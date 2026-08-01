@@ -4,16 +4,16 @@ ctx is a local search CLI for existing agent history.
 
 ## Promise
 
-Given local provider transcripts that ctx supports, the CLI builds a local
-SQLite index and returns deterministic retrieval results with citations. The
-paid Local Pro helper adds an encrypted local work graph with deterministic,
-evidence-backed fact materialization. Neither path generates an LLM
-interpretation, uploads transcript or repository content, or requires a hosted
-research agent.
+Given local provider transcripts that ctx supports, the CLI publishes a
+self-contained local Core generation and returns deterministic retrieval
+results with citations. The paid Local Pro helper adds an encrypted local work
+graph with deterministic, evidence-backed fact materialization. Neither path
+generates an LLM interpretation, uploads transcript or repository content, or
+requires a hosted research agent.
 
 ## In Scope
 
-- `ctx setup` initializes local storage, indexes discovered supported local
+- `ctx setup` initializes local storage, publishes discovered supported local
   transcript formats, and can opportunistically start the default-on ctx-owned
   background daemon maintenance profile. An explicit `[daemon] enabled = false`
   remains a durable opt-out.
@@ -22,17 +22,18 @@ research agent.
   nudge maintenance.
 - `ctx sources` reports known local provider history paths, including whether a
   native source is currently importable.
-- `ctx import` indexes supported local transcript formats and selected local
-  history-source plugins, and can opportunistically start the same short
-  one-pass ctx-owned maintenance profile when `[daemon].enabled` is true.
+- `ctx import` publishes supported local transcript formats and selected local
+  history-source plugins as complete normalized Core records, and can
+  opportunistically start the same short one-pass ctx-owned maintenance profile
+  when `[daemon].enabled` is true.
   Explicit custom JSONL and history-source imports use its required
   daemon-owned source-refresh endpoint. `ctx import --no-daemon` never starts
   it and therefore requires an already-running endpoint for those explicit
-  source-backed routes.
-- `ctx search` can refresh a bounded batch from discovered native provider
-  sources before returning ranked local hits from the local index, with event
-  IDs when a hit maps to an indexed event. History-source plugins enter the
-  same source-backed index only through explicit single-source import in 1.0.
+  provider-source routes.
+- `ctx search` can request a bounded refresh of discovered native provider
+  sources before returning ranked local hits from the active Core generation,
+  with event IDs when a hit maps to an imported event. History-source plugins
+  enter Core only through explicit single-source import in 1.0.
   Default background refresh may autostart daemon maintenance for
   human-readable search while
   semantic search is disabled. Semantic and hybrid search read existing local
@@ -41,10 +42,9 @@ research agent.
   is complete and dirty work is drained; explicit semantic search may query
   partial coverage for diagnostics.
 - `ctx show session` and `ctx show event` render transcripts, hits, and context
-  windows using ctx-owned IDs, and `ctx show session --out` writes transcript
-  artifacts.
-- `ctx locate session` and `ctx locate event` report provenance and resume
-  metadata.
+  windows from the active verified Core generation using ctx-owned IDs, and
+  `ctx show session --out` writes transcript artifacts. Search/show expose the
+  provider-owned session ID when known; for Codex, it is the resume UUID.
 - `ctx pro` starts or resumes an anonymous 14-day trial without an account,
   authentication, or payment method, installs or repairs the signed
   target-specific helper, and catches the encrypted graph up. The official
@@ -139,8 +139,8 @@ research agent.
   canonical activity rather than accepted as setup flags.
 - The only public Pro query is `ctx blame file|commit|pr`. It returns typed,
   bounded matches with complete deduplicated canonical evidence. OSS
-  `ctx show session|event` and `ctx locate session|event` remain available;
-  there are no Pro show, locate, timeline, facts, or related aliases. Blame may
+  `ctx show session|event` remains available; there are no Pro show, timeline,
+  facts, or related aliases. Blame may
   catch stale derived state up;
   that changes only the encrypted graph. Pure canonical tail appends
   resume from the durable frontier; incompatible mutation epochs, legacy
@@ -152,8 +152,9 @@ research agent.
   only when a recognized structured forge record binds the canonical PR
   identity and exact Git object ID. Without that proof, associated commits are
   explicitly unproven.
-- `ctx sql` runs one read-only SQL statement against the existing local index
-  for advanced inspection when normal search is not expressive enough.
+- `ctx sql` runs one read-only SQL statement against the existing relational
+  metadata projection for advanced inspection when normal search is not
+  expressive enough.
 - `ctx doctor` reports local storage health.
 - `ctx docs` exposes embedded public documentation and generated man pages.
 - `ctx upgrade` checks and applies signed CLI releases for official
@@ -190,8 +191,8 @@ research agent.
 
 `ctx pro manage` handles cancellation, payment recovery, and resubscription.
 Pro is $20 USD per month.
-Core OSS setup, search, indexed show/locate, and SQL remain available in every
-state. Pro uninstall and explicit Pro data deletion also remain available.
+Core OSS setup, search, show, and SQL remain available in every state. Pro
+uninstall and explicit Pro data deletion also remain available.
 Explicit status, MCP `pro_status`, and Pro management may show the
 `$20/month` continuation action for trial access or a neutral
 unpriced `pro_restore_access` action for locked access that confirms the local
@@ -244,19 +245,19 @@ details:
 - provider when known;
 - ctx-owned session and event IDs;
 - provider-owned session ID when known;
-- event sequence when known;
-- source path and cursor when available;
-- source availability when checked.
+- event sequence when known.
 
 Provider-owned IDs are metadata. Positional command arguments are ctx-owned
 IDs unless a command explicitly accepts `--provider ... --provider-session ...`.
 
-If raw source files move, ctx may still return indexed text from SQLite. Output
-should make source availability visible when that information is known.
+Search and show read complete normalized content from Core. They do not reopen
+provider transcript files at query time. Explicit import and daemon refresh are
+the surfaces that discover and ingest provider-file changes.
 
 ## Privacy Contract
 
-The local index, encrypted Pro graph, and JSON output are private by default.
+Core generations, local projections, the encrypted Pro graph, and JSON output
+are private by default.
 Identity, billing, entitlement, and signed-artifact requests do not carry
 history, repository, graph, citation, or query content. A user must review
 copied output before sharing it outside the machine.

@@ -1,7 +1,7 @@
 use std::{
     fs::Metadata,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
 
 use ctx_history_core::EventType;
@@ -16,16 +16,10 @@ use crate::{
     PROVIDER_MAX_PREVIEW_CHARS,
 };
 
-mod complete_content;
 pub(crate) mod native_path;
 mod normalization;
 
-pub(crate) use complete_content::{
-    message_record as openclaw_complete_content_record,
-    source_from_admitted as openclaw_complete_content_source_from_admitted,
-};
 pub(crate) use native_path::openclaw_source_backed_adapter_v0;
-pub(crate) use normalization::event as openclaw_event;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OpenClawFrozenFileMetadata {
@@ -53,25 +47,6 @@ impl OpenClawFrozenFileMetadata {
             device,
             inode,
         })
-    }
-
-    fn revision_component(&self) -> String {
-        let (side, seconds, nanos) = match self.modified.duration_since(UNIX_EPOCH) {
-            Ok(duration) => ('+', duration.as_secs(), duration.subsec_nanos()),
-            Err(error) => {
-                let duration = error.duration();
-                ('-', duration.as_secs(), duration.subsec_nanos())
-            }
-        };
-        format!(
-            "length={};modified={side}{seconds}.{nanos:09};readonly={};device={};inode={}",
-            self.length,
-            self.readonly,
-            self.device
-                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-            self.inode
-                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-        )
     }
 }
 
@@ -113,19 +88,6 @@ impl OpenClawSessionObservation {
             index,
             index_revision,
         })
-    }
-
-    pub(super) fn source_revision(&self) -> String {
-        let index_file = self
-            .index_file
-            .as_ref()
-            .map(OpenClawFrozenFileMetadata::revision_component)
-            .unwrap_or_else(|| "absent".to_owned());
-        format!(
-            "openclaw-jsonl-metadata-v1:transcript={};index={index_file};index-entry={:016x}",
-            self.transcript.revision_component(),
-            self.index_revision,
-        )
     }
 }
 
@@ -215,11 +177,12 @@ pub(super) fn openclaw_output_metadata(value: &Value) -> Option<OpenClawOutputMe
         .get("role")
         .or_else(|| value.get("role"))
         .and_then(Value::as_str)?;
-    if role != "tool" {
+    if !matches!(role, "tool" | "toolResult") {
         return None;
     }
     let tool_name = message
-        .get("name")
+        .get("toolName")
+        .or_else(|| message.get("name"))
         .or_else(|| message.get("tool_name"))
         .or_else(|| message.get("tool"))
         .and_then(Value::as_str)
@@ -231,17 +194,20 @@ pub(super) fn openclaw_output_metadata(value: &Value) -> Option<OpenClawOutputMe
     } else {
         OutputObservationKind::Tool
     };
-    let timed_out = openclaw_value_timed_out(message);
-    let exit_code = openclaw_i64_field(message, &["exit_code", "exitCode"])
+    let details = message.get("details").unwrap_or(message);
+    let timed_out = openclaw_value_timed_out(details);
+    let exit_code = openclaw_i64_field(details, &["exit_code", "exitCode", "exit_code"])
         .and_then(|value| i32::try_from(value).ok());
-    let duration_ms = openclaw_i64_field(message, &["duration_ms", "durationMs"])
+    let duration_ms = openclaw_i64_field(details, &["duration_ms", "durationMs"])
         .and_then(|value| u64::try_from(value).ok());
     let outcome = if timed_out {
         OutputOutcome::Timeout
-    } else if provider_output_event_is_failure(message) {
+    } else if provider_output_event_is_failure(details) {
         OutputOutcome::Failure
-    } else if provider_result_outcome_evidence(EventType::ToolOutput, message).as_str()
+    } else if provider_result_outcome_evidence(EventType::ToolOutput, details).as_str()
         == Some("success")
+        || details.get("status").and_then(Value::as_str) == Some("completed")
+        || exit_code == Some(0)
     {
         OutputOutcome::Success
     } else {

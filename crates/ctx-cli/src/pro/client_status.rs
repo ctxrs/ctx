@@ -5,8 +5,9 @@ use std::{
 
 use anyhow::Result;
 use ctx_pro_host_protocol::{
-    Capability, EntitlementAccessState, GraphState, HelperMessage, HostMessage, StatusRequest,
-    StatusResult, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+    Capability, CoreProjectionCurrentness, EntitlementAccessState, HelperMessage, HostMessage,
+    MaterializedCoverage, ProOperation, RepositoryCoverage, StatusRequest, StatusResult,
+    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 
@@ -33,6 +34,11 @@ pub(crate) struct ProStatus {
     pub(crate) protocol_version: u16,
     pub(crate) capabilities: Vec<String>,
     pub(crate) error_code: Option<String>,
+    pub(crate) projection_currentness: Option<CoreProjectionCurrentness>,
+    pub(crate) materialized_coverage: Option<MaterializedCoverage>,
+    pub(crate) repository_coverage: Option<RepositoryCoverage>,
+    pub(crate) supported_operations: Option<BTreeSet<ProOperation>>,
+    pub(crate) available_operations: Option<BTreeSet<ProOperation>>,
     pub(crate) access_state: Option<String>,
     pub(crate) refresh_after_unix: Option<i64>,
     pub(crate) access_deadline_unix: Option<i64>,
@@ -141,6 +147,11 @@ pub(crate) fn status_with_helper_resolver(
                 protocol_version: PROTOCOL_VERSION,
                 capabilities: Vec::new(),
                 error_code: Some(error_code),
+                projection_currentness: None,
+                materialized_coverage: None,
+                repository_coverage: None,
+                supported_operations: None,
+                available_operations: None,
                 access_state: None,
                 refresh_after_unix: None,
                 access_deadline_unix: None,
@@ -158,10 +169,16 @@ pub(crate) fn status_with_helper_resolver(
                 .map(|capability| capability.wire_name().to_owned())
                 .collect();
             let access = client.public_access_status();
-            match client.exchange(HostMessage::Status(StatusRequest {}), HANDSHAKE_TIMEOUT) {
+            match client.exchange(
+                HostMessage::Status(StatusRequest {
+                    requested_core_generation_id: None,
+                }),
+                HANDSHAKE_TIMEOUT,
+            ) {
                 Ok(HelperMessage::Status(result)) => {
-                    let (ready, materialized, state_error) =
-                        status_outcome(result.state, client.authorization_state);
+                    let (ready, materialized, error_code) =
+                        status_outcome(&result, client.authorization_state);
+                    let valid_status = result.validate().is_ok().then_some(&result);
                     ProStatus {
                         schema_version: 1,
                         installed: true,
@@ -171,7 +188,14 @@ pub(crate) fn status_with_helper_resolver(
                         helper_version,
                         protocol_version: PROTOCOL_VERSION,
                         capabilities,
-                        error_code: state_error.map(ToOwned::to_owned),
+                        error_code: error_code.map(ToOwned::to_owned),
+                        projection_currentness: valid_status.map(|status| status.currentness),
+                        materialized_coverage: valid_status.map(|status| status.coverage),
+                        repository_coverage: valid_status.map(|status| status.repository_coverage),
+                        supported_operations: valid_status
+                            .map(|status| status.supported_operations.clone()),
+                        available_operations: valid_status
+                            .map(|status| status.available_operations.clone()),
                         access_state: access.state,
                         refresh_after_unix: access.refresh_after_unix,
                         access_deadline_unix: access.access_deadline_unix,
@@ -189,6 +213,11 @@ pub(crate) fn status_with_helper_resolver(
                     protocol_version: PROTOCOL_VERSION,
                     capabilities,
                     error_code: Some(support::error_code(&protocol_error(error))),
+                    projection_currentness: None,
+                    materialized_coverage: None,
+                    repository_coverage: None,
+                    supported_operations: None,
+                    available_operations: None,
                     access_state: access.state,
                     refresh_after_unix: access.refresh_after_unix,
                     access_deadline_unix: access.access_deadline_unix,
@@ -205,6 +234,11 @@ pub(crate) fn status_with_helper_resolver(
                     protocol_version: PROTOCOL_VERSION,
                     capabilities,
                     error_code: Some("protocol_mismatch".to_owned()),
+                    projection_currentness: None,
+                    materialized_coverage: None,
+                    repository_coverage: None,
+                    supported_operations: None,
+                    available_operations: None,
                     access_state: access.state,
                     refresh_after_unix: access.refresh_after_unix,
                     access_deadline_unix: access.access_deadline_unix,
@@ -223,6 +257,11 @@ pub(crate) fn status_with_helper_resolver(
             protocol_version: PROTOCOL_VERSION,
             capabilities: Vec::new(),
             error_code: Some(support::error_code(&error)),
+            projection_currentness: None,
+            materialized_coverage: None,
+            repository_coverage: None,
+            supported_operations: None,
+            available_operations: None,
             access_state: None,
             refresh_after_unix: None,
             access_deadline_unix: None,
@@ -233,19 +272,28 @@ pub(crate) fn status_with_helper_resolver(
 }
 
 pub(super) fn status_outcome(
-    state: GraphState,
+    status: &StatusResult,
     authorization_state: Option<EntitlementAccessState>,
 ) -> (bool, bool, Option<&'static str>) {
-    let materialized = state == GraphState::Ready;
+    if status.validate().is_err() {
+        return (false, false, Some("protocol_mismatch"));
+    }
+    let materialized = status.currentness == CoreProjectionCurrentness::Current
+        && matches!(
+            status.coverage,
+            MaterializedCoverage::Complete
+                | MaterializedCoverage::Empty
+                | MaterializedCoverage::Abstained
+        );
     if authorization_state == Some(EntitlementAccessState::Locked) {
         return (false, materialized, Some("entitlement_expired"));
     }
-    let error = match state {
-        GraphState::NotMaterialized => Some("not_materialized"),
-        GraphState::NeedsRebuild => Some("needs_rebuild"),
-        GraphState::Partial => Some("partial"),
-        GraphState::NeedsResume => Some("needs_resume"),
-        GraphState::Ready => None,
+    let error = match status.currentness {
+        CoreProjectionCurrentness::NotMaterialized => Some("not_materialized"),
+        CoreProjectionCurrentness::NeedsRebuild => Some("needs_rebuild"),
+        CoreProjectionCurrentness::Partial => Some("partial"),
+        CoreProjectionCurrentness::Stale => Some("stale_source"),
+        CoreProjectionCurrentness::Current => None,
     };
-    (materialized, materialized, error)
+    (!status.available_operations.is_empty(), materialized, error)
 }

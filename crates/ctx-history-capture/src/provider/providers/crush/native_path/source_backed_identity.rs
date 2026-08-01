@@ -23,14 +23,6 @@ pub(super) fn crush_source_revision(
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MessageAddress {
-    pub(super) rowid: i64,
-    pub(super) native_record_id: String,
-    pub(super) parent_rowid: i64,
-    pub(super) provider_session_id: String,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SessionLineage {
     pub(super) parent_session_id: Option<StableEntityId>,
@@ -98,60 +90,6 @@ pub(super) fn crush_session_id(
         logical_session_kind: CRUSH_LOGICAL_SESSION_KIND,
         native_session_key: &session_key,
     })?)
-}
-
-pub(super) fn validate_message_locator(
-    locator: &SourceRecordLocator,
-) -> CrushSourceBackedResultV0<MessageAddress> {
-    if locator.source().provider() != CaptureProvider::Crush.as_str()
-        || locator.source().source_format() != CRUSH_SQLITE_SOURCE_FORMAT
-        || locator.source().schema_variant() != CRUSH_SOURCE_SCHEMA_VARIANT
-        || locator.source().provider_identity_version() != 1
-        || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
-        || locator.certified_source_revision_digest().is_some()
-    {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    }
-    let SourceAnchor::ProviderNative { namespace, .. } = locator.source().anchor() else {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    };
-    if namespace != CRUSH_SOURCE_ANCHOR_NAMESPACE {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    }
-    let NativeRecordCoordinate::ProviderSqlite {
-        logical_relation,
-        primary_key,
-        row_version,
-    } = locator.coordinate()
-    else {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    };
-    if logical_relation != CRUSH_MESSAGE_RELATION
-        || row_version.as_ref() != Some(&TypedKey::Bytes(locator.record_digest().to_vec()))
-    {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    }
-    let TypedKey::Composite(parts) = primary_key else {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    };
-    let [TypedKey::I64(rowid), TypedKey::Utf8(native_record_id), TypedKey::I64(parent_rowid), TypedKey::Utf8(provider_session_id)] =
-        parts.as_slice()
-    else {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    };
-    if *rowid <= 0
-        || *parent_rowid <= 0
-        || native_record_id.is_empty()
-        || provider_session_id.is_empty()
-    {
-        return Err(CrushSourceBackedErrorV0::InvalidLocator);
-    }
-    Ok(MessageAddress {
-        rowid: *rowid,
-        native_record_id: native_record_id.clone(),
-        parent_rowid: *parent_rowid,
-        provider_session_id: provider_session_id.clone(),
-    })
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {

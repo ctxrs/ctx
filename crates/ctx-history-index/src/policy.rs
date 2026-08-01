@@ -1,4 +1,4 @@
-//! Canonical policy for source-backed lexical and semantic generations.
+//! Canonical policy for self-contained Core lexical and semantic generations.
 //!
 //! The compact JSON encoding of [`SourceGenerationPolicy`] is hashed into each
 //! lexical generation manifest. Any generation-affecting policy change must
@@ -8,10 +8,10 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 1;
-pub const LEXICAL_SCHEMA_REVISION: u32 = 5;
+pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 7;
+pub const LEXICAL_SCHEMA_REVISION: u32 = 14;
 pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
-pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 1;
+pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 3;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
     LexicalIndexedBodyLimit::ProviderValidatedFullText;
 pub const SEMANTIC_ELIGIBILITY_REVISION: u32 = 2;
@@ -45,6 +45,15 @@ impl SourceGenerationPolicy {
 #[serde(deny_unknown_fields)]
 pub struct LexicalGenerationPolicy {
     pub event_projector_revision: u32,
+    pub core_record_version: u32,
+    pub core_normalization_revision: u32,
+    pub core_content_policy_revision: u32,
+    pub core_repository_contract_revision: u32,
+    pub core_repository_observation_revision: u32,
+    pub core_bounded_shell_subset_revision: u32,
+    pub core_repository_association_policy_revision: u32,
+    pub core_repository_outcome_capture_revision: u32,
+    pub core_repository_local_root_authorization_fingerprint_revision: u32,
     pub included_event_classes: [SourceEventClass; 11],
     pub body_selection: LexicalBodySelection,
     pub indexed_body_limit: LexicalIndexedBodyLimit,
@@ -60,8 +69,8 @@ pub struct SemanticGenerationPolicy {
     pub eligibility_revision: u32,
     pub candidate_event_classes: [SourceEventClass; 1],
     pub candidate_roles: [SourceEventRole; 1],
-    /// Filter applied after the exact source locator is hydrated.
-    pub hydrated_content_filter: SemanticHydratedContentFilter,
+    /// Filter applied after complete content is read from stored Core.
+    pub core_content_filter: SemanticCoreContentFilter,
     pub chunking_revision: u32,
     pub chunk_target_chars: u32,
     pub chunk_overlap_chars: u32,
@@ -96,12 +105,12 @@ pub enum LexicalIndexedBodyLimit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StoredSourceContent {
-    None,
+    CompleteCoreRecordV1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SemanticHydratedContentFilter {
+pub enum SemanticCoreContentFilter {
     PolicySelectedMeaningfulTextV1,
 }
 
@@ -132,6 +141,20 @@ pub fn current_source_generation_policy() -> SourceGenerationPolicy {
         policy_version: SOURCE_GENERATION_POLICY_VERSION,
         lexical: LexicalGenerationPolicy {
             event_projector_revision: SOURCE_EVENT_PROJECTOR_REVISION,
+            core_record_version: ctx_history_core::CORE_RECORD_VERSION,
+            core_normalization_revision: ctx_history_core::CORE_NORMALIZATION_REVISION,
+            core_content_policy_revision: ctx_history_core::CORE_CONTENT_POLICY_REVISION,
+            core_repository_contract_revision: ctx_history_core::CORE_REPOSITORY_CONTRACT_REVISION,
+            core_repository_observation_revision:
+                ctx_history_core::CORE_REPOSITORY_OBSERVATION_REVISION,
+            core_bounded_shell_subset_revision:
+                ctx_history_core::CORE_BOUNDED_SHELL_SUBSET_REVISION,
+            core_repository_association_policy_revision:
+                ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+            core_repository_outcome_capture_revision:
+                ctx_history_core::CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+            core_repository_local_root_authorization_fingerprint_revision:
+                ctx_history_core::CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
             included_event_classes: [
                 SourceEventClass::Message,
                 SourceEventClass::ToolCall,
@@ -147,7 +170,7 @@ pub fn current_source_generation_policy() -> SourceGenerationPolicy {
             ],
             body_selection: LexicalBodySelection::FullPolicySelectedMeaningfulText,
             indexed_body_limit: LEXICAL_INDEXED_BODY_LIMIT,
-            stored_content: StoredSourceContent::None,
+            stored_content: StoredSourceContent::CompleteCoreRecordV1,
             schema_revision: LEXICAL_SCHEMA_REVISION,
             tokenizer_revision: LEXICAL_TOKENIZER_REVISION,
         },
@@ -155,7 +178,7 @@ pub fn current_source_generation_policy() -> SourceGenerationPolicy {
             eligibility_revision: SEMANTIC_ELIGIBILITY_REVISION,
             candidate_event_classes: [SourceEventClass::Message],
             candidate_roles: [SourceEventRole::User],
-            hydrated_content_filter: SemanticHydratedContentFilter::PolicySelectedMeaningfulTextV1,
+            core_content_filter: SemanticCoreContentFilter::PolicySelectedMeaningfulTextV1,
             chunking_revision: SEMANTIC_CHUNKING_REVISION,
             chunk_target_chars: SEMANTIC_CHUNK_TARGET_CHARS as u32,
             chunk_overlap_chars: SEMANTIC_CHUNK_OVERLAP_CHARS as u32,
@@ -175,6 +198,10 @@ pub fn current_source_generation_policy_hash() -> serde_json::Result<String> {
     current_source_generation_policy().canonical_sha256()
 }
 
+pub(crate) fn is_semantic_candidate(event_type: &str, role: Option<&str>) -> bool {
+    event_type == "message" && role == Some("user")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,9 +219,17 @@ mod tests {
             first.canonical_sha256().unwrap(),
             second.canonical_sha256().unwrap()
         );
+        assert!(serde_json::to_value(&first).unwrap()["lexical"]
+            .as_object()
+            .unwrap()
+            .contains_key("core_repository_local_root_authorization_fingerprint_revision"));
+        assert!(serde_json::to_value(&first).unwrap()["lexical"]
+            .as_object()
+            .unwrap()
+            .contains_key("core_repository_association_policy_revision"));
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "a17e860b6d719dfde065256ec070970b3d12e4d76ff0e59f16aabbc1666b71b9"
+            "6f01c55783c6708a6e7b37b99c5731db55e16fe1e5288b28e1a56906f84e12f1"
         );
     }
 
@@ -202,7 +237,7 @@ mod tests {
     fn generation_affecting_field_changes_policy_hash() {
         let current = current_source_generation_policy();
         let mut changed = current.clone();
-        changed.semantic.chunk_target_chars += 1;
+        changed.lexical.core_repository_association_policy_revision += 1;
 
         assert_ne!(
             current.canonical_sha256().unwrap(),

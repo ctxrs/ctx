@@ -3,6 +3,16 @@ use super::super::*;
 pub type SourceBackedCoordinatorResult<T> = Result<T, SourceBackedCoordinatorError>;
 pub type SourceBackedRouteResult<T> = Result<T, SourceBackedRouteError>;
 
+/// Three independently committed complete inventories bound transient
+/// automatic-source absence while preserving prompt eventual deletion.
+pub const AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBackedDeletionDisposition {
+    Deferred,
+    Deleted,
+}
+
 /// Runtime metadata for one selected source route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceBackedRouteMetadata {
@@ -55,8 +65,8 @@ pub enum SourceBackedCoordinatorError {
     },
     #[error("source {source_id} was staged by more than one provider route")]
     DuplicateSourceOwner { source_id: String },
-    #[error("no executable source-backed routes were registered")]
-    NoExecutableRoutes,
+    #[error("base source {source_id} was not claimed by any provider route in this refresh")]
+    UnclaimedBaseSource { source_id: String },
     #[error("source deletion was not certified by its supplied authoritative inventory")]
     InvalidDeletionWitness,
     #[error("retained source deletion {source_id} could not be recertified: {detail}")]
@@ -73,6 +83,7 @@ pub struct SourceBackedGenerationSink<'writer> {
     pub(in super::super) complete_inventories: &'writer mut Vec<CompleteInventoryOwner>,
     pub(in super::super) route_index: usize,
     pub(in super::super) leaf_worker_budget: usize,
+    pub(in super::super) automatic_missing_observed_at_unix_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -111,8 +122,8 @@ impl SourceBackedGenerationSink<'_> {
         Ok(self.writer.begin_source_append(source)?)
     }
 
-    pub fn add_document(&mut self, document: LexicalDocument) -> SourceBackedCoordinatorResult<()> {
-        self.writer.add_document(document)?;
+    pub fn add_core_record(&mut self, record: CoreRecord) -> SourceBackedCoordinatorResult<()> {
+        self.writer.add_core_record(record)?;
         Ok(())
     }
 
@@ -157,23 +168,36 @@ impl SourceBackedGenerationSink<'_> {
         &mut self,
         deletion: CertifiedSourceDeletion,
         inventory: CertifiedSourceInventory,
-    ) -> SourceBackedCoordinatorResult<()> {
+    ) -> SourceBackedCoordinatorResult<SourceBackedDeletionDisposition> {
         if !deletion.verifies(&inventory) {
             return Err(SourceBackedCoordinatorError::InvalidDeletionWitness);
         }
         self.claim(deletion.source())?;
+        if let Some(observed_at_unix_ms) = self.automatic_missing_observed_at_unix_ms {
+            let deleted = self.writer.observe_automatic_source_missing(
+                deletion,
+                inventory,
+                observed_at_unix_ms,
+                AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES,
+            )?;
+            return Ok(if deleted {
+                SourceBackedDeletionDisposition::Deleted
+            } else {
+                SourceBackedDeletionDisposition::Deferred
+            });
+        }
         self.writer.delete_source(deletion, inventory)?;
-        Ok(())
+        Ok(SourceBackedDeletionDisposition::Deleted)
     }
 
     pub fn replace_source(
         &mut self,
         certificate: CertifiedSource,
-        documents: impl IntoIterator<Item = LexicalDocument>,
+        core_records: impl IntoIterator<Item = CoreRecord>,
     ) -> SourceBackedCoordinatorResult<()> {
         self.begin_source(certificate.observation().source().clone())?;
-        for document in documents {
-            self.add_document(document)?;
+        for record in core_records {
+            self.add_core_record(record)?;
         }
         self.certify_source(certificate)
     }
@@ -221,11 +245,6 @@ type RevalidationCallback =
 type CompleteInventoryRevalidationCallback =
     dyn Fn(&CertifiedSourceInventory) -> bool + Send + Sync;
 type SuccessfulPublicationCallback = dyn Fn() + Send + Sync;
-type HydrationCallback = dyn Fn(&EventHydrationRequest) -> Result<HydratedProviderRecord, HydrationFailure>
-    + Send
-    + Sync;
-type BatchHydrationCallback =
-    dyn Fn(&BatchHydrationRequest) -> Result<BatchHydrationResult, HydrationFailure> + Send + Sync;
 
 /// Closure bundle at the coordinator boundary. This deliberately does not
 /// pretend provider scanners share a provider-local trait.
@@ -237,8 +256,6 @@ pub struct SourceBackedRouteDriver {
     pub(in super::super) revalidate_complete_inventory:
         Option<Arc<CompleteInventoryRevalidationCallback>>,
     pub(in super::super) after_successful_publication: Option<Arc<SuccessfulPublicationCallback>>,
-    pub(in super::super) hydrate: Arc<HydrationCallback>,
-    pub(in super::super) hydrate_batch: Option<Arc<BatchHydrationCallback>>,
 }
 
 impl fmt::Debug for SourceBackedRouteDriver {
@@ -255,10 +272,6 @@ impl SourceBackedRouteDriver {
             + 'static,
         owns_source: impl Fn(&SourceKey) -> bool + Send + Sync + 'static,
         revalidate: impl for<'a> Fn(SourceBackedRevalidationTarget<'a>) -> bool + Send + Sync + 'static,
-        hydrate: impl Fn(&EventHydrationRequest) -> Result<HydratedProviderRecord, HydrationFailure>
-            + Send
-            + Sync
-            + 'static,
     ) -> Self {
         Self {
             scan: Arc::new(scan),
@@ -266,8 +279,6 @@ impl SourceBackedRouteDriver {
             revalidate: Arc::new(revalidate),
             revalidate_complete_inventory: None,
             after_successful_publication: None,
-            hydrate: Arc::new(hydrate),
-            hydrate_batch: None,
         }
     }
 
@@ -289,39 +300,6 @@ impl SourceBackedRouteDriver {
     ) -> Self {
         self.after_successful_publication = Some(Arc::new(after_publication));
         self
-    }
-
-    /// Installs a provider-native ordered batch reader without changing the
-    /// mechanically compatible event hydration constructor.
-    pub fn with_batch_hydration(
-        mut self,
-        hydrate_batch: impl Fn(&BatchHydrationRequest) -> Result<BatchHydrationResult, HydrationFailure>
-            + Send
-            + Sync
-            + 'static,
-    ) -> Self {
-        self.hydrate_batch = Some(Arc::new(hydrate_batch));
-        self
-    }
-
-    pub(in super::super) fn hydrate_batch(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        if let Some(hydrate_batch) = &self.hydrate_batch {
-            return hydrate_batch(request);
-        }
-        let records = request
-            .events()
-            .iter()
-            .map(|event| (self.hydrate)(event))
-            .collect::<Result<Vec<_>, _>>()?;
-        BatchHydrationResult::new(records).map_err(|error| {
-            hydration_failure(
-                HydrationFailureKind::InvalidLocator,
-                format!("invalid default route batch result: {error}"),
-            )
-        })
     }
 }
 
@@ -412,12 +390,6 @@ impl SourceBackedProviderRegistry {
 
     pub fn routes(&self) -> impl ExactSizeIterator<Item = &SourceBackedRouteMetadata> {
         self.routes.iter().map(SourceBackedRoute::metadata)
-    }
-
-    pub fn resolver_registry(&self) -> SourceBackedResolverRegistry {
-        SourceBackedResolverRegistry {
-            routes: self.routes.clone(),
-        }
     }
 
     pub fn executable_route_count(&self) -> usize {

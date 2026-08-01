@@ -198,20 +198,6 @@ export class LocalAgentHistoryClient {
     return this.#agentHistoryJson("showSession", args);
   }
 
-  async locateEvent(id) {
-    requireId("event id", id);
-    return this.#agentHistoryJson("locateEvent", ["locate", "event", id, "--format", "json"]);
-  }
-
-  async locateSession(idOrOptions) {
-    const options =
-      typeof idOrOptions === "string" ? { id: idOrOptions } : { ...idOrOptions };
-    const args = ["locate", "session"];
-    appendSessionLookupArgs(args, options);
-    args.push("--format", "json");
-    return this.#agentHistoryJson("locateSession", args);
-  }
-
   async version() {
     const result = await this.adapter.execute(["--version"]);
     if (result.exitCode !== 0) {
@@ -294,14 +280,6 @@ export class HostedAgentHistoryClient {
     return hostedUnsupported();
   }
 
-  locateEvent() {
-    return hostedUnsupported();
-  }
-
-  locateSession() {
-    return hostedUnsupported();
-  }
-
   version() {
     return Promise.resolve({
       schema_version: 1,
@@ -367,21 +345,15 @@ export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
       envelope.event = {
         event: camelizeKeys(raw?.event ?? null),
         events: camelizeKeys(raw?.events ?? []),
-        source: camelizeKeys(raw?.source ?? null),
       };
       break;
     case "showSession":
       envelope.session = {
         session: camelizeKeys(raw?.session ?? null),
         events: camelizeKeys(raw?.events ?? []),
-        source: camelizeKeys(raw?.source ?? null),
         mode: camelizeKeys(raw?.mode ?? null),
         format: camelizeKeys(raw?.format ?? null),
       };
-      break;
-    case "locateEvent":
-    case "locateSession":
-      envelope.location = camelizeKeys(raw);
       break;
     default:
       throw new CtxValidationError(`unsupported agent-history-v1 operation: ${operation}`, {

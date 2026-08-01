@@ -152,31 +152,8 @@ pub(super) fn mistral_vibe_event_text(role: &str, value: &Value, event_type: Eve
 }
 
 pub(super) fn mistral_vibe_tool_calls_text(value: &Value) -> Option<String> {
-    let calls = value.as_array()?;
-    let names = calls
-        .iter()
-        .filter_map(|call| {
-            call.pointer("/function/name")
-                .or_else(|| call.get("name"))
-                .and_then(Value::as_str)
-                .filter(|name| !name.trim().is_empty())
-        })
-        .collect::<Vec<_>>();
-    if names.is_empty() {
-        Some(provider_value_text(value)?)
-    } else {
-        Some(format!("tool calls: {}", names.join(", ")))
-    }
-}
-
-pub(super) fn mistral_vibe_event_id(value: &Value, line_number: usize, role: &str) -> String {
-    value
-        .get("message_id")
-        .or_else(|| value.get("tool_call_id"))
-        .and_then(Value::as_str)
-        .filter(|id| !id.trim().is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("{role}:line-{line_number}"))
+    value.as_array()?;
+    serde_json::to_string(value).ok()
 }
 
 pub(super) fn mistral_vibe_metadata_string(value: &Value, field: &str) -> Option<String> {

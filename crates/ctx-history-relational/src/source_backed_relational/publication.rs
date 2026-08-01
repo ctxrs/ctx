@@ -1,18 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{params, Connection, TransactionBehavior};
-
 use super::{
-    manifest::{invalid_generation, ValidatedManifest},
+    manifest::ValidatedGeneration,
     materialization::{
-        materialize_records, source_projection_snapshot, stored_projection_counts,
-        validate_incremental_projected_generation, validate_no_unaffected_cascade_dependencies,
+        materialize_records, prune_orphan_repository_bindings, source_projection_snapshot,
+        stored_projection_counts, validate_incremental_projected_generation,
         validate_projected_generation, ProjectionCounts, SourceProjectionSnapshot,
     },
-    sqlite_u64, CommittedCoreGeneration, RelationalProjectionError, RelationalProjectionReceipt,
-    RelationalProjectionRecord, Result, SourceBackedRelationalProjection,
-    GENERATION_MANIFEST_VERSION, REQUIRED_LEXICAL_SCHEMA_VERSION,
+    sqlite_u64, CommittedCoreGeneration, RelationalProjectionError, RelationalProjectionPlan,
+    RelationalProjectionReceipt, RelationalProjectionRecord, RelationalProjectionStatus, Result,
+    SourceBackedRelationalProjection, RELATIONAL_MATERIALIZER_REVISION,
+    RELATIONAL_PROJECTION_SCHEMA_VERSION,
 };
+use rusqlite::{params, Connection, TransactionBehavior};
 
 const MAX_FAILURE_DETAIL_CHARS: usize = 2_048;
 
@@ -28,13 +28,55 @@ enum ValidationScope {
         prior_counts: ProjectionCounts,
         changed_source_ids: BTreeSet<String>,
         affected_source_ids: BTreeSet<String>,
-        relationship_scope_changed: bool,
         old: SourceProjectionSnapshot,
     },
 }
 
 impl SourceBackedRelationalProjection {
-    /// Replaces the complete relational projection from one Core generation.
+    /// Computes the exact work required without opening Core pages.
+    pub fn plan_generation(
+        &self,
+        generation: &CommittedCoreGeneration,
+    ) -> Result<RelationalProjectionPlan> {
+        let validated = ValidatedGeneration::from_commit(generation)?;
+        let metadata = self.metadata()?;
+        if metadata.status == RelationalProjectionStatus::Ready
+            && metadata.active_core_generation_id.as_deref() == Some(&generation.generation_id)
+            && metadata.active_manifest_version == Some(generation.manifest_version)
+            && metadata.active_materializer_revision == Some(RELATIONAL_MATERIALIZER_REVISION)
+            && metadata.active_core_record_version == Some(generation.core_record_version)
+            && metadata.active_core_record_contract_fingerprint.as_deref()
+                == Some(&generation.core_record_contract_fingerprint)
+            && metadata.active_lexical_schema_version == Some(generation.lexical_schema_version)
+            && metadata.active_policy_schema_hash.as_deref() == Some(&generation.policy_schema_hash)
+            && metadata.target_core_generation_id.is_none()
+            && usize::try_from(metadata.source_count) == Ok(generation.sources.len())
+            && metadata.event_count == generation.indexed_documents
+        {
+            return Ok(RelationalProjectionPlan::NoOp(receipt_from_metadata(
+                &generation.generation_id,
+                &metadata,
+            )));
+        }
+        if metadata.status == RelationalProjectionStatus::Empty
+            || metadata.active_materializer_revision != Some(RELATIONAL_MATERIALIZER_REVISION)
+            || metadata.active_core_record_version != Some(generation.core_record_version)
+            || metadata.active_core_record_contract_fingerprint.as_deref()
+                != Some(&generation.core_record_contract_fingerprint)
+        {
+            return Ok(RelationalProjectionPlan::Rebuild);
+        }
+
+        let prior = stored_source_revisions(&self.conn)?;
+        let changed_source_ids = validated
+            .sources
+            .iter()
+            .filter(|(source_id, source)| prior.get(*source_id) != Some(&source.revision_digest))
+            .map(|(_, source)| source.source.identity().as_uuid())
+            .collect();
+        Ok(RelationalProjectionPlan::CatchUp { changed_source_ids })
+    }
+
     pub fn rebuild<I>(
         &mut self,
         generation: &CommittedCoreGeneration,
@@ -46,8 +88,6 @@ impl SourceBackedRelationalProjection {
         self.rebuild_stream(generation, records.into_iter().map(Ok))
     }
 
-    /// Replaces the complete relational projection from a fallible record
-    /// stream. A producer error rolls back the generation transaction.
     pub fn rebuild_stream<I>(
         &mut self,
         generation: &CommittedCoreGeneration,
@@ -59,8 +99,6 @@ impl SourceBackedRelationalProjection {
         self.apply_generation(BuildMode::Rebuild, generation, records)
     }
 
-    /// Advances only changed sources and retires sources omitted by the new
-    /// certified manifest.
     pub fn catch_up<I>(
         &mut self,
         generation: &CommittedCoreGeneration,
@@ -72,8 +110,6 @@ impl SourceBackedRelationalProjection {
         self.catch_up_stream(generation, records.into_iter().map(Ok))
     }
 
-    /// Advances changed sources from a fallible record stream. A producer
-    /// error rolls back the generation transaction.
     pub fn catch_up_stream<I>(
         &mut self,
         generation: &CommittedCoreGeneration,
@@ -87,7 +123,7 @@ impl SourceBackedRelationalProjection {
 
     fn apply_generation<I>(
         &mut self,
-        mode: BuildMode,
+        requested_mode: BuildMode,
         generation: &CommittedCoreGeneration,
         records: I,
     ) -> Result<RelationalProjectionReceipt>
@@ -99,12 +135,21 @@ impl SourceBackedRelationalProjection {
                 "a read-only SQL projection cannot publish a generation".to_owned(),
             ));
         }
-        let manifest = ValidatedManifest::from_commit(generation)?;
+        let plan = self.plan_generation(generation)?;
+        if let RelationalProjectionPlan::NoOp(receipt) = plan {
+            return Ok(receipt);
+        }
+        let mode = match (requested_mode, plan) {
+            (_, RelationalProjectionPlan::Rebuild) | (BuildMode::Rebuild, _) => BuildMode::Rebuild,
+            (BuildMode::CatchUp, RelationalProjectionPlan::CatchUp { .. }) => BuildMode::CatchUp,
+            (_, RelationalProjectionPlan::NoOp(receipt)) => return Ok(receipt),
+        };
+        let validated = ValidatedGeneration::from_commit(generation)?;
         let result = apply_transaction(
             &mut self.conn,
             mode,
             generation,
-            &manifest,
+            &validated,
             records.into_iter(),
         );
         if let Err(error) = &result {
@@ -118,94 +163,75 @@ fn apply_transaction<I>(
     conn: &mut Connection,
     mode: BuildMode,
     generation: &CommittedCoreGeneration,
-    manifest: &ValidatedManifest,
+    validated: &ValidatedGeneration,
     records: I,
 ) -> Result<RelationalProjectionReceipt>
 where
     I: Iterator<Item = Result<RelationalProjectionRecord>>,
 {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let prior = stored_certificate_digests(&tx)?;
-    let manifest_ids = manifest.sources.keys().cloned().collect::<BTreeSet<_>>();
+    let prior = stored_source_revisions(&tx)?;
+    let generation_ids = validated.sources.keys().cloned().collect::<BTreeSet<_>>();
     let (expected, validation_scope) = match mode {
         BuildMode::Rebuild => {
-            tx.execute("DELETE FROM source_backed_sources", [])?;
-            (manifest_ids.clone(), ValidationScope::Full)
+            tx.execute("DELETE FROM core_sources", [])?;
+            (generation_ids.clone(), ValidationScope::Full)
         }
         BuildMode::CatchUp => {
-            let changed = manifest
+            let changed = validated
                 .sources
                 .iter()
-                .filter(|&(source_id, source)| {
-                    prior.get(source_id) != Some(&source.certificate_digest)
+                .filter(|(source_id, source)| {
+                    prior.get(*source_id) != Some(&source.revision_digest)
                 })
                 .map(|(source_id, _)| source_id.clone())
                 .collect::<BTreeSet<_>>();
-            // Additions and certified removals both change which lineage
-            // targets the manifest requires, even when no stored row changes.
-            let relationship_scope_changed = changed
-                .iter()
-                .any(|source_id| !prior.contains_key(source_id))
-                || !manifest.removal_ids.is_empty();
             let removed = prior
                 .keys()
-                .filter(|id| !manifest_ids.contains(*id))
+                .filter(|source_id| !generation_ids.contains(*source_id))
                 .cloned()
                 .collect::<BTreeSet<_>>();
-            for source_id in &removed {
-                if !manifest.removal_ids.contains(source_id) {
-                    return invalid_generation(format!(
-                        "source {source_id} is omitted without durable certified deletion evidence"
-                    ));
-                }
-            }
-            let affected = changed.union(&removed).cloned().collect::<BTreeSet<_>>();
+            let affected_source_ids = changed.union(&removed).cloned().collect::<BTreeSet<_>>();
             let prior_counts = stored_projection_counts(&tx)?;
-            let old = source_projection_snapshot(&tx, &affected)?;
-            validate_no_unaffected_cascade_dependencies(&tx, &affected)?;
-            for source_id in &affected {
-                tx.execute(
-                    "DELETE FROM source_backed_sources WHERE source_id = ?1",
-                    [source_id],
-                )?;
+            let old = source_projection_snapshot(&tx, &affected_source_ids)?;
+            for source_id in &affected_source_ids {
+                tx.execute("DELETE FROM core_sources WHERE source_id = ?1", [source_id])?;
             }
             (
                 changed.clone(),
                 ValidationScope::Incremental {
                     prior_counts,
                     changed_source_ids: changed,
-                    affected_source_ids: affected,
-                    relationship_scope_changed,
+                    affected_source_ids,
                     old,
                 },
             )
         }
     };
 
-    materialize_records(&tx, expected, manifest, records)?;
+    materialize_records(&tx, expected, validated, records)?;
+    prune_orphan_repository_bindings(&tx)?;
     let counts = match validation_scope {
-        ValidationScope::Full => validate_projected_generation(&tx, manifest)?,
+        ValidationScope::Full => validate_projected_generation(&tx, validated)?,
         ValidationScope::Incremental {
             prior_counts,
             changed_source_ids,
             affected_source_ids,
-            relationship_scope_changed,
             old,
         } => {
             let new = source_projection_snapshot(&tx, &affected_source_ids)?;
             validate_incremental_projected_generation(
                 &tx,
-                manifest,
+                validated,
                 prior_counts,
                 &old,
                 &new,
                 &changed_source_ids,
-                relationship_scope_changed,
             )?
         }
     };
     let prior_build: i64 = tx.query_row(
-        "SELECT build_generation FROM source_backed_relational_state WHERE singleton = 1",
+        "SELECT build_generation FROM core_relational_state WHERE singleton = 1",
         [],
         |row| row.get(0),
     )?;
@@ -216,61 +242,93 @@ where
                 "projection build generation",
             ))?;
     tx.execute(
-        "UPDATE source_backed_relational_state
+        "UPDATE core_relational_state
          SET build_generation = ?1,
              active_generation_id = ?2,
-             active_manifest_digest = ?3,
-             active_manifest_version = ?4,
-             active_lexical_schema_version = ?5,
-             active_policy_schema_hash = ?6,
+             active_manifest_version = ?3,
+             active_core_record_version = ?4,
+             active_core_record_contract_fingerprint = ?5,
+             active_lexical_schema_version = ?6,
+             active_policy_schema_hash = ?7,
+             active_materializer_revision = ?8,
              target_generation_id = NULL,
              status = 'ready',
-             source_count = ?7,
-             session_count = ?8,
-             event_count = ?9,
-             file_touch_count = ?10,
+             source_count = ?9,
+             session_count = ?10,
+             event_count = ?11,
+             repository_binding_count = ?12,
+             file_observation_count = ?13,
+             vcs_observation_count = ?14,
              last_error = NULL
          WHERE singleton = 1",
         params![
             build_generation,
             generation.generation_id,
-            manifest.digest.as_slice(),
-            GENERATION_MANIFEST_VERSION,
-            REQUIRED_LEXICAL_SCHEMA_VERSION,
-            manifest.policy_schema_hash,
+            i64::from(generation.manifest_version),
+            i64::from(generation.core_record_version),
+            generation.core_record_contract_fingerprint,
+            i64::from(generation.lexical_schema_version),
+            generation.policy_schema_hash,
+            i64::from(RELATIONAL_MATERIALIZER_REVISION),
             counts.sources,
             counts.sessions,
             counts.events,
-            counts.file_touches,
+            counts.repository_bindings,
+            counts.file_observations,
+            counts.vcs_observations,
         ],
     )?;
     tx.commit()?;
     Ok(RelationalProjectionReceipt {
         core_generation_id: generation.generation_id.clone(),
-        build_generation: sqlite_u64(build_generation, "build_generation")?,
-        source_count: sqlite_u64(counts.sources, "source_count")?,
-        session_count: sqlite_u64(counts.sessions, "session_count")?,
-        event_count: sqlite_u64(counts.events, "event_count")?,
-        file_touch_count: sqlite_u64(counts.file_touches, "file_touch_count")?,
+        relational_schema_version: RELATIONAL_PROJECTION_SCHEMA_VERSION,
+        materializer_revision: RELATIONAL_MATERIALIZER_REVISION,
+        build_generation: sqlite_u64(build_generation, "build generation")?,
+        source_count: sqlite_u64(counts.sources, "source count")?,
+        session_count: sqlite_u64(counts.sessions, "session count")?,
+        event_count: sqlite_u64(counts.events, "event count")?,
+        repository_binding_count: sqlite_u64(
+            counts.repository_bindings,
+            "repository binding count",
+        )?,
+        file_touch_count: sqlite_u64(counts.file_observations, "file observation count")?,
+        vcs_observation_count: sqlite_u64(counts.vcs_observations, "VCS observation count")?,
     })
 }
 
-fn stored_certificate_digests(conn: &Connection) -> Result<BTreeMap<String, [u8; 32]>> {
-    let mut stmt =
-        conn.prepare("SELECT source_id, certificate_digest FROM source_backed_sources")?;
-    let mut rows = stmt.query([])?;
-    let mut output = BTreeMap::new();
+fn stored_source_revisions(conn: &Connection) -> Result<BTreeMap<String, [u8; 32]>> {
+    let mut statement = conn.prepare("SELECT source_id, revision_digest FROM core_sources")?;
+    let mut rows = statement.query([])?;
+    let mut revisions = BTreeMap::new();
     while let Some(row) = rows.next()? {
         let source_id: String = row.get(0)?;
-        let bytes: Vec<u8> = row.get(1)?;
-        let digest: [u8; 32] = bytes.try_into().map_err(|_| {
-            RelationalProjectionError::InvalidRecord(
-                "stored source certificate digest is malformed".to_owned(),
+        let digest: Vec<u8> = row.get(1)?;
+        let digest = digest.try_into().map_err(|_| {
+            RelationalProjectionError::IncompatibleState(
+                "stored source revision digest is malformed".to_owned(),
             )
         })?;
-        output.insert(source_id, digest);
+        revisions.insert(source_id, digest);
     }
-    Ok(output)
+    Ok(revisions)
+}
+
+fn receipt_from_metadata(
+    core_generation_id: &str,
+    metadata: &super::RelationalProjectionMetadata,
+) -> RelationalProjectionReceipt {
+    RelationalProjectionReceipt {
+        core_generation_id: core_generation_id.to_owned(),
+        relational_schema_version: RELATIONAL_PROJECTION_SCHEMA_VERSION,
+        materializer_revision: RELATIONAL_MATERIALIZER_REVISION,
+        build_generation: metadata.build_generation,
+        source_count: metadata.source_count,
+        session_count: metadata.session_count,
+        event_count: metadata.event_count,
+        repository_binding_count: metadata.repository_binding_count,
+        file_touch_count: metadata.file_touch_count,
+        vcs_observation_count: metadata.vcs_observation_count,
+    }
 }
 
 fn note_failed_target(conn: &Connection, generation_id: &str, error: &RelationalProjectionError) {
@@ -280,7 +338,7 @@ fn note_failed_target(conn: &Connection, generation_id: &str, error: &Relational
         .take(MAX_FAILURE_DETAIL_CHARS)
         .collect::<String>();
     let _ = conn.execute(
-        "UPDATE source_backed_relational_state
+        "UPDATE core_relational_state
          SET target_generation_id = ?1, status = 'behind', last_error = ?2
          WHERE singleton = 1",
         params![generation_id, detail],

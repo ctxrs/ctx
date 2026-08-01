@@ -6,7 +6,7 @@ use serde::{
     de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{common::time::parse_rfc3339_utc, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
@@ -318,8 +318,13 @@ fn decode_message(
 ) -> Option<ZedDecodedCoreEvent> {
     match message {
         ZedMessageWire::User(user) => {
-            let body = retained_content_text(&user.content);
-            body.map(|body| ZedDecodedCoreEvent {
+            let body = retained_content_text(&user.content)?;
+            let native_content = json!({
+                "kind": "user",
+                "id": &user.id,
+                "content": structured_content(&user.content),
+            });
+            Some(ZedDecodedCoreEvent {
                 provider_message_id: nonempty_owned(user.id),
                 thread_ordinal,
                 message_ordinal,
@@ -328,11 +333,16 @@ fn decode_message(
                 occurred_at,
                 kind: "user",
                 call_ids: Vec::new(),
+                native_content,
                 body,
                 safe_file_touches: Vec::new(),
             })
         }
         ZedMessageWire::Agent(agent) => {
+            let native_content = json!({
+                "kind": "agent",
+                "content": structured_content(&agent.content),
+            });
             let mut parts = Vec::new();
             let mut call_ids = Vec::new();
             let mut touches = BTreeSet::new();
@@ -400,24 +410,29 @@ fn decode_message(
                     "agent"
                 },
                 call_ids,
+                native_content,
                 body: parts.join("\n"),
                 safe_file_touches: touches.into_iter().collect(),
             })
         }
-        ZedMessageWire::Compaction(summary) => Some(ZedDecodedCoreEvent {
-            provider_message_id: None,
-            thread_ordinal,
-            message_ordinal,
-            event_type: EventType::Summary,
-            role: EventRole::System,
-            occurred_at,
-            kind: "compaction",
-            call_ids: Vec::new(),
-            body: summary
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "Zed compaction".to_owned()),
-            safe_file_touches: Vec::new(),
-        }),
+        ZedMessageWire::Compaction(summary) => {
+            let native_content = json!({"kind": "compaction", "summary": &summary});
+            Some(ZedDecodedCoreEvent {
+                provider_message_id: None,
+                thread_ordinal,
+                message_ordinal,
+                event_type: EventType::Summary,
+                role: EventRole::System,
+                occurred_at,
+                kind: "compaction",
+                call_ids: Vec::new(),
+                native_content,
+                body: summary
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "Zed compaction".to_owned()),
+                safe_file_touches: Vec::new(),
+            })
+        }
         ZedMessageWire::Resume => Some(ZedDecodedCoreEvent {
             provider_message_id: None,
             thread_ordinal,
@@ -427,22 +442,51 @@ fn decode_message(
             occurred_at,
             kind: "resume",
             call_ids: Vec::new(),
+            native_content: json!({"kind": "resume"}),
             body: "[resume]".to_owned(),
             safe_file_touches: Vec::new(),
         }),
-        ZedMessageWire::Unknown(kind) => Some(ZedDecodedCoreEvent {
-            provider_message_id: None,
-            thread_ordinal,
-            message_ordinal,
-            event_type: EventType::Notice,
-            role: EventRole::Unknown,
-            occurred_at,
-            kind: "unknown",
-            call_ids: Vec::new(),
-            body: format!("[zed message: {kind}]"),
-            safe_file_touches: Vec::new(),
-        }),
+        ZedMessageWire::Unknown(kind) => {
+            let native_content = json!({"kind": "unknown", "native_kind": &kind});
+            Some(ZedDecodedCoreEvent {
+                provider_message_id: None,
+                thread_ordinal,
+                message_ordinal,
+                event_type: EventType::Notice,
+                role: EventRole::Unknown,
+                occurred_at,
+                kind: "unknown",
+                call_ids: Vec::new(),
+                native_content,
+                body: format!("[zed message: {kind}]"),
+                safe_file_touches: Vec::new(),
+            })
+        }
     }
+}
+
+fn structured_content(content: &[ZedContentWire]) -> Vec<Value> {
+    content
+        .iter()
+        .map(|item| match item {
+            ZedContentWire::Text(_) => json!({"type": "text"}),
+            ZedContentWire::Thinking(_) => json!({"type": "thinking"}),
+            ZedContentWire::RedactedThinking => json!({"type": "redacted_thinking"}),
+            ZedContentWire::ToolUse(tool) => json!({
+                "type": "tool_use",
+                "id": &tool.id,
+                "name": &tool.name,
+                "input": &tool.input,
+                "raw_input": &tool.raw_input,
+            }),
+            ZedContentWire::ToolResult => json!({"type": "tool_result"}),
+            ZedContentWire::Mention(_) => json!({"type": "mention"}),
+            ZedContentWire::Image => json!({"type": "image"}),
+            ZedContentWire::Unknown(kind) => {
+                json!({"type": "unknown", "native_kind": kind})
+            }
+        })
+        .collect()
 }
 
 fn retained_content_text(content: &[ZedContentWire]) -> Option<String> {

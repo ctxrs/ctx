@@ -1,86 +1,38 @@
-use std::{
-    sync::{Arc, Barrier},
-    thread,
-};
-
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend,
-    CertifiedSourceDeletion, CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceInventoryObservation,
-    SourceObservation, SourceRecordLocator, TypedKey,
+    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceDeletion,
+    CertifiedSourceInventory, CoreRecord, EventIdentityInput, NativeItemKey, NativeSessionKey,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceInventoryObservation,
+    SourceObservation, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, LexicalDocument, WriterOptions};
-use ctx_history_relational::{RawSqlValue, RelationalProjectionStatus};
-use rusqlite::types::ValueRef;
-use sha2::Digest as _;
+use ctx_history_index::{GenerationWriter, WriterOptions};
+use ctx_history_relational::{
+    RawSqlOptions, RawSqlValue, RelationalProjectionStatus, RELATIONAL_MATERIALIZER_REVISION,
+};
 
 use super::*;
 use crate::source_sql::SqlCompatibility;
 
-const PROVIDER_TEXT: &str = "provider-body-sentinel-must-not-enter-relational";
-const PREVIEW_TEXT: &str = "provider-preview-sentinel-must-not-enter-relational";
+const BODY_SENTINEL: &str = "complete-core-body-must-not-enter-relational";
 
-#[test]
-fn concurrent_catch_up_owners_serialize_the_complete_projection_run() {
-    const OWNERS: usize = 8;
-    let temp = tempfile::tempdir().unwrap();
-    let source = source();
-    let generation = initial_generation(temp.path(), &source);
-    let barrier = Arc::new(Barrier::new(OWNERS));
-    let handles = (0..OWNERS)
-        .map(|_| {
-            let data_root = temp.path().to_path_buf();
-            let generation = generation.clone();
-            let barrier = Arc::clone(&barrier);
-            thread::spawn(move || {
-                barrier.wait();
-                run_after_core_publication(&data_root, &generation)
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let completed = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("catch-up owner panicked").unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(completed.iter().filter(|run| run.did_work).count(), 1);
-    assert!(read_status(temp.path()).is_some_and(|status| status.is_completed_for(&generation)));
-    assert!(ready_projection_metadata(temp.path(), &generation).is_some());
-}
-
-#[test]
-fn durable_state_path_is_purpose_based() {
-    assert_eq!(
-        status_path(Path::new("ctx-data")),
-        Path::new("ctx-data/daemon/jobs/relational-catch-up.json")
-    );
-}
-
-fn source() -> ctx_history_core::SourceKey {
-    source_with_name("relational-production-writer.jsonl")
-}
-
-fn source_with_name(name: &str) -> ctx_history_core::SourceKey {
-    ctx_history_core::SourceKey::derive(
+fn source() -> SourceKey {
+    SourceKey::derive(
         "codex",
         "codex_session_jsonl",
         "session",
         1,
-        SourceAnchor::provider_native("session-file", TypedKey::utf8(name).unwrap()).unwrap(),
+        SourceAnchor::provider_native(
+            "session-file",
+            TypedKey::utf8("provider-session.jsonl").unwrap(),
+        )
+        .unwrap(),
     )
     .unwrap()
 }
 
-fn appendable_certificate(
-    source: &ctx_history_core::SourceKey,
-    revision: u8,
-    documents: u64,
-    bytes: u64,
-) -> CertifiedSource {
+fn certificate(source: &SourceKey, revision: u8, documents: u64) -> CertifiedSource {
     let observation =
         SourceObservation::new(source.clone(), "regular-file-v1", vec![revision]).unwrap();
-    CertifiedSource::certify_with_frontier(
+    CertifiedSource::certify(
         observation.clone(),
         observation,
         "codex-parser-v1",
@@ -89,28 +41,14 @@ fn appendable_certificate(
             complete_records: documents,
             retained_records: documents,
             indexed_documents: documents,
-            certified_bytes: bytes,
+            certified_bytes: documents * 100,
             ..ScannedSourceCounts::default()
         },
-        Some(
-            SourceFrontier::new(
-                "jsonl-byte-offset",
-                TypedKey::U64(bytes),
-                bytes,
-                [revision; 32],
-            )
-            .unwrap(),
-        ),
     )
     .unwrap()
 }
 
-fn document(
-    source: &ctx_history_core::SourceKey,
-    sequence: u64,
-    role: &str,
-    touched_files: &[&str],
-) -> LexicalDocument {
+fn record(source: &SourceKey, sequence: u64, _provider_file: &Path) -> CoreRecord {
     let native_session = TypedKey::utf8("provider-session").unwrap();
     let session_key = NativeSessionKey::native_id("session", native_session.clone()).unwrap();
     let session_id = derive_session_id(SessionIdentityInput {
@@ -119,11 +57,7 @@ fn document(
         native_session_key: &session_key,
     })
     .unwrap();
-    let native_item = NativeItemKey::native_id(
-        "message",
-        TypedKey::utf8(format!("event-{sequence}")).unwrap(),
-    )
-    .unwrap();
+    let native_item = NativeItemKey::native_id("message", TypedKey::U64(sequence)).unwrap();
     let event_id = derive_event_id(EventIdentityInput {
         source,
         session_id,
@@ -132,112 +66,59 @@ fn document(
         subrecord_selector: None,
     })
     .unwrap();
-    LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator: SourceRecordLocator::new(
-            source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset: sequence * 100,
-                byte_length: 100,
-                physical_ordinal: sequence,
-                native_session_key: Some(native_session),
-                native_event_key: Some(TypedKey::U64(sequence)),
-            },
-            LocatorRevisionPolicy::StableRecordEvidence,
-            None,
-            [sequence as u8; 32],
-        )
-        .unwrap(),
-        provider_session_id: Some("provider-session".to_owned()),
-        branch: Some("main".to_owned()),
-        source_path: Some("/provider/codex/session.jsonl".to_owned()),
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: sequence,
-        occurred_at_unix_ms: Some(1_700_000_000_000 + sequence as i64),
-        event_type: "message".to_owned(),
-        role: Some(role.to_owned()),
-        body: format!("{PROVIDER_TEXT} {PREVIEW_TEXT} sequence-{sequence}"),
-        workspace: Some("ctx".to_owned()),
-        cwd: Some("/work/ctx".to_owned()),
-        touched_files: touched_files
-            .iter()
-            .map(|path| (*path).to_owned())
-            .collect(),
-    }
+        session_id,
+        source.clone(),
+        sequence,
+        "message",
+        "primary",
+        true,
+        "codex-parser-v1",
+        format!("{BODY_SENTINEL}-{sequence}"),
+    )
+    .unwrap();
+    record.provider_session_id = Some("provider-session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(sequence));
+    record.branch = Some("main".to_owned());
+    record.occurred_at_unix_ms = Some(1_700_000_000_000 + sequence as i64);
+    record.role = Some("user".to_owned());
+    record.workspace = Some("ctx".to_owned());
+    record.cwd = Some("/work/ctx".to_owned());
+    record.validate_contract().unwrap();
+    record
 }
 
 fn replace_generation(
     data_root: &Path,
-    source: &ctx_history_core::SourceKey,
+    source: &SourceKey,
     revision: u8,
-    documents: Vec<LexicalDocument>,
+    records: Vec<CoreRecord>,
 ) -> String {
-    let document_count = documents.len() as u64;
+    let count = records.len() as u64;
     let mut writer = GenerationWriter::open(
         source_backed_index_root(data_root),
         WriterOptions::default(),
     )
     .unwrap();
     writer.begin_source(source.clone()).unwrap();
-    for document in documents {
-        writer.add_document(document).unwrap();
+    for record in records {
+        writer.add_core_record(record).unwrap();
     }
     writer
-        .certify_source(appendable_certificate(
-            source,
-            revision,
-            document_count,
-            document_count * 100,
-        ))
+        .certify_source(certificate(source, revision, count))
         .unwrap();
     writer.commit(|_| true).unwrap().generation_id
 }
 
-fn initial_generation(data_root: &Path, source: &ctx_history_core::SourceKey) -> String {
-    replace_generation(
-        data_root,
-        source,
-        1,
-        vec![document(source, 1, "user", &["src/lib.rs"])],
-    )
-}
-
-fn append_generation(data_root: &Path, source: &ctx_history_core::SourceKey) -> String {
-    let mut writer = GenerationWriter::open(
-        source_backed_index_root(data_root),
-        WriterOptions::default(),
-    )
-    .unwrap();
-    let base = writer.begin_source_append(source.clone()).unwrap().clone();
-    writer
-        .add_document(document(
-            source,
-            2,
-            "assistant",
-            &["src/lib.rs", "src/main.rs"],
-        ))
-        .unwrap();
-    let current = appendable_certificate(source, 2, 2, 200);
-    writer
-        .certify_source_append(
-            CertifiedSourceAppend::certify(&base, current, 100, [1; 32]).unwrap(),
-        )
-        .unwrap();
-    writer.commit(|_| true).unwrap().generation_id
-}
-
-fn delete_generation(data_root: &Path, source: &ctx_history_core::SourceKey) -> String {
+fn delete_generation(data_root: &Path, source: &SourceKey) -> String {
     let observation = SourceInventoryObservation::new(
         source.provider(),
         "provider-root",
         TypedKey::utf8("root-lineage").unwrap(),
         "tree-inventory-v1",
-        vec![4],
+        vec![2],
     )
     .unwrap();
     let inventory =
@@ -261,303 +142,602 @@ fn query(data_root: &Path, sql: &str) -> Vec<Vec<RawSqlValue>> {
         .rows
 }
 
-fn projection_bytes(data_root: &Path) -> Vec<u8> {
+fn query_projection(data_root: &Path, sql: &str) -> Vec<Vec<RawSqlValue>> {
+    SourceBackedRelationalProjection::open_read_only(sql_compatibility_path(data_root))
+        .unwrap()
+        .raw_sql_query(sql, RawSqlOptions::default())
+        .unwrap()
+        .rows
+}
+
+fn sequence_value(value: u64) -> RawSqlValue {
+    RawSqlValue::Text {
+        value: format!("{value:020}"),
+        bytes: 20,
+        truncated: false,
+    }
+}
+
+fn relational_bytes(data_root: &Path) -> Vec<u8> {
     let path = sql_compatibility_path(data_root);
-    let mut output = fs::read(&path).unwrap();
+    let mut bytes = fs::read(&path).unwrap();
     for suffix in ["-wal", "-shm"] {
-        if let Ok(bytes) = fs::read(format!("{}{suffix}", path.display())) {
-            output.extend(bytes);
+        if let Ok(sidecar) = fs::read(format!("{}{suffix}", path.display())) {
+            bytes.extend(sidecar);
         }
     }
-    output
+    bytes
 }
 
-fn contains_bytes(haystack: &[u8], needle: &str) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|candidate| candidate == needle.as_bytes())
-}
-
-fn digest_hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(DIGITS[(byte >> 4) as usize] as char);
-        output.push(DIGITS[(byte & 0x0f) as usize] as char);
+fn projection_receipt(
+    generation: &CommittedCoreGeneration,
+    metadata: &RelationalProjectionMetadata,
+) -> RelationalProjectionReceipt {
+    RelationalProjectionReceipt {
+        core_generation_id: generation.generation_id.clone(),
+        relational_schema_version: RELATIONAL_PROJECTION_SCHEMA_VERSION,
+        materializer_revision: RELATIONAL_MATERIALIZER_REVISION,
+        build_generation: metadata.build_generation,
+        source_count: metadata.source_count,
+        session_count: metadata.session_count,
+        event_count: metadata.event_count,
+        repository_binding_count: metadata.repository_binding_count,
+        file_touch_count: metadata.file_touch_count,
+        vcs_observation_count: metadata.vcs_observation_count,
     }
-    output
 }
 
-fn logical_projection_digest(data_root: &Path) -> String {
-    let queries = [
-        "SELECT * FROM source_backed_relational_state ORDER BY singleton",
-        "SELECT * FROM source_backed_sources ORDER BY source_id",
-        "SELECT * FROM source_backed_sessions ORDER BY ctx_session_id",
-        "SELECT * FROM source_backed_events ORDER BY ctx_event_id",
-        "SELECT * FROM source_backed_files_touched ORDER BY ctx_file_touch_id",
-    ];
+fn committed_generation_for(data_root: &Path, generation_id: &str) -> CommittedCoreGeneration {
+    let index = VerifiedIndex::open(source_backed_index_root(data_root)).unwrap();
+    assert_eq!(index.generation_id(), generation_id);
+    committed_generation(&index).unwrap()
+}
+
+fn force_materializer_rebuild(data_root: &Path) {
     let connection = rusqlite::Connection::open(sql_compatibility_path(data_root)).unwrap();
-    let mut digest = sha2::Sha256::new();
-    for sql in queries {
-        digest.update((sql.len() as u64).to_be_bytes());
-        digest.update(sql.as_bytes());
-        let mut statement = connection.prepare(sql).unwrap();
-        let column_count = statement.column_count();
-        let mut rows = statement.query([]).unwrap();
-        while let Some(row) = rows.next().unwrap() {
-            digest.update([0xff]);
-            for column in 0..column_count {
-                match row.get_ref(column).unwrap() {
-                    ValueRef::Null => digest.update([0]),
-                    ValueRef::Integer(value) => {
-                        digest.update([1]);
-                        digest.update(value.to_be_bytes());
-                    }
-                    ValueRef::Real(value) => {
-                        digest.update([2]);
-                        digest.update(value.to_bits().to_be_bytes());
-                    }
-                    ValueRef::Text(value) => {
-                        digest.update([3]);
-                        digest.update((value.len() as u64).to_be_bytes());
-                        digest.update(value);
-                    }
-                    ValueRef::Blob(value) => {
-                        digest.update([4]);
-                        digest.update((value.len() as u64).to_be_bytes());
-                        digest.update(value);
-                    }
-                }
-            }
-        }
-    }
-    digest_hex(&digest.finalize())
+    connection
+        .execute(
+            "UPDATE core_relational_state SET active_materializer_revision = 0",
+            [],
+        )
+        .unwrap();
 }
 
-#[test]
-fn relational_record_stream_holds_only_bounded_event_pages() {
-    let temp = tempfile::tempdir().unwrap();
-    let source = source();
-    let documents = (1..=7)
-        .map(|sequence| document(&source, sequence, "assistant", &["src/lib.rs"]))
-        .collect();
-    replace_generation(temp.path(), &source, 1, documents);
-    let index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
-    let mut records = RelationalRecordStream::new(&index, RelationalSourceSelection::All, 2);
-    let mut events = 0;
-    let mut sessions = 0;
-
-    for record in records.by_ref() {
-        match record.unwrap() {
-            RelationalProjectionRecord::Event(_) => events += 1,
-            RelationalProjectionRecord::Session(_) => sessions += 1,
-            _ => {}
-        }
-    }
-
-    assert_eq!(events, 7);
-    assert_eq!(sessions, 2, "one provisional and one finalized session");
-    assert_eq!(records.pages_loaded, 4, "each source page loads once");
-    assert_eq!(records.page_items_loaded, 7);
-    assert_eq!(records.max_session_aggregates, 1);
-    assert!(
-        records.max_page_items <= 2,
-        "stream loaded {} events in one page",
-        records.max_page_items
-    );
-}
-
-#[test]
-fn relational_record_stream_closes_an_empty_certified_source_once() {
-    let temp = tempfile::tempdir().unwrap();
-    let source = source();
-    replace_generation(temp.path(), &source, 1, Vec::new());
-    let index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
-    let mut records = RelationalRecordStream::new(&index, RelationalSourceSelection::All, 2);
-    let mut begins = 0;
-    let mut ends = 0;
-
-    for record in records.by_ref() {
-        match record.unwrap() {
-            RelationalProjectionRecord::BeginSource(_) => begins += 1,
-            RelationalProjectionRecord::EndSource { .. } => ends += 1,
-            _ => {}
-        }
-    }
-
-    assert_eq!((begins, ends), (1, 1));
-    assert_eq!(records.pages_loaded, 1);
-    assert_eq!(records.page_items_loaded, 0);
-    assert_eq!(records.max_page_items, 0);
-    assert_eq!(records.max_session_aggregates, 0);
-}
-
-#[test]
-fn bounded_source_subset_projects_events_without_fabricating_external_parent() {
-    let temp = tempfile::tempdir().unwrap();
-    let selected_child = source_with_name("selected-child.jsonl");
-    let external_parent = source_with_name("external-parent.jsonl");
-    let parent_session_id = document(&external_parent, 1, "user", &[]).session_id;
-    let mut child = document(&selected_child, 1, "assistant", &["src/subset.rs"]);
-    child.parent_session_id = Some(parent_session_id);
-    child.root_session_id = parent_session_id;
-
-    let generation = replace_generation(temp.path(), &selected_child, 1, vec![child]);
-    let index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
-    let lexical_page = index.source_event_page(&selected_child, None, 2).unwrap();
-    assert_eq!(lexical_page.items.len(), 1);
-    assert_eq!(
-        lexical_page.items[0].parent_session_id,
-        Some(parent_session_id)
-    );
-    assert_eq!(lexical_page.items[0].root_session_id, parent_session_id);
-
-    let catch_up = run_after_core_publication(temp.path(), &generation).unwrap();
-    assert!(catch_up.did_work);
-    assert_eq!(catch_up.status["status"], "completed");
-    assert_eq!(
-        query(
-            temp.path(),
-            "SELECT parent_ctx_session_id IS NULL, root_ctx_session_id IS NULL
-             FROM ctx_sessions"
-        )[0],
-        vec![RawSqlValue::Integer(1), RawSqlValue::Integer(1)]
-    );
-    assert_eq!(
-        query(temp.path(), "SELECT COUNT(*) FROM ctx_events")[0][0],
-        RawSqlValue::Integer(1)
-    );
-    assert_eq!(
-        query(
-            temp.path(),
-            &format!(
-                "SELECT parent_ctx_session_id = '{parent_session_id}',
-                        root_ctx_session_id = '{parent_session_id}'
-                 FROM source_backed_sessions"
-            )
-        )[0],
-        vec![RawSqlValue::Integer(1), RawSqlValue::Integer(1)]
-    );
-}
-
-#[test]
-#[ignore = "manual 40k-event relational catch-up profile"]
-fn relational_large_source_profile_fixture() {
-    const EVENT_COUNT: usize = 40_000;
-    let temp = tempfile::tempdir().unwrap();
-    let source = source();
-    let documents = (1..=EVENT_COUNT as u64)
-        .map(|sequence| document(&source, sequence, "assistant", &["src/large.rs"]))
-        .collect();
-    replace_generation(temp.path(), &source, 1, documents);
-    let index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
+fn build_rebuild_candidate(
+    data_root: &Path,
+    generation_id: &str,
+) -> (
+    SourceBackedRelationalProjection,
+    PathBuf,
+    CommittedCoreGeneration,
+    RelationalProjectionReceipt,
+) {
+    let index = VerifiedIndex::open(source_backed_index_root(data_root)).unwrap();
+    assert_eq!(index.generation_id(), generation_id);
     let generation = committed_generation(&index).unwrap();
-    let mut projection =
-        SourceBackedRelationalProjection::open(sql_compatibility_path(temp.path())).unwrap();
-    let mut records = RelationalRecordStream::new(
+    let destination = sql_compatibility_path(data_root);
+    let PreparedProjection::RebuildCandidate {
+        mut projection,
+        path,
+    } = prepare_projection(&destination, &generation).unwrap()
+    else {
+        panic!("test generation unexpectedly did not require a relational rebuild");
+    };
+    let plan = projection.plan_generation(&generation).unwrap();
+    assert_eq!(plan, RelationalProjectionPlan::Rebuild);
+    let records = relational_record_stream(
         &index,
         RelationalSourceSelection::All,
+        &generation,
         MAX_SOURCE_EVENT_PAGE_ITEMS,
     );
+    let receipt = projection.rebuild_stream(&generation, records).unwrap();
+    (projection, path, generation, receipt)
+}
 
-    let started = Instant::now();
-    let receipt = projection
-        .rebuild_stream(&generation, records.by_ref())
-        .unwrap();
-    let elapsed = started.elapsed();
-    assert_eq!(receipt.source_count, 1);
-    assert_eq!(receipt.session_count, 1);
-    assert_eq!(receipt.event_count, EVENT_COUNT as u64);
-    assert_eq!(receipt.file_touch_count, EVENT_COUNT as u64);
-    assert_eq!(records.pages_loaded, 10);
-    assert_eq!(records.page_items_loaded, EVENT_COUNT);
-    assert!(records.max_page_items <= MAX_SOURCE_EVENT_PAGE_ITEMS);
-    assert_eq!(records.max_session_aggregates, 1);
-    drop(projection);
-
-    let digest = logical_projection_digest(temp.path());
-    assert_eq!(
-        digest,
-        "51dc260b600bb9fdd533a33cd8e3ffab9373b3f2a04fc729a915d7b64e57ee97"
-    );
-    eprintln!(
-        "relational_large_source_profile events={EVENT_COUNT} pages={} \
-         page_items={} max_page_items={} max_sessions={} digest={digest} wall_ms={}",
-        records.pages_loaded,
-        records.page_items_loaded,
-        records.max_page_items,
-        records.max_session_aggregates,
-        elapsed.as_millis()
-    );
+fn assert_no_sqlite_sidecars(path: &Path) {
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = sqlite_sidecar_path(path, suffix);
+        assert!(!sidecar.exists(), "stale sidecar {}", sidecar.display());
+    }
 }
 
 #[test]
-fn cold_append_rewrite_delete_and_noop_preserve_only_relational_metadata() {
+fn first_publish_seals_syncs_and_reopens_exact_generation() {
     let temp = tempfile::tempdir().unwrap();
     let source = source();
-    let first_generation = initial_generation(temp.path(), &source);
+    let generation_id = replace_generation(
+        temp.path(),
+        &source,
+        1,
+        vec![record(&source, 1, &temp.path().join("first-publish.jsonl"))],
+    );
+    let destination = sql_compatibility_path(temp.path());
+    let candidate = candidate_projection_path(&destination);
+    assert!(!destination.exists());
 
-    let cold = run_after_core_publication(temp.path(), &first_generation).unwrap();
-    assert!(cold.did_work);
-    assert_eq!(cold.status["status"], "completed");
-    assert_eq!(cold.status["core_generation_id"], first_generation);
-    assert_eq!(cold.status["receipt_core_generation_id"], first_generation);
+    let run = run_after_core_publication(temp.path(), &generation_id).unwrap();
 
-    let metadata = SqlCompatibility::open_for_data_root(temp.path())
-        .unwrap()
-        .metadata()
-        .unwrap();
+    assert!(run.did_work, "unexpected catch-up status: {}", run.status);
+    assert!(destination.is_file());
+    assert!(!candidate.exists());
+    assert_no_sqlite_sidecars(&destination);
+    assert_no_sqlite_sidecars(&candidate);
+    let generation = committed_generation_for(temp.path(), &generation_id);
+    let projection = SourceBackedRelationalProjection::open_read_only(&destination).unwrap();
+    let metadata = projection.metadata().unwrap();
+    let receipt = projection_receipt(&generation, &metadata);
+    verify_projection_identity(&destination, &generation, &receipt).unwrap();
+}
+
+#[test]
+fn live_catch_up_appends_rewrites_and_deletes_without_touching_a_candidate() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("live-catch-up.jsonl");
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    let destination = sql_compatibility_path(temp.path());
+    let candidate = candidate_projection_path(&destination);
+    let candidate_sentinel = b"candidate-must-remain-untouched-on-live-catch-up";
+    fs::write(&candidate, candidate_sentinel).unwrap();
+    assert!(fs::metadata(&destination).unwrap().len() > candidate_sentinel.len() as u64);
+
+    let appended_generation = replace_generation(
+        temp.path(),
+        &source,
+        2,
+        vec![record(&source, 1, &provider), record(&source, 2, &provider)],
+    );
+    let append = run_after_core_publication(temp.path(), &appended_generation).unwrap();
+
+    assert!(append.did_work);
+    assert_eq!(fs::read(&candidate).unwrap(), candidate_sentinel);
+    let metadata = projection_metadata(temp.path()).unwrap();
+    assert_eq!(
+        metadata.active_core_generation_id.as_deref(),
+        Some(appended_generation.as_str())
+    );
+    assert_eq!(metadata.build_generation, 2);
+    assert_eq!(
+        query(
+            temp.path(),
+            "SELECT event_seq FROM ctx_events ORDER BY event_seq",
+        ),
+        vec![vec![sequence_value(1)], vec![sequence_value(2)]]
+    );
+
+    let rewritten_generation =
+        replace_generation(temp.path(), &source, 3, vec![record(&source, 3, &provider)]);
+    let rewrite = run_after_core_publication(temp.path(), &rewritten_generation).unwrap();
+
+    assert!(rewrite.did_work);
+    assert_eq!(fs::read(&candidate).unwrap(), candidate_sentinel);
+    let metadata = projection_metadata(temp.path()).unwrap();
+    assert_eq!(
+        metadata.active_core_generation_id.as_deref(),
+        Some(rewritten_generation.as_str())
+    );
+    assert_eq!(metadata.build_generation, 3);
+    assert_eq!(
+        query(
+            temp.path(),
+            "SELECT event_seq FROM ctx_events ORDER BY event_seq",
+        ),
+        vec![vec![sequence_value(3)]]
+    );
+
+    let deleted_generation = delete_generation(temp.path(), &source);
+    let delete = run_after_core_publication(temp.path(), &deleted_generation).unwrap();
+
+    assert!(delete.did_work);
+    assert_eq!(fs::read(&candidate).unwrap(), candidate_sentinel);
+    let metadata = projection_metadata(temp.path()).unwrap();
+    assert_eq!(
+        metadata.active_core_generation_id.as_deref(),
+        Some(deleted_generation.as_str())
+    );
+    assert_eq!(metadata.build_generation, 4);
+    assert_eq!(metadata.event_count, 0);
+
+    let noop = run_after_core_publication(temp.path(), &deleted_generation).unwrap();
+
+    assert!(!noop.did_work);
+    assert_eq!(
+        projection_metadata(temp.path()).unwrap().build_generation,
+        4
+    );
+    assert_eq!(fs::read(&candidate).unwrap(), candidate_sentinel);
+}
+
+#[test]
+fn live_catch_up_record_error_rolls_back_partial_rows_and_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("live-catch-up-error.jsonl");
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    let destination = sql_compatibility_path(temp.path());
+    let candidate = candidate_projection_path(&destination);
+    let target_generation = replace_generation(
+        temp.path(),
+        &source,
+        2,
+        vec![record(&source, 1, &provider), record(&source, 2, &provider)],
+    );
     let index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
-    assert_eq!(metadata.status, RelationalProjectionStatus::Ready);
+    let generation = committed_generation(&index).unwrap();
+    assert_eq!(generation.generation_id, target_generation);
+    let PreparedProjection::LiveCatchUp(mut projection) =
+        prepare_projection(&destination, &generation).unwrap()
+    else {
+        panic!("incremental generation did not select live catch-up");
+    };
+    let RelationalProjectionPlan::CatchUp { changed_source_ids } =
+        projection.plan_generation(&generation).unwrap()
+    else {
+        panic!("live projection did not retain its catch-up plan");
+    };
+    let mut core_records = 0;
+    let records = relational_record_stream(
+        &index,
+        RelationalSourceSelection::Changed(&changed_source_ids),
+        &generation,
+        MAX_SOURCE_EVENT_PAGE_ITEMS,
+    )
+    .map(|record| {
+        let record = record?;
+        if matches!(&record, RelationalProjectionRecord::CoreRecord(_)) {
+            core_records += 1;
+            if core_records == 2 {
+                return Err(RelationalProjectionError::InvalidRecord(
+                    "injected Core stream interruption before commit".to_owned(),
+                ));
+            }
+        }
+        Ok(record)
+    });
+
+    let error = projection
+        .catch_up_stream(&generation, records)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("injected Core stream interruption"));
+    drop(projection);
+
+    let metadata = projection_metadata(temp.path()).unwrap();
+    assert_eq!(metadata.status, RelationalProjectionStatus::Behind);
     assert_eq!(
         metadata.active_core_generation_id.as_deref(),
         Some(first_generation.as_str())
     );
-    assert_eq!(metadata.active_manifest_version, Some(3));
-    assert_eq!(metadata.active_lexical_schema_version, Some(5));
     assert_eq!(
-        metadata.active_policy_schema_hash.as_deref(),
-        Some(index.manifest().policy_schema_hash.as_str())
+        metadata.target_core_generation_id.as_deref(),
+        Some(target_generation.as_str())
     );
-    assert_eq!((metadata.source_count, metadata.session_count), (1, 1));
-    assert_eq!((metadata.event_count, metadata.file_touch_count), (1, 1));
+    assert_eq!(metadata.build_generation, 1);
+    assert_eq!(
+        query_projection(temp.path(), "SELECT event_seq FROM ctx_events"),
+        vec![vec![sequence_value(1)]]
+    );
+    assert!(!candidate.exists());
 
-    let rows = query(
-        temp.path(),
-        "SELECT e.provider, e.provider_session_id, s.agent_type, e.branch, e.workspace, e.cwd,
-                e.source_path, e.event_type, e.role, e.event_seq
-         FROM ctx_events e
-         JOIN ctx_sessions s ON s.ctx_session_id = e.ctx_session_id",
+    let retry = run_after_core_publication(temp.path(), &target_generation).unwrap();
+    assert!(retry.did_work);
+    assert_eq!(
+        query(
+            temp.path(),
+            "SELECT event_seq FROM ctx_events ORDER BY event_seq",
+        ),
+        vec![vec![sequence_value(1)], vec![sequence_value(2)]]
     );
-    assert_eq!(rows.len(), 1);
-    assert!(matches!(
-        &rows[0][0],
-        RawSqlValue::Text { value, .. } if value == "codex"
-    ));
-    assert!(matches!(
-        &rows[0][2],
-        RawSqlValue::Text { value, .. } if value == "primary"
-    ));
-    assert!(matches!(
-        &rows[0][8],
-        RawSqlValue::Text { value, .. } if value == "user"
-    ));
-    assert!(matches!(rows[0][9], RawSqlValue::Integer(1)));
-    let locator_rows = query(
-        temp.path(),
-        "SELECT native_locator_json FROM source_backed_events",
-    );
-    assert_eq!(locator_rows.len(), 1);
-    assert!(matches!(
-        &locator_rows[0][0],
-        RawSqlValue::Blob { bytes, .. } if *bytes > 0
-    ));
-    let bytes = projection_bytes(temp.path());
-    assert!(!contains_bytes(&bytes, PROVIDER_TEXT));
-    assert!(!contains_bytes(&bytes, PREVIEW_TEXT));
+}
 
-    let build_generation = metadata.build_generation;
-    let noop = run_after_core_publication(temp.path(), &first_generation).unwrap();
+#[test]
+fn mismatched_receipt_cannot_publish_completed_status_or_advance_live_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("receipt-mismatch.jsonl");
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    let first_metadata = projection_metadata(temp.path()).unwrap();
+    let first_committed = committed_generation_for(temp.path(), &first_generation);
+    let stale_receipt = projection_receipt(&first_committed, &first_metadata);
+    let target_generation =
+        replace_generation(temp.path(), &source, 2, vec![record(&source, 2, &provider)]);
+
+    let run = run_with(temp.path(), &target_generation, move |_, _| {
+        Ok(ProjectionOutcome {
+            receipt: stale_receipt,
+            did_work: true,
+        })
+    })
+    .unwrap();
+
+    assert!(!run.did_work);
+    assert_eq!(run.status["status"], "error");
+    assert_eq!(
+        run.status["error_code"],
+        "source_relational_receipt_mismatch"
+    );
+    let metadata = projection_metadata(temp.path()).unwrap();
+    assert_eq!(
+        metadata.active_core_generation_id.as_deref(),
+        Some(first_generation.as_str())
+    );
+    assert_eq!(metadata.build_generation, first_metadata.build_generation);
+    assert_eq!(
+        query_projection(temp.path(), "SELECT event_seq FROM ctx_events"),
+        vec![vec![sequence_value(1)]]
+    );
+}
+
+#[test]
+fn equal_count_core_aggregate_change_replays_the_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("aggregate-only-change.jsonl");
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    let first_index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
+    let first_certificate = first_index.manifest().sources[0].clone();
+    let first_aggregate = first_index.manifest().core_record_aggregates[0].clone();
+    let first_revision = committed_generation(&first_index).unwrap().sources[0].revision_digest;
+    drop(first_index);
+
+    let replacement_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 2, &provider)]);
+    let replacement_index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
+    assert_eq!(replacement_index.manifest().sources[0], first_certificate);
+    assert_ne!(
+        replacement_index.manifest().core_record_aggregates[0],
+        first_aggregate
+    );
+    let replacement_revision =
+        committed_generation(&replacement_index).unwrap().sources[0].revision_digest;
+    assert_ne!(replacement_revision, first_revision);
+    drop(replacement_index);
+
+    let run = run_after_core_publication(temp.path(), &replacement_generation).unwrap();
+
+    assert!(run.did_work);
+    assert_eq!(
+        query(temp.path(), "SELECT event_seq FROM ctx_events"),
+        vec![vec![sequence_value(2)]]
+    );
+}
+
+#[test]
+fn replacement_removes_stale_destination_and_candidate_sidecars() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("stale-sidecars.jsonl");
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    force_materializer_rebuild(temp.path());
+    let destination = sql_compatibility_path(temp.path());
+    let candidate = candidate_projection_path(&destination);
+    fs::write(sqlite_sidecar_path(&destination, "-wal"), b"stale wal").unwrap();
+    fs::write(sqlite_sidecar_path(&destination, "-shm"), b"stale shm").unwrap();
+    fs::write(&candidate, b"abandoned candidate").unwrap();
+    fs::write(
+        sqlite_sidecar_path(&candidate, "-wal"),
+        b"stale candidate wal",
+    )
+    .unwrap();
+    fs::write(
+        sqlite_sidecar_path(&candidate, "-shm"),
+        b"stale candidate shm",
+    )
+    .unwrap();
+
+    let replacement_generation =
+        replace_generation(temp.path(), &source, 2, vec![record(&source, 2, &provider)]);
+    let run = run_after_core_publication(temp.path(), &replacement_generation).unwrap();
+
+    assert!(run.did_work);
+    assert!(!candidate.exists());
+    assert_no_sqlite_sidecars(&candidate);
+    assert_no_sqlite_sidecars(&destination);
+    assert_eq!(
+        SourceBackedRelationalProjection::open_read_only(&destination)
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .active_core_generation_id
+            .as_deref(),
+        Some(replacement_generation.as_str())
+    );
+}
+
+#[test]
+fn prepublication_replacement_failure_keeps_prior_projection_visible() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("injected-replace-failure.jsonl");
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    let destination = sql_compatibility_path(temp.path());
+    let replacement_generation =
+        replace_generation(temp.path(), &source, 2, vec![record(&source, 2, &provider)]);
+    force_materializer_rebuild(temp.path());
+    let (projection, candidate, generation, receipt) =
+        build_rebuild_candidate(temp.path(), &replacement_generation);
+
+    let error = finish_candidate_publication_with(
+        projection,
+        &candidate,
+        &destination,
+        &generation,
+        &receipt,
+        |_, _| Err(io::Error::other("injected atomic replacement failure")),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceBackedRelationalCatchUpError::Publication(
+            RelationalPublicationError::AtomicReplace { .. }
+        )
+    ));
+    assert_eq!(error.code(), "source_relational_publication_failed");
+    assert!(error
+        .to_string()
+        .contains("prior projection remains visible"));
+    assert!(candidate.is_file());
+    assert_no_sqlite_sidecars(&candidate);
+    assert_no_sqlite_sidecars(&destination);
+    assert_eq!(
+        SourceBackedRelationalProjection::open_read_only(&destination)
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .active_core_generation_id
+            .as_deref(),
+        Some(first_generation.as_str())
+    );
+}
+
+#[test]
+fn published_projection_is_reopened_and_wrong_generation_is_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("reopen-generation.jsonl");
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    let expected_generation =
+        replace_generation(temp.path(), &source, 2, vec![record(&source, 2, &provider)]);
+    force_materializer_rebuild(temp.path());
+    let (projection, candidate, generation, receipt) =
+        build_rebuild_candidate(temp.path(), &expected_generation);
+    let destination = sql_compatibility_path(temp.path());
+
+    let impostor_root = tempfile::tempdir().unwrap();
+    let impostor_generation = replace_generation(
+        impostor_root.path(),
+        &source,
+        3,
+        vec![record(
+            &source,
+            3,
+            &impostor_root.path().join("impostor.jsonl"),
+        )],
+    );
+    run_after_core_publication(impostor_root.path(), &impostor_generation).unwrap();
+    let impostor = sql_compatibility_path(impostor_root.path());
+
+    let error = finish_candidate_publication_with(
+        projection,
+        &candidate,
+        &destination,
+        &generation,
+        &receipt,
+        |candidate, destination| {
+            fs::copy(&impostor, candidate)?;
+            fs::File::open(candidate)?.sync_all()?;
+            durable_atomic_replace_file(candidate, destination)
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceBackedRelationalCatchUpError::Publication(
+            RelationalPublicationError::PublishedVerification { .. }
+        )
+    ));
+    assert!(error
+        .to_string()
+        .contains("after replacement became visible"));
+    assert!(error.to_string().contains(&expected_generation));
+    assert_eq!(
+        SourceBackedRelationalProjection::open_read_only(&destination)
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .active_core_generation_id
+            .as_deref(),
+        Some(impostor_generation.as_str())
+    );
+}
+
+#[test]
+fn relational_stream_reads_bounded_complete_core_pages() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider_file = temp.path().join("bounded-provider-session.jsonl");
+    replace_generation(
+        temp.path(),
+        &source,
+        1,
+        (1..=7)
+            .map(|sequence| record(&source, sequence, &provider_file))
+            .collect(),
+    );
+    let index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
+    let mut stream = RelationalRecordStream::new(&index, RelationalSourceSelection::All, 2);
+    let mut records = 0;
+    for item in stream.by_ref() {
+        if let RelationalProjectionRecord::CoreRecord(record) = item.unwrap() {
+            records += 1;
+            assert!(record.content.meaningful_text().contains(BODY_SENTINEL));
+        }
+    }
+
+    assert_eq!(records, 7);
+    assert_eq!(stream.pages_loaded, 4);
+    assert_eq!(stream.page_items_loaded, 7);
+    assert!(stream.max_page_items <= 2);
+}
+
+#[test]
+fn initial_noop_replacement_and_deletion_need_no_provider_file_and_store_no_body() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider_file = temp.path().join("provider-session.jsonl");
+    fs::write(&provider_file, BODY_SENTINEL).unwrap();
+    let provider_path = provider_file.to_string_lossy().into_owned();
+    let initial_generation = replace_generation(
+        temp.path(),
+        &source,
+        1,
+        vec![record(&source, 1, &provider_file)],
+    );
+    fs::remove_file(&provider_file).unwrap();
+
+    let initial = run_after_core_publication(temp.path(), &initial_generation).unwrap();
+    assert!(initial.did_work);
+    let metadata = SqlCompatibility::open_for_data_root(temp.path())
+        .unwrap()
+        .metadata()
+        .unwrap();
+    assert_eq!(metadata.status, RelationalProjectionStatus::Ready);
+    assert_eq!(metadata.event_count, 1);
+    assert_eq!(
+        metadata.file_touch_count, 0,
+        "unscoped legacy paths are not authority"
+    );
+    assert_eq!(
+        query(temp.path(), "SELECT event_seq FROM ctx_events"),
+        vec![vec![sequence_value(1)]]
+    );
+    let bytes = relational_bytes(temp.path());
+    assert!(!bytes
+        .windows(BODY_SENTINEL.len())
+        .any(|candidate| candidate == BODY_SENTINEL.as_bytes()));
+    assert!(!bytes
+        .windows(provider_path.len())
+        .any(|candidate| candidate == provider_path.as_bytes()));
+
+    let noop = run_after_core_publication(temp.path(), &initial_generation).unwrap();
     assert!(!noop.did_work);
     assert_eq!(
         SqlCompatibility::open_for_data_root(temp.path())
@@ -565,206 +745,84 @@ fn cold_append_rewrite_delete_and_noop_preserve_only_relational_metadata() {
             .metadata()
             .unwrap()
             .build_generation,
-        build_generation
+        metadata.build_generation
     );
 
-    let appended_generation = append_generation(temp.path(), &source);
-    let appended = run_after_core_publication(temp.path(), &appended_generation).unwrap();
-    assert!(appended.did_work);
-    assert_eq!(
-        query(temp.path(), "SELECT COUNT(*) FROM ctx_events")[0][0],
-        RawSqlValue::Integer(2)
-    );
-    assert_eq!(
-        query(temp.path(), "SELECT COUNT(*) FROM ctx_files_touched")[0][0],
-        RawSqlValue::Integer(3)
-    );
-
-    let rewritten_generation = replace_generation(
+    let replacement_generation = replace_generation(
         temp.path(),
         &source,
-        3,
-        vec![document(&source, 3, "tool", &["README.md"])],
+        2,
+        vec![record(&source, 2, &provider_file)],
     );
-    let rewritten = run_after_core_publication(temp.path(), &rewritten_generation).unwrap();
-    assert!(rewritten.did_work);
+    assert!(
+        run_after_core_publication(temp.path(), &replacement_generation)
+            .unwrap()
+            .did_work
+    );
     assert_eq!(
         query(temp.path(), "SELECT event_seq FROM ctx_events"),
-        vec![vec![RawSqlValue::Integer(3)]]
+        vec![vec![sequence_value(2)]]
     );
-    assert_eq!(
-        query(temp.path(), "SELECT path FROM ctx_files_touched"),
-        vec![vec![RawSqlValue::Text {
-            value: "README.md".to_owned(),
-            bytes: "README.md".len(),
-            truncated: false,
-        }]]
-    );
-    let bytes = projection_bytes(temp.path());
-    assert!(!contains_bytes(&bytes, PROVIDER_TEXT));
-    assert!(!contains_bytes(&bytes, PREVIEW_TEXT));
 
     let deleted_generation = delete_generation(temp.path(), &source);
-    let deleted = run_after_core_publication(temp.path(), &deleted_generation).unwrap();
-    assert!(deleted.did_work);
+    assert!(
+        run_after_core_publication(temp.path(), &deleted_generation)
+            .unwrap()
+            .did_work
+    );
+    assert_eq!(
+        query(temp.path(), "SELECT COUNT(*) FROM ctx_events")[0][0],
+        RawSqlValue::Integer(0)
+    );
+
+    let bytes = relational_bytes(temp.path());
+    assert!(!bytes
+        .windows(BODY_SENTINEL.len())
+        .any(|candidate| candidate == BODY_SENTINEL.as_bytes()));
+    assert!(!provider_file.exists());
+}
+
+#[test]
+fn materializer_revision_mismatch_rebuilds_from_the_same_pinned_core_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider_file = temp.path().join("revision-provider-session.jsonl");
+    let generation = replace_generation(
+        temp.path(),
+        &source,
+        1,
+        vec![record(&source, 1, &provider_file)],
+    );
+    run_after_core_publication(temp.path(), &generation).unwrap();
+    force_materializer_rebuild(temp.path());
+
+    assert!(generation_needs_catch_up(temp.path(), &generation));
+    let rebuilt = run_after_core_publication(temp.path(), &generation).unwrap();
+
+    assert!(rebuilt.did_work);
     let metadata = SqlCompatibility::open_for_data_root(temp.path())
         .unwrap()
         .metadata()
         .unwrap();
     assert_eq!(
-        metadata.active_core_generation_id.as_deref(),
-        Some(deleted_generation.as_str())
+        metadata.active_materializer_revision,
+        Some(RELATIONAL_MATERIALIZER_REVISION)
     );
-    assert_eq!(
-        (
-            metadata.source_count,
-            metadata.session_count,
-            metadata.event_count,
-            metadata.file_touch_count,
-        ),
-        (0, 0, 0, 0)
-    );
+    assert_eq!(metadata.build_generation, 2);
+    assert_eq!(metadata.event_count, 1);
 }
 
 #[test]
-fn failed_catch_up_keeps_prior_generation_and_a_later_tick_retries() {
+fn generation_mismatch_reports_lag_without_creating_a_projection() {
     let temp = tempfile::tempdir().unwrap();
     let source = source();
-    let first_generation = initial_generation(temp.path(), &source);
-    run_after_core_publication(temp.path(), &first_generation).unwrap();
-    let appended_generation = append_generation(temp.path(), &source);
-
-    let interrupted = SourceBackedRelationalCatchUpStatus::pending(
-        &appended_generation,
-        1,
-        projection_metadata(temp.path()).as_ref(),
-    );
-    persist_status(temp.path(), &interrupted).unwrap();
-
-    let failed = run_with(
+    let provider_file = temp.path().join("mismatch-provider-session.jsonl");
+    let generation = replace_generation(
         temp.path(),
-        &appended_generation,
-        |data_root, generation_id| {
-            let index =
-                VerifiedIndex::open(source_backed_index_root(data_root)).map_err(|error| {
-                    SourceBackedRelationalCatchUpError::IndexUnavailable(error.to_string())
-                })?;
-            let generation = committed_generation(&index)?;
-            let mut projection =
-                SourceBackedRelationalProjection::open(sql_compatibility_path(data_root))
-                    .map_err(SourceBackedRelationalCatchUpError::projection)?;
-            let error = projection
-                .catch_up(&generation, Vec::<RelationalProjectionRecord>::new())
-                .expect_err("changed source must be present");
-            assert_eq!(generation_id, generation.generation_id);
-            Err(SourceBackedRelationalCatchUpError::projection(error))
-        },
-    )
-    .unwrap();
-    assert!(!failed.did_work);
-    assert_eq!(failed.status["status"], "error");
-    assert_eq!(failed.status["pending"], true);
-    assert_eq!(failed.status["retryable"], true);
-    assert_eq!(failed.status["attempts"], 2);
-    assert_eq!(failed.status["active_core_generation_id"], first_generation);
-    assert_eq!(failed.status["core_generation_id"], appended_generation);
-    assert_eq!(failed.status["projection_status"], "behind");
-
-    let compatibility_error = SqlCompatibility::open_for_data_root(temp.path())
-        .err()
-        .expect("SQL compatibility must fail closed while projection is behind");
-    assert!(
-        compatibility_error
-            .to_string()
-            .contains("wait for daemon catch-up"),
-        "{compatibility_error}"
+        &source,
+        1,
+        vec![record(&source, 1, &provider_file)],
     );
-    let prior_projection =
-        SourceBackedRelationalProjection::open_read_only(sql_compatibility_path(temp.path()))
-            .unwrap();
-    let prior = prior_projection.metadata().unwrap();
-    assert_eq!(
-        prior.active_core_generation_id.as_deref(),
-        Some(first_generation.as_str())
-    );
-    assert_eq!(
-        prior.target_core_generation_id,
-        Some(appended_generation.clone())
-    );
-    assert_eq!(prior.status, RelationalProjectionStatus::Behind);
-    assert_eq!(
-        prior_projection
-            .raw_sql_query("SELECT COUNT(*) FROM ctx_events", RawSqlOptions::default())
-            .unwrap()
-            .rows[0][0],
-        RawSqlValue::Integer(1)
-    );
-
-    let retried = run_after_core_publication(temp.path(), &appended_generation).unwrap();
-    assert!(retried.did_work);
-    assert_eq!(retried.status["status"], "completed");
-    assert_eq!(retried.status["attempts"], 3);
-    assert_eq!(
-        retried.status["active_core_generation_id"],
-        appended_generation
-    );
-    let ready = SqlCompatibility::open_for_data_root(temp.path())
-        .unwrap()
-        .metadata()
-        .unwrap();
-    assert_eq!(ready.status, RelationalProjectionStatus::Ready);
-    assert_eq!(ready.target_core_generation_id, None);
-    assert_eq!(
-        query(temp.path(), "SELECT COUNT(*) FROM ctx_events")[0][0],
-        RawSqlValue::Integer(2)
-    );
-}
-
-#[test]
-fn arbitrary_relational_bytes_fail_closed_during_daemon_catch_up() {
-    let temp = tempfile::tempdir().unwrap();
-    let source = source();
-    let first_generation = initial_generation(temp.path(), &source);
-    run_after_core_publication(temp.path(), &first_generation).unwrap();
-    let appended_generation = append_generation(temp.path(), &source);
-    let projection_path = sql_compatibility_path(temp.path());
-
-    fs::write(&projection_path, vec![0xa5; 4096]).unwrap();
-    let run = run_after_core_publication(temp.path(), &appended_generation).unwrap();
-
-    assert!(!run.did_work);
-    assert_eq!(run.status["status"], "error");
-    assert_eq!(run.status["pending"], true);
-    assert_eq!(run.status["retryable"], true);
-    assert_eq!(
-        run.status["error_code"],
-        "source_relational_projection_unavailable"
-    );
-    assert!(
-        run.status["last_error"]
-            .as_str()
-            .is_some_and(|error| error.contains("file is not a database")),
-        "{:#}",
-        run.status
-    );
-    let compatibility_error = SqlCompatibility::open_for_data_root(temp.path())
-        .err()
-        .expect("arbitrarily corrupted relational bytes must fail closed");
-    assert!(
-        compatibility_error
-            .to_string()
-            .contains("file is not a database"),
-        "{compatibility_error}"
-    );
-    let legacy_path = temp.path().join(["work", ".sqlite"].concat());
-    assert!(!legacy_path.exists());
-}
-
-#[test]
-fn generation_mismatch_is_persistent_and_never_creates_a_fallback_database() {
-    let temp = tempfile::tempdir().unwrap();
-    let source = source();
-    let generation = initial_generation(temp.path(), &source);
     let wrong_generation = "f".repeat(64);
     assert_ne!(wrong_generation, generation);
 
@@ -776,86 +834,5 @@ fn generation_mismatch_is_persistent_and_never_creates_a_fallback_database() {
         run.status["error_code"],
         "source_relational_generation_mismatch"
     );
-    assert_eq!(run.status["core_generation_id"], wrong_generation);
     assert!(!sql_compatibility_path(temp.path()).exists());
-}
-
-#[test]
-fn foreground_wait_requires_exact_ready_generation_and_surfaces_daemon_failure() {
-    let foreground = tempfile::tempdir().unwrap();
-    let foreground_source = source();
-    let foreground_generation = initial_generation(foreground.path(), &foreground_source);
-    converge_required_generation(foreground.path(), &foreground_generation).unwrap();
-    assert!(read_status(foreground.path())
-        .is_some_and(|status| status.is_completed_for(&foreground_generation)));
-
-    let temp = tempfile::tempdir().unwrap();
-    let source = source();
-    let generation = initial_generation(temp.path(), &source);
-    run_after_core_publication(temp.path(), &generation).unwrap();
-
-    wait_for_completed_generation_with(temp.path(), &generation, false, Duration::ZERO, || {
-        panic!("ready relational generation must not poll")
-    })
-    .unwrap();
-
-    let wrong_generation = "f".repeat(64);
-    run_after_core_publication(temp.path(), &wrong_generation).unwrap();
-    let error = wait_for_completed_generation_with(
-        temp.path(),
-        &wrong_generation,
-        false,
-        Duration::ZERO,
-        || panic!("failed relational generation must not poll"),
-    )
-    .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("source_relational_generation_mismatch"),
-        "{error:#}"
-    );
-
-    let unavailable = tempfile::tempdir().unwrap();
-    let pending_generation = "e".repeat(64);
-    let pending =
-        status::SourceBackedRelationalCatchUpStatus::pending(&pending_generation, 1, None);
-    persist_status(unavailable.path(), &pending).unwrap();
-    let error = wait_for_completed_generation_with(
-        unavailable.path(),
-        &pending_generation,
-        true,
-        Duration::from_secs(1),
-        || panic!("--no-daemon import must not poll without a relational owner"),
-    )
-    .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("no foreground writer was started"),
-        "{error:#}"
-    );
-}
-
-#[test]
-fn materializer_has_no_provider_hydration_or_legacy_store_authority() {
-    let source = include_str!("source_backed_relational_catch_up.rs");
-    for forbidden in [
-        ["database_", "path"].concat(),
-        ["work", ".sqlite"].concat(),
-        ["SourceBacked", "ResolverRegistry"].concat(),
-        ["provider_", "bytes"].concat(),
-        ["bounded_", "preview"].concat(),
-    ] {
-        assert!(
-            !source.contains(&forbidden),
-            "relational catch-up contains forbidden architecture term {forbidden}"
-        );
-    }
-    assert!(source.contains("open_verified_index"));
-    assert!(!source.contains(&["VerifiedIndex", "::open"].concat()));
-    assert!(source.contains(".source_event_page("));
-    assert!(source.contains("SourceBackedRelationalProjection::open"));
-    assert!(!source.contains("Vec<EventRecord>"));
-    assert!(!source.contains("Vec<RelationalProjectionRecord>"));
 }

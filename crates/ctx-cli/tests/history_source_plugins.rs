@@ -132,7 +132,7 @@ fn command_only_plugin_is_discoverable_but_typed_unsupported_and_never_runs() {
 }
 
 #[test]
-fn durable_plugin_path_indexes_in_place_and_hydrates_exact_content() {
+fn durable_plugin_path_indexes_in_place_and_renders_complete_core_content() {
     let temp = tempdir();
     let (manifest_dir, source_path) = write_durable_plugin(&temp);
     let sources = json_output(
@@ -200,19 +200,12 @@ fn durable_plugin_path_indexes_in_place_and_hydrates_exact_content() {
     ]));
     let result = &search["results"].as_array().unwrap()[0];
     let event_id = result["ctx_event_id"].as_str().unwrap();
-    let shown = json_output(ctx(&temp).args([
-        "show",
-        "event",
-        event_id,
-        "--content",
-        "complete",
-        "--format=json",
-    ]));
+    let shown = json_output(ctx(&temp).args(["show", "event", event_id, "--format=json"]));
     assert_eq!(
         shown["event"]["text"],
         "provider-owned durable plugin oracle"
     );
-    assert_eq!(shown["event"]["content"]["origin"], "provider_source");
+    assert_eq!(shown["event"]["content"]["policy_status"], "selected");
 }
 
 #[test]

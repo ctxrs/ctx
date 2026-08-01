@@ -1,41 +1,16 @@
-//! Independent relational compatibility projection for source-backed Core.
+//! Disposable relational metadata projection over one immutable Core generation.
 //!
-//! This database is a disposable consumer of a committed Core generation. It
-//! stores stable identities, relational metadata, and native locator/evidence
-//! envelopes; it stores no event payload, provider body, search text, or
-//! preview and never participates in Core lexical publication.
+//! The materializer accepts source-grouped complete [`ctx_history_core::CoreRecord`]
+//! values from one pinned Core reader. It stores identities, timestamps, source
+//! health, and repository-scoped file/VCS observations. It never stores record
+//! content, source locators, provider paths, or hydration state, and it never
+//! opens provider inputs.
 //!
-//! Integration sequence:
-//!
-//! 1. Commit and reopen the source-backed lexical generation.
-//! 2. Serialize the verified generation manifest and pair it with the exact
-//!    Core commit receipt in [`CommittedCoreGeneration`].
-//! 3. Stream source-grouped [`RelationalProjectionRecord`] values into
-//!    [`SourceBackedRelationalProjection::catch_up`]. Use
-//!    [`SourceBackedRelationalProjection::rebuild`] for first install, repair,
-//!    or a consumer-contract change.
-//! 4. Treat the returned frontier as SQL-owned state. A projection error leaves
-//!    the prior SQL generation queryable and marks only this consumer behind.
-//!
-//! For the schema-v5 lexical seam, one source-backed event supplies event and
-//! session identities, parent/root lineage, provider-session ID, branch,
-//! source path, agent scope, workspace/cwd, event ordering/type/role, touched
-//! paths, and locator evidence. The integration host emits one deduplicated
-//! session record before its events and supplies deterministic file-relation
-//! IDs plus any richer old-path/change metadata retained by the provider
-//! projector. Rebuild obtains the same records by rereading certified provider
-//! sources; it does not enumerate or hydrate bodies from SQLite.
-//!
-//! Session lineage may name a source outside a bounded committed manifest. The
-//! projection retains that target identity as source evidence but exposes no
-//! parent/root relationship until the target session is present. A missing
-//! target whose source is selected by the same manifest remains an integrity
-//! error; the projection never fabricates a session to satisfy it.
-//!
-//! A normal catch-up stream contains only sources whose certificates changed.
-//! A rebuild stream contains every source in the manifest. Confirmed deletion
-//! is represented by omission from the new certified manifest, so no provider
-//! body archive or relational tombstone row is required.
+//! Every successful receipt binds one Core generation, this SQLite schema, and
+//! the materializer revision. An exact ready generation is a read-only no-op.
+//! Replacement, deletion, and revision rebuilds run in one SQLite transaction;
+//! failure leaves the prior coherent rows available and marks their frontier
+//! behind the requested Core generation.
 
 mod manifest;
 mod materialization;
@@ -58,20 +33,6 @@ use std::path::PathBuf;
 
 use rusqlite::Connection;
 
-pub(super) const GENERATION_MANIFEST_VERSION: u32 = manifest::GENERATION_MANIFEST_VERSION;
-pub(super) const REQUIRED_LEXICAL_SCHEMA_VERSION: u32 = manifest::REQUIRED_LEXICAL_SCHEMA_VERSION;
-pub(super) const REQUIRED_SOURCE_GENERATION_POLICY_HASH: &str =
-    manifest::REQUIRED_SOURCE_GENERATION_POLICY_HASH;
-
-#[cfg(test)]
-use ctx_history_core::{
-    CertifiedSource, EventRole, FileChangeKind, SourceKey, StableEntityId, IDENTITY_VERSION,
-};
-#[cfg(test)]
-use manifest::{GenerationManifest, GenerationRemoval, REQUIRED_LEXICAL_ANALYZER_VERSION};
-#[cfg(test)]
-use sha2::{Digest, Sha256};
-
 pub struct SourceBackedRelationalProjection {
     path: PathBuf,
     conn: Connection,
@@ -82,22 +43,16 @@ fn sqlite_i64(value: u64, field: &'static str) -> Result<i64> {
     i64::try_from(value).map_err(|_| RelationalProjectionError::CountOverflow(field))
 }
 
+fn sqlite_u64_ordered_text(value: u64) -> String {
+    format!("{value:020}")
+}
+
 fn sqlite_u64(value: i64, field: &'static str) -> Result<u64> {
     u64::try_from(value).map_err(|_| RelationalProjectionError::CountOverflow(field))
 }
 
 fn sqlite_u32(value: i64, field: &'static str) -> Result<u32> {
     u32::try_from(value).map_err(|_| RelationalProjectionError::CountOverflow(field))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(DIGITS[(byte >> 4) as usize] as char);
-        output.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
 
 #[cfg(test)]

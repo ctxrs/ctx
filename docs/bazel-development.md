@@ -126,8 +126,8 @@ and process/fault injection run in `nightly` and `release`; they are
 intentionally outside the per-change `ci` loop.
 
 The affected command uses pinned bazel-diff, an ephemeral detached base
-worktree, a commit-keyed cached base hash, and complete-content hashes for both
-graphs. BUILD, `.bzl`, module, lock, and configuration changes select the full
+worktree, a commit-keyed cached base hash, and complete target-graph hashes for
+both graphs. BUILD, `.bzl`, module, lock, and configuration changes select the full
 `ci` suite. A diff/query/filter failure or a changed file with no mapped test
 also fails closed to `ci`. Non-routine external, manual, network,
 platform, stress, and release targets stay outside affected execution.

@@ -1,5 +1,4 @@
-use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use serde_json::Value;
 
 use super::{
     dto::{
@@ -9,17 +8,10 @@ use super::{
     },
     ZedNativePathError, ZedNativeResult,
 };
-use crate::{
-    complete_content::CompleteContentBodyDigest,
-    provider::normalization::provider_policy_event_text,
-};
-use ctx_history_core::CaptureProvider;
+use crate::record_evidence::RecordDigest;
 
-const ZED_NATIVE_BODY_MAX_CHARS: usize = 16_000;
-const ZED_NATIVE_PREVIEW_MAX_CHARS: usize = 240;
 const ZED_NATIVE_PAGE_ENCODING_ENVELOPE_BYTES: usize = 1_024;
 const ZED_NATIVE_PAGE_ITEM_ENCODING_ENVELOPE_BYTES: usize = 64;
-const ZED_EVENT_HASH_DOMAIN: &[u8] = b"ctx-zed-retained-event-v1\0";
 
 pub(super) struct ZedDecodedCoreEvent {
     pub(super) provider_message_id: Option<String>,
@@ -30,6 +22,7 @@ pub(super) struct ZedDecodedCoreEvent {
     pub(super) occurred_at: chrono::DateTime<chrono::Utc>,
     pub(super) kind: &'static str,
     pub(super) call_ids: Vec<String>,
+    pub(super) native_content: Value,
     pub(super) body: String,
     pub(super) safe_file_touches: Vec<String>,
 }
@@ -39,7 +32,7 @@ impl ZedNativeEvent {
         sqlite_rowid: i64,
         thread_id: &str,
         draft: ZedDecodedCoreEvent,
-        record_digest: CompleteContentBodyDigest,
+        record_digest: RecordDigest,
     ) -> ZedNativeResult<Self> {
         let identity = event_identity(
             thread_id,
@@ -60,7 +53,8 @@ impl ZedNativeEvent {
             occurred_at: draft.occurred_at,
             kind: draft.kind.to_owned(),
             call_ids: draft.call_ids,
-            lexical_body: draft.body,
+            native_content: draft.native_content,
+            normalized_body: draft.body,
             safe_file_touches: draft.safe_file_touches,
         })
     }
@@ -68,7 +62,7 @@ impl ZedNativeEvent {
     fn estimated_bytes(&self) -> usize {
         serde_json::to_vec(self)
             .map_or(usize::MAX, |encoded| encoded.len())
-            .saturating_add(self.lexical_body.len())
+            .saturating_add(self.normalized_body.len())
     }
 }
 
@@ -146,39 +140,6 @@ impl<'a> ZedNativePageBuilder<'a> {
     }
 }
 
-fn truncate_chars(value: &str, limit: usize) -> String {
-    match value.char_indices().nth(limit) {
-        Some((end, _)) => value[..end].to_owned(),
-        None => value.to_owned(),
-    }
-}
-
-pub(super) fn legacy_retained_event_hash(
-    identity: &ZedNativeEventIdentity,
-    complete_body: &str,
-) -> String {
-    let body = truncate_chars(complete_body, ZED_NATIVE_BODY_MAX_CHARS);
-    let mut hasher = Sha256::new();
-    hasher.update(ZED_EVENT_HASH_DOMAIN);
-    hash_text(&mut hasher, &identity.thread_id);
-    match &identity.message {
-        ZedNativeMessageIdentity::ProviderId {
-            value,
-            message_ordinal,
-        } => {
-            hasher.update([1]);
-            hash_text(&mut hasher, value);
-            hasher.update(message_ordinal.to_le_bytes());
-        }
-        ZedNativeMessageIdentity::MessageOrdinal(value) => {
-            hasher.update([2]);
-            hasher.update(value.to_le_bytes());
-        }
-    }
-    hash_text(&mut hasher, &body);
-    hex_digest(hasher.finalize().into())
-}
-
 pub(super) fn event_identity(
     thread_id: &str,
     provider_message_id: Option<&str>,
@@ -196,68 +157,12 @@ pub(super) fn event_identity(
     }
 }
 
-pub(super) fn legacy_event_payload(
-    thread_id: &str,
-    provider_event_index: u64,
-    cursor: &str,
-    draft: &ZedDecodedCoreEvent,
-) -> ZedNativeResult<Value> {
-    let body_shape = json!({
-        "message_kind": draft.kind,
-        "text": draft.body,
-        "call_ids": draft.call_ids,
-    });
-    let retained = provider_policy_event_text(draft.event_type, &draft.body, &body_shape);
-    let body = retained.text;
-    let preview = truncate_chars(&body, ZED_NATIVE_PREVIEW_MAX_CHARS);
-    let payload = json!({
-        "provider": CaptureProvider::Zed.as_str(),
-        "provider_session_id": thread_id,
-        "provider_event_index": provider_event_index,
-        "cursor": cursor,
-        "artifacts": [],
-        "text": body,
-        "text_retention": retained.retention.as_json(),
-        "body": {
-            "message_kind": draft.kind,
-            "text": body,
-            "preview": preview,
-            "call_ids": draft.call_ids,
-        },
-    });
-    Ok(payload)
-}
-
 fn session_estimated_bytes(session: &ZedNativeSession) -> usize {
     serde_json::to_vec(session).map_or(usize::MAX, |encoded| encoded.len())
 }
 
 fn rejection_estimated_bytes(rejection: &ZedNativeRejection) -> usize {
     serde_json::to_vec(rejection).map_or(usize::MAX, |encoded| encoded.len())
-}
-
-pub(super) fn event_cursor(identity: &ZedNativeEventIdentity) -> String {
-    match &identity.message {
-        ZedNativeMessageIdentity::ProviderId {
-            value,
-            message_ordinal,
-        } => format!(
-            "thread:{}:message:{message_ordinal}:id:{value}",
-            identity.thread_id
-        ),
-        ZedNativeMessageIdentity::MessageOrdinal(message_ordinal) => {
-            format!("thread:{}:message:{message_ordinal}", identity.thread_id)
-        }
-    }
-}
-
-fn hash_text(hasher: &mut Sha256, value: &str) {
-    hash_bytes(hasher, value.as_bytes());
-}
-
-fn hash_bytes(hasher: &mut Sha256, value: &[u8]) {
-    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
-    hasher.update(value);
 }
 
 pub(super) fn hex_digest(digest: [u8; 32]) -> String {

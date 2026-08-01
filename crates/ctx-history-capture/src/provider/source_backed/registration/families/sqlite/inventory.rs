@@ -36,15 +36,11 @@ pub fn register_astrbot_source_backed_route(
         data_root,
         CaptureProvider::AstrBot,
         "astrbot_data_v4_sqlite",
-        AstrBotInventoryProvider {
-            data_root: data_root.to_path_buf(),
-            discovery,
-        },
+        AstrBotInventoryProvider { discovery },
     )
 }
 
 struct AstrBotInventoryProvider {
-    data_root: PathBuf,
     discovery: DiscoveryContext,
 }
 
@@ -83,8 +79,8 @@ impl SqliteInventoryProvider for AstrBotInventoryProvider {
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<CertifiedSource> {
         let mut sink_failure = None;
-        let certificate = scan_astrbot_snapshot_v0(leaf, snapshot, &mut |document| {
-            if let Err(error) = sink.emit_document(document) {
+        let certificate = scan_astrbot_snapshot_v0(leaf, snapshot, &mut |record| {
+            if let Err(error) = sink.emit_core_record(record) {
                 let detail = error.to_string();
                 sink_failure = Some(error);
                 return Err(
@@ -99,19 +95,6 @@ impl SqliteInventoryProvider for AstrBotInventoryProvider {
             return Err(error);
         }
         certificate.map_err(route_error)
-    }
-
-    fn hydrate(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let inventory =
-            AstrBotSourceBackedInventoryV0::discover(&self.discovery).map_err(|error| {
-                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-            })?;
-        AstrBotSourceBackedResolverV0::from_inventory(&self.data_root, &inventory)
-            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))?
-            .hydrate_batch_request(request)
     }
 }
 
@@ -160,16 +143,11 @@ pub fn register_shelley_source_backed_route(
         data_root,
         CaptureProvider::Shelley,
         "shelley_sqlite",
-        ShelleyInventoryProvider {
-            data_root: data_root.to_path_buf(),
-            exact_cwd,
-            adapter,
-        },
+        ShelleyInventoryProvider { exact_cwd, adapter },
     )
 }
 
 struct ShelleyInventoryProvider {
-    data_root: PathBuf,
     exact_cwd: PathBuf,
     adapter: ShelleySourceBackedAdapter,
 }
@@ -215,31 +193,10 @@ impl SqliteInventoryProvider for ShelleyInventoryProvider {
         let mut scan = leaf.start_snapshot_scan(snapshot).map_err(route_error)?;
         while let Some(page) = scan.next_page().map_err(route_error)? {
             for document in page.documents {
-                sink.emit_document(document)?;
+                sink.emit_core_record(document)?;
             }
         }
         Ok(scan.finish().map_err(route_error)?.certificate)
-    }
-
-    fn hydrate(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let adapter = discover_shelley_source_backed_exact_cwd(&self.data_root, &self.exact_cwd)
-            .map_err(|error| {
-                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-            })?
-            .ok_or_else(|| {
-                hydration_failure(
-                    HydrationFailureKind::ConfirmedDeleted,
-                    "Shelley database is absent from the exact CWD",
-                )
-            })?;
-        let result = adapter
-            .hydrate_batch(request)
-            .map_err(|error| hydration_failure(HydrationFailureKind::StaleRecordEvidence, error))?;
-        result.validate_for_request(request)?;
-        Ok(result)
     }
 }
 
@@ -312,15 +269,11 @@ pub(in crate::provider::source_backed) fn register_lingma_inventory_source(
         data_root,
         CaptureProvider::Lingma,
         "lingma_sqlite",
-        LingmaInventoryProvider {
-            data_root: data_root.to_path_buf(),
-            inventory_source,
-        },
+        LingmaInventoryProvider { inventory_source },
     )
 }
 
 struct LingmaInventoryProvider {
-    data_root: PathBuf,
     inventory_source: Arc<dyn LingmaInventorySource>,
 }
 
@@ -362,8 +315,8 @@ impl SqliteInventoryProvider for LingmaInventoryProvider {
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<CertifiedSource> {
         let mut sink_failure = None;
-        let certificate = scan_lingma_snapshot_v0(leaf, snapshot, &mut |document| {
-            if let Err(error) = sink.emit_document(document) {
+        let certificate = scan_lingma_snapshot_v0(leaf, snapshot, &mut |record| {
+            if let Err(error) = sink.emit_core_record(record) {
                 let detail = error.to_string();
                 sink_failure = Some(error);
                 return Err(LingmaSourceBackedErrorV0::Capture(
@@ -376,20 +329,6 @@ impl SqliteInventoryProvider for LingmaInventoryProvider {
             return Err(error);
         }
         certificate.map_err(route_error)
-    }
-
-    fn hydrate(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let inventory = self.inventory_source.observe().map_err(|error| {
-            hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-        })?;
-        LingmaSourceBackedResolverV0::new(&self.data_root, &inventory)
-            .map_err(|error| {
-                hydration_failure(HydrationFailureKind::TemporarilyUnavailable, error)
-            })?
-            .hydrate_batch_request(request)
     }
 }
 

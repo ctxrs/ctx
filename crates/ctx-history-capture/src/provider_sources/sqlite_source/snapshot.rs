@@ -1,70 +1,5 @@
 use super::*;
 
-/// A pinned read-only SQLite view over a snapshot already owned by ctx.
-///
-/// The caller is responsible for proving that `path` lives in private
-/// ctx-owned storage. SQLite may create or update sidecars beside this path;
-/// it can never reach the provider directory through this API.
-#[must_use = "call finish() after complete-content queries"]
-#[derive(Debug)]
-pub(crate) struct CtxOwnedSqliteReadSnapshot {
-    connection: Option<Connection>,
-}
-
-impl CtxOwnedSqliteReadSnapshot {
-    pub(crate) fn finish(mut self) -> SqliteSourceAccessResult<()> {
-        let connection = self
-            .connection
-            .as_ref()
-            .ok_or(SqliteSourceAccessError::SnapshotNotActive)?;
-        clear_snapshot_authorizer(connection)?;
-        connection
-            .execute_batch("ROLLBACK")
-            .map_err(|source| sqlite_error("ending the ctx-owned SQLite snapshot", source))?;
-        self.connection.take();
-        Ok(())
-    }
-}
-
-impl Deref for CtxOwnedSqliteReadSnapshot {
-    type Target = Connection;
-
-    fn deref(&self) -> &Self::Target {
-        match self.connection.as_ref() {
-            Some(connection) => connection,
-            None => std::process::abort(),
-        }
-    }
-}
-
-impl Drop for CtxOwnedSqliteReadSnapshot {
-    fn drop(&mut self) {
-        if let Some(connection) = self.connection.as_ref() {
-            let _ = clear_snapshot_authorizer(connection);
-            let _ = connection.execute_batch("ROLLBACK");
-        }
-        self.connection.take();
-    }
-}
-
-pub(crate) fn open_ctx_owned_sqlite_read_snapshot(
-    path: &Path,
-) -> SqliteSourceAccessResult<CtxOwnedSqliteReadSnapshot> {
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|source| sqlite_error("opening a ctx-owned SQLite snapshot", source))?;
-    verify_connection_read_only(&connection)?;
-    configure_and_pin_snapshot(&connection)?;
-    Ok(CtxOwnedSqliteReadSnapshot {
-        connection: Some(connection),
-    })
-}
-
 /// Retains an approved parent-directory handle together with the pathname that
 /// stock SQLite is allowed to open beneath it.
 pub(crate) fn retain_sqlite_source_directory_authority(
@@ -117,7 +52,9 @@ fn open_root_handle_sqlite_source_snapshot_inner(
         native_evidence,
         sqlite_evidence,
         evidence,
+        #[cfg(test)]
         strategy: acquired.strategy,
+        #[cfg(test)]
         copied_bytes: acquired.copied_bytes,
         _snapshot_directory: acquired.snapshot_directory,
         snapshot_activity: Some(acquired.snapshot_activity),
@@ -128,7 +65,9 @@ fn open_root_handle_sqlite_source_snapshot_inner(
 
 struct AcquiredSqliteConnection {
     connection: Connection,
+    #[cfg(test)]
     strategy: SqliteSourceSnapshotStrategy,
+    #[cfg(test)]
     copied_bytes: u64,
     snapshot_directory: Option<TempDir>,
     snapshot_activity: SqliteSourceSnapshotActivity,
@@ -146,7 +85,9 @@ fn acquire_sqlite_connection(
         if immutable_procfd_available(family.database.file()) {
             return Ok(AcquiredSqliteConnection {
                 connection: open_immutable_main(&family.database)?,
+                #[cfg(test)]
                 strategy: SqliteSourceSnapshotStrategy::ImmutableMain,
+                #[cfg(test)]
                 copied_bytes: 0,
                 snapshot_directory: None,
                 snapshot_activity: snapshot_context
@@ -169,7 +110,9 @@ fn acquire_sqlite_connection(
     .map_err(|source| sqlite_error("opening the ctx-owned provider snapshot", source))?;
     Ok(AcquiredSqliteConnection {
         connection,
+        #[cfg(test)]
         strategy: SqliteSourceSnapshotStrategy::CopiedFamily,
+        #[cfg(test)]
         copied_bytes,
         snapshot_directory: Some(snapshot_directory),
         snapshot_activity: snapshot_context

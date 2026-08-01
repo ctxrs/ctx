@@ -417,7 +417,7 @@ fn gemini_nativepath_treats_divergent_routes_as_independent_replacements() {
 }
 
 #[test]
-fn gemini_nativepath_delegates_cross_page_duplicate_authority_to_canonical_identity_consumer() {
+fn gemini_source_backed_rejects_cross_page_duplicate_before_canonical_writer() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
     let mut records = vec![header("duplicate-session", "main")];
@@ -445,6 +445,17 @@ fn gemini_nativepath_delegates_cross_page_duplicate_authority_to_canonical_ident
         "type": "gemini",
         "content": "later sibling survives"
     }));
+    let mut native_item_ids = GeminiSourceNativeItemIds::default();
+    let admitted = records
+        .iter()
+        .map(|record| serde_json::to_vec(record).unwrap())
+        .map(|record| native_item_ids.admit(&record))
+        .collect::<Vec<_>>();
+    assert!(admitted[..MAX_GEMINI_NATIVE_PAGE_RECORDS]
+        .iter()
+        .all(|admitted| *admitted));
+    assert!(!admitted[MAX_GEMINI_NATIVE_PAGE_RECORDS]);
+    assert!(admitted[MAX_GEMINI_NATIVE_PAGE_RECORDS + 1]);
     let path = write_transcript(&root, &records);
     let source = rediscover(&root, &path);
     let mut reader = read_gemini_transcript_pages(&source, None).unwrap();
@@ -471,6 +482,21 @@ fn gemini_nativepath_delegates_cross_page_duplicate_authority_to_canonical_ident
         second_page.events[1].identity,
         GeminiEventIdentity::NativeRecordId("later-valid".to_owned())
     );
+    let mut retained_events = first_page.events.clone();
+    retained_events.extend(second_page.events.clone());
+    let projected = project_gemini_test_events(&source, retained_events).unwrap();
+    assert_eq!(projected.len(), MAX_GEMINI_NATIVE_PAGE_RECORDS);
+    assert_eq!(
+        projected
+            .iter()
+            .map(|record| record.event_id.digest())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        projected.len()
+    );
+    assert!(!serde_json::to_string(&projected)
+        .unwrap()
+        .contains("same canonical native identity on the next bounded page"));
     let replay_frontier = second_page.expected_frontier.clone();
     let second_identity = second_page.identity;
     assert!(reader.next_page().unwrap().is_none());

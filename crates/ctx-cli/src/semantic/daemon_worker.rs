@@ -1,14 +1,8 @@
 use std::{path::Path, process, time::Instant};
 
-use anyhow::Result;
-#[cfg(test)]
-use ctx_history_capture::SourceBackedResolverRegistry;
-use ctx_history_core::{
-    utc_now, AgentType, BatchHydrationRequest, BatchHydrationResult, CaptureProvider,
-    ContentSourceResolver, EventHydrationRequest, EventRole, EventType, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind,
-};
-use ctx_history_index::{EventRecord, VerifiedIndex};
+use anyhow::{anyhow, Result};
+use ctx_history_core::{utc_now, AgentType, CaptureProvider, EventRole, EventType};
+use ctx_history_index::{CoreEventPageBudget, CoreEventRecord, VerifiedIndex};
 use serde_json::{json, Value};
 
 use crate::{DaemonRunArgs, DaemonTriggerCommandArg};
@@ -29,13 +23,13 @@ use super::{
     },
     runtime_limits::{
         DAEMON_MIN_REMAINING_FOR_JOB_SECS, DAEMON_SEMANTIC_RESERVE_GRACE_SECS,
-        SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS, SEMANTIC_SOURCE_MAX_CHARS,
+        SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS,
     },
     source_backed_refresh_coordinator::{pin_published_generation, PinnedSourceBackedGeneration},
     vector_store::{
-        semantic_hydrated_source_is_control, source_backed_semantic_vector_path,
-        SemanticChunkDocument, SemanticVectorStore, SourceBackedSemanticEmbedder,
-        SourceBackedSemanticOutcome, SourceBackedSemanticResolver,
+        semantic_core_content_is_control, source_backed_semantic_vector_path,
+        SemanticChunkDocument, SemanticVectorStore, SourceBackedSemanticDocumentBuilder,
+        SourceBackedSemanticEmbedder, SourceBackedSemanticOutcome,
     },
     SemanticEventDocument,
 };
@@ -44,6 +38,10 @@ use super::{
 use super::daemon::daemon_test_job;
 
 use crate::output::compact_json;
+
+const MAX_LITE_TURN_PAIRING_PAGE_RECORDS: usize = 64;
+const LITE_TURN_PAIRING_BUDGET: CoreEventPageBudget =
+    CoreEventPageBudget::new(64 * 1024 * 1024, 16 * 1024 * 1024);
 
 #[derive(Debug)]
 pub(super) enum DaemonSemanticModelStartup {
@@ -277,15 +275,7 @@ pub(super) fn run_daemon_semantic_job(
         &cache_dir,
         deadline,
     )?;
-    let (status, reason, last_error) = if let Some(unavailable) = outcome.unavailable {
-        (
-            "failed",
-            Some("source_hydration_unavailable"),
-            Some(format!(
-                "source-backed semantic hydration failed: {unavailable:?}"
-            )),
-        )
-    } else if outcome.ready {
+    let (status, reason, last_error) = if outcome.ready {
         ("ready", None, None)
     } else {
         ("budget_exhausted", None, None)
@@ -302,7 +292,7 @@ pub(super) fn run_daemon_semantic_job(
 }
 
 fn reconcile_source_backed_semantic_page(
-    data_root: &Path,
+    _data_root: &Path,
     generation: PinnedSourceBackedGeneration,
     vector_store: &mut SemanticVectorStore,
     runtime: &SharedSemanticRuntime,
@@ -310,13 +300,7 @@ fn reconcile_source_backed_semantic_page(
     deadline: Option<Instant>,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
     let index = generation.into_index();
-    let mut resolver = ProviderSourceSemanticResolver {
-        index: &index,
-        sources: DaemonGenerationSourceResolver {
-            index: &index,
-            data_root,
-        },
-    };
+    let mut builder = CoreSemanticDocumentBuilder::new(&index);
     let mut embedder = RuntimeSourceSemanticEmbedder {
         runtime,
         cache_dir,
@@ -324,145 +308,74 @@ fn reconcile_source_backed_semantic_page(
         indexed_chunks: 0,
     };
     let outcome =
-        vector_store.reconcile_source_backed_index(&index, &mut resolver, &mut embedder)?;
+        vector_store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
     Ok((outcome, embedder.indexed_chunks))
 }
 
-struct DaemonGenerationSourceResolver<'a> {
+struct CoreSemanticDocumentBuilder<'a> {
     index: &'a VerifiedIndex,
-    data_root: &'a Path,
+    pairing_page_records: usize,
+    pairing_budget: CoreEventPageBudget,
 }
 
-impl ContentSourceResolver for DaemonGenerationSourceResolver<'_> {
-    fn hydrate_event(
-        &self,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
-        let event = self
-            .index
-            .event_by_id(request.event_id().as_uuid())
-            .map_err(|error| {
-                source_hydration_failure(
-                    HydrationFailureKind::TemporarilyUnavailable,
-                    format!(
-                        "read source-backed semantic event {}: {error}",
-                        request.event_id()
-                    ),
-                )
-            })?
-            .ok_or_else(|| {
-                source_hydration_failure(
-                    HydrationFailureKind::MissingRecord,
-                    format!(
-                        "source-backed generation omitted semantic event {}",
-                        request.event_id()
-                    ),
-                )
-            })?;
-        validate_source_semantic_request(&event, request)?;
-        let mut hydrated = PinnedSourceBackedGeneration::hydrate_source_complete_events(
-            self.index,
-            self.data_root,
-            &[&event],
-        )
-        .map_err(daemon_source_hydration_failure)?;
-        let text = hydrated
-            .remove(&request.event_id().as_uuid())
-            .filter(|text| !text.is_empty())
-            .ok_or_else(|| {
-                source_hydration_failure(
-                    HydrationFailureKind::MissingRecord,
-                    format!(
-                        "daemon source hydration omitted semantic event {}",
-                        request.event_id()
-                    ),
-                )
-            })?;
-        Ok(HydratedProviderRecord {
-            event_id: request.event_id(),
-            provider_bytes: text.into_bytes(),
-        })
-    }
-
-    fn hydrate_batch(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> std::result::Result<BatchHydrationResult, HydrationFailure> {
-        let mut events = Vec::with_capacity(request.events().len());
-        for event_request in request.events() {
-            let event = self
-                .index
-                .event_by_id(event_request.event_id().as_uuid())
-                .map_err(|error| {
-                    source_hydration_failure(
-                        HydrationFailureKind::TemporarilyUnavailable,
-                        format!(
-                            "read source-backed semantic session event {}: {error}",
-                            event_request.event_id()
-                        ),
-                    )
-                })?
-                .ok_or_else(|| {
-                    source_hydration_failure(
-                        HydrationFailureKind::MissingRecord,
-                        format!(
-                            "source-backed generation omitted semantic session event {}",
-                            event_request.event_id()
-                        ),
-                    )
-                })?;
-            validate_source_semantic_request(&event, event_request)?;
-            events.push(event);
+impl SourceBackedSemanticDocumentBuilder for CoreSemanticDocumentBuilder<'_> {
+    fn build_document(
+        &mut self,
+        record: &CoreEventRecord,
+    ) -> Result<Option<SemanticEventDocument>> {
+        let user_text = record.core_record.content.meaningful_text();
+        if user_text.trim().is_empty() {
+            return Ok(None);
         }
-        let references = events.iter().collect::<Vec<_>>();
-        let mut hydrated = PinnedSourceBackedGeneration::hydrate_source_complete_events(
-            self.index,
-            self.data_root,
-            &references,
-        )
-        .map_err(daemon_source_hydration_failure)?;
-        let records = request
-            .events()
-            .iter()
-            .map(|event| {
-                let text = hydrated
-                    .remove(&event.event_id().as_uuid())
-                    .filter(|text| !text.is_empty())
-                    .ok_or_else(|| {
-                        source_hydration_failure(
-                            HydrationFailureKind::MissingRecord,
-                            format!(
-                                "daemon source hydration omitted semantic session event {}",
-                                event.event_id()
-                            ),
-                        )
-                    })?;
-                Ok(HydratedProviderRecord {
-                    event_id: event.event_id(),
-                    provider_bytes: text.into_bytes(),
-                })
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let result = BatchHydrationResult::new(records).map_err(|error| {
-            source_hydration_failure(
-                HydrationFailureKind::InvalidLocator,
-                format!("construct daemon semantic batch hydration result: {error}"),
-            )
-        })?;
-        result.validate_for_request(request)?;
-        Ok(result)
+        let mut sections = vec![format!("user:\n{}", user_text.trim())];
+        let mut occurred_at_ms = record.occurred_at_unix_ms.unwrap_or_default();
+        if !semantic_core_content_is_control(&sections[0]) {
+            if let Some((assistant_text, assistant_at_ms)) = self.paired_assistant(record)? {
+                sections.push(format!("assistant:\n{}", assistant_text.trim()));
+                occurred_at_ms = occurred_at_ms.max(assistant_at_ms);
+            }
+        }
+        Ok(Some(SemanticEventDocument {
+            event_id: record.event_id.as_uuid(),
+            session_id: Some(record.session_id.as_uuid()),
+            seq: record.event_sequence,
+            occurred_at_ms,
+            event_type: parse_core_event_type(&record.event_type)?,
+            role: record
+                .role
+                .as_deref()
+                .map(parse_core_event_role)
+                .transpose()?,
+            rank_bucket: "lite_turn".to_owned(),
+            provider: Some(parse_core_provider(&record.provider)?),
+            source_format: Some(record.source_format.clone()),
+            agent_type: Some(parse_core_agent_type(&record.agent_type)?),
+            session_is_primary: Some(record.is_primary),
+            cwd: record.cwd.clone(),
+            record_title: None,
+            record_kind: Some(record.event_type.clone()),
+            record_workspace: record.workspace.clone(),
+            text: sections.join("\n\n"),
+        }))
     }
 }
 
-fn daemon_source_hydration_failure(error: anyhow::Error) -> HydrationFailure {
-    PinnedSourceBackedGeneration::source_hydration_failure(&error).unwrap_or_else(|| {
-        source_hydration_failure(
-            HydrationFailureKind::TemporarilyUnavailable,
-            format!(
-                "request generation-bound daemon source hydration for semantic projection: {error:#}"
-            ),
-        )
-    })
+impl CoreSemanticDocumentBuilder<'_> {
+    fn new(index: &VerifiedIndex) -> CoreSemanticDocumentBuilder<'_> {
+        CoreSemanticDocumentBuilder {
+            index,
+            pairing_page_records: MAX_LITE_TURN_PAIRING_PAGE_RECORDS,
+            pairing_budget: LITE_TURN_PAIRING_BUDGET,
+        }
+    }
+
+    fn paired_assistant(&self, anchor: &CoreEventRecord) -> Result<Option<(String, i64)>> {
+        Ok(self.index.semantic_lite_turn_assistant(
+            anchor,
+            self.pairing_page_records,
+            self.pairing_budget,
+        )?)
+    }
 }
 
 fn annotate_source_backed_semantic_progress(
@@ -500,257 +413,28 @@ impl SourceBackedSemanticEmbedder for RuntimeSourceSemanticEmbedder<'_> {
     }
 }
 
-trait SourceSemanticSessionReader {
-    fn events_for_semantic_session(
-        &self,
-        anchor: &EventRecord,
-    ) -> std::result::Result<Vec<EventRecord>, HydrationFailure>;
+fn parse_core_event_type(value: &str) -> Result<EventType> {
+    value
+        .parse()
+        .map_err(|error| anyhow!("invalid Core event type {value:?}: {error}"))
 }
 
-impl SourceSemanticSessionReader for VerifiedIndex {
-    fn events_for_semantic_session(
-        &self,
-        anchor: &EventRecord,
-    ) -> std::result::Result<Vec<EventRecord>, HydrationFailure> {
-        self.events_for_session(anchor.session_id.as_uuid())
-            .map_err(|error| {
-                source_hydration_failure(
-                    HydrationFailureKind::TemporarilyUnavailable,
-                    format!(
-                        "read source-backed session {} for semantic lite turn: {error}",
-                        anchor.session_id
-                    ),
-                )
-            })
-    }
+fn parse_core_event_role(value: &str) -> Result<EventRole> {
+    value
+        .parse()
+        .map_err(|error| anyhow!("invalid Core event role {value:?}: {error}"))
 }
 
-struct ProviderSourceSemanticResolver<'a, Index, Sources> {
-    index: &'a Index,
-    sources: Sources,
+fn parse_core_provider(value: &str) -> Result<CaptureProvider> {
+    value
+        .parse()
+        .map_err(|error| anyhow!("invalid Core provider {value:?}: {error}"))
 }
 
-impl<Index, Sources> SourceBackedSemanticResolver
-    for ProviderSourceSemanticResolver<'_, Index, Sources>
-where
-    Index: SourceSemanticSessionReader,
-    Sources: ContentSourceResolver,
-{
-    fn resolve_document(
-        &mut self,
-        event: &EventRecord,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<SemanticEventDocument, HydrationFailure> {
-        validate_source_semantic_request(event, request)?;
-        let user_text = hydrate_source_semantic_text(&self.sources, event, request)?;
-        let mut sections = vec![format!("user:\n{}", user_text.trim())];
-        let mut occurred_at_ms = event.occurred_at_unix_ms.unwrap_or_default();
-        if !semantic_hydrated_source_is_control(&sections[0]) {
-            if let Some((assistant_text, assistant_at_ms)) = self.paired_assistant(event)? {
-                if !assistant_text.trim().is_empty() {
-                    sections.push(format!("assistant:\n{}", assistant_text.trim()));
-                }
-                occurred_at_ms = occurred_at_ms.max(assistant_at_ms);
-            }
-        }
-        let text = sections
-            .join("\n\n")
-            .chars()
-            .take(SEMANTIC_SOURCE_MAX_CHARS)
-            .collect::<String>();
-        Ok(SemanticEventDocument {
-            event_id: event.event_id.as_uuid(),
-            history_record_id: None,
-            session_id: Some(event.session_id.as_uuid()),
-            seq: event.event_sequence,
-            occurred_at_ms,
-            anchor_occurred_at_ms: event.occurred_at_unix_ms.unwrap_or_default(),
-            event_type: parse_source_event_type(&event.event_type)?,
-            role: event
-                .role
-                .as_deref()
-                .map(parse_source_event_role)
-                .transpose()?,
-            rank_bucket: "lite_turn".to_owned(),
-            provider: Some(parse_source_provider(&event.provider)?),
-            source_format: Some(event.source_format.clone()),
-            agent_type: Some(parse_source_agent_type(&event.agent_type)?),
-            session_is_primary: Some(event.is_primary),
-            cwd: event.cwd.clone(),
-            raw_source_path: event.source_path.clone(),
-            record_title: None,
-            record_kind: Some(event.event_type.clone()),
-            record_workspace: event.workspace.clone(),
-            text,
-        })
-    }
-}
-
-impl<Index, Sources> ProviderSourceSemanticResolver<'_, Index, Sources>
-where
-    Index: SourceSemanticSessionReader,
-    Sources: ContentSourceResolver,
-{
-    fn paired_assistant(
-        &self,
-        anchor: &EventRecord,
-    ) -> std::result::Result<Option<(String, i64)>, HydrationFailure> {
-        let events = self.index.events_for_semantic_session(anchor)?;
-        let anchor_index = events
-            .iter()
-            .position(|event| event.event_id == anchor.event_id)
-            .ok_or_else(|| {
-                source_hydration_failure(
-                    HydrationFailureKind::MissingRecord,
-                    format!(
-                        "semantic anchor {} is absent from its session",
-                        anchor.event_id
-                    ),
-                )
-            })?;
-        let assistant = events[anchor_index.saturating_add(1)..]
-            .iter()
-            .take_while(|event| {
-                !(event.event_type == EventType::Message.as_str()
-                    && event.role.as_deref() == Some(EventRole::User.as_str()))
-            })
-            .filter(|event| {
-                event.event_type == EventType::Message.as_str()
-                    && event.role.as_deref() == Some(EventRole::Assistant.as_str())
-            })
-            .last();
-        let Some(assistant) = assistant else {
-            return Ok(None);
-        };
-        let request = EventHydrationRequest::new(assistant.event_id, assistant.locator.clone())
-            .map_err(|error| {
-                source_hydration_failure(
-                    HydrationFailureKind::InvalidLocator,
-                    format!(
-                        "validate paired assistant locator {}: {error}",
-                        assistant.event_id
-                    ),
-                )
-            })?;
-        Ok(Some((
-            hydrate_source_semantic_text(&self.sources, assistant, &request)?,
-            assistant.occurred_at_unix_ms.unwrap_or_default(),
-        )))
-    }
-}
-
-fn validate_source_semantic_request(
-    event: &EventRecord,
-    request: &EventHydrationRequest,
-) -> std::result::Result<(), HydrationFailure> {
-    let source = request.locator().source();
-    if request.event_id() != event.event_id
-        || request.locator() != &event.locator
-        || source.provider() != event.provider.as_str()
-        || source.source_format() != event.source_format.as_str()
-    {
-        return Err(source_hydration_failure(
-            HydrationFailureKind::InvalidLocator,
-            format!(
-                "mismatched source-backed semantic identity or locator for {}",
-                event.event_id
-            ),
-        ));
-    }
-    request.locator().validate_contract().map_err(|error| {
-        source_hydration_failure(
-            HydrationFailureKind::InvalidLocator,
-            format!(
-                "invalid typed source-backed semantic locator for {}: {error}",
-                event.event_id
-            ),
-        )
-    })
-}
-
-fn hydrate_source_semantic_text(
-    sources: &impl ContentSourceResolver,
-    event: &EventRecord,
-    request: &EventHydrationRequest,
-) -> std::result::Result<String, HydrationFailure> {
-    validate_source_semantic_request(event, request)?;
-    let hydrated = sources.hydrate_event(request)?;
-    if hydrated.event_id != request.event_id() {
-        return Err(source_hydration_failure(
-            HydrationFailureKind::InvalidLocator,
-            format!(
-                "provider resolver returned mismatched identity {} for {}",
-                hydrated.event_id,
-                request.event_id()
-            ),
-        ));
-    }
-    let text = String::from_utf8(hydrated.provider_bytes).map_err(|error| {
-        source_hydration_failure(
-            HydrationFailureKind::UnsupportedParserRevision,
-            format!(
-                "provider resolver returned non-UTF-8 source content for {}: {}",
-                request.event_id(),
-                error.utf8_error()
-            ),
-        )
-    })?;
-    if text.trim().is_empty() {
-        return Err(source_hydration_failure(
-            HydrationFailureKind::MissingRecord,
-            format!(
-                "provider resolver returned no source content for {}",
-                request.event_id()
-            ),
-        ));
-    }
-    Ok(text)
-}
-
-fn source_hydration_failure(
-    kind: HydrationFailureKind,
-    detail: impl Into<String>,
-) -> HydrationFailure {
-    HydrationFailure {
-        kind,
-        detail: detail.into(),
-    }
-}
-
-fn parse_source_event_type(value: &str) -> std::result::Result<EventType, HydrationFailure> {
-    value.parse().map_err(|error| {
-        source_hydration_failure(
-            HydrationFailureKind::InvalidLocator,
-            format!("invalid source-backed event type {value:?}: {error}"),
-        )
-    })
-}
-
-fn parse_source_event_role(value: &str) -> std::result::Result<EventRole, HydrationFailure> {
-    value.parse().map_err(|error| {
-        source_hydration_failure(
-            HydrationFailureKind::InvalidLocator,
-            format!("invalid source-backed event role {value:?}: {error}"),
-        )
-    })
-}
-
-fn parse_source_provider(value: &str) -> std::result::Result<CaptureProvider, HydrationFailure> {
-    value.parse().map_err(|error| {
-        source_hydration_failure(
-            HydrationFailureKind::InvalidLocator,
-            format!("invalid source-backed provider {value:?}: {error}"),
-        )
-    })
-}
-
-fn parse_source_agent_type(value: &str) -> std::result::Result<AgentType, HydrationFailure> {
-    value.parse().map_err(|error| {
-        source_hydration_failure(
-            HydrationFailureKind::InvalidLocator,
-            format!("invalid source-backed agent type {value:?}: {error}"),
-        )
-    })
+fn parse_core_agent_type(value: &str) -> Result<AgentType> {
+    value
+        .parse()
+        .map_err(|error| anyhow!("invalid Core agent type {value:?}: {error}"))
 }
 
 pub(super) fn daemon_semantic_skipped_job(

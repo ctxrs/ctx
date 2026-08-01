@@ -85,7 +85,7 @@ pub(super) fn start_isolated_provider_daemon(temp: &TempDir) -> SourceRefreshDae
             .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
         if status.as_ref().is_some_and(|status| {
             status["daemon"]["running"] == true
-                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+                && status["daemon"]["core_refresh_endpoint"]["available"] == true
         }) {
             wait_for_test_daemon_source_refresh(temp);
             return daemon;
@@ -109,7 +109,8 @@ pub(super) fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
             break serde_json::from_slice::<Value>(&output.stdout).unwrap();
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if (stderr.contains("source-backed SQL projection")
+        if (stderr.contains("Core SQL projection")
+            || stderr.contains("source-backed SQL projection")
             || stderr.contains("source-backed relational projection")
             || stderr.contains("no such table: source_backed_relational_state"))
             && Instant::now() < deadline
@@ -143,16 +144,18 @@ pub(super) fn assert_source_backed_search(search: &Value, provider: &str, query:
     assert_eq!(search["schema_version"], 1, "{search:#}");
     assert_eq!(search["query"], query, "{search:#}");
     assert_eq!(search["filters"]["provider"], provider, "{search:#}");
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     let results = search["results"].as_array().unwrap();
-    assert_eq!(results.len(), 1, "{search:#}");
-    assert_eq!(results[0]["provider"], provider, "{search:#}");
-    assert!(results[0]["ctx_event_id"].is_string(), "{search:#}");
-    assert!(results[0]["ctx_session_id"].is_string(), "{search:#}");
-    assert!(
-        results[0]["snippet"]
-            .as_str()
-            .is_some_and(|snippet| snippet.contains(query)),
-        "{search:#}"
-    );
+    assert!(!results.is_empty(), "{search:#}");
+    for result in results {
+        assert_eq!(result["provider"], provider, "{search:#}");
+        assert!(result["ctx_event_id"].is_string(), "{search:#}");
+        assert!(result["ctx_session_id"].is_string(), "{search:#}");
+        assert!(
+            result["snippet"]
+                .as_str()
+                .is_some_and(|snippet| snippet.contains(query)),
+            "{search:#}"
+        );
+    }
 }

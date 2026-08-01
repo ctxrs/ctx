@@ -1,42 +1,42 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
+mod projection;
+
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, EventHydrationRequest,
-    EventIdentityInput, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    ProjectionContractError, SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey,
+    CaptureProvider, CoreRecord, CoreRecordError, ProjectionContractError, RepositoryAbstention,
+    RepositoryAbstentionReason, RepositoryEvidenceKind, RepositoryFileObservationKind, SourceKey,
+    StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::dto::{GeminiEventBody, GeminiTranscriptLayout};
 use super::parser::{read_gemini_session_header, GeminiBorrowedRecordParser};
 use super::{
-    discover_gemini_transcripts, GeminiEventIdentity, GeminiFileObservation, GeminiScanError,
-    GeminiSession, GeminiTranscriptSource,
+    discover_gemini_transcripts, GeminiFileObservation, GeminiScanError, GeminiSession,
+    GeminiTranscriptSource,
 };
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::source_backed::{
         executable_route,
         family::jsonl::{
-            jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator,
-            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlRecordRef,
+            jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
+            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlRecordRef,
         },
         SourceBackedCoordinatorResult, SourceBackedProviderRegistry, SourceBackedRouteSelection,
         SourceBackedSelectorAuthority,
     },
-    CaptureError, GEMINI_CLI_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
+    repository_attribution::{linked_outcome_evidence, LinkedOutcomeInput},
+    CaptureError, OutputOutcome, GEMINI_CLI_SOURCE_FORMAT,
 };
+use projection::{gemini_event_id, gemini_session_id, gemini_source_key, project_event};
 
 const GEMINI_SOURCE_ANCHOR_NAMESPACE: &str = "gemini.session";
 const GEMINI_NATIVE_SESSION_NAMESPACE: &str = "gemini.session";
@@ -44,8 +44,11 @@ const GEMINI_NATIVE_EVENT_NAMESPACE: &str = "gemini.event";
 const GEMINI_LOGICAL_SESSION_KIND: &str = "gemini-session";
 const GEMINI_LOGICAL_EVENT_KIND: &str = "gemini-event";
 const GEMINI_SOURCE_SCHEMA_VARIANT: &str = "gemini-nativepath-jsonl-v0";
-const GEMINI_SOURCE_BACKED_PARSER_REVISION: &str = "gemini-nativepath-source-backed-v0-p6-p4";
+const GEMINI_SOURCE_BACKED_PARSER_REVISION: &str =
+    "gemini-nativepath-source-backed-v0-p8-p6-core-result-linkage";
 const MAX_GEMINI_LEXICAL_METADATA_CHARS: usize = 8 * 1024;
+const MAX_GEMINI_REPOSITORY_FIELD_CHARS: usize = 64 * 1024;
+const MAX_GEMINI_TOOL_CONTEXTS: usize = 256;
 
 pub(crate) mod registration {
     use super::*;
@@ -76,21 +79,11 @@ pub(crate) enum GeminiSourceBackedError {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    Core(#[from] CoreRecordError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[error("locator is not a Gemini NativePath JSONL record")]
-    InvalidLocator,
-    #[error("Gemini locator byte range exceeds the bounded JSONL record size")]
-    LocatorRangeTooLarge,
-    #[error("Gemini locator byte range ends after the provider source")]
-    LocatorRangeMissing,
-    #[error("Gemini locator record digest no longer matches provider bytes")]
-    LocatorDigestMismatch,
-    #[error("Gemini locator record has no exact canonical logical display content")]
-    ExactDisplayUnavailable,
 }
 
 pub(crate) type GeminiSourceBackedResult<T> = Result<T, GeminiSourceBackedError>;
@@ -223,28 +216,17 @@ impl JsonlFamilyAdapter for GeminiJsonlAdapter {
         Ok(Box::new(GeminiProjector {
             parser: GeminiBorrowedRecordParser::new(transcript, binding.session.clone()),
             source: leaf.source().clone(),
-            source_path: leaf.source_path().display().to_string(),
             session: binding.session,
             session_id,
             parent_session_id,
             root_session_id,
             source_file,
             authority: Arc::clone(leaf.authority()),
-        }))
-    }
-
-    fn hydrator(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        source_file: Arc<OpenedProviderSourceFile>,
-    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
-        let binding = decode_binding(leaf).map_err(unavailable)?;
-        if source_file.ordinary_file_token() != binding.ordinary_file_token {
-            return Err(stale("Gemini source identity changed before hydration"));
-        }
-        Ok(Box::new(GeminiHydrator {
-            source: leaf.source().clone(),
-            source_file,
+            repository_attributor: crate::repository_attribution::RepositoryAttributor::default(),
+            tool_contexts: BTreeMap::new(),
+            linkage_capacity_exceeded: false,
+            native_item_ids: GeminiSourceNativeItemIds::default(),
+            emitted_event_digests: BTreeSet::new(),
         }))
     }
 }
@@ -252,23 +234,104 @@ impl JsonlFamilyAdapter for GeminiJsonlAdapter {
 struct GeminiProjector {
     parser: GeminiBorrowedRecordParser,
     source: SourceKey,
-    source_path: String,
     session: GeminiSession,
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
     root_session_id: StableEntityId,
     source_file: Arc<OpenedProviderSourceFile>,
     authority: Arc<ProviderSourceRoot>,
+    repository_attributor: crate::repository_attribution::RepositoryAttributor,
+    tool_contexts: BTreeMap<String, GeminiToolContextState>,
+    linkage_capacity_exceeded: bool,
+    native_item_ids: GeminiSourceNativeItemIds,
+    emitted_event_digests: BTreeSet<[u8; 32]>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct GeminiSourceNativeItemIds {
+    header_seen: bool,
+    ids: BTreeSet<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiSourceNativeItemProbe {
+    id: Option<String>,
+    session_id: Option<String>,
+}
+
+impl GeminiSourceNativeItemIds {
+    fn candidate(&mut self, payload: &[u8]) -> Option<String> {
+        let Ok(probe) = serde_json::from_slice::<GeminiSourceNativeItemProbe>(payload) else {
+            return None;
+        };
+        if probe
+            .session_id
+            .as_deref()
+            .is_some_and(|session_id| !session_id.trim().is_empty())
+        {
+            self.header_seen = true;
+            return None;
+        }
+        if !self.header_seen {
+            return None;
+        }
+        probe.id.filter(|id| !id.trim().is_empty())
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        self.ids.contains(id)
+    }
+
+    fn remember(&mut self, id: Option<String>) {
+        if let Some(id) = id {
+            self.ids.insert(id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn admit(&mut self, payload: &[u8]) -> bool {
+        let candidate = self.candidate(payload);
+        if candidate.as_deref().is_some_and(|id| self.contains(id)) {
+            return false;
+        }
+        self.remember(candidate);
+        true
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct GeminiToolContext {
+    origin_call_id: Option<String>,
+    origin_event_sequence: Option<u64>,
+    command: Option<String>,
+    command_too_large: bool,
+    declared_workdir: Option<String>,
+    file_paths: Vec<String>,
+    ambiguous_native_fields: bool,
+}
+
+#[derive(Debug, Clone)]
+enum GeminiToolContextState {
+    Exact(GeminiToolContext),
+    Ambiguous,
 }
 
 impl JsonlFamilyProjector for GeminiProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
-        emit: &mut dyn FnMut(LexicalDocument) -> crate::Result<()>,
+        emit: &mut dyn FnMut(CoreRecord) -> crate::Result<()>,
     ) -> crate::Result<()> {
+        let native_item_id = self.native_item_ids.candidate(record.bytes());
+        if native_item_id
+            .as_deref()
+            .is_some_and(|id| self.native_item_ids.contains(id))
+        {
+            return Ok(());
+        }
         let evidence = record.evidence();
-        for event in self
+        let events = self
             .parser
             .project(
                 record.bytes(),
@@ -277,17 +340,26 @@ impl JsonlFamilyProjector for GeminiProjector {
                 evidence.byte_end_exclusive(),
                 evidence.record_digest(),
             )
-            .map_err(capture_scan_error)?
-        {
+            .map_err(capture_scan_error)?;
+        if !events.is_empty() {
+            self.native_item_ids.remember(native_item_id);
+        }
+        for event in events {
+            let event_id =
+                gemini_event_id(&self.source, self.session_id, &event).map_err(capture_error)?;
+            if !self.emitted_event_digests.insert(event_id.digest()) {
+                continue;
+            }
+            let annotation = self.attribution_for_event(&event);
             emit(
                 project_event(
                     &self.source,
                     self.session_id,
                     self.parent_session_id,
                     self.root_session_id,
-                    &self.source_path,
                     &self.session,
                     event,
+                    annotation,
                 )
                 .map_err(capture_error)?,
             )?;
@@ -302,27 +374,503 @@ impl JsonlFamilyProjector for GeminiProjector {
     }
 }
 
-struct GeminiHydrator {
-    source: SourceKey,
-    source_file: Arc<OpenedProviderSourceFile>,
+impl GeminiProjector {
+    fn attribution_for_event(
+        &mut self,
+        event: &super::GeminiRetainedEvent,
+    ) -> ctx_history_core::CoreRecordAnnotation {
+        gemini_attribution_for_event(
+            &mut self.repository_attributor,
+            &self.session,
+            &mut self.tool_contexts,
+            &mut self.linkage_capacity_exceeded,
+            event,
+        )
+    }
 }
 
-impl JsonlFamilyHydrator for GeminiHydrator {
-    fn hydrate(
-        &mut self,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
-        let hydrated = hydrate_opened_gemini_record(
-            self.source_file.as_ref(),
-            &self.source,
-            request.locator(),
-        )
-        .map_err(map_hydration_error)?;
-        Ok(HydratedProviderRecord {
-            event_id: request.event_id(),
-            provider_bytes: hydrated.provider_bytes,
-        })
+fn gemini_attribution_for_event(
+    repository_attributor: &mut crate::repository_attribution::RepositoryAttributor,
+    session: &GeminiSession,
+    tool_contexts: &mut BTreeMap<String, GeminiToolContextState>,
+    linkage_capacity_exceeded: &mut bool,
+    event: &super::GeminiRetainedEvent,
+) -> ctx_history_core::CoreRecordAnnotation {
+    let structured_content = gemini_structured_content(event);
+    let mut input = crate::repository_attribution::AttributionInput {
+        activity_at_unix_ms: event
+            .occurred_at
+            .or(session.started_at)
+            .map(|timestamp| timestamp.timestamp_millis()),
+        session_cwd: session.cwd.clone(),
+        structured_content,
+        ..crate::repository_attribution::AttributionInput::default()
+    };
+    let mut adapter_abstentions = Vec::new();
+    if session.cwd_ambiguous {
+        input.provider_native_context_ambiguous = true;
+        adapter_abstentions.push((
+            RepositoryEvidenceKind::SessionCwd,
+            RepositoryAbstentionReason::Ambiguous,
+            "gemini_header_has_multiple_workspace_directories",
+        ));
     }
+    match &event.body {
+        GeminiEventBody::ToolCall { calls } => {
+            let contexts = calls
+                .iter()
+                .map(gemini_tool_call_context)
+                .collect::<Vec<_>>();
+            let combined = combine_gemini_tool_contexts(&contexts, &event.safe_file_touches);
+            apply_gemini_context(&mut input, &combined);
+            if combined.ambiguous_native_fields {
+                input.provider_native_context_ambiguous = true;
+                adapter_abstentions.push((
+                    RepositoryEvidenceKind::DeclaredToolWorkdir,
+                    RepositoryAbstentionReason::Ambiguous,
+                    "gemini_tool_calls_do_not_share_one_exact_repository_context",
+                ));
+            }
+            for (call, mut context) in calls.iter().zip(contexts) {
+                let Some(call_id) = call
+                    .id
+                    .as_deref()
+                    .filter(|call_id| call_id.chars().count() <= MAX_GEMINI_REPOSITORY_FIELD_CHARS)
+                else {
+                    adapter_abstentions.push((
+                        RepositoryEvidenceKind::ProviderNativeResult,
+                        RepositoryAbstentionReason::ProviderOutputUnjoined,
+                        "gemini_tool_call_has_no_exact_result_link_id",
+                    ));
+                    continue;
+                };
+                context.origin_call_id = Some(call_id.to_owned());
+                context.origin_event_sequence = gemini_event_sequence(event);
+                if tool_contexts.contains_key(call_id) {
+                    tool_contexts.insert(call_id.to_owned(), GeminiToolContextState::Ambiguous);
+                } else if tool_contexts.len() < MAX_GEMINI_TOOL_CONTEXTS {
+                    tool_contexts
+                        .insert(call_id.to_owned(), GeminiToolContextState::Exact(context));
+                } else {
+                    *linkage_capacity_exceeded = true;
+                }
+            }
+        }
+        GeminiEventBody::OutputDiagnostic {
+            result,
+            call_id,
+            command,
+            command_too_large,
+            declared_workdir,
+            file_paths,
+            ambiguous_native_fields,
+            outcome,
+            ..
+        } => {
+            let direct = GeminiToolContext {
+                command: command.clone(),
+                command_too_large: *command_too_large,
+                declared_workdir: declared_workdir.clone(),
+                file_paths: file_paths.clone(),
+                ambiguous_native_fields: *ambiguous_native_fields,
+                ..GeminiToolContext::default()
+            };
+            let linked = call_id
+                .as_ref()
+                .and_then(|call_id| tool_contexts.remove(call_id));
+            let (context, linkage_exact) = match linked {
+                Some(GeminiToolContextState::Exact(linked)) => {
+                    merge_gemini_result_context(direct, linked)
+                }
+                Some(GeminiToolContextState::Ambiguous) => (direct, false),
+                None => (direct, false),
+            };
+            apply_gemini_context(&mut input, &context);
+            if context.ambiguous_native_fields {
+                input.provider_native_context_ambiguous = true;
+                adapter_abstentions.push((
+                    RepositoryEvidenceKind::DeclaredToolWorkdir,
+                    RepositoryAbstentionReason::Ambiguous,
+                    "gemini_result_repository_fields_are_ambiguous",
+                ));
+            }
+            if !linkage_exact {
+                let (reason, detail) = if *linkage_capacity_exceeded {
+                    (
+                        RepositoryAbstentionReason::LinkageCapacityExceeded,
+                        "gemini_tool_result_linkage_capacity_exceeded",
+                    )
+                } else {
+                    (
+                        RepositoryAbstentionReason::ProviderOutputUnjoined,
+                        "gemini_result_has_no_exact_unique_call_link",
+                    )
+                };
+                adapter_abstentions.push((
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    reason,
+                    detail,
+                ));
+            }
+            let result_outcome = match outcome.as_str() {
+                "success" => OutputOutcome::Success,
+                "failure" => OutputOutcome::Failure,
+                "timeout" => OutputOutcome::Timeout,
+                _ => OutputOutcome::Unknown,
+            };
+            if linkage_exact && result_outcome == OutputOutcome::Success {
+                if let (
+                    Some(command),
+                    Some(origin_call_id),
+                    Some(result_call_id),
+                    Some(origin_event_sequence),
+                    Some(result),
+                ) = (
+                    context.command.as_deref(),
+                    context.origin_call_id.as_deref(),
+                    call_id.as_deref(),
+                    context.origin_event_sequence,
+                    result.as_ref(),
+                ) {
+                    let structured_oid = result
+                        .pointer("/gitOperation/commit/sha")
+                        .and_then(serde_json::Value::as_str);
+                    let output_workdir = result
+                        .get("cwd")
+                        .or_else(|| result.get("workdir"))
+                        .and_then(serde_json::Value::as_str);
+                    if let Some(linked) = linked_outcome_evidence(LinkedOutcomeInput {
+                        provider: "gemini",
+                        command,
+                        session_cwd: input.session_cwd.as_deref(),
+                        declared_workdir: context.declared_workdir.as_deref(),
+                        origin_call_id,
+                        result_call_id,
+                        origin_event_sequence,
+                        continuation_call_id_sha256: &[],
+                        result_record_sha256: event.source_record.record_digest,
+                        observed_at_unix_ms: input.activity_at_unix_ms.unwrap_or(0),
+                        result_outcome,
+                        result_output: result,
+                        structured_commit_oid: structured_oid,
+                        output_repository_path: output_workdir,
+                    }) {
+                        input.provider_native_repository_aliases =
+                            linked.provider_native_repository_aliases;
+                        input.outcome_operation_repository_path =
+                            linked.outcome_operation_repository_path;
+                        input.outcome_output_repository_path =
+                            linked.outcome_output_repository_path;
+                        input.outcome_observations = linked.outcomes;
+                        input.outcome_abstentions = linked.abstentions;
+                    }
+                }
+            }
+            input.outcome_abstentions.extend(gemini_outcome_abstentions(
+                &context,
+                result_outcome,
+                linkage_exact,
+                result.is_some(),
+            ));
+        }
+        GeminiEventBody::Message { .. }
+        | GeminiEventBody::StateNotice { .. }
+        | GeminiEventBody::RewindNotice { .. } => {}
+    }
+    let mut annotation = repository_attributor.attribute(input);
+    append_adapter_abstentions(&mut annotation, adapter_abstentions);
+    annotation
+}
+
+fn gemini_structured_content(event: &super::GeminiRetainedEvent) -> Option<serde_json::Value> {
+    if matches!(&event.body, GeminiEventBody::Message { .. }) && event.safe_file_touches.is_empty()
+    {
+        return None;
+    }
+    let details = match &event.body {
+        GeminiEventBody::Message { .. } => None,
+        GeminiEventBody::OutputDiagnostic {
+            result,
+            call_id,
+            tool_name,
+            command,
+            command_too_large,
+            declared_workdir,
+            file_paths,
+            ambiguous_native_fields,
+            outcome,
+            exit_code,
+            duration_ms,
+        } => Some(serde_json::json!({
+            "kind": "output_diagnostic",
+            "complete_result": result.as_ref().map(|_| serde_json::json!({
+                "location": "normalized_body",
+                "retained_body_sha256": hex_digest(event.body_sha256),
+                "source_record_sha256": hex_digest(event.source_record.record_digest),
+            })),
+            "call_id": call_id,
+            "tool_name": tool_name,
+            "command": command,
+            "declared_workdir": declared_workdir,
+            "file_paths": file_paths,
+            "ambiguous_native_fields": ambiguous_native_fields,
+            "command_too_large": command_too_large,
+            "outcome": outcome,
+            "exit_code": exit_code,
+            "duration_ms": duration_ms,
+        })),
+        body => serde_json::to_value(body).ok(),
+    };
+    Some(serde_json::json!({
+        "details": details,
+        "file_touches": event.safe_file_touches,
+    }))
+}
+
+fn hex_digest(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn append_adapter_abstentions(
+    annotation: &mut ctx_history_core::CoreRecordAnnotation,
+    abstentions: Vec<(
+        RepositoryEvidenceKind,
+        RepositoryAbstentionReason,
+        &'static str,
+    )>,
+) {
+    for (evidence_kind, reason, detail) in abstentions {
+        let abstention = RepositoryAbstention {
+            evidence_kind,
+            reason,
+            detail: Some(detail.to_owned()),
+            association_policy_revision:
+                ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+        };
+        if !annotation.repository_abstentions.contains(&abstention) {
+            annotation.repository_abstentions.push(abstention);
+        }
+    }
+}
+
+fn gemini_tool_call_context(call: &super::dto::GeminiToolCall) -> GeminiToolContext {
+    let mut context = GeminiToolContext::default();
+    let Some(args) = call.args.as_ref() else {
+        return context;
+    };
+    let Some(args) = args.as_object() else {
+        context.ambiguous_native_fields = true;
+        return context;
+    };
+    context.command = exact_json_command(
+        args.get("command"),
+        &mut context.command_too_large,
+        &mut context.ambiguous_native_fields,
+    );
+    context.declared_workdir =
+        exact_json_string(args.get("dir_path"), &mut context.ambiguous_native_fields);
+    for key in ["path", "file_path", "filePath"] {
+        if let Some(path) = exact_json_string(args.get(key), &mut context.ambiguous_native_fields) {
+            context.file_paths.push(path);
+        }
+    }
+    context
+}
+
+fn exact_json_command(
+    value: Option<&serde_json::Value>,
+    too_large: &mut bool,
+    invalid: &mut bool,
+) -> Option<String> {
+    match value {
+        Some(serde_json::Value::String(value))
+            if value.len() > crate::repository_attribution::MAX_COMMAND_BYTES =>
+        {
+            *too_large = true;
+            None
+        }
+        Some(serde_json::Value::String(value)) => Some(value.clone()),
+        Some(_) => {
+            *invalid = true;
+            None
+        }
+        None => None,
+    }
+}
+
+fn exact_json_string(value: Option<&serde_json::Value>, invalid: &mut bool) -> Option<String> {
+    match value {
+        Some(serde_json::Value::String(value))
+            if value.chars().count() <= MAX_GEMINI_REPOSITORY_FIELD_CHARS =>
+        {
+            Some(value.clone())
+        }
+        Some(serde_json::Value::String(_)) => {
+            *invalid = true;
+            None
+        }
+        Some(_) => {
+            *invalid = true;
+            None
+        }
+        None => None,
+    }
+}
+
+fn combine_gemini_tool_contexts(
+    contexts: &[GeminiToolContext],
+    file_paths: &[String],
+) -> GeminiToolContext {
+    let (mut command, mut command_ambiguous) =
+        common_gemini_field(contexts, |context| context.command.as_deref());
+    let command_too_large = contexts.iter().any(|context| context.command_too_large);
+    if command_too_large {
+        command_ambiguous |= contexts.iter().any(|context| context.command.is_some());
+        command = None;
+    }
+    let (declared_workdir, workdir_ambiguous) =
+        common_gemini_field(contexts, |context| context.declared_workdir.as_deref());
+    GeminiToolContext {
+        command,
+        command_too_large,
+        declared_workdir,
+        file_paths: file_paths.to_vec(),
+        ambiguous_native_fields: command_ambiguous
+            || workdir_ambiguous
+            || contexts
+                .iter()
+                .any(|context| context.ambiguous_native_fields),
+        ..GeminiToolContext::default()
+    }
+}
+
+fn common_gemini_field(
+    contexts: &[GeminiToolContext],
+    select: impl Fn(&GeminiToolContext) -> Option<&str>,
+) -> (Option<String>, bool) {
+    let Some(first) = contexts.first().and_then(&select) else {
+        return (
+            None,
+            contexts
+                .iter()
+                .skip(1)
+                .any(|context| select(context).is_some()),
+        );
+    };
+    if contexts
+        .iter()
+        .all(|context| select(context) == Some(first))
+    {
+        (Some(first.to_owned()), false)
+    } else {
+        (None, true)
+    }
+}
+
+fn merge_gemini_result_context(
+    mut direct: GeminiToolContext,
+    linked: GeminiToolContext,
+) -> (GeminiToolContext, bool) {
+    let mut exact = !direct.ambiguous_native_fields && !linked.ambiguous_native_fields;
+    direct.origin_call_id = linked.origin_call_id;
+    direct.origin_event_sequence = linked.origin_event_sequence;
+    let direct_command = direct.command.take();
+    match (
+        direct.command_too_large,
+        linked.command_too_large,
+        direct_command,
+        linked.command,
+    ) {
+        (true, true, _, _) | (true, false, _, None) | (false, true, None, _) => {
+            direct.command_too_large = true;
+        }
+        (true, false, _, Some(_)) | (false, true, Some(_), _) => {
+            direct.command_too_large = true;
+            exact = false;
+        }
+        (false, false, None, Some(linked)) => direct.command = Some(linked),
+        (false, false, Some(direct_command), Some(linked)) => {
+            exact &= direct_command == linked;
+            direct.command = Some(direct_command);
+        }
+        (false, false, Some(direct_command), None) => direct.command = Some(direct_command),
+        (false, false, None, None) => {}
+    }
+    match (&direct.declared_workdir, linked.declared_workdir) {
+        (None, Some(linked)) => direct.declared_workdir = Some(linked),
+        (Some(direct_workdir), Some(linked)) if direct_workdir != &linked => exact = false,
+        _ => {}
+    }
+    for path in linked.file_paths {
+        if !direct.file_paths.contains(&path) {
+            direct.file_paths.push(path);
+        }
+    }
+    direct.ambiguous_native_fields |= !exact;
+    (direct, exact)
+}
+
+fn apply_gemini_context(
+    input: &mut crate::repository_attribution::AttributionInput,
+    context: &GeminiToolContext,
+) {
+    input.command = context.command.clone();
+    input.command_disposition = if context.command_too_large {
+        crate::repository_attribution::CommandEvidenceDisposition::CommandTooLarge
+    } else {
+        crate::repository_attribution::CommandEvidenceDisposition::Analyze
+    };
+    input.declared_tool_workdir = context.declared_workdir.clone();
+    input
+        .file_observations
+        .extend(context.file_paths.iter().cloned().map(|path| {
+            crate::repository_attribution::UnscopedFileObservation {
+                path,
+                prior_path: None,
+                kind: RepositoryFileObservationKind::Unknown,
+            }
+        }));
+}
+
+fn gemini_outcome_abstentions(
+    context: &GeminiToolContext,
+    outcome: OutputOutcome,
+    linkage_exact: bool,
+    has_exact_result: bool,
+) -> Vec<(RepositoryAbstentionReason, &'static str)> {
+    let Some(command) = context.command.as_deref() else {
+        return Vec::new();
+    };
+    if !crate::repository_attribution::bounded_outcome_evidence_relevant(command) {
+        return Vec::new();
+    }
+    if !linkage_exact {
+        return vec![(
+            RepositoryAbstentionReason::ProviderOutputUnjoined,
+            "gemini_repository_outcome_has_no_exact_result_link",
+        )];
+    }
+    if outcome != OutputOutcome::Success {
+        return vec![(
+            RepositoryAbstentionReason::OutcomeResultInadmissible,
+            "recognized_gemini_outcome_command_did_not_succeed",
+        )];
+    }
+    (!has_exact_result)
+        .then_some((
+            RepositoryAbstentionReason::OutcomeResultInadmissible,
+            "gemini_result_has_no_exact_value",
+        ))
+        .into_iter()
+        .collect()
+}
+
+fn gemini_event_sequence(event: &super::GeminiRetainedEvent) -> Option<u64> {
+    event
+        .native_order
+        .raw_ordinal
+        .checked_mul(u64::from(u32::MAX) + 1)
+        .and_then(|sequence| sequence.checked_add(u64::from(event.native_order.sub_ordinal)))
 }
 
 fn shared_authority(
@@ -354,312 +902,55 @@ fn decode_binding(leaf: &JsonlFamilyLeaf) -> crate::Result<GeminiFamilyBinding> 
     Ok(serde_json::from_slice(bytes)?)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GeminiHydratedSourceRecord {
-    pub(crate) provider_bytes: Vec<u8>,
-    pub(crate) decoded_display_text: Option<String>,
-}
-
-/// Reopens one exact record from a freshly discovered Gemini leaf. The
-/// provider-owned record digest remains valid across a benign append.
 #[cfg(test)]
-pub(crate) fn hydrate_gemini_source_backed_record(
+pub(super) fn project_gemini_test_events(
     source: &GeminiTranscriptSource,
-    locator: &SourceRecordLocator,
-) -> GeminiSourceBackedResult<GeminiHydratedSourceRecord> {
+    events: Vec<super::GeminiRetainedEvent>,
+) -> GeminiSourceBackedResult<Vec<CoreRecord>> {
     let session = read_gemini_session_header(source)?;
-    let expected_source = gemini_source_key(&session.native_session_id)?;
-    let source_file = source.open()?;
-    hydrate_opened_gemini_record(&source_file, &expected_source, locator)
-}
-
-fn hydrate_opened_gemini_record(
-    source_file: &OpenedProviderSourceFile,
-    expected_source: &SourceKey,
-    locator: &SourceRecordLocator,
-) -> GeminiSourceBackedResult<GeminiHydratedSourceRecord> {
-    locator.validate_contract()?;
-    let (byte_offset, byte_length, physical_ordinal) = validate_locator(locator, expected_source)?;
-    let maximum = u64::try_from(MAX_PROVIDER_JSONL_LINE_BYTES)
-        .map_err(|_| GeminiSourceBackedError::LocatorRangeTooLarge)?
-        .checked_add(2)
-        .ok_or(GeminiSourceBackedError::LocatorRangeTooLarge)?;
-    if byte_length == 0 || byte_length > maximum {
-        return Err(GeminiSourceBackedError::LocatorRangeTooLarge);
-    }
-    let range_end = byte_offset
-        .checked_add(byte_length)
-        .ok_or(GeminiSourceBackedError::LocatorRangeTooLarge)?;
-    if source_file.len() < range_end {
-        return Err(GeminiSourceBackedError::LocatorRangeMissing);
-    }
-    let byte_length =
-        usize::try_from(byte_length).map_err(|_| GeminiSourceBackedError::LocatorRangeTooLarge)?;
-    let provider_bytes = source_file.read_exact_range(
-        byte_offset,
-        byte_length,
-        MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
-    )?;
-    let actual_digest: [u8; 32] = Sha256::digest(&provider_bytes).into();
-    if &actual_digest != locator.record_digest() {
-        return Err(GeminiSourceBackedError::LocatorDigestMismatch);
-    }
-    let decoded_display_text = decode_display_text(&provider_bytes, physical_ordinal)?
-        .ok_or(GeminiSourceBackedError::ExactDisplayUnavailable)?;
-    Ok(GeminiHydratedSourceRecord {
-        provider_bytes: decoded_display_text.as_bytes().to_vec(),
-        decoded_display_text: Some(decoded_display_text),
-    })
-}
-
-fn project_event(
-    source: &SourceKey,
-    session_id: StableEntityId,
-    parent_session_id: Option<StableEntityId>,
-    root_session_id: StableEntityId,
-    source_path: &str,
-    session: &GeminiSession,
-    event: super::GeminiRetainedEvent,
-) -> GeminiSourceBackedResult<LexicalDocument> {
-    let GeminiEventIdentity::NativeRecordId(native_event_id) = &event.identity;
-    let native_item_key = NativeItemKey::native_id(
-        GEMINI_NATIVE_EVENT_NAMESPACE,
-        TypedKey::utf8(native_event_id)?,
-    )?;
-    let event_id = derive_event_id(EventIdentityInput {
-        source,
-        session_id,
-        logical_item_kind: GEMINI_LOGICAL_EVENT_KIND,
-        native_item_key: &native_item_key,
-        subrecord_selector: None,
-    })?;
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::Jsonl {
-            byte_offset: event.source_record.byte_offset,
-            byte_length: event.source_record.byte_length,
-            physical_ordinal: event.native_order.raw_ordinal,
-            native_session_key: Some(TypedKey::utf8(&session.native_session_id)?),
-            native_event_key: Some(TypedKey::utf8(native_event_id)?),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        event.source_record.record_digest,
-    )?;
-    let event_sequence = event
-        .native_order
-        .raw_ordinal
-        .checked_mul(u64::from(u32::MAX) + 1)
-        .and_then(|sequence| sequence.checked_add(u64::from(event.native_order.sub_ordinal)))
-        .ok_or_else(|| {
-            GeminiSourceBackedError::Capture(CaptureError::SystemInvariant(
-                "Gemini event sequence overflowed",
+    let source_key = gemini_source_key(&session.native_session_id)?;
+    let session_id = gemini_session_id(&source_key, &session.native_session_id)?;
+    let parent_session_id = session
+        .parent_native_session_id
+        .as_deref()
+        .map(|parent_native_session_id| {
+            let parent_source = gemini_source_key(parent_native_session_id)?;
+            gemini_session_id(&parent_source, parent_native_session_id)
+        })
+        .transpose()?;
+    let root_session_id = parent_session_id.unwrap_or(session_id);
+    let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
+    let mut tool_contexts = BTreeMap::new();
+    let mut linkage_capacity_exceeded = false;
+    let mut emitted_event_digests = BTreeSet::new();
+    events
+        .into_iter()
+        .filter_map(|event| {
+            let event_id = match gemini_event_id(&source_key, session_id, &event) {
+                Ok(event_id) => event_id,
+                Err(error) => return Some(Err(error)),
+            };
+            if !emitted_event_digests.insert(event_id.digest()) {
+                return None;
+            }
+            let annotation = gemini_attribution_for_event(
+                &mut repository_attributor,
+                &session,
+                &mut tool_contexts,
+                &mut linkage_capacity_exceeded,
+                &event,
+            );
+            Some(project_event(
+                &source_key,
+                session_id,
+                parent_session_id,
+                root_session_id,
+                &session,
+                event,
+                annotation,
             ))
-        })?;
-    let body = lexical_body(&event);
-    if body.is_empty() {
-        return Err(CaptureError::InvalidPayload(
-            "Gemini source-backed event has no lexical body".to_owned(),
-        )
-        .into());
-    }
-    Ok(LexicalDocument {
-        event_id,
-        session_id,
-        parent_session_id,
-        root_session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(session.native_session_id.clone()),
-        branch: None,
-        source_path: Some(source_path.to_owned()),
-        agent_type: session.agent_type.as_str().to_owned(),
-        is_primary: session.parent_native_session_id.is_none()
-            && session.agent_type != AgentType::Subagent,
-        event_sequence,
-        occurred_at_unix_ms: event
-            .occurred_at
-            .or(session.started_at)
-            .map(|timestamp| timestamp.timestamp_millis()),
-        event_type: event.event_type.as_str().to_owned(),
-        role: Some(event.role.as_str().to_owned()),
-        body,
-        workspace: None,
-        cwd: session
-            .cwd
-            .as_deref()
-            .map(|cwd| bounded_chars(cwd, MAX_GEMINI_LEXICAL_METADATA_CHARS)),
-        touched_files: event.safe_file_touches,
-    })
-}
-
-fn lexical_body(event: &super::GeminiRetainedEvent) -> String {
-    if !event.searchable_text.is_empty() {
-        return event.searchable_text.clone();
-    }
-    match &event.body {
-        GeminiEventBody::Message { text, .. } => text.clone(),
-        GeminiEventBody::ToolCall { .. } => "Gemini tool call".to_owned(),
-        GeminiEventBody::OutputDiagnostic {
-            call_id,
-            tool_name,
-            outcome,
-            exit_code,
-            duration_ms,
-        } => format!(
-            "Gemini {} output {}{}{}{}",
-            tool_name.as_deref().unwrap_or("tool"),
-            outcome,
-            call_id
-                .as_deref()
-                .map(|call| format!(", call {call}"))
-                .unwrap_or_default(),
-            exit_code
-                .map(|code| format!(", exit code {code}"))
-                .unwrap_or_default(),
-            duration_ms
-                .map(|duration| format!(", duration {duration} ms"))
-                .unwrap_or_default(),
-        ),
-        GeminiEventBody::StateNotice { summary } => summary
-            .as_deref()
-            .filter(|summary| !summary.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| "Gemini state update".to_owned()),
-        GeminiEventBody::RewindNotice {
-            target_native_record_id,
-        } => format!("Gemini rewind to {target_native_record_id}"),
-    }
-}
-
-fn bounded_chars(value: &str, maximum: usize) -> String {
-    value.chars().take(maximum).collect()
-}
-
-fn gemini_source_key(native_session_id: &str) -> GeminiSourceBackedResult<SourceKey> {
-    let anchor = SourceAnchor::provider_native(
-        GEMINI_SOURCE_ANCHOR_NAMESPACE,
-        TypedKey::utf8(native_session_id)?,
-    )?;
-    Ok(SourceKey::derive(
-        CaptureProvider::Gemini.as_str(),
-        GEMINI_CLI_SOURCE_FORMAT,
-        GEMINI_SOURCE_SCHEMA_VARIANT,
-        1,
-        anchor,
-    )?)
-}
-
-fn gemini_session_id(
-    source: &SourceKey,
-    native_session_id: &str,
-) -> GeminiSourceBackedResult<StableEntityId> {
-    let native_session_key = NativeSessionKey::native_id(
-        GEMINI_NATIVE_SESSION_NAMESPACE,
-        TypedKey::utf8(native_session_id)?,
-    )?;
-    Ok(derive_session_id(SessionIdentityInput {
-        source,
-        logical_session_kind: GEMINI_LOGICAL_SESSION_KIND,
-        native_session_key: &native_session_key,
-    })?)
-}
-
-fn validate_locator(
-    locator: &SourceRecordLocator,
-    expected_source: &SourceKey,
-) -> GeminiSourceBackedResult<(u64, u64, u64)> {
-    if !expected_source.exact_descriptor_eq(locator.source())
-        || locator.source().provider() != CaptureProvider::Gemini.as_str()
-        || locator.source().source_format() != GEMINI_CLI_SOURCE_FORMAT
-        || locator.source().schema_variant() != GEMINI_SOURCE_SCHEMA_VARIANT
-        || locator.source().provider_identity_version() != 1
-        || locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
-        || locator.certified_source_revision_digest().is_some()
-    {
-        return Err(GeminiSourceBackedError::InvalidLocator);
-    }
-    let NativeRecordCoordinate::Jsonl {
-        byte_offset,
-        byte_length,
-        physical_ordinal,
-        native_session_key,
-        native_event_key,
-    } = locator.coordinate()
-    else {
-        return Err(GeminiSourceBackedError::InvalidLocator);
-    };
-    let SourceAnchor::ProviderNative { namespace, key } = expected_source.anchor() else {
-        return Err(GeminiSourceBackedError::InvalidLocator);
-    };
-    if namespace != GEMINI_SOURCE_ANCHOR_NAMESPACE
-        || native_session_key.as_ref() != Some(key)
-        || !matches!(native_event_key, Some(TypedKey::Utf8(value)) if !value.is_empty())
-    {
-        return Err(GeminiSourceBackedError::InvalidLocator);
-    }
-    Ok((*byte_offset, *byte_length, *physical_ordinal))
-}
-
-fn decode_display_text(
-    provider_bytes: &[u8],
-    _physical_ordinal: u64,
-) -> GeminiSourceBackedResult<Option<String>> {
-    let record = provider_bytes.strip_suffix(b"\n").unwrap_or(provider_bytes);
-    let record = record.strip_suffix(b"\r").unwrap_or(record);
-    let value: Value = serde_json::from_slice(record)?;
-    if matches!(
-        value.get("type").and_then(Value::as_str),
-        Some("user" | "gemini")
-    ) {
-        return Ok(value
-            .get("content")
-            .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
-            .map(str::to_owned));
-    }
-    if let Some(calls) = value.get("toolCalls").and_then(Value::as_array) {
-        if calls
-            .iter()
-            .any(|call| call.get("result").is_some_and(|result| !result.is_null()))
-        {
-            return Ok(None);
-        }
-        let mut text = String::new();
-        for call in calls {
-            if let Some(name) = call
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|name| !name.trim().is_empty())
-            {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(name);
-            }
-            if let Some(args) = call.get("args") {
-                if let Ok(args) = serde_json::to_string(args) {
-                    if !text.is_empty() {
-                        text.push('\n');
-                    }
-                    text.push_str(&args);
-                }
-            }
-        }
-        return Ok((!text.is_empty()).then_some(text));
-    }
-    if let Some(summary) = value
-        .pointer("/$set/summary")
-        .and_then(Value::as_str)
-        .filter(|summary| !summary.is_empty())
-    {
-        return Ok(Some(summary.to_owned()));
-    }
-    Ok(value
-        .get("$rewindTo")
-        .and_then(Value::as_str)
-        .map(|target| format!("rewind to {}", target.trim()))
-        .filter(|text| text != "rewind to "))
+        })
+        .collect()
 }
 
 fn capture_scan_error(error: GeminiScanError) -> CaptureError {
@@ -672,42 +963,4 @@ fn capture_error(error: impl std::fmt::Display) -> CaptureError {
 
 fn contract_error(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
-}
-
-fn map_hydration_error(error: GeminiSourceBackedError) -> HydrationFailure {
-    let kind = match error {
-        GeminiSourceBackedError::InvalidLocator
-        | GeminiSourceBackedError::Projection(_)
-        | GeminiSourceBackedError::Resolver(_) => HydrationFailureKind::InvalidLocator,
-        GeminiSourceBackedError::ExactDisplayUnavailable => {
-            HydrationFailureKind::UnsupportedParserRevision
-        }
-        GeminiSourceBackedError::Capture(_)
-        | GeminiSourceBackedError::Scan(_)
-        | GeminiSourceBackedError::Io(_)
-        | GeminiSourceBackedError::Json(_)
-        | GeminiSourceBackedError::LocatorRangeTooLarge
-        | GeminiSourceBackedError::LocatorRangeMissing
-        | GeminiSourceBackedError::LocatorDigestMismatch => {
-            HydrationFailureKind::StaleRecordEvidence
-        }
-    };
-    HydrationFailure {
-        kind,
-        detail: error.to_string(),
-    }
-}
-
-fn unavailable(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::TemporarilyUnavailable,
-        detail: error.to_string(),
-    }
-}
-
-fn stale(detail: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::StaleRecordEvidence,
-        detail: detail.to_string(),
-    }
 }

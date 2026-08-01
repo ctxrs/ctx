@@ -43,13 +43,13 @@ fn terminal_authority_defers_a_verified_append_and_retry_advances_the_prefix() {
             .iter()
             .map(|row| row.raw_ordinal)
             .collect::<Vec<_>>(),
-        vec![1, 3]
+        vec![1, 2, 3]
     );
     assert_eq!(retry_scan.next_raw_ordinal, 4);
 }
 
 #[test]
-fn c0_shapes_retain_conversation_summaries_and_calls_but_no_results() {
+fn c0_shapes_retain_conversation_summaries_calls_and_results() {
     let mut baseline = session_meta("c0-baseline");
     for index in 0_usize..11 {
         baseline.push_str(&message(
@@ -68,8 +68,8 @@ fn c0_shapes_retain_conversation_summaries_and_calls_but_no_results() {
     }
     let (_temp, path) = write_source(&baseline);
     let (scan, sink) = scan_collect(discover_one(&path, "c0-baseline"), None);
-    assert_eq!(sink.rows.len(), 17);
-    assert_eq!(scan.counters.retained_records, 17);
+    assert_eq!(sink.rows.len(), 20);
+    assert_eq!(scan.counters.retained_records, 20);
     assert_eq!(scan.counters.native_result_records, 3);
     assert_eq!(
         sink.rows
@@ -82,6 +82,13 @@ fn c0_shapes_retain_conversation_summaries_and_calls_but_no_results() {
         sink.rows
             .iter()
             .filter(|row| row.event_type == EventType::Summary)
+            .count(),
+        3
+    );
+    assert_eq!(
+        sink.rows
+            .iter()
+            .filter(|row| row.event_type == EventType::CommandOutput)
             .count(),
         3
     );
@@ -113,12 +120,12 @@ fn c0_shapes_retain_conversation_summaries_and_calls_but_no_results() {
     }
     fs::write(&path, output_heavy).unwrap();
     let (scan, sink) = scan_collect(discover_one(&path, "c0-output-heavy"), None);
-    assert_eq!(sink.rows.len(), 12);
+    assert_eq!(sink.rows.len(), 20);
     assert_eq!(scan.counters.native_result_records, 8);
 }
 
 #[test]
-fn compacted_payloads_and_future_result_aliases_are_fail_closed() {
+fn compacted_payloads_and_future_result_aliases_retain_known_result_content() {
     let contents = [
         session_meta("shape-owner"),
         jsonl(json!({
@@ -131,7 +138,7 @@ fn compacted_payloads_and_future_result_aliases_are_fail_closed() {
             "type": "response_item",
             "payload": {
                 "type": "tool_result",
-                "result": "must not survive"
+                "result": "future result survives"
             }
         })),
         jsonl(json!({
@@ -147,9 +154,12 @@ fn compacted_payloads_and_future_result_aliases_are_fail_closed() {
     let (_temp, path) = write_source(&contents);
     let (scan, sink) = scan_collect(discover_one(&path, "shape-owner"), None);
 
-    assert_eq!(sink.rows.len(), 1);
+    assert_eq!(sink.rows.len(), 2);
     assert_eq!(sink.rows[0].event_type, EventType::Summary);
     assert_eq!(sink.rows[0].raw_ordinal, 1);
+    assert_eq!(sink.rows[1].event_type, EventType::ToolOutput);
+    assert_eq!(sink.rows[1].raw_ordinal, 2);
+    assert_eq!(sink.rows[1].lexical_body, "future result survives");
     assert_eq!(scan.counters.native_result_records, 2);
     assert_eq!(scan.counters.retained_json_parses, 1);
 }

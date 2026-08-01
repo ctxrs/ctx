@@ -15,5 +15,4 @@ pub(crate) use source_backed::{
     scan_codex_prompt_history_source_backed_v0,
     stage_planned_codex_prompt_history_source_backed_v0,
     CodexPromptHistorySourceBackedDispositionV0, CodexPromptHistorySourceBackedInputV0,
-    CodexPromptHistorySourceBackedResolverV0,
 };

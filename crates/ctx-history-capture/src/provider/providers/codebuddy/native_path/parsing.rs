@@ -1,17 +1,5 @@
 use super::*;
 
-pub(super) fn scan_time(value: Option<&str>, field: &str) -> Result<Option<DateTime<Utc>>> {
-    value
-        .map(|value| {
-            value.parse::<DateTime<Utc>>().map_err(|_| {
-                CaptureError::InvalidPayload(format!(
-                    "CodeBuddy NativePath state has an invalid {field}"
-                ))
-            })
-        })
-        .transpose()
-}
-
 pub(super) fn initial_state(
     source: &CodeBuddySource,
     _context: &ProviderAdapterContext,
@@ -41,23 +29,6 @@ pub(super) fn initial_state(
                 native_session_id: metadata.native_session_id.clone(),
                 project_hash: metadata.project_hash.clone(),
                 cwd: None,
-                started_at: metadata
-                    .conversation
-                    .as_ref()
-                    .and_then(|value| {
-                        task_json_time_field(value, &["createdAt", "created_at", "timestamp"])
-                    })
-                    .map(|value| value.to_rfc3339()),
-                ended_at: metadata
-                    .conversation
-                    .as_ref()
-                    .and_then(|value| {
-                        task_json_time_field(
-                            value,
-                            &["lastMessageAt", "updatedAt", "completedAt", "last_modified"],
-                        )
-                    })
-                    .map(|value| value.to_rfc3339()),
                 generated_title: None,
                 row_count: 0,
             }
@@ -189,9 +160,6 @@ pub(super) fn next_cli_page(
             )?;
             records.push(CodeBuddyRecord {
                 native_ordinal: ordinal,
-                physical_line,
-                byte_start: Some(start),
-                byte_end_exclusive: Some(offset),
                 native_bytes: Vec::new(),
                 classification: CodeBuddyRecordClassification::RejectedRecord,
             });
@@ -207,9 +175,6 @@ pub(super) fn next_cli_page(
                     ))?;
             records.push(CodeBuddyRecord {
                 native_ordinal: ordinal,
-                physical_line,
-                byte_start: Some(start),
-                byte_end_exclusive: Some(offset),
                 native_bytes: record_bytes,
                 classification: CodeBuddyRecordClassification::SkippedMetadata,
             });
@@ -239,9 +204,6 @@ pub(super) fn next_cli_page(
                 )?;
                 records.push(CodeBuddyRecord {
                     native_ordinal: ordinal,
-                    physical_line,
-                    byte_start: Some(start),
-                    byte_end_exclusive: Some(offset),
                     native_bytes: record_bytes,
                     classification: CodeBuddyRecordClassification::RejectedRecord,
                 });
@@ -256,12 +218,11 @@ pub(super) fn next_cli_page(
                 .ok_or(CaptureError::SystemInvariant(
                     "CodeBuddy CLI row count overflowed",
                 ))?;
-        update_cli_session(&mut next.session, &value, context.imported_at);
+        update_cli_session(&mut next.session, &value);
         let classification = cli_core_row(
             context,
             &mut next.session,
             &mut session_title,
-            ordinal,
             physical_line,
             value,
         )?;
@@ -286,9 +247,6 @@ pub(super) fn next_cli_page(
         }
         records.push(CodeBuddyRecord {
             native_ordinal: ordinal,
-            physical_line,
-            byte_start: Some(start),
-            byte_end_exclusive: Some(offset),
             native_bytes: record_bytes,
             classification,
         });
@@ -470,9 +428,6 @@ pub(super) fn next_extension_page(
             )?;
             records.push(CodeBuddyRecord {
                 native_ordinal: ordinal,
-                physical_line,
-                byte_start: None,
-                byte_end_exclusive: None,
                 native_bytes: Vec::new(),
                 classification: CodeBuddyRecordClassification::RejectedRecord,
             });
@@ -500,9 +455,6 @@ pub(super) fn next_extension_page(
                 )?;
                 records.push(CodeBuddyRecord {
                     native_ordinal: ordinal,
-                    physical_line,
-                    byte_start: None,
-                    byte_end_exclusive: None,
                     native_bytes: record_bytes,
                     classification: CodeBuddyRecordClassification::RejectedRecord,
                 });
@@ -515,7 +467,6 @@ pub(super) fn next_extension_page(
             metadata,
             &mut next.session,
             &mut session_title,
-            ordinal,
             message_ref,
             Some(frozen.modified()),
             raw_message,
@@ -541,9 +492,6 @@ pub(super) fn next_extension_page(
         }
         records.push(CodeBuddyRecord {
             native_ordinal: ordinal,
-            physical_line,
-            byte_start: None,
-            byte_end_exclusive: None,
             native_bytes: record_bytes,
             classification,
         });

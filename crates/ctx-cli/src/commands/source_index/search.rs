@@ -1,13 +1,16 @@
+mod hydration;
 mod query;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Result};
-use ctx_history_index::{EventRecord, EventSearchCandidate, EventSearchFilters, VerifiedIndex};
+use ctx_history_index::{
+    EventRecord, EventSearchCandidate, EventSearchFilters, VerifiedIndex, MAX_LEXICAL_QUERY_RESULTS,
+};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -38,6 +41,14 @@ use super::{
     shared::index_root,
 };
 
+use hydration::core_records_for_search_hits;
+#[cfg(test)]
+pub(super) use hydration::{
+    core_records_for_search_hits_with_budget, SearchCoreHydrationBudget,
+    SearchCoreHydrationBudgetExceeded, SearchCoreHydrationBudgetStage,
+    SEARCH_CORE_BODY_PREFIX_CHARS, SEARCH_CORE_HYDRATION_BUDGET,
+    SEARCH_CORE_MAX_RETAINED_BODY_BYTES,
+};
 pub(crate) use query::SourceSearchRequest;
 pub(super) use query::{index_search_filters, NormalizedSearchQuery};
 use query::{normalize_search_request, resolve_source_search_backend, validate_search_request};
@@ -48,7 +59,7 @@ const CANDIDATE_OVERSAMPLE: usize = 8;
 const SOURCE_FUSION_CANDIDATES: usize = 1_600;
 const MAX_USAGE_CONTEXT_EVENTS_PER_SESSION: usize = 256;
 pub(super) const MISSING_INDEX_ERROR: &str =
-    "the source-backed index does not exist; retry with daemon refresh enabled";
+    "the Core index does not exist; retry with daemon refresh enabled";
 const QUEUED_WITHOUT_GENERATION_ERROR: &str =
     "daemon source refresh was queued but no published generation exists; retry with --refresh wait";
 
@@ -135,8 +146,8 @@ fn run_search_inner(
     telemetry.refresh_mode = Some(request.refresh);
 
     let query_started = Instant::now();
-    let (value, collection, index, refresh_status, refresh_source_count, retry_refresh_duration) =
-        search_with_hydration_retry(&request, &data_root, semantic_weight, refresh)?;
+    let (value, collection, index, refresh_status, refresh_source_count) =
+        search_pinned_generation(&request, &data_root, semantic_weight, refresh)?;
     if !json_output {
         if let Some(fallback) = collection.semantic_fallback.as_ref() {
             let warning = render_semantic_fallback_warning(ui.stderr_context(), fallback);
@@ -144,9 +155,7 @@ fn run_search_inner(
         }
     }
     let query_duration = query_started.elapsed();
-    telemetry.refresh_duration = Some(duration_bucket(
-        initial_refresh_duration.saturating_add(retry_refresh_duration),
-    ));
+    telemetry.refresh_duration = Some(duration_bucket(initial_refresh_duration));
     telemetry.refresh_status = Some(RefreshStatus::from_safe_summary(refresh_status));
     telemetry.refresh_source_count = Some(count_bucket(refresh_source_count as u64));
     telemetry.query_duration = Some(duration_bucket(query_duration));
@@ -171,7 +180,7 @@ fn run_search_inner(
         .unwrap_or(&[]);
     let result_count = results.len();
     let search_context = if config.local_usage.enabled {
-        search_context_observation(&value, &collection, &index, &data_root)
+        search_context_observation(&value, &collection, &index)
     } else {
         SearchContextObservation::unavailable()
     };
@@ -219,8 +228,13 @@ fn search_index_is_not_ready(data_root: &Path, error: &anyhow::Error) -> bool {
             MISSING_INDEX_ERROR | QUEUED_WITHOUT_GENERATION_ERROR
         )
     });
+    let root = index_root(data_root);
+    let active_generation_missing = VerifiedIndex::active_generation_id(&root)
+        .ok()
+        .flatten()
+        .is_none();
     missing_generation
-        || (!index_root(data_root).join("meta.json").is_file()
+        || (active_generation_missing
             && error
                 .downcast_ref::<SourceBackedRefreshDaemonUnavailable>()
                 .is_some())
@@ -262,43 +276,21 @@ pub(crate) fn mcp_search(
     request.semantic_enabled = config.semantic_search_enabled();
     let semantic_weight = request.semantic_weight;
     let refresh = refresh_for_search(&request, data_root)?;
-    let (value, collection, index, _, _, _) =
-        search_with_hydration_retry(&request, data_root, semantic_weight, refresh)?;
+    let (value, collection, index, _, _) =
+        search_pinned_generation(&request, data_root, semantic_weight, refresh)?;
     let observation = if config.local_usage.enabled {
-        search_context_observation(&value, &collection, &index, data_root)
+        search_context_observation(&value, &collection, &index)
     } else {
         SearchContextObservation::unavailable()
     };
     Ok((value, observation))
 }
 
-fn search_context_observation(
+pub(super) fn search_context_observation(
     value: &Value,
     collection: &SearchCollection,
     index: &VerifiedIndex,
-    data_root: &Path,
 ) -> SearchContextObservation {
-    search_context_observation_with_hydrator(
-        value,
-        collection,
-        index,
-        data_root,
-        |index, data_root, events| {
-            PinnedSourceBackedGeneration::hydrate_source_complete_events(index, data_root, events)
-        },
-    )
-}
-
-pub(super) fn search_context_observation_with_hydrator<Hydrate>(
-    value: &Value,
-    collection: &SearchCollection,
-    index: &VerifiedIndex,
-    data_root: &Path,
-    hydrate: Hydrate,
-) -> SearchContextObservation
-where
-    Hydrate: FnOnce(&VerifiedIndex, &Path, &[&EventRecord]) -> Result<HashMap<Uuid, String>>,
-{
     if collection.result_window.hits.is_empty() {
         return SearchContextObservation::unavailable();
     }
@@ -320,29 +312,19 @@ where
         .iter()
         .map(|hit| hit.event.session_id.as_uuid())
         .collect::<BTreeSet<_>>();
-    let mut session_events = Vec::new();
+    let mut matched_normalized_session_bytes = 0_usize;
     for session_id in session_ids {
-        let Ok(Some(events)) =
-            index.events_for_session_if_bounded(session_id, MAX_USAGE_CONTEXT_EVENTS_PER_SESSION)
-        else {
+        let Ok(Some(session_bytes)) = index.core_content_bytes_for_session_if_bounded(
+            session_id,
+            MAX_USAGE_CONTEXT_EVENTS_PER_SESSION,
+        ) else {
             return SearchContextObservation::unavailable();
         };
-        if events.is_empty() {
+        let Some(total) = matched_normalized_session_bytes.checked_add(session_bytes) else {
             return SearchContextObservation::unavailable();
-        }
-        session_events.extend(events);
+        };
+        matched_normalized_session_bytes = total;
     }
-    let event_refs = session_events.iter().collect::<Vec<_>>();
-    let Ok(contents) = hydrate(index, data_root, &event_refs) else {
-        return SearchContextObservation::unavailable();
-    };
-    let Some(matched_normalized_session_bytes) =
-        session_events.iter().try_fold(0_usize, |total, event| {
-            total.checked_add(contents.get(&event.event_id.as_uuid())?.len())
-        })
-    else {
-        return SearchContextObservation::unavailable();
-    };
     SearchContextObservation::complete(delivered_context_bytes, matched_normalized_session_bytes)
         .unwrap_or_else(SearchContextObservation::unavailable)
 }
@@ -393,107 +375,26 @@ pub(super) fn source_backed_refresh_mode(refresh: RefreshArg) -> SourceBackedRef
     }
 }
 
-fn search_with_hydration_retry(
+fn search_pinned_generation(
     request: &SourceSearchRequest,
     data_root: &Path,
     semantic_weight: f32,
     refresh: RefreshOutcome,
-) -> Result<(
-    Value,
-    SearchCollection,
-    VerifiedIndex,
-    &'static str,
-    usize,
-    Duration,
-)> {
-    search_with_hydration_retry_with(
-        request,
-        data_root,
-        semantic_weight,
-        refresh,
-        search_existing_generation,
-        |request, data_root| {
-            let mut wait_request = request.clone();
-            wait_request.refresh = RefreshArg::Wait;
-            refresh_for_search(&wait_request, data_root)
-        },
-    )
-}
-
-#[allow(clippy::type_complexity)]
-pub(super) fn search_with_hydration_retry_with<Run, Refresh>(
-    request: &SourceSearchRequest,
-    data_root: &Path,
-    semantic_weight: f32,
-    refresh: RefreshOutcome,
-    mut run: Run,
-    mut wait_refresh: Refresh,
-) -> Result<(
-    Value,
-    SearchCollection,
-    VerifiedIndex,
-    &'static str,
-    usize,
-    Duration,
-)>
-where
-    Run: FnMut(
-        &SourceSearchRequest,
-        VerifiedIndex,
-        &Path,
-        f32,
-        &'static str,
-        usize,
-    ) -> Result<(Value, SearchCollection, VerifiedIndex)>,
-    Refresh: FnMut(&SourceSearchRequest, &Path) -> Result<RefreshOutcome>,
-{
+) -> Result<(Value, SearchCollection, VerifiedIndex, &'static str, usize)> {
     let RefreshOutcome {
         pin,
         status,
         source_count,
     } = refresh;
-    match run(
+    let (value, collection, index) = search_existing_generation(
         request,
         pin.into_index(),
         data_root,
         semantic_weight,
         status,
         source_count,
-    ) {
-        Ok((value, collection, index)) => Ok((
-            value,
-            collection,
-            index,
-            status,
-            source_count,
-            Duration::ZERO,
-        )),
-        Err(error)
-            if request.refresh != RefreshArg::Off
-                && PinnedSourceBackedGeneration::source_hydration_retryable(&error) =>
-        {
-            let retry_started = Instant::now();
-            let retry = wait_refresh(request, data_root)?;
-            let retry_duration = retry_started.elapsed();
-            let (value, collection, index) = run(
-                request,
-                retry.pin.into_index(),
-                data_root,
-                semantic_weight,
-                retry.status,
-                retry.source_count,
-            )?;
-            Ok((
-                value,
-                collection,
-                index,
-                retry.status,
-                retry.source_count,
-                retry_duration,
-            ))
-        }
-        Err(error) => Err(error),
-    }
+    )?;
+    Ok((value, collection, index, status, source_count))
 }
 
 pub(super) fn search_existing_generation(
@@ -504,52 +405,20 @@ pub(super) fn search_existing_generation(
     refresh_status: &str,
     refresh_source_count: usize,
 ) -> Result<(Value, SearchCollection, VerifiedIndex)> {
-    search_existing_generation_with_hydrator(
-        request,
-        index,
-        data_root,
-        semantic_weight,
-        refresh_status,
-        refresh_source_count,
-        |index, data_root, events| {
-            PinnedSourceBackedGeneration::hydrate_source_search_page(index, data_root, events)
-        },
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn search_existing_generation_with_hydrator<Hydrate>(
-    request: &SourceSearchRequest,
-    index: VerifiedIndex,
-    data_root: &Path,
-    semantic_weight: f32,
-    refresh_status: &str,
-    refresh_source_count: usize,
-    hydrate: Hydrate,
-) -> Result<(Value, SearchCollection, VerifiedIndex)>
-where
-    Hydrate: FnOnce(&VerifiedIndex, &Path, &[&EventRecord]) -> Result<HashMap<Uuid, String>>,
-{
     validate_search_request(request)?;
     let filters = index_search_filters(request, &index)?;
     let query_started = Instant::now();
     let collection =
         collect_search_hits_with_backend(request, &index, data_root, semantic_weight, &filters)?;
     let query_duration = query_started.elapsed();
-    let events = collection
-        .result_window
-        .hits
-        .iter()
-        .map(|hit| &hit.event)
-        .collect::<Vec<_>>();
-    let snippets = hydrate(&index, data_root, &events)?;
+    let core_records = core_records_for_search_hits(&index, &collection.result_window.hits)?;
     let value = search_json(
         request,
         data_root,
         &index,
         &collection,
         &filters,
-        &snippets,
+        &core_records,
         refresh_status,
         refresh_source_count,
         query_duration,
@@ -772,7 +641,9 @@ fn collect_search_hits(
     filters: &EventSearchFilters,
 ) -> Result<SearchCollection> {
     let document_count = usize::try_from(index.document_count()).unwrap_or(usize::MAX);
-    let maximum = document_count.min(MAX_SESSION_DIVERSITY_CANDIDATES);
+    let maximum = document_count
+        .min(MAX_SESSION_DIVERSITY_CANDIDATES)
+        .min(MAX_LEXICAL_QUERY_RESULTS);
     let mut candidate_limit = limit
         .saturating_mul(CANDIDATE_OVERSAMPLE)
         .max(MIN_CANDIDATE_BATCH)

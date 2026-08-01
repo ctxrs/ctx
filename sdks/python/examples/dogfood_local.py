@@ -18,8 +18,6 @@ from pathlib import Path
 from typing import Iterator, Optional, Union
 
 from ctx_agent_history import (
-    LocateEventResponse,
-    LocateSessionResponse,
     AgentHistoryClient,
     ImportResponse,
     InitResponse,
@@ -43,8 +41,6 @@ class DogfoodSnapshot:
     search: SearchResponse
     event: ShowEventResponse
     session: ShowSessionResponse
-    event_location: LocateEventResponse
-    session_location: LocateSessionResponse
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -55,8 +51,6 @@ class DogfoodSnapshot:
             "search": self.search,
             "event": self.event,
             "session": self.session,
-            "event_location": self.event_location,
-            "session_location": self.session_location,
         }
 
 
@@ -69,8 +63,6 @@ def run_demo(client: AgentHistoryClient) -> DogfoodSnapshot:
         search=client.search("local agent history", provider="codex", limit=5, refresh="off"),
         event=client.show_event(EVENT_ID, window=1),
         session=client.show_session(SESSION_ID, mode="lite"),
-        event_location=client.locate_event(EVENT_ID),
-        session_location=client.locate_session(SESSION_ID),
     )
 
 
@@ -185,12 +177,13 @@ def _fake_ctx_script() -> str:
                     "event": {{
                         "ctx_event_id": args[2],
                         "ctx_session_id": SESSION_ID,
+                        "provider": "codex",
+                        "provider_session_id": "codex-fixture-session",
                         "event_type": "message",
                         "role": "assistant",
                         "text": "local agent history search result",
                     }},
                     "events": [],
-                    "source": {{"path": "/tmp/ctx-agent-history-dogfood/session.jsonl", "exists": True}},
                 }}
             )
         elif args[:2] == ["show", "session"]:
@@ -200,26 +193,8 @@ def _fake_ctx_script() -> str:
                     "provider_session_id": "codex-fixture-session",
                     "session": {{"provider": "codex", "title": "Fixture session"}},
                     "events": [],
-                    "source": {{"path": "/tmp/ctx-agent-history-dogfood/session.jsonl", "exists": True}},
                     "mode": "lite",
                     "format": "json",
-                }}
-            )
-        elif args[:2] == ["locate", "event"]:
-            payload.update(
-                {{
-                    "ctx_session_id": SESSION_ID,
-                    "ctx_event_id": args[2],
-                    "provider": "codex",
-                    "source": {{"path": "/tmp/ctx-agent-history-dogfood/session.jsonl", "exists": True}},
-                }}
-            )
-        elif args[:2] == ["locate", "session"]:
-            payload.update(
-                {{
-                    "ctx_session_id": args[2],
-                    "provider": "codex",
-                    "source": {{"path": "/tmp/ctx-agent-history-dogfood/session.jsonl", "exists": True}},
                 }}
             )
         else:

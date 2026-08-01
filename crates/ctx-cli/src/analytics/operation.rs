@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::cli::{CommandRoot, LocateTarget, ShowTarget};
+use crate::cli::{CommandRoot, ShowTarget};
 
 use super::*;
 
@@ -12,7 +12,6 @@ pub(crate) enum ClientOperationV1 {
     Sources(SourcesTelemetry),
     Import(ImportTelemetry),
     Show(ShowTelemetry),
-    Locate(LocateTelemetry),
     Search(SearchTelemetry),
     Sql(SqlTelemetry),
     Docs(DocsTelemetry),
@@ -30,7 +29,6 @@ impl ClientOperationV1 {
             Self::Sources(_) => "sources",
             Self::Import(_) => "import",
             Self::Show(_) => "show",
-            Self::Locate(_) => "locate",
             Self::Search(_) => "search",
             Self::Sql(_) => "sql",
             Self::Docs(_) => "docs",
@@ -192,18 +190,6 @@ impl ClientOperationDraft {
                     events_returned: None,
                 }),
             },
-            CommandRoot::Locate(args) => match &args.target {
-                LocateTarget::Session(args) => ClientOperationV1::Locate(LocateTelemetry {
-                    target_kind: TargetKind::Session,
-                    output_format: RenderFormat::from_json_output_format(args.format),
-                    provider_lookup: args.provider.is_some() || args.provider_session.is_some(),
-                }),
-                LocateTarget::Event(args) => ClientOperationV1::Locate(LocateTelemetry {
-                    target_kind: TargetKind::Event,
-                    output_format: RenderFormat::from_json_output_format(args.format),
-                    provider_lookup: false,
-                }),
-            },
             CommandRoot::Search(args) => ClientOperationV1::Search(SearchTelemetry {
                 has_query: args.query.is_some(),
                 has_provider_filter: args.provider.is_some(),
@@ -344,13 +330,6 @@ impl ClientOperationDraft {
         match &mut self.operation {
             ClientOperationV1::Show(value) => value,
             _ => unreachable!("show telemetry requested for a different operation"),
-        }
-    }
-
-    pub(crate) fn locate_mut(&mut self) -> &mut LocateTelemetry {
-        match &mut self.operation {
-            ClientOperationV1::Locate(value) => value,
-            _ => unreachable!("locate telemetry requested for a different operation"),
         }
     }
 

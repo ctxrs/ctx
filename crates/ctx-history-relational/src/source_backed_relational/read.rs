@@ -55,10 +55,12 @@ impl SourceBackedRelationalProjection {
     pub fn metadata(&self) -> Result<RelationalProjectionMetadata> {
         let row = self.conn.query_row(
             "SELECT build_generation, active_generation_id, active_manifest_version,
+                    active_core_record_version, active_core_record_contract_fingerprint,
                     active_lexical_schema_version, active_policy_schema_hash,
-                    target_generation_id, status, source_count, session_count,
-                    event_count, file_touch_count, last_error
-             FROM source_backed_relational_state WHERE singleton = 1",
+                    active_materializer_revision, target_generation_id, status,
+                    source_count, session_count, event_count, repository_binding_count,
+                    file_observation_count, vcs_observation_count, last_error
+             FROM core_relational_state WHERE singleton = 1",
             [],
             |row| {
                 Ok((
@@ -67,17 +69,22 @@ impl SourceBackedRelationalProjection {
                     row.get::<_, Option<i64>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
                     row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, i64>(9)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
                     row.get::<_, i64>(10)?,
-                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, i64>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, i64>(15)?,
+                    row.get::<_, Option<String>>(16)?,
                 ))
             },
         )?;
-        let status = match row.6.as_str() {
+        let status = match row.9.as_str() {
             "empty" => RelationalProjectionStatus::Empty,
             "ready" => RelationalProjectionStatus::Ready,
             "behind" => RelationalProjectionStatus::Behind,
@@ -94,19 +101,60 @@ impl SourceBackedRelationalProjection {
                 .2
                 .map(|value| sqlite_u32(value, "active_manifest_version"))
                 .transpose()?,
-            active_lexical_schema_version: row
+            active_core_record_version: row
                 .3
+                .map(|value| sqlite_u32(value, "active_core_record_version"))
+                .transpose()?,
+            active_core_record_contract_fingerprint: row.4,
+            active_lexical_schema_version: row
+                .5
                 .map(|value| sqlite_u32(value, "active_lexical_schema_version"))
                 .transpose()?,
-            active_policy_schema_hash: row.4,
-            target_core_generation_id: row.5,
+            active_policy_schema_hash: row.6,
+            active_materializer_revision: row
+                .7
+                .map(|value| sqlite_u32(value, "active_materializer_revision"))
+                .transpose()?,
+            target_core_generation_id: row.8,
             status,
-            source_count: sqlite_u64(row.7, "source_count")?,
-            session_count: sqlite_u64(row.8, "session_count")?,
-            event_count: sqlite_u64(row.9, "event_count")?,
-            file_touch_count: sqlite_u64(row.10, "file_touch_count")?,
-            last_error: row.11,
+            source_count: sqlite_u64(row.10, "source_count")?,
+            session_count: sqlite_u64(row.11, "session_count")?,
+            event_count: sqlite_u64(row.12, "event_count")?,
+            repository_binding_count: sqlite_u64(row.13, "repository_binding_count")?,
+            file_touch_count: sqlite_u64(row.14, "file_observation_count")?,
+            vcs_observation_count: sqlite_u64(row.15, "vcs_observation_count")?,
+            last_error: row.16,
         })
+    }
+
+    /// Checkpoints a fully built candidate so its main file can be published.
+    pub fn seal_for_replacement(&mut self) -> Result<()> {
+        if self.read_only {
+            return Err(RelationalProjectionError::IncompatibleState(
+                "a read-only projection cannot be sealed".to_owned(),
+            ));
+        }
+        let (busy, log_frames, checkpointed_frames) =
+            self.conn
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+        if busy != 0 {
+            return Err(RelationalProjectionError::WalCheckpointBusy {
+                busy,
+                log_frames,
+                checkpointed_frames,
+            });
+        }
+        let journal_mode: String =
+            self.conn
+                .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))?;
+        if !journal_mode.eq_ignore_ascii_case("delete") {
+            return Err(RelationalProjectionError::UnexpectedJournalMode {
+                actual: journal_mode,
+            });
+        }
+        Ok(())
     }
 
     pub fn raw_sql_query(&self, sql: &str, options: RawSqlOptions) -> Result<RawSqlResult> {

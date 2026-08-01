@@ -13,14 +13,13 @@ use crate::{
     compact_json,
     progress::ProgressReporter,
     provider_sources::{discovered_sources_for_provider_report, manual_path_guidance},
-    semantic::{
-        autostart_daemon_and_wait, converge_source_backed_relational_generation,
-        coordinate_source_backed_refresh, SourceBackedRefreshMode,
-    },
-    DaemonTriggerCommandArg, ImportArgs,
+    ImportArgs,
 };
 
-use super::{ImportReport, ImportRunOptions, ImportTotals, ProviderRefreshCollector};
+use super::{
+    core_refresh::{wait_for_import_core_refresh, ImportCoreRefreshRequest},
+    ImportReport, ImportRunOptions, ImportTotals, ProviderRefreshCollector,
+};
 
 pub(super) struct AutomaticSourceRefreshImportContext<'a> {
     pub(super) args: &'a ImportArgs,
@@ -59,22 +58,16 @@ pub(super) fn run_automatic_source_refresh_import(
         .context("validate explicit provider roots before initializing ctx state")?;
     establish_private_data_root(&context.data_root)
         .context("protect ctx data root before provider refresh")?;
-    if !context.args.no_daemon {
-        autostart_daemon_and_wait(
-            &context.data_root,
-            context.config,
-            DaemonTriggerCommandArg::Import,
-        )?;
-    }
-    let refresh =
-        coordinate_source_backed_refresh(&context.data_root, SourceBackedRefreshMode::Wait)
-            .context("publish provider sources through daemon-owned source refresh")?;
+    let refresh = wait_for_import_core_refresh(
+        &context.data_root,
+        context.config,
+        context.args.no_daemon,
+        ImportCoreRefreshRequest::Automatic,
+    )?;
     let receipt = refresh
         .receipt
         .clone()
         .context("daemon source refresh published without an authoritative terminal receipt")?;
-    converge_source_backed_relational_generation(&context.data_root, &receipt.published_generation)
-        .context("converge required relational projection after provider source publication")?;
     let request_id = refresh.request_id.clone();
     let index = refresh.pin.into_index();
     let manifest = index.manifest();
@@ -96,14 +89,13 @@ pub(super) fn run_automatic_source_refresh_import(
         },
         ..ImportTotals::default()
     };
-    context.provider_refreshes.record_source_backed_publication(
-        ProviderRefreshTrigger::Import,
-        receipt.generation_changed,
-    );
+    context
+        .provider_refreshes
+        .record_core_publication(ProviderRefreshTrigger::Import, receipt.generation_changed);
 
     let completion = if context.options.progress == crate::progress::ProgressArg::Json {
         format!(
-            "Published source-backed generation {}.",
+            "Published Core generation {}.",
             receipt.published_generation
         )
     } else {

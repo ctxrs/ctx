@@ -203,18 +203,13 @@ pub(crate) fn assert_search_provider_oracle_with_scope(
 
     for result in results {
         assert_eq!(result["provider"], provider, "provider filter failed");
-        if let Some(source_exists) = result.get("source_exists") {
-            assert!(
-                source_exists.is_boolean(),
-                "legacy source_exists must be boolean in {result:#}"
-            );
-        }
+        assert!(result.get("source_exists").is_none(), "{result:#}");
         assert_eq!(result["result_type"], expected_result_type);
         assert_eq!(result["result_scope"], expected_scope);
         assert!(result["ctx_event_id"].is_string());
         assert!(result["ctx_session_id"].is_string());
         assert!(result["provider_session_id"].is_string());
-        assert!(result["source_path"].is_string());
+        assert!(result.get("source_path").is_none(), "{result:#}");
         if expected_scope == "session" {
             assert!(result["session_importance"].is_number());
             assert!(result["more_matches_in_session"].is_number());
@@ -240,13 +235,8 @@ pub(crate) fn assert_provider_citations(result: &Value, provider: &str) {
         assert!(citation["ctx_event_id"].is_string());
         assert!(citation["ctx_session_id"].is_string());
         assert_eq!(citation["provider"], provider, "citation provider failed");
-        if let Some(source_exists) = citation.get("source_exists") {
-            assert!(
-                source_exists.is_boolean(),
-                "legacy citation source_exists must be boolean in {citation:#}"
-            );
-        }
-        assert!(citation["source_path"].is_string());
+        assert!(citation.get("source_exists").is_none(), "{citation:#}");
+        assert!(citation.get("source_path").is_none(), "{citation:#}");
     }
 }
 

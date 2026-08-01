@@ -136,7 +136,7 @@ fn launch_source_refresh_daemon(
             .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
         if status.as_ref().is_some_and(|status| {
             status["daemon"]["running"] == true
-                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+                && status["daemon"]["core_refresh_endpoint"]["available"] == true
         }) {
             return daemon;
         }
@@ -171,11 +171,16 @@ fn spawn_copied_test_binary(command: &mut StdCommand) -> io::Result<Child> {
 
 fn assert_published_generation(search: &Value, expected_mode: &str) -> String {
     assert_eq!(search["freshness"]["mode"], expected_mode, "{search:#}");
-    assert_eq!(search["freshness"]["status"], "completed", "{search:#}");
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    let expected_status = if expected_mode == "off" {
+        "existing_generation"
+    } else {
+        "completed"
+    };
+    assert_eq!(search["freshness"]["status"], expected_status, "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     search["retrieval"]["generation_id"]
         .as_str()
-        .expect("search response should identify its source-backed generation")
+        .expect("search response should identify its Core generation")
         .to_owned()
 }
 
@@ -201,11 +206,6 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
             && status["lexical"]["request_state"] == "published"
             && status["refresh"]["status"] == "ready"
             && status["refresh"]["published_generation"] == expected_generation
-            && status["resolver"]["status"] == "ready"
-            && status["daemon"]["jobs"]["source_backed_refresh"]["status"] == "completed"
-            && status["daemon"]["jobs"]["source_backed_refresh"]["request_state"] == "published"
-            && status["daemon"]["jobs"]["source_backed_refresh"]["published_generation"]
-                == expected_generation
     });
     assert_eq!(status["history_epoch"]["status"], "ready", "{status:#}");
     assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
@@ -228,12 +228,6 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
         "{status:#}"
     );
     assert_eq!(status["refresh"]["generation_matches"], true, "{status:#}");
-    assert_eq!(status["resolver"]["status"], "ready", "{status:#}");
-    assert_eq!(
-        status["resolver"]["generation_id"], expected_generation,
-        "{status:#}"
-    );
-    assert_eq!(status["resolver"]["generation_matches"], true, "{status:#}");
     assert_eq!(
         status["indexed_events"], status["lexical"]["indexed_documents"],
         "{status:#}"
@@ -245,7 +239,7 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
     assert!(status.get("prior_epoch").is_none(), "{status:#}");
     assert!(
         !search_refresh_data_root(temp).join("work.sqlite").exists(),
-        "source-backed search/status must not create the previous-epoch Store"
+        "Core search/status must not create the previous-epoch Store"
     );
     status
 }
@@ -262,10 +256,10 @@ fn assert_source_backed_search_show_oracle(
     assert_eq!(packet["payload_type"], "search_results", "{packet:#}");
     assert_eq!(packet["query"], query, "{packet:#}");
     assert_eq!(packet["filters"]["provider"], provider, "{packet:#}");
-    assert_eq!(packet["retrieval"]["index"], "source_backed", "{packet:#}");
+    assert_eq!(packet["retrieval"]["index"], "core", "{packet:#}");
     let generation = packet["retrieval"]["generation_id"]
         .as_str()
-        .expect("source-backed search generation");
+        .expect("Core search generation");
     assert_eq!(generation.len(), 64, "{packet:#}");
     assert!(
         generation
@@ -274,9 +268,7 @@ fn assert_source_backed_search_show_oracle(
         "generation ID must be lowercase hexadecimal: {packet:#}"
     );
 
-    let results = packet["results"]
-        .as_array()
-        .expect("source-backed search results");
+    let results = packet["results"].as_array().expect("Core search results");
     for (offset, result) in results.iter().enumerate() {
         assert_eq!(result["rank"], offset + 1, "{result:#}");
         assert!(result["retrieval_score"].is_number(), "{result:#}");
@@ -292,7 +284,7 @@ fn assert_source_backed_search_show_oracle(
     assert_eq!(
         matching_results.len(),
         expected_results,
-        "unexpected exact-oracle source-backed result count: {packet:#}"
+        "unexpected exact-oracle Core result count: {packet:#}"
     );
     for result in matching_results {
         assert_eq!(result["provider"], provider, "{result:#}");
@@ -305,7 +297,8 @@ fn assert_source_backed_search_show_oracle(
         assert!(result["ctx_session_id"].is_string(), "{result:#}");
         assert!(result["provider_session_id"].is_string(), "{result:#}");
         assert!(result["source_format"].is_string(), "{result:#}");
-        assert!(result["source_path"].is_string(), "{result:#}");
+        assert!(result.get("source_path").is_none(), "{result:#}");
+        assert!(result.get("source_exists").is_none(), "{result:#}");
         assert!(result["session_importance"].is_number(), "{result:#}");
         assert!(result["more_matches_in_session"].is_number(), "{result:#}");
         assert!(
@@ -320,18 +313,15 @@ fn assert_source_backed_search_show_oracle(
                 .is_some_and(|snippet| snippet.contains(query)),
             "{result:#}"
         );
-        let source_exists = result["source_exists"]
-            .as_bool()
-            .expect("source-backed results report current source availability");
         assert_eq!(
             result.get("why_matched"),
             None,
-            "source-backed results use the indexed event type and hydrated snippet: {result:#}"
+            "Core results use the indexed event type and normalized snippet: {result:#}"
         );
 
         let commands = result["suggested_next_commands"]
             .as_array()
-            .expect("source-backed next commands");
+            .expect("Core search next commands");
         let event_id = result["ctx_event_id"].as_str().unwrap();
         let session_id = result["ctx_session_id"].as_str().unwrap();
         let command_prefix = format!(
@@ -363,7 +353,7 @@ fn assert_source_backed_search_show_oracle(
 
         let citations = result["citations"]
             .as_array()
-            .expect("source-backed citations");
+            .expect("Core search citations");
         assert_eq!(citations.len(), 1, "{result:#}");
         let citation = &citations[0];
         assert_eq!(citation["item_id"], result["ctx_event_id"], "{result:#}");
@@ -377,12 +367,8 @@ fn assert_source_backed_search_show_oracle(
             "{result:#}"
         );
         assert_eq!(citation["provider"], provider, "{result:#}");
-        assert_eq!(citation["source_path"], result["source_path"], "{result:#}");
-        assert_eq!(
-            citation["source_exists"].as_bool(),
-            Some(source_exists),
-            "source-backed citations must preserve current source availability: {result:#}"
-        );
+        assert!(citation.get("source_path").is_none(), "{result:#}");
+        assert!(citation.get("source_exists").is_none(), "{result:#}");
 
         let shown_event = json_output(ctx(temp).args([
             "show", "event", event_id, "--window", "1", "--format", "json",
@@ -397,16 +383,9 @@ fn assert_source_backed_search_show_oracle(
             shown_event["event"]["provider"], provider,
             "{shown_event:#}"
         );
+        assert!(shown_event["event"].get("source_path").is_none());
         assert_eq!(
-            shown_event["event"]["source_path"], result["source_path"],
-            "{shown_event:#}"
-        );
-        assert_eq!(
-            shown_event["event"]["content"]["origin"], "provider_source",
-            "{shown_event:#}"
-        );
-        assert_eq!(
-            shown_event["event"]["content"]["source_verified"], true,
+            shown_event["event"]["content"]["policy_status"], "selected",
             "{shown_event:#}"
         );
         assert!(
@@ -416,8 +395,15 @@ fn assert_source_backed_search_show_oracle(
             "{shown_event:#}"
         );
 
-        let shown_session =
-            json_output(ctx(temp).args(["show", "session", session_id, "--format", "json"]));
+        let shown_session = json_output(ctx(temp).args([
+            "show",
+            "session",
+            session_id,
+            "--max-events",
+            "4096",
+            "--format",
+            "json",
+        ]));
         assert_eq!(
             shown_session["payload_type"], "session_transcript",
             "{shown_session:#}"
@@ -432,8 +418,7 @@ fn assert_source_backed_search_show_oracle(
                 .as_array()
                 .is_some_and(|events| events.iter().any(|event| {
                     event["ctx_event_id"] == result["ctx_event_id"]
-                        && event["content"]["origin"] == "provider_source"
-                        && event["content"]["source_verified"] == true
+                        && event["content"]["policy_status"] == "selected"
                         && event["text"]
                             .as_str()
                             .is_some_and(|text| text.contains(query))
@@ -446,7 +431,7 @@ fn assert_source_backed_search_show_oracle(
 fn generation_id(search: &Value) -> &str {
     search["retrieval"]["generation_id"]
         .as_str()
-        .expect("search response should identify its source-backed generation")
+        .expect("search response should identify its Core generation")
 }
 
 fn generation_manifest(temp: &TempDir, generation: &str) -> (GenerationManifest, Value) {
@@ -473,6 +458,17 @@ fn generation_manifest_paths(temp: &TempDir) -> Vec<PathBuf> {
     };
     let mut paths = entries
         .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .and_then(|name| name.strip_suffix(".json"))
+                .is_some_and(|stem| {
+                    stem.len() == 64
+                        && stem
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+        })
         .collect::<Vec<_>>();
     paths.sort();
     paths
@@ -566,7 +562,7 @@ fn assert_daemon_publication(
 ) -> Value {
     let expected_source_count = expected_providers.len() as u64;
     let status = assert_source_generation_ready(temp, expected_generation);
-    let job = &status["daemon"]["jobs"]["source_backed_refresh"];
+    let job = &status["daemon"]["jobs"]["core_refresh"];
     assert_eq!(job["owner"], "daemon", "{status:#}");
     assert_eq!(
         status["daemon"]["mode"], "source-refresh-only",
@@ -659,18 +655,18 @@ fn assert_daemon_refresh_failure(
     expected_route_count: u64,
     retained_generation: Option<&str>,
 ) -> Value {
-    let status = wait_for_status(temp, "terminal source refresh failure", |status| {
+    let status = wait_for_status(temp, "terminal Core refresh failure", |status| {
         status["refresh"]["status"] == "unavailable"
-            && status["daemon"]["jobs"]["source_backed_refresh"]["status"] == "failed"
-            && status["daemon"]["jobs"]["source_backed_refresh"]["request_state"] == "failed"
+            && status["daemon"]["jobs"]["core_refresh"]["status"] == "failed"
+            && status["daemon"]["jobs"]["core_refresh"]["request_state"] == "failed"
     });
     assert_eq!(status["refresh"]["status"], "unavailable", "{status:#}");
     assert_eq!(
-        status["refresh"]["reason"], "source_refresh_failed",
+        status["refresh"]["reason"], "core_refresh_failed",
         "{status:#}"
     );
     assert_eq!(status["refresh"]["request_state"], "failed", "{status:#}");
-    let job = &status["daemon"]["jobs"]["source_backed_refresh"];
+    let job = &status["daemon"]["jobs"]["core_refresh"];
     assert_eq!(job["owner"], "daemon", "{status:#}");
     assert!(
         matches!(

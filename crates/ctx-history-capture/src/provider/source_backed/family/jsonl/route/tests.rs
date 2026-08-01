@@ -1,15 +1,9 @@
 use std::{fs, path::Path, sync::Arc};
 
-use ctx_history_core::{
-    derive_event_id, derive_session_id, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, SessionIdentityInput, SourceAnchor,
-    SourceRecordLocator,
-};
-use ctx_history_index::{CommitReceipt, GenerationWriter, WriterOptions};
-use sha2::{Digest, Sha256};
-
 use super::super::JsonlReader;
 use super::*;
+use ctx_history_core::{CoreRecord, SourceAnchor};
+use ctx_history_index::{CommitReceipt, GenerationWriter, WriterOptions};
 
 const TEST_SOURCE_FORMAT: &str = "terminal_witness_jsonl";
 const TEST_SCHEMA: &str = "terminal-witness-v1";
@@ -17,47 +11,6 @@ const TEST_SCHEMA: &str = "terminal-witness-v1";
 struct TestAdapter;
 
 const TEST_RECORD: &[u8] = b"{\"message\":\"before\"}\n";
-
-struct TestHydrator {
-    source_file: Arc<OpenedProviderSourceFile>,
-}
-
-impl JsonlFamilyHydrator for TestHydrator {
-    fn hydrate(
-        &mut self,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
-        let NativeRecordCoordinate::Jsonl {
-            byte_offset,
-            byte_length,
-            ..
-        } = request.locator().coordinate()
-        else {
-            return Err(hydration_error(
-                HydrationFailureKind::InvalidLocator,
-                "terminal witness locator is not JSONL",
-            ));
-        };
-        let bytes = self
-            .source_file
-            .read_exact_range_allow_append(
-                *byte_offset,
-                usize::try_from(*byte_length).unwrap(),
-                TEST_RECORD.len(),
-            )
-            .map_err(|error| hydration_error(HydrationFailureKind::StaleRecordEvidence, error))?;
-        if &<[u8; 32]>::from(Sha256::digest(&bytes)) != request.locator().record_digest() {
-            return Err(hydration_error(
-                HydrationFailureKind::StaleRecordEvidence,
-                "terminal witness record digest changed",
-            ));
-        }
-        Ok(HydratedProviderRecord {
-            event_id: request.event_id(),
-            provider_bytes: b"frozen exact body".to_vec(),
-        })
-    }
-}
 
 impl JsonlFamilyAdapter for TestAdapter {
     fn provider(&self) -> CaptureProvider {
@@ -126,50 +79,6 @@ impl JsonlFamilyAdapter for TestAdapter {
             "terminal witness tests never project",
         ))
     }
-
-    fn hydrator(
-        &self,
-        _leaf: &JsonlFamilyLeaf,
-        source_file: Arc<OpenedProviderSourceFile>,
-    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
-        Ok(Box::new(TestHydrator { source_file }))
-    }
-}
-
-fn hydration_request(source: SourceKey) -> EventHydrationRequest {
-    let native_session_key =
-        NativeSessionKey::native_id("terminal-witness.session", TypedKey::U64(1)).unwrap();
-    let session_id = derive_session_id(SessionIdentityInput {
-        source: &source,
-        logical_session_kind: "terminal-witness-session",
-        native_session_key: &native_session_key,
-    })
-    .unwrap();
-    let native_item_key =
-        NativeItemKey::native_id("terminal-witness.event", TypedKey::U64(1)).unwrap();
-    let event_id = derive_event_id(EventIdentityInput {
-        source: &source,
-        session_id,
-        logical_item_kind: "terminal-witness-event",
-        native_item_key: &native_item_key,
-        subrecord_selector: None,
-    })
-    .unwrap();
-    let locator = SourceRecordLocator::new(
-        source,
-        NativeRecordCoordinate::Jsonl {
-            byte_offset: 0,
-            byte_length: TEST_RECORD.len() as u64,
-            physical_ordinal: 0,
-            native_session_key: Some(TypedKey::U64(1)),
-            native_event_key: Some(TypedKey::U64(1)),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        Sha256::digest(TEST_RECORD).into(),
-    )
-    .unwrap();
-    EventHydrationRequest::new(event_id, locator).unwrap()
 }
 
 fn expected_state(
@@ -226,7 +135,6 @@ fn expected_state(
             owned_sources,
             terminal_sources,
             certified_inventory: Some(inventory.clone()),
-            hydration_inventory: None,
         },
         inventory,
     )
@@ -250,7 +158,7 @@ impl JsonlFamilyProjector for ParallelTestProjector {
     fn project(
         &mut self,
         _record: JsonlRecordRef<'_>,
-        _emit: &mut dyn FnMut(LexicalDocument) -> Result<()>,
+        _emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         Ok(())
     }
@@ -289,16 +197,107 @@ impl JsonlFamilyAdapter for ParallelTestAdapter {
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         Ok(Box::new(ParallelTestProjector))
     }
+}
 
-    fn hydrator(
+struct CheckpointTestAdapter;
+
+struct CheckpointTestProjector {
+    projected_records: u64,
+    resumed: bool,
+}
+
+impl JsonlFamilyProjector for CheckpointTestProjector {
+    fn project(
+        &mut self,
+        record: JsonlRecordRef<'_>,
+        _emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
+    ) -> Result<()> {
+        if self.resumed && self.projected_records != record.evidence().physical_ordinal() {
+            return Err(CaptureError::InvalidPayload(
+                "opaque checkpoint resumed from the wrong JSONL ordinal".to_owned(),
+            ));
+        }
+        self.projected_records =
+            self.projected_records
+                .checked_add(1)
+                .ok_or(CaptureError::SystemInvariant(
+                    "checkpoint test record count overflowed",
+                ))?;
+        Ok(())
+    }
+
+    fn provider_checkpoint(&self) -> Result<Option<TypedKey>> {
+        Ok(Some(TypedKey::U64(self.projected_records)))
+    }
+}
+
+impl JsonlFamilyAdapter for CheckpointTestAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Pi
+    }
+
+    fn source_format(&self) -> &'static str {
+        TEST_SOURCE_FORMAT
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        TEST_SCHEMA
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        "checkpoint-test-parser-v1"
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::CertifiedSuffix
+    }
+
+    fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
+        TestAdapter.discover(root)
+    }
+
+    fn projector(
         &self,
         _leaf: &JsonlFamilyLeaf,
         _source_file: Arc<OpenedProviderSourceFile>,
-    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
-        Err(hydration_error(
-            HydrationFailureKind::TemporarilyUnavailable,
-            "parallel tests never hydrate",
-        ))
+        _imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        Ok(Box::new(CheckpointTestProjector {
+            projected_records: 0,
+            resumed: false,
+        }))
+    }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        let Some(checkpoint) = checkpoint else {
+            if base_event_lookup.is_some() {
+                return Err(CaptureError::InvalidPayload(
+                    "cold checkpoint test unexpectedly received a base lookup".to_owned(),
+                ));
+            }
+            return self.projector(leaf, source_file, imported_at);
+        };
+        if base_event_lookup.is_none() {
+            return Err(CaptureError::InvalidPayload(
+                "resumed checkpoint test did not receive a base lookup".to_owned(),
+            ));
+        }
+        let TypedKey::U64(projected_records) = checkpoint else {
+            return Err(CaptureError::InvalidPayload(
+                "checkpoint test state is malformed".to_owned(),
+            ));
+        };
+        Ok(Box::new(CheckpointTestProjector {
+            projected_records: *projected_records,
+            resumed: true,
+        }))
     }
 }
 
@@ -326,6 +325,7 @@ fn capture_parallel_test_generation(
             complete_inventories: &mut complete_inventories,
             route_index: 0,
             leaf_worker_budget: workers,
+            automatic_missing_observed_at_unix_ms: None,
         };
         with_family_scanner_workers(workers, || {
             capture(adapter, root, &resident, &mut sink).unwrap();
@@ -336,6 +336,57 @@ fn capture_parallel_test_generation(
         .commit_with_complete_inventory_revalidation(|_| true, |_| true)
         .unwrap();
     (commit, activity)
+}
+
+fn capture_checkpoint_test_generation(
+    root: &Path,
+    index_root: &Path,
+    workers: usize,
+) -> CommitReceipt {
+    let resident = Mutex::new(FamilyResident::default());
+    let mut writer = GenerationWriter::open(
+        index_root,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    let mut owners = HashMap::new();
+    let mut complete_inventories = Vec::new();
+    {
+        let mut sink = SourceBackedGenerationSink {
+            writer: &mut writer,
+            owners: &mut owners,
+            complete_inventories: &mut complete_inventories,
+            route_index: 0,
+            leaf_worker_budget: workers,
+            automatic_missing_observed_at_unix_ms: None,
+        };
+        with_family_scanner_workers(workers, || {
+            capture(&CheckpointTestAdapter, root, &resident, &mut sink).unwrap();
+        });
+    }
+    writer
+        .commit_with_complete_inventory_revalidation(|_| true, |_| true)
+        .unwrap()
+}
+
+fn provider_checkpoints(receipt: &CommitReceipt) -> Vec<Option<TypedKey>> {
+    receipt
+        .manifest()
+        .sources
+        .iter()
+        .map(|source| {
+            let frontier = source.frontier().unwrap();
+            let TypedKey::Bytes(bytes) = frontier.checkpoint() else {
+                panic!("family checkpoint was not bytes");
+            };
+            serde_json::from_slice::<FamilyCheckpoint>(bytes)
+                .unwrap()
+                .provider_checkpoint
+        })
+        .collect()
 }
 
 #[test]
@@ -421,6 +472,47 @@ fn certified_append_generation_is_identical_with_one_and_eight_workers() {
 }
 
 #[test]
+fn opaque_provider_checkpoint_and_base_lookup_resume_only_the_certified_suffix() {
+    use std::{fs::OpenOptions, io::Write};
+
+    for workers in [1, 8] {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let root = temp.path().join("sessions");
+        let index = temp.path().join("index");
+        fs::create_dir_all(&root).unwrap();
+        let transcripts = (0..workers)
+            .map(|index| root.join(format!("checkpoint-{index}.jsonl")))
+            .collect::<Vec<_>>();
+        for transcript in &transcripts {
+            fs::write(transcript, b"{\"message\":\"prefix\"}\n").unwrap();
+        }
+
+        let cold = capture_checkpoint_test_generation(&root, &index, workers);
+        assert!(provider_checkpoints(&cold)
+            .into_iter()
+            .all(|checkpoint| checkpoint == Some(TypedKey::U64(1))));
+
+        for transcript in &transcripts {
+            OpenOptions::new()
+                .append(true)
+                .open(transcript)
+                .unwrap()
+                .write_all(b"{\"message\":\"suffix\"}\n")
+                .unwrap();
+        }
+        let appended = capture_checkpoint_test_generation(&root, &index, workers);
+        assert!(provider_checkpoints(&appended)
+            .into_iter()
+            .all(|checkpoint| checkpoint == Some(TypedKey::U64(2))));
+        assert!(appended
+            .manifest()
+            .sources
+            .iter()
+            .all(|source| source.counts().complete_records == 2));
+    }
+}
+
+#[test]
 fn production_jsonl_scheduler_projects_multiple_sources_concurrently() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
@@ -450,6 +542,7 @@ fn production_jsonl_scheduler_projects_multiple_sources_concurrently() {
         complete_inventories: &mut complete_inventories,
         route_index: 0,
         leaf_worker_budget: 4,
+        automatic_missing_observed_at_unix_ms: None,
     };
 
     with_family_scanner_workers(4, || {
@@ -526,55 +619,6 @@ fn active_source_family_contract_jsonl_terminal_inventory_accepts_proven_append(
         .write_all(b"{\"message\":\"next refresh\"}\n")
         .unwrap();
     assert!(revalidate_complete_inventory(&adapter, &root, &resident, &inventory,).unwrap());
-
-    let hydration_source = adapter
-        .discover(&root)
-        .unwrap()
-        .leaves()
-        .first()
-        .unwrap()
-        .source()
-        .clone();
-    let request = hydration_request(hydration_source);
-    let append_path = first.clone();
-    set_after_jsonl_group_open_hook(move || {
-        OpenOptions::new()
-            .append(true)
-            .open(append_path)
-            .unwrap()
-            .write_all(b"{\"message\":\"during hydration\"}\n")
-            .unwrap();
-    });
-    let hydration_resident = Mutex::new(FamilyResident::default());
-    let hydrated = hydrate_single(&adapter, &root, &hydration_resident, &request)
-        .expect("append-safe hydrate");
-    assert_eq!(hydrated.provider_bytes, b"frozen exact body");
-}
-
-#[test]
-fn active_source_family_contract_jsonl_hydration_rejects_same_length_rewrite() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let root = temp.path().join("sessions");
-    fs::create_dir_all(&root).unwrap();
-    let source_path = root.join("first.jsonl");
-    fs::write(&source_path, TEST_RECORD).unwrap();
-    let adapter = TestAdapter;
-    let source = adapter
-        .discover(&root)
-        .unwrap()
-        .leaves()
-        .first()
-        .unwrap()
-        .source()
-        .clone();
-    let request = hydration_request(source);
-    let rewrite_path = source_path.clone();
-    set_after_jsonl_group_open_hook(move || {
-        fs::write(rewrite_path, b"{\"message\":\"after!\"}\n").unwrap();
-    });
-    let resident = Mutex::new(FamilyResident::default());
-    let error = hydrate_single(&adapter, &root, &resident, &request).unwrap_err();
-    assert_eq!(error.kind, HydrationFailureKind::StaleRecordEvidence);
 }
 
 #[test]

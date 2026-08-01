@@ -10,7 +10,9 @@ use crate::{
     OutputOutcome, OutputOutcomeMetadata, QWEN_CODE_SOURCE_FORMAT,
 };
 
-use super::super::result_content::{NativeJsonlResultExtractionError, NativeJsonlResultSubrecord};
+use super::super::result_content::{
+    extract_direct_result_content, NativeJsonlResultExtractionError, NativeJsonlResultSubrecord,
+};
 
 pub(crate) const fn qwen_code_source_backed_adapter() -> super::DirectJsonlFamilyAdapter {
     super::DirectJsonlFamilyAdapter::new(
@@ -41,7 +43,3 @@ pub(super) use records::{
     enumerate_qwen_code_results, qwen_code_event_text, qwen_code_event_type, qwen_code_header_cwd,
     qwen_code_header_session_id, qwen_code_model, qwen_code_role,
 };
-
-#[cfg(test)]
-#[path = "qwen_code_tests.rs"]
-mod tests;

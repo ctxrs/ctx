@@ -135,23 +135,17 @@ fn factory_droid_content_has(value: &Value, expected: &str) -> bool {
 fn placeholder_results(
     content: Option<&Value>,
 ) -> std::result::Result<Vec<NativeJsonlResultSubrecord<'_>>, NativeJsonlResultExtractionError> {
-    let count = content
-        .map(|content| {
-            content
-                .as_array()
-                .ok_or(NativeJsonlResultExtractionError::InvalidShape)
-                .map(|blocks| {
-                    blocks
-                        .iter()
-                        .filter(|block| {
-                            block.get("type").and_then(Value::as_str) == Some("tool_result")
-                        })
-                        .count()
-                })
+    let Some(content) = content else {
+        return Ok(Vec::new());
+    };
+    content
+        .as_array()
+        .ok_or(NativeJsonlResultExtractionError::InvalidShape)?
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            (block.get("type").and_then(Value::as_str) == Some("tool_result")).then_some(index)
         })
-        .transpose()?
-        .unwrap_or(0);
-    (0..count)
         .map(|index| {
             Ok(NativeJsonlResultSubrecord {
                 subrecord_index: u32::try_from(index)
@@ -176,8 +170,8 @@ fn enumerate_content_results<'a>(
         .as_array()
         .ok_or(NativeJsonlResultExtractionError::InvalidShape)?
         .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
         .enumerate()
+        .filter(|(_, block)| block.get("type").and_then(Value::as_str) == Some("tool_result"))
         .map(|(index, block)| {
             let (content, redacted) =
                 match extract_result_ref(Some(block), &["content", "output", "text"]) {
@@ -206,30 +200,8 @@ fn enumerate_content_results<'a>(
 fn extract_result_ref<'a>(
     value: Option<&'a Value>,
     object_fields: &[&str],
-) -> std::result::Result<Option<&'a str>, NativeJsonlResultExtractionError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    reject_redacted(value)?;
-    match value {
-        Value::String(text) => Ok(Some(text)),
-        Value::Null => Ok(None),
-        Value::Object(object) => {
-            for field in object_fields {
-                if let Some(selected) = object.get(*field) {
-                    return match selected {
-                        Value::String(text) => Ok(Some(text)),
-                        Value::Null => Ok(None),
-                        _ => Err(NativeJsonlResultExtractionError::InvalidShape),
-                    };
-                }
-            }
-            Ok(None)
-        }
-        Value::Array(_) | Value::Bool(_) | Value::Number(_) => {
-            Err(NativeJsonlResultExtractionError::InvalidShape)
-        }
-    }
+) -> std::result::Result<Option<std::borrow::Cow<'a, str>>, NativeJsonlResultExtractionError> {
+    extract_direct_result_content(value, object_fields, true)
 }
 
 fn native_result_identity(value: &Value) -> Option<&str> {

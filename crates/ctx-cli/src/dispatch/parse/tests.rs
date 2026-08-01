@@ -88,7 +88,7 @@ fn root_errors_wrap_at_terminal_width_with_public_ctx_usage() {
         assert!(invalid.contains("unrecognized subcommand"), "{invalid}");
         assert!(invalid.contains("frobnicate"), "{invalid}");
         assert!(
-            normalized.contains("A similar subcommand exists: 'locate'."),
+            !normalized.contains("A similar subcommand exists:"),
             "{invalid}"
         );
         assert!(invalid.contains("ctx [OPTIONS] <COMMAND>"), "{invalid}");
@@ -176,7 +176,7 @@ fn machine_parse_errors_remain_raw_clap_bytes() {
         ),
         (
             &["ctx", "frobnicate", "--format=json"][..],
-            "tip: a similar subcommand exists: 'locate'",
+            "unrecognized subcommand 'frobnicate'",
         ),
     ] {
         let (error, arguments) = error_and_arguments(arguments);

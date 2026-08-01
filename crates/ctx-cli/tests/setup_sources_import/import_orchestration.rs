@@ -94,7 +94,7 @@ fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
             .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
         if status.as_ref().is_some_and(|status| {
             status["daemon"]["running"] == true
-                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+                && status["daemon"]["core_refresh_endpoint"]["available"] == true
         }) {
             return daemon;
         }
@@ -451,7 +451,7 @@ fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projecti
     assert_eq!(native_status["lexical"]["indexed_documents"], 1);
     assert_eq!(native_status["relational"]["event_count"], 1);
     assert!(data_root(&native)
-        .join("search/lexical/meta.json")
+        .join("search/lexical/active-generation.json")
         .is_file());
     assert!(data_root(&native).join("relational.sqlite").is_file());
     let native_search = json_output(ctx(&native).args([
@@ -463,7 +463,7 @@ fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projecti
         "off",
         "--format=json",
     ]));
-    assert_eq!(native_search["retrieval"]["index"], "source_backed");
+    assert_eq!(native_search["retrieval"]["index"], "core");
     assert_eq!(
         native_search["retrieval"]["generation_id"],
         native_generation
@@ -543,7 +543,7 @@ fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projecti
     assert_eq!(explicit_status["lexical"]["indexed_documents"], 1);
     assert_eq!(explicit_status["relational"]["event_count"], 1);
     assert!(data_root(&explicit)
-        .join("search/lexical/meta.json")
+        .join("search/lexical/active-generation.json")
         .is_file());
     assert!(data_root(&explicit).join("relational.sqlite").is_file());
     let explicit_search = json_output(ctx(&explicit).args([
@@ -555,7 +555,7 @@ fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projecti
         "off",
         "--format=json",
     ]));
-    assert_eq!(explicit_search["retrieval"]["index"], "source_backed");
+    assert_eq!(explicit_search["retrieval"]["index"], "core");
     assert_eq!(
         explicit_search["retrieval"]["generation_id"],
         explicit_generation
@@ -639,9 +639,25 @@ fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
         ]));
         assert!(stderr.contains(failure_kind), "{name}: {stderr}");
         assert!(stderr.contains(cli_classification), "{name}: {stderr}");
+        let status = json_output(ctx(&temp).args(["status", "--format=json"]));
         assert!(
-            stderr.contains("retained generation"),
-            "{name} did not report fail-closed retention: {stderr}"
+            matches!(
+                status["refresh"]["status"].as_str(),
+                Some("pending" | "unavailable")
+            ),
+            "{name}: {status:#}"
+        );
+        assert!(
+            status["indexed_sources"]
+                .as_u64()
+                .is_none_or(|count| count == 0),
+            "{name}: {status:#}"
+        );
+        assert!(
+            status["indexed_events"]
+                .as_u64()
+                .is_none_or(|count| count == 0),
+            "{name}: {status:#}"
         );
     }
 
@@ -978,7 +994,7 @@ fn provider_projection_snapshot(temp: &TempDir, provider: &str) -> ProviderProje
     let status = json_output(ctx(temp).args(["status", "--format=json"]));
     let generation = status["lexical"]["generation_id"]
         .as_str()
-        .expect("source-backed lexical generation")
+        .expect("published lexical Core generation")
         .to_owned();
     let status = wait_for_relational_projection(temp, &generation);
     assert_eq!(
@@ -1004,8 +1020,9 @@ fn provider_projection_snapshot(temp: &TempDir, provider: &str) -> ProviderProje
         ),
         sources: relational_rows(
             &conn,
-            "SELECT source_id || ':' || source_format || ':' || content_digest_hex
-             FROM source_backed_sources
+            "SELECT source_id || ':' || source_format || ':' || parser_revision || ':' ||
+                    indexed_event_count || ':' || health
+             FROM ctx_sources
              WHERE provider = ?1
              ORDER BY source_id",
             provider,
@@ -1051,7 +1068,7 @@ fn assert_searchable_and_showable(temp: &TempDir, provider: &str, query: &str) -
         "off",
         "--format=json",
     ]));
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     assert_eq!(search["filters"]["provider"], provider, "{search:#}");
     assert_eq!(search["results"].as_array().unwrap().len(), 1, "{search:#}");
     let result = &search["results"][0];
@@ -1071,8 +1088,7 @@ fn assert_searchable_and_showable(temp: &TempDir, provider: &str, query: &str) -
     assert_eq!(shown_event["payload_type"], "event_window");
     assert_eq!(shown_event["ctx_event_id"], event_id);
     assert_eq!(shown_event["ctx_session_id"], session_id);
-    assert_eq!(shown_event["event"]["content"]["origin"], "provider_source");
-    assert_eq!(shown_event["event"]["content"]["source_verified"], true);
+    assert_eq!(shown_event["event"]["content"]["policy_status"], "selected");
 
     let shown_session =
         json_output(ctx(temp).args(["show", "session", &session_id, "--format", "json"]));
@@ -1105,7 +1121,9 @@ fn fresh_setup_publishes_provider_sources_to_tantivy_and_relational() {
     assert_eq!(status["relational"]["source_count"], 1, "{status:#}");
     assert_eq!(status["relational"]["session_count"], 1, "{status:#}");
     assert_eq!(status["relational"]["event_count"], 1, "{status:#}");
-    assert!(data_root(&temp).join("search/lexical/meta.json").is_file());
+    assert!(data_root(&temp)
+        .join("search/lexical/active-generation.json")
+        .is_file());
     assert!(data_root(&temp).join("relational.sqlite").is_file());
 
     let projection = provider_projection_snapshot(&temp, "codex");
@@ -1180,7 +1198,7 @@ fn setup_adds_provider_without_changing_unchanged_source_ids() {
 }
 
 #[test]
-fn repeated_setup_and_import_preserve_generation_and_source_backed_ids() {
+fn repeated_setup_and_import_preserve_generation_and_public_ids() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
     let _daemon = start_full_source_refresh_daemon(&temp);

@@ -14,10 +14,10 @@ use std::{
 use ctx_protocol::{camel_alias_object, camelize_object_keys, JsonObject};
 pub use ctx_protocol::{
     AgentHistoryEnvelope, AgentHistoryErrorBody, AgentHistoryErrorCode, AgentHistoryEvent,
-    AgentHistoryOperation, AgentHistoryStatus, BackendInfo, BackendKind, EventResult, Freshness,
-    ImportResult, LocationResult, ProviderSource, SearchHit, SearchResult, SearchResultWindow,
-    SearchRetrieval, SearchRetrievalCoverage, SessionResult, SourceLocation, Totals,
-    CONTRACT_VERSION, SCHEMA_VERSION,
+    AgentHistoryOperation, AgentHistoryStatus, BackendInfo, BackendKind, CoreContentMetadata,
+    CoreContentPolicyStatus, EventResult, Freshness, ImportResult, ProviderSource, SearchHit,
+    SearchResult, SearchResultWindow, SearchRetrieval, SearchRetrievalCoverage, SessionResult,
+    SessionSummary, Totals, CONTRACT_VERSION, SCHEMA_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -327,38 +327,6 @@ impl AgentHistoryClient {
         )
     }
 
-    pub fn locate_event(
-        &self,
-        id: impl AsRef<str>,
-    ) -> Result<AgentHistoryEnvelope, AgentHistoryError> {
-        self.local_json_owned(
-            AgentHistoryOperation::LocateEvent,
-            vec![
-                "locate".to_owned(),
-                "event".to_owned(),
-                id.as_ref().to_owned(),
-                "--format".to_owned(),
-                "json".to_owned(),
-            ],
-        )
-    }
-
-    pub fn locate_session(
-        &self,
-        id: impl AsRef<str>,
-    ) -> Result<AgentHistoryEnvelope, AgentHistoryError> {
-        self.local_json_owned(
-            AgentHistoryOperation::LocateSession,
-            vec![
-                "locate".to_owned(),
-                "session".to_owned(),
-                id.as_ref().to_owned(),
-                "--format".to_owned(),
-                "json".to_owned(),
-            ],
-        )
-    }
-
     fn import_or_sync(
         &self,
         operation: AgentHistoryOperation,
@@ -532,9 +500,6 @@ fn normalize(
         AgentHistoryOperation::Search => envelope.search = Some(normalize_search(&raw)?),
         AgentHistoryOperation::ShowEvent => envelope.event = Some(normalize_event(&raw)?),
         AgentHistoryOperation::ShowSession => envelope.session = Some(normalize_session(&raw)?),
-        AgentHistoryOperation::LocateEvent | AgentHistoryOperation::LocateSession => {
-            envelope.location = Some(normalize_location(&raw)?)
-        }
         AgentHistoryOperation::Error => {}
     }
     Ok(envelope)
@@ -622,8 +587,7 @@ fn bridge_search_pagination(value: &mut Value) {
 fn normalize_event(raw: &Value) -> Result<EventResult, AgentHistoryError> {
     let value = json!({
         "event": raw.get("event").cloned(),
-        "events": raw.get("events").cloned().unwrap_or_else(|| json!([])),
-        "source": raw.get("source").cloned()
+        "events": raw.get("events").cloned().unwrap_or_else(|| json!([]))
     });
     decode_payload(camelize_object_keys(&value), "event")
 }
@@ -632,23 +596,10 @@ fn normalize_session(raw: &Value) -> Result<SessionResult, AgentHistoryError> {
     let value = json!({
         "session": raw.get("session").cloned(),
         "events": raw.get("events").cloned().unwrap_or_else(|| json!([])),
-        "source": raw.get("source").cloned(),
         "mode": raw.get("mode").cloned(),
         "format": raw.get("format").cloned()
     });
     decode_payload(camelize_object_keys(&value), "session")
-}
-
-fn normalize_location(raw: &Value) -> Result<LocationResult, AgentHistoryError> {
-    let value = camel_alias_object(
-        raw,
-        &[
-            ("ctx_session_id", "ctxSessionId"),
-            ("ctx_event_id", "ctxEventId"),
-            ("provider_session_id", "providerSessionId"),
-        ],
-    );
-    decode_payload(camelize_object_keys(&value), "location")
 }
 
 pub fn fixture_path(name: impl AsRef<Path>) -> PathBuf {

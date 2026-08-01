@@ -120,13 +120,8 @@ final class CtxAgentHistoryTests: XCTestCase {
         )
     }
 
-    func testWrapsShowAndLocateCommands() throws {
-        let runner = CapturingRunner { request in
-            if request.arguments.contains("locate") {
-                return CommandResult(stdout: Self.locationJSON)
-            }
-            return CommandResult(stdout: #"{"events":[]}"#)
-        }
+    func testWrapsShowCommands() throws {
+        let runner = CapturingRunner { _ in CommandResult(stdout: #"{"events":[]}"#) }
         let client = AgentHistoryClient(
             adapter: LocalCLIAdapter(dataRoot: "/tmp/ctx-sdk-test", runner: runner)
         )
@@ -134,17 +129,13 @@ final class CtxAgentHistoryTests: XCTestCase {
         _ = try client.showEvent("00000000-0000-0000-0000-000000000002", options: ShowEventOptions(window: 3))
         _ = try client.showSession("00000000-0000-0000-0000-000000000003", options: ShowSessionOptions(mode: "full"))
         _ = try client.showSession(ShowSessionOptions(provider: "codex", providerSession: "codex-session", mode: "log"))
-        _ = try client.locateEvent("00000000-0000-0000-0000-000000000004")
-        _ = try client.locateSession(LocateSessionOptions(provider: "codex", providerSession: "codex-session"))
 
         XCTAssertEqual(
             runner.requests.map { Array($0.arguments.dropFirst(2)) },
             [
                 ["show", "event", "00000000-0000-0000-0000-000000000002", "--format", "json", "--window", "3"],
                 ["show", "session", "00000000-0000-0000-0000-000000000003", "--mode", "full", "--format", "json"],
-                ["show", "session", "--provider", "codex", "--provider-session", "codex-session", "--mode", "log", "--format", "json"],
-                ["locate", "event", "00000000-0000-0000-0000-000000000004", "--format", "json"],
-                ["locate", "session", "--provider", "codex", "--provider-session", "codex-session", "--format", "json"]
+                ["show", "session", "--provider", "codex", "--provider-session", "codex-session", "--mode", "log", "--format", "json"]
             ]
         )
     }
@@ -160,8 +151,6 @@ final class CtxAgentHistoryTests: XCTestCase {
                 return CommandResult(stdout: Self.eventJSON)
             case ["show", "session"]:
                 return CommandResult(stdout: Self.sessionJSON)
-            case ["locate", "event"], ["locate", "session"]:
-                return CommandResult(stdout: Self.locationJSON)
             default:
                 return CommandResult(stdout: #"{"events":[]}"#)
             }
@@ -187,6 +176,7 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertEqual(search.search.results.first?.retrievalScore, 0.98)
         XCTAssertEqual(search.search.results.first?.resultType, "event")
         XCTAssertEqual(search.search.results.first?.resultScope, "event")
+        XCTAssertEqual(search.search.results.first?.sourceFormat, "codex_session_jsonl")
         XCTAssertEqual(search.search.results.first?.citations.first?.targetType, "event")
         XCTAssertEqual(search.search.results.first?.citations.first?.label, "codex event")
         XCTAssertEqual(search.search.resultWindow?.limit, 1)
@@ -197,15 +187,20 @@ final class CtxAgentHistoryTests: XCTestCase {
 
         let event = try client.showEvent("11111111-1111-4111-8111-111111111111")
         XCTAssertEqual(event.event.event?.text, "local agent history search result")
-        XCTAssertEqual(event.event.source?.sourceFormat, "codex_session_jsonl")
+        XCTAssertEqual(event.event.event?.providerSessionId, "codex-fixture-session")
+        XCTAssertEqual(event.event.event?.sourceFormat, "codex_session_jsonl")
+        XCTAssertEqual(event.event.event?.content?.complete, true)
+        XCTAssertEqual(event.event.event?.content?.policyStatus, .selected)
+        XCTAssertEqual(event.event.event?.structuredContent?["kind"]?.stringValue, "toolResult")
+        let structuredItems = event.event.event?.structuredContent?["payload"]?["items"]?.arrayValue
+        let nestedStructuredValues = structuredItems?[2]["nested"]?.arrayValue
+        XCTAssertEqual(nestedStructuredValues?[1], .bool(false))
 
         let session = try client.showSession("22222222-2222-4222-8222-222222222222")
         XCTAssertEqual(session.session.session?.providerSessionId, "codex-fixture-session")
+        XCTAssertEqual(session.session.session?.sourceFormat, "codex_session_jsonl")
         XCTAssertEqual(session.session.events.first?.text, "local agent history search result")
 
-        let location = try client.locateEvent("11111111-1111-4111-8111-111111111111")
-        XCTAssertEqual(location.location.provider, "codex")
-        XCTAssertEqual(location.location.resume?.cursor, "line:2")
     }
 
     func testVersioningMetadata() throws {
@@ -291,7 +286,11 @@ final class CtxAgentHistoryTests: XCTestCase {
             "recordType": "event",
             "item_type": "event",
             "itemType": "event",
-            "target_type": "event"
+            "target_type": "event",
+            "acquisition": [
+                "source": "local_scan",
+                "cursor": "opaque-checkpoint"
+            ]
         ])
         let normalized = raw.camelizedPublicJSON().objectValue ?? [:]
 
@@ -300,6 +299,8 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertNil(normalized["itemType"])
         XCTAssertEqual(normalized["resultType"], .string("event"))
         XCTAssertEqual(normalized["targetType"], .string("event"))
+        XCTAssertEqual(normalized["acquisition"]?["source"], .string("local_scan"))
+        XCTAssertEqual(normalized["acquisition"]?["cursor"], .string("opaque-checkpoint"))
     }
 
     func testHostedClientIsExplicitPlaceholder() throws {
@@ -364,12 +365,22 @@ final class CtxAgentHistoryTests: XCTestCase {
                 }
             case .showEvent:
                 XCTAssertEqual(envelope.event?.events.first?.ctxEventId, "11111111-1111-4111-8111-111111111111", url.lastPathComponent)
+                XCTAssertEqual(envelope.event?.events.first?.content?.complete, true, url.lastPathComponent)
+                XCTAssertEqual(envelope.event?.events.first?.content?.policyStatus, .selected, url.lastPathComponent)
+                XCTAssertEqual(
+                    envelope.event?.event?.structuredContent?["kind"]?.stringValue,
+                    "toolResult",
+                    url.lastPathComponent
+                )
             case .showSession:
                 XCTAssertEqual(envelope.session?.session?.title, "Fixture session", url.lastPathComponent)
-            case .locateEvent:
-                XCTAssertEqual(envelope.location?.source.cursor, "line:2", url.lastPathComponent)
-            case .locateSession:
-                XCTAssertEqual(envelope.location?.source.cursor, "session:codex-fixture-session", url.lastPathComponent)
+                XCTAssertEqual(envelope.session?.session?.providerSessionId, "codex-fixture-session", url.lastPathComponent)
+                XCTAssertEqual(envelope.session?.session?.sourceFormat, "codex_session_jsonl", url.lastPathComponent)
+                XCTAssertEqual(
+                    envelope.session?.events.first?.structuredContent?.arrayValue?[1]["complete"],
+                    .bool(true),
+                    url.lastPathComponent
+                )
             case .initialize, .sync, .error:
                 break
             }
@@ -377,10 +388,9 @@ final class CtxAgentHistoryTests: XCTestCase {
     }
 
     private static let statusJSON = #"{"initialized":true,"local_only":true,"data_root":"/tmp/ctx-sdk-test","indexed_items":3,"indexed_sources":1,"cataloged_sessions":1}"#
-    private static let searchJSON = #"{"query":"local agent history","filters":{"provider":"codex"},"freshness":{"mode":"off","status":"skipped","source_count":0,"totals":{"imported_events":0}},"generated_at":"2026-07-01T12:00:00Z","retrieval":{"requested_mode":"hybrid","effective_mode":"lexical","semantic_weight":0.0,"semantic_fallback_code":"semantic_retrieval_failed","semantic_fallback":"semantic_retrieval_failed","coverage":{"embedded_items":4,"indexed_now":1},"diagnostics":{"query_embed_ms":2}},"results":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider_session_id":"codex-fixture-session","event_seq":1,"title":"Fixture session","snippet":"local agent history search result","rank":1,"retrieval_score":0.98,"result_type":"event","result_scope":"event","provider":"codex","timestamp":"2026-07-01T12:00:00Z","cwd":"/workspace/ctx","source_path":"/tmp/ctx-sdk-fixture/session.jsonl","source_exists":true,"cursor":"line:2","why_matched":["text"],"citations":[{"target_type":"event","ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","label":"codex event","provider":"codex","source_path":"/tmp/ctx-sdk-fixture/session.jsonl","source_exists":true,"cursor":"line:2"}],"suggested_next_commands":["ctx show event 11111111-1111-4111-8111-111111111111 --window 10","ctx locate event 11111111-1111-4111-8111-111111111111","ctx search 'local agent history' --session 22222222-2222-4222-8222-222222222222","ctx show session 22222222-2222-4222-8222-222222222222","ctx locate session 22222222-2222-4222-8222-222222222222"],"visibility":"local_only"}],"result_window":{"limit":1,"returned":1,"more_available":true},"truncation":{"truncated":false}}"#
-    private static let eventJSON = #"{"event":{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","source":"codex","cursor":"line:2","text":"local agent history search result","redaction_state":"redacted"},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","source":"codex","cursor":"line:2","text":"local agent history search result","redaction_state":"redacted"}],"source":{"path":"/tmp/ctx-sdk-fixture/session.jsonl","cursor":"line:2","exists":true,"source_id":"33333333-3333-4333-8333-333333333333","source_format":"codex_session_jsonl"}}"#
-    private static let sessionJSON = #"{"session":{"ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","title":"Fixture session"},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","sequence":1,"event_type":"message","role":"assistant","text":"local agent history search result"}],"source":{"path":"/tmp/ctx-sdk-fixture/session.jsonl","exists":true,"source_format":"codex_session_jsonl"},"mode":"lite","format":"json"}"#
-    private static let locationJSON = #"{"ctx_session_id":"22222222-2222-4222-8222-222222222222","ctx_event_id":"11111111-1111-4111-8111-111111111111","provider":"codex","provider_session_id":"codex-fixture-session","source":{"path":"/tmp/ctx-sdk-fixture/session.jsonl","cursor":"line:2","exists":true,"source_id":"33333333-3333-4333-8333-333333333333","source_format":"codex_session_jsonl"},"resume":{"cursor":"line:2"}}"#
+    private static let searchJSON = #"{"query":"local agent history","filters":{"provider":"codex"},"freshness":{"mode":"off","status":"skipped","source_count":0,"totals":{"imported_events":0}},"generated_at":"2026-07-01T12:00:00Z","retrieval":{"requested_mode":"hybrid","effective_mode":"lexical","semantic_weight":0.0,"semantic_fallback_code":"semantic_retrieval_failed","semantic_fallback":"semantic_retrieval_failed","coverage":{"embedded_items":4,"indexed_now":1},"diagnostics":{"query_embed_ms":2}},"results":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","event_seq":1,"title":"Fixture session","snippet":"local agent history search result","rank":1,"retrieval_score":0.98,"result_type":"event","result_scope":"event","provider":"codex","timestamp":"2026-07-01T12:00:00Z","cwd":"/workspace/ctx","why_matched":["text"],"citations":[{"target_type":"event","ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","label":"codex event","provider":"codex"}],"suggested_next_commands":["ctx show event 11111111-1111-4111-8111-111111111111 --window 10","ctx search 'local agent history' --session 22222222-2222-4222-8222-222222222222","ctx show session 22222222-2222-4222-8222-222222222222"],"visibility":"local_only"}],"result_window":{"limit":1,"returned":1,"more_available":true},"truncation":{"truncated":false}}"#
+    private static let eventJSON = #"{"event":{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result","structured_content":{"kind":"toolResult","payload":{"items":["alpha",null,{"nested":[1,false]}]}},"content":{"complete":true,"policy_status":"selected"}},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result","structured_content":null,"content":{"complete":true,"policy_status":"selected"}}]}"#
+    private static let sessionJSON = #"{"session":{"ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","title":"Fixture session"},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","text":"local agent history search result","content":{"complete":true,"policy_status":"selected"}}],"mode":"lite","format":"json"}"#
 }
 
 private final class CapturingRunner: CommandRunner, @unchecked Sendable {

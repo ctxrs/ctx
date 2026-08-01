@@ -1,6 +1,10 @@
 use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
-use ctx_history_relational::{CommittedCoreGeneration, SourceBackedRelationalProjection};
+use ctx_history_relational::{
+    CommittedCoreGeneration, RelationalSourceHealth, RelationalSourceMetadata,
+    SourceBackedRelationalProjection,
+};
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -83,12 +87,27 @@ pub(crate) fn initialize_generation_only_sql_projection(data_root: &Path) -> Str
     let verified = VerifiedIndex::open(index_root).unwrap();
     assert_eq!(verified.generation_id(), core_receipt.generation_id);
 
+    let manifest = verified.manifest();
+    let sources = manifest
+        .sources
+        .iter()
+        .map(|certificate| RelationalSourceMetadata {
+            source: certificate.observation().source().clone(),
+            parser_revision: certificate.parser_revision().to_owned(),
+            revision_digest: Sha256::digest(serde_json::to_vec(certificate).unwrap()).into(),
+            indexed_event_count: certificate.counts().indexed_documents,
+            health: RelationalSourceHealth::Ready,
+        })
+        .collect();
     let generation = CommittedCoreGeneration {
-        generation_id: core_receipt.generation_id.clone(),
-        manifest_json: serde_json::to_vec(verified.manifest()).unwrap(),
-        indexed_documents: core_receipt.indexed_documents,
-        certified_sources: core_receipt.certified_sources,
-        certified_source_bytes: core_receipt.certified_source_bytes,
+        generation_id: verified.generation_id().to_owned(),
+        manifest_version: manifest.manifest_version,
+        core_record_version: manifest.core_record_version,
+        core_record_contract_fingerprint: manifest.core_record_contract_fingerprint.clone(),
+        lexical_schema_version: manifest.lexical_schema_version,
+        policy_schema_hash: manifest.policy_schema_hash.clone(),
+        indexed_documents: manifest.indexed_documents,
+        sources,
     };
     let mut projection =
         SourceBackedRelationalProjection::open(data_root.join("relational.sqlite")).unwrap();

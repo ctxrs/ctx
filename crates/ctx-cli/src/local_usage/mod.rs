@@ -82,7 +82,6 @@ pub(crate) enum ResultObservationAction {
     Search,
     OpenSession,
     OpenEvent,
-    Locate,
     Sources,
     Sql,
     Blame,
@@ -330,7 +329,6 @@ impl CliUsage {
                 }),
                 TargetType::NotApplicable,
             ),
-            CommandRoot::Locate(_) => (Some("locate"), TargetType::NotApplicable),
             CommandRoot::Search(_) => (Some("search"), TargetType::NotApplicable),
             CommandRoot::Pro(args) => (
                 Some(args.local_usage_operation()),

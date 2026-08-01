@@ -23,18 +23,16 @@ use crate::{
             source::{visit_mux_session_sources, MuxSessionSource},
         },
         source_backed::family::jsonl::{
-            observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator,
-            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation,
+            observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
+            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation,
         },
     },
     CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES, MUX_SOURCE_FORMAT,
 };
 
 mod projection;
-mod resolver;
 
 use projection::MuxProjector;
-use resolver::MuxHydrator;
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "mux.session";
 const NATIVE_SESSION_NAMESPACE: &str = "mux.session";
@@ -187,19 +185,6 @@ impl JsonlFamilyAdapter for MuxJsonlAdapter {
             Arc::clone(leaf.authority()),
             decode_binding(leaf)?,
         )))
-    }
-
-    fn hydrator(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        source_file: Arc<OpenedProviderSourceFile>,
-    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, ctx_history_core::HydrationFailure> {
-        Ok(Box::new(MuxHydrator::new(
-            leaf.source().clone(),
-            Arc::clone(leaf.authority()),
-            decode_binding(leaf).map_err(resolver::unavailable)?,
-            source_file,
-        )?))
     }
 }
 
@@ -384,6 +369,3 @@ fn relative_to_authority(authority: &ProviderSourceRoot, path: &Path) -> Result<
 fn contract(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
 }
-
-#[cfg(test)]
-mod tests;

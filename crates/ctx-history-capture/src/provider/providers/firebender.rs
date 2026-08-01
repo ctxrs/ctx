@@ -5,20 +5,17 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{EventRole, EventType};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::{
-    provider::normalization::{
-        provider_policy_body, provider_policy_event_text, provider_result_identifier_evidence,
-        provider_result_outcome_evidence, provider_role, provider_timestamp_value,
-    },
-    CaptureError, Result, FIREBENDER_SQLITE_SOURCE_FORMAT,
+    provider::normalization::{provider_role, provider_timestamp_value},
+    CaptureError, Result,
 };
 
 mod message_text;
 pub(crate) mod native_path;
 
-pub(crate) use message_text::firebender_message_text;
+pub(crate) use message_text::{firebender_message_text, firebender_result_content};
 
 pub(crate) fn firebender_chat_history_db_path(path: &Path) -> Result<PathBuf> {
     match fs::symlink_metadata(path) {
@@ -165,61 +162,14 @@ fn error_value_is_present(value: &Value) -> bool {
     }
 }
 
-pub(crate) struct FirebenderNativeEvent {
-    pub(crate) provider_event_index: u64,
-    pub(crate) provider_event_hash: Option<String>,
-    pub(crate) cursor: String,
-    pub(crate) event_type: EventType,
-    pub(crate) payload: Value,
-}
-
-pub(crate) fn firebender_native_event(
-    provider_session_id: &str,
-    provider_event_index: u64,
-    message: &Value,
-    occurred_at: DateTime<Utc>,
-) -> FirebenderNativeEvent {
-    let event = firebender_event_parts(
-        provider_session_id,
-        provider_event_index,
-        message,
-        occurred_at,
-    );
-    let retained_text = provider_policy_event_text(event.event_type, &event.text, &event.body);
-    let retained_body = provider_policy_body(event.event_type, &event.body);
-    let result_evidence =
-        provider_result_identifier_evidence(event.event_type, &event.text, &event.body);
-    let result_outcome = provider_result_outcome_evidence(event.event_type, &event.body);
-    FirebenderNativeEvent {
-        provider_event_index: event.provider_event_index,
-        provider_event_hash: event.provider_event_hash,
-        cursor: event.cursor,
-        event_type: event.event_type,
-        payload: json!({
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "result_evidence": result_evidence,
-            "result_outcome": result_outcome,
-            "source_format": FIREBENDER_SQLITE_SOURCE_FORMAT,
-            "body": retained_body,
-        }),
-    }
-}
-
-struct FirebenderEventParts {
-    provider_event_index: u64,
-    provider_event_hash: Option<String>,
-    cursor: String,
+pub(super) struct FirebenderEventParts {
     event_type: EventType,
     role: Option<EventRole>,
     occurred_at: DateTime<Utc>,
     text: String,
-    body: Value,
 }
 
-fn firebender_event_parts(
-    provider_session_id: &str,
-    provider_event_index: u64,
+pub(super) fn firebender_event_parts(
     message: &Value,
     occurred_at: DateTime<Utc>,
 ) -> FirebenderEventParts {
@@ -240,19 +190,10 @@ fn firebender_event_parts(
         EventType::Message
     };
     FirebenderEventParts {
-        provider_event_index,
-        provider_event_hash: message
-            .get("id")
-            .or_else(|| message.get("tool_call_id"))
-            .or_else(|| message.get("toolCallId"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        cursor: format!("chat_sessions:{provider_session_id}:message:{provider_event_index}"),
         event_type,
         role: Some(provider_role(role)),
         occurred_at,
         text: firebender_message_text(message)
             .unwrap_or_else(|| format!("Firebender {}", role.unwrap_or("message"))),
-        body: message.clone(),
     }
 }

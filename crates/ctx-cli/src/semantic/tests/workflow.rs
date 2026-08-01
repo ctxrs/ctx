@@ -315,7 +315,6 @@ fn foreground_query_preempts_daemon_background_jobs() -> Result<()> {
     let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let _hooks = install_test_daemon_jobs(
         calls.clone(),
-        Some(daemon_history_completed_test_job()),
         Some(daemon_semantic_indexed_test_job(temp.path())),
     );
     let activity = Arc::new(DaemonQueryActivity::new());
@@ -337,6 +336,6 @@ fn foreground_query_preempts_daemon_background_jobs() -> Result<()> {
     assert!(!iteration.did_work);
     assert!(!iteration.failed);
     assert!(calls.borrow().is_empty());
-    assert!(!daemon_source_backed_refresh_job_path(temp.path()).exists());
+    assert!(!daemon_core_refresh_job_path(temp.path()).exists());
     Ok(())
 }

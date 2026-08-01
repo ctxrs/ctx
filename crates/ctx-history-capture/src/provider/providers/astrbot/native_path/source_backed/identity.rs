@@ -1,10 +1,9 @@
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, EventIdentityInput, EventRole, EventType,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    SessionIdentityInput, SourceKey, SourceRecordLocator, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CoreRecord, EventIdentityInput, EventRole,
+    EventType, NativeItemKey, NativeSessionKey, SessionIdentityInput, SourceKey, StableEntityId,
+    TypedKey, MAX_CORE_CONTENT_BYTES,
 };
-use ctx_history_index::LexicalDocument;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -12,9 +11,8 @@ use crate::native_source::NativeSqliteValue;
 
 use super::super::super::model::item_id;
 use super::{
-    discovery::AstrBotSourceBackedSourceV0, AstrBotSourceBackedErrorV0,
-    AstrBotSourceBackedResultV0, CONVERSATION_MESSAGE_RELATION, CONVERSATION_OUTPUT_RELATION,
-    LOGICAL_EVENT_KIND, LOGICAL_SESSION_KIND, PLATFORM_MESSAGE_RELATION, SESSION_NAMESPACE,
+    discovery::AstrBotSourceBackedSourceV0, AstrBotSourceBackedResultV0, LOGICAL_EVENT_KIND,
+    LOGICAL_SESSION_KIND, PARSER_REVISION, SESSION_NAMESPACE,
 };
 
 #[derive(Debug)]
@@ -31,29 +29,39 @@ pub(super) struct EventFact {
     pub(super) occurred_at: DateTime<Utc>,
 }
 
-pub(super) fn conversation_native_item_key(
+fn conversation_native_identity(
     physical_rowid: i64,
     item_index: usize,
     item: Option<&Value>,
     revision_scope: &TypedKey,
-) -> AstrBotSourceBackedResultV0<NativeItemKey> {
+) -> AstrBotSourceBackedResultV0<(NativeItemKey, TypedKey)> {
     if let Some(native_id) = item.and_then(item_id) {
-        Ok(NativeItemKey::composite(
-            "astrbot.conversation-item",
-            vec![TypedKey::I64(physical_rowid), TypedKey::utf8(native_id)?],
-        )?)
+        let parts = vec![TypedKey::I64(physical_rowid), TypedKey::utf8(native_id)?];
+        let native_event_id = TypedKey::composite(parts.clone())?;
+        Ok((
+            NativeItemKey::composite("astrbot.conversation-item", parts)?,
+            native_event_id,
+        ))
     } else {
-        Ok(NativeItemKey::revision_scoped_position(
-            "astrbot.conversation-position",
-            TypedKey::composite(vec![
-                TypedKey::I64(physical_rowid),
-                TypedKey::U64(
-                    u64::try_from(item_index)
-                        .map_err(|_| AstrBotSourceBackedErrorV0::CountOverflow)?,
-                ),
-            ])?,
+        let item_index = u64::try_from(item_index)
+            .map_err(|_| super::AstrBotSourceBackedErrorV0::CountOverflow)?;
+        let coordinate = TypedKey::composite(vec![
+            TypedKey::I64(physical_rowid),
+            TypedKey::U64(item_index),
+        ])?;
+        let native_event_id = TypedKey::composite(vec![
+            TypedKey::I64(physical_rowid),
+            TypedKey::U64(item_index),
             revision_scope.clone(),
-        )?)
+        ])?;
+        Ok((
+            NativeItemKey::revision_scoped_position(
+                "astrbot.conversation-position",
+                coordinate,
+                revision_scope.clone(),
+            )?,
+            native_event_id,
+        ))
     }
 }
 
@@ -97,11 +105,11 @@ pub(super) fn conversation_document(
     session: &SessionFact,
     event: &EventFact,
     complete_text: &str,
-) -> AstrBotSourceBackedResultV0<LexicalDocument> {
+) -> AstrBotSourceBackedResultV0<CoreRecord> {
     let session_id = stable_session_id(&source.source_key, &session.provider_session_id)?;
     let revision_scope = TypedKey::bytes(row_digest.to_vec())?;
-    let native_item_key =
-        conversation_native_item_key(physical_rowid, item_index, item, &revision_scope)?;
+    let (native_item_key, native_event_id) =
+        conversation_native_identity(physical_rowid, item_index, item, &revision_scope)?;
     let event_id = derive_event_id(EventIdentityInput {
         source: &source.source_key,
         session_id,
@@ -109,66 +117,41 @@ pub(super) fn conversation_document(
         native_item_key: &native_item_key,
         subrecord_selector: None,
     })?;
-    let logical_relation = if event.event_type == EventType::Message {
-        CONVERSATION_MESSAGE_RELATION
-    } else {
-        CONVERSATION_OUTPUT_RELATION
-    };
-    let locator = SourceRecordLocator::new(
-        source.source_key.clone(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation: logical_relation.to_owned(),
-            primary_key: TypedKey::composite(vec![
-                TypedKey::I64(physical_rowid),
-                TypedKey::U64(
-                    u64::try_from(item_index)
-                        .map_err(|_| AstrBotSourceBackedErrorV0::CountOverflow)?,
-                ),
-            ])?,
-            row_version: Some(TypedKey::bytes(row_digest.to_vec())?),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        Sha256::digest(complete_text.as_bytes()).into(),
-    )?;
-    Ok(LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.source_key.clone(),
-        locator,
-        provider_session_id: Some(session.provider_session_id.clone()),
-        branch: None,
-        source_path: Some(source.path.to_string_lossy().into_owned()),
-        agent_type: AgentType::Primary.as_str().to_owned(),
-        is_primary: true,
-        event_sequence: event.source_record_ordinal,
-        occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
-        event_type: event.event_type.as_str().to_owned(),
-        role: event.role.map(|role| role.as_str().to_owned()),
-        body: complete_text.to_owned(),
-        workspace: None,
-        cwd: None,
-        touched_files: Vec::new(),
-    })
+        session_id,
+        source.source_key.clone(),
+        event.source_record_ordinal,
+        event.event_type.as_str(),
+        AgentType::Primary.as_str(),
+        true,
+        PARSER_REVISION,
+        complete_text,
+    )?;
+    record.provider_session_id = Some(session.provider_session_id.clone());
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = Some(event.occurred_at.timestamp_millis());
+    record.role = event.role.map(|role| role.as_str().to_owned());
+    record.content.structured_content =
+        item.and_then(|value| structured_content(complete_text, value));
+    record.validate_contract()?;
+    Ok(record)
 }
 
-// These eight values are the explicit certified identity and projection inputs;
-// bundling them would only obscure the provider-local contract.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn platform_document(
     source: &AstrBotSourceBackedSourceV0,
-    physical_rowid: i64,
     logical_id: i64,
-    row_digest: [u8; 32],
     session: &SessionFact,
     event: &EventFact,
     complete_text: &str,
-) -> AstrBotSourceBackedResultV0<LexicalDocument> {
+    provider_content: &Value,
+) -> AstrBotSourceBackedResultV0<CoreRecord> {
     let session_id = stable_session_id(&source.source_key, &session.provider_session_id)?;
+    let native_event_id = TypedKey::I64(logical_id);
     let native_item_key =
-        NativeItemKey::native_id("astrbot.platform-message", TypedKey::I64(logical_id))?;
+        NativeItemKey::native_id("astrbot.platform-message", native_event_id.clone())?;
     let event_id = derive_event_id(EventIdentityInput {
         source: &source.source_key,
         session_id,
@@ -176,41 +159,36 @@ pub(super) fn platform_document(
         native_item_key: &native_item_key,
         subrecord_selector: None,
     })?;
-    let locator = SourceRecordLocator::new(
-        source.source_key.clone(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation: PLATFORM_MESSAGE_RELATION.to_owned(),
-            primary_key: TypedKey::composite(vec![
-                TypedKey::I64(physical_rowid),
-                TypedKey::I64(logical_id),
-            ])?,
-            row_version: Some(TypedKey::bytes(row_digest.to_vec())?),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        Sha256::digest(complete_text.as_bytes()).into(),
-    )?;
-    Ok(LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.source_key.clone(),
-        locator,
-        provider_session_id: Some(session.provider_session_id.clone()),
-        branch: None,
-        source_path: Some(source.path.to_string_lossy().into_owned()),
-        agent_type: AgentType::Primary.as_str().to_owned(),
-        is_primary: true,
-        event_sequence: event.source_record_ordinal,
-        occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
-        event_type: event.event_type.as_str().to_owned(),
-        role: event.role.map(|role| role.as_str().to_owned()),
-        body: complete_text.to_owned(),
-        workspace: None,
-        cwd: None,
-        touched_files: Vec::new(),
-    })
+        session_id,
+        source.source_key.clone(),
+        event.source_record_ordinal,
+        event.event_type.as_str(),
+        AgentType::Primary.as_str(),
+        true,
+        PARSER_REVISION,
+        complete_text,
+    )?;
+    record.provider_session_id = Some(session.provider_session_id.clone());
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = Some(event.occurred_at.timestamp_millis());
+    record.role = event.role.map(|role| role.as_str().to_owned());
+    record.content.structured_content = structured_content(complete_text, provider_content);
+    record.validate_contract()?;
+    Ok(record)
+}
+
+fn structured_content(body: &str, value: &Value) -> Option<Value> {
+    if !matches!(value, Value::Array(_) | Value::Object(_)) {
+        return None;
+    }
+    let encoded = serde_json::to_vec(value).ok()?;
+    body.len()
+        .checked_add(encoded.len())
+        .filter(|bytes| *bytes <= MAX_CORE_CONTENT_BYTES)
+        .map(|_| value.clone())
 }
 
 pub(super) fn stable_session_id(

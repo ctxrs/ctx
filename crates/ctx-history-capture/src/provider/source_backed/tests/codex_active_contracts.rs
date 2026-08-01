@@ -37,15 +37,22 @@ fn active_source_family_contract_explicit_codex_append_catches_up() {
     .unwrap();
     assert_eq!(cold.commit.indexed_documents, 1);
     let source = cold.sources[0].observation().source().clone();
-    let first = VerifiedIndex::open(&index)
-        .unwrap()
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let first = verified
         .source_event_page(&source, None, 8)
         .unwrap()
         .items
         .into_iter()
         .next()
         .unwrap();
-    let first_request = EventHydrationRequest::new(first.event_id, first.locator).unwrap();
+    let first_core = verified
+        .core_record_by_id(first.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first_core.content.normalized_body.as_deref(),
+        Some("explicitfrozenmarker")
+    );
 
     let append = codex_rollout_bytes(native_session_id, &["discarded", "explicitappendmarker"]);
     let second_line = append
@@ -62,14 +69,6 @@ fn active_source_family_contract_explicit_codex_append_catches_up() {
     super::super::set_after_explicit_codex_stage_hook(move |counters| {
         *captured_counters.lock().unwrap() = Some(counters);
     });
-    assert_eq!(
-        registry
-            .resolver_registry()
-            .hydrate_event(&first_request)
-            .unwrap()
-            .provider_bytes,
-        b"explicitfrozenmarker"
-    );
     let appended = refresh_source_backed_generation(
         &index,
         &registry,

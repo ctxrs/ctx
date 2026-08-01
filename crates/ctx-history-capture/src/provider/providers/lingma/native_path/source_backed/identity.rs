@@ -1,12 +1,10 @@
 use chrono::{DateTime, Duration, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, EventIdentityInput, EventRole, EventType,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    ProjectionContractError, SessionIdentityInput, SourceKey, SourceRecordLocator, StableEntityId,
-    SubrecordSelector, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CoreRecord, EventIdentityInput, EventRole,
+    EventType, NativeItemKey, NativeSessionKey, ProjectionContractError, SessionIdentityInput,
+    SourceKey, StableEntityId, SubrecordSelector, TypedKey, MAX_CORE_CONTENT_BYTES,
 };
-use ctx_history_index::LexicalDocument;
-use sha2::{Digest, Sha256};
+use serde_json::Value;
 
 use super::super::{
     records::{assistant_text, lingma_timestamp},
@@ -14,27 +12,15 @@ use super::super::{
 };
 use super::{
     LingmaSourceBackedErrorV0, LingmaSourceBackedResultV0, ASSISTANT_ERROR_COORDINATE,
-    ASSISTANT_SUMMARY_COORDINATE, LOGICAL_EVENT_KIND, LOGICAL_RELATION, LOGICAL_SESSION_KIND,
-    NATIVE_POSITION_KIND, NATIVE_REQUEST_NAMESPACE, NATIVE_SESSION_NAMESPACE,
-    NATIVE_SUBRECORD_NAMESPACE, USER_PROMPT_COORDINATE,
+    ASSISTANT_SUMMARY_COORDINATE, LOGICAL_EVENT_KIND, LOGICAL_SESSION_KIND, NATIVE_POSITION_KIND,
+    NATIVE_REQUEST_NAMESPACE, NATIVE_SESSION_NAMESPACE, NATIVE_SUBRECORD_NAMESPACE,
+    PARSER_REVISION, USER_PROMPT_COORDINATE,
 };
 
 struct ProjectedEvent {
     event_type: EventType,
     role: EventRole,
     occurred_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct LingmaSourceBackedRecordV0 {
-    pub(super) document: LexicalDocument,
-}
-
-impl LingmaSourceBackedRecordV0 {
-    #[cfg(test)]
-    pub(crate) fn document(&self) -> &LexicalDocument {
-        &self.document
-    }
 }
 
 pub(super) struct ParsedRow {
@@ -46,9 +32,8 @@ pub(super) struct ParsedRow {
 
 pub(super) fn project_row(
     source: &SourceKey,
-    source_path: &str,
     parsed: ParsedRow,
-    records: &mut Vec<LingmaSourceBackedRecordV0>,
+    records: &mut Vec<CoreRecord>,
 ) -> LingmaSourceBackedResultV0<()> {
     let session_key = NativeSessionKey::native_id(
         NATIVE_SESSION_NAMESPACE,
@@ -71,10 +56,9 @@ pub(super) fn project_row(
         session_id,
         &parsed.row,
         &native_identity,
-        parsed.record_digest,
         user_sequence,
         USER_PROMPT_COORDINATE,
-        source_path,
+        &parsed.row.chat_prompt,
         &parsed.row.chat_prompt,
         user_event,
     )?);
@@ -101,11 +85,14 @@ pub(super) fn project_row(
             session_id,
             &parsed.row,
             &native_identity,
-            parsed.record_digest,
             user_sequence.saturating_add(1),
             coordinate,
-            source_path,
             &logical_text,
+            if body_kind == "summary" {
+                parsed.row.summary.as_deref().unwrap_or_default()
+            } else {
+                parsed.row.error_result.as_deref().unwrap_or_default()
+            },
             assistant_event,
         )?);
     }
@@ -158,13 +145,12 @@ fn project_event(
     session_id: StableEntityId,
     row: &LingmaRow,
     native_identity: &LingmaNativeItemIdentity,
-    record_digest: [u8; 32],
     event_sequence: u64,
     coordinate_kind: &'static str,
-    source_path: &str,
     logical_text: &str,
+    provider_content: &str,
     event: ProjectedEvent,
-) -> LingmaSourceBackedResultV0<LingmaSourceBackedRecordV0> {
+) -> LingmaSourceBackedResultV0<CoreRecord> {
     let subrecord =
         SubrecordSelector::native_id(NATIVE_SUBRECORD_NAMESPACE, TypedKey::utf8(coordinate_kind)?)?;
     let event_id = derive_event_id(EventIdentityInput {
@@ -174,45 +160,42 @@ fn project_event(
         native_item_key: &native_identity.item_key,
         subrecord_selector: Some(&subrecord),
     })?;
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation: LOGICAL_RELATION.to_owned(),
-            primary_key: TypedKey::composite(vec![
-                TypedKey::I64(row.rowid),
-                TypedKey::utf8(coordinate_kind)?,
-                native_identity.coordinate.clone(),
-            ])?,
-            row_version: Some(TypedKey::bytes(record_digest.to_vec())?),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        Sha256::digest(logical_text.as_bytes()).into(),
-    )?;
     if logical_text.is_empty() {
-        return Err(LingmaSourceBackedErrorV0::EmptyLexicalBody);
+        return Err(LingmaSourceBackedErrorV0::EmptySelectedBody);
     }
-    Ok(LingmaSourceBackedRecordV0 {
-        document: LexicalDocument {
-            event_id,
-            session_id,
-            parent_session_id: None,
-            root_session_id: session_id,
-            source: source.clone(),
-            locator,
-            provider_session_id: Some(row.session_id.clone()),
-            branch: None,
-            source_path: Some(source_path.to_owned()),
-            agent_type: "primary".to_owned(),
-            is_primary: true,
-            event_sequence,
-            occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
-            event_type: event.event_type.as_str().to_owned(),
-            role: Some(event.role.as_str().to_owned()),
-            body: logical_text.to_owned(),
-            workspace: None,
-            cwd: None,
-            touched_files: Vec::new(),
-        },
-    })
+    let native_event_id = TypedKey::composite(vec![
+        native_identity.coordinate.clone(),
+        TypedKey::utf8(coordinate_kind)?,
+    ])?;
+    let mut record = CoreRecord::new_selected(
+        event_id,
+        session_id,
+        session_id,
+        source.clone(),
+        event_sequence,
+        event.event_type.as_str(),
+        AgentType::Primary.as_str(),
+        true,
+        PARSER_REVISION,
+        logical_text,
+    )?;
+    record.provider_session_id = Some(row.session_id.clone());
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = Some(event.occurred_at.timestamp_millis());
+    record.role = Some(event.role.as_str().to_owned());
+    record.content.structured_content = structured_content(logical_text, provider_content);
+    record.validate_contract()?;
+    Ok(record)
+}
+
+fn structured_content(body: &str, provider_content: &str) -> Option<Value> {
+    let value = serde_json::from_str::<Value>(provider_content).ok()?;
+    if !matches!(value, Value::Array(_) | Value::Object(_)) {
+        return None;
+    }
+    let encoded = serde_json::to_vec(&value).ok()?;
+    body.len()
+        .checked_add(encoded.len())
+        .filter(|bytes| *bytes <= MAX_CORE_CONTENT_BYTES)
+        .map(|_| value)
 }

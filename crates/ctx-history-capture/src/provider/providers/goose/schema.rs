@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
-use crate::native_source::NativeSqliteValue;
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, sqlite_ident, sqlite_table_columns, sqlite_table_exists,
 };
@@ -36,19 +35,6 @@ pub(super) struct GooseSessionRow {
     pub(super) project_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct GooseMessageRow {
-    pub(super) rowid: i64,
-    pub(super) id: i64,
-    pub(super) message_id: Option<String>,
-    pub(super) session_id: String,
-    pub(super) role: String,
-    pub(super) content_json: String,
-    pub(super) created_timestamp: Option<i64>,
-    pub(super) timestamp: Option<String>,
-    pub(super) tokens: Option<String>,
-    pub(super) metadata_json: Option<String>,
-}
 pub(super) fn goose_session_columns(conn: &Connection) -> Result<BTreeSet<String>> {
     if !sqlite_table_exists(conn, "sessions")? {
         return Err(CaptureError::InvalidPayload(
@@ -158,140 +144,6 @@ pub(super) fn goose_session_expressions(
         goose_optional_field(columns, alias, "archived_at", "NULL"),
         goose_optional_field(columns, alias, "project_id", "NULL"),
     ])
-}
-
-pub(super) fn goose_message_expressions(
-    columns: &BTreeSet<String>,
-    alias: &str,
-) -> GooseSqlExpressions {
-    let id = if columns.contains("id") {
-        format!("{alias}.id")
-    } else {
-        format!("{alias}.rowid")
-    };
-    let tokens = if columns.contains("tokens") {
-        GooseSqlFieldExpressions::same(format!("CAST({alias}.tokens AS TEXT)"))
-    } else {
-        GooseSqlFieldExpressions::same("NULL".to_owned())
-    };
-    goose_sql_expressions([
-        GooseSqlFieldExpressions::same(format!("{alias}.rowid")),
-        GooseSqlFieldExpressions::same(id),
-        goose_optional_field(columns, alias, "message_id", "NULL"),
-        GooseSqlFieldExpressions::same(format!("CAST({alias}.session_id AS TEXT)")),
-        GooseSqlFieldExpressions::same(format!("{alias}.role")),
-        GooseSqlFieldExpressions::same(format!("{alias}.content_json")),
-        goose_optional_field(columns, alias, "created_timestamp", "NULL"),
-        goose_optional_field(columns, alias, "timestamp", "NULL"),
-        tokens,
-        goose_optional_field(columns, alias, "metadata_json", "NULL"),
-    ])
-}
-
-pub(super) fn goose_message_values_at(
-    row: &rusqlite::Row<'_>,
-    offset: usize,
-) -> rusqlite::Result<Vec<NativeSqliteValue>> {
-    Ok(vec![
-        NativeSqliteValue::Integer(row.get(offset)?),
-        NativeSqliteValue::Integer(row.get(offset + 1)?),
-        goose_optional_text_value(row.get(offset + 2)?),
-        NativeSqliteValue::Text(row.get(offset + 3)?),
-        NativeSqliteValue::Text(row.get(offset + 4)?),
-        NativeSqliteValue::Text(row.get(offset + 5)?),
-        goose_optional_integer_value(row.get(offset + 6)?),
-        goose_optional_text_value(row.get(offset + 7)?),
-        goose_optional_text_value(row.get(offset + 8)?),
-        goose_optional_text_value(row.get(offset + 9)?),
-    ])
-}
-
-fn goose_optional_text_value(value: Option<String>) -> NativeSqliteValue {
-    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Text)
-}
-
-fn goose_optional_integer_value(value: Option<i64>) -> NativeSqliteValue {
-    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer)
-}
-
-pub(super) fn decode_goose_message_record(
-    values: &[NativeSqliteValue],
-) -> Result<(Option<i64>, GooseMessageRow)> {
-    if values.len() != GOOSE_MESSAGE_VALUE_COUNT + 1 {
-        return Err(CaptureError::InvalidPayload(
-            "Goose message logical row has an unexpected value count".to_owned(),
-        ));
-    }
-    let parent_rowid = goose_optional_integer(values, 0, "message parent rowid")?;
-    let message = GooseMessageRow {
-        rowid: goose_required_integer(values, 1, "message rowid")?,
-        id: goose_required_integer(values, 2, "message id")?,
-        message_id: goose_optional_text(values, 3, "message_id")?,
-        session_id: goose_required_text(values, 4, "message session_id")?,
-        role: goose_required_text(values, 5, "message role")?,
-        content_json: goose_required_text(values, 6, "message content_json")?,
-        created_timestamp: goose_optional_integer(values, 7, "message created_timestamp")?,
-        timestamp: goose_optional_text(values, 8, "message timestamp")?,
-        tokens: goose_optional_text(values, 9, "message tokens")?,
-        metadata_json: goose_optional_text(values, 10, "message metadata_json")?,
-    };
-    Ok((parent_rowid, message))
-}
-
-fn goose_value<'a>(
-    values: &'a [NativeSqliteValue],
-    index: usize,
-    field: &str,
-) -> Result<&'a NativeSqliteValue> {
-    values.get(index).ok_or_else(|| {
-        CaptureError::InvalidPayload(format!("Goose logical row is missing {field}"))
-    })
-}
-
-fn goose_required_text(values: &[NativeSqliteValue], index: usize, field: &str) -> Result<String> {
-    match goose_value(values, index, field)? {
-        NativeSqliteValue::Text(value) => Ok(value.clone()),
-        _ => Err(CaptureError::InvalidPayload(format!(
-            "Goose logical row {field} must be text"
-        ))),
-    }
-}
-
-fn goose_optional_text(
-    values: &[NativeSqliteValue],
-    index: usize,
-    field: &str,
-) -> Result<Option<String>> {
-    match goose_value(values, index, field)? {
-        NativeSqliteValue::Null => Ok(None),
-        NativeSqliteValue::Text(value) => Ok(Some(value.clone())),
-        _ => Err(CaptureError::InvalidPayload(format!(
-            "Goose logical row {field} must be text or null"
-        ))),
-    }
-}
-
-fn goose_required_integer(values: &[NativeSqliteValue], index: usize, field: &str) -> Result<i64> {
-    match goose_value(values, index, field)? {
-        NativeSqliteValue::Integer(value) => Ok(*value),
-        _ => Err(CaptureError::InvalidPayload(format!(
-            "Goose logical row {field} must be an integer"
-        ))),
-    }
-}
-
-fn goose_optional_integer(
-    values: &[NativeSqliteValue],
-    index: usize,
-    field: &str,
-) -> Result<Option<i64>> {
-    match goose_value(values, index, field)? {
-        NativeSqliteValue::Null => Ok(None),
-        NativeSqliteValue::Integer(value) => Ok(Some(*value)),
-        _ => Err(CaptureError::InvalidPayload(format!(
-            "Goose logical row {field} must be an integer or null"
-        ))),
-    }
 }
 
 pub(super) fn goose_schema_version(conn: &Connection) -> Result<Option<i64>> {

@@ -8,35 +8,37 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 use super::source::{CodexCheckpointGeneration, CodexSourceIdentity};
 use super::{
     checkpoint::{
-        CodexNativeCheckpoint, CodexPendingToolAuthority, MAX_CODEX_TOOL_CALL_ID_BYTES,
-        MAX_CODEX_TOOL_CONTEXTS,
+        CodexNativeCheckpoint, CodexPendingToolAuthority, MAX_CODEX_CONTINUATION_CELL_ID_BYTES,
+        MAX_CODEX_TOOL_CALL_ID_BYTES, MAX_CODEX_TOOL_CONTEXTS,
     },
     record::{
-        classify_codex_record, parse_decoded_record, parse_session_meta, prefilter_codex_record,
-        CodexRecordAdmission, CodexRecordClass, CodexRecordProbe, CodexResultKind,
-        CodexSkipProjection,
+        classify_codex_record, parse_decoded_record, parse_session_meta, parse_turn_context_cwd,
+        prefilter_codex_record, CodexRecordAdmission, CodexRecordClass, CodexRecordProbe,
+        CodexResultKind, CodexSkipProjection,
     },
     rows::{
         build_source_backed_event_row, build_source_backed_sparse_output_row,
-        source_backed_output_eligibility, CodexEventRow, CodexRetainedNonMaterialized,
-        CodexSessionRow, CodexSourceBackedDocumentEligibility, CodexSourceBackedRowV0,
+        provider_event_identity, source_backed_display_text, source_backed_output_eligibility,
+        CodexEventRow, CodexRetainedNonMaterialized, CodexSessionRow,
+        CodexSourceBackedDocumentEligibility, CodexSourceBackedRowV0,
     },
     source::{CodexAppendProof, CodexCatalogSource, CodexFileObservation},
 };
 use crate::{
     common::io::{open_provider_source_file, OpenedProviderSourceFile},
-    provider::codex::events::CodexToolCallContext,
+    provider::codex::events::{codex_output_content, codex_result_value, CodexToolCallContext},
     provider::file_touches::{
         event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
         MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
     },
-    CaptureError, OutputOutcome, Result,
+    CaptureError, Result,
 };
 #[cfg(test)]
 pub(crate) use checkpoint::install_after_codex_prefix_hash_hook;
@@ -52,6 +54,11 @@ pub(crate) const MAX_CODEX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(test)]
 pub(crate) const MAX_CODEX_PAGE_ROWS: usize = MAX_CODEX_PAGE_UNITS;
 pub(crate) const MAX_CODEX_PAGE_BYTES: usize = 8 * 1024 * 1024;
+// One source-backed row may retain both decoded text and structured/path data
+// derived from a single 16 MiB provider record. The ordinary page bound is a
+// rollover target; this larger envelope is valid only for a singleton row.
+pub(crate) const MAX_CODEX_SOURCE_BACKED_SINGLE_ROW_PAGE_BYTES: usize =
+    PAGE_FIXED_WIRE_BYTES + (MAX_CODEX_RECORD_BYTES * 2) + (1024 * 1024);
 // These stay wire-identical to provider_sources::ordinary_file so a catalog
 // observation can be certified against identity read from the scanner's handle.
 const ORDINARY_FILE_TOKEN_DOMAIN: &[u8] = b"ctx-ordinary-file-observation-v2\0";
@@ -101,7 +108,6 @@ pub(crate) struct CodexScanCounters {
     pub(crate) legacy_row_json_serializations: u64,
     pub(crate) legacy_json_serialized_bytes: u64,
     pub(crate) legacy_file_touch_rows_created: u64,
-    pub(crate) legacy_complete_content_locators_created: u64,
     pub(crate) legacy_page_owner_json_serializations: u64,
     pub(crate) legacy_page_identity_owner_json_serializations: u64,
     pub(crate) legacy_page_identity_row_json_serializations: u64,
@@ -218,6 +224,7 @@ pub(crate) struct CodexNativeScanner {
     owner: Option<CodexSessionRow>,
     tool_contexts: BTreeMap<String, CodexToolCallContext>,
     tool_authorities: BTreeMap<String, CodexPendingToolAuthority>,
+    continuations: BTreeMap<String, String>,
     complete_hasher: Sha256,
     full_hasher: Sha256,
     record_buffer: Vec<u8>,
@@ -264,11 +271,15 @@ impl CodexRecordProjection {
 // to match the 24-byte removal variant would add a per-record heap allocation.
 #[allow(clippy::large_enum_variant)]
 enum CodexContextMutation {
-    Remove(String),
+    Remove(Vec<String>),
+    RegisterContinuation {
+        cell_id: String,
+        origin_call_id: String,
+    },
     SourceBackedRow {
         row: CodexSourceBackedRowV0,
         insert_context: Option<(String, CodexToolCallContext, CodexPendingToolAuthority)>,
-        remove_context: Option<String>,
+        remove_contexts: Vec<String>,
     },
 }
 

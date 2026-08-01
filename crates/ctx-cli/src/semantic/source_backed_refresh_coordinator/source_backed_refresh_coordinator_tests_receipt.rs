@@ -4,7 +4,7 @@ use super::*;
 fn explicit_catalog_request_retains_daemon_metadata_and_authority() {
     let temp = tempfile::tempdir().unwrap();
     let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
     let periodic = coordinator.enqueue_periodic(temp.path()).unwrap();
     let response = coordinator
         .handle_ipc_request(
@@ -65,7 +65,7 @@ fn mismatched_catalog_publication_is_not_recorded_as_verified() {
     let temp = tempfile::tempdir().unwrap();
     let requested = test_catalog_authority(1, 0x11);
     let published = test_catalog_authority(2, 0x22);
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
     let response = coordinator
         .handle_ipc_request(
             temp.path(),
@@ -189,7 +189,7 @@ fn nonempty_explicit_catalog_publication_is_recorded_in_the_terminal_receipt() {
     assert_eq!(publication.published_explicit_source_catalog, authority);
 
     let generation_id = publication.generation_id.clone();
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
     coordinator.enqueue_periodic(&data_root).unwrap();
     let run = coordinator
         .run_next_with(

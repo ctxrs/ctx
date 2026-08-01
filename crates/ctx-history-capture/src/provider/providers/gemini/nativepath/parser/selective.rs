@@ -1,12 +1,12 @@
 use super::*;
 
-mod hydration;
+mod decoding;
 mod output;
 
-use hydration::parse_timestamp;
-pub(super) use hydration::{
-    hydrate_result_record, hydrate_retained_event, nonempty, retained_event_bytes,
-    GeminiHydrationError,
+use decoding::parse_timestamp;
+pub(super) use decoding::{
+    decode_result_record, decode_retained_event, nonempty, retained_event_bytes,
+    GeminiDecodingError,
 };
 use output::*;
 
@@ -207,7 +207,7 @@ struct GeminiHeaderDto {
     directories: Vec<String>,
 }
 
-pub(super) fn hydrate_header(
+pub(super) fn decode_header(
     payload: &[u8],
     layout: &GeminiTranscriptLayout,
 ) -> std::result::Result<GeminiSession, String> {
@@ -232,15 +232,24 @@ pub(super) fn hydrate_header(
         } else {
             path_agent_type
         };
+    let mut directories = header
+        .directories
+        .into_iter()
+        .filter(|directory| !directory.trim().is_empty())
+        .collect::<Vec<_>>();
+    directories.dedup();
+    let (cwd, cwd_ambiguous) = match directories.as_slice() {
+        [] => (None, false),
+        [directory] => (Some(directory.clone()), false),
+        _ => (None, true),
+    };
     Ok(GeminiSession {
         native_session_id: native_session_id.to_owned(),
         parent_native_session_id,
         agent_type,
         started_at: header.start_time.as_deref().and_then(parse_timestamp),
-        cwd: header
-            .directories
-            .into_iter()
-            .find(|directory| !directory.trim().is_empty()),
+        cwd,
+        cwd_ambiguous,
         native_kind: header.kind,
     })
 }
@@ -411,31 +420,41 @@ impl StatusMarker {
     }
 }
 
-#[derive(Debug, Default, Clone)]
-struct GeminiBoundedContent {
-    preview: Option<String>,
-    decoded_bytes: usize,
-    sha256: [u8; 32],
-}
-
 #[derive(Default)]
 enum GeminiSelectedContent {
     #[default]
     Absent,
-    String(GeminiBoundedContent),
+    String {
+        value: String,
+        sha256: [u8; 32],
+    },
     Null,
-    Unsupported,
+    Structured {
+        value: Value,
+        sha256: [u8; 32],
+    },
+}
+
+#[derive(Debug, Default)]
+pub(super) struct GeminiRepositoryArgs {
+    command: Option<String>,
+    command_too_large: bool,
+    declared_workdir: Option<String>,
+    file_paths: Vec<String>,
+    ambiguous_native_fields: bool,
 }
 
 struct ProbedGeminiOutput {
+    result: Option<Value>,
     call_id: Option<String>,
     tool_name: Option<String>,
+    command: Option<String>,
+    command_too_large: bool,
+    declared_workdir: Option<String>,
+    file_paths: Vec<String>,
+    ambiguous_native_fields: bool,
     outcome: OutputOutcomeMetadata,
     redacted: bool,
-    released_diagnostic_preview: Option<String>,
-    content: Option<String>,
-    content_bytes: usize,
-    has_output_content: bool,
     fallback_identity_sha256: [u8; 32],
 }
 
@@ -445,53 +464,46 @@ struct ProbedGeminiResult {
     outputs: Vec<ProbedGeminiOutput>,
 }
 
-pub(super) struct HydratedGeminiResult {
+pub(super) struct DecodedGeminiResult {
     pub(super) events: Vec<(GeminiRetainedEvent, usize)>,
-    pub(super) outputs: Vec<(ProOutputObservation, usize)>,
-    pub(super) output_reservations: Vec<(u32, usize)>,
-    pub(super) decoded_body_bytes: u64,
-    pub(super) failure_diagnostics: usize,
-    pub(super) failure_previews: usize,
 }
 
 const MAX_GEMINI_STRUCTURAL_DEPTH: usize = 128;
 const MAX_GEMINI_STRUCTURAL_KEY_CHARS: usize = 64;
+const MAX_GEMINI_REPOSITORY_STRING_CHARS: usize = 64 * 1024;
+const MAX_GEMINI_REPOSITORY_PATHS: usize = 256;
 
 struct GeminiRawJson<'a> {
     bytes: &'a [u8],
     offset: usize,
-    capture_full_content: bool,
 }
 
 struct GeminiRawString {
     retained: String,
-    decoded_bytes: usize,
     truncated: bool,
     non_whitespace: bool,
     sha256: [u8; 32],
 }
 
 impl GeminiRawString {
-    fn bounded_content(self) -> GeminiBoundedContent {
-        GeminiBoundedContent {
-            preview: Some(self.retained),
-            decoded_bytes: self.decoded_bytes,
-            sha256: self.sha256,
-        }
-    }
-
     fn exact(self) -> Option<String> {
         (!self.truncated).then_some(self.retained)
+    }
+
+    fn bounded_command(self) -> (Option<String>, bool) {
+        let too_large = self.truncated
+            || self.retained.len() > crate::repository_attribution::MAX_COMMAND_BYTES;
+        if too_large {
+            (None, true)
+        } else {
+            (Some(self.retained), false)
+        }
     }
 }
 
 impl<'a> GeminiRawJson<'a> {
-    fn new(bytes: &'a [u8], capture_full_content: bool) -> Self {
-        Self {
-            bytes,
-            offset: 0,
-            capture_full_content,
-        }
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
     }
 
     fn finish(mut self) -> std::result::Result<(), String> {
@@ -548,7 +560,6 @@ impl<'a> GeminiRawJson<'a> {
         let mut retained = String::new();
         let mut retained_chars = 0_usize;
         let mut decoded_chars = 0_usize;
-        let mut decoded_bytes = 0_usize;
         let mut non_whitespace = false;
         let mut hasher = Sha256::new();
         hasher.update(RESULT_STRING_HASH_DOMAIN);
@@ -561,7 +572,6 @@ impl<'a> GeminiRawJson<'a> {
                     self.offset = self.offset.saturating_add(1);
                     return Ok(GeminiRawString {
                         retained,
-                        decoded_bytes,
                         truncated: retained_chars < decoded_chars,
                         non_whitespace,
                         sha256: hasher.finalize().into(),
@@ -590,9 +600,6 @@ impl<'a> GeminiRawJson<'a> {
                             ));
                         }
                     };
-                    decoded_bytes = decoded_bytes
-                        .checked_add(character.len_utf8())
-                        .ok_or_else(|| "Gemini result string length overflowed".to_owned())?;
                     let mut encoded = [0_u8; 4];
                     hasher.update(character.encode_utf8(&mut encoded).as_bytes());
                     decoded_chars = decoded_chars.saturating_add(1);
@@ -616,9 +623,6 @@ impl<'a> GeminiRawJson<'a> {
                         self.offset = self.offset.saturating_add(1);
                     }
                     let run = &self.bytes[start..self.offset];
-                    decoded_bytes = decoded_bytes
-                        .checked_add(run.len())
-                        .ok_or_else(|| "Gemini result string length overflowed".to_owned())?;
                     hasher.update(run);
                     decoded_chars = decoded_chars.saturating_add(run.len());
                     non_whitespace |= run.iter().any(|byte| !byte.is_ascii_whitespace());
@@ -653,9 +657,6 @@ impl<'a> GeminiRawJson<'a> {
                         .and_then(|value| value.chars().next())
                         .ok_or_else(|| "Gemini result JSON string is not UTF-8".to_owned())?;
                     self.offset = end;
-                    decoded_bytes = decoded_bytes
-                        .checked_add(character.len_utf8())
-                        .ok_or_else(|| "Gemini result string length overflowed".to_owned())?;
                     hasher.update(encoded);
                     decoded_chars = decoded_chars.saturating_add(1);
                     non_whitespace |= !character.is_whitespace();
@@ -712,11 +713,9 @@ impl<'a> GeminiRawJson<'a> {
         self.whitespace();
         if self.peek() == Some(b'"') {
             return self
-                .string(usize::MAX)?
+                .string(MAX_GEMINI_REPOSITORY_STRING_CHARS)?
                 .exact()
-                .ok_or_else(|| {
-                    "Gemini result metadata string exceeded addressable memory".to_owned()
-                })
+                .ok_or_else(|| "Gemini result metadata string exceeded the bound".to_owned())
                 .map(Some);
         }
         self.skip_value(0)?;

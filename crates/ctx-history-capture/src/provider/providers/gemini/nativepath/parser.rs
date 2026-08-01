@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::{AgentType, EventRole, EventType};
 use serde::{
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
-    Deserialize, Deserializer, Serialize,
+    Deserialize, Deserializer,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -19,9 +19,8 @@ use sha2::{Digest, Sha256};
 use std::cell::Cell;
 
 use crate::{
-    CaptureError, OutputAssociations, OutputNativeCoordinate, OutputObservationKind, OutputOutcome,
-    OutputOutcomeMetadata, OutputSourceLocator, ProOutputObservation, Result,
-    MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
+    CaptureError, OutputOutcome, OutputOutcomeMetadata, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
+    PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 #[cfg(test)]
@@ -33,9 +32,9 @@ use super::dto::{
 };
 use super::dto::{
     GeminiEventBody, GeminiEventIdentity, GeminiFileObservation, GeminiNativeOrder,
-    GeminiNativePathProfile, GeminiRetainedEvent, GeminiScanError, GeminiScanResult, GeminiSession,
-    GeminiSourceLocator, GeminiSourceRecordEvidence, GeminiToolCall, GeminiTouchOverflow,
-    GeminiTranscriptLayout, GeminiTranscriptSource,
+    GeminiRetainedEvent, GeminiScanError, GeminiScanResult, GeminiSession,
+    GeminiSourceRecordEvidence, GeminiToolCall, GeminiTouchOverflow, GeminiTranscriptLayout,
+    GeminiTranscriptSource,
 };
 
 mod identity;
@@ -61,8 +60,8 @@ pub(crate) use resume::read_gemini_transcript_pages_from_frontier;
 
 const BODY_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-retained-body-v1\0";
 const RESULT_STRING_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-result-string-v1\0";
+const RESULT_STRUCTURED_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-result-structured-v1\0";
 const RESULT_FALLBACK_ID_DOMAIN: &[u8] = b"ctx-gemini-nativepath-result-fallback-id-v1\0";
-const OUTPUT_UNIT_KEY_DOMAIN: &[u8] = b"ctx-gemini-nativepath-output-unit-key-v1\0";
 const PREFIX_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-complete-prefix-v1\0";
 #[cfg(test)]
 const CORE_PAGE_IDENTITY_DOMAIN: &[u8] = b"ctx-gemini-nativepath-core-page-v2\0";
@@ -71,7 +70,6 @@ const PREFIX_HASH_BUFFER_BYTES: usize = 64 * 1024;
 #[cfg(test)]
 const PAGE_ENVELOPE_FIXED_BYTES: usize = 4 * 1024;
 const EVENT_ENVELOPE_FIXED_BYTES: usize = 1024;
-const OUTPUT_ENVELOPE_FIXED_BYTES: usize = 1024;
 #[cfg(test)]
 const REJECTION_ENVELOPE_FIXED_BYTES: usize = 512;
 #[cfg(test)]
@@ -80,6 +78,8 @@ pub(super) const MAX_GEMINI_FILE_TOUCHES_PER_EVENT: usize = 256;
 pub(super) const MAX_GEMINI_FILE_TOUCH_BYTES_PER_EVENT: usize = 64 * 1024;
 pub(super) const MAX_GEMINI_NATIVE_PAGE_RECORDS: usize = 64;
 pub(super) const MAX_GEMINI_NATIVE_PAGE_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES: usize =
+    MAX_PROVIDER_JSONL_LINE_BYTES * 2 + 1024 * 1024;
 pub(super) const MAX_GEMINI_NATIVE_EVENT_IDS: usize = MAX_GEMINI_NATIVE_PAGE_RECORDS;
 pub(super) const MAX_GEMINI_NATIVE_EVENT_ID_BYTES: usize = MAX_GEMINI_NATIVE_PAGE_BYTES;
 
@@ -88,7 +88,6 @@ thread_local! {
     static TEST_RECORD_READS: Cell<u64> = const { Cell::new(0) };
     static TEST_PREFIX_BYTES_HASHED: Cell<u64> = const { Cell::new(0) };
     static TEST_RESULT_SELECTIVE_PASSES: Cell<u64> = const { Cell::new(0) };
-    static TEST_RESULT_FULL_HYDRATIONS: Cell<u64> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -96,16 +95,11 @@ pub(super) fn reset_gemini_parse_counters() {
     TEST_RECORD_READS.set(0);
     TEST_PREFIX_BYTES_HASHED.set(0);
     TEST_RESULT_SELECTIVE_PASSES.set(0);
-    TEST_RESULT_FULL_HYDRATIONS.set(0);
 }
 
 #[cfg(test)]
-pub(super) fn gemini_parse_counters() -> (u64, u64, u64) {
-    (
-        TEST_RECORD_READS.get(),
-        TEST_RESULT_SELECTIVE_PASSES.get(),
-        TEST_RESULT_FULL_HYDRATIONS.get(),
-    )
+pub(super) fn gemini_parse_counters() -> (u64, u64) {
+    (TEST_RECORD_READS.get(), TEST_RESULT_SELECTIVE_PASSES.get())
 }
 
 #[cfg(test)]
@@ -190,7 +184,7 @@ impl GeminiBorrowedRecordParser {
                     reason: "a second Gemini session header appeared in one transcript".to_owned(),
                 });
             }
-            let session = hydrate_header(payload, &self.source.layout).map_err(|reason| {
+            let session = decode_header(payload, &self.source.layout).map_err(|reason| {
                 GeminiScanError::UncommittedRecord {
                     raw_ordinal,
                     byte_start,
@@ -226,39 +220,26 @@ impl GeminiBorrowedRecordParser {
         };
         let events = match class {
             GeminiRecordClass::Result => {
-                let hydrated = match hydrate_result_record(
-                    payload,
-                    GeminiNativePathProfile::CoreOnly,
-                    &self.source,
-                    &self.session,
-                    raw_ordinal,
-                    source_record,
-                    byte_start,
-                    byte_end_exclusive,
-                ) {
-                    Ok(hydrated) => hydrated,
+                let decoded = match decode_result_record(payload, raw_ordinal, source_record) {
+                    Ok(decoded) => decoded,
                     Err(_) => return Ok(Vec::new()),
                 };
-                if hydrated
+                if decoded
                     .events
                     .iter()
-                    .any(|(_, bytes)| *bytes > MAX_GEMINI_NATIVE_PAGE_BYTES)
+                    .any(|(_, bytes)| *bytes > MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES)
                 {
                     return Ok(Vec::new());
                 }
-                hydrated
-                    .events
-                    .into_iter()
-                    .map(|(event, _)| event)
-                    .collect()
+                decoded.events.into_iter().map(|(event, _)| event).collect()
             }
             GeminiRecordClass::Message
             | GeminiRecordClass::ToolCall
             | GeminiRecordClass::StateNotice
             | GeminiRecordClass::RewindNotice => {
-                let hydrated =
-                    match hydrate_retained_event(payload, class, raw_ordinal, source_record) {
-                        Ok(Some(hydrated)) => hydrated,
+                let decoded =
+                    match decode_retained_event(payload, class, raw_ordinal, source_record) {
+                        Ok(Some(decoded)) => decoded,
                         Ok(None) => {
                             if let Some(native_event_id) = native_event_id {
                                 self.page_native_event_ids
@@ -266,22 +247,22 @@ impl GeminiBorrowedRecordParser {
                             }
                             return Ok(Vec::new());
                         }
-                        Err(GeminiHydrationError::Invalid(reason)) => {
+                        Err(GeminiDecodingError::Invalid(reason)) => {
                             drop(reason);
                             return Ok(Vec::new());
                         }
-                        Err(GeminiHydrationError::TouchOverflow(error)) => {
+                        Err(GeminiDecodingError::TouchOverflow(error)) => {
                             drop(error.to_string());
                             return Ok(Vec::new());
                         }
                     };
-                let Ok(event_bytes) = retained_event_bytes(&hydrated) else {
+                let Ok(event_bytes) = retained_event_bytes(&decoded) else {
                     return Ok(Vec::new());
                 };
-                if event_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES {
+                if event_bytes > MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES {
                     return Ok(Vec::new());
                 }
-                let mut event = hydrated.event;
+                let mut event = decoded.event;
                 if event.occurred_at.is_none() {
                     event.occurred_at = self.session.started_at;
                 }
@@ -360,15 +341,14 @@ pub(crate) fn read_gemini_session_header(
             if !payload.iter().all(u8::is_ascii_whitespace) {
                 if let Ok(probe) = serde_json::from_slice::<GeminiRecordProbe>(payload) {
                     if probe.classify() == GeminiRecordClass::Header {
-                        let session =
-                            hydrate_header(payload, &source.layout).map_err(|reason| {
-                                GeminiScanError::UncommittedRecord {
-                                    raw_ordinal,
-                                    byte_start,
-                                    byte_end_exclusive: offset,
-                                    reason,
-                                }
-                            })?;
+                        let session = decode_header(payload, &source.layout).map_err(|reason| {
+                            GeminiScanError::UncommittedRecord {
+                                raw_ordinal,
+                                byte_start,
+                                byte_end_exclusive: offset,
+                                reason,
+                            }
+                        })?;
                         if GeminiFileObservation::from_metadata(&reader.get_ref().metadata()?)?
                             != opening
                         {

@@ -40,15 +40,7 @@ fn importable_provider_inventory_covers_default_and_explicit_formats() {
         );
         assert!(!route.source_format.is_empty());
         assert!(!route.certified_source_format.is_empty());
-        match route.exact_hydration {
-            SourceBackedHydrationSupport::Full => {
-                assert!(route.hydration_limitation.is_none());
-                assert!(route.unsupported_reason.is_none());
-            }
-            SourceBackedHydrationSupport::Unsupported => {
-                assert!(route.unsupported_reason.is_some());
-            }
-        }
+        assert!(route.unsupported_reason.is_none());
     }
 
     for spec in crate::provider_source_specs()
@@ -247,13 +239,6 @@ fn public_supported_formats_have_one_exact_hydratable_landed_route() {
                 routes.len(),
                 1,
                 "{} {} must have exactly one landed source-backed route",
-                capture_provider.as_str(),
-                source_format
-            );
-            assert_eq!(
-                routes[0].exact_hydration,
-                SourceBackedHydrationSupport::Full,
-                "{} {} must hydrate exact provider-owned content",
                 capture_provider.as_str(),
                 source_format
             );

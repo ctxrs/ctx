@@ -6,7 +6,7 @@ use std::{
 
 use super::{
     catalog::{CatalogRoute, RouteKind},
-    note_discovery_operation, CaptureError, Result,
+    CaptureError, Result,
 };
 
 #[derive(Debug)]
@@ -35,7 +35,6 @@ impl DiscoveryIndex {
         };
         let mut directories = Vec::new();
         for (route_index, route) in routes.iter().enumerate() {
-            note_discovery_operation(0);
             if index
                 .by_path
                 .insert(route.relative_path.clone(), route_index)
@@ -92,12 +91,10 @@ impl DiscoveryIndex {
         routes: &'a [CatalogRoute],
         route_index: usize,
     ) -> &'a CatalogRoute {
-        note_discovery_operation(0);
         &routes[route_index]
     }
 
     pub(super) fn route_index(&self, path: &Path) -> Option<usize> {
-        note_discovery_operation(1);
         self.by_path.get(path).copied()
     }
 
@@ -111,7 +108,6 @@ impl DiscoveryIndex {
     }
 
     pub(super) fn children(&self, parent: &Path) -> &[usize] {
-        note_discovery_operation(2);
         self.by_parent.get(parent).map_or(&[], Vec::as_slice)
     }
 
@@ -121,7 +117,6 @@ impl DiscoveryIndex {
     }
 
     pub(super) fn session(&self, path: &Path) -> Option<&IndexedSession> {
-        note_discovery_operation(1);
         self.sessions.get(path)
     }
 

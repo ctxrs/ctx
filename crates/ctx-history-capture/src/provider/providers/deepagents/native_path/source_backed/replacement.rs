@@ -1,10 +1,5 @@
 use std::sync::Mutex;
 
-use ctx_history_core::{
-    BatchHydrationRequest, BatchHydrationResult, HydratedProviderRecord, HydrationFailure,
-    HydrationFailureKind,
-};
-
 use super::*;
 use crate::provider::source_backed::{
     family::document::{
@@ -80,7 +75,7 @@ impl ReplacementDocumentTree for DeepAgentsDatabaseSelectionV0 {
         sink.begin_source(source.clone())?;
         while let Some(page) = scanner.next_page().map_err(route_error)? {
             for document in page {
-                sink.emit_document(document)?;
+                sink.emit_core_record(document)?;
             }
         }
         let opening_evidence = scanner.evidence.clone();
@@ -120,33 +115,6 @@ impl ReplacementDocumentTree for DeepAgentsDatabaseSelectionV0 {
         (tree.authority.terminal_revalidate)().map_err(route_error)?;
         Ok(tree.tree_fingerprint)
     }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let locators = request
-            .events()
-            .iter()
-            .map(|event| event.locator())
-            .collect::<Vec<_>>();
-        let hydrated = DeepAgentsLocatorResolverV0::explicit(&self.data_root, self.path.clone())
-            .hydrate_locators(&locators)
-            .map_err(deepagents_hydration_failure)?;
-        let records = request
-            .events()
-            .iter()
-            .zip(hydrated)
-            .map(|(event, hydrated)| HydratedProviderRecord {
-                event_id: event.event_id(),
-                provider_bytes: hydrated.text.into_bytes(),
-            })
-            .collect();
-        BatchHydrationResult::new(records).map_err(|error| HydrationFailure {
-            kind: HydrationFailureKind::InvalidLocator,
-            detail: error.to_string(),
-        })
-    }
 }
 
 fn document_terminal(certificate: CertifiedSource) -> DocumentSourceTerminal {
@@ -157,23 +125,6 @@ fn document_terminal(certificate: CertifiedSource) -> DocumentSourceTerminal {
         parser_revision: DEEPAGENTS_SOURCE_PARSER_REVISION,
         content_digest: *certificate.content_digest(),
         counts: certificate.counts(),
-    }
-}
-
-fn deepagents_hydration_failure(error: DeepAgentsSourceBackedErrorV0) -> HydrationFailure {
-    let kind = match error {
-        DeepAgentsSourceBackedErrorV0::InvalidLocator
-        | DeepAgentsSourceBackedErrorV0::Resolver(_) => HydrationFailureKind::InvalidLocator,
-        DeepAgentsSourceBackedErrorV0::MissingRecord => HydrationFailureKind::MissingRecord,
-        DeepAgentsSourceBackedErrorV0::StaleRecordEvidence
-        | DeepAgentsSourceBackedErrorV0::StaleSourceEvidence => {
-            HydrationFailureKind::StaleRecordEvidence
-        }
-        _ => HydrationFailureKind::TemporarilyUnavailable,
-    };
-    HydrationFailure {
-        kind,
-        detail: error.to_string(),
     }
 }
 

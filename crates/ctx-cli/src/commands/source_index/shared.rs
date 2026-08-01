@@ -1,12 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use ctx_history_index::{EventRecord, SessionRecord, VerifiedIndex};
-use serde_json::{json, Value};
+use ctx_history_index::{CoreEventRecord, SessionRecord, VerifiedIndex};
 use uuid::Uuid;
 
 use crate::{
-    output::compact_json,
     transcript::normalize_uuid_prefix,
     ui::{diagnostic, Action, Diagnostic, DiagnosticLevel, Field, RenderContext, Ui},
 };
@@ -41,7 +39,7 @@ impl MissingLookupError {
     fn exact(kind: MissingLookupKind, requested: impl Into<String>) -> Self {
         let requested = requested.into();
         let message = format!(
-            "{} {requested} was not found in the source-backed Core generation",
+            "{} {requested} was not found in the Core generation",
             kind.noun()
         );
         Self {
@@ -54,7 +52,7 @@ impl MissingLookupError {
     fn prefix(kind: MissingLookupKind, requested: impl Into<String>) -> Self {
         let requested = requested.into();
         let message = format!(
-            "{} id prefix {requested:?} was not found in the source-backed Core generation",
+            "{} id prefix {requested:?} was not found in the Core generation",
             kind.noun()
         );
         Self {
@@ -65,16 +63,23 @@ impl MissingLookupError {
     }
 }
 
-pub(super) fn resolve_event(index: &VerifiedIndex, id: &str) -> Result<EventRecord> {
+pub(super) fn resolve_core_event(index: &VerifiedIndex, id: &str) -> Result<CoreEventRecord> {
     if let Ok(uuid) = Uuid::parse_str(id.trim()) {
-        return index.event_by_id(uuid)?.ok_or_else(|| {
+        return index.core_event_by_id(uuid)?.ok_or_else(|| {
             MissingLookupError::exact(MissingLookupKind::Event, uuid.to_string()).into()
         });
     }
     let prefix = validate_ctx_id(id, "event")?;
     match index.events_by_id_prefix(&prefix)?.as_slice() {
         [] => Err(MissingLookupError::prefix(MissingLookupKind::Event, prefix).into()),
-        [event] => Ok(event.clone()),
+        [event] => index
+            .core_event_by_id(event.event_id.as_uuid())?
+            .ok_or_else(|| {
+                anyhow!(
+                    "event {} disappeared from the pinned Core generation",
+                    event.event_id
+                )
+            }),
         matches => Err(anyhow!(
             "event id prefix {prefix:?} is ambiguous; first matches are {} and {}; use a longer ctx_event_id",
             matches[0].event_id,
@@ -177,54 +182,22 @@ pub(super) fn validate_session_selector(
             "pass either a ctx session ID or --provider-session, not both"
         )),
         (None, None) => Err(anyhow!(
-            "source-backed session lookup requires a ctx session ID or --provider-session"
+            "Core session lookup requires a ctx session ID or --provider-session"
         )),
     }
 }
 
-pub(super) fn source_path_exists(path: Option<&str>) -> Option<bool> {
-    path.map(|path| Path::new(path).exists())
-}
-
-pub(super) fn event_source_json(event: &EventRecord) -> Value {
-    compact_json(json!({
-        "source_id": event.locator.source().identity().as_uuid(),
-        "provider": event.provider,
-        "provider_session_id": event.provider_session_id,
-        "path": event.source_path,
-        "exists": source_path_exists(event.source_path.as_deref()),
-        "workspace": event.workspace,
-        "cwd": event.cwd,
-        "source_format": event.source_format,
-    }))
-}
-
-pub(super) fn session_source_json(
-    session: &SessionRecord,
-    first_event: Option<&EventRecord>,
-) -> Value {
-    compact_json(json!({
-        "source_id": first_event.map(|event| event.locator.source().identity().as_uuid()),
-        "provider": session.provider,
-        "provider_session_id": session.provider_session_id,
-        "path": session.source_path,
-        "exists": source_path_exists(session.source_path.as_deref()),
-        "workspace": session.workspace,
-        "cwd": session.cwd,
-        "source_format": session.source_format,
-    }))
-}
-
 pub(super) fn open_index(data_root: &Path) -> Result<VerifiedIndex> {
     let root = index_root(data_root);
-    if !root.join("meta.json").is_file() {
-        return Err(anyhow!(
-            "source-backed Core index is not initialized at {}",
-            root.display()
-        ));
+    match VerifiedIndex::open_pinned(&root) {
+        Ok(index) => Ok(index),
+        Err(ctx_history_index::IndexError::MissingActiveGenerationPointer) => Err(anyhow!(
+            "the Core index does not exist; retry with daemon refresh enabled"
+        )),
+        Err(error) => {
+            Err(error).with_context(|| format!("open verified Core index {}", root.display()))
+        }
     }
-    VerifiedIndex::open_pinned(&root)
-        .with_context(|| format!("open verified source-backed Core index {}", root.display()))
 }
 
 pub(super) fn index_root(data_root: &Path) -> PathBuf {

@@ -29,8 +29,10 @@ import observe  # noqa: E402
 )
 class ObserverTests(unittest.TestCase):
     def setUp(self) -> None:
+        # Bazel's TEST_TMPDIR can exceed Linux's AF_UNIX pathname limit once
+        # the observer adds its isolated capture-root and socket suffixes.
         self.temporary = tempfile.TemporaryDirectory(
-            prefix="ctx-cli-ux-observe-test."
+            prefix="ctx-cli-ux-observe-test.", dir="/tmp"
         )
         self.addCleanup(self.temporary.cleanup)
         self.root_parent = Path(self.temporary.name)

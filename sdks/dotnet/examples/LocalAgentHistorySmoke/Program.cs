@@ -19,8 +19,6 @@ var search = await client.SearchAsync(new SearchOptions
 });
 var showEvent = await client.ShowEventAsync(FirstEventId(search) ?? EventId, new ShowEventOptions { Window = 1 });
 var showSession = await client.ShowSessionAsync(FirstSessionId(search) ?? SessionId, new ShowSessionOptions { Mode = "lite" });
-var locateEvent = await client.LocateEventAsync(showEvent.Event.Event?.CtxEventId ?? EventId);
-var locateSession = await client.LocateSessionAsync(showSession.Session.Session?.CtxSessionId ?? SessionId);
 
 var output = new JsonObject
 {
@@ -30,9 +28,7 @@ var output = new JsonObject
     ["sync"] = synced.ToJsonObject(),
     ["search"] = search.ToJsonObject(),
     ["showEvent"] = showEvent.ToJsonObject(),
-    ["showSession"] = showSession.ToJsonObject(),
-    ["locateEvent"] = locateEvent.ToJsonObject(),
-    ["locateSession"] = locateSession.ToJsonObject()
+    ["showSession"] = showSession.ToJsonObject()
 };
 
 _ = search.Search.ResultWindow?.MoreAvailable;
@@ -93,8 +89,6 @@ internal sealed class FakeAgentHistoryTransport : IAgentHistoryTransport
             "search" => Search(),
             "showEvent" => ShowEvent(args.Count > 2 ? args[2] : EventId),
             "showSession" => ShowSession(args.Count > 2 ? args[2] : SessionId),
-            "locateEvent" => LocateEvent(args.Count > 2 ? args[2] : EventId),
-            "locateSession" => LocateSession(args.Count > 2 ? args[2] : SessionId),
             _ => throw new CtxAgentHistoryValidationException($"fake transport does not implement {operation}")
         });
     }
@@ -170,9 +164,7 @@ internal sealed class FakeAgentHistoryTransport : IAgentHistoryTransport
                 ["event_seq"] = 1,
                 ["result_scope"] = "event",
                 ["provider"] = "codex",
-                ["snippet"] = "local agent history smoke result",
-                ["source_path"] = $"{DataRoot}/session.jsonl",
-                ["source_exists"] = true
+                ["snippet"] = "local agent history smoke result"
             }
         };
         payload["result_window"] = new JsonObject
@@ -191,13 +183,15 @@ internal sealed class FakeAgentHistoryTransport : IAgentHistoryTransport
         {
             ["ctx_event_id"] = eventId,
             ["ctx_session_id"] = SessionId,
+            ["provider"] = "codex",
+            ["provider_session_id"] = "codex-fixture-session",
+            ["source_format"] = "codex_session_jsonl",
             ["sequence"] = 1,
             ["event_type"] = "message",
             ["role"] = "assistant",
             ["text"] = "local agent history smoke result"
         };
         payload["events"] = new JsonArray();
-        payload["source"] = Source();
         return payload;
     }
 
@@ -210,45 +204,13 @@ internal sealed class FakeAgentHistoryTransport : IAgentHistoryTransport
         {
             ["ctx_session_id"] = sessionId,
             ["provider"] = "codex",
+            ["provider_session_id"] = "codex-fixture-session",
             ["title"] = "LocalAgentHistorySmoke fixture"
         };
         payload["events"] = new JsonArray();
-        payload["source"] = Source();
         payload["mode"] = "lite";
         payload["format"] = "json";
         return payload;
     }
 
-    private static JsonObject LocateEvent(string eventId)
-    {
-        var payload = Base();
-        payload["ctx_session_id"] = SessionId;
-        payload["ctx_event_id"] = eventId;
-        payload["provider"] = "codex";
-        payload["provider_session_id"] = "codex-fixture-session";
-        payload["source"] = Source();
-        payload["resume"] = new JsonObject { ["cursor"] = "line:1" };
-        return payload;
-    }
-
-    private static JsonObject LocateSession(string sessionId)
-    {
-        var payload = Base();
-        payload["ctx_session_id"] = sessionId;
-        payload["provider"] = "codex";
-        payload["provider_session_id"] = "codex-fixture-session";
-        payload["source"] = Source();
-        return payload;
-    }
-
-    private static JsonObject Source()
-    {
-        return new JsonObject
-        {
-            ["path"] = $"{DataRoot}/session.jsonl",
-            ["cursor"] = "line:1",
-            ["exists"] = true,
-            ["source_format"] = "codex_session_jsonl"
-        };
-    }
 }

@@ -1,7 +1,7 @@
 //! Shared coordination for provider-owned source-backed projections.
 //!
 //! Provider adapters remain responsible for discovery, parsing, projection,
-//! and exact source resolution. This module owns the one production
+//! and source certification. This module owns the one production
 //! publication boundary: all registered adapters stage into one
 //! [`GenerationWriter`] and no adapter can publish a generation by itself.
 
@@ -15,19 +15,16 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    BatchHydrationRequest, BatchHydrationResult, CaptureProvider, CertifiedSource,
-    CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory,
-    ContentSourceResolver, EventHydrationRequest, HydratedProviderRecord, HydrationFailure,
-    HydrationFailureKind, ScannedSourceCounts, SourceAnchor, SourceFrontier, SourceKey, TypedKey,
+    CaptureProvider, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
+    CertifiedSourceInventory, CoreRecord, ScannedSourceCounts, SourceAnchor, SourceFrontier,
+    SourceKey, TypedKey,
 };
 use ctx_history_index::{
-    CommitReceipt, GenerationRemoval, GenerationWriter, IndexError, LexicalDocument,
-    RevalidationTarget, WriterOptions,
+    CommitReceipt, GenerationRemoval, GenerationWriter, IndexError, RevalidationTarget,
+    WriterOptions,
 };
 use thiserror::Error;
 
-#[cfg(test)]
-use super::codex::nativepath::CodexHydratedRecordV0;
 use super::codex::nativepath::{
     codex_source_observation, codex_writer_base_sources, ingest_codex_sources_serial_v0,
     managed_codex_session_source, observe_codex_explicit_session_source_backed_v0,
@@ -35,8 +32,7 @@ use super::codex::nativepath::{
     plan_codex_prompt_history_source_backed_v0, revalidate_codex_prompt_history_source_backed_v0,
     scan_codex_prompt_history_source_backed_v0,
     stage_planned_codex_prompt_history_source_backed_v0, CodexExplicitSessionSourceBackedInputV0,
-    CodexLocatorResolverV0, CodexPromptHistorySourceBackedDispositionV0,
-    CodexPromptHistorySourceBackedInputV0, CodexPromptHistorySourceBackedResolverV0,
+    CodexPromptHistorySourceBackedDispositionV0, CodexPromptHistorySourceBackedInputV0,
     CodexSourceBackedCountersV0, CodexSourceBackedErrorV0, CodexSourceBackedPhaseTimingsV0,
     CodexTerminalSourceEvidenceV0,
 };
@@ -44,38 +40,35 @@ use super::custom_history_jsonl::{
     observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,
     scan_custom_history_source_backed_explicit, CustomHistorySourceBackedDisposition,
     CustomHistorySourceBackedError, CustomHistorySourceBackedInput,
-    CustomHistorySourceBackedOutcome, CustomHistorySourceBackedResolver,
+    CustomHistorySourceBackedOutcome,
 };
 pub use super::providers::crush::native_path::source_backed::{
     CrushProjectDatabaseV0, CrushProjectInventoryObservationV0, CrushProjectInventorySourceV0,
 };
 use super::providers::{
     astrbot::native_path::source_backed::{
-        scan_astrbot_snapshot_v0, AstrBotSourceBackedInventoryV0, AstrBotSourceBackedResolverV0,
-        AstrBotSourceBackedSourceV0, PARSER_REVISION as ASTRBOT_SOURCE_BACKED_PARSER_REVISION,
+        scan_astrbot_snapshot_v0, AstrBotSourceBackedInventoryV0, AstrBotSourceBackedSourceV0,
+        PARSER_REVISION as ASTRBOT_SOURCE_BACKED_PARSER_REVISION,
     },
     continue_cli::native_path::{ContinueSourceBackedOutcome, ContinueSourceBackedReader},
     crush::native_path::source_backed::{
         bind_inventory as bind_crush_inventory, closing_observation as closing_crush_observation,
         exact_replay_matches as crush_exact_replay_matches,
         finish_opened_source as finish_crush_source, open_source as open_crush_source,
-        scan_source as scan_crush_source, CrushLocatorResolverV0, CrushSourceBackedErrorV0,
-        CrushSourceBackedResultV0, CRUSH_DISCOVERY_REVISION, CRUSH_FRONTIER_KIND,
-        CRUSH_PARSER_REVISION, CRUSH_SOURCE_SCHEMA_VARIANT,
+        scan_source as scan_crush_source, CrushSourceBackedErrorV0, CrushSourceBackedResultV0,
+        CRUSH_DISCOVERY_REVISION, CRUSH_FRONTIER_KIND, CRUSH_PARSER_REVISION,
+        CRUSH_SOURCE_SCHEMA_VARIANT,
     },
     deepagents::native_path::source_backed::DeepAgentsDatabaseSelectionV0,
     forgecode::nativepath::source_backed::ForgeCodeSourceSelectionV0,
-    goose::{
-        GooseSourceBackedAdapterV0, GooseSourceBackedResolverV0, GooseSourceBackedSelectionV0,
-        GooseSourceRouteV0,
-    },
+    goose::{GooseSourceBackedAdapterV0, GooseSourceBackedSelectionV0, GooseSourceRouteV0},
     hermes::source_backed::{hermes_source_backed_explicit, HermesSourceCandidate},
     junie::nativepath::junie_jsonl_adapter,
     kimi::native_path::source_backed::{KimiSourceBackedCatalog, KimiSourceBackedResolver},
     lingma::native_path::{
         reject_duplicate_paths as reject_duplicate_lingma_paths, scan_lingma_snapshot_v0,
-        LingmaDatabaseSourceV0, LingmaSourceBackedErrorV0, LingmaSourceBackedResolverV0,
-        LingmaSourceBackedResultV0, LingmaSourceInventoryV0, LINGMA_SOURCE_BACKED_PARSER_REVISION,
+        LingmaDatabaseSourceV0, LingmaSourceBackedErrorV0, LingmaSourceBackedResultV0,
+        LingmaSourceInventoryV0, LINGMA_SOURCE_BACKED_PARSER_REVISION,
     },
     mistral_vibe::native_path::source_backed::scan_mistral_vibe_source_backed,
     mux::mux_jsonl_adapter,
@@ -92,15 +85,14 @@ use super::providers::{
         SHELLEY_SOURCE_PARSER_REVISION,
     },
     task_json::cline_nativepath::{
-        cline_task_json_source_backed_adapter, cline_task_json_source_backed_resolver,
-        roo_task_json_source_backed_adapter, roo_task_json_source_backed_resolver,
+        cline_task_json_source_backed_adapter, roo_task_json_source_backed_adapter,
     },
-    warp::{project_warp_source_backed_v0, resolve_warp_locator_v0, WarpSourceSelectionV0},
+    warp::{project_warp_source_backed_v0, WarpSourceSelectionV0},
     zed::native_path::source_backed::{
         acquire_snapshot as acquire_zed_snapshot, decode_sha256_hex as decode_zed_digest,
         scan_zed_native_snapshot, snapshot_revision_digest as zed_snapshot_revision_digest,
-        source_observation as zed_source_observation, zed_source_key, ZedLocatorResolverV0,
-        ZedSourceBackedSinkV0,
+        source_observation as zed_source_observation, zed_source_key, ZedSourceBackedSinkV0,
+        ZED_PARSER_REVISION,
     },
 };
 use crate::provider_sources::{
@@ -122,14 +114,12 @@ pub(crate) mod family;
 mod inventory;
 mod publication;
 mod registration;
-mod resolver;
 
 pub use discovery::*;
 pub use driver::*;
 pub use inventory::*;
 pub use publication::*;
 pub use registration::*;
-pub use resolver::*;
 
 pub(crate) fn source_backed_base_sources(
     sink: &SourceBackedGenerationSink<'_>,

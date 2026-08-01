@@ -30,46 +30,6 @@ pub(super) fn truncate_chars(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
-pub(in crate::provider::providers::warp::nativepath) fn normalized_retained_event_hash(
-    identity: &WarpNativeEventIdentity,
-    complete_body: &str,
-    result_outcome: Option<OutputOutcome>,
-    call_id: Option<&str>,
-) -> Result<String> {
-    retained_event_hash(
-        identity,
-        &truncate_chars(complete_body, WARP_NATIVE_BODY_MAX_CHARS),
-        result_outcome,
-        call_id,
-    )
-}
-
-pub(super) fn retained_event_hash(
-    identity: &WarpNativeEventIdentity,
-    body: &str,
-    result_outcome: Option<OutputOutcome>,
-    call_id: Option<&str>,
-) -> Result<String> {
-    let mut hasher = Sha256::new();
-    hasher.update(WARP_EVENT_HASH_DOMAIN);
-    hash_text(&mut hasher, &identity.conversation_id)?;
-    hash_text(&mut hasher, &identity.task_id)?;
-    match &identity.message {
-        WarpNativeMessageIdentity::ProviderId(value) => {
-            hasher.update([1]);
-            hash_text(&mut hasher, value)?;
-        }
-        WarpNativeMessageIdentity::MessageOrdinal(value) => {
-            hasher.update([2]);
-            hasher.update(value.to_le_bytes());
-        }
-    }
-    hash_text(&mut hasher, body)?;
-    hash_optional_outcome(&mut hasher, result_outcome);
-    hash_optional_text(&mut hasher, call_id)?;
-    Ok(hex_digest(hasher.finalize().into()))
-}
-
 pub(super) fn session_estimated_bytes(session: &WarpNativeSession) -> Result<usize> {
     let metadata_bytes = serde_json::to_vec(&session.metadata)?.len();
     let text = session
@@ -179,7 +139,6 @@ fn hash_rejection(hasher: &mut Sha256, rejection: &WarpNativeRejection) -> Resul
         WarpNativeRejectionKind::MalformedProtobuf => 3,
         WarpNativeRejectionKind::MissingConversation => 4,
         WarpNativeRejectionKind::OversizedTask => 5,
-        WarpNativeRejectionKind::OversizedNormalizedUnit => 6,
         WarpNativeRejectionKind::DuplicateMessageIdentity => 7,
     }]);
     hash_text(hasher, &rejection.native_key)?;

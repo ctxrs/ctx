@@ -1,6 +1,7 @@
 # Threat Model
 
-The current CLI protects a local search index for developer agent history.
+The current CLI protects locally imported Core history and its derived search
+and metadata projections.
 
 ## Assets
 
@@ -13,21 +14,18 @@ The current CLI protects a local search index for developer agent history.
 
 ## Boundaries
 
-The default-enabled persistent daemon and explicit source-backed import route
-write derived history state only under the configured ctx data root. Search and
-MCP may send a bounded, content-free daemon wake, but query processes do not
-become foreground history writers. Show, sources, SQL, and doctor do not write
-provider data or repositories. `ctx status` does not mutate Core history or
-local Pro graph data and does not initialize or migrate local storage; Pro
-entitlement authorization may advance nonsecret anti-clock-rollback security
-metadata. `ctx show session --out` writes only the explicit output path
-requested by the user.
+The default-enabled persistent daemon and explicit provider-source import route
+write Core generations and derived state only under the configured ctx data
+root. Search and MCP may send a bounded, content-free daemon wake, but query
+processes do not become foreground history writers. Show, sources, SQL, and
+doctor do not write provider data or repositories. `ctx status` does not mutate
+Core history or local Pro graph data and does not initialize or migrate local
+storage; Pro entitlement authorization may advance nonsecret
+anti-clock-rollback security metadata. `ctx show session --out` writes only the
+explicit output path requested by the user.
 
-Both the default `--content indexed` and explicit `--content complete` show
-policies read the recorded provider source needed for selected events and
-verify it through the generation-bound typed resolver. `indexed` controls
-selection/versioning, not body authority. Neither policy scans for replacement
-transcripts, uses a stored body/preview, or uses a network fallback.
+Show reads policy-selected normalized content from the active Core generation.
+It does not scan for replacement transcripts or use a network fallback.
 
 Source repositories and provider homes remain outside ctx ownership. Provider
 files are read as import sources, not modified.
@@ -57,31 +55,26 @@ and orphan credentials or graph keys.
 
 ## Risks
 
-- searchable terms and source-hydrated prompts or output may contain secrets;
+- searchable terms and imported prompts or output may contain secrets;
 - local paths and repository names may reveal private work;
 - copied JSON output may leave the machine;
-- stale citations may point to moved or deleted raw files;
 - unsupported provider formats may be parsed incorrectly if adapters are too
   permissive;
 - compatibility JSON fields may expose more local store detail than an agent
   needs.
-- source-hydrated transcript output may contain secrets, and MCP hosts may
+- transcript output may contain secrets, and MCP hosts may
   retain or forward it;
-- a provider source can move, be replaced, or change after import.
+- provider sources can move, be replaced, or change before a later import.
 
 ## Mitigations
 
 - keep imports explicit and repeatable;
 - reject unknown provider formats;
-- keep provider sources as the sole body authority; index full meaningful text
-  only into unstored lexical fields and retain metadata/typed locators in the
-  relational projection;
-- preserve citations and source availability flags;
+- persist policy-selected normalized content in Core and keep the relational
+  projection metadata-only;
+- preserve stable ctx citations and provider session identity;
 - keep setup local and side-effect-limited;
-- document that SQLite and stable SQL views are metadata/locator-only and
+- document that SQLite and stable SQL views are metadata-only and
   cannot return event payloads;
 - treat JSON output as private until reviewed.
-- require exact native-record verification for every show policy, bounded
-  body/output sizes, and all-or-nothing results;
-- keep typed hydration errors path- and body-free and direct diagnosis through
-  `ctx locate event`.
+- require bounded Core body/output sizes and all-or-nothing show results.

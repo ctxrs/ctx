@@ -17,7 +17,3 @@ pub(super) fn copilot_event_identity(value: &Value) -> Option<&str> {
         .and_then(Value::as_str)
         .filter(|event_id| !event_id.trim().is_empty())
 }
-
-#[cfg(test)]
-#[path = "copilot_tests.rs"]
-mod tests;

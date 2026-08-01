@@ -1,8 +1,3 @@
-use ctx_history_core::{
-    BatchHydrationRequest, BatchHydrationResult, HydratedProviderRecord, HydrationFailure,
-    HydrationFailureKind,
-};
-
 use super::*;
 use crate::provider::source_backed::{
     family::document::{
@@ -12,6 +7,7 @@ use crate::provider::source_backed::{
     route_error, SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
 };
 use crate::provider_sources::SqliteSourceAccessError;
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone)]
 pub(crate) struct TraeReplacementTree {
@@ -89,7 +85,7 @@ impl ReplacementDocumentTree for TraeReplacementTree {
         let mut sink_error = None;
         let scan = scan_trae_authority(&authority.canonical_path, &authority.source, &mut |page| {
             for document in page.documents {
-                if let Err(error) = sink.emit_document(document) {
+                if let Err(error) = sink.emit_core_record(document) {
                     let detail = error.to_string();
                     sink_error = Some(error);
                     return Err(TraeSourceBackedErrorV0::Capture(
@@ -139,33 +135,6 @@ impl ReplacementDocumentTree for TraeReplacementTree {
         (tree.authority.terminal_revalidate)().map_err(route_error)?;
         Ok(tree.tree_fingerprint)
     }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let locators = request
-            .events()
-            .iter()
-            .map(|event| event.locator())
-            .collect::<Vec<_>>();
-        let hydrated = TraeLocatorResolverV0::new(self.data_root.clone(), self.path.clone())
-            .hydrate_locators(&locators)
-            .map_err(trae_hydration_failure)?;
-        let records = request
-            .events()
-            .iter()
-            .zip(hydrated)
-            .map(|(event, hydrated)| HydratedProviderRecord {
-                event_id: event.event_id(),
-                provider_bytes: hydrated.exact_text.into_bytes(),
-            })
-            .collect();
-        BatchHydrationResult::new(records).map_err(|error| HydrationFailure {
-            kind: HydrationFailureKind::InvalidLocator,
-            detail: error.to_string(),
-        })
-    }
 }
 
 fn document_terminal(certificate: CertifiedSource) -> DocumentSourceTerminal {
@@ -176,25 +145,6 @@ fn document_terminal(certificate: CertifiedSource) -> DocumentSourceTerminal {
         parser_revision: TRAE_SOURCE_BACKED_PARSER_REVISION,
         content_digest: *certificate.content_digest(),
         counts: certificate.counts(),
-    }
-}
-
-fn trae_hydration_failure(error: TraeSourceBackedErrorV0) -> HydrationFailure {
-    let kind = match error {
-        TraeSourceBackedErrorV0::InvalidLocator
-        | TraeSourceBackedErrorV0::LocatorSourceMismatch
-        | TraeSourceBackedErrorV0::SourceRevisionMismatch
-        | TraeSourceBackedErrorV0::Resolver(_) => HydrationFailureKind::InvalidLocator,
-        TraeSourceBackedErrorV0::LocatorValueMissing
-        | TraeSourceBackedErrorV0::LocatorMessageMissing => HydrationFailureKind::MissingRecord,
-        TraeSourceBackedErrorV0::LocatorValueDigestMismatch => {
-            HydrationFailureKind::StaleRecordEvidence
-        }
-        _ => HydrationFailureKind::TemporarilyUnavailable,
-    };
-    HydrationFailure {
-        kind,
-        detail: error.to_string(),
     }
 }
 

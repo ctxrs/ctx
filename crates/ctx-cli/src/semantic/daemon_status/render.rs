@@ -65,20 +65,15 @@ pub(in crate::semantic) fn render_daemon_status_human(
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    let history = daemon
-        .get("jobs")
-        .and_then(|jobs| jobs.get("history_refresh"));
-    let source_refresh = daemon
-        .get("jobs")
-        .and_then(|jobs| jobs.get("source_backed_refresh"));
+    let core_refresh = daemon.get("jobs").and_then(|jobs| jobs.get("core_refresh"));
     let semantic = daemon
         .get("jobs")
         .and_then(|jobs| jobs.get("semantic_index"));
 
-    let rejected_records = rejected_record_count(history);
-    let history_failed = job_failed(history) || job_failed(source_refresh);
+    let rejected_records = rejected_record_count(core_refresh);
+    let history_failed = job_failed(core_refresh);
     let semantic_failed = job_failed(semantic);
-    let history_catching_up = job_catching_up(history) || job_catching_up(source_refresh);
+    let history_catching_up = job_catching_up(core_refresh);
     let semantic_fallback = semantic_fallback(semantic);
     let config_issue = config_reload_issue(daemon);
     let supervisor_issue = daemon
@@ -126,7 +121,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
         DaemonPresentation::Partial if rejected_records > 0 => (
             OutcomeState::Warning,
             "Daemon is partially healthy",
-            Some("History refresh rejected one or more records."),
+            Some("Core refresh rejected one or more records."),
         ),
         DaemonPresentation::Partial if semantic_fallback.is_some() => (
             OutcomeState::Warning,
@@ -235,17 +230,16 @@ pub(in crate::semantic) fn render_daemon_status_human(
     document.push_blank();
     document.append(section("Service", fields(context, &service)));
 
-    if history.is_some() || source_refresh.is_some() {
-        let (history_state, history_token) = history_state(
-            history,
-            source_refresh,
+    if core_refresh.is_some() {
+        let (history_state, history_token) = core_refresh_state(
+            core_refresh,
             enabled || matches!(presentation, DaemonPresentation::Completed),
             rejected_records,
         );
         let mut history_fields = vec![state_field("Status", history_state, history_token)];
         let mut history_details = Vec::new();
         if history_catching_up {
-            if let Some(phase) = source_refresh
+            if let Some(phase) = core_refresh
                 .and_then(|job| job.get("progress"))
                 .and_then(|progress| progress.get("phase"))
                 .and_then(Value::as_str)
@@ -254,7 +248,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
                 history_details.push(("Progress", humanize_code(phase)));
             }
         }
-        if let Some(count) = source_refresh
+        if let Some(count) = core_refresh
             .and_then(|job| {
                 job.get("certified_source_count")
                     .or_else(|| job.get("source_count"))
@@ -275,10 +269,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
                 "One or more history sources could not be refreshed.".to_owned(),
             ));
         } else {
-            for error in [job_error(source_refresh), job_error(history)]
-                .into_iter()
-                .flatten()
-            {
+            for error in [job_error(core_refresh)].into_iter().flatten() {
                 push_unique_detail(&mut history_details, "Error", error);
             }
         }
@@ -608,30 +599,29 @@ fn service_state(
     }
 }
 
-fn history_state(
-    history: Option<&Value>,
-    source_refresh: Option<&Value>,
+fn core_refresh_state(
+    core_refresh: Option<&Value>,
     enabled: bool,
     rejected_records: u64,
 ) -> (&'static str, Token) {
     if !enabled {
         return ("disabled", Token::Text);
     }
-    if job_failed(source_refresh) || job_failed(history) {
+    if job_failed(core_refresh) {
         return ("failed", Token::Error);
     }
-    if job_catching_up(source_refresh) || job_catching_up(history) {
+    if job_catching_up(core_refresh) {
         return ("catching up", Token::Warning);
     }
     if rejected_records > 0 {
         return ("ready with rejections", Token::Warning);
     }
-    let status = preferred_job_status(source_refresh, history);
+    let status = job_status(core_refresh);
     match status {
         "completed" | "ready" | "published" | "idle" | "succeeded" => ("ready", Token::Success),
         "disabled" => ("disabled", Token::Text),
         "skipped"
-            if source_refresh
+            if core_refresh
                 .and_then(|job| job.get("reason"))
                 .and_then(Value::as_str)
                 == Some("retry_backoff") =>
@@ -736,15 +726,6 @@ fn job_status(job: Option<&Value>) -> &str {
         .unwrap_or("unknown")
 }
 
-fn preferred_job_status<'a>(primary: Option<&'a Value>, fallback: Option<&'a Value>) -> &'a str {
-    let primary_status = job_status(primary);
-    if primary_status == "unknown" {
-        job_status(fallback)
-    } else {
-        primary_status
-    }
-}
-
 fn job_failed(job: Option<&Value>) -> bool {
     matches!(job_status(job), "failed" | "error") || job_error(job).is_some()
 }
@@ -766,14 +747,15 @@ fn job_error(job: Option<&Value>) -> Option<&str> {
         .filter(|error| !error.is_empty())
 }
 
-fn rejected_record_count(history: Option<&Value>) -> u64 {
-    history
+fn rejected_record_count(core_refresh: Option<&Value>) -> u64 {
+    core_refresh
         .and_then(|job| {
             job.get("rejection_diagnostics")
                 .and_then(|diagnostics| diagnostics.get("rejected_records"))
                 .or_else(|| {
-                    job.get("totals")
-                        .and_then(|totals| totals.get("rejected_records"))
+                    job.get("receipt")
+                        .and_then(|receipt| receipt.get("current"))
+                        .and_then(|current| current.get("current_rejected_records"))
                 })
         })
         .and_then(Value::as_u64)

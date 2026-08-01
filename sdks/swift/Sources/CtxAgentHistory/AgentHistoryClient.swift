@@ -136,22 +136,6 @@ public struct AgentHistoryClient: Sendable {
         return try ShowSessionResponse(envelope: localEnvelope(operation: .showSession, arguments: arguments))
     }
 
-    public func locateEvent(_ id: String) throws -> LocateEventResponse {
-        try requireID("event id", id)
-        return try LocateEventResponse(envelope: localEnvelope(operation: .locateEvent, arguments: ["locate", "event", id, "--format", "json"]))
-    }
-
-    public func locateSession(_ id: String) throws -> LocateSessionResponse {
-        try locateSession(LocateSessionOptions(id: id))
-    }
-
-    public func locateSession(_ options: LocateSessionOptions) throws -> LocateSessionResponse {
-        var arguments = ["locate", "session"]
-        try appendSessionLookup(&arguments, id: options.id, provider: options.provider, providerSession: options.providerSession)
-        arguments.append(contentsOf: ["--format", "json"])
-        return try LocateSessionResponse(envelope: localEnvelope(operation: .locateSession, arguments: arguments))
-    }
-
     public func version() throws -> VersionInfo {
         switch backend {
         case let .local(adapter):
@@ -254,12 +238,6 @@ public struct AgentHistoryClient: Sendable {
                 operation: operation,
                 backend: backendWithRawDataRoot(backend, raw),
                 session: try decodeTyped(normalizeSession(raw), as: AgentHistorySessionResult.self, context: "session")
-            )
-        case .locateEvent, .locateSession:
-            return AgentHistoryEnvelope(
-                operation: operation,
-                backend: backendWithRawDataRoot(backend, raw),
-                location: try decodeTyped(raw.camelizedPublicJSON().droppingNulls(), as: AgentHistoryLocationResult.self, context: "location")
             )
         case .error:
             throw CtxAgentHistorySDKError(code: .invalidRequest, message: "error is not a local CLI operation")
@@ -448,11 +426,9 @@ private func normalizeSearchHit(_ raw: JSONValue) -> JSONValue {
 private func normalizeEvent(_ raw: JSONValue) -> JSONValue {
     let event = raw["event"]?.camelizedPublicJSON().droppingNulls()
     let events = raw["events"]?.arrayValue?.map { $0.camelizedPublicJSON().droppingNulls() } ?? []
-    let source = raw["source"]?.camelizedPublicJSON().droppingNulls()
     return .object([
         "event": event ?? .null,
-        "events": .array(events),
-        "source": source ?? .null
+        "events": .array(events)
     ]).droppingNulls()
 }
 
@@ -468,7 +444,6 @@ private func normalizeSession(_ raw: JSONValue) -> JSONValue {
     return .object([
         "session": .object(session),
         "events": .array(events),
-        "source": raw["source"]?.camelizedPublicJSON().droppingNulls() ?? .null,
         "mode": raw["mode"] ?? .null,
         "format": raw["format"] ?? .null
     ]).droppingNulls()

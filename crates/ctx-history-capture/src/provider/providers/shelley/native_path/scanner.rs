@@ -18,7 +18,6 @@ pub(super) struct ShelleyQueryCounters {
     pub(super) pages_emitted: u64,
     pub(super) peak_buffered_rows: u64,
     pub(super) peak_buffered_bytes: u64,
-    pub(super) hydration_snapshot_opens: u64,
 }
 
 #[cfg(test)]
@@ -34,7 +33,6 @@ thread_local! {
             pages_emitted: 0,
             peak_buffered_rows: 0,
             peak_buffered_bytes: 0,
-            hydration_snapshot_opens: 0,
         }) };
 }
 
@@ -81,13 +79,6 @@ pub(super) fn record_shelley_buffered_results(buffered_rows: usize, buffered_byt
         counters.peak_buffered_bytes = counters
             .peak_buffered_bytes
             .max(u64::try_from(buffered_bytes).unwrap_or(u64::MAX));
-    });
-}
-
-#[cfg(test)]
-pub(super) fn record_shelley_hydration_snapshot() {
-    record_query(|counters| {
-        counters.hydration_snapshot_opens = counters.hydration_snapshot_opens.saturating_add(1);
     });
 }
 
@@ -142,27 +133,6 @@ pub(super) fn next_message_units(
     )
 }
 
-pub(super) fn message_units_for_rowids(
-    conn: &Connection,
-    message_select: &[String],
-    conversation_select: &[String],
-    has_sequence_id: bool,
-    rowids: &[i64],
-) -> Result<BTreeMap<i64, ShelleyScannedUnit>> {
-    let candidates = candidates_for_rowids(conn, "messages", "m", message_select, rowids)?;
-    Ok(project_message_candidates(
-        conn,
-        message_select,
-        conversation_select,
-        has_sequence_id,
-        candidates,
-        false,
-    )?
-    .into_iter()
-    .map(|unit| (unit.0.rowid(), unit))
-    .collect())
-}
-
 fn project_message_candidates(
     conn: &Connection,
     message_select: &[String],
@@ -182,28 +152,12 @@ fn project_message_candidates(
 
     let message_rowids = candidates
         .iter()
-        .filter(|candidate| candidate.retained_bytes <= SHELLEY_ROW_MAX_BYTES)
         .map(|candidate| candidate.rowid)
         .collect::<Vec<_>>();
     let mut message_values =
         query_row_values_set(conn, "messages", "m", message_select, &message_rowids, true)?;
     let mut prepared = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        if candidate.retained_bytes > SHELLEY_ROW_MAX_BYTES {
-            let reason = format!(
-                "Shelley message row {} exceeds the source-backed row byte limit",
-                candidate.rowid
-            );
-            prepared.push(PreparedMessage::Complete((
-                ShelleyUnit::Rejected {
-                    rowid: candidate.rowid,
-                    retained_bytes: SHELLEY_PAGE_FIXED_OVERHEAD.min(SHELLEY_ROW_MAX_BYTES),
-                    reason: reason.clone(),
-                },
-                rejected_row_digest(b'm', candidate.rowid, candidate.retained_bytes, &reason),
-            )));
-            continue;
-        }
         let values = message_values
             .remove(&candidate.rowid)
             .ok_or(CaptureError::SourceChangedDuringCapture)?;
@@ -239,9 +193,7 @@ fn project_message_candidates(
     let conversation_rowids = conversation_candidates
         .values()
         .filter_map(|candidates| match candidates.as_slice() {
-            [candidate] if candidate.retained_bytes <= SHELLEY_ROW_MAX_BYTES => {
-                Some(candidate.rowid)
-            }
+            [candidate] => Some(candidate.rowid),
             _ => None,
         })
         .collect::<BTreeSet<_>>()
@@ -299,29 +251,6 @@ fn project_message_candidates(
             )));
             continue;
         };
-        if parent_candidate.retained_bytes > SHELLEY_ROW_MAX_BYTES {
-            let reason = format!(
-                "Shelley message {} parent conversation exceeds the source-backed row byte limit",
-                message.message_id
-            );
-            let parent_digest = rejected_row_digest(
-                b'p',
-                parent_candidate.rowid,
-                parent_candidate.retained_bytes,
-                &reason,
-            );
-            let row_digest =
-                values_row_digest(b'm', candidate.rowid, &values, Some(&parent_digest));
-            units.push(PreparedUnit::Complete((
-                ShelleyUnit::Rejected {
-                    rowid: candidate.rowid,
-                    retained_bytes: candidate.retained_bytes.saturating_add(256),
-                    reason,
-                },
-                row_digest,
-            )));
-            continue;
-        }
         let parent_values = conversation_values
             .get(&parent_candidate.rowid)
             .ok_or(CaptureError::SourceChangedDuringCapture)?;
@@ -468,58 +397,6 @@ fn next_candidates(
             (None, None) => collect(rusqlite::params![]),
             _ => unreachable!(),
         }
-    })?;
-    candidates
-        .into_iter()
-        .map(|(rowid, retained)| {
-            let retained_bytes = usize::try_from(retained).map_err(|_| {
-                CaptureError::InvalidPayload(format!(
-                    "Shelley {table} retained byte count must be nonnegative"
-                ))
-            })?;
-            Ok(Candidate {
-                rowid,
-                retained_bytes: retained_bytes.saturating_add(select.len() * 16),
-            })
-        })
-        .collect()
-}
-
-fn candidates_for_rowids(
-    conn: &Connection,
-    table: &str,
-    alias: &str,
-    select: &[String],
-    rowids: &[i64],
-) -> Result<Vec<Candidate>> {
-    if rowids.is_empty() {
-        return Ok(Vec::new());
-    }
-    if rowids.len() > SHELLEY_QUERY_BATCH_ROWS {
-        return Err(CaptureError::SystemInvariant(
-            "Shelley exact-row query exceeded its bounded SQL batch",
-        ));
-    }
-    record_query(|counters| counters.candidate_set_reads += 1);
-    let placeholders = std::iter::repeat_n("?", rowids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let lengths = shelley_retained_length_expr(select);
-    let sql = format!(
-        "select {alias}.rowid, {lengths}
-           from {table} {alias}
-          where {alias}.rowid in ({placeholders})
-          order by {alias}.rowid"
-    );
-    let parameters = rowids.iter().copied().map(SqlValue::Integer);
-    let candidates: Vec<(i64, i64)> = with_shelley_length_preflight(conn, || {
-        let mut statement = conn.prepare(&sql)?;
-        let candidates = statement
-            .query_map(params_from_iter(parameters), |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?
-            .collect();
-        candidates
     })?;
     candidates
         .into_iter()

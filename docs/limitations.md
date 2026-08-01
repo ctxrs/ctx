@@ -67,17 +67,12 @@ shipped.
 
 - Search output is retrieval material, not generated analysis.
 - Token counts are estimates.
-- If a raw source moves, ctx may still return indexed text from SQLite.
 - JSON is local/private and can include sensitive content.
-- Complete message retrieval is opt-in. It is available only for provider
-  adapters and newly imported records that retain a safe, bounded locator and
-  can re-verify the native record. Legacy rows, rewritten or missing sources,
-  and unsupported formats fail with a typed error rather than returning a
-  best-effort body.
-- Complete retrieval applies only to eligible truncated user, assistant, and
-  system message text. It does not recover omitted tool output, command output,
-  patches, diffs, binary payloads, secret-marked fields, or arbitrary provider
-  blobs.
+- Show reads policy-selected normalized content from the active Core generation
+  and does not require provider files at query time.
+- Core presentation includes accepted structured tool input, tool output,
+  command output, patch, and diff content. Explicitly redacted content,
+  unsupported binary payloads, and provider-private blobs remain unavailable.
 
 ## Operations
 

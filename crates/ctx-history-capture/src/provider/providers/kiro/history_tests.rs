@@ -28,7 +28,7 @@ fn assistant_tool_use_does_not_invent_a_completion_result() {
 }
 
 #[test]
-fn authoritative_history_iterator_preserves_edge_record_order_identity_and_content() {
+fn history_entry_projection_preserves_edge_record_order_identity_and_content() {
     let row = test_row();
     let provider_session_id = "kiro-session-11";
     let started_at = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
@@ -70,11 +70,15 @@ fn authoritative_history_iterator_preserves_edge_record_order_identity_and_conte
         ]
     });
 
-    let decoded_events = kiro_history_events(&row, provider_session_id, &value, started_at)
-        .map(|decoded| {
-            let text = decoded.complete_text();
-            (decoded.event, text)
+    let decoded_events = value["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .flat_map(|(history_index, entry)| {
+            kiro_history_entry_events(&row, provider_session_id, history_index, entry, started_at)
         })
+        .map(|decoded| (decoded.event, decoded.complete_text))
         .collect::<Vec<_>>();
 
     assert_eq!(
@@ -94,25 +98,6 @@ fn authoritative_history_iterator_preserves_edge_record_order_identity_and_conte
             EventType::Message,
             EventType::ToolCall,
             EventType::Message,
-        ]
-    );
-    assert!(decoded_events
-        .iter()
-        .all(|(event, _)| event.provider_event_hash.is_none()));
-    assert_eq!(
-        decoded_events
-            .iter()
-            .map(|(event, _)| {
-                event.metadata["legacy_provider_event_hash"]
-                    .as_str()
-                    .unwrap()
-            })
-            .collect::<Vec<_>>(),
-        vec![
-            "conversations_v2:kiro-session-11:0:user",
-            "conversations_v2:kiro-session-11:0:assistant",
-            "conversations_v2:kiro-session-11:2:assistant",
-            "conversations_v2:kiro-session-11:3:assistant",
         ]
     );
     assert_eq!(
@@ -139,21 +124,4 @@ fn authoritative_history_iterator_preserves_edge_record_order_identity_and_conte
             "plain assistant fallback",
         ]
     );
-}
-
-#[test]
-fn malformed_history_shapes_fail_closed_without_events() {
-    let row = test_row();
-    for value in [
-        json!({}),
-        json!({"history": null}),
-        json!({"history": {}}),
-        json!({"history": "not-an-array"}),
-    ] {
-        assert!(
-            kiro_history_events(&row, "kiro-session-11", &value, DateTime::<Utc>::UNIX_EPOCH,)
-                .next()
-                .is_none()
-        );
-    }
 }

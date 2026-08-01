@@ -872,8 +872,8 @@ fn statement_end(tokens: &[Token], start: usize, limit: usize) -> Option<usize> 
     let mut parens = 0usize;
     let mut brackets = 0usize;
     let mut braces = 0usize;
-    for index in start..limit {
-        match tokens[index].text.as_str() {
+    for (index, token) in tokens.iter().enumerate().take(limit).skip(start) {
+        match token.text.as_str() {
             "(" => parens += 1,
             ")" => parens = parens.saturating_sub(1),
             "[" => brackets += 1,
@@ -998,12 +998,10 @@ fn primitive_at(
         text,
         "write_stdout" | "write_stdout_line" | "write_stderr_line"
     ) && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
+        && ((path == "src/output.rs" && previous_is(tokens, index, "fn"))
+            || origins.aliases.is_output_helper(tokens, index))
     {
-        if (path == "src/output.rs" && previous_is(tokens, index, "fn"))
-            || origins.aliases.is_output_helper(tokens, index)
-        {
-            return Some(Primitive::OutputRawHelper);
-        }
+        return Some(Primitive::OutputRawHelper);
     }
     if text == "with_writers"
         && ((path == "src/ui/writer.rs" && previous_is(tokens, index, "fn"))
@@ -1012,14 +1010,13 @@ fn primitive_at(
     {
         return Some(Primitive::UiWriterInjection);
     }
-    if text == "render_plain" && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
-    {
-        if (previous_is(tokens, index, ".")
+    if text == "render_plain"
+        && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(")
+        && ((previous_is(tokens, index, ".")
             && documents.render_receiver_is_document(tokens, functions, index, document_catalog))
-            || (path == "src/ui/document.rs" && previous_is(tokens, index, "fn"))
-        {
-            return Some(Primitive::DocumentRender);
-        }
+            || (path == "src/ui/document.rs" && previous_is(tokens, index, "fn")))
+    {
+        return Some(Primitive::DocumentRender);
     }
     if text == "render" && tokens.get(index + 1).map(|token| token.text.as_str()) == Some("(") {
         let document_call = previous_is(tokens, index, ".")

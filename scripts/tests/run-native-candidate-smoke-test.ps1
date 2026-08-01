@@ -15,6 +15,8 @@ if not "%CTX_UPGRADE_AUTO%"=="off" exit /b 92
 if not "%CTX_DAEMON_AUTOSTART_OFF%"=="1" exit /b 93
 if "%HOME%"=="" exit /b 94
 if "%USERPROFILE%"=="" exit /b 95
+set "CTX_FAKE_VERSION=0.25.0"
+if /I "%~n0"=="ctx-v1" set "CTX_FAKE_VERSION=1.0.0"
 echo %* | findstr /c:"--backend semantic" >nul
 if not errorlevel 1 (
   if not "%CTX_SEARCH_SEMANTIC%"=="1" exit /b 96
@@ -23,11 +25,20 @@ if not errorlevel 1 (
   exit /b 1
 )
 if "%1"=="--version" (
-  echo ctx 0.25.0
+  echo ctx %CTX_FAKE_VERSION%
   exit /b 0
 )
 if "%1"=="setup" exit /b 0
 if "%1"=="import" (
+  if "%CTX_FAKE_VERSION%"=="1.0.0" (
+    mkdir "%CTX_DATA_ROOT%\search\lexical\ctx-generations" >nul
+    mkdir "%CTX_DATA_ROOT%\search\lexical\index-generations\generation-11111111111111111111111111111111" >nul
+    > "%CTX_DATA_ROOT%\search\lexical\active-generation.json" echo {"version":1,"active":{"generation_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","directory":"generation-11111111111111111111111111111111"},"previous":null}
+    type nul > "%CTX_DATA_ROOT%\search\lexical\index-generations\generation-11111111111111111111111111111111\meta.json"
+    type nul > "%CTX_DATA_ROOT%\search\lexical\ctx-generations\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+    echo {"totals":{"current_source_count":1,"current_indexed_documents":2},"sources":[{"published_generation":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
+    exit /b 0
+  )
   echo {"totals":{"imported_events":2}}
   exit /b 0
 )
@@ -70,6 +81,15 @@ exit /b 99
         if ($parsed.steps.$key -ne "passed") {
             throw "candidate smoke step did not pass: $key"
         }
+    }
+
+    $freshEpochFake = Join-Path $root "ctx-v1.cmd"
+    Copy-Item -LiteralPath $fake -Destination $freshEpochFake
+    $freshEpochResult = Join-Path $root "fresh-epoch-result.json"
+    & $smoke -Binary $freshEpochFake -Fixture $fixture -ExpectedVersion 1.0.0 -ResultPath $freshEpochResult | Out-Null
+    $freshEpochParsed = Get-Content -LiteralPath $freshEpochResult -Raw | ConvertFrom-Json
+    if ($freshEpochParsed.status -ne "passed") {
+        throw "fresh-epoch candidate smoke did not pass"
     }
 
     $hung = Join-Path $root "ctx-hang.cmd"

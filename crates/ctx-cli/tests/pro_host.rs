@@ -259,7 +259,7 @@ fn commit_blame_human_output_preserves_production_grouping() {
         ))
         .stdout(predicate::str::contains("state         asserted"))
         .stdout(predicate::str::contains(
-            "Evidence\n  [1]  ctx show event 00000000-0000-0000-0000-000000000001",
+            "Evidence\n  [1]  ctx show event d863cb84-6bd3-8071-abdb-5326c44c896a",
         ))
         .stdout(predicate::str::contains("\u{1b}[").not())
         .stdout(predicate::str::contains("Also recorded").not());
@@ -367,7 +367,7 @@ fn obsolete_public_pro_query_commands_have_no_compatibility_aliases() {
 }
 
 #[test]
-fn blame_without_a_store_fails_before_starting_the_helper() {
+fn blame_without_an_installation_identity_fails_before_starting_the_helper() {
     let root = tempdir().unwrap();
     let marker = root.path().join("helper-started");
     let helper = root.path().join("ctx-pro-must-not-start");
@@ -389,7 +389,7 @@ fn blame_without_a_store_fails_before_starting_the_helper() {
         .args(["blame", "commit", "abc"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("source_unavailable"))
+        .stderr(predicate::str::contains("key store is unavailable"))
         .stderr(predicate::str::contains("helper_crashed").not());
     assert!(!marker.exists());
 }

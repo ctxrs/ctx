@@ -91,32 +91,6 @@ public struct ShowSessionResponse: Equatable, Sendable {
     }
 }
 
-public struct LocateEventResponse: Equatable, Sendable {
-    public var envelope: AgentHistoryEnvelope
-    public var location: AgentHistoryLocationResult
-
-    public init(envelope: AgentHistoryEnvelope) throws {
-        guard let location = envelope.location else {
-            throw missingPayload("location", operation: envelope.operation)
-        }
-        self.envelope = envelope
-        self.location = location
-    }
-}
-
-public struct LocateSessionResponse: Equatable, Sendable {
-    public var envelope: AgentHistoryEnvelope
-    public var location: AgentHistoryLocationResult
-
-    public init(envelope: AgentHistoryEnvelope) throws {
-        guard let location = envelope.location else {
-            throw missingPayload("location", operation: envelope.operation)
-        }
-        self.envelope = envelope
-        self.location = location
-    }
-}
-
 private func missingPayload(_ payload: String, operation: AgentHistoryOperation) -> CtxAgentHistorySDKError {
     CtxAgentHistorySDKError(
         code: .decodeError,

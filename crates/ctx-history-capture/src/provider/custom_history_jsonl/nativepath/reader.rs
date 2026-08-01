@@ -2,25 +2,21 @@
 
 use std::{
     collections::BTreeMap,
-    fs::File,
     io::{BufReader, Read, Seek, SeekFrom, Write},
 };
 
 use ctx_history_core::{
-    derive_event_id, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, SourceKey, SourceRecordLocator,
+    derive_event_id, CoreRecord, EventIdentityInput, NativeItemKey, SourceKey, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 
 #[cfg(test)]
 use super::source_backed::record_custom_history_work;
 use super::source_backed::{
-    bounded_metadata, custom_event_typed_key_parts, custom_session_identity,
-    custom_session_typed_key, CustomHistorySourceBackedError, CustomHistorySourceBackedInput,
+    custom_event_typed_key_parts, custom_session_identity, CustomHistorySourceBackedError,
     CustomHistorySourceBackedPage, CustomHistorySourceBackedResult, CustomSessionCatalogEntry,
     CustomSessionKey, CustomSourceCatalogEntry, ParsedProjection, SpooledCustomEvent,
-    TouchSpoolRef, CUSTOM_EVENT_KEY_NAMESPACE, CUSTOM_LOGICAL_EVENT_KIND,
-    CUSTOM_PAGE_MAX_DOCUMENTS, CUSTOM_PAGE_MAX_RETAINED_BYTES,
+    CUSTOM_EVENT_KEY_NAMESPACE, CUSTOM_LOGICAL_EVENT_KIND, CUSTOM_PAGE_MAX_DOCUMENTS,
+    CUSTOM_PAGE_MAX_RETAINED_BYTES, CUSTOM_SOURCE_BACKED_PARSER_REVISION,
 };
 use crate::provider::custom_history_jsonl::{
     custom_history_internal_session_id, CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES,
@@ -103,7 +99,6 @@ impl CatalogBudget {
 
 pub(super) fn emit_projection_pages(
     source: &SourceKey,
-    input: &CustomHistorySourceBackedInput,
     projection: &mut ParsedProjection,
     emit_from: u64,
     emit: &mut impl FnMut(CustomHistorySourceBackedPage) -> CustomHistorySourceBackedResult<()>,
@@ -136,64 +131,45 @@ pub(super) fn emit_projection_pages(
             .sessions
             .get(&(event.source_id.clone(), event.session_id.clone()))
             .ok_or(CustomHistorySourceBackedError::CountMismatch)?;
-        let touched_files = read_touched_files(
-            &mut projection.touch_spool,
-            projection.event_touches.get(&key).map(Vec::as_slice),
-        )?;
-        let document = lexical_document(
+        let record = core_record(
             source,
-            input,
             &projection.session_roots,
             source_record,
             session,
             &mut event,
-            &event_entry.line,
-            touched_files,
         )?;
-        let document_bytes = retained_document_bytes(&document);
+        let record_bytes = record
+            .encode_stored()
+            .map_err(|error| {
+                CustomHistorySourceBackedError::Capture(crate::CaptureError::InvalidPayload(
+                    error.to_string(),
+                ))
+            })?
+            .len();
         if !documents.is_empty()
             && (documents.len() == CUSTOM_PAGE_MAX_DOCUMENTS
-                || retained_bytes.saturating_add(document_bytes) > CUSTOM_PAGE_MAX_RETAINED_BYTES)
+                || retained_bytes.saturating_add(record_bytes) > CUSTOM_PAGE_MAX_RETAINED_BYTES)
         {
             emit(CustomHistorySourceBackedPage {
-                documents: std::mem::take(&mut documents),
+                records: std::mem::take(&mut documents),
             })?;
             retained_bytes = 0;
             retained_body_bytes = 0;
             #[cfg(test)]
             record_resident_event_body_bytes(body_bytes);
         }
-        retained_bytes = retained_bytes.saturating_add(document_bytes);
+        retained_bytes = retained_bytes.saturating_add(record_bytes);
         retained_body_bytes = retained_body_bytes.saturating_add(body_bytes);
-        documents.push(document);
+        documents.push(record);
         #[cfg(test)]
         record_resident_event_body_bytes(retained_body_bytes);
     }
     if !documents.is_empty() {
-        emit(CustomHistorySourceBackedPage { documents })?;
+        emit(CustomHistorySourceBackedPage { records: documents })?;
     }
     #[cfg(test)]
     record_resident_event_body_bytes(0);
     Ok(())
-}
-
-fn read_touched_files(
-    spool: &mut File,
-    references: Option<&[TouchSpoolRef]>,
-) -> CustomHistorySourceBackedResult<Vec<String>> {
-    let Some(references) = references else {
-        return Ok(Vec::new());
-    };
-    let mut paths = Vec::with_capacity(references.len());
-    for reference in references {
-        spool.seek(SeekFrom::Start(reference.byte_offset))?;
-        let mut bytes = vec![0; reference.byte_length];
-        spool.read_exact(&mut bytes)?;
-        paths.push(
-            String::from_utf8(bytes).map_err(|_| CustomHistorySourceBackedError::CountMismatch)?,
-        );
-    }
-    Ok(paths)
 }
 
 #[cfg(test)]
@@ -205,22 +181,20 @@ fn record_resident_event_body_bytes(bytes: usize) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn lexical_document(
+fn core_record(
     source: &SourceKey,
-    input: &CustomHistorySourceBackedInput,
     session_roots: &BTreeMap<CustomSessionKey, String>,
     source_record: &CustomSourceCatalogEntry,
     session: &CustomSessionCatalogEntry,
     event: &mut SpooledCustomEvent,
-    line: &super::source_backed::CompleteLine,
-    touched_files: Vec<String>,
-) -> CustomHistorySourceBackedResult<LexicalDocument> {
+) -> CustomHistorySourceBackedResult<CoreRecord> {
     let session_id = custom_session_identity(
         source,
         &source_record.provider_key,
         &event.source_id,
         &session.session_id,
-    )?;
+    )
+    .map_err(core_contract)?;
     let parent_session_id = session
         .parent_session_id
         .as_deref()
@@ -252,6 +226,15 @@ fn lexical_document(
     };
     let event_key = custom_event_typed_key_parts(event.event_id.as_deref(), event.event_index)?;
     let native_item_key = NativeItemKey::native_id(CUSTOM_EVENT_KEY_NAMESPACE, event_key.clone())?;
+    let event_selector = event.event_id.as_ref().map_or_else(
+        || format!("event_index:{}", event.event_index),
+        |id| format!("event_id:{id}"),
+    );
+    let native_event_id = TypedKey::composite(vec![
+        TypedKey::utf8(source_record.provider_key.clone())?,
+        TypedKey::utf8(event.source_id.clone())?,
+        TypedKey::utf8(event_selector)?,
+    ])?;
     let event_id = derive_event_id(EventIdentityInput {
         source,
         session_id,
@@ -259,70 +242,35 @@ fn lexical_document(
         native_item_key: &native_item_key,
         subrecord_selector: None,
     })?;
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::Jsonl {
-            byte_offset: line.byte_offset,
-            byte_length: line.byte_length,
-            physical_ordinal: line.physical_ordinal,
-            native_session_key: Some(custom_session_typed_key(
-                &source_record.provider_key,
-                &event.source_id,
-                &session.session_id,
-            )?),
-            native_event_key: Some(event_key),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        line.record_digest,
-    )?;
-    let source_path = source_record
-        .raw_source_path
-        .clone()
-        .or_else(|| input.path().to_str().and_then(bounded_metadata));
-    Ok(LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id,
         root_session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(custom_history_internal_session_id(
-            &source_record.provider_key,
-            &event.source_id,
-            &session.session_id,
-        )),
-        // The v1 interchange schema has no branch or workspace field.
-        branch: None,
-        source_path,
-        agent_type: session.agent_type.clone(),
-        is_primary: session.is_primary,
-        event_sequence: event.event_index,
-        occurred_at_unix_ms: Some(event.occurred_at_unix_ms),
-        event_type: event.event_type.clone(),
-        role: event.role.clone(),
-        body: std::mem::take(&mut event.body),
-        workspace: None,
-        cwd: session.cwd.clone(),
-        touched_files,
-    })
+        source.clone(),
+        event.event_index,
+        event.event_type.clone(),
+        session.agent_type.clone(),
+        session.is_primary,
+        CUSTOM_SOURCE_BACKED_PARSER_REVISION,
+        std::mem::take(&mut event.body),
+    )
+    .map_err(core_contract)?;
+    record.parent_session_id = parent_session_id;
+    record.provider_session_id = Some(custom_history_internal_session_id(
+        &source_record.provider_key,
+        &event.source_id,
+        &session.session_id,
+    ));
+    record.native_event_id = Some(native_event_id);
+    record.occurred_at_unix_ms = Some(event.occurred_at_unix_ms);
+    record.role = event.role.clone();
+    record.cwd = session.cwd.clone();
+    record.validate_contract().map_err(core_contract)?;
+    Ok(record)
 }
 
-fn retained_document_bytes(document: &LexicalDocument) -> usize {
-    document
-        .body
-        .len()
-        .saturating_add(document.provider_session_id.as_ref().map_or(0, String::len))
-        .saturating_add(document.source_path.as_ref().map_or(0, String::len))
-        .saturating_add(document.cwd.as_ref().map_or(0, String::len))
-        .saturating_add(
-            document
-                .touched_files
-                .iter()
-                .map(String::len)
-                .sum::<usize>(),
-        )
-        .saturating_add(512)
+fn core_contract(error: impl std::fmt::Display) -> CustomHistorySourceBackedError {
+    CustomHistorySourceBackedError::Capture(crate::CaptureError::InvalidPayload(error.to_string()))
 }
 
 pub(super) fn write_spooled_event(

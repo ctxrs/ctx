@@ -46,8 +46,6 @@ assert session_id, "search result must include ctxSessionId"
 
 assert client.show_event(event_id, window=1)["operation"] == "showEvent"
 assert client.show_session(session_id, mode="lite")["operation"] == "showSession"
-assert client.locate_event(event_id)["operation"] == "locateEvent"
-assert client.locate_session(session_id)["operation"] == "locateSession"
 
 print("sdk local smoke passed")
 PY

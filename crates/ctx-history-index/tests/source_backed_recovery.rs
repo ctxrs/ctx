@@ -16,15 +16,14 @@ use std::{
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend,
-    CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation,
-    SourceRecordLocator, TypedKey,
+    CertifiedSourceInventory, CoreRecord, EventIdentityInput, NativeItemKey, NativeSessionKey,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
+    SourceInventoryObservation, SourceKey, SourceObservation, TypedKey,
 };
 use ctx_history_index::{
-    CommitReceipt, GenerationWriter, IndexError, LexicalDocument, VerifiedIndex, WriterOptions,
+    CommitReceipt, GenerationWriter, IndexError, VerifiedIndex, WriterOptions,
 };
-use tantivy::Index;
+use tantivy::{store::Compressor, Index};
 use tempfile::{tempdir, TempDir};
 
 const CHILD_MODE_ENV: &str = "CTX_SOURCE_RECOVERY_CHILD_MODE";
@@ -119,7 +118,7 @@ fn stale_writer_lock_after_sigkill_is_recoverable() {
     let mut child = fixture.spawn_stopped_child("pause_after_writer_open", None);
     fixture.kill_at_marker(&mut child);
 
-    let stale_lock = fixture.root.join(".tantivy-writer.lock");
+    let stale_lock = fixture.root.join(".ctx-generation-writer.lock");
     assert!(
         stale_lock.is_file(),
         "SIGKILL did not leave the lock witness"
@@ -228,7 +227,11 @@ fn torn_manifest_and_meta_fail_closed_without_damaging_the_previous_root() {
         "torn manifest was accepted"
     );
 
-    fs::write(meta_copy.join("meta.json"), b"{\"index_settings\":").unwrap();
+    fs::write(
+        active_generation_path(&meta_copy).join("meta.json"),
+        b"{\"index_settings\":",
+    )
+    .unwrap();
     assert!(
         VerifiedIndex::open(&meta_copy).is_err(),
         "torn meta.json was accepted"
@@ -259,7 +262,7 @@ fn active_segment_corruption_is_detected_and_rebuild_is_deterministic() {
         VerifiedIndex::open(&corrupt_copy).is_err(),
         "verified open admitted a malformed active document"
     );
-    let damaged = Index::open_in_dir(&corrupt_copy)
+    let damaged = Index::open_in_dir(active_generation_path(&corrupt_copy))
         .unwrap()
         .validate_checksum()
         .unwrap();
@@ -288,27 +291,60 @@ fn active_segment_corruption_is_detected_and_rebuild_is_deterministic() {
 }
 
 #[test]
+fn incompatible_zstd_generation_rebuilds_from_sources_without_cloning_the_slot() {
+    let fixture = RecoveryFixture::new();
+    let pointer_path = fixture.root.join("active-generation.json");
+    let pointer_before = fs::read(&pointer_path).unwrap();
+    let old_generation_path = active_generation_path(&fixture.root);
+    let meta_path = old_generation_path.join("meta.json");
+    let mut meta: serde_json::Value =
+        serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+    meta["index_settings"]["docstore_compression"] =
+        serde_json::Value::String("zstd(compression_level=1)".to_owned());
+    meta["index_settings"]["docstore_blocksize"] = serde_json::Value::from(64 * 1024);
+    fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    assert!(matches!(
+        VerifiedIndex::open(&fixture.root),
+        Err(IndexError::IndexSettingsMismatch(_))
+    ));
+
+    let mut rebuild = GenerationWriter::open(&fixture.root, writer_options()).unwrap();
+    assert!(rebuild.base_manifest().is_none());
+    assert_eq!(fs::read(&pointer_path).unwrap(), pointer_before);
+    let candidates = inactive_generation_directories(&fixture.root);
+    assert_eq!(candidates.len(), 1);
+    let candidate = Index::open_in_dir(&candidates[0]).unwrap();
+    assert!(candidate.load_metas().unwrap().segments.is_empty());
+    assert_eq!(candidate.settings().docstore_compression, Compressor::Lz4);
+    assert_eq!(candidate.settings().docstore_blocksize, 32 * 1024);
+    drop(candidate);
+
+    let source = source();
+    rebuild.begin_source(source.clone()).unwrap();
+    rebuild
+        .add_core_record(document(&source, CANDIDATE_BODY))
+        .unwrap();
+    rebuild.certify_source(certificate(&source, 2)).unwrap();
+    let receipt = rebuild.commit(|_| true).unwrap();
+
+    assert_ne!(fs::read(&pointer_path).unwrap(), pointer_before);
+    assert!(!old_generation_path.exists());
+    assert_generation(
+        &fixture.root,
+        &receipt.generation_id,
+        "candidate",
+        "previous",
+    );
+}
+
+#[test]
 #[ignore = "requires scripts/source-backed-recovery/run-linux-fault-tests.sh"]
-fn exact_manifest_and_tantivy_swap_process_death_matrix() {
+fn inactive_generation_and_atomic_pointer_process_death_matrix() {
     let shim = required_fault_shim();
     let cases = [
         FaultCase::stop("sync", "manifest_temp", "after", None, Visibility::Old),
         FaultCase::stop("rename", "manifest_final", "before", None, Visibility::Old),
         FaultCase::stop("rename", "manifest_final", "after", None, Visibility::Old),
-        FaultCase::stop(
-            "rename",
-            "meta_final",
-            "before",
-            Some("manifest_rename"),
-            Visibility::Old,
-        ),
-        FaultCase::stop(
-            "rename",
-            "meta_final",
-            "after",
-            Some("manifest_rename"),
-            Visibility::New,
-        ),
         FaultCase::stop(
             "sync",
             "manifest_dir",
@@ -318,9 +354,58 @@ fn exact_manifest_and_tantivy_swap_process_death_matrix() {
         ),
         FaultCase::stop(
             "sync",
+            "generation_temp",
+            "after",
+            Some("manifest_rename"),
+            Visibility::Old,
+        ),
+        FaultCase::stop(
+            "rename",
+            "generation_meta_final",
+            "before",
+            Some("manifest_rename"),
+            Visibility::Old,
+        ),
+        FaultCase::stop(
+            "rename",
+            "generation_meta_final",
+            "after",
+            Some("manifest_rename"),
+            Visibility::Old,
+        ),
+        FaultCase::stop(
+            "sync",
+            "generation_dir",
+            "after",
+            Some("generation_meta_rename"),
+            Visibility::Old,
+        ),
+        FaultCase::stop(
+            "sync",
+            "pointer_temp",
+            "after",
+            Some("generation_meta_rename"),
+            Visibility::Old,
+        ),
+        FaultCase::stop(
+            "rename",
+            "pointer_final",
+            "before",
+            Some("generation_meta_rename"),
+            Visibility::Old,
+        ),
+        FaultCase::stop(
+            "rename",
+            "pointer_final",
+            "after",
+            Some("generation_meta_rename"),
+            Visibility::New,
+        ),
+        FaultCase::stop(
+            "sync",
             "root_dir",
             "after",
-            Some("meta_rename"),
+            Some("pointer_rename"),
             Visibility::New,
         ),
     ];
@@ -332,24 +417,28 @@ fn exact_manifest_and_tantivy_swap_process_death_matrix() {
 
 #[test]
 #[ignore = "requires scripts/source-backed-recovery/run-linux-fault-tests.sh"]
-fn retry_after_pre_meta_crash_reclaims_tantivy_candidate_files() {
+fn retry_after_pre_pointer_crash_reclaims_inactive_generation() {
     let shim = required_fault_shim();
     let fixture = RecoveryFixture::new();
     let pinned_reader = VerifiedIndex::open(&fixture.root).unwrap();
     let case = FaultCase::stop(
         "rename",
-        "meta_final",
+        "pointer_final",
         "before",
-        Some("manifest_rename"),
+        Some("generation_meta_rename"),
         Visibility::Old,
     );
     let mut child = fixture.spawn_stopped_child("commit", Some((&shim, case)));
     fixture.kill_at_marker(&mut child);
-    let orphaned_before = orphaned_managed_files(&fixture.root);
-    let orphaned_bytes_before = managed_file_bytes(&fixture.root, &orphaned_before);
+    let inactive_before = inactive_generation_directories(&fixture.root);
     assert!(
-        orphaned_bytes_before > 0,
-        "the pre-meta crash left no orphaned managed bytes: {orphaned_before:?}"
+        inactive_before.len() == 1,
+        "the pre-pointer crash did not leave exactly one inactive generation: {inactive_before:?}"
+    );
+    let inactive_bytes_before = directory_file_bytes(&inactive_before[0]);
+    assert!(
+        inactive_bytes_before > 0,
+        "the pre-pointer crash left an empty inactive generation: {inactive_before:?}"
     );
     assert_generation(
         &fixture.root,
@@ -358,9 +447,12 @@ fn retry_after_pre_meta_crash_reclaims_tantivy_candidate_files() {
         "candidate",
     );
 
-    let meta_path = fixture.root.join("meta.json");
+    let pointer_path = fixture.root.join("active-generation.json");
+    let pointer_before = fs::read(&pointer_path).unwrap();
+    let active_path = active_generation_path(&fixture.root);
+    let meta_path = active_path.join("meta.json");
     let meta_before = fs::read(&meta_path).unwrap();
-    let opstamp_before = Index::open_in_dir(&fixture.root)
+    let opstamp_before = Index::open_in_dir(&active_path)
         .unwrap()
         .load_metas()
         .unwrap()
@@ -384,14 +476,16 @@ fn retry_after_pre_meta_crash_reclaims_tantivy_candidate_files() {
     assert_eq!(receipt.generation_id, fixture.baseline.generation_id);
     assert_eq!(receipt.opstamp, fixture.baseline.opstamp);
     assert_eq!(receipt.opstamp, opstamp_before);
+    assert_eq!(fs::read(pointer_path).unwrap(), pointer_before);
+    assert_eq!(active_generation_path(&fixture.root), active_path);
     assert_eq!(fs::read(meta_path).unwrap(), meta_before);
     assert!(
-        orphaned_managed_files(&fixture.root).is_empty(),
-        "exact replay left orphaned managed files"
+        inactive_generation_directories(&fixture.root).is_empty(),
+        "exact replay left an inactive generation"
     );
     assert!(
-        orphaned_before.iter().all(|path| !path.exists()),
-        "exact replay did not reclaim every candidate file: {orphaned_before:?}"
+        inactive_before.iter().all(|path| !path.exists()),
+        "exact replay did not reclaim every inactive generation: {inactive_before:?}"
     );
     assert!(
         atomic_temporary_files(&fixture.root).is_empty(),
@@ -410,11 +504,17 @@ fn injected_enospc_and_write_sync_failures_preserve_previous_generation() {
         FaultCase::fail("sync", "manifest_temp", "EIO", None),
         FaultCase::fail(
             "write",
-            "root_atomic_temp",
+            "pointer_temp",
             "ENOSPC",
-            Some("manifest_rename"),
+            Some("generation_meta_rename"),
         ),
-        FaultCase::fail("sync", "root_atomic_temp", "EIO", Some("manifest_rename")),
+        FaultCase::fail(
+            "sync",
+            "pointer_temp",
+            "EIO",
+            Some("generation_meta_rename"),
+        ),
+        FaultCase::fail("sync", "index_data", "EIO", Some("generation_meta_rename")),
         FaultCase::fail("sync", "manifest_dir", "EIO", Some("manifest_rename")),
     ];
 
@@ -524,12 +624,25 @@ fn writer_reopen_reclaims_abandoned_atomic_write_files() {
 
 #[test]
 #[ignore = "requires scripts/source-backed-recovery/run-linux-fault-tests.sh"]
-fn retry_resynchronizes_a_reused_manifest_before_meta_publication() {
+fn retry_republishes_a_reclaimed_manifest_before_pointer_publication() {
     let shim = required_fault_shim();
     let fixture = RecoveryFixture::new();
     let first_crash = FaultCase::stop("rename", "manifest_final", "after", None, Visibility::Old);
     let mut child = fixture.spawn_stopped_child("commit", Some((&shim, first_crash)));
     fixture.kill_at_marker(&mut child);
+    let baseline_manifest = format!("{}.json", fixture.baseline.generation_id);
+    let manifest_directory = fixture.root.join("ctx-generations");
+    let candidate_manifests = canonical_generation_manifests(&manifest_directory)
+        .into_iter()
+        .filter(|entry| entry.file_name() != OsStr::new(&baseline_manifest))
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert!(
+        candidate_manifests.len() == 1,
+        "first crash did not leave exactly one candidate manifest: {candidate_manifests:?}"
+    );
+    let candidate_manifest = &candidate_manifests[0];
+    let candidate_manifest_bytes = fs::read(candidate_manifest).unwrap();
     assert_generation(
         &fixture.root,
         &fixture.baseline.generation_id,
@@ -537,10 +650,17 @@ fn retry_resynchronizes_a_reused_manifest_before_meta_publication() {
         "candidate",
     );
 
-    let retry_file_fence =
-        FaultCase::stop("sync", "manifest_final", "after", None, Visibility::Old);
-    let mut file_retry = fixture.spawn_stopped_child("commit", Some((&shim, retry_file_fence)));
-    fixture.kill_at_marker(&mut file_retry);
+    let retry_temp_fence = FaultCase::stop("sync", "manifest_temp", "after", None, Visibility::Old);
+    let mut temp_retry = fixture.spawn_stopped_child("commit", Some((&shim, retry_temp_fence)));
+    fixture.kill_at_marker(&mut temp_retry);
+    assert!(
+        !candidate_manifest.exists(),
+        "writer preflight did not reclaim the unreferenced candidate manifest"
+    );
+    assert!(
+        !atomic_temporary_files(&manifest_directory).is_empty(),
+        "retry did not leave its synchronized manifest staging witness"
+    );
     assert_generation(
         &fixture.root,
         &fixture.baseline.generation_id,
@@ -548,11 +668,15 @@ fn retry_resynchronizes_a_reused_manifest_before_meta_publication() {
         "candidate",
     );
 
-    let retry_directory_fence =
-        FaultCase::stop("sync", "manifest_dir", "after", None, Visibility::Old);
-    let mut directory_retry =
-        fixture.spawn_stopped_child("commit", Some((&shim, retry_directory_fence)));
-    fixture.kill_at_marker(&mut directory_retry);
+    let retry_publish_fence =
+        FaultCase::stop("rename", "manifest_final", "after", None, Visibility::Old);
+    let mut publish_retry =
+        fixture.spawn_stopped_child("commit", Some((&shim, retry_publish_fence)));
+    fixture.kill_at_marker(&mut publish_retry);
+    assert_eq!(
+        fs::read(candidate_manifest).unwrap(),
+        candidate_manifest_bytes
+    );
     assert_generation(
         &fixture.root,
         &fixture.baseline.generation_id,
@@ -764,7 +888,7 @@ fn build_generation(root: &Path, revision: u8, body: &str) -> CommitReceipt {
     let source = source();
     let mut writer = GenerationWriter::open(root, writer_options()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, body)).unwrap();
+    writer.add_core_record(document(&source, body)).unwrap();
     writer
         .certify_source(certificate(&source, revision))
         .unwrap();
@@ -792,7 +916,7 @@ fn try_staged_replacement(root: &Path) -> std::result::Result<GenerationWriter, 
     let source = source();
     let mut writer = GenerationWriter::open(root, writer_options())?;
     writer.begin_source(source.clone())?;
-    writer.add_document(document(&source, CANDIDATE_BODY))?;
+    writer.add_core_record(document(&source, CANDIDATE_BODY))?;
     writer.certify_source(certificate(&source, 2))?;
     Ok(writer)
 }
@@ -814,36 +938,93 @@ fn complete_inventory(
         .unwrap()
 }
 
-fn orphaned_managed_files(root: &Path) -> Vec<PathBuf> {
-    let index = Index::open_in_dir(root).unwrap();
-    let metas = index.load_metas().unwrap();
-    let mut living = metas
-        .segments
-        .iter()
-        .flat_map(|segment| segment.list_files())
-        .collect::<HashSet<_>>();
-    living.insert(PathBuf::from("meta.json"));
-    let mut orphaned = index
-        .directory()
-        .list_managed_files()
+fn inactive_generation_directories(root: &Path) -> Vec<PathBuf> {
+    let pointer: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("active-generation.json")).unwrap()).unwrap();
+    let retained = ["active", "previous"]
         .into_iter()
-        .filter(|path| !living.contains(path))
-        .map(|path| root.join(path))
-        .filter(|path| path.is_file())
+        .filter_map(|slot| pointer.get(slot))
+        .filter_map(|slot| slot.get("directory"))
+        .filter_map(serde_json::Value::as_str)
+        .collect::<HashSet<_>>();
+    let generations = root.join("index-generations");
+    let mut inactive = fs::read_dir(generations)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_dir()))
+        .filter(|entry| !retained.contains(entry.file_name().to_string_lossy().as_ref()))
+        .map(|entry| entry.path())
         .collect::<Vec<_>>();
-    orphaned.sort();
-    orphaned
+    inactive.sort();
+    inactive
 }
 
-fn managed_file_bytes(root: &Path, files: &[PathBuf]) -> u64 {
-    files
-        .iter()
-        .map(|path| {
-            assert!(
-                path.starts_with(root),
-                "managed file escaped the index root: {path:?}"
-            );
-            fs::metadata(path).unwrap().len()
+fn canonical_generation_manifests(directory: &Path) -> Vec<fs::DirEntry> {
+    let mut manifests = fs::read_dir(directory)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_file()))
+        .filter(|entry| {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            let Some(generation_id) = name.strip_suffix(".json") else {
+                return false;
+            };
+            generation_id.len() == 64
+                && generation_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .collect::<Vec<_>>();
+    manifests.sort_by_key(fs::DirEntry::file_name);
+    manifests
+}
+
+#[test]
+fn recovery_manifest_selector_excludes_integrity_receipts_and_temporaries() {
+    let directory = tempdir().unwrap();
+    let generation_id = "ab".repeat(32);
+    let canonical = directory.path().join(format!("{generation_id}.json"));
+    fs::write(&canonical, b"manifest").unwrap();
+    fs::write(
+        directory
+            .path()
+            .join(format!("generation-{generation_id}.integrity.json")),
+        b"receipt",
+    )
+    .unwrap();
+    fs::write(
+        directory
+            .path()
+            .join(format!(".{generation_id}.json.temporary")),
+        b"temporary",
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join(format!("{generation_id}.JSON")),
+        b"wrong case",
+    )
+    .unwrap();
+
+    let manifests = canonical_generation_manifests(directory.path())
+        .into_iter()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert_eq!(manifests, vec![canonical]);
+}
+
+fn directory_file_bytes(directory: &Path) -> u64 {
+    fs::read_dir(directory)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|entry| {
+            if entry.file_type().unwrap().is_dir() {
+                directory_file_bytes(&entry.path())
+            } else {
+                entry.metadata().unwrap().len()
+            }
         })
         .sum()
 }
@@ -905,7 +1086,7 @@ fn certificate(source: &SourceKey, revision: u8) -> CertifiedSource {
     .unwrap()
 }
 
-fn document(source: &SourceKey, body: &str) -> LexicalDocument {
+fn document(source: &SourceKey, body: &str) -> CoreRecord {
     let native_session_coordinate = TypedKey::utf8("session").unwrap();
     let session_key =
         NativeSessionKey::native_id("session", native_session_coordinate.clone()).unwrap();
@@ -925,40 +1106,27 @@ fn document(source: &SourceKey, body: &str) -> LexicalDocument {
         subrecord_selector: None,
     })
     .unwrap();
-    LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator: SourceRecordLocator::new(
-            source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset: 100,
-                byte_length: 100,
-                physical_ordinal: 1,
-                native_session_key: Some(native_session_coordinate),
-                native_event_key: Some(TypedKey::U64(1)),
-            },
-            LocatorRevisionPolicy::StableRecordEvidence,
-            None,
-            [1; 32],
-        )
-        .unwrap(),
-        provider_session_id: Some("session".to_owned()),
-        branch: Some("main".to_owned()),
-        source_path: Some("/history/source-backed-recovery.jsonl".to_owned()),
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: 1,
-        occurred_at_unix_ms: Some(1_700_000_000_001),
-        event_type: "message".to_owned(),
-        role: Some("user".to_owned()),
-        body: body.to_owned(),
-        workspace: Some("ctx".to_owned()),
-        cwd: Some("/work/ctx".to_owned()),
-        touched_files: vec!["src/lib.rs".to_owned()],
-    }
+        session_id,
+        source.clone(),
+        1,
+        "message",
+        "primary",
+        true,
+        "codex-parser-v1",
+        body,
+    )
+    .unwrap();
+    record.provider_session_id = Some("session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(1));
+    record.branch = Some("main".to_owned());
+    record.occurred_at_unix_ms = Some(1_700_000_000_001);
+    record.role = Some("user".to_owned());
+    record.workspace = Some("ctx".to_owned());
+    record.cwd = Some("/work/ctx".to_owned());
+    record
 }
 
 fn assert_generation(root: &Path, generation_id: &str, present: &str, absent: &str) {
@@ -1047,7 +1215,8 @@ fn copy_tree(source: &Path, destination: &Path) {
 }
 
 fn corrupt_active_store(root: &Path) -> PathBuf {
-    let path = fs::read_dir(root)
+    let active = active_generation_path(root);
+    let path = fs::read_dir(&active)
         .unwrap()
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
@@ -1069,6 +1238,17 @@ fn corrupt_active_store(root: &Path) -> PathBuf {
     file.write_all(&byte).unwrap();
     file.sync_all().unwrap();
     path.file_name().unwrap().into()
+}
+
+fn active_generation_path(root: &Path) -> PathBuf {
+    let pointer: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("active-generation.json")).unwrap()).unwrap();
+    let directory = pointer
+        .get("active")
+        .and_then(|active| active.get("directory"))
+        .and_then(serde_json::Value::as_str)
+        .expect("active generation pointer has no directory");
+    root.join("index-generations").join(directory)
 }
 
 fn atomic_temporary_files(directory: &Path) -> Vec<PathBuf> {

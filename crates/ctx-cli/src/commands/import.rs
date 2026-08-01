@@ -9,6 +9,7 @@ use crate::ImportArgs;
 
 mod automatic_source_refresh;
 mod catalog;
+mod core_refresh;
 mod entry;
 mod explicit;
 mod explicit_source_catalog;

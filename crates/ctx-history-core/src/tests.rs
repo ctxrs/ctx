@@ -4,10 +4,18 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    blob_dir, config_path, database_path, default_data_root, device_path, history_dir, logs_dir,
-    managed_data_root, object_dir, CaptureProvider, Confidence, ContextCitationType, Fidelity,
-    HistoryRecord, Session, SyncMetadata, SyncOutboxItem, SyncState, Visibility,
+    config_path, default_data_root, device_path, history_dir, logs_dir, managed_data_root,
+    CaptureProvider, Confidence, Fidelity, HistoryRecord, Session, SyncMetadata, SyncOutboxItem,
+    SyncState, Visibility,
 };
+
+#[test]
+fn obsolete_content_reference_surface_is_absent() {
+    let crate_root = include_str!("lib.rs");
+    for removed in [concat!("Content", "Ref"), concat!("mod content", "_ref;")] {
+        assert!(!crate_root.contains(removed), "found {removed}");
+    }
+}
 
 #[test]
 fn enum_string_roundtrips_and_defaults() {
@@ -107,35 +115,19 @@ fn history_record_json_names_are_public_names() {
     assert_eq!(session.history_record_id, Some(record_id));
     let value = serde_json::to_value(&session).unwrap();
     assert_eq!(value["history_record_id"], record_id.to_string());
-    assert_eq!(
-        serde_json::to_string(&ContextCitationType::HistoryRecord).unwrap(),
-        "\"history_record\""
-    );
 }
 
 #[test]
-fn generated_ids_are_uuid_v7_and_paths_are_centralized() {
+fn generated_ids_are_uuid_v7() {
     let record = HistoryRecord::new("Task", "body", Vec::new(), "task", None);
 
     assert_eq!(record.id.get_version_num(), 7);
 }
 
 #[test]
-fn local_layout_paths_are_flat_under_data_root() {
+fn retained_local_layout_paths_are_flat_under_data_root() {
     let root = PathBuf::from("/tmp/ctx-root");
     assert_eq!(history_dir(root.clone()), PathBuf::from("/tmp/ctx-root"));
-    assert_eq!(
-        database_path(root.clone()),
-        PathBuf::from("/tmp/ctx-root/work.sqlite")
-    );
-    assert_eq!(
-        object_dir(root.clone()),
-        PathBuf::from("/tmp/ctx-root/objects")
-    );
-    assert_eq!(
-        blob_dir(root.clone()),
-        PathBuf::from("/tmp/ctx-root/objects")
-    );
     assert_eq!(
         config_path(root.clone()),
         PathBuf::from("/tmp/ctx-root/config.toml")
@@ -165,10 +157,6 @@ fn ctx_data_root_env_is_the_ctx_root_itself() {
     assert_eq!(
         default_data_root().unwrap(),
         PathBuf::from("/tmp/custom-ctx-root")
-    );
-    assert_eq!(
-        database_path(default_data_root().unwrap()),
-        PathBuf::from("/tmp/custom-ctx-root/work.sqlite")
     );
     assert_eq!(managed_data_root().unwrap(), managed_root);
 

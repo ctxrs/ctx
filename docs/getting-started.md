@@ -68,10 +68,10 @@ ctx setup
 ctx status
 ```
 
-Setup creates the configured ctx data root, prepares the source-backed history
-epoch, starts or health-checks the enabled persistent daemon, requests provider
-source refresh, and prints next steps. It does not write `config.toml` for
-implicit defaults and does not execute history-source plugin commands. The
+Setup creates the configured ctx data root, prepares the self-contained Core
+generation, starts or health-checks the enabled persistent daemon, requests a
+provider-source refresh, and prints next steps. It does not write `config.toml`
+for implicit defaults and does not execute history-source plugin commands. The
 default data root is `~/.ctx`. Use `ctx daemon disable` for a durable opt-out or
 `ctx setup --no-daemon` for a one-run opt-out. Existing configurations that
 already set `[daemon] enabled = false` remain disabled after upgrade.
@@ -138,9 +138,9 @@ Use `ctx import --no-daemon` for a one-run opt-out. JSON import output does not
 start or nudge the daemon. Use a human-readable native import or an explicit
 daemon command when background maintenance should start.
 
-After upgrading an older data root to `0.10.x` or newer, the first refresh or import may
-re-read previously indexed provider transcripts once. That rebuilds search
-content with touched-file metadata and local/private transcript text.
+After upgrading an older data root to `0.10.x` or newer, the first refresh or
+import may perform a one-time provider reimport. That rebuilds search content
+with touched-file metadata and local/private transcript text.
 
 Native provider `--path` imports require `--provider`. Custom JSONL imports use
 `--input-format ctx-history-jsonl-v1 --path <file>` instead.
@@ -166,16 +166,16 @@ eight hex characters. Search also accepts filters such as `--provider`,
 `--include-current-session`, `--term`, `--limit`, and
 `--refresh background|off|wait`.
 `--limit` is capped at `200`.
-Search defaults to `--refresh background`, which serves existing indexes while
-daemon maintenance refreshes lexical and semantic indexes when enabled. Use
-`--refresh wait` for foreground text refresh, or `ctx import --all` for an
-explicit import catch-up.
+Search defaults to `--refresh background`, which serves the active Core
+generation while daemon maintenance requests a Core refresh and semantic
+catch-up when enabled. Use `--refresh wait` for foreground Core refresh, or
+`ctx import --all` for an explicit import catch-up.
 
 When ctx runs inside Codex, search excludes the active Codex session tree by
 default when it can identify it. Use `--include-current-session` if the current
 session or its subagent work is the history you want to search. Use
-`--refresh off` when you need a strictly read-only query over the existing ctx
-index.
+`--refresh off` when you need a strictly read-only query over the active Core
+generation.
 
 Default background refresh may start the configured daemon for local history
 freshness. Semantic and hybrid search read existing local sidecar coverage; when

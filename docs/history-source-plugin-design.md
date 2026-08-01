@@ -12,8 +12,8 @@ storage schema. The plugin or provider owns a durable
 - bounded manifest discovery and validation;
 - explicit single-source selection;
 - validation of the durable path, container schema, and source identity;
-- registration of that provider-owned path with the custom source-backed route;
-- daemon-owned generation publication and exact locator hydration.
+- registration of that provider-owned path with the custom acquisition route;
+- daemon-owned import and Core generation publication.
 
 This does not add an in-process ABI, marketplace, hosted plugin store,
 installation manager, automatic plugin scheduling, command-output body store,
@@ -81,13 +81,13 @@ validate provider-owned path + bounded identity header
 upsert explicit custom ctx_history_jsonl_v1 route
         |
         v
-daemon-owned source-backed refresh + terminal receipt
+daemon-owned Core refresh + terminal receipt
 ```
 
-The provider file is the exact-body authority. Tantivy and relational
-projections are disposable derivatives, and complete-content hydration returns
-to that file through typed locators. Neither the old Store, a `NativePath`
-body, a command-output snapshot, nor a ctx-owned content pack participates.
+The immutable Core/Tantivy generation is the imported-content authority used by
+search and presentation. Relational and semantic projections are disposable
+derivatives. Neither a `NativePath` body nor a command-output snapshot
+participates in query-time presentation.
 
 The shared custom JSONL route handles cold builds, no-ops, appends, rewrites,
 replacement, deletion, source certification, and crash-safe publication.
@@ -96,8 +96,9 @@ replacement, deletion, source certification, and crash-safe publication.
 ## User Reachability
 
 `ctx sources` performs discovery only. Durable rows report
-`explicit_source_backed` importability and their provider path. Command-only
-rows report a typed unsupported reason without executing the command.
+`explicit_source_backed` importability and their provider path. That
+compatibility value describes the acquisition route. Command-only rows report a
+typed unsupported reason without executing the command.
 
 Production registration is reached through:
 
@@ -107,8 +108,8 @@ ctx import --history-source-manifest ./ctx-history-plugin.json
 ```
 
 Selection must resolve to one source. Search filters use the canonical
-`provider_key/source_id` identity from the provider file. `ctx show ...
---content complete` hydrates from that same file.
+`provider_key/source_id` identity from the provider file. Once imported,
+`ctx show` reads the normalized imported content from the active Core generation.
 
 ## Failure And Trust Model
 
@@ -123,5 +124,6 @@ The route fails closed on:
 - source mutation during certification or publication;
 - daemon-publication failure.
 
-Manifest discovery is read-only. Import writes only the ctx-owned route catalog
-and disposable projections; it never rewrites or copies the provider file.
+Manifest discovery is read-only. Import writes the ctx-owned route catalog,
+Core generation, and derived projections; it never rewrites or copies the
+provider file itself.

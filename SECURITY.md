@@ -11,14 +11,14 @@ Security review for the current product covers:
 
 - the `ctx` CLI commands documented in `docs/cli-reference.md`;
 - the default data root `${CTX_DATA_ROOT:-~/.ctx}`;
-- the disposable Tantivy lexical index in `search/lexical`, the optional flat
-  F32 semantic projection in `search/semantic`, and metadata-only
+- the immutable Core/Tantivy generations in `search/lexical`, the optional
+  flat-F32 semantic projection in `search/semantic`, and metadata-only
   `relational.sqlite`;
 - local `config.toml` and diagnostic logs when present;
 - read-only discovery of known provider history paths;
 - explicit imports for supported local transcript formats, including Codex,
   Pi, Claude, OpenCode, Gemini, Cursor, Copilot CLI, and Factory AI Droid;
-- setup, status, sources, import, show, locate, search, MCP, and doctor output;
+- setup, status, sources, import, show, search, MCP, and doctor output;
 - JSON output treated as private local data unless reviewed before sharing.
 
 Setup, source discovery, import, and search do not require API keys,
@@ -51,17 +51,19 @@ Treat the ctx data root and command output as sensitive. They may contain source
 code, prompts, local paths, tool-call arguments, private repository names, and
 typed identifiers extracted from provider transcripts.
 
-Raw provider transcript files remain the sole content authority in
-provider-owned locations. ctx stores searchable terms and source locators in
-disposable derived projections, but does not store transcript bodies or
-previews. Confirmed source deletion retires its lexical, semantic, relational,
-and Pro projections; an unavailable or temporarily inaccessible source fails
-closed without being treated as confirmed deletion.
+Provider transcript files remain provider-owned acquisition inputs. Import and
+daemon refresh publish policy-selected normalized content and metadata into
+self-contained Core generations. Search and show read the active verified Core
+generation without reopening provider transcripts at query time. Acquisition
+paths remain source-level discovery and import metadata; `show` does not return
+them. A temporarily inaccessible input fails that source's refresh without being
+treated as confirmed deletion, while the active Core generation remains
+queryable until a later refresh publishes new source state.
 
 ## Local Output Limits
 
 Search, show, SQL, MCP, and JSON output are local/private by default and may
-contain hydrated provider text, local paths, token-shaped strings, command
+contain Core-backed transcript text, local paths, token-shaped strings, command
 output, and other transcript data. Review copied output before sharing it
 outside the machine.
 

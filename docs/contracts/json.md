@@ -27,7 +27,6 @@ Writes local storage and returns schema version 2:
 - `history_epoch`;
 - `lexical`;
 - `catalog`;
-- `resolver`;
 - `refresh`;
 - `refresh_request`;
 - `semantic`;
@@ -46,13 +45,13 @@ health-check and recover the persistent daemon before returning.
 `--no-daemon` opt-out reports `status: "not_requested"` and reason
 `explicit_opt_out`; a durable disabled configuration uses reason
 `daemon_disabled`. `refresh_request` separately reports whether setup queued
-or waited for a daemon-owned source publication. A completed `--wait` request
+or waited for daemon-owned Core publication. A completed `--wait` request
 also includes its request-bound terminal `receipt`; callers should use that
 receipt rather than a later periodic daemon job when reporting the setup run.
 
 Setup does not perform a foreground provider import. `--wait` waits for the
-daemon-owned source refresh; without it, setup requests background refresh.
-The deprecated `--catalog-only` flag is reported by
+daemon-owned Core refresh; without it, setup requests a background Core
+refresh. The deprecated `--catalog-only` flag is reported by
 `deprecated_catalog_only_ignored` and does not change the persistent lifecycle.
 Use `ctx daemon status --format json` for the complete process and applied
 configuration state.
@@ -349,7 +348,7 @@ ctx import --format json
 ctx import --format json --no-daemon
 ```
 
-Requests source-backed publication and returns:
+Requests Core generation publication and returns:
 
 - `schema_version`;
 - `outcome`;
@@ -387,7 +386,7 @@ accepted content while rejecting other records. `resume_mode` is currently `idem
 Imports may opportunistically start the ctx-owned daemon maintenance profile
 when `[daemon].enabled` is true. Explicit custom JSONL and history-source
 imports require its source-refresh endpoint even with JSON output. Set
-`ctx import --no-daemon` to prevent autostart; those explicit source-backed
+`ctx import --no-daemon` to prevent autostart; those explicit provider-source
 routes then require an already-running endpoint. The daemon, when started, reports
 `start_mode: "auto"` and `trigger_command: "import"` through status surfaces.
 Import result schema version 2 does not embed daemon process state. Use
@@ -439,67 +438,26 @@ ctx show event <ctx-event-id> --format json
 Writes nothing and returns:
 
 - `schema_version`;
+- `target`, either `session` or `event`;
 - `payload_type`, either `session_transcript` or `event_window`;
 - `mode` for session transcripts;
 - `format`;
-- `content_policy`, either `indexed` (the default) or `complete`;
 - `session` for session output;
 - `event` for event output;
-- `source`;
 - `events[]`.
 
-`source` contains the known source lineage ID, provider, provider-owned session
-ID, path, current path existence, working directory, and source format.
 `session` includes the ctx-owned `item_id`, `record_type`, `provider`, and
-`provider_session_id` when known. `event` and `events[]` rows include
-`ctx_event_id`, `record_type`, `ctx_session_id`, `sequence`, `event_type`,
-`role`, `occurred_at`, `source`, `cursor`, and `text` or `preview`. Each
-rendered event also includes `content` with `requested`, `complete`, `origin`,
-`stored_truncated`, and `source_verified`. Every rendered body is hydrated from
-the provider source, so successful output reports `complete: true`,
-`origin: "provider_source"`, `stored_truncated: false`, and
-`source_verified: true`; it does not read a stored preview or body. This is
-true for both the default `indexed` policy and the explicit `complete` policy:
-`indexed` controls item selection and the generation-bound parser contract. A
-source or event `cursor` is present only when the provider exposes a real
-provenance cursor. Source-backed locators are not rendered as cursors.
+`provider_session_id` when known. For Codex, `provider_session_id` is the resume
+UUID. `event` and `events[]` rows include `ctx_event_id`, `record_type`,
+`ctx_session_id`, `provider`, `provider_session_id`, `source_format`,
+`sequence`, `event_type`, `role`, `occurred_at`, and complete normalized `text`
+or `structured_content` when policy permits. Each rendered event also includes
+`content.complete`, `content.policy_status`, and an optional
+`content.policy_reason`.
 
-Hydration failures are all-or-nothing. JSON mode writes no transcript
-and reports a stable error object containing `error`, `error_code`,
-`ctx_event_id`, `retryable`, and a `ctx locate event` remediation command.
-Current error codes are `source_missing`, `source_unreadable`, `source_changed`,
-`hydration_unsupported`, `source_record_missing`, `content_too_large`, and
-`content_verification_failed`.
-
-## Locate
-
-```bash
-ctx locate session <ctx-session-id> --format json
-ctx locate event <ctx-event-id> --format json
-```
-
-Writes nothing and returns provenance metadata:
-
-- `schema_version`;
-- `payload_type`, either `session_location` or `event_location`;
-- `ctx_session_id`;
-- `ctx_event_id` for event output;
-- `provider`;
-- `provider_session_id` when known;
-- `source`;
-- `resume`.
-
-`source` includes `path`, `cursor`, `exists`, `source_id`, and
-`source_format` when known. `cursor` is omitted when the provider has no real
-provenance cursor; ctx does not synthesize one from a source-backed locator.
-`resume` includes provider cursor or import resume metadata when available.
-Event locations can additionally include safe `source_record` coordinates and
-`complete_content.locator_available`, `complete_content.available`,
-`complete_content.source_family`, and `complete_content.locator_kind`.
-`locator_available` reports that the indexed event retains a typed locator.
-`available` reports conservative current availability and is false when the
-known backing path is absent. Locate does not expose locator key bytes,
-revision evidence, or complete body digests.
+Show reads the active verified Core generation. It does not reopen provider
+transcript files at query time and does not return provider source paths,
+existence checks, or source cursors.
 
 ## Transcript Artifacts
 
@@ -576,9 +534,6 @@ Each result can include:
 - `provider`;
 - `timestamp`;
 - `cwd`;
-- `source_path`;
-- `source_exists`;
-- `cursor`;
 - `why_matched`;
 - `citations[]`;
 - `suggested_next_commands[]`;
@@ -587,10 +542,8 @@ Each result can include:
 `why_matched[]` can include text, metadata, or touched-file reasons. A touched
 file match is backed by normalized touched-file storage and can appear when
 search uses `--file <path>` or when file-path metadata contributes to ranking.
-`citations[]` can cite sessions, events, files, or source metadata depending on
+`citations[]` can cite sessions, events, or files depending on
 which indexed item produced the match.
-Per-result and citation `cursor` fields are source-provenance cursors only.
-They are omitted when unavailable and are unrelated to search continuation.
 
 Search JSON is local/private by default.
 
@@ -668,14 +621,14 @@ fields such as `vector_path`/`vectorPath` can still appear as additive JSON from
 the local CLI adapter, but they are intentionally not stable SDK fields.
 
 `retrieval.diagnostics` can include `query_embed_ms`, `vector_backend`,
-`vector_scan_ms`, `chunks_scanned`, `vector_bytes_read`, `events_scored`,
-`hydration_ms`, `stale_events_dropped`, and `semantic_candidates`. These fields
+`vector_scan_ms`, `chunks_scanned`, `vector_bytes_read`, `events_scored`, and
+`semantic_candidates`. These fields
 are local performance diagnostics and can reveal corpus size/timing; treat them
 as private like the rest of search JSON.
 
-`suggested_next_commands` can include `ctx show event`, `ctx show session`,
-`ctx search "<query>" --session <ctx-session-id>`, `ctx locate event`, and
-`ctx locate session` command strings when the required ctx IDs are known.
+`suggested_next_commands` can include `ctx show event`, `ctx show session`, and
+`ctx search "<query>" --session <ctx-session-id>` command strings when the
+required ctx IDs are known.
 
 When ctx can identify the active Codex provider session through
 `CODEX_THREAD_ID`, search filters include `exclude_provider_session` and omit
@@ -689,8 +642,8 @@ ctx sql "SELECT COUNT(*) AS sessions FROM ctx_sessions" --format json
 ctx sql --file query.sql --format json
 ```
 
-Runs one read-only SQL statement against the existing local SQLite index and
-returns:
+Runs one read-only SQL statement against the existing local SQLite metadata
+projection and returns:
 
 - `schema_version`;
 - `payload_type: "sql_result"`;
@@ -716,9 +669,9 @@ encoded as objects with `type: "blob"`, `bytes`, `preview_hex`, and
 
 `share_safe` is required and is always `false` for schema-version-1 SQL
 results. `read_only: true` describes database mutation only. The relational
-projection and its stable/internal views are metadata/locator-only: they do not
-contain event bodies, previews, command/result payloads, or transcript text and
-SQL does not hydrate provider sources. Selected metadata can still contain
+projection and its stable/internal views are metadata-only: they do not
+contain event bodies, previews, command/result payloads, or transcript text,
+and SQL does not fetch those bodies. Selected metadata can still contain
 private paths and identifiers, so clients must not infer that SQL output is
 safe to share.
 
@@ -887,13 +840,7 @@ Citations can include:
 - `time`;
 - `provider`;
 - `session_id`;
-- `event_seq`;
-- `source_path`;
-- `source_exists`;
-- `cursor`.
-
-`source_exists: false` means indexed text is available but the raw source
-was not present at the stored path when checked.
+- `event_seq`.
 
 ## Local Pro
 
@@ -1001,9 +948,8 @@ Continuation cursors are authenticated and bound to the request and graph
 state. Tampering returns `invalid_request`; a changed snapshot returns
 `stale_snapshot`.
 
-OSS `show` and `locate` JSON for session/event retrieval is unchanged. There
-are no Pro `show`, `locate`, `timeline`, `facts`, or `related` payloads or
-compatibility aliases.
+Core `show` JSON remains the session/event retrieval contract. There are no Pro
+`show`, `timeline`, `facts`, or `related` payloads or compatibility aliases.
 
 Human CLI failures exit nonzero with a stable error token on stderr. When a Pro
 or referral command is explicitly invoked with `--format json`, a classified

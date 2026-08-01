@@ -5,15 +5,11 @@ use ctx_history_core::default_data_root;
 
 use crate::{
     analytics::{self, ClientOperationDraft},
-    cli::{
-        CommandRoot, DaemonCommand, DaemonTriggerCommandArg, ImportArgs, LocateArgs, LocateTarget,
-        ShowArgs, ShowTarget,
-    },
+    cli::{CommandRoot, DaemonCommand, DaemonTriggerCommandArg, ImportArgs, ShowArgs, ShowTarget},
     commands::{
         doctor::run_doctor,
         import::{run_import, ProviderRefreshCollector},
         index::run_index,
-        locate::run_locate,
         search::run_search,
         setup::run_setup,
         show::run_show,
@@ -24,14 +20,11 @@ use crate::{
             malformed_config_failure, removed_cloud_config_failure, run_status, run_usage_action,
         },
     },
-    complete_content,
     config::AppConfig,
     deprecated_controls::DeprecatedControls,
-    docs,
-    hydration_error::source_hydration_error_contract,
-    integrations, local_usage, mcp,
-    output::{JsonOutputFormat, OutputFormat, OutputMeasurement, SqlFormat},
-    pro, semantic,
+    docs, integrations, local_usage, mcp,
+    output::{OutputFormat, OutputMeasurement, SqlFormat},
+    presentation_limit, pro, semantic,
     ui::{
         diagnostic, outcome, scan_color_mode, scan_machine_output_hint, ColorMode, Diagnostic,
         DiagnosticLevel, Outcome, OutcomeState, Ui,
@@ -324,16 +317,6 @@ pub(crate) fn run_cli() -> Result<()> {
             &mut local_usage_draft,
             &mut ui,
         ),
-        CommandRoot::Locate(args) => run_locate(
-            args,
-            data_root.clone(),
-            analytics_draft
-                .as_mut()
-                .expect("locate has a telemetry draft")
-                .locate_mut(),
-            &mut local_usage_draft,
-            &mut ui,
-        ),
         CommandRoot::Search(args) => run_search(
             args,
             data_root.clone(),
@@ -418,15 +401,14 @@ pub(crate) fn run_cli() -> Result<()> {
             if pro_referral_json_output && render_stable_pro_error_json(error)? {
                 Some(RenderedJsonError.into())
             } else if let Some(error) =
-                error.downcast_ref::<ctx_history_capture::complete_content::CompleteContentError>()
+                error.downcast_ref::<presentation_limit::PresentationOutputLimitError>()
             {
                 eprintln!(
                     "{}",
-                    serde_json::to_string(&complete_content::complete_content_error_json(error))?
+                    serde_json::to_string(
+                        &presentation_limit::presentation_output_limit_error_json(error)
+                    )?
                 );
-                Some(RenderedJsonError.into())
-            } else if let Some(error) = source_hydration_error_contract(error) {
-                eprintln!("{}", serde_json::to_string(&error.structured())?);
                 Some(RenderedJsonError.into())
             } else if let Some(error) =
                 error.downcast_ref::<semantic::SourceBackedSemanticNotReady>()
@@ -566,7 +548,6 @@ fn command_json_output(command: &CommandRoot) -> bool {
         CommandRoot::Sources(args) => args.format.is_json(),
         CommandRoot::Import(args) => args.format.is_json(),
         CommandRoot::Show(args) => show_json_output(args),
-        CommandRoot::Locate(args) => locate_json_output(args),
         CommandRoot::Search(args) => args.format.is_json(),
         CommandRoot::Pro(args) => args.json_output(),
         CommandRoot::Referral(args) => args.json_output(),
@@ -593,13 +574,6 @@ fn show_json_output(args: &ShowArgs) -> bool {
     match &args.target {
         ShowTarget::Session(args) => args.format == OutputFormat::Json,
         ShowTarget::Event(args) => args.format == OutputFormat::Json,
-    }
-}
-
-fn locate_json_output(args: &LocateArgs) -> bool {
-    match &args.target {
-        LocateTarget::Session(args) => args.format == JsonOutputFormat::Json,
-        LocateTarget::Event(args) => args.format == JsonOutputFormat::Json,
     }
 }
 

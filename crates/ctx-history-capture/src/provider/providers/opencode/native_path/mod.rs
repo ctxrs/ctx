@@ -1,4 +1,4 @@
-//! Source-backed OpenCode-family SQLite discovery, parsing, and exact hydration.
+//! Source-backed OpenCode-family SQLite discovery, parsing, and direct Core projection.
 
 mod json;
 mod model;

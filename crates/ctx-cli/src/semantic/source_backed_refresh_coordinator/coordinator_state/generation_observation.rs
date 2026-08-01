@@ -1,6 +1,6 @@
 use super::*;
 
-impl SourceBackedRefreshCoordinator {
+impl CoreRefreshEngine {
     pub(super) fn observed_published_generation(&self, data_root: &Path) -> Result<Option<String>> {
         let (retained, active_previous_generation) = {
             let state = self.lock_state();

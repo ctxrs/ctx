@@ -7,10 +7,9 @@ use serde_json::{json, Value};
 
 use crate::provider::file_touches::normalized_key;
 use crate::provider::normalization::{
-    provider_capped_json, provider_capped_json_value, provider_line_from_index,
-    provider_normalized_result_value, provider_policy_body, provider_policy_event_text,
-    provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
-    provider_timestamp_value, provider_value_text,
+    provider_capped_json_value, provider_line_from_index, provider_normalized_result_value,
+    provider_policy_body, provider_policy_event_text, provider_result_identifier_evidence,
+    provider_result_outcome_evidence, provider_role, provider_timestamp_value, provider_value_text,
 };
 use crate::provider::providers::goose::goose_timestamp;
 use crate::{compute_payload_hash, FORGECODE_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS};
@@ -61,23 +60,6 @@ pub(super) fn forgecode_event_type(parts: ForgeCodeMessageParts<'_>) -> EventTyp
         "image" => EventType::Artifact,
         _ => EventType::Notice,
     }
-}
-
-pub(super) fn forgecode_tool_result_is_error(parts: ForgeCodeMessageParts<'_>) -> Option<bool> {
-    (parts.variant == "tool")
-        .then(|| {
-            parts
-                .body
-                .pointer("/output/is_error")
-                .and_then(Value::as_bool)
-        })
-        .flatten()
-}
-
-pub(super) fn forgecode_tool_result_call_id(parts: ForgeCodeMessageParts<'_>) -> Option<String> {
-    (parts.variant == "tool")
-        .then(|| parts.body.get("call_id").and_then(forgecode_scalar_text))
-        .flatten()
 }
 
 pub(super) fn forgecode_event_role(parts: ForgeCodeMessageParts<'_>) -> Option<EventRole> {
@@ -134,8 +116,8 @@ pub(super) fn forgecode_event(
         "message": entry,
         "usage": parts.usage,
     });
-    let retained_text = provider_policy_event_text(event_type, &text, &body);
     let retained_body = provider_policy_body(event_type, &body);
+    let retained_text = provider_policy_event_text(event_type, &text, &body);
     ForgeCodeNativeEvent {
         provider_event_index,
         provider_event_hash: compute_payload_hash(entry).ok(),
@@ -149,7 +131,7 @@ pub(super) fn forgecode_event(
             "result_evidence": provider_result_identifier_evidence(event_type, &text, &body),
             "result_outcome": provider_result_outcome_evidence(event_type, &body),
             "source_format": FORGECODE_SQLITE_SOURCE_FORMAT,
-            "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
+            "body": retained_body,
         }),
         metadata: json!({
             "source": "forgecode_conversations",

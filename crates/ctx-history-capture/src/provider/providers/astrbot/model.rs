@@ -1,12 +1,9 @@
-use ctx_history_core::{EventRole, EventType};
+use ctx_history_core::EventRole;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::native_source::NativeSqliteValue;
 use crate::provider::normalization::{provider_role, provider_value_text};
-use crate::{CaptureError, Result};
-
-const CONVERSATION_VALUE_COUNT: usize = 11;
 
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ConversationRow {
@@ -124,104 +121,6 @@ pub(super) fn conversation_values(row: ConversationRow) -> Vec<NativeSqliteValue
         optional_integer(row.created_at),
         optional_integer(row.updated_at),
     ]
-}
-
-/// Shape retained only so the untouched released complete-content wrapper can
-/// compile. Provider-local fallback construction now rejects below.
-pub(crate) struct AstrBotCompleteMessage {
-    pub(crate) provider_event_index: u64,
-    pub(crate) provider_event_hash: Option<String>,
-    pub(crate) cursor: String,
-    pub(crate) event_type: EventType,
-    pub(crate) payload: Value,
-    pub(crate) text: String,
-    pub(crate) provider_session_id: String,
-}
-
-pub(super) fn complete_conversation_message(
-    _values: &[NativeSqliteValue],
-    _item_index: u32,
-) -> Result<Option<AstrBotCompleteMessage>> {
-    Err(CaptureError::InvalidPayload(
-        "AstrBot canonical Store hydration was removed; use source-backed hydration".to_owned(),
-    ))
-}
-
-pub(super) fn decode_conversation(values: &[NativeSqliteValue]) -> Result<ConversationRow> {
-    if values.len() != CONVERSATION_VALUE_COUNT {
-        return Err(CaptureError::InvalidPayload(
-            "AstrBot conversation logical row has an unexpected value count".to_owned(),
-        ));
-    }
-    Ok(ConversationRow {
-        row_id: required_integer(values, 0, "conversation row id")?,
-        inner_conversation_id: optional_text_value(values, 1, "inner_conversation_id")?,
-        conversation_id: required_text(values, 2, "conversation_id")?,
-        platform_id: optional_text_value(values, 3, "platform_id")?,
-        user_id: optional_text_value(values, 4, "user_id")?,
-        content: required_text(values, 5, "conversation content")?,
-        title: optional_text_value(values, 6, "conversation title")?,
-        persona_id: optional_text_value(values, 7, "persona_id")?,
-        token_usage: optional_text_value(values, 8, "token_usage")?,
-        created_at: optional_integer_value(values, 9, "conversation created_at")?,
-        updated_at: optional_integer_value(values, 10, "conversation updated_at")?,
-    })
-}
-
-fn value<'a>(
-    values: &'a [NativeSqliteValue],
-    index: usize,
-    field: &str,
-) -> Result<&'a NativeSqliteValue> {
-    values.get(index).ok_or_else(|| {
-        CaptureError::InvalidPayload(format!("AstrBot logical row is missing {field}"))
-    })
-}
-
-fn required_text(values: &[NativeSqliteValue], index: usize, field: &str) -> Result<String> {
-    match value(values, index, field)? {
-        NativeSqliteValue::Text(value) => Ok(value.clone()),
-        _ => Err(CaptureError::InvalidPayload(format!(
-            "AstrBot logical row {field} must be text"
-        ))),
-    }
-}
-
-fn optional_text_value(
-    values: &[NativeSqliteValue],
-    index: usize,
-    field: &str,
-) -> Result<Option<String>> {
-    match value(values, index, field)? {
-        NativeSqliteValue::Null => Ok(None),
-        NativeSqliteValue::Text(value) => Ok(Some(value.clone())),
-        _ => Err(CaptureError::InvalidPayload(format!(
-            "AstrBot logical row {field} must be text or null"
-        ))),
-    }
-}
-
-fn required_integer(values: &[NativeSqliteValue], index: usize, field: &str) -> Result<i64> {
-    match value(values, index, field)? {
-        NativeSqliteValue::Integer(value) => Ok(*value),
-        _ => Err(CaptureError::InvalidPayload(format!(
-            "AstrBot logical row {field} must be an integer"
-        ))),
-    }
-}
-
-fn optional_integer_value(
-    values: &[NativeSqliteValue],
-    index: usize,
-    field: &str,
-) -> Result<Option<i64>> {
-    match value(values, index, field)? {
-        NativeSqliteValue::Null => Ok(None),
-        NativeSqliteValue::Integer(value) => Ok(Some(*value)),
-        _ => Err(CaptureError::InvalidPayload(format!(
-            "AstrBot logical row {field} must be an integer or null"
-        ))),
-    }
 }
 
 fn optional_text(value: Option<String>) -> NativeSqliteValue {

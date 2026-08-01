@@ -2,9 +2,9 @@ use std::io::{BufReader, Seek, SeekFrom, Write};
 
 use super::*;
 
-/// One logical source may stage no more documents than the provider-neutral
+/// One logical source may stage no more Core records than the provider-neutral
 /// source-inventory entry ceiling.
-const LOGICAL_SNAPSHOT_SPOOL_MAX_DOCUMENTS: usize =
+const LOGICAL_SNAPSHOT_SPOOL_MAX_CORE_RECORDS: usize =
     crate::PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES;
 /// This matches the existing bounded source-document catalog byte ceiling.
 ///
@@ -19,107 +19,104 @@ const LOGICAL_SNAPSHOT_SPOOL_MAX_ENCODED_BYTES: usize = 256 * 1024 * 1024;
 /// certificate proves whether the live Tantivy generation needs a mutation.
 pub(crate) struct ChangedDocumentSink<'sink, 'writer> {
     target: ChangedDocumentTarget<'sink, 'writer>,
-    deferred: Option<DeferredLexicalDocuments>,
+    deferred: Option<DeferredCoreRecords>,
     logical_base: Option<CertifiedSource>,
     source: Option<SourceKey>,
-    emitted_documents: u64,
+    emitted_core_records: u64,
 }
 
-struct DeferredLexicalDocuments {
+struct DeferredCoreRecords {
     file: std::fs::File,
-    budget: DeferredLexicalDocumentBudget,
+    budget: DeferredCoreRecordBudget,
     #[cfg(test)]
     cleanup_path: Option<tempfile::TempPath>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DeferredLexicalDocumentLimits {
-    documents: usize,
+struct DeferredCoreRecordLimits {
+    core_records: usize,
     encoded_bytes: usize,
 }
 
-impl DeferredLexicalDocumentLimits {
+impl DeferredCoreRecordLimits {
     const PRODUCTION: Self = Self {
-        documents: LOGICAL_SNAPSHOT_SPOOL_MAX_DOCUMENTS,
+        core_records: LOGICAL_SNAPSHOT_SPOOL_MAX_CORE_RECORDS,
         encoded_bytes: LOGICAL_SNAPSHOT_SPOOL_MAX_ENCODED_BYTES,
     };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeferredLexicalDocumentBound {
-    DocumentCount,
+enum DeferredCoreRecordBound {
+    CoreRecordCount,
     EncodedBytes,
 }
 
-impl std::fmt::Display for DeferredLexicalDocumentBound {
+impl std::fmt::Display for DeferredCoreRecordBound {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::DocumentCount => "document-count",
+            Self::CoreRecordCount => "core-record-count",
             Self::EncodedBytes => "encoded-byte",
         })
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-enum DeferredLexicalDocumentAdmissionError {
+enum DeferredCoreRecordAdmissionError {
     #[error(
-        "logical-snapshot lexical spool {bound} bound exceeded: \
+        "logical-snapshot Core-record spool {bound} bound exceeded: \
          maximum {maximum}, observed {observed}"
     )]
     Bounds {
-        bound: DeferredLexicalDocumentBound,
+        bound: DeferredCoreRecordBound,
         maximum: usize,
         observed: usize,
     },
-    #[error("logical-snapshot lexical spool {bound} accounting overflowed")]
-    Arithmetic { bound: DeferredLexicalDocumentBound },
+    #[error("logical-snapshot Core-record spool {bound} accounting overflowed")]
+    Arithmetic { bound: DeferredCoreRecordBound },
 }
 
 #[derive(Debug)]
-struct DeferredLexicalDocumentBudget {
-    limits: DeferredLexicalDocumentLimits,
-    documents: usize,
+struct DeferredCoreRecordBudget {
+    limits: DeferredCoreRecordLimits,
+    core_records: usize,
     encoded_bytes: usize,
 }
 
-impl DeferredLexicalDocumentBudget {
-    fn new(limits: DeferredLexicalDocumentLimits) -> Self {
+impl DeferredCoreRecordBudget {
+    fn new(limits: DeferredCoreRecordLimits) -> Self {
         Self {
             limits,
-            documents: 0,
+            core_records: 0,
             encoded_bytes: 0,
         }
     }
 
-    fn admit_document(&mut self) -> Result<(), DeferredLexicalDocumentAdmissionError> {
-        let observed = self.documents.checked_add(1).ok_or(
-            DeferredLexicalDocumentAdmissionError::Arithmetic {
-                bound: DeferredLexicalDocumentBound::DocumentCount,
+    fn admit_core_record(&mut self) -> Result<(), DeferredCoreRecordAdmissionError> {
+        let observed = self.core_records.checked_add(1).ok_or(
+            DeferredCoreRecordAdmissionError::Arithmetic {
+                bound: DeferredCoreRecordBound::CoreRecordCount,
             },
         )?;
-        if observed > self.limits.documents {
-            return Err(DeferredLexicalDocumentAdmissionError::Bounds {
-                bound: DeferredLexicalDocumentBound::DocumentCount,
-                maximum: self.limits.documents,
+        if observed > self.limits.core_records {
+            return Err(DeferredCoreRecordAdmissionError::Bounds {
+                bound: DeferredCoreRecordBound::CoreRecordCount,
+                maximum: self.limits.core_records,
                 observed,
             });
         }
-        self.documents = observed;
+        self.core_records = observed;
         Ok(())
     }
 
-    fn check_encoded_bytes(
-        &self,
-        bytes: usize,
-    ) -> Result<usize, DeferredLexicalDocumentAdmissionError> {
+    fn check_encoded_bytes(&self, bytes: usize) -> Result<usize, DeferredCoreRecordAdmissionError> {
         let observed = self.encoded_bytes.checked_add(bytes).ok_or(
-            DeferredLexicalDocumentAdmissionError::Arithmetic {
-                bound: DeferredLexicalDocumentBound::EncodedBytes,
+            DeferredCoreRecordAdmissionError::Arithmetic {
+                bound: DeferredCoreRecordBound::EncodedBytes,
             },
         )?;
         if observed > self.limits.encoded_bytes {
-            return Err(DeferredLexicalDocumentAdmissionError::Bounds {
-                bound: DeferredLexicalDocumentBound::EncodedBytes,
+            return Err(DeferredCoreRecordAdmissionError::Bounds {
+                bound: DeferredCoreRecordBound::EncodedBytes,
                 maximum: self.limits.encoded_bytes,
                 observed,
             });
@@ -130,7 +127,7 @@ impl DeferredLexicalDocumentBudget {
     fn commit_encoded_bytes(
         &mut self,
         bytes: usize,
-    ) -> Result<(), DeferredLexicalDocumentAdmissionError> {
+    ) -> Result<(), DeferredCoreRecordAdmissionError> {
         self.encoded_bytes = self.check_encoded_bytes(bytes)?;
         Ok(())
     }
@@ -138,12 +135,12 @@ impl DeferredLexicalDocumentBudget {
 
 struct BoundedDeferredWriter<'writer> {
     file: &'writer mut std::fs::File,
-    budget: &'writer mut DeferredLexicalDocumentBudget,
-    admission_error: Option<DeferredLexicalDocumentAdmissionError>,
+    budget: &'writer mut DeferredCoreRecordBudget,
+    admission_error: Option<DeferredCoreRecordAdmissionError>,
 }
 
 impl BoundedDeferredWriter<'_> {
-    fn reject(&mut self, error: DeferredLexicalDocumentAdmissionError) -> std::io::Error {
+    fn reject(&mut self, error: DeferredCoreRecordAdmissionError) -> std::io::Error {
         self.admission_error = Some(error);
         std::io::Error::new(std::io::ErrorKind::InvalidData, error)
     }
@@ -161,7 +158,7 @@ impl BoundedDeferredWriter<'_> {
             .map_err(|error| self.reject(error))
     }
 
-    fn take_admission_error(&mut self) -> Option<DeferredLexicalDocumentAdmissionError> {
+    fn take_admission_error(&mut self) -> Option<DeferredCoreRecordAdmissionError> {
         self.admission_error.take()
     }
 }
@@ -185,7 +182,7 @@ impl Write for BoundedDeferredWriter<'_> {
     }
 }
 
-impl DeferredLexicalDocuments {
+impl DeferredCoreRecords {
     fn new() -> SourceBackedRouteResult<Self> {
         let file = tempfile::tempfile().map_err(|error| {
             document_internal(format!(
@@ -194,7 +191,7 @@ impl DeferredLexicalDocuments {
         })?;
         Ok(Self {
             file,
-            budget: DeferredLexicalDocumentBudget::new(DeferredLexicalDocumentLimits::PRODUCTION),
+            budget: DeferredCoreRecordBudget::new(DeferredCoreRecordLimits::PRODUCTION),
             #[cfg(test)]
             cleanup_path: None,
         })
@@ -203,7 +200,7 @@ impl DeferredLexicalDocuments {
     #[cfg(test)]
     fn test_with_limits(
         directory: &std::path::Path,
-        limits: DeferredLexicalDocumentLimits,
+        limits: DeferredCoreRecordLimits,
     ) -> SourceBackedRouteResult<(Self, std::path::PathBuf)> {
         let named = tempfile::NamedTempFile::new_in(directory).map_err(|error| {
             document_internal(format!(
@@ -215,32 +212,29 @@ impl DeferredLexicalDocuments {
         Ok((
             Self {
                 file,
-                budget: DeferredLexicalDocumentBudget::new(limits),
+                budget: DeferredCoreRecordBudget::new(limits),
                 cleanup_path: Some(cleanup_path),
             },
             path,
         ))
     }
 
-    fn push(&mut self, document: &LexicalDocument) -> SourceBackedRouteResult<()> {
-        document
-            .validate_contract()
-            .map_err(document_contract_error)?;
+    fn push(&mut self, record: &CoreRecord) -> SourceBackedRouteResult<()> {
         self.budget
-            .admit_document()
+            .admit_core_record()
             .map_err(document_spool_admission_error)?;
         let mut writer = BoundedDeferredWriter {
             file: &mut self.file,
             budget: &mut self.budget,
             admission_error: None,
         };
-        let encoded = serde_json::to_writer(&mut writer, document);
+        let encoded = serde_json::to_writer(&mut writer, record);
         if let Some(error) = writer.take_admission_error() {
             return Err(document_spool_admission_error(error));
         }
         encoded.map_err(|error| {
             document_internal(format!(
-                "could not encode logical-snapshot staging document: {error}"
+                "could not encode logical-snapshot staging Core record: {error}"
             ))
         })?;
         let delimited = writer.write_all(b"\n");
@@ -249,43 +243,42 @@ impl DeferredLexicalDocuments {
         }
         delimited.map_err(|error| {
             document_internal(format!(
-                "could not delimit logical-snapshot staging document: {error}"
+                "could not delimit logical-snapshot staging Core record: {error}"
             ))
         })
     }
 
     fn replay(
         mut self,
-        mut emit: impl FnMut(LexicalDocument) -> SourceBackedRouteResult<()>,
+        mut emit: impl FnMut(CoreRecord) -> SourceBackedRouteResult<()>,
     ) -> SourceBackedRouteResult<()> {
         self.file.flush().map_err(|error| {
             document_internal(format!(
-                "could not flush logical-snapshot staging documents: {error}"
+                "could not flush logical-snapshot staging Core records: {error}"
             ))
         })?;
         self.file.seek(SeekFrom::Start(0)).map_err(|error| {
             document_internal(format!(
-                "could not rewind logical-snapshot staging documents: {error}"
+                "could not rewind logical-snapshot staging Core records: {error}"
             ))
         })?;
         #[cfg(test)]
         let _cleanup_path = self.cleanup_path.take();
         let reader = BufReader::new(self.file);
-        for document in serde_json::Deserializer::from_reader(reader).into_iter::<LexicalDocument>()
-        {
-            let document = document.map_err(|error| {
+        for record in serde_json::Deserializer::from_reader(reader).into_iter::<CoreRecord>() {
+            let record = record.map_err(|error| {
                 document_internal(format!(
-                    "could not decode logical-snapshot staging document: {error}"
+                    "could not decode logical-snapshot staging Core record: {error}"
                 ))
             })?;
-            emit(document)?;
+            emit(record)?;
         }
         Ok(())
     }
 }
 
 fn document_spool_admission_error(
-    error: DeferredLexicalDocumentAdmissionError,
+    error: DeferredCoreRecordAdmissionError,
 ) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::InvalidSource, error.to_string())
 }
@@ -302,7 +295,7 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
             deferred: None,
             logical_base: None,
             source: None,
-            emitted_documents: 0,
+            emitted_core_records: 0,
         }
     }
 
@@ -311,10 +304,10 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
     ) -> SourceBackedRouteResult<Self> {
         Ok(Self {
             target: ChangedDocumentTarget::Generation(sink),
-            deferred: Some(DeferredLexicalDocuments::new()?),
+            deferred: Some(DeferredCoreRecords::new()?),
             logical_base: None,
             source: None,
-            emitted_documents: 0,
+            emitted_core_records: 0,
         })
     }
 
@@ -330,7 +323,7 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
             deferred: None,
             logical_base: None,
             source: None,
-            emitted_documents: 0,
+            emitted_core_records: 0,
         }
     }
 
@@ -344,10 +337,10 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
     ) -> SourceBackedRouteResult<Self> {
         Ok(Self {
             target: ChangedDocumentTarget::Parallel(emitter),
-            deferred: Some(DeferredLexicalDocuments::new()?),
+            deferred: Some(DeferredCoreRecords::new()?),
             logical_base,
             source: None,
-            emitted_documents: 0,
+            emitted_core_records: 0,
         })
     }
 
@@ -373,37 +366,32 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
         Ok(())
     }
 
-    pub(crate) fn emit_document(
-        &mut self,
-        document: LexicalDocument,
-    ) -> SourceBackedRouteResult<()> {
+    pub(crate) fn emit_core_record(&mut self, record: CoreRecord) -> SourceBackedRouteResult<()> {
         let source = self.source.as_ref().ok_or_else(|| {
             document_internal("document adapter emitted before beginning its source")
         })?;
-        if !document.source.exact_descriptor_eq(source)
-            || !document.locator.source().exact_descriptor_eq(source)
-        {
+        if !record.source.exact_descriptor_eq(source) {
             return Err(document_changed(
                 "document adapter emitted a row outside its active exact source",
             ));
         }
         if let Some(deferred) = self.deferred.as_mut() {
-            deferred.push(&document)?;
+            deferred.push(&record)?;
         } else {
             match &mut self.target {
                 ChangedDocumentTarget::Generation(sink) => {
-                    sink.add_document(document)
+                    sink.add_core_record(record)
                         .map_err(route_coordinator_error)?;
                 }
                 ChangedDocumentTarget::Parallel(emitter) => {
-                    emitter.emit_document(document).map_err(|_| {
+                    emitter.emit_core_record(record).map_err(|_| {
                         document_internal("independent document leaf scan was cancelled")
                     })?;
                 }
             }
         }
-        self.emitted_documents = self
-            .emitted_documents
+        self.emitted_core_records = self
+            .emitted_core_records
             .checked_add(1)
             .ok_or_else(|| document_internal("document emission count overflowed"))?;
         Ok(())
@@ -429,9 +417,9 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
                 "document terminal changed its active exact source descriptor",
             ));
         }
-        if terminal.counts.indexed_documents != self.emitted_documents {
+        if terminal.counts.indexed_documents != self.emitted_core_records {
             return Err(document_changed(
-                "document terminal indexed count did not match forwarded documents",
+                "document terminal indexed count did not match forwarded Core records",
             ));
         }
         let certificate = terminal.certify(replay_fingerprint)?;
@@ -465,8 +453,9 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
             match &mut self.target {
                 ChangedDocumentTarget::Generation(sink) => {
                     sink.begin_source(source).map_err(route_coordinator_error)?;
-                    deferred.replay(|document| {
-                        sink.add_document(document).map_err(route_coordinator_error)
+                    deferred.replay(|record| {
+                        sink.add_core_record(record)
+                            .map_err(route_coordinator_error)
                     })?;
                     sink.certify_source(certificate.clone())
                         .map_err(route_coordinator_error)?;
@@ -477,8 +466,8 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
                         .map_err(|_| {
                             document_internal("independent document leaf scan was cancelled")
                         })?;
-                    deferred.replay(|document| {
-                        emitter.emit_document(document).map_err(|_| {
+                    deferred.replay(|record| {
+                        emitter.emit_core_record(record).map_err(|_| {
                             document_internal("independent document leaf scan was cancelled")
                         })
                     })?;
@@ -512,15 +501,13 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
 #[cfg(test)]
 mod tests {
     use ctx_history_core::{
-        derive_event_id, derive_session_id, CaptureProvider, EventIdentityInput,
-        LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-        SessionIdentityInput, SourceAnchor, SourceRecordLocator, TypedKey,
+        derive_event_id, derive_session_id, CaptureProvider, EventIdentityInput, NativeItemKey,
+        NativeSessionKey, SessionIdentityInput, SourceAnchor, TypedKey,
     };
-    use sha2::{Digest, Sha256};
 
     use super::*;
 
-    fn lexical_document(sequence: u64, body: &str) -> LexicalDocument {
+    fn core_record(sequence: u64, body: &str) -> CoreRecord {
         let source = SourceKey::derive(
             CaptureProvider::Auggie.as_str(),
             "synthetic_logical_sqlite",
@@ -547,66 +534,49 @@ mod tests {
             subrecord_selector: None,
         })
         .unwrap();
-        let digest: [u8; 32] = Sha256::digest(body.as_bytes()).into();
-        let locator = SourceRecordLocator::new(
-            source.clone(),
-            NativeRecordCoordinate::Document {
-                object_key: TypedKey::U64(sequence),
-                json_pointer: Some("/message".to_owned()),
-            },
-            LocatorRevisionPolicy::ExactSourceRevision,
-            Some(digest),
-            digest,
-        )
-        .unwrap();
-        LexicalDocument {
+        let mut record = CoreRecord::new_selected(
             event_id,
             session_id,
-            parent_session_id: None,
-            root_session_id: session_id,
+            session_id,
             source,
-            locator,
-            provider_session_id: Some("synthetic-session".to_owned()),
-            branch: None,
-            source_path: Some("/synthetic/logical.sqlite".to_owned()),
-            agent_type: "primary".to_owned(),
-            is_primary: true,
-            event_sequence: sequence,
-            occurred_at_unix_ms: Some(sequence as i64),
-            event_type: "message".to_owned(),
-            role: Some("user".to_owned()),
-            body: body.to_owned(),
-            workspace: None,
-            cwd: None,
-            touched_files: Vec::new(),
-        }
+            sequence,
+            "message",
+            "primary",
+            true,
+            "synthetic-core-record-v1",
+            body,
+        )
+        .unwrap();
+        record.provider_session_id = Some("synthetic-session".to_owned());
+        record.native_event_id = Some(TypedKey::U64(sequence));
+        record.occurred_at_unix_ms = Some(sequence as i64);
+        record.role = Some("user".to_owned());
+        record
     }
 
-    fn encoded_frame_bytes(document: &LexicalDocument) -> usize {
-        serde_json::to_vec(document).unwrap().len() + 1
+    fn encoded_frame_bytes(record: &CoreRecord) -> usize {
+        serde_json::to_vec(record).unwrap().len() + 1
     }
 
     #[test]
-    fn logical_spool_admits_n_documents_and_rejects_n_plus_one_before_writing() {
+    fn logical_spool_admits_n_core_records_and_rejects_n_plus_one_before_writing() {
         let temp = crate::test_support_paths::tempdir().unwrap();
-        let (mut spool, path) = DeferredLexicalDocuments::test_with_limits(
+        let (mut spool, path) = DeferredCoreRecords::test_with_limits(
             temp.path(),
-            DeferredLexicalDocumentLimits {
-                documents: 2,
+            DeferredCoreRecordLimits {
+                core_records: 2,
                 encoded_bytes: 1024 * 1024,
             },
         )
         .unwrap();
-        spool.push(&lexical_document(1, "first")).unwrap();
-        spool.push(&lexical_document(2, "second")).unwrap();
+        spool.push(&core_record(1, "first")).unwrap();
+        spool.push(&core_record(2, "second")).unwrap();
         let admitted_bytes = std::fs::metadata(&path).unwrap().len();
 
-        let error = spool
-            .push(&lexical_document(3, "not admitted"))
-            .unwrap_err();
+        let error = spool.push(&core_record(3, "not admitted")).unwrap_err();
         assert_eq!(error.kind, SourceBackedRouteErrorKind::InvalidSource);
         assert!(error.detail.contains(
-            "logical-snapshot lexical spool document-count bound exceeded: \
+            "logical-snapshot Core-record spool core-record-count bound exceeded: \
              maximum 2, observed 3"
         ));
         assert_eq!(std::fs::metadata(&path).unwrap().len(), admitted_bytes);
@@ -616,29 +586,29 @@ mod tests {
     }
 
     #[test]
-    fn logical_spool_counts_framing_and_rejects_one_oversized_document() {
+    fn logical_spool_counts_framing_and_rejects_one_oversized_core_record() {
         let temp = crate::test_support_paths::tempdir().unwrap();
-        let document = lexical_document(1, "frame must count");
-        let encoded_document_bytes = serde_json::to_vec(&document).unwrap().len();
-        let (mut spool, path) = DeferredLexicalDocuments::test_with_limits(
+        let record = core_record(1, "frame must count");
+        let encoded_record_bytes = serde_json::to_vec(&record).unwrap().len();
+        let (mut spool, path) = DeferredCoreRecords::test_with_limits(
             temp.path(),
-            DeferredLexicalDocumentLimits {
-                documents: 1,
-                encoded_bytes: encoded_document_bytes,
+            DeferredCoreRecordLimits {
+                core_records: 1,
+                encoded_bytes: encoded_record_bytes,
             },
         )
         .unwrap();
 
-        let error = spool.push(&document).unwrap_err();
+        let error = spool.push(&record).unwrap_err();
         assert_eq!(error.kind, SourceBackedRouteErrorKind::InvalidSource);
         assert!(error.detail.contains(&format!(
-            "logical-snapshot lexical spool encoded-byte bound exceeded: maximum \
-             {encoded_document_bytes}, observed {}",
-            encoded_document_bytes + 1
+            "logical-snapshot Core-record spool encoded-byte bound exceeded: maximum \
+             {encoded_record_bytes}, observed {}",
+            encoded_record_bytes + 1
         )));
         assert_eq!(
             std::fs::metadata(&path).unwrap().len(),
-            encoded_document_bytes as u64
+            encoded_record_bytes as u64
         );
 
         drop(spool);
@@ -648,21 +618,21 @@ mod tests {
     #[test]
     fn logical_spool_arithmetic_error_is_invalid_source_and_cleans_up() {
         let temp = crate::test_support_paths::tempdir().unwrap();
-        let (mut spool, path) = DeferredLexicalDocuments::test_with_limits(
+        let (mut spool, path) = DeferredCoreRecords::test_with_limits(
             temp.path(),
-            DeferredLexicalDocumentLimits {
-                documents: 1,
+            DeferredCoreRecordLimits {
+                core_records: 1,
                 encoded_bytes: usize::MAX,
             },
         )
         .unwrap();
         spool.budget.encoded_bytes = usize::MAX;
 
-        let error = spool.push(&lexical_document(1, "overflow")).unwrap_err();
+        let error = spool.push(&core_record(1, "overflow")).unwrap_err();
         assert_eq!(error.kind, SourceBackedRouteErrorKind::InvalidSource);
         assert_eq!(
             error.detail,
-            "logical-snapshot lexical spool encoded-byte accounting overflowed"
+            "logical-snapshot Core-record spool encoded-byte accounting overflowed"
         );
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
 
@@ -671,25 +641,25 @@ mod tests {
     }
 
     #[test]
-    fn logical_spool_replays_streamed_documents_at_the_exact_byte_bound() {
+    fn logical_spool_replays_streamed_core_records_at_the_exact_byte_bound() {
         let temp = crate::test_support_paths::tempdir().unwrap();
-        let documents = [
-            lexical_document(1, "first replay"),
-            lexical_document(2, "second replay"),
+        let records = [
+            core_record(1, "first replay"),
+            core_record(2, "second replay"),
         ];
-        let expected_bytes = documents.iter().map(encoded_frame_bytes).sum();
-        let (mut spool, path) = DeferredLexicalDocuments::test_with_limits(
+        let expected_bytes = records.iter().map(encoded_frame_bytes).sum();
+        let (mut spool, path) = DeferredCoreRecords::test_with_limits(
             temp.path(),
-            DeferredLexicalDocumentLimits {
-                documents: documents.len(),
+            DeferredCoreRecordLimits {
+                core_records: records.len(),
                 encoded_bytes: expected_bytes,
             },
         )
         .unwrap();
-        for document in &documents {
-            spool.push(document).unwrap();
+        for record in &records {
+            spool.push(record).unwrap();
         }
-        assert_eq!(spool.budget.documents, documents.len());
+        assert_eq!(spool.budget.core_records, records.len());
         assert_eq!(spool.budget.encoded_bytes, expected_bytes);
         assert_eq!(
             std::fs::metadata(&path).unwrap().len(),
@@ -698,19 +668,23 @@ mod tests {
 
         let mut replayed = Vec::new();
         spool
-            .replay(|document| {
-                replayed.push((document.event_id, document.event_sequence, document.body));
+            .replay(|record| {
+                replayed.push((
+                    record.event_id,
+                    record.event_sequence,
+                    record.content.normalized_body,
+                ));
                 Ok(())
             })
             .unwrap();
         assert_eq!(
             replayed,
-            documents
+            records
                 .iter()
-                .map(|document| (
-                    document.event_id,
-                    document.event_sequence,
-                    document.body.clone()
+                .map(|record| (
+                    record.event_id,
+                    record.event_sequence,
+                    record.content.normalized_body.clone()
                 ))
                 .collect::<Vec<_>>()
         );

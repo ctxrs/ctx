@@ -1,21 +1,8 @@
 //! Captured MessagePack decoding and privacy-preserving message interpretation.
 
-use chrono::{DateTime, Utc};
+use crate::{CaptureError, OutputOutcome, OutputOutcomeMetadata, Result};
 use ctx_history_core::{EventRole, EventType};
 use rmpv::{decode::read_value as read_msgpack_value, Value as MsgpackValue};
-use serde_json::{json, Value};
-
-use crate::{
-    provider::normalization::{
-        provider_policy_body, provider_policy_event_text, provider_result_identifier_evidence,
-        provider_result_outcome_evidence,
-    },
-    CaptureError, OutputOutcome, OutputOutcomeMetadata, Result, DEEPAGENTS_SQLITE_SOURCE_FORMAT,
-};
-
-use super::source::DeepAgentsWriteKey;
-
-const MAX_RETAINED_MESSAGE_REJECTIONS: usize = 64;
 
 #[derive(Debug, Clone)]
 pub(super) struct DeepAgentsMessage {
@@ -33,124 +20,6 @@ pub(super) struct DeepAgentsMessage {
     pub(super) text: String,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct DeepAgentsParsedMessage {
-    pub(super) offset: usize,
-    pub(super) provider_event_index: u64,
-    pub(super) message: DeepAgentsMessage,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct DeepAgentsMessageIdentity {
-    pub(super) provider_index: u64,
-}
-
-pub(super) fn deepagents_message_identity(
-    thread_id: &str,
-    message_id: &str,
-) -> DeepAgentsMessageIdentity {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = OFFSET;
-    for component in [
-        b"ctx-deepagents-message-v1".as_slice(),
-        thread_id.as_bytes(),
-        message_id.as_bytes(),
-    ] {
-        for byte in component {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(PRIME);
-        }
-        hash ^= 0xff;
-        hash = hash.wrapping_mul(PRIME);
-    }
-    DeepAgentsMessageIdentity {
-        provider_index: hash,
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct DeepAgentsNativeEvent {
-    pub(crate) provider_event_index: u64,
-    pub(crate) provider_event_hash: Option<String>,
-    pub(crate) cursor: String,
-    pub(crate) event_type: EventType,
-    // Role, time, and provider metadata remain part of the exact native event
-    // shape consumed by non-Core materializers.
-    #[allow(dead_code)]
-    pub(crate) role: Option<EventRole>,
-    #[allow(dead_code)]
-    pub(crate) occurred_at: DateTime<Utc>,
-    pub(crate) payload: Value,
-    #[allow(dead_code)]
-    pub(crate) metadata: Value,
-}
-
-pub(super) fn deepagents_native_event(
-    key: &DeepAgentsWriteKey,
-    parsed: &DeepAgentsParsedMessage,
-    occurred_at: DateTime<Utc>,
-    provider_event_hash: &str,
-    provider_event_identity_index: Option<u64>,
-    _record_digest: Option<crate::complete_content::CompleteContentBodyDigest>,
-) -> DeepAgentsNativeEvent {
-    let event_type = deepagents_event_type(&parsed.message);
-    let cursor = format!(
-        "thread:{}:checkpoint:{}:task:{}:write:{}:message:{}",
-        key.thread_id, key.checkpoint_id, key.task_id, key.idx, parsed.offset
-    );
-    let body = json!({
-        "message_type": parsed.message.message_type,
-        "message_class": parsed.message.message_class,
-        "message_id": parsed.message.message_id,
-        "tool_call_id": parsed.message.tool_call_id,
-        "status": parsed.message.status,
-        "exit_code": parsed.message.exit_code,
-        "duration_ms": parsed.message.duration_ms,
-        "timed_out": parsed.message.timed_out,
-        "is_error": parsed.message.is_error,
-        "success": parsed.message.success,
-        "checkpoint_id": key.checkpoint_id,
-        "task_id": key.task_id,
-        "write_idx": key.idx,
-        "message_offset": parsed.offset,
-    });
-    let retained_text = provider_policy_event_text(event_type, &parsed.message.text, &body);
-    let retained_body = provider_policy_body(event_type, &body);
-    let result_evidence =
-        provider_result_identifier_evidence(event_type, &parsed.message.text, &body);
-    let result_outcome = provider_result_outcome_evidence(event_type, &body);
-    DeepAgentsNativeEvent {
-        provider_event_index: parsed.provider_event_index,
-        provider_event_hash: Some(provider_event_hash.to_owned()),
-        cursor,
-        event_type,
-        role: Some(parsed.message.role),
-        occurred_at,
-        payload: json!({
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "result_evidence": result_evidence,
-            "result_outcome": result_outcome,
-            "source_format": DEEPAGENTS_SQLITE_SOURCE_FORMAT,
-            "body": retained_body,
-        }),
-        metadata: json!({
-            "source": DEEPAGENTS_SQLITE_SOURCE_FORMAT,
-            "source_format": DEEPAGENTS_SQLITE_SOURCE_FORMAT,
-            "checkpoint_id": key.checkpoint_id,
-            "task_id": key.task_id,
-            "write_idx": key.idx,
-            "message_offset": parsed.offset,
-            "message_type": parsed.message.message_type,
-            "message_class": parsed.message.message_class,
-            "message_id": parsed.message.message_id,
-            "provider_event_identity_index": provider_event_identity_index,
-            "privacy": "decoded from writes.messages only",
-        }),
-    }
-}
-
 pub(super) fn deepagents_event_type(message: &DeepAgentsMessage) -> EventType {
     if message.role == EventRole::Tool {
         EventType::ToolOutput
@@ -160,16 +29,11 @@ pub(super) fn deepagents_event_type(message: &DeepAgentsMessage) -> EventType {
 }
 
 pub(super) fn core_eligible(message: &DeepAgentsMessage) -> bool {
-    if message.role != EventRole::Tool {
-        return true;
-    }
-    matches!(
-        deepagents_output_outcome(message).outcome,
-        OutputOutcome::Failure | OutputOutcome::Timeout
-    )
+    let _ = message;
+    true
 }
 
-fn deepagents_output_outcome(message: &DeepAgentsMessage) -> OutputOutcomeMetadata {
+pub(super) fn deepagents_output_outcome(message: &DeepAgentsMessage) -> OutputOutcomeMetadata {
     let status = message
         .status
         .as_deref()
@@ -211,22 +75,11 @@ fn deepagents_output_outcome(message: &DeepAgentsMessage) -> OutputOutcomeMetada
     }
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct DeepAgentsMessageRejection {
-    // Exact rejected-entry location and text are retained for provider
-    // diagnostics even though the release summary consumes only counts.
-    #[allow(dead_code)]
-    pub(super) entry_offset: usize,
-    #[allow(dead_code)]
-    pub(super) error: String,
-}
-
 #[derive(Debug, Clone, Default)]
 pub(super) struct DeepAgentsDecodedMessages {
     pub(super) messages: Vec<DeepAgentsMessage>,
     pub(super) rejected_entries: u64,
     pub(super) ignored_entries: u64,
-    pub(super) rejections: Vec<DeepAgentsMessageRejection>,
 }
 
 pub(super) fn deepagents_messages_from_blob(
@@ -267,30 +120,24 @@ pub(super) fn deepagents_messages_from_msgpack_value(
     let mut decoded = DeepAgentsDecodedMessages::default();
     match value {
         MsgpackValue::Array(items) => {
-            for (entry_offset, item) in items.iter().enumerate() {
-                decoded.record(entry_offset, deepagents_message_from_msgpack_value(item));
+            for item in items {
+                decoded.record(deepagents_message_from_msgpack_value(item));
             }
         }
-        _ => decoded.record(0, deepagents_message_from_msgpack_value(value)),
+        _ => decoded.record(deepagents_message_from_msgpack_value(value)),
     }
     decoded
 }
 
 impl DeepAgentsDecodedMessages {
-    fn record(&mut self, entry_offset: usize, outcome: DeepAgentsMessageOutcome) {
+    fn record(&mut self, outcome: DeepAgentsMessageOutcome) {
         match outcome {
             DeepAgentsMessageOutcome::Message(message) => self.messages.push(message),
             DeepAgentsMessageOutcome::System => {
                 self.ignored_entries = self.ignored_entries.saturating_add(1);
             }
-            DeepAgentsMessageOutcome::Rejected(error) => {
+            DeepAgentsMessageOutcome::Rejected => {
                 self.rejected_entries = self.rejected_entries.saturating_add(1);
-                if self.rejections.len() < MAX_RETAINED_MESSAGE_REJECTIONS {
-                    self.rejections.push(DeepAgentsMessageRejection {
-                        entry_offset,
-                        error,
-                    });
-                }
             }
         }
     }
@@ -299,7 +146,7 @@ impl DeepAgentsDecodedMessages {
 enum DeepAgentsMessageOutcome {
     Message(DeepAgentsMessage),
     System,
-    Rejected(String),
+    Rejected,
 }
 
 fn deepagents_message_from_msgpack_value(value: &MsgpackValue) -> DeepAgentsMessageOutcome {
@@ -308,39 +155,24 @@ fn deepagents_message_from_msgpack_value(value: &MsgpackValue) -> DeepAgentsMess
         MsgpackValue::Ext(5, payload) => {
             let decoded = match deepagents_decode_msgpack(payload) {
                 Ok(decoded) => decoded,
-                Err(error) => {
-                    return DeepAgentsMessageOutcome::Rejected(format!(
-                        "Deep Agents message extension payload is invalid: {error}"
-                    ));
-                }
+                Err(_) => return DeepAgentsMessageOutcome::Rejected,
             };
             let MsgpackValue::Array(items) = decoded else {
-                return DeepAgentsMessageOutcome::Rejected(
-                    "Deep Agents message extension payload is not an array".to_owned(),
-                );
+                return DeepAgentsMessageOutcome::Rejected;
             };
             let class_name = items.get(1).and_then(msgpack_string);
             let fields = match items.get(2) {
                 Some(MsgpackValue::Map(fields)) => fields,
                 Some(_) => {
-                    return DeepAgentsMessageOutcome::Rejected(
-                        "Deep Agents message extension fields are not a map".to_owned(),
-                    );
+                    return DeepAgentsMessageOutcome::Rejected;
                 }
                 None => {
-                    return DeepAgentsMessageOutcome::Rejected(
-                        "Deep Agents message extension is missing fields".to_owned(),
-                    );
+                    return DeepAgentsMessageOutcome::Rejected;
                 }
             };
             deepagents_message_from_fields(fields, class_name)
         }
-        MsgpackValue::Ext(_, _) => DeepAgentsMessageOutcome::Rejected(
-            "Deep Agents message uses an unsupported extension type".to_owned(),
-        ),
-        _ => DeepAgentsMessageOutcome::Rejected(
-            "Deep Agents message entry has an unsupported non-system shape".to_owned(),
-        ),
+        _ => DeepAgentsMessageOutcome::Rejected,
     }
 }
 
@@ -348,35 +180,30 @@ fn deepagents_message_from_fields(
     fields: &[(MsgpackValue, MsgpackValue)],
     class_name: Option<String>,
 ) -> DeepAgentsMessageOutcome {
+    if deepagents_has_duplicate_projected_keys(fields) {
+        return DeepAgentsMessageOutcome::Rejected;
+    }
     let message_type = msgpack_map_string(fields, "type")
         .or_else(|| msgpack_map_string(fields, "role"))
         .or_else(|| class_name.clone())
         .unwrap_or_else(|| "unknown".to_owned());
     let Some(role) = deepagents_message_role(&message_type, class_name.as_deref()) else {
-        return DeepAgentsMessageOutcome::Rejected(
-            "Deep Agents message has an unsupported non-system type".to_owned(),
-        );
+        return DeepAgentsMessageOutcome::Rejected;
     };
     if role == EventRole::System {
         return DeepAgentsMessageOutcome::System;
     }
     let Some(content) = msgpack_map_get(fields, "content") else {
-        return DeepAgentsMessageOutcome::Rejected(
-            "Deep Agents non-system message is missing content".to_owned(),
-        );
+        return DeepAgentsMessageOutcome::Rejected;
     };
     let Some(text) = deepagents_content_text(content) else {
-        return DeepAgentsMessageOutcome::Rejected(
-            "Deep Agents non-system message content has an unsupported shape".to_owned(),
-        );
+        return DeepAgentsMessageOutcome::Rejected;
     };
     if text.starts_with("[SYSTEM]") {
         return DeepAgentsMessageOutcome::System;
     }
     if text.trim().is_empty() {
-        return DeepAgentsMessageOutcome::Rejected(
-            "Deep Agents non-system message content is empty".to_owned(),
-        );
+        return DeepAgentsMessageOutcome::Rejected;
     }
     DeepAgentsMessageOutcome::Message(DeepAgentsMessage {
         role,
@@ -429,19 +256,60 @@ pub(super) fn deepagents_content_text(value: &MsgpackValue) -> Option<String> {
         return Some(text);
     }
     if let MsgpackValue::Array(items) = value {
-        let parts = items
-            .iter()
-            .filter_map(|item| match item {
-                MsgpackValue::Map(fields) => msgpack_map_string(fields, "text"),
-                _ => msgpack_string(item),
-            })
-            .collect::<Vec<_>>();
+        let mut parts = Vec::with_capacity(items.len());
+        for item in items {
+            let text = match item {
+                MsgpackValue::Map(fields) if !deepagents_has_duplicate_key(fields, "text") => {
+                    msgpack_map_string(fields, "text")?
+                }
+                MsgpackValue::Map(_) => return None,
+                _ => msgpack_string(item)?,
+            };
+            parts.push(text);
+        }
         let joined = parts.join(" ").trim().to_owned();
         if !joined.is_empty() {
             return Some(joined);
         }
     }
     None
+}
+
+fn deepagents_has_duplicate_projected_keys(fields: &[(MsgpackValue, MsgpackValue)]) -> bool {
+    const PROJECTED_KEYS: &[&str] = &[
+        "type",
+        "role",
+        "content",
+        "id",
+        "tool_call_id",
+        "toolCallId",
+        "status",
+        "state",
+        "outcome",
+        "exit_code",
+        "exitCode",
+        "duration_ms",
+        "durationMs",
+        "timed_out",
+        "timedOut",
+        "timeout",
+        "is_error",
+        "isError",
+        "success",
+        "ok",
+    ];
+    PROJECTED_KEYS
+        .iter()
+        .any(|key| deepagents_has_duplicate_key(fields, key))
+}
+
+fn deepagents_has_duplicate_key(fields: &[(MsgpackValue, MsgpackValue)], key: &str) -> bool {
+    fields
+        .iter()
+        .filter(|(field_key, _)| msgpack_string(field_key).as_deref() == Some(key))
+        .take(2)
+        .count()
+        > 1
 }
 
 pub(super) fn msgpack_map_get<'a>(

@@ -3,10 +3,10 @@ use ctx_history_core::{EventRole, EventType};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    complete_content::CompleteContentBodyDigest,
     provider::native_ingestion::{
         NATIVE_INGESTION_PAGE_MAX_BYTES, NATIVE_INGESTION_PAGE_MAX_UNITS,
     },
+    record_evidence::RecordDigest,
 };
 
 use super::ZedNativeResult;
@@ -22,15 +22,21 @@ pub(crate) enum ZedNativeEncoding {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ZedNativeSession {
+    pub(super) sqlite_rowid: i64,
     pub(super) thread_id: String,
     pub(super) parent_thread_id: Option<String>,
-    pub(super) root_thread_id: String,
     pub(super) title: String,
+    pub(super) payload_title: Option<String>,
     pub(super) summary: String,
     pub(super) created_at: DateTime<Utc>,
     pub(super) updated_at: DateTime<Utc>,
+    pub(super) native_created_at: Option<String>,
+    pub(super) native_updated_at: String,
     pub(super) cwd: Option<String>,
     pub(super) folder_paths: Vec<String>,
+    pub(super) native_folder_paths: Option<String>,
+    pub(super) native_folder_paths_order: Option<String>,
+    pub(super) native_data_type: String,
     pub(super) encoding: ZedNativeEncoding,
 }
 
@@ -58,14 +64,15 @@ pub(crate) struct ZedNativeEvent {
     pub(super) sqlite_rowid: i64,
     pub(super) identity: ZedNativeEventIdentity,
     pub(super) native_order: ZedNativeOrder,
-    pub(super) record_digest: CompleteContentBodyDigest,
+    pub(super) record_digest: RecordDigest,
     pub(super) event_type: EventType,
     pub(super) role: EventRole,
     pub(super) occurred_at: DateTime<Utc>,
     pub(super) kind: String,
     pub(super) call_ids: Vec<String>,
+    pub(super) native_content: serde_json::Value,
     #[serde(skip)]
-    pub(super) lexical_body: String,
+    pub(super) normalized_body: String,
     pub(super) safe_file_touches: Vec<String>,
 }
 
@@ -128,7 +135,6 @@ pub(crate) trait ZedNativeSink {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ZedNativeCounters {
     pub(super) candidate_page_queries: u64,
-    pub(super) hydration_queries: u64,
     pub(crate) native_thread_rows: u64,
     pub(crate) certified_logical_bytes: u64,
     pub(super) encoded_payload_bytes: u64,

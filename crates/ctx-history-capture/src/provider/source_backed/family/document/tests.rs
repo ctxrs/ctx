@@ -5,10 +5,8 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, ContentSourceResolver,
-    EventHydrationRequest, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, SessionIdentityInput, SourceAnchor,
-    SourceRecordLocator,
+    derive_event_id, derive_session_id, CaptureProvider, CoreRecord, EventIdentityInput,
+    NativeItemKey, NativeSessionKey, SessionIdentityInput, SourceAnchor,
 };
 use ctx_history_index::{VerifiedIndex, WriterOptions};
 use sha2::{Digest, Sha256};
@@ -18,6 +16,7 @@ use crate::{
     provider::source_backed::{
         refresh_source_backed_generation, source_backed_leaf_worker_budget,
         SourceBackedCoordinatorError, SourceBackedProviderRegistry,
+        AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES,
     },
     ProviderCatalogSupport, ProviderImportSupport, ProviderSourceKind, ProviderSourceStatus,
     AUGGIE_SESSION_JSON_SOURCE_FORMAT,
@@ -64,7 +63,6 @@ struct SyntheticState {
     durable_replay: bool,
     parser_v2: bool,
     scan_counts: HashMap<u8, usize>,
-    hydration_parses: usize,
     discovery_calls: usize,
     mutate_before_scan: Option<u8>,
     mutate_on_revalidate: bool,
@@ -283,9 +281,9 @@ impl ReplacementDocumentTree for SyntheticAdapter {
         drop(state);
 
         let source = leaf.source();
-        let document = synthetic_document(leaf);
+        let record = synthetic_core_record(leaf);
         sink.begin_source(source.clone())?;
-        sink.emit_document(document)?;
+        sink.emit_core_record(record)?;
         let revision = if durable_replay {
             vec![leaf.physical_id, leaf.revision]
         } else {
@@ -333,55 +331,6 @@ impl ReplacementDocumentTree for SyntheticAdapter {
             }
         })
     }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        let mut state = self.state.lock().unwrap();
-        state.hydration_parses += 1;
-        let source = request
-            .events()
-            .first()
-            .map(|event| event.locator().source())
-            .ok_or_else(|| {
-                hydration_failure(
-                    HydrationFailureKind::InvalidLocator,
-                    "synthetic hydration group is empty",
-                )
-            })?;
-        let leaf = state
-            .leaves
-            .iter()
-            .find(|leaf| leaf.source().exact_descriptor_eq(source))
-            .ok_or_else(|| {
-                hydration_failure(
-                    HydrationFailureKind::MissingRecord,
-                    "synthetic source is missing",
-                )
-            })?;
-        let digest = leaf.content_digest();
-        let records = request
-            .events()
-            .iter()
-            .map(|event| {
-                if event.locator().certified_source_revision_digest() != Some(&digest)
-                    || event.locator().record_digest() != &digest
-                {
-                    return Err(hydration_failure(
-                        HydrationFailureKind::StaleRecordEvidence,
-                        "synthetic locator is stale",
-                    ));
-                }
-                Ok(HydratedProviderRecord {
-                    event_id: event.event_id(),
-                    provider_bytes: leaf.body.as_bytes().to_vec(),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        BatchHydrationResult::new(records)
-            .map_err(|error| hydration_failure(HydrationFailureKind::InvalidLocator, error))
-    }
 }
 
 fn synthetic_tree_fingerprint(leaves: &[ObservedDocumentLeaf<SyntheticLeaf>]) -> [u8; 32] {
@@ -398,7 +347,7 @@ fn synthetic_tree_fingerprint(leaves: &[ObservedDocumentLeaf<SyntheticLeaf>]) ->
     digest.finalize().into()
 }
 
-fn synthetic_document(leaf: &SyntheticLeaf) -> LexicalDocument {
+fn synthetic_core_record(leaf: &SyntheticLeaf) -> CoreRecord {
     let source = leaf.source();
     let native_session_key =
         NativeSessionKey::native_id("synthetic.session", TypedKey::U64(leaf.logical_id as u64))
@@ -418,39 +367,24 @@ fn synthetic_document(leaf: &SyntheticLeaf) -> LexicalDocument {
         subrecord_selector: None,
     })
     .unwrap();
-    let digest = leaf.content_digest();
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::Document {
-            object_key: TypedKey::U64(1),
-            json_pointer: Some("/message".to_owned()),
-        },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(digest),
-        digest,
-    )
-    .unwrap();
-    LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
+        session_id,
         source,
-        locator,
-        provider_session_id: Some(format!("synthetic-{}", leaf.logical_id)),
-        branch: None,
-        source_path: Some(format!("/synthetic/{}.json", leaf.physical_id)),
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: 1,
-        occurred_at_unix_ms: Some(1),
-        event_type: "message".to_owned(),
-        role: Some("user".to_owned()),
-        body: leaf.body.clone(),
-        workspace: None,
-        cwd: None,
-        touched_files: Vec::new(),
-    }
+        1,
+        "message",
+        "primary",
+        true,
+        "synthetic-document-parser-v1",
+        leaf.body.clone(),
+    )
+    .unwrap();
+    record.provider_session_id = Some(format!("synthetic-{}", leaf.logical_id));
+    record.native_event_id = Some(TypedKey::U64(1));
+    record.occurred_at_unix_ms = Some(1);
+    record.role = Some("user".to_owned());
+    record
 }
 
 fn fixture_registry(root: &Path, adapter: SyntheticAdapter) -> SourceBackedProviderRegistry {
@@ -500,6 +434,15 @@ fn publish(
     registry: &SourceBackedProviderRegistry,
 ) -> crate::provider::source_backed::SourceBackedRefreshReceipt {
     refresh_source_backed_generation(root, registry, writer_options()).unwrap()
+}
+
+fn publish_with_reopened_route(
+    index_root: &Path,
+    selected_root: &Path,
+    adapter: SyntheticAdapter,
+) -> crate::provider::source_backed::SourceBackedRefreshReceipt {
+    let registry = fixture_registry(selected_root, adapter);
+    publish(index_root, &registry)
 }
 
 fn membership_source(logical_id: u64, schema_variant: &str) -> SourceKey {
@@ -628,26 +571,6 @@ fn independent_leaf_runner_has_one_vs_four_parity_and_bounded_peak_work() {
     assert_eq!(serial_runner.scan_count(3), 1);
     assert_eq!(parallel_runner.scan_count(3), 1);
 
-    let retained_source = serial_runner.source(3);
-    let retained_event = VerifiedIndex::open(&serial_root)
-        .unwrap()
-        .source_event_page(&retained_source, None, 8)
-        .unwrap()
-        .items
-        .remove(0);
-    let retained_hydration =
-        EventHydrationRequest::new(retained_event.event_id, retained_event.locator).unwrap();
-    assert_eq!(
-        serial_registry
-            .resolver_registry()
-            .hydrate_event(&retained_hydration)
-            .unwrap(),
-        parallel_registry
-            .resolver_registry()
-            .hydrate_event(&retained_hydration)
-            .unwrap()
-    );
-
     let deleted_source = serial_runner.source(0);
     serial_runner
         .state
@@ -661,6 +584,38 @@ fn independent_leaf_runner_has_one_vs_four_parity_and_bounded_peak_work() {
         .unwrap()
         .leaves
         .retain(|leaf| leaf.logical_id != 0);
+    serial_runner.reset_scan_counts();
+    parallel_runner.reset_scan_counts();
+    for expected_missing in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
+        let serial_grace = publish(&serial_root, &serial_registry);
+        let parallel_grace = publish(&parallel_root, &parallel_registry);
+        assert!(serial_grace.removals.is_empty());
+        assert!(parallel_grace.removals.is_empty());
+        assert_eq!(serial_grace.sources.len(), 8);
+        assert_eq!(parallel_grace.sources.len(), 8);
+        assert_eq!(
+            serial_grace
+                .commit
+                .manifest()
+                .source_catalog()
+                .missing_source(&deleted_source)
+                .unwrap()
+                .consecutive_missing()
+                .get(),
+            expected_missing
+        );
+        assert_eq!(
+            parallel_grace
+                .commit
+                .manifest()
+                .source_catalog()
+                .missing_source(&deleted_source)
+                .unwrap()
+                .consecutive_missing()
+                .get(),
+            expected_missing
+        );
+    }
     serial_runner.reset_scan_counts();
     parallel_runner.reset_scan_counts();
     let serial_deleted = publish(&serial_root, &serial_registry);
@@ -737,16 +692,12 @@ fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
             .unwrap()
             .items;
         assert_eq!(items.len(), 1);
-        let hydration =
-            EventHydrationRequest::new(items[0].event_id, items[0].locator.clone()).unwrap();
-        assert_eq!(
-            registry
-                .resolver_registry()
-                .hydrate_event(&hydration)
-                .unwrap()
-                .provider_bytes,
-            body.as_bytes()
-        );
+        let record = VerifiedIndex::open(&index_root)
+            .unwrap()
+            .core_record_by_id(items[0].event_id.as_uuid())
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.content.normalized_body.as_deref(), Some(body));
     }
 
     adapter.state.lock().unwrap().leaves.push(SyntheticLeaf {
@@ -769,6 +720,32 @@ fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
         .unwrap()
         .leaves
         .retain(|leaf| leaf.logical_id != 1);
+    adapter.reset_scan_counts();
+    for expected_missing in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
+        let grace = publish(&index_root, &registry);
+        assert_eq!(grace.sources.len(), 3);
+        assert!(grace.removals.is_empty());
+        assert_eq!(
+            grace
+                .commit
+                .manifest()
+                .source_catalog()
+                .missing_source(&deleted_source)
+                .unwrap()
+                .consecutive_missing()
+                .get(),
+            expected_missing
+        );
+        assert_eq!(
+            VerifiedIndex::open(&index_root)
+                .unwrap()
+                .source_event_page(&deleted_source, None, 8)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+    }
     adapter.reset_scan_counts();
     let deleted = publish(&index_root, &registry);
     assert_eq!(deleted.sources.len(), 2);
@@ -804,6 +781,77 @@ fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         retained_generation
+    );
+}
+
+#[test]
+fn automatic_document_missing_grace_survives_route_reopen_and_reappearance() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let index_root = temp.path().join("index");
+    let selected_root = temp.path().join("selected");
+    let leaf = SyntheticLeaf {
+        physical_id: 1,
+        logical_id: 1,
+        revision: 1,
+        body: "durable last-good leaf".to_owned(),
+    };
+    let source = leaf.source();
+    let adapter = SyntheticAdapter::new(vec![leaf.clone()]);
+
+    let cold = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
+    let noop = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
+    assert_eq!(noop.commit.generation_id, cold.commit.generation_id);
+    assert!(noop.commit.manifest().source_catalog().is_empty());
+
+    adapter.state.lock().unwrap().leaves.clear();
+    for expected_missing in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
+        let grace = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
+        assert_eq!(grace.sources.len(), 1);
+        assert!(grace.removals.is_empty());
+        assert_eq!(
+            grace
+                .commit
+                .manifest()
+                .source_catalog()
+                .missing_source(&source)
+                .unwrap()
+                .consecutive_missing()
+                .get(),
+            expected_missing
+        );
+        assert_eq!(
+            VerifiedIndex::open(&index_root).unwrap().document_count(),
+            1
+        );
+    }
+
+    adapter.state.lock().unwrap().leaves.push(leaf.clone());
+    let reappeared = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
+    assert_eq!(reappeared.sources.len(), 1);
+    assert!(reappeared.removals.is_empty());
+    assert!(reappeared.commit.manifest().source_catalog().is_empty());
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        1
+    );
+
+    adapter.state.lock().unwrap().leaves.clear();
+    for _ in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
+        let grace = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
+        assert!(grace.removals.is_empty());
+        assert_eq!(grace.sources.len(), 1);
+    }
+    let deleted = publish_with_reopened_route(&index_root, &selected_root, adapter);
+    assert!(deleted.commit.manifest().source_catalog().is_empty());
+    assert_eq!(deleted.sources.len(), 0);
+    assert_eq!(deleted.removals.len(), 1);
+    assert!(deleted.removals[0]
+        .deletion
+        .source()
+        .exact_descriptor_eq(&source));
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        0
     );
 }
 
@@ -889,14 +937,14 @@ fn logical_snapshot_four_worker_noop_retains_and_changed_leaf_replays() {
         .unwrap()
         .items
         .remove(0);
-    let hydration = EventHydrationRequest::new(item.event_id, item.locator).unwrap();
+    let record = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .core_record_by_id(item.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        registry
-            .resolver_registry()
-            .hydrate_event(&hydration)
-            .unwrap()
-            .provider_bytes,
-        b"logical leaf 3 changed"
+        record.content.normalized_body.as_deref(),
+        Some("logical leaf 3 changed")
     );
 }
 
@@ -1085,83 +1133,4 @@ fn terminal_tree_witness_rejects_mutation_and_reappearance_between_callbacks() {
     ));
     adapter.state.lock().unwrap().leaves.push(deleted_leaf);
     assert!(!revalidate_document_inventory(&adapter, &state, &inventory,));
-}
-
-#[test]
-fn replacement_tree_group_hydration_parses_once_preserves_order_and_fails_atomically() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let index_root = temp.path().join("index");
-    let adapter = SyntheticAdapter::new(vec![
-        SyntheticLeaf {
-            physical_id: 1,
-            logical_id: 1,
-            revision: 1,
-            body: "first source".to_owned(),
-        },
-        SyntheticLeaf {
-            physical_id: 2,
-            logical_id: 2,
-            revision: 1,
-            body: "second source".to_owned(),
-        },
-    ]);
-    let registry = fixture_registry(temp.path(), adapter.clone());
-    publish(&index_root, &registry);
-    let source = adapter.source(1);
-    let event = VerifiedIndex::open(&index_root)
-        .unwrap()
-        .source_event_page(&source, None, 8)
-        .unwrap()
-        .items
-        .remove(0);
-    let first = EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap();
-    let second_document = synthetic_document(&SyntheticLeaf {
-        physical_id: 1,
-        logical_id: 1,
-        revision: 1,
-        body: "first source".to_owned(),
-    });
-    let second_locator = SourceRecordLocator::new(
-        source,
-        NativeRecordCoordinate::Document {
-            object_key: TypedKey::U64(2),
-            json_pointer: Some("/message".to_owned()),
-        },
-        LocatorRevisionPolicy::ExactSourceRevision,
-        second_document
-            .locator
-            .certified_source_revision_digest()
-            .copied(),
-        *second_document.locator.record_digest(),
-    )
-    .unwrap();
-    let second_item = NativeItemKey::native_id("synthetic.message", TypedKey::U64(2)).unwrap();
-    let second_id = derive_event_id(EventIdentityInput {
-        source: second_locator.source(),
-        session_id: second_document.session_id,
-        logical_item_kind: "synthetic-message",
-        native_item_key: &second_item,
-        subrecord_selector: None,
-    })
-    .unwrap();
-    let second = EventHydrationRequest::new(second_id, second_locator).unwrap();
-    let batch = BatchHydrationRequest::new(vec![second.clone(), first.clone()]).unwrap();
-    let result = registry.resolver_registry().hydrate_batch(&batch).unwrap();
-    assert_eq!(
-        result
-            .records()
-            .iter()
-            .map(|record| record.event_id)
-            .collect::<Vec<_>>(),
-        vec![second.event_id(), first.event_id()]
-    );
-    assert_eq!(adapter.state.lock().unwrap().hydration_parses, 1);
-
-    adapter.replace(1, 2, "changed after indexing");
-    let stale = registry
-        .resolver_registry()
-        .hydrate_batch(&batch)
-        .unwrap_err();
-    assert_eq!(stale.kind, HydrationFailureKind::StaleRecordEvidence);
-    assert_eq!(adapter.state.lock().unwrap().hydration_parses, 2);
 }

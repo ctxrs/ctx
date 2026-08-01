@@ -1,6 +1,11 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
+    thread,
 };
 
 use ctx_history_core::platform_security::validate_provider_source_outside_data_root;
@@ -15,6 +20,8 @@ use super::{
 };
 
 const MAX_PROJECT_DISCOVERY_LOCATORS: usize = 128;
+const MAX_PROVIDER_DISCOVERY_WORKERS: usize = 16;
+const PROVIDER_DISCOVERY_THREAD_PREFIX: &str = "ctx-src-disc";
 
 #[derive(Debug, Error)]
 #[error(
@@ -63,6 +70,103 @@ pub fn discover_provider_sources_with_context(context: &DiscoveryContext) -> Dis
         report.issues.append(&mut provider_report.issues);
     }
     dedupe_report(report)
+}
+
+/// Resolves independent provider specifications concurrently under the
+/// caller's refresh-wide worker limit, then merges reports in specification
+/// order so scheduling cannot affect discovery or publication identity.
+pub fn discover_provider_sources_with_context_and_work_budget(
+    context: &DiscoveryContext,
+    worker_limit: usize,
+) -> DiscoveryReport {
+    let reports = bounded_ordered_map(PROVIDER_SPECS.len(), worker_limit, |index| {
+        resolve(context, &PROVIDER_SPECS[index])
+    });
+    let mut report = DiscoveryReport::default();
+    for mut provider_report in reports {
+        report.sources.append(&mut provider_report.sources);
+        report.issues.append(&mut provider_report.issues);
+    }
+    dedupe_report(report)
+}
+
+fn bounded_ordered_map<T, F>(job_count: usize, worker_limit: usize, operation: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(usize) -> T + Sync,
+{
+    if job_count == 0 {
+        return Vec::new();
+    }
+    let worker_count = worker_limit
+        .max(1)
+        .min(job_count)
+        .min(MAX_PROVIDER_DISCOVERY_WORKERS);
+    if worker_count == 1 {
+        return (0..job_count).map(operation).collect();
+    }
+
+    let next_job = AtomicUsize::new(0);
+    let results = Mutex::new(
+        std::iter::repeat_with(|| None)
+            .take(job_count)
+            .collect::<Vec<Option<T>>>(),
+    );
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count.saturating_sub(1));
+        for worker_index in 1..worker_count {
+            let operation = &operation;
+            let next_job = &next_job;
+            let results = &results;
+            let spawn = thread::Builder::new()
+                .name(format!(
+                    "{PROVIDER_DISCOVERY_THREAD_PREFIX}{worker_index:02}"
+                ))
+                .spawn_scoped(scope, move || {
+                    run_ordered_jobs(job_count, next_job, results, operation)
+                });
+            if let Ok(handle) = spawn {
+                handles.push(handle);
+            }
+        }
+        run_ordered_jobs(job_count, &next_job, &results, &operation);
+        for handle in handles {
+            // A panicking resolver leaves its claimed slot empty. Discovery is
+            // side-effect free, so the caller retries only that missing slot.
+            let _ = handle.join();
+        }
+    });
+
+    let slots = results
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, result)| result.unwrap_or_else(|| operation(index)))
+        .collect()
+}
+
+fn run_ordered_jobs<T, F>(
+    job_count: usize,
+    next_job: &AtomicUsize,
+    results: &Mutex<Vec<Option<T>>>,
+    operation: &F,
+) where
+    T: Send,
+    F: Fn(usize) -> T + Sync,
+{
+    loop {
+        let index = next_job.fetch_add(1, Ordering::Relaxed);
+        if index >= job_count {
+            return;
+        }
+        let result = operation(index);
+        let mut slots = results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slots[index] = Some(result);
+    }
 }
 
 /// Discovers official provider roots across an explicit bounded set of activity locators.
@@ -160,5 +264,39 @@ mod boundary_error_tests {
         let rendered = error.to_string();
         assert!(rendered.contains("choose or move ctx --data-root"));
         assert!(rendered.contains("correct the explicit provider path"));
+    }
+
+    #[test]
+    fn bounded_discovery_work_is_concurrent_and_returns_input_order() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let workers = std::sync::Arc::new(Mutex::new(HashSet::new()));
+        let barrier_for_jobs = std::sync::Arc::clone(&barrier);
+        let workers_for_jobs = std::sync::Arc::clone(&workers);
+
+        let results = bounded_ordered_map(4, 4, move |index| {
+            workers_for_jobs
+                .lock()
+                .unwrap()
+                .insert(std::thread::current().id());
+            barrier_for_jobs.wait();
+            index
+        });
+
+        assert_eq!(results, [0, 1, 2, 3]);
+        assert_eq!(workers.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn bounded_discovery_work_clamps_zero_and_oversized_limits() {
+        assert_eq!(bounded_ordered_map(3, 0, |index| index), [0, 1, 2]);
+        let names = std::sync::Arc::new(Mutex::new(HashSet::new()));
+        let names_for_jobs = std::sync::Arc::clone(&names);
+        let _ = bounded_ordered_map(MAX_PROVIDER_DISCOVERY_WORKERS + 4, usize::MAX, move |_| {
+            names_for_jobs
+                .lock()
+                .unwrap()
+                .insert(std::thread::current().name().map(str::to_owned));
+        });
+        assert!(names.lock().unwrap().len() <= MAX_PROVIDER_DISCOVERY_WORKERS);
     }
 }

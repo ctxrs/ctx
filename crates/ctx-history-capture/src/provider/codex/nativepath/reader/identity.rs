@@ -33,5 +33,41 @@ pub(super) fn bound_tool_context(mut context: CodexToolCallContext) -> CodexTool
         .arguments_preview
         .as_deref()
         .map(|value| truncate_utf8(value, MAX_CODEX_TOOL_PREVIEW_BYTES));
+    if context
+        .exact_command
+        .as_ref()
+        .is_some_and(|value| value.len() > crate::repository_attribution::MAX_COMMAND_BYTES)
+    {
+        context.exact_command = None;
+        context.command_too_large = true;
+    }
+    if context
+        .session_cwd
+        .as_ref()
+        .is_some_and(|value| value.len() > 16 * 1024)
+    {
+        context.session_cwd = None;
+    }
+    if context
+        .declared_workdir
+        .as_ref()
+        .is_some_and(|value| value.len() > 16 * 1024)
+    {
+        context.declared_workdir = None;
+    }
+    if context.continuation_cell_id.as_ref().is_some_and(|value| {
+        value.len() > MAX_CODEX_CONTINUATION_CELL_ID_BYTES
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            })
+    }) {
+        context.continuation_cell_id = None;
+    }
+    if context.continuation_call_id_sha256.len() > MAX_CODEX_TOOL_CONTEXTS {
+        context.continuation_capacity_exceeded = true;
+        context
+            .continuation_call_id_sha256
+            .truncate(MAX_CODEX_TOOL_CONTEXTS);
+    }
     context
 }

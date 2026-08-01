@@ -6,24 +6,29 @@ the local retrieval product.
 ## Required Invariants
 
 - `ctx setup` reads supported provider history and writes only under the
-  configured ctx data root: SQLite index/config data, and optional daemon
-  lock/status/job state when daemon autostart runs.
+  configured ctx data root: Core generations, derived projections, config data,
+  and optional daemon lock/status/job state when daemon autostart runs.
 - `ctx sources` writes nothing in local-only security mode.
-- `ctx import` writes only under the configured ctx data root: SQLite
-  index/config data, and optional daemon lock/status/job state when daemon
-  autostart runs.
-- `ctx search` may refresh a bounded batch of discovered native provider
-  history into the configured ctx data root before querying. Default search must
-  not download embedding models, start semantic indexing, start a daemon, or
-  write the semantic sidecar.
-- `ctx show` and `ctx locate` write nothing in local-only security mode, except
+- `ctx import` writes only under the configured ctx data root: Core generations,
+  derived projections, config data, and optional daemon lock/status/job state
+  when daemon autostart runs.
+- `ctx search` may request a bounded daemon-owned refresh of discovered native
+  provider history before querying the active Core generation. The query process
+  does not write Core generations or projections. Without semantic opt-in,
+  default search must not download embedding models or start semantic indexing.
+- `ctx show` writes nothing in local-only security mode, except
   `ctx show session --out` writes only the explicit path when one is provided.
 - `ctx status` does not mutate canonical history or local Pro graph data:
   missing stores stay missing, and existing stores are not migrated, repaired,
   or used to create search projections. Pro entitlement authorization may
   advance nonsecret anti-clock-rollback security metadata.
-- `ctx sql` opens only the existing SQLite index, rejects write statements and
-  multiple statements, and does not run background upgrade checks.
+- On a completely fresh data root, `ctx sql` may initialize only an empty
+  relational metadata projection. It does not create Core or import provider
+  history. Otherwise it admits only a ready projection bound to the active Core
+  generation, or the canonical empty projection when Core is absent; stale
+  populated or generation-bound projections fail closed. SQL rejects write
+  statements and multiple statements and does not run background upgrade
+  checks.
 - In local-only security mode, setup/import/default search do not use network
   access or API keys. Explicit semantic use still must not call hosted model
   APIs, and search must not download the local embedding model when the required
@@ -57,7 +62,7 @@ the local retrieval product.
 - Provider files are read as sources and not modified.
 - Provider transcript imports reject symlinked JSONL files by default.
 - JSON output is private by default.
-- Search/show/locate JSON and SQLite search projections preserve local
+- Search/show JSON and SQLite search projections preserve local
   transcript text by default, including absolute paths and secret-shaped
   strings. They must be treated as private local data.
 - The public provider support matrix contains only supported providers and uses
@@ -137,8 +142,8 @@ unavailable:
    their sticky owner-private file backends.
 2. Import canonical NativePath history, materialize Core plus Pro, restart the daemon,
    and run `ctx blame`; verify Core Tantivy retrieval never depends on either
-   credential namespace and the SQLCipher graph remains derived-facts and
-   locator-only, source-rebuildable state.
+   credential namespace and the SQLCipher graph remains derived-facts,
+   source-rebuildable state.
 3. Upgrade the same root to the candidate pair, restart the daemon and helper,
    and repeat materialization and blame. Verify neither namespace changes its
    selected backend when a native vault later becomes available.

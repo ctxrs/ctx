@@ -3,13 +3,10 @@ use std::{
     io::{Seek, SeekFrom, Write},
 };
 
-use ctx_history_core::{
-    EventType, LocatorRevisionPolicy, NativeRecordCoordinate, SourceRecordLocator,
-};
+use ctx_history_core::EventType;
 
 use super::*;
 
-mod hydration;
 mod lifecycle;
 mod projection;
 
@@ -19,7 +16,6 @@ fn assert_no_legacy_operations(counters: CodexSourceBackedCountersV0) {
     assert_eq!(counters.scanner_legacy_json_serialized_bytes, 0);
     assert_eq!(counters.scanner_legacy_normalized_payload_hashes, 0);
     assert_eq!(counters.scanner_legacy_file_touch_rows, 0);
-    assert_eq!(counters.scanner_legacy_complete_content_locators, 0);
     assert_eq!(counters.scanner_legacy_duplicate_preview_allocations, 0);
     assert_eq!(counters.scanner_legacy_page_owner_json_serializations, 0);
     assert_eq!(
@@ -99,6 +95,20 @@ fn tool_call_with_patch(call_id: &str) -> String {
             }
         })
         .to_string()
+}
+
+fn identity_exec_call(call_id: &str, command: &str) -> String {
+    serde_json::json!({
+        "timestamp": "2026-07-28T12:00:02Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": call_id,
+            "arguments": {"cmd": command}
+        }
+    })
+    .to_string()
 }
 
 fn failed_tool_output(call_id: &str) -> String {

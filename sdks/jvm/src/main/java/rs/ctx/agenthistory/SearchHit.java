@@ -105,6 +105,14 @@ public final class SearchHit {
         return getProvider();
     }
 
+    public String getSourceFormat() {
+        return AgentHistoryValue.string(fields.get("sourceFormat"));
+    }
+
+    public String sourceFormat() {
+        return getSourceFormat();
+    }
+
     public String getTimestamp() {
         return AgentHistoryValue.string(fields.get("timestamp"));
     }
@@ -119,30 +127,6 @@ public final class SearchHit {
 
     public String cwd() {
         return getCwd();
-    }
-
-    public String getSourcePath() {
-        return AgentHistoryValue.string(fields.get("sourcePath"));
-    }
-
-    public String sourcePath() {
-        return getSourcePath();
-    }
-
-    public Boolean getSourceExists() {
-        return AgentHistoryValue.bool(fields.get("sourceExists"));
-    }
-
-    public Boolean sourceExists() {
-        return getSourceExists();
-    }
-
-    public String getCursor() {
-        return AgentHistoryValue.string(fields.get("cursor"));
-    }
-
-    public String cursor() {
-        return getCursor();
     }
 
     public List<String> getWhyMatched() {

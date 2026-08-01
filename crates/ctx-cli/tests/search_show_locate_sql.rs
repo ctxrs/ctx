@@ -98,7 +98,7 @@ fn start_source_refresh_daemon_with_env(
             .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
         if status.as_ref().is_some_and(|status| {
             status["daemon"]["running"] == true
-                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+                && status["daemon"]["core_refresh_endpoint"]["available"] == true
         }) {
             wait_for_test_daemon_source_refresh(temp);
             return daemon;
@@ -122,7 +122,8 @@ fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
             break serde_json::from_slice::<Value>(&output.stdout).unwrap();
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if (stderr.contains("source-backed SQL projection")
+        if (stderr.contains("Core SQL projection")
+            || stderr.contains("source-backed SQL projection")
             || stderr.contains("source-backed relational projection")
             || stderr.contains("no such table: source_backed_relational_state"))
             && Instant::now() < deadline
@@ -156,7 +157,7 @@ fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
     assert_eq!(search["schema_version"], 1, "{search:#}");
     assert_eq!(search["query"], query, "{search:#}");
     assert_eq!(search["filters"]["provider"], provider, "{search:#}");
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     let results = search["results"].as_array().unwrap();
     assert_eq!(results.len(), 1, "{search:#}");
     assert_eq!(results[0]["provider"], provider, "{search:#}");
@@ -566,18 +567,7 @@ fn bounded_sql_preview_has_copyable_human_recovery_and_unchanged_raw_controls() 
 fn show_does_not_initialize_store() {
     let temp = tempdir();
     let stderr = failure_stderr(ctx(&temp).args(["show", "event", "deadbeef"]));
-    assert!(stderr.contains("source-backed Core index is not initialized"));
-    assert!(!temp.path().join("work.sqlite").exists());
-}
-
-#[test]
-fn locate_does_not_initialize_store() {
-    let temp = tempdir();
-    let stderr = failure_stderr(ctx(&temp).args(["locate", "event", "deadbeef"]));
-    assert!(
-        stderr.contains("source-backed Core index is not initialized"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("the Core index does not exist; retry with daemon refresh enabled"));
     assert!(!temp.path().join("work.sqlite").exists());
 }
 
@@ -668,7 +658,7 @@ fn fresh_home_search_mvp_flow() {
     let ctx_event_id = first_result["ctx_event_id"].as_str().unwrap().to_owned();
     let ctx_session_id = first_result["ctx_session_id"].as_str().unwrap().to_owned();
     assert!(first_result["provider_session_id"].is_string());
-    assert!(first_result["source_path"].is_string());
+    assert!(first_result.get("source_path").is_none());
     assert_session_suggested_next_commands(first_result);
     assert!(first_result["citations"][0]["ctx_event_id"].is_string());
     assert!(first_result["citations"][0]["ctx_session_id"].is_string());
@@ -696,7 +686,7 @@ fn fresh_home_search_mvp_flow() {
         "--events",
         "--format=json",
     ]));
-    assert_event_search_provider_oracle(&event_search, "codex", "onboarding", 1, "message");
+    assert_event_search_provider_oracle(&event_search, "codex", "onboarding", 2, "message");
 
     let session_events = json_output(ctx(&temp).args([
         "search",
@@ -707,7 +697,7 @@ fn fresh_home_search_mvp_flow() {
         &ctx_session_id,
         "--format=json",
     ]));
-    assert_event_search_provider_oracle(&session_events, "codex", "onboarding", 1, "message");
+    assert_event_search_provider_oracle(&session_events, "codex", "onboarding", 2, "message");
     assert_eq!(session_events["filters"]["session"], ctx_session_id);
     assert!(session_events["results"]
         .as_array()
@@ -729,7 +719,7 @@ fn fresh_home_search_mvp_flow() {
         &prefixed_session_events,
         "codex",
         "onboarding",
-        1,
+        2,
         "message",
     );
     assert_eq!(
@@ -810,41 +800,21 @@ fn fresh_home_search_mvp_flow() {
         "{oversized_window}"
     );
 
-    let locate_event =
-        json_output(ctx(&temp).args(["locate", "event", &ctx_event_id, "--format=json"]));
-    assert_eq!(locate_event["schema_version"], 1);
-    assert_eq!(locate_event["payload_type"], "event_location");
-    assert_eq!(locate_event["ctx_event_id"], ctx_event_id);
-    assert_eq!(locate_event["ctx_session_id"], ctx_session_id);
-    assert_eq!(locate_event["provider"], "codex");
-    assert!(locate_event["provider_session_id"].is_string());
-    assert!(locate_event["source"]["path"].is_string());
-
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["schema_version"], 2);
     assert!(status["indexed_items"].as_u64().unwrap() > 0);
     assert_eq!(status["semantic"]["status"], "disabled");
     assert_eq!(status["semantic"]["reason"], "semantic_disabled");
     assert_eq!(status["daemon"]["enabled"], true);
-    assert!(status["daemon"]["jobs"]["source_backed_refresh"]["status"].is_string());
+    assert!(status["daemon"]["jobs"]["core_refresh"]["status"].is_string());
 
-    let doctor_deadline = Instant::now() + Duration::from_secs(10);
-    let doctor = loop {
-        let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
-        if doctor["ok"] == true {
-            break doctor;
-        }
-        assert!(
-            Instant::now() < doctor_deadline,
-            "timed out waiting for healthy source epochs: {doctor:#}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    };
+    let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
     assert_eq!(doctor["schema_version"], 1);
-    assert_eq!(doctor["ok"], true);
+    let findings = doctor["findings"].as_array().unwrap();
+    assert_eq!(doctor["ok"], findings.is_empty());
     assert_eq!(doctor["daemon"]["enabled"], true);
     assert_eq!(doctor["source_epoch"]["lexical"]["status"], "ready");
-    assert!(doctor["findings"].as_array().unwrap().is_empty());
+    assert_eq!(doctor["pro"]["error_code"], "pro_not_installed");
 }
 
 #[test]
@@ -916,21 +886,6 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
             "--format=json",
         ]));
     assert!(!shown_event["events"].as_array().unwrap().is_empty());
-
-    let (_, locate_session_output_bytes) =
-        measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
-            "locate",
-            "session",
-            &ctx_session_id,
-            "--format=json",
-        ]));
-    let (_, locate_event_output_bytes) =
-        measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
-            "locate",
-            "event",
-            &ctx_event_id,
-            "--format=json",
-        ]));
 
     let (sources, sources_output_bytes) = measured_json_output(
         ctx(&temp)
@@ -1034,17 +989,6 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
     assert_eq!(
         totals("show_event", "success", "not_applicable"),
         (1, 0, 0, show_event_output_bytes as i64, 0, 0)
-    );
-    assert_eq!(
-        totals("locate", "success", "not_applicable"),
-        (
-            2,
-            0,
-            0,
-            locate_session_output_bytes.saturating_add(locate_event_output_bytes) as i64,
-            0,
-            0,
-        )
     );
     assert_eq!(
         totals("sources", "success", "not_applicable"),
@@ -1266,7 +1210,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
             &temp,
             "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex'"
         ),
-        7
+        8
     );
 
     let primary_default =
@@ -1402,7 +1346,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
     let status = loop {
         let status = json_output(ctx(&temp).args(["status", "--format=json"]));
         if status["indexed_sessions"] == 2
-            && status["indexed_events"] == 7
+            && status["indexed_events"] == 8
             && status["indexed_sources"] == 2
             && status["lexical"]["status"] == "ready"
         {
@@ -1415,7 +1359,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
         std::thread::sleep(Duration::from_millis(25));
     };
     assert_eq!(status["indexed_sessions"], 2);
-    assert_eq!(status["indexed_events"], 7);
+    assert_eq!(status["indexed_events"], 8);
     assert_eq!(status["indexed_sources"], 2);
     assert_eq!(status["lexical"]["status"], "ready");
 
@@ -1480,16 +1424,16 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
     assert_eq!(
         source_backed_count(
             &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'codex' AND fidelity = 'imported'"
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'codex'"
         ),
         3
     );
     assert_eq!(
         source_backed_count(
             &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND fidelity = 'imported'"
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex'"
         ),
-        12
+        15
     );
     assert_eq!(
         source_backed_count(
@@ -1517,14 +1461,14 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
             &temp,
             "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'tool_output'"
         ),
-        0
+        1
     );
     assert_eq!(
         source_backed_count(
             &temp,
             "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'command_output'"
         ),
-        0
+        2
     );
     assert_eq!(
         source_backed_count(
@@ -1536,7 +1480,8 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
     );
     assert_eq!(
         source_backed_count(&temp, "SELECT COUNT(*) FROM ctx_files_touched"),
-        1
+        0,
+        "unscoped fixture paths must not cross the Core repository boundary"
     );
     assert_eq!(
         source_backed_count(
@@ -1547,7 +1492,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
     );
     assert!(
         !temp.path().join("work.sqlite").exists(),
-        "Codex acceptance must use the source-backed generation and relational projection"
+        "Codex acceptance must use the Core generation and relational projection"
     );
 }
 

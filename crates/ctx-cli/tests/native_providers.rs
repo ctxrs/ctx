@@ -85,7 +85,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "none",
         ]));
         assert_authoritative_provider_publication(&first);
-        assert_eq!(first["totals"]["current_rejected_records"], 0, "{first:#}");
+        assert_eq!(first["totals"]["current_rejected_records"], 1, "{first:#}");
         assert!(
             source_backed_count(
                 &temp,
@@ -126,7 +126,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
         ]));
         assert_authoritative_provider_publication(&second);
         assert_eq!(
-            second["totals"]["current_rejected_records"], 0,
+            second["totals"]["current_rejected_records"], 1,
             "{second:#}"
         );
     }
@@ -546,7 +546,11 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             "--format=json",
         ]));
         assert_explicit_source_publication(&first, stored_provider, expected_format);
-        assert_eq!(first["totals"]["current_rejected_records"], 0, "{first:#}");
+        let expected_rejected_records = u64::from(stored_provider == "qwen_code");
+        assert_eq!(
+            first["totals"]["current_rejected_records"], expected_rejected_records,
+            "{first:#}"
+        );
         assert!(
             source_backed_count(
                 &temp,
@@ -631,14 +635,15 @@ fn has_provider_source_path(packet: &Value, provider: &str, path: &Path) -> bool
 }
 
 #[test]
-fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payloads() {
-    for (provider, source_format, fixture, query, sentinel) in [
+fn native_provider_cli_preserves_complete_tool_outputs_without_legacy_payloads() {
+    for (provider, source_format, fixture, query, sentinel, output_is_searchable) in [
         (
             "qoder",
             "qoder_transcript_jsonl_tree",
             write_native_qoder_fixture as fn(&TempDir, &str) -> String,
             "qoder-policy-real-message-oracle",
             "qoderleakproofxylophonium",
+            true,
         ),
         (
             "openhands",
@@ -646,6 +651,7 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             write_native_openhands_fixture,
             "openhands-policy-real-message-oracle",
             "openhandssuccesstooloutputsentinel",
+            true,
         ),
         (
             "continue",
@@ -653,6 +659,7 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             write_native_continue_fixture,
             "continue-policy-real-message-oracle",
             "continuesuccesstooloutputsentinel",
+            false,
         ),
     ] {
         let temp = tempdir();
@@ -693,10 +700,14 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             "off",
             "--format=json",
         ]));
-        assert!(
-            search["results"].as_array().unwrap().is_empty(),
-            "{provider} success tool output leaked into search: {search:#}"
-        );
+        if output_is_searchable {
+            assert_source_backed_search(&search, provider, sentinel);
+        } else {
+            assert!(
+                search["results"].as_array().unwrap().is_empty(),
+                "{provider} must not invent a Core event for nested result context: {search:#}"
+            );
+        }
 
         assert_eq!(
             source_backed_count(
@@ -706,15 +717,11 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             0,
             "the metadata-only relational projection must expose no payload column"
         );
-        if provider == "openhands" {
-            assert!(
-                source_backed_count(
-                    &temp,
-                    "SELECT COUNT(*) FROM ctx_files_touched \
-                     WHERE path = 'openhands-cli-native-oracle.txt'",
-                ) > 0
-            );
-        }
+        assert_eq!(
+            source_backed_count(&temp, "SELECT COUNT(*) FROM ctx_files_touched"),
+            0,
+            "unscoped file paths must not cross the Core repository boundary"
+        );
     }
 }
 
@@ -1080,7 +1087,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
             &temp,
             "SELECT COUNT(*) FROM ctx_events WHERE provider = 'cline'"
         ),
-        4
+        5
     );
 
     let second = json_output(ctx(&temp).args([
@@ -1130,7 +1137,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
             &temp,
             "SELECT COUNT(*) FROM ctx_events WHERE provider = 'roo_code'"
         ),
-        6
+        7
     );
 
     let search = json_output(ctx(&temp).args([

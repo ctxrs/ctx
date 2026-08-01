@@ -51,7 +51,7 @@ working directory. A long-lived daemon uses the named environment/CWD snapshot
 from its launch, so restart it after changing provider root variables. A
 coordinator that evaluates project-scoped providers across multiple worktrees
 must call the injected discovery context once per already observed or explicitly
-authorized worktree locator, then apply the normal bounded de-duplication. It
+authorized worktree, then apply the normal bounded de-duplication. It
 must not use provider roots as repository identity, infer worktrees from those
 roots, or crawl for repositories; logical repository, checkout, and worktree
 identity remain a separate activity-derived concern.

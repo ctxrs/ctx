@@ -42,19 +42,22 @@ The public methods mirror the agent-history-v1 client surface:
 - `search()` with a query, term, or file option
 - `show_event()` / `showEvent()`
 - `show_session()` / `showSession()`
-- `locate_event()` / `locateEvent()`
-- `locate_session()` / `locateSession()`
 - `version()` and `versioning()`
 
 Every operation returns a dictionary with `contractVersion: "agent-history-v1"`,
 `schemaVersion: 1`, `operation`, `backend`, and an operation-specific payload
-such as `status`, `sources`, `import`, `search`, `event`, `session`, or
-`location`.
+such as `status`, `sources`, `import`, `search`, `event`, or `session`.
 
 The package includes PEP 561 type metadata and exports operation-specific
 `TypedDict` envelopes such as `StatusResponse`, `SearchResponse`,
-`ShowEventResponse`, and `LocateSessionResponse`. These are hand-written to
+`ShowEventResponse`, and `ShowSessionResponse`. These are hand-written to
 match the shared `agent-history-v1` contract while keeping runtime dependencies empty.
+
+Search hits, shown events, and `SessionSummary` expose `provider`,
+`providerSessionId`, and `sourceFormat`; for Codex, `providerSessionId` is the
+resume UUID. Event `content` is typed completeness/policy metadata and `text` is
+the only body. Per-event source paths, cursors, source locations, and `preview`
+are not part of the SDK contract.
 
 `sync()` is an alias for import because the current local agent-history-v1
 implementation syncs by importing local provider history into the ctx index.
@@ -91,8 +94,8 @@ python3 examples/dogfood_local.py
 ```
 
 By default the example creates a temporary fake `ctx` binary and exercises
-`status`, `search`, `show_event`, `show_session`, `locate_event`, and
-`locate_session` without network access, API keys, or private history. Set
+`status`, `search`, `show_event`, and `show_session` without network access,
+API keys, or private history. Set
 `CTX_AGENT_HISTORY_CTX=/path/to/ctx` to point it at a real local CLI instead.
 
 ## Tests

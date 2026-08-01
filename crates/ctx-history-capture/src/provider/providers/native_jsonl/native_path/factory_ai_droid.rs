@@ -10,7 +10,9 @@ use crate::{
     OutputOutcome, OutputOutcomeMetadata, FACTORY_DROID_SOURCE_FORMAT,
 };
 
-use super::super::result_content::{NativeJsonlResultExtractionError, NativeJsonlResultSubrecord};
+use super::super::result_content::{
+    extract_direct_result_content, NativeJsonlResultExtractionError, NativeJsonlResultSubrecord,
+};
 
 pub(crate) const fn factory_droid_source_backed_adapter() -> super::DirectJsonlFamilyAdapter {
     super::DirectJsonlFamilyAdapter::new(
@@ -28,7 +30,3 @@ pub(in crate::provider::providers::native_jsonl) use records::{
     factory_droid_header_session_id, factory_droid_model, factory_droid_role,
     factory_droid_session_relationships,
 };
-
-#[cfg(test)]
-#[path = "factory_ai_droid_tests.rs"]
-mod tests;

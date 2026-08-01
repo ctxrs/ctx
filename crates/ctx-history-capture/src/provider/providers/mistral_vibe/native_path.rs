@@ -31,8 +31,6 @@ use super::{
 };
 
 pub(crate) mod source_backed;
-#[cfg(test)]
-mod source_backed_tests;
 
 const MAX_TOUCHES_PER_RECORD: usize = 60;
 

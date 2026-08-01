@@ -7,7 +7,7 @@ fn failed_final_revalidation_keeps_the_previous_generation() {
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(source.clone()).unwrap();
     first
-        .add_document(document(&source, 1, "previous generation"))
+        .add_core_record(document(&source, 1, "previous generation"))
         .unwrap();
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     let first_receipt = first.commit(|_| true).unwrap();
@@ -15,7 +15,7 @@ fn failed_final_revalidation_keeps_the_previous_generation() {
     let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     replacement.begin_source(source.clone()).unwrap();
     replacement
-        .add_document(document(&source, 1, "uncommitted replacement"))
+        .add_core_record(document(&source, 1, "uncommitted replacement"))
         .unwrap();
     replacement
         .certify_source(certificate(&source, 2, 1))
@@ -30,13 +30,240 @@ fn failed_final_revalidation_keeps_the_previous_generation() {
 }
 
 #[test]
+fn crash_after_candidate_commit_before_verification_keeps_old_pointer_and_restarts() {
+    let temp = tempdir().unwrap();
+    let source = source("candidate-crash.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "audited baseline"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    let baseline = initial.commit(|_| true).unwrap();
+    let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
+
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    candidate.begin_source(source.clone()).unwrap();
+    candidate
+        .add_core_record(document(&source, 1, "unverified candidate"))
+        .unwrap();
+    candidate
+        .certify_source(certificate(&source, 2, 1))
+        .unwrap();
+    candidate.after_candidate_commit = Some(Box::new(|_| {
+        panic!("simulated process death after candidate meta commit")
+    }));
+    let crash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = candidate.commit(|_| true);
+    }));
+    assert!(crash.is_err());
+    assert_eq!(
+        fs::read(temp.path().join("active-generation.json")).unwrap(),
+        pointer_before
+    );
+    let still_active = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(still_active.generation_id(), baseline.generation_id);
+    assert_eq!(still_active.count_term("baseline").unwrap(), 1);
+    assert_eq!(still_active.count_term("unverified").unwrap(), 0);
+
+    let restarted = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    assert_eq!(
+        restarted.base_manifest().unwrap().generation_id().unwrap(),
+        baseline.generation_id
+    );
+}
+
+#[test]
+fn structural_verification_fault_never_switches_the_active_pointer() {
+    let temp = tempdir().unwrap();
+    let source = source("candidate-verification-fault.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "verified baseline"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    let baseline = initial.commit(|_| true).unwrap();
+    let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
+
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    candidate.begin_source(source.clone()).unwrap();
+    candidate
+        .add_core_record(document(&source, 1, "corrupt candidate"))
+        .unwrap();
+    candidate
+        .certify_source(certificate(&source, 2, 1))
+        .unwrap();
+    let source_token = source_token(&source);
+    candidate.before_pointer_switch = Some(Box::new(move |candidate_path| {
+        let directory = DurableMmapDirectory::open(candidate_path).unwrap();
+        let index = Index::open(directory).unwrap();
+        let payload = index.load_metas().unwrap().payload.unwrap();
+        let source_key = required_field(&index.schema(), "source_key").unwrap();
+        let mut writer = index
+            .writer_with_num_threads::<TantivyDocument>(1, INDEX_MEMORY_MIN_PER_THREAD)
+            .unwrap();
+        writer.delete_term(Term::from_field_text(source_key, &source_token));
+        let mut prepared = writer.prepare_commit().unwrap();
+        prepared.set_payload(&payload);
+        prepared.commit().unwrap();
+        writer.wait_merging_threads().unwrap();
+    }));
+    assert!(matches!(
+        candidate.commit(|_| true),
+        Err(IndexError::DocumentCountMismatch {
+            manifest: 1,
+            index: 0
+        })
+    ));
+    assert_eq!(
+        fs::read(temp.path().join("active-generation.json")).unwrap(),
+        pointer_before
+    );
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        baseline.generation_id
+    );
+    drop(GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap());
+}
+
+#[test]
+fn crash_immediately_after_pointer_switch_reopens_new_and_retains_previous() {
+    let temp = tempdir().unwrap();
+    let source = source("pointer-switch-crash.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "previous generation"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    let baseline = initial.commit(|_| true).unwrap();
+
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    candidate.begin_source(source.clone()).unwrap();
+    candidate
+        .add_core_record(document(&source, 1, "switched generation"))
+        .unwrap();
+    candidate
+        .certify_source(certificate(&source, 2, 1))
+        .unwrap();
+    candidate.after_pointer_switch = Some(Box::new(|_| {
+        panic!("simulated process death after active pointer switch")
+    }));
+    let crash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = candidate.commit(|_| true);
+    }));
+    assert!(crash.is_err());
+
+    let switched = VerifiedIndex::open(temp.path()).unwrap();
+    assert_ne!(switched.generation_id(), baseline.generation_id);
+    assert_eq!(switched.count_term("switched").unwrap(), 1);
+    assert_eq!(switched.count_term("previous").unwrap(), 0);
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pointer.previous().unwrap().generation_id(),
+        baseline.generation_id
+    );
+    let restarted = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    assert_eq!(
+        restarted.base_manifest().unwrap().generation_id().unwrap(),
+        switched.generation_id()
+    );
+}
+
+#[test]
+fn post_pointer_cleanup_failure_preserves_success_and_runs_later_cleanup() {
+    let temp = tempdir().unwrap();
+    let source = source("post-pointer-cleanup.jsonl");
+
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    first.begin_source(source.clone()).unwrap();
+    first
+        .add_core_record(document(&source, 1, "first generation"))
+        .unwrap();
+    first.certify_source(certificate(&source, 1, 1)).unwrap();
+    let first_receipt = first.commit(|_| true).unwrap();
+    let first_slot = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap()
+        .active()
+        .clone();
+    let first_generation_path = temp
+        .path()
+        .join(INDEX_GENERATIONS_DIRECTORY)
+        .join(first_slot.directory());
+    let first_manifest_path = manifest_path(temp.path(), &first_receipt.generation_id);
+    let first_integrity_receipt_path = temp
+        .path()
+        .join(MANIFEST_DIRECTORY)
+        .join(format!("{}.integrity.json", first_slot.directory()));
+
+    let mut second = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    second.begin_source(source.clone()).unwrap();
+    second
+        .add_core_record(document(&source, 1, "second generation"))
+        .unwrap();
+    second.certify_source(certificate(&source, 2, 1)).unwrap();
+    second.commit(|_| true).unwrap();
+    assert!(first_generation_path.exists());
+    assert!(first_manifest_path.exists());
+    assert!(first_integrity_receipt_path.exists());
+
+    let mut third = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    third.begin_source(source.clone()).unwrap();
+    third
+        .add_core_record(document(&source, 1, "third generation"))
+        .unwrap();
+    third.certify_source(certificate(&source, 3, 1)).unwrap();
+
+    let prior_pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    writer_support::mark_active_generation_for_rebuild(temp.path(), prior_pointer.active())
+        .unwrap();
+    let rebuild_marker = temp.path().join("active-generation-rebuild-required.json");
+    let stale_marker_bytes = fs::read(&rebuild_marker).unwrap();
+    let obstructed_marker = rebuild_marker.clone();
+    third.after_pointer_switch = Some(Box::new(move |_| {
+        fs::remove_file(&obstructed_marker).unwrap();
+        fs::create_dir(&obstructed_marker).unwrap();
+        fs::write(obstructed_marker.join("obstruction"), b"test fault").unwrap();
+    }));
+
+    let third_receipt = third.commit(|_| true).unwrap();
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        third_receipt.generation_id
+    );
+    assert!(rebuild_marker.is_dir());
+    assert!(!first_generation_path.exists());
+    assert!(!first_manifest_path.exists());
+    assert!(
+        !first_integrity_receipt_path.exists(),
+        "an earlier cleanup failure skipped integrity receipt reclamation"
+    );
+
+    fs::remove_file(rebuild_marker.join("obstruction")).unwrap();
+    fs::remove_dir(&rebuild_marker).unwrap();
+    fs::write(&rebuild_marker, stale_marker_bytes).unwrap();
+    let reopened = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    assert_eq!(
+        reopened.base_manifest().unwrap().generation_id().unwrap(),
+        third_receipt.generation_id
+    );
+    assert!(!rebuild_marker.exists());
+}
+
+#[test]
 fn deletion_requires_final_inventory_revalidation() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(source.clone()).unwrap();
     first
-        .add_document(document(&source, 1, "retained"))
+        .add_core_record(document(&source, 1, "retained"))
         .unwrap();
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     first.commit(|_| true).unwrap();
@@ -81,12 +308,12 @@ fn generation_removals_persist_until_the_exact_lineage_returns() {
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(removed.clone()).unwrap();
     first
-        .add_document(document(&removed, 1, "removed body"))
+        .add_core_record(document(&removed, 1, "removed body"))
         .unwrap();
     first.certify_source(certificate(&removed, 1, 1)).unwrap();
     first.begin_source(retained.clone()).unwrap();
     first
-        .add_document(document(&retained, 1, "retained body"))
+        .add_core_record(document(&retained, 1, "retained body"))
         .unwrap();
     first.certify_source(certificate(&retained, 1, 1)).unwrap();
     first.commit(|_| true).unwrap();
@@ -108,7 +335,7 @@ fn generation_removals_persist_until_the_exact_lineage_returns() {
     let mut unrelated = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     unrelated.begin_source(retained.clone()).unwrap();
     unrelated
-        .add_document(document(&retained, 2, "rewritten retained body"))
+        .add_core_record(document(&retained, 2, "rewritten retained body"))
         .unwrap();
     unrelated
         .certify_source(certificate(&retained, 3, 1))
@@ -127,7 +354,7 @@ fn generation_removals_persist_until_the_exact_lineage_returns() {
     let mut republishing = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     republishing.begin_source(returning.clone()).unwrap();
     republishing
-        .add_document(document(&returning, 4, "returned body"))
+        .add_core_record(document(&returning, 4, "returned body"))
         .unwrap();
     republishing
         .certify_source(certificate(&returning, 4, 1))
@@ -203,7 +430,7 @@ fn replacement_atomically_removes_old_source_documents() {
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(source.clone()).unwrap();
     first
-        .add_document(document(&source, 1, "retired content"))
+        .add_core_record(document(&source, 1, "retired content"))
         .unwrap();
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     first.commit(|_| true).unwrap();
@@ -211,7 +438,7 @@ fn replacement_atomically_removes_old_source_documents() {
     let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     replacement.begin_source(source.clone()).unwrap();
     replacement
-        .add_document(document(&source, 1, "current content"))
+        .add_core_record(document(&source, 1, "current content"))
         .unwrap();
     replacement
         .certify_source(certificate(&source, 2, 1))
@@ -230,7 +457,7 @@ fn certified_append_indexes_only_the_delta() {
     let source = source("session.jsonl");
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(source.clone()).unwrap();
-    first.add_document(document(&source, 1, "base")).unwrap();
+    first.add_core_record(document(&source, 1, "base")).unwrap();
     first
         .certify_source(appendable_certificate(&source, 1, 1, 10))
         .unwrap();
@@ -238,7 +465,9 @@ fn certified_append_indexes_only_the_delta() {
 
     let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     let base = append.begin_source_append(source.clone()).unwrap().clone();
-    append.add_document(document(&source, 2, "delta")).unwrap();
+    append
+        .add_core_record(document(&source, 2, "delta"))
+        .unwrap();
     let proof = CertifiedSourceAppend::certify(
         &base,
         appendable_certificate(&source, 2, 2, 20),
@@ -257,23 +486,39 @@ fn certified_append_indexes_only_the_delta() {
 }
 
 #[test]
-fn append_rejects_an_identity_already_in_the_base() {
+fn append_event_term_audit_rejects_an_identity_already_in_the_base() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(source.clone()).unwrap();
-    first.add_document(document(&source, 1, "base")).unwrap();
+    first.add_core_record(document(&source, 1, "base")).unwrap();
     first
         .certify_source(appendable_certificate(&source, 1, 1, 10))
         .unwrap();
-    first.commit(|_| true).unwrap();
+    let baseline = first.commit(|_| true).unwrap();
 
     let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    append.begin_source_append(source.clone()).unwrap();
-    let error = append
-        .add_document(document(&source, 1, "duplicate"))
-        .unwrap_err();
-    assert!(matches!(error, IndexError::DuplicateEventIdentity(_)));
+    let base = append.begin_source_append(source.clone()).unwrap().clone();
+    append
+        .add_core_record(document(&source, 1, "duplicate"))
+        .unwrap();
+    let proof = CertifiedSourceAppend::certify(
+        &base,
+        appendable_certificate(&source, 2, 2, 20),
+        10,
+        [1; 32],
+    )
+    .unwrap();
+    append.certify_source_append(proof).unwrap();
+    let error = append.commit(|_| true).unwrap_err();
+    assert!(
+        matches!(error, IndexError::DuplicateEventIdentity(_)),
+        "unexpected event term audit error: {error:?}"
+    );
+    assert_eq!(
+        VerifiedIndex::active_generation_id(temp.path()).unwrap(),
+        Some(baseline.generation_id)
+    );
 }
 
 #[test]
@@ -283,7 +528,7 @@ fn verified_reader_remains_pinned_to_its_generation() {
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     first.begin_source(source.clone()).unwrap();
     first
-        .add_document(document(&source, 1, "old pinned generation"))
+        .add_core_record(document(&source, 1, "old pinned generation"))
         .unwrap();
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     first.commit(|_| true).unwrap();
@@ -292,7 +537,7 @@ fn verified_reader_remains_pinned_to_its_generation() {
     let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     replacement.begin_source(source.clone()).unwrap();
     replacement
-        .add_document(document(&source, 1, "new committed generation"))
+        .add_core_record(document(&source, 1, "new committed generation"))
         .unwrap();
     replacement
         .certify_source(certificate(&source, 2, 1))
@@ -320,12 +565,15 @@ fn a_partial_unreferenced_manifest_does_not_poison_retry() {
 
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate).unwrap();
     let receipt = writer.commit(|_| true).unwrap();
-    assert_eq!(receipt.generation_id, generation_id);
+    assert_ne!(receipt.generation_id, generation_id);
+    assert!(!path.exists());
     assert!(VerifiedIndex::open(temp.path()).is_ok());
-    assert!(fs::read_dir(path.parent().unwrap())
+    assert!(!fs::read_dir(path.parent().unwrap())
         .unwrap()
         .filter_map(std::result::Result::ok)
         .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")));
@@ -337,7 +585,9 @@ fn manifest_corruption_fails_closed() {
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     let receipt = writer.commit(|_| true).unwrap();
     fs::write(
@@ -359,13 +609,16 @@ fn stale_schema_manifest_fails_closed_at_generation_boundary() {
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
     let mut stale_manifest = index.manifest().clone();
-    stale_manifest.lexical_schema_version = 3;
+    const STALE_LEXICAL_SCHEMA: u32 = 9;
+    stale_manifest.lexical_schema_version = STALE_LEXICAL_SCHEMA;
     let stale_generation_id = stale_manifest.generation_id().unwrap();
     write_manifest(temp.path(), &stale_generation_id, &stale_manifest).unwrap();
     let mut stale_metas = index.searcher.index().load_metas().unwrap();
@@ -382,10 +635,122 @@ fn stale_schema_manifest_fails_closed_at_generation_boundary() {
         error,
         IndexError::GenerationContractMismatch {
             identity: IDENTITY_VERSION,
-            schema: 3,
+            schema: STALE_LEXICAL_SCHEMA,
             analyzer: LEXICAL_ANALYZER_VERSION,
+            core_record: ctx_history_core::CORE_RECORD_VERSION,
         }
     ));
+}
+
+fn assert_active_meta_incompatibility_is_rebuilt(
+    source_name: &str,
+    mutate_meta: impl FnOnce(&mut serde_json::Value),
+    assert_incompatibility: impl FnOnce(&IndexError),
+) {
+    let temp = tempdir().unwrap();
+    let source = source(source_name);
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "source authoritative body"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    let baseline = initial.commit(|_| true).unwrap();
+    let pointer_path = temp.path().join("active-generation.json");
+    let pointer_before = fs::read(&pointer_path).unwrap();
+    let old_generation_path = active_generation_path(temp.path());
+    let meta_path = old_generation_path.join("meta.json");
+    let mut meta: serde_json::Value =
+        serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+    mutate_meta(&mut meta);
+    fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+
+    let error = match VerifiedIndex::open(temp.path()) {
+        Ok(_) => panic!("incompatible generation unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert_incompatibility(&error);
+
+    let mut rebuild = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    assert!(
+        rebuild.base_manifest().is_none(),
+        "incompatible generation was exposed as reusable base state"
+    );
+    assert_eq!(
+        fs::read(&pointer_path).unwrap(),
+        pointer_before,
+        "writer open changed the active pointer before replacement"
+    );
+    let candidate_path = temp
+        .path()
+        .join(INDEX_GENERATIONS_DIRECTORY)
+        .join(rebuild.candidate_directory_name.as_deref().unwrap());
+    let candidate = Index::open_in_dir(&candidate_path).unwrap();
+    assert!(candidate.load_metas().unwrap().segments.is_empty());
+    assert_eq!(
+        candidate.settings(),
+        &publication::lexical_index_settings(),
+        "replacement candidate did not use current settings"
+    );
+    drop(candidate);
+
+    rebuild.begin_source(source.clone()).unwrap();
+    rebuild
+        .add_core_record(document(&source, 1, "source authoritative body"))
+        .unwrap();
+    rebuild.certify_source(certificate(&source, 1, 1)).unwrap();
+    let rebuilt = rebuild.commit(|_| true).unwrap();
+
+    assert_eq!(rebuilt.generation_id, baseline.generation_id);
+    assert_ne!(active_generation_path(temp.path()), old_generation_path);
+    assert!(
+        !old_generation_path.exists(),
+        "incompatible slot survived as a retained clone or rollback base"
+    );
+    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(verified.count_term("authoritative").unwrap(), 1);
+}
+
+#[test]
+fn zstd_settings_generation_is_rebuilt_without_clone_or_pointer_churn() {
+    assert_active_meta_incompatibility_is_rebuilt(
+        "zstd-settings.jsonl",
+        |meta| {
+            meta["index_settings"] = serde_json::to_value(tantivy::IndexSettings {
+                docstore_compression: tantivy::store::Compressor::Zstd(
+                    tantivy::store::ZstdCompressor {
+                        compression_level: Some(1),
+                    },
+                ),
+                docstore_compress_dedicated_thread: true,
+                docstore_blocksize: 64 * 1024,
+            })
+            .unwrap();
+        },
+        |error| {
+            assert!(matches!(
+                error,
+                IndexError::IndexSettingsMismatch(LEXICAL_SCHEMA_VERSION)
+            ));
+        },
+    );
+}
+
+#[test]
+fn incompatible_schema_generation_is_rebuilt_without_interpretation() {
+    assert_active_meta_incompatibility_is_rebuilt(
+        "schema-mismatch-rebuild.jsonl",
+        |meta| {
+            meta["schema"] =
+                serde_json::to_value(tantivy::schema::Schema::builder().build()).unwrap();
+        },
+        |error| {
+            assert!(matches!(
+                error,
+                IndexError::SchemaMismatch(LEXICAL_SCHEMA_VERSION)
+            ));
+        },
+    );
 }
 
 #[test]
@@ -401,16 +766,59 @@ fn current_manifest_roundtrips_with_exact_policy_hash() {
         current_source_generation_policy_hash().unwrap()
     );
     assert_eq!(
+        roundtrip.core_record_version,
+        ctx_history_core::CORE_RECORD_VERSION
+    );
+    assert_eq!(
+        roundtrip.core_record_contract_fingerprint,
+        ctx_history_core::core_record_contract_fingerprint()
+    );
+    assert_eq!(
         roundtrip.generation_id().unwrap(),
         manifest.generation_id().unwrap()
     );
 }
 
 #[test]
+fn verified_open_rejects_mismatched_core_contract_fingerprint() {
+    const PRIOR_REPOSITORY_CONTRACT_FINGERPRINT: &str =
+        "e4a46c8bac8fce97b984f4cf11b92ab926f69993e20176873cbfc03739f5b6cc";
+    let temp = tempdir().unwrap();
+    let source = source("core-fingerprint-mismatch.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let pinned = VerifiedIndex::open(temp.path()).unwrap();
+    let mut mismatched_manifest = pinned.manifest().clone();
+    mismatched_manifest.core_record_contract_fingerprint =
+        PRIOR_REPOSITORY_CONTRACT_FINGERPRINT.to_owned();
+    let index = pinned.searcher.index().clone();
+    publish_unchecked_generation(temp.path(), &index, mismatched_manifest, &[], Vec::new());
+
+    let error = match VerifiedIndex::open(temp.path()) {
+        Ok(_) => panic!("mismatched Core fingerprint generation unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        IndexError::CoreRecordContractMismatch { expected, actual }
+            if expected == ctx_history_core::core_record_contract_fingerprint()
+                && actual == PRIOR_REPOSITORY_CONTRACT_FINGERPRINT
+    ));
+}
+
+#[test]
 fn policy_field_change_changes_hash_and_generation_id() {
     let manifest = GenerationManifest::from_sources(Vec::new()).unwrap();
     let mut changed_policy = current_source_generation_policy();
-    changed_policy.semantic.chunk_overlap_chars += 1;
+    changed_policy
+        .lexical
+        .core_repository_association_policy_revision += 1;
     let changed_policy_hash = changed_policy.canonical_sha256().unwrap();
     let mut changed_manifest = manifest.clone();
     changed_manifest.policy_schema_hash = changed_policy_hash.clone();
@@ -428,9 +836,11 @@ fn verified_open_rejects_mismatched_active_policy() {
     let source = source("policy-mismatch.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
-    writer.commit(|_| true).unwrap();
+    let baseline = writer.commit(|_| true).unwrap();
 
     let pinned = VerifiedIndex::open(temp.path()).unwrap();
     let mut mismatched_policy = current_source_generation_policy();
@@ -453,6 +863,27 @@ fn verified_open_rejects_mismatched_active_policy() {
         } if expected == current_source_generation_policy_hash().unwrap()
             && actual == mismatched_policy_hash
     ));
+
+    let pointer_path = temp.path().join("active-generation.json");
+    let pointer_before = fs::read(&pointer_path).unwrap();
+    let incompatible_path = active_generation_path(temp.path());
+    drop(pinned);
+    let mut rebuild = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    assert!(rebuild.base_manifest().is_none());
+    assert_eq!(fs::read(&pointer_path).unwrap(), pointer_before);
+    rebuild.begin_source(source.clone()).unwrap();
+    rebuild
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
+    rebuild.certify_source(certificate(&source, 1, 1)).unwrap();
+    let rebuilt = rebuild.commit(|_| true).unwrap();
+
+    assert_eq!(rebuilt.generation_id, baseline.generation_id);
+    assert!(!incompatible_path.exists());
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        baseline.generation_id
+    );
 }
 
 #[test]
@@ -461,7 +892,9 @@ fn certificate_count_mismatch_is_rejected_before_commit() {
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     let error = writer
         .certify_source(certificate(&source, 1, 2))
         .unwrap_err();
@@ -472,15 +905,20 @@ fn certificate_count_mismatch_is_rejected_before_commit() {
 }
 
 #[test]
-fn duplicate_event_identity_is_rejected_before_commit() {
+fn duplicate_event_identity_is_rejected_by_prepublication_term_audit() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
     let duplicate = document(&source, 1, "first");
-    writer.add_document(duplicate.clone()).unwrap();
-    let error = writer.add_document(duplicate).unwrap_err();
+    writer.add_core_record(duplicate.clone()).unwrap();
+    writer.add_core_record(duplicate).unwrap();
+    writer.certify_source(certificate(&source, 1, 2)).unwrap();
+    let error = writer.commit(|_| true).unwrap_err();
     assert!(matches!(error, IndexError::DuplicateEventIdentity(_)));
+    assert!(load_active_generation_pointer(temp.path())
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -489,16 +927,16 @@ fn verified_generation_rejects_a_forged_duplicate_event_identity() {
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 
     let pinned = VerifiedIndex::open(temp.path()).unwrap();
     let addresses = pinned.searcher.search(&AllQuery, &DocSetCollector).unwrap();
-    let duplicate = pinned
-        .searcher
-        .doc(addresses.into_iter().next().unwrap())
-        .unwrap();
+    let address = addresses.into_iter().next().unwrap();
+    let duplicate = indexed_document(decoded_stored_core(&pinned.searcher, address));
     let index = pinned.searcher.index().clone();
     publish_unchecked_generation(
         temp.path(),
@@ -530,7 +968,7 @@ fn verified_generation_rejects_forged_source_ownership() {
     let second = source("second.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(first.clone()).unwrap();
-    writer.add_document(document(&first, 1, "body")).unwrap();
+    writer.add_core_record(document(&first, 1, "body")).unwrap();
     writer.certify_source(certificate(&first, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -543,7 +981,7 @@ fn verified_generation_rejects_forged_source_ownership() {
         .into_iter()
         .next()
         .unwrap();
-    let document = pinned.searcher.doc::<TantivyDocument>(address).unwrap();
+    let document = indexed_document(decoded_stored_core(&pinned.searcher, address));
     let mut forged = TantivyDocument::default();
     for (field, value) in document.field_values() {
         if field != fields.source_key {
@@ -574,7 +1012,50 @@ fn verified_generation_rejects_forged_source_ownership() {
     };
     assert!(matches!(
         error,
-        IndexError::InvalidStoredDocumentField("native_locator")
+        IndexError::InvalidStoredDocumentField("core_record")
+    ));
+}
+
+#[test]
+fn verified_generation_rejects_malformed_stored_core_during_exhaustive_audit() {
+    let temp = tempdir().unwrap();
+    let source = source("malformed-core.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    let event = document(&source, 1, "complete body");
+    writer.add_core_record(event).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let pinned = VerifiedIndex::open(temp.path()).unwrap();
+    let fields = fields_from_schema(pinned.searcher.schema()).unwrap();
+    let address = pinned
+        .searcher
+        .search(&AllQuery, &DocSetCollector)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let document = pinned.searcher.doc::<TantivyDocument>(address).unwrap();
+    let mut forged = TantivyDocument::default();
+    for (field, value) in document.field_values() {
+        if field != fields.core_record {
+            forged.add_field_value(field, value);
+        }
+    }
+    forged.add_bytes(fields.core_record, b"{");
+    let index = pinned.searcher.index().clone();
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        GenerationManifest::from_sources(vec![certificate(&source, 2, 1)]).unwrap(),
+        std::slice::from_ref(&source),
+        vec![forged],
+    );
+
+    assert!(matches!(
+        VerifiedIndex::open(temp.path()),
+        Err(IndexError::CoreRecord(_))
     ));
 }
 
@@ -586,8 +1067,8 @@ fn document_identity_kinds_are_checked() {
     writer.begin_source(source.clone()).unwrap();
     let mut invalid = document(&source, 1, "body");
     invalid.event_id = invalid.session_id;
-    let error = writer.add_document(invalid).unwrap_err();
-    assert!(matches!(error, IndexError::InvalidEventIdentityKind(_)));
+    let error = writer.add_core_record(invalid).unwrap_err();
+    assert!(matches!(error, IndexError::CoreRecord(_)));
 }
 
 #[test]
@@ -598,23 +1079,21 @@ fn document_identities_must_belong_to_the_document_source() {
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(second.clone()).unwrap();
     let mut invalid = document(&first, 1, "body");
-    invalid.locator = document(&second, 2, "other").locator;
     invalid.source = second;
-    let error = writer.add_document(invalid).unwrap_err();
-    assert!(matches!(error, IndexError::IdentitySourceMismatch(_)));
+    let error = writer.add_core_record(invalid).unwrap_err();
+    assert!(matches!(error, IndexError::CoreRecord(_)));
 }
 
 #[test]
-fn empty_body_is_rejected_without_an_index_side_length_limit() {
+fn empty_core_body_is_rejected_by_the_canonical_writer_validation() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    let error = writer.add_document(document(&source, 1, "")).unwrap_err();
-    assert!(matches!(
-        error,
-        IndexError::EmptyDocumentField { field: "body" }
-    ));
+    let mut invalid = document(&source, 1, "body");
+    invalid.content.normalized_body = Some(String::new());
+    let error = writer.add_core_record(invalid).unwrap_err();
+    assert!(matches!(error, IndexError::CoreRecord(_)));
 }
 
 #[test]
@@ -665,18 +1144,8 @@ fn one_pass_verifier_matches_reference_with_bounded_parallel_segment_state() {
     assert!(one_pass.segment_tasks < reference.segment_query_visits);
 
     assert_eq!(one_pass.max_buffered_segments, one_pass.worker_budget);
-    assert!(
-        one_pass.max_buffered_event_identities
-            <= one_pass.worker_budget * DOCUMENTS_PER_SOURCE as usize
-    );
-    assert!(
-        one_pass.max_buffered_session_identities <= one_pass.worker_budget,
-        "one fixture session identity per segment should be buffered"
-    );
-    assert!(
-        one_pass.max_buffered_event_identities < expected_documents,
-        "temporary segment maps must be bounded below full-generation cardinality"
-    );
+    assert_eq!(one_pass.max_buffered_event_identities, 1);
+    assert_eq!(one_pass.max_buffered_session_identities, 1);
 }
 
 #[test]
@@ -685,7 +1154,9 @@ fn one_pass_verifier_matches_reference_for_identity_digest_corruption() {
     let source = source("digest-corruption.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -698,7 +1169,7 @@ fn one_pass_verifier_matches_reference_for_identity_digest_corruption() {
         .into_iter()
         .next()
         .unwrap();
-    let document = pinned.searcher.doc::<TantivyDocument>(address).unwrap();
+    let document = indexed_document(decoded_stored_core(&pinned.searcher, address));
     let mut forged = TantivyDocument::default();
     for (field, value) in document.field_values() {
         if field != fields.event_identity_digest {
@@ -725,7 +1196,7 @@ fn one_pass_verifier_matches_reference_for_identity_digest_corruption() {
     );
     assert!(matches!(
         one_pass,
-        IndexError::InvalidStoredDocumentField("event_identity")
+        IndexError::InvalidStoredDocumentField("core_record")
     ));
 }
 
@@ -736,11 +1207,17 @@ fn one_pass_verifier_matches_reference_for_source_count_corruption() {
     let second = source("count-second.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(first.clone()).unwrap();
-    writer.add_document(document(&first, 1, "first")).unwrap();
+    writer
+        .add_core_record(document(&first, 1, "first"))
+        .unwrap();
     writer.certify_source(certificate(&first, 1, 1)).unwrap();
     writer.begin_source(second.clone()).unwrap();
-    writer.add_document(document(&second, 1, "second")).unwrap();
-    writer.add_document(document(&second, 2, "second")).unwrap();
+    writer
+        .add_core_record(document(&second, 1, "second"))
+        .unwrap();
+    writer
+        .add_core_record(document(&second, 2, "second"))
+        .unwrap();
     writer.certify_source(certificate(&second, 1, 2)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -766,7 +1243,10 @@ fn one_pass_verifier_matches_reference_for_source_count_corruption() {
         std::mem::discriminant(&reference),
         std::mem::discriminant(&one_pass)
     );
-    assert!(matches!(one_pass, IndexError::SourceCountMismatch { .. }));
+    assert!(matches!(
+        one_pass,
+        IndexError::CoreRecordAggregateCountMismatch { .. }
+    ));
 }
 
 #[test]
@@ -775,7 +1255,9 @@ fn one_pass_verifier_matches_reference_for_total_count_corruption() {
     let source = source("total-count.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(document(&source, 1, "body")).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "body"))
+        .unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
 

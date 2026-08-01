@@ -31,8 +31,7 @@ fn running_report() -> Value {
             "live_owner_verified": true
         },
         "jobs": {
-            "history_refresh": {"status": "disabled"},
-            "source_backed_refresh": {
+            "core_refresh": {
                 "status": "completed",
                 "certified_source_count": 1248,
                 "published_generation": "internal-generation-to-omit"
@@ -47,7 +46,7 @@ fn running_report() -> Value {
         },
         "live_pid": 4242,
         "lock_identity": {"owner_id": "internal-lock-owner"},
-        "source_refresh_endpoint": {"identity_path": "/tmp/internal-endpoint"},
+        "core_refresh_endpoint": {"identity_path": "/tmp/internal-endpoint"},
         "trigger_provenance": "daemon_scheduler"
     })
 }
@@ -285,8 +284,7 @@ fn disabled_status_is_clear_and_enable_is_the_only_action() {
         "semantic_runtime_active": false,
         "config_reload": {"status": "applied"},
         "jobs": {
-            "history_refresh": {"status": "disabled"},
-            "source_backed_refresh": {"status": "disabled"},
+            "core_refresh": {"status": "disabled"},
             "semantic_index": {"status": "disabled", "reason": "semantic_disabled"}
         }
     });
@@ -311,8 +309,7 @@ fn completed_finite_run_wins_over_disabled_persistent_preference() {
         "semantic_runtime_active": false,
         "config_reload": {"status": "applied"},
         "jobs": {
-            "history_refresh": {"status": "completed"},
-            "source_backed_refresh": {"status": "completed"},
+            "core_refresh": {"status": "completed"},
             "semantic_index": {"status": "disabled", "reason": "semantic_disabled"}
         }
     });
@@ -373,7 +370,7 @@ fn completed_finite_run_wins_over_disabled_persistent_preference() {
 #[test]
 fn catching_up_status_keeps_search_availability_and_progress_visible() {
     let mut report = running_report();
-    report["jobs"]["source_backed_refresh"] = json!({
+    report["jobs"]["core_refresh"] = json!({
         "status": "running",
         "progress": {"phase": "scanning_provider_sources"},
         "source_count": 9
@@ -400,7 +397,7 @@ fn recoverable_failure_surfaces_error_and_one_restart_action() {
         "last_error": "the previous daemon exited unexpectedly",
         "config_reload": {"status": "applied"},
         "jobs": {
-            "source_backed_refresh": {"status": "completed"},
+            "core_refresh": {"status": "completed"},
             "semantic_index": {"status": "disabled"}
         },
         "live_pid": 999,
@@ -426,11 +423,10 @@ fn enabled_daemon_without_observed_lifecycle_is_not_a_failure() {
         "semantic_runtime_active": false,
         "config_reload": {"status": "unknown"},
         "jobs": {
-            "history_refresh": {
+            "core_refresh": {
                 "status": "disabled",
-                "reason": "history_epoch_source_backed"
+                "reason": "not_started"
             },
-            "source_backed_refresh": {"status": "unknown"},
             "semantic_index": {"status": "disabled"}
         }
     });
@@ -460,7 +456,7 @@ fn enabled_daemon_without_observed_lifecycle_is_not_a_failure() {
 #[test]
 fn source_rejections_are_visible_without_internal_provenance() {
     let mut report = running_report();
-    report["jobs"]["history_refresh"] = json!({
+    report["jobs"]["core_refresh"] = json!({
         "status": "completed",
         "rejection_diagnostics": {"rejected_records": 3},
         "trigger_provenance": "internal-import-route"
@@ -483,7 +479,7 @@ fn failed_source_refresh_is_bounded_actionable_and_never_leaks_backend_details()
         "running": false,
         "last_error": format!("source-backed refresh failed: {backend_error}"),
         "jobs": {
-            "source_backed_refresh": {
+            "core_refresh": {
                 "status": "failed",
                 "last_error": backend_error,
                 "certified_source_count": 0
@@ -843,7 +839,7 @@ fn uninstall_receipt_preserves_binary_and_data_caveat() {
 #[test]
 fn representative_documents_fit_32_48_80_and_120_columns() {
     let mut partial = running_report();
-    partial["jobs"]["source_backed_refresh"] = json!({
+    partial["jobs"]["core_refresh"] = json!({
         "status": "failed",
         "last_error": "provider history refresh failed after validating the selected source",
         "certified_source_count": 12000
@@ -892,7 +888,7 @@ fn representative_documents_fit_32_48_80_and_120_columns() {
 #[test]
 fn controls_are_neutralized_and_ansi_stripped_output_matches_plain() {
     let mut report = running_report();
-    report["jobs"]["source_backed_refresh"] = json!({
+    report["jobs"]["core_refresh"] = json!({
         "status": "failed",
         "last_error": "\u{1b}[31mowned\u{1b}[0m\nsecond line"
     });

@@ -423,6 +423,7 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "mcp_tests",
     src = "tests/mcp.rs",
+    extra_srcs = ["tests/mcp/input_validation.rs"],
     test_support = [
         "base",
         "fixtures",
@@ -544,7 +545,6 @@ ctx_cli_integration_test(
     name = "pro_qualification_tests",
     src = "tests/pro_qualification.rs",
     binary = ":ctx_pro_qualification",
-    extra_crates = ["sha2"],
     tags = ["qualification", "release-gate", "security"],
     test_support = [
         "base",
@@ -615,6 +615,10 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "search_show_locate_sql_tests",
     src = "tests/search_show_locate_sql.rs",
+    extra_crates = [
+        "anstream",
+        "unicode-width",
+    ],
     extra_srcs = [
         "tests/support/search_show_locate_sql/import_paths.rs",
         "tests/support/search_show_locate_sql/pi_flow.rs",
@@ -627,8 +631,8 @@ ctx_cli_integration_test(
 )
 
 ctx_cli_integration_test(
-    name = "source_backed_content_tests",
-    src = "tests/source_backed_content.rs",
+    name = "self_contained_core_content_tests",
+    src = "tests/self_contained_core_content.rs",
     extra_deps = ["//crates/ctx-history-capture:lib"],
 )
 
@@ -702,9 +706,4 @@ ctx_cli_integration_test(
         "base",
         "upgrade",
     ],
-)
-
-test_suite(
-    name = "complete_content_tests",
-    tests = [":unit_tests"],
 )

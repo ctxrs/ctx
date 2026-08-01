@@ -1,6 +1,5 @@
 mod digest;
 
-pub(super) use digest::normalized_retained_event_hash;
 use digest::{
     bound_rejection_text, checked_add, conservative_text_bytes, event_estimated_bytes, hash_bytes,
     page_identity, session_estimated_bytes,
@@ -11,17 +10,15 @@ use ctx_history_core::{EventRole, EventType};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{complete_content::CompleteContentBodyDigest, CaptureError, OutputOutcome, Result};
+use crate::{record_evidence::RecordDigest, CaptureError, OutputOutcome, Result};
 
 pub(in super::super) const WARP_NATIVE_PAGE_MAX_ROWS: usize = 64;
 pub(in super::super) const WARP_NATIVE_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
-const WARP_NATIVE_BODY_MAX_CHARS: usize = 16_000;
 const WARP_NATIVE_REJECTION_KEY_MAX_CHARS: usize = 512;
 const WARP_NATIVE_REJECTION_REASON_MAX_CHARS: usize = 1_024;
 const WARP_NATIVE_REJECTION_RESERVE_BYTES: usize = 40 * 1024;
 pub(super) const WARP_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-warp-source-integrity-v4\0";
 const WARP_DIGEST_CHAIN_DOMAIN: &[u8] = b"ctx-warp-native-digest-chain-v1\0";
-const WARP_EVENT_HASH_DOMAIN: &[u8] = b"ctx-warp-retained-event-v2\0";
 const WARP_PAGE_IDENTITY_DOMAIN: &[u8] = b"ctx-warp-native-safe-page-v2\0";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -79,7 +76,7 @@ pub(in super::super) struct WarpNativeEvent {
     pub(in super::super) call_id: Option<String>,
     pub(in super::super) occurred_at: Option<DateTime<Utc>>,
     pub(in super::super) lexical_body: String,
-    pub(in super::super) source_record_digest: CompleteContentBodyDigest,
+    pub(in super::super) source_record_digest: RecordDigest,
 }
 
 pub(in super::super) struct WarpNativeEventDraft {
@@ -98,7 +95,7 @@ pub(in super::super) struct WarpNativeEventDraft {
     pub(in super::super) call_id: Option<String>,
     pub(in super::super) occurred_at: Option<DateTime<Utc>>,
     pub(in super::super) body: String,
-    pub(in super::super) source_record_digest: CompleteContentBodyDigest,
+    pub(in super::super) source_record_digest: RecordDigest,
 }
 
 impl WarpNativeEvent {
@@ -139,7 +136,6 @@ pub(in super::super) enum WarpNativeRejectionKind {
     ConversationRecord,
     TaskRecord,
     OversizedTask,
-    OversizedNormalizedUnit,
     MalformedProtobuf,
     MissingConversation,
     DuplicateMessageIdentity,
@@ -188,7 +184,6 @@ pub(in super::super) struct WarpNativeCounters {
     pub(in super::super) hierarchy_edges: u64,
     pub(in super::super) task_rows: u64,
     pub(in super::super) oversized_task_rows: u64,
-    pub(in super::super) oversized_normalized_units: u64,
     pub(in super::super) malformed_output_records: u64,
     pub(in super::super) duplicate_message_identity_tasks: u64,
     pub(in super::super) peak_task_identity_entries: u64,
@@ -297,27 +292,9 @@ impl WarpNativeUnit {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn estimated_bytes(&self) -> usize {
         self.core.estimated_bytes
-    }
-
-    pub(super) fn into_oversized_rejection(
-        mut self,
-        kind: WarpNativeRejectionKind,
-        native_key: String,
-    ) -> Result<Self> {
-        let observed_bytes = self.core.estimated_bytes;
-        let mut replacement = Self::progress();
-        replacement.push_rejection(WarpNativeRejection {
-            kind,
-            native_key,
-            reason: format!(
-                "Warp normalized unit exceeds the {WARP_NATIVE_PAGE_MAX_BYTES}-byte \
-                safe-page limit ({observed_bytes} estimated bytes)"
-            ),
-        })?;
-        self.core = replacement.core;
-        Ok(self)
     }
 
     pub(super) fn into_core(self) -> WarpNativeCoreUnit {
@@ -360,7 +337,9 @@ impl WarpNativePageAccumulator {
                 .page
                 .estimated_bytes
                 .checked_add(unit.estimated_bytes)
-                .is_some_and(|bytes| bytes <= WARP_NATIVE_PAGE_MAX_BYTES)
+                .is_some_and(|bytes| {
+                    self.page.logical_units == 0 || bytes <= WARP_NATIVE_PAGE_MAX_BYTES
+                })
     }
 
     pub(super) fn push(&mut self, unit: WarpNativeCoreUnit) -> Result<()> {
@@ -425,4 +404,50 @@ impl WarpNativeDigestChain {
 
 pub(in super::super) fn hex_digest(digest: [u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indivisible_event_larger_than_page_target_is_accepted() {
+        let body = format!(
+            "warp-page-head-{}-warp-page-tail",
+            "x".repeat(8 * 1024 * 1024)
+        );
+        let mut unit = WarpNativeUnit::progress();
+        unit.push_event(WarpNativeEvent {
+            identity: WarpNativeEventIdentity {
+                conversation_id: "conversation".to_owned(),
+                task_id: "task".to_owned(),
+                message: WarpNativeMessageIdentity::MessageOrdinal(0),
+            },
+            native_order: WarpNativeOrder {
+                provider_event_index: 0,
+                legacy_provider_event_index: Some(0),
+                task_rowid: 1,
+                task_key: "task".to_owned(),
+                message_ordinal: 0,
+            },
+            event_type: EventType::ToolOutput,
+            role: Some(EventRole::Tool),
+            kind: "run_shell_command",
+            request_id: None,
+            result_outcome: Some(OutputOutcome::Success),
+            call_id: Some("call".to_owned()),
+            occurred_at: None,
+            lexical_body: body.clone(),
+            source_record_digest: RecordDigest::from_text("warp large result"),
+        })
+        .unwrap();
+        assert!(unit.estimated_bytes() > WARP_NATIVE_PAGE_MAX_BYTES);
+        let mut page = WarpNativePageAccumulator::new();
+        assert!(page.can_accept(&unit.core));
+        page.push(unit.into_core()).unwrap();
+        let page = page.finish().unwrap().unwrap();
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.events[0].lexical_body, body);
+        assert!(page.estimated_bytes > WARP_NATIVE_PAGE_MAX_BYTES);
+    }
 }

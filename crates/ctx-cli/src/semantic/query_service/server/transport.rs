@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::semantic::{
     daemon_wakeup::DaemonWakeup, health_search::create_private_dir_all,
     model_runtime::SharedSemanticRuntime, paths_status::daemon_root_path,
-    source_backed_refresh_coordinator::SourceBackedRefreshCoordinator,
+    source_backed_refresh_coordinator::CoreRefreshEngine,
 };
 
 #[cfg(unix)]
@@ -42,16 +42,10 @@ use super::{
 };
 
 fn source_refresh_coordinator(
-    data_root: &Path,
-    service: DaemonIpcService,
-) -> Result<Arc<SourceBackedRefreshCoordinator>> {
-    let coordinator = Arc::new(SourceBackedRefreshCoordinator::new());
-    if service == DaemonIpcService::SourceRefresh {
-        coordinator
-            .recover_published_resolver(data_root)
-            .context("restore generation-bound source hydration resolver")?;
-    }
-    Ok(coordinator)
+    _data_root: &Path,
+    _service: DaemonIpcService,
+) -> Result<Arc<CoreRefreshEngine>> {
+    Ok(Arc::new(CoreRefreshEngine::new()))
 }
 
 #[cfg(unix)]

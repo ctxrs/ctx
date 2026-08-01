@@ -29,10 +29,6 @@ public final class AgentHistoryOptions {
         return new ShowSession();
     }
 
-    public static LocateSession locateSession() {
-        return new LocateSession();
-    }
-
     public static final class Init {
         private boolean catalogOnly;
         private String progress;
@@ -365,36 +361,4 @@ public final class AgentHistoryOptions {
         }
     }
 
-    public static final class LocateSession {
-        private String id;
-        private String provider;
-        private String providerSessionId;
-
-        public String id() {
-            return id;
-        }
-
-        public String provider() {
-            return provider;
-        }
-
-        public String providerSessionId() {
-            return providerSessionId;
-        }
-
-        public LocateSession id(String id) {
-            this.id = id;
-            return this;
-        }
-
-        public LocateSession provider(String provider) {
-            this.provider = provider;
-            return this;
-        }
-
-        public LocateSession providerSessionId(String providerSessionId) {
-            this.providerSessionId = providerSessionId;
-            return this;
-        }
-    }
 }

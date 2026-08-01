@@ -16,7 +16,7 @@ fn human_search_reports_no_results() {
         assert!(
             stderr.contains(
                 "daemon source refresh was queued but no published generation exists; retry with --refresh wait"
-            ),
+            ) || stderr.contains("There is no current searchable generation"),
             "{stderr}"
         );
     }
@@ -71,24 +71,24 @@ fn search_requires_query_term_or_file_before_refreshing() {
 }
 
 #[test]
-fn search_refresh_off_requires_existing_store_without_creating_one() {
+fn search_refresh_off_requires_existing_core_generation_without_creating_one() {
     let temp = tempdir();
     let stderr = failure_stderr(ctx(&temp).args(["search", "anything", "--refresh", "off"]));
 
     assert!(
-        stderr.contains("source-backed index does not exist; retry with daemon refresh enabled"),
+        stderr.contains("There is no current searchable generation"),
         "{stderr}"
     );
     assert!(
         !temp.path().join("work.sqlite").exists(),
-        "refresh-off search should not create the ctx store"
+        "refresh-off search should not create retired work.sqlite"
     );
 }
 
 #[test]
 fn file_only_search_returns_touched_file_matches() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("codex-rich-sessions");
+    let fixture = repository_backed_rich_fixture(&temp);
     json_output(ctx(&temp).args([
         "import",
         "--provider",
@@ -103,7 +103,7 @@ fn file_only_search_returns_touched_file_matches() {
     let results = search["results"].as_array().unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["provider"], "codex");
-    assert_eq!(results[0]["source_exists"], true);
+    assert!(results[0].get("source_exists").is_none());
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn search_rejects_whitespace_only_filters() {
 #[test]
 fn search_trims_whitespace_padded_workspace_and_file_filters() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("codex-rich-sessions");
+    let fixture = repository_backed_rich_fixture(&temp);
     json_output(ctx(&temp).args([
         "import",
         "--provider",
@@ -174,5 +174,41 @@ fn search_trims_whitespace_padded_workspace_and_file_filters() {
         "file-filtered search should return results with trimmed path"
     );
     assert_eq!(results[0]["provider"], "codex");
-    assert!(results[0]["source_path"].is_string());
+    assert!(results[0].get("source_path").is_none());
+}
+
+fn repository_backed_rich_fixture(temp: &TempDir) -> String {
+    let fixture = provider_history_fixture("codex-rich-sessions");
+    let repository = temp.path().join("ctx-rich-fixture");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    fs::write(repository.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let initialized = StdCommand::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&repository)
+        .status()
+        .unwrap();
+    assert!(initialized.success());
+    let remote = StdCommand::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/ctxrs/ctx.git",
+        ])
+        .current_dir(&repository)
+        .status()
+        .unwrap();
+    assert!(remote.success());
+
+    let transcript = Path::new(&fixture).join("2026/06/24/rich.jsonl");
+    let original = fs::read_to_string(&transcript).unwrap();
+    fs::write(
+        transcript,
+        original.replace(
+            "/workspace/ctx-rich-fixture",
+            &repository.display().to_string(),
+        ),
+    )
+    .unwrap();
+    fixture
 }

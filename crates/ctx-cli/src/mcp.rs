@@ -39,8 +39,7 @@ use response::{
     success_response, tool_error_result, tool_result,
 };
 use response_bound::{
-    bound_blame_mcp_response, bound_complete_content_mcp_response, is_blame_tool_call,
-    is_complete_content_tool_call,
+    bound_blame_mcp_response, bound_show_mcp_response, is_blame_tool_call, is_show_tool_call,
 };
 use show::{tool_show_event, tool_show_session};
 use telemetry::{McpHandled, McpTelemetry, RequestDescriptor};
@@ -52,8 +51,8 @@ use super::{
     TranscriptMode, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
 };
 use crate::analytics::{McpErrorClassV1, McpStopReasonV1, Outcome};
-use crate::complete_content::MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES;
 use crate::local_usage::{McpInvocation, McpUsageRecorder};
+use crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES;
 use crate::provider_sources::{discovered_sources_report, discovery_report_issues_json};
 use crate::source_sql::SqlCompatibility;
 
@@ -274,7 +273,7 @@ fn handle_message(
             None,
         );
     }
-    let bound_complete_content = is_complete_content_tool_call(&message);
+    let bound_show = is_show_tool_call(&message);
     let bound_blame = is_blame_tool_call(&message);
     let id = message
         .as_object()
@@ -362,12 +361,8 @@ fn handle_message(
     };
     (
         McpHandled {
-            value: Some(if bound_complete_content {
-                bound_complete_content_mcp_response(
-                    response,
-                    response_id,
-                    MCP_COMPLETE_CONTENT_MAX_OUTPUT_BYTES,
-                )
+            value: Some(if bound_show {
+                bound_show_mcp_response(response, response_id, MCP_PRESENTATION_MAX_OUTPUT_BYTES)
             } else if bound_blame {
                 bound_blame_mcp_response(response, response_id, MCP_BLAME_MAX_OUTPUT_BYTES)
             } else {
@@ -734,7 +729,6 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": object_schema(json!({
                 "ctx_session_id": { "type": "string" },
                 "mode": { "type": "string", "enum": ["full", "lite", "log"], "default": "lite" },
-                "content": { "type": "string", "enum": ["indexed", "complete"], "default": "indexed", "description": "Complete explicitly reads verified local provider sources and caps the final serialized JSON-RPC response at 8 MiB. MCP hosts may log or forward returned transcript content." }
             }), vec!["ctx_session_id"]),
             "annotations": { "readOnlyHint": true },
         }),
@@ -746,8 +740,7 @@ fn tool_definitions() -> Vec<Value> {
                 "ctx_event_id": { "type": "string" },
                 "before": { "type": "integer", "minimum": 0, "default": 0 },
                 "after": { "type": "integer", "minimum": 0, "default": 0 },
-                "window": { "type": "integer", "minimum": 0 },
-                "content": { "type": "string", "enum": ["indexed", "complete"], "default": "indexed", "description": "Complete explicitly reads verified local provider sources and caps the final serialized JSON-RPC response at 8 MiB. MCP hosts may log or forward returned transcript content." }
+                "window": { "type": "integer", "minimum": 0 }
             }), vec!["ctx_event_id"]),
             "annotations": { "readOnlyHint": true },
         }),
@@ -877,7 +870,7 @@ mod tests {
         assert!(result["structuredContent"]["error"]
             .as_str()
             .unwrap()
-            .contains("source-backed SQL projection is missing"));
+            .contains("Core SQL projection is missing"));
         assert!(
             std::fs::read_dir(temp.path()).unwrap().next().is_none(),
             "MCP SQL must leave a pristine data root empty"

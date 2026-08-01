@@ -1,49 +1,62 @@
 //! Thin OpenClaw legacy-session adapter for the shared borrowed JSONL family.
-
+use chrono::{DateTime, Utc};
+use ctx_history_core::{
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, EventIdentityInput,
+    EventType, NativeItemKey, NativeSessionKey, RepositoryAbstentionReason,
+    RepositoryFileObservationKind, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId,
+    TypedKey,
+};
+use ctx_history_index::BaseEventIdentityLookup;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use chrono::{DateTime, Utc};
-use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, EventHydrationRequest,
-    EventIdentityInput, EventType, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    PositionStability, SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
-    StableEntityId, TypedKey,
+use super::{discover_inventory, normalization, openclaw_output_metadata};
+use crate::repository_attribution::{
+    apply_annotation, linked_outcome_evidence, AttributionInput, LinkedOutcomeInput,
+    RepositoryAttributor, UnscopedFileObservation,
 };
-use ctx_history_index::LexicalDocument;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
-
-use super::{complete_content, discover_inventory, normalization, openclaw_output_metadata};
+#[cfg(test)]
+use crate::OutputOutcome;
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::{
-        file_touches::visit_all_file_touch_drafts,
-        normalization::provider_timestamp_value,
+        normalization::{provider_explicit_result_value_text, provider_timestamp_value},
         source_backed::family::jsonl::{
-            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator, JsonlFamilyInventory,
-            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlRecordRef,
+            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
+            JsonlFamilyProjector, JsonlRecordRef,
         },
     },
     provider_sources::{provider_source_for_path, ProviderSourceStatus},
-    CaptureError, OutputObservationKind, OutputOutcome, Result, MAX_OPENCLAW_SESSION_INDEX_BYTES,
-    MAX_PROVIDER_JSONL_LINE_BYTES, OPENCLAW_SOURCE_FORMAT,
+    CaptureError, OutputObservationKind, Result, MAX_OPENCLAW_SESSION_INDEX_BYTES,
+    OPENCLAW_SOURCE_FORMAT,
 };
+
+mod checkpoint;
+mod native;
+mod projection;
+
+use checkpoint::*;
+use native::*;
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "openclaw.legacy-session";
 const NATIVE_SESSION_NAMESPACE: &str = "openclaw.legacy-session";
 const NATIVE_EVENT_NAMESPACE: &str = "openclaw.legacy-event";
-const NATIVE_EVENT_POSITION_KIND: &str = "openclaw.legacy-jsonl.raw-ordinal";
+const FALLBACK_EVENT_ID_VERSION: &str = "openclaw.fallback-event.v1";
+const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-openclaw-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "openclaw-legacy-session";
 const LOGICAL_EVENT_KIND: &str = "openclaw-legacy-event";
-const SOURCE_SCHEMA_VARIANT: &str = "openclaw-legacy-jsonl-v1";
-const PARSER_REVISION: &str = "openclaw-source-backed-v0";
+const SOURCE_SCHEMA_VARIANT: &str = "openclaw-legacy-jsonl-v2";
+const PARSER_REVISION: &str = "openclaw-source-backed-v4-result-content";
+const MAX_PENDING_CALLS: usize = 4096;
+const MAX_RUNNING_PROCESSES: usize = 256;
+const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct OpenClawJsonlAdapter;
@@ -57,8 +70,9 @@ pub(crate) fn openclaw_source_backed_adapter_v0() -> Arc<dyn JsonlFamilyAdapter>
 struct Binding {
     index_relative_path: PathBuf,
     native_session_id: String,
-    revision_digest: [u8; 32],
     index: Value,
+    parent_native_session_id: Option<String>,
+    root_native_session_id: Option<String>,
 }
 
 impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
@@ -79,7 +93,7 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
-        JsonlFamilyAppendMode::Replacement
+        JsonlFamilyAppendMode::CertifiedSuffix
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
@@ -134,8 +148,9 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
             let binding = Binding {
                 index_relative_path,
                 native_session_id,
-                revision_digest: compound.revision_digest,
                 index: compound.index,
+                parent_native_session_id: compound.parent_native_session_id,
+                root_native_session_id: compound.root_native_session_id,
             };
             leaves.push(JsonlFamilyLeaf::observe(
                 source,
@@ -154,6 +169,17 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
         source_file: Arc<OpenedProviderSourceFile>,
         imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        self.projector_with_provider_checkpoint(leaf, source_file, imported_at, None, None)
+    }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
         let binding = decode_binding(leaf)?;
         let compound = admit_compound(
             leaf.authority(),
@@ -161,359 +187,108 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
             &binding.index_relative_path,
             source_file.as_ref(),
         )?;
-        if compound.revision_digest != binding.revision_digest {
+        if compound.index != binding.index
+            || compound.parent_native_session_id != binding.parent_native_session_id
+            || compound.root_native_session_id != binding.root_native_session_id
+        {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
         let session_id = session_identity(leaf.source(), &binding.native_session_id)?;
-        let session = SessionState::new(
+        let mut session = SessionState::new(
             leaf.source_path(),
             &binding.native_session_id,
             &binding.index,
+            binding.parent_native_session_id.as_deref(),
+            binding.root_native_session_id.as_deref(),
             imported_at,
             session_id,
         )?;
+        let restored = checkpoint
+            .map(|checkpoint| decode_projector_checkpoint(checkpoint, &binding))
+            .transpose()?;
+        let (pending_calls, running_processes, linkage_capacity_exceeded) = restored.map_or_else(
+            || (HashMap::new(), HashMap::new(), false),
+            |restored| {
+                session.restore(restored.session);
+                (
+                    restored.pending_calls,
+                    restored.running_processes,
+                    restored.linkage_capacity_exceeded,
+                )
+            },
+        );
         Ok(Box::new(OpenClawProjector {
             source: leaf.source().clone(),
-            source_path: leaf.source_path().display().to_string(),
-            binding,
+            native_session_id: binding.native_session_id,
             session_id,
             session,
             index_file: compound.index_file,
             authority: Arc::clone(leaf.authority()),
-        }))
-    }
-
-    fn hydrator(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        source_file: Arc<OpenedProviderSourceFile>,
-    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
-        let binding = decode_binding(leaf).map_err(unavailable)?;
-        let compound = admit_compound(
-            leaf.authority(),
-            leaf.source_path(),
-            &binding.index_relative_path,
-            source_file.as_ref(),
-        )
-        .map_err(stale)?;
-        if compound.revision_digest != binding.revision_digest {
-            return Err(stale("OpenClaw compound source revision changed"));
-        }
-        Ok(Box::new(OpenClawHydrator {
-            source: leaf.source().clone(),
-            binding,
-            source_file,
-            index_file: compound.index_file,
-            authority: Arc::clone(leaf.authority()),
+            attributor: RepositoryAttributor::default(),
+            pending_calls,
+            running_processes,
+            linkage_capacity_exceeded,
+            fallback_identities: FallbackEventIdentityState::new(base_event_lookup),
         }))
     }
 }
 
 struct OpenClawProjector {
     source: SourceKey,
-    source_path: String,
-    binding: Binding,
+    native_session_id: String,
     session_id: StableEntityId,
     session: SessionState,
     index_file: Option<OpenedProviderSourceFile>,
     authority: Arc<ProviderSourceRoot>,
+    attributor: RepositoryAttributor,
+    pending_calls: HashMap<String, PendingCallState>,
+    running_processes: HashMap<String, PendingCallState>,
+    linkage_capacity_exceeded: bool,
+    fallback_identities: FallbackEventIdentityState,
 }
 
-impl JsonlFamilyProjector for OpenClawProjector {
-    fn project(
-        &mut self,
-        record: JsonlRecordRef<'_>,
-        emit: &mut dyn FnMut(LexicalDocument) -> Result<()>,
-    ) -> Result<()> {
-        let bytes = record.bytes();
-        if bytes.iter().all(u8::is_ascii_whitespace) {
-            return Ok(());
-        }
-        let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
-            return Ok(());
-        };
-        if !value.is_object() {
-            return Ok(());
-        }
-        if value.get("type").and_then(Value::as_str) == Some("session") {
-            self.session.observe_header(&value);
-            return Ok(());
-        }
-        let evidence = record.evidence();
-        let line_number = usize::try_from(evidence.physical_ordinal())
-            .ok()
-            .and_then(|ordinal| ordinal.checked_add(1))
-            .ok_or(CaptureError::SystemInvariant(
-                "OpenClaw line number exceeds platform limits",
-            ))?;
-        let occurred_at = provider_timestamp_value(value.get("timestamp"), self.session.started_at);
-        let mut event = normalization::event_fact(
-            evidence.physical_ordinal(),
-            line_number,
-            &value,
-            occurred_at,
-        );
-        if let Some(output) = openclaw_output_metadata(&value) {
-            if !matches!(
-                output.outcome.outcome,
-                OutputOutcome::Failure | OutputOutcome::Timeout
-            ) {
-                return Ok(());
-            }
-            if output.kind == OutputObservationKind::Command {
-                event.event_type = EventType::CommandOutput;
-            }
-        }
-        let body = event.lexical_text;
-        if body.trim().is_empty() {
-            return Ok(());
-        }
-        let (native_item_key, native_event_key) = native_event_keys(
-            event.provider_event_hash.as_deref(),
-            evidence.physical_ordinal(),
-        )?;
-        let event_id = derive_event_id(EventIdentityInput {
-            source: &self.source,
-            session_id: self.session_id,
-            logical_item_kind: LOGICAL_EVENT_KIND,
-            native_item_key: &native_item_key,
-            subrecord_selector: None,
-        })
-        .map_err(contract)?;
-        let touched_files = touched_files(&value)?;
-        let locator = SourceRecordLocator::new(
-            self.source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset: evidence.byte_start(),
-                byte_length: evidence
-                    .byte_end_exclusive()
-                    .checked_sub(evidence.byte_start())
-                    .ok_or(CaptureError::SystemInvariant(
-                        "OpenClaw record range underflowed",
-                    ))?,
-                physical_ordinal: evidence.physical_ordinal(),
-                native_session_key: Some(
-                    TypedKey::utf8(self.binding.native_session_id.clone()).map_err(contract)?,
-                ),
-                native_event_key: Some(native_event_key),
-            },
-            LocatorRevisionPolicy::ExactSourceRevision,
-            Some(self.binding.revision_digest),
-            Sha256::digest(bytes).into(),
-        )
-        .map_err(contract)?;
-        emit(LexicalDocument {
-            event_id,
-            session_id: self.session_id,
-            parent_session_id: self.session.parent_session_id,
-            root_session_id: self.session.root_session_id,
-            source: self.source.clone(),
-            locator,
-            provider_session_id: Some(self.session.provider_session_id.clone()),
-            branch: self.session.branch.clone(),
-            source_path: Some(self.source_path.clone()),
-            agent_type: AgentType::Primary.as_str().to_owned(),
-            is_primary: true,
-            event_sequence: event.provider_event_index,
-            occurred_at_unix_ms: Some(event.occurred_at.timestamp_millis()),
-            event_type: event.event_type.as_str().to_owned(),
-            role: event.role.map(|role| role.as_str().to_owned()),
-            body,
-            workspace: None,
-            cwd: self.session.cwd.clone(),
-            touched_files,
-        })
-    }
-
-    fn finish(&mut self) -> Result<()> {
-        if let Some(index) = &self.index_file {
-            index.revalidate()?;
-        }
-        self.authority.revalidate()
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingCall {
+    origin_call_id: String,
+    command: Option<String>,
+    declared_workdir: Option<String>,
+    event_sequence: u64,
+    continuation_call_id_sha256: Vec<[u8; 32]>,
 }
 
-struct OpenClawHydrator {
-    source: SourceKey,
-    binding: Binding,
-    source_file: Arc<OpenedProviderSourceFile>,
-    index_file: Option<OpenedProviderSourceFile>,
-    authority: Arc<ProviderSourceRoot>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PendingCallState {
+    Exact(PendingCall),
+    Ambiguous,
 }
 
-impl JsonlFamilyHydrator for OpenClawHydrator {
-    fn hydrate(
-        &mut self,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
-        let (byte_offset, byte_length, ordinal, native_event_key) =
-            validate_locator(request.locator(), &self.source, &self.binding)?;
-        let length = usize::try_from(byte_length)
-            .map_err(|_| invalid("OpenClaw locator range exceeds platform limits"))?;
-        if length == 0 || length > MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2) {
-            return Err(invalid("OpenClaw locator range is invalid"));
-        }
-        if byte_offset > 0
-            && self
-                .source_file
-                .read_exact_range(byte_offset - 1, 1, 1)
-                .map_err(stale)?
-                != b"\n"
-        {
-            return Err(stale("OpenClaw record boundary changed"));
-        }
-        let wire = self
-            .source_file
-            .read_exact_range(
-                byte_offset,
-                length,
-                MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
-            )
-            .map_err(stale)?;
-        let payload = strip_jsonl_terminator(&wire);
-        if Sha256::digest(payload).as_slice() != request.locator().record_digest() {
-            return Err(stale("OpenClaw record digest changed"));
-        }
-        let value: Value =
-            serde_json::from_slice(payload).map_err(|_| stale("OpenClaw record JSON changed"))?;
-        match (&native_event_key, value.get("id").and_then(Value::as_str)) {
-            (TypedKey::Utf8(expected), Some(observed)) if expected == observed => {}
-            (TypedKey::U64(expected), _) if *expected == ordinal => {}
-            _ => return Err(stale("OpenClaw record identity changed")),
-        }
-        let line_number = usize::try_from(ordinal)
-            .ok()
-            .and_then(|ordinal| ordinal.checked_add(1))
-            .ok_or_else(|| invalid("OpenClaw locator ordinal is invalid"))?;
-        let mut event =
-            normalization::event_fact(ordinal, line_number, &value, DateTime::<Utc>::UNIX_EPOCH);
-        if let Some(output) = openclaw_output_metadata(&value) {
-            if output.kind == OutputObservationKind::Command {
-                event.event_type = EventType::CommandOutput;
-            }
-        }
-        Ok(HydratedProviderRecord {
-            event_id: request.event_id(),
-            provider_bytes: event.lexical_text.into_bytes(),
-        })
-    }
-
-    fn finish(&mut self) -> std::result::Result<(), HydrationFailure> {
-        if let Some(index) = &self.index_file {
-            index.revalidate().map_err(stale)?;
-        }
-        self.authority.revalidate().map_err(stale)
-    }
+#[derive(Debug)]
+enum PendingCallLookup {
+    Exact(PendingCall),
+    Ambiguous,
+    Missing,
 }
 
-struct CompoundAdmission {
-    revision_digest: [u8; 32],
-    index: Value,
-    index_file: Option<OpenedProviderSourceFile>,
+#[derive(Debug, Clone, Copy)]
+struct FallbackEventIdentity {
+    digest: [u8; 32],
+    duplicate_occurrence: u64,
 }
 
-fn admit_compound(
-    authority: &ProviderSourceRoot,
-    path: &Path,
-    index_relative_path: &Path,
-    transcript: &OpenedProviderSourceFile,
-) -> Result<CompoundAdmission> {
-    let index_file = match authority.open_file(index_relative_path) {
-        Ok(index) => Some(index),
-        Err(CaptureError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error),
-    };
-    let index_bytes = index_file
-        .as_ref()
-        .map(|index| index.read_all_bounded(MAX_OPENCLAW_SESSION_INDEX_BYTES))
-        .transpose()?;
-    if let Some(index) = &index_file {
-        index.revalidate()?;
-    }
-    let observation = super::super::OpenClawSessionObservation::from_admitted(
-        path.to_path_buf(),
-        transcript.metadata(),
-        index_file
-            .as_ref()
-            .zip(index_bytes.as_deref())
-            .map(|(index, bytes)| (index.metadata(), bytes)),
-    )?;
-    let revision_digest =
-        complete_content::exact_source_revision_digest(&observation.source_revision());
-    Ok(CompoundAdmission {
-        revision_digest,
-        index: observation.index,
-        index_file,
-    })
+#[derive(Default)]
+struct FallbackEventIdentityState {
+    base_lookup: Option<BaseEventIdentityLookup>,
+    next_occurrences: HashMap<[u8; 32], u64>,
 }
 
-struct SessionState {
-    provider_session_id: String,
-    agent_id: Option<String>,
-    parent_session_id: Option<StableEntityId>,
-    root_session_id: StableEntityId,
-    started_at: DateTime<Utc>,
-    cwd: Option<String>,
-    branch: Option<String>,
-}
-
-impl SessionState {
-    fn new(
-        path: &Path,
-        native_session_id: &str,
-        index: &Value,
-        imported_at: DateTime<Utc>,
-        direct_session_id: StableEntityId,
-    ) -> Result<Self> {
-        let agent_id =
-            super::super::openclaw_agent_id(path).map(|value| super::capped_text(&value));
-        let provider_session_id = native_session_id.to_owned();
-        let parent_provider_session_id = related_session_id(
-            index,
-            agent_id.as_deref(),
-            &["parentSessionId", "parent_session_id"],
-        );
-        let root_provider_session_id = related_session_id(
-            index,
-            agent_id.as_deref(),
-            &["rootSessionId", "root_session_id"],
-        )
-        .or_else(|| parent_provider_session_id.clone());
-        let parent_session_id = parent_provider_session_id
-            .as_deref()
-            .map(|related| related_session_identity(related, native_session_id, direct_session_id))
-            .transpose()?;
-        let root_session_id = root_provider_session_id
-            .as_deref()
-            .map(|related| related_session_identity(related, native_session_id, direct_session_id))
-            .transpose()?
-            .or(parent_session_id)
-            .unwrap_or(direct_session_id);
-        Ok(Self {
-            provider_session_id,
-            agent_id,
-            parent_session_id,
-            root_session_id,
-            started_at: imported_at,
-            cwd: None,
-            branch: explicit_branch(index),
-        })
-    }
-
-    fn observe_header(&mut self, value: &Value) {
-        if let Some(id) = value
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.trim().is_empty())
-        {
-            self.provider_session_id = super::qualify_session_id(self.agent_id.as_deref(), id);
+impl FallbackEventIdentityState {
+    fn new(base_lookup: Option<BaseEventIdentityLookup>) -> Self {
+        Self {
+            base_lookup,
+            next_occurrences: HashMap::new(),
         }
-        self.started_at = provider_timestamp_value(value.get("timestamp"), self.started_at);
-        self.cwd = value
-            .get("cwd")
-            .and_then(Value::as_str)
-            .map(super::capped_text);
-        self.branch = self.branch.clone().or_else(|| explicit_branch(value));
     }
 }
 
@@ -561,7 +336,11 @@ fn related_session_identity(
 
 fn native_event_keys(
     native_record_id: Option<&str>,
-    ordinal: u64,
+    value: &Value,
+    event: &normalization::OpenClawEventFact,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    state: &mut FallbackEventIdentityState,
 ) -> Result<(NativeItemKey, TypedKey)> {
     match native_record_id {
         Some(id) => {
@@ -571,54 +350,195 @@ fn native_event_keys(
                 key,
             ))
         }
-        None => Ok((
-            NativeItemKey::certified_position(
-                NATIVE_EVENT_POSITION_KIND,
-                TypedKey::U64(ordinal),
-                PositionStability::AppendStable,
-            )
-            .map_err(contract)?,
-            TypedKey::U64(ordinal),
-        )),
+        None => {
+            let identity = next_fallback_event_identity(value, event, source, session_id, state)?;
+            let parts = fallback_event_key_parts(identity)?;
+            Ok((
+                NativeItemKey::composite(NATIVE_EVENT_NAMESPACE, parts.clone())
+                    .map_err(contract)?,
+                TypedKey::composite(parts).map_err(contract)?,
+            ))
+        }
     }
 }
 
-fn validate_locator(
-    locator: &SourceRecordLocator,
+#[cfg(test)]
+fn remember_pending_call(
+    pending_calls: &mut HashMap<String, PendingCallState>,
+    linkage_capacity_exceeded: &mut bool,
+    capacity: usize,
+    call_id: &str,
+    state: PendingCallState,
+) {
+    if let Some(existing) = pending_calls.get_mut(call_id) {
+        *existing = PendingCallState::Ambiguous;
+    } else if pending_calls.len() < capacity {
+        pending_calls.insert(call_id.to_owned(), state);
+    } else {
+        *linkage_capacity_exceeded = true;
+    }
+}
+
+fn take_pending_call(
+    pending_calls: &mut HashMap<String, PendingCallState>,
+    call_id: Option<&str>,
+) -> PendingCallLookup {
+    match call_id.and_then(|call_id| pending_calls.remove(call_id)) {
+        Some(PendingCallState::Exact(context)) => PendingCallLookup::Exact(context),
+        Some(PendingCallState::Ambiguous) => PendingCallLookup::Ambiguous,
+        None => PendingCallLookup::Missing,
+    }
+}
+
+fn resolve_pending_call(
+    pending_calls: &mut HashMap<String, PendingCallState>,
+    call_id: Option<&str>,
+    linkage_capacity_exceeded: bool,
+    input: &mut AttributionInput,
+) -> (Option<PendingCall>, bool) {
+    match take_pending_call(pending_calls, call_id) {
+        PendingCallLookup::Exact(context) => (Some(context), false),
+        PendingCallLookup::Ambiguous => {
+            input.outcome_abstentions.push((
+                RepositoryAbstentionReason::ProviderOutputUnjoined,
+                "openclaw_tool_result_call_id_is_ambiguous",
+            ));
+            (None, true)
+        }
+        PendingCallLookup::Missing => {
+            let (reason, detail) = if linkage_capacity_exceeded {
+                (
+                    RepositoryAbstentionReason::LinkageCapacityExceeded,
+                    "openclaw_tool_result_linkage_capacity_exceeded",
+                )
+            } else {
+                (
+                    RepositoryAbstentionReason::ProviderOutputUnjoined,
+                    "openclaw_tool_result_has_no_exact_unique_call_link",
+                )
+            };
+            input.outcome_abstentions.push((reason, detail));
+            (None, true)
+        }
+    }
+}
+
+fn next_fallback_event_identity(
+    value: &Value,
+    event: &normalization::OpenClawEventFact,
     source: &SourceKey,
-    binding: &Binding,
-) -> std::result::Result<(u64, u64, u64, TypedKey), HydrationFailure> {
-    locator.validate_contract().map_err(invalid)?;
-    source
-        .validate_exact_descriptor(locator.source())
-        .map_err(invalid)?;
-    if locator.revision_policy() != LocatorRevisionPolicy::ExactSourceRevision
-        || locator.certified_source_revision_digest() != Some(&binding.revision_digest)
-    {
-        return Err(invalid("OpenClaw locator revision is invalid"));
-    }
-    let NativeRecordCoordinate::Jsonl {
-        byte_offset,
-        byte_length,
-        physical_ordinal,
-        native_session_key,
-        native_event_key,
-    } = locator.coordinate()
-    else {
-        return Err(invalid("OpenClaw locator is not a JSONL range"));
+    session_id: StableEntityId,
+    state: &mut FallbackEventIdentityState,
+) -> Result<FallbackEventIdentity> {
+    let digest = fallback_event_digest(value, event)?;
+    let occurrence = match state.next_occurrences.get(&digest).copied() {
+        Some(occurrence) => occurrence,
+        None => {
+            first_unused_base_occurrence(state.base_lookup.as_ref(), source, session_id, digest)?
+        }
     };
-    if native_session_key.as_ref() != Some(&TypedKey::Utf8(binding.native_session_id.clone())) {
-        return Err(invalid("OpenClaw locator session key is invalid"));
+    let identity = FallbackEventIdentity {
+        digest,
+        duplicate_occurrence: occurrence,
+    };
+    state.next_occurrences.insert(
+        digest,
+        occurrence
+            .checked_add(1)
+            .ok_or(CaptureError::SystemInvariant(
+                "OpenClaw fallback duplicate occurrence overflowed",
+            ))?,
+    );
+    Ok(identity)
+}
+
+fn first_unused_base_occurrence(
+    base_lookup: Option<&BaseEventIdentityLookup>,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    digest: [u8; 32],
+) -> Result<u64> {
+    let Some(base_lookup) = base_lookup else {
+        return Ok(0);
+    };
+    if !base_occurrence_exists(base_lookup, source, session_id, digest, 0)? {
+        return Ok(0);
     }
-    let native_event_key = native_event_key
-        .clone()
-        .ok_or_else(|| invalid("OpenClaw locator event key is absent"))?;
-    Ok((
-        *byte_offset,
-        *byte_length,
-        *physical_ordinal,
-        native_event_key,
-    ))
+
+    let mut present = 0_u64;
+    let mut missing = 1_u64;
+    while base_occurrence_exists(base_lookup, source, session_id, digest, missing)? {
+        present = missing;
+        missing = match missing.checked_mul(2) {
+            Some(next) => next,
+            None if missing != u64::MAX => u64::MAX,
+            None => {
+                return Err(CaptureError::SystemInvariant(
+                    "OpenClaw fallback duplicate occurrence overflowed",
+                ));
+            }
+        };
+    }
+    while present.saturating_add(1) < missing {
+        let candidate = present + (missing - present) / 2;
+        if base_occurrence_exists(base_lookup, source, session_id, digest, candidate)? {
+            present = candidate;
+        } else {
+            missing = candidate;
+        }
+    }
+    Ok(missing)
+}
+
+fn base_occurrence_exists(
+    base_lookup: &BaseEventIdentityLookup,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    digest: [u8; 32],
+    occurrence: u64,
+) -> Result<bool> {
+    let identity = FallbackEventIdentity {
+        digest,
+        duplicate_occurrence: occurrence,
+    };
+    let native_item_key =
+        NativeItemKey::composite(NATIVE_EVENT_NAMESPACE, fallback_event_key_parts(identity)?)
+            .map_err(contract)?;
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })
+    .map_err(contract)?;
+    base_lookup
+        .contains(event_id.as_uuid())
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
+}
+
+fn fallback_event_digest(
+    value: &Value,
+    event: &normalization::OpenClawEventFact,
+) -> Result<[u8; 32]> {
+    let logical = serde_json::to_vec(&(
+        event.event_type.as_str(),
+        event.role.map(|role| role.as_str()),
+        value,
+    ))?;
+    let mut hasher = Sha256::new();
+    hasher.update(FALLBACK_EVENT_ID_DOMAIN);
+    hasher.update((logical.len() as u64).to_be_bytes());
+    hasher.update(logical);
+    Ok(hasher.finalize().into())
+}
+
+fn fallback_event_key_parts(identity: FallbackEventIdentity) -> Result<Vec<TypedKey>> {
+    Ok(vec![
+        TypedKey::utf8(FALLBACK_EVENT_ID_VERSION).map_err(contract)?,
+        TypedKey::bytes(identity.digest.to_vec()).map_err(contract)?,
+        TypedKey::U64(identity.duplicate_occurrence),
+    ])
 }
 
 fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<Binding> {
@@ -658,6 +578,56 @@ fn related_session_id(index: &Value, agent_id: Option<&str>, fields: &[&str]) ->
         .map(|value| super::qualify_session_id(agent_id, value))
 }
 
+fn native_session_family(path: &Path, index: &Value) -> (Option<String>, Option<String>) {
+    let Some(entries) = index.as_object() else {
+        return (None, None);
+    };
+    let direct_id = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let Some((_, selected)) = entries.iter().find(|(_, entry)| {
+        entry
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id == direct_id)
+    }) else {
+        return (None, None);
+    };
+    let Some(first_parent_key) = selected.get("spawnedBy").and_then(Value::as_str) else {
+        return (None, None);
+    };
+    let mut current_key = first_parent_key;
+    let mut parent = None;
+    let mut root = None;
+    let mut visited = BTreeSet::new();
+    for depth in 0..16 {
+        if !visited.insert(current_key.to_owned()) {
+            return (None, None);
+        }
+        let Some(entry) = entries.get(current_key) else {
+            return (None, None);
+        };
+        let Some(session_id) = entry.get("sessionId").and_then(Value::as_str) else {
+            return (None, None);
+        };
+        let agent = current_key
+            .strip_prefix("agent:")
+            .and_then(|value| value.split(':').next());
+        let qualified = super::qualify_session_id(agent, session_id);
+        if depth == 0 {
+            parent = Some(qualified.clone());
+        }
+        root = Some(qualified);
+        let Some(next) = entry.get("spawnedBy").and_then(Value::as_str) else {
+            break;
+        };
+        current_key = next;
+    }
+    let root = root.or_else(|| parent.clone());
+    (parent, root)
+}
+
 fn explicit_branch(value: &Value) -> Option<String> {
     ["branch", "gitBranch", "git_branch"]
         .into_iter()
@@ -667,45 +637,9 @@ fn explicit_branch(value: &Value) -> Option<String> {
         .map(super::capped_text)
 }
 
-fn touched_files(value: &Value) -> Result<Vec<String>> {
-    let mut paths = BTreeSet::new();
-    visit_all_file_touch_drafts(value, |draft| {
-        paths.insert(draft.path);
-        Ok::<(), CaptureError>(())
-    })?;
-    Ok(paths.into_iter().collect())
-}
-
-fn strip_jsonl_terminator(record: &[u8]) -> &[u8] {
-    let record = record.strip_suffix(b"\n").unwrap_or(record);
-    record.strip_suffix(b"\r").unwrap_or(record)
-}
-
 fn contract(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
 }
 
-fn invalid(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::InvalidLocator,
-        detail: error.to_string(),
-    }
-}
-
-fn stale(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::StaleRecordEvidence,
-        detail: error.to_string(),
-    }
-}
-
-fn unavailable(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::TemporarilyUnavailable,
-        detail: error.to_string(),
-    }
-}
-
 #[cfg(test)]
-#[path = "source_backed_tests.rs"]
 mod tests;

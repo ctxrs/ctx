@@ -1,8 +1,8 @@
-//! Source-backed Kimi Code CLI projection and exact hydration.
+//! Source-backed Kimi Code CLI projection.
 //!
 //! Kimi's authority is compound: one `wire.jsonl` leaf is interpreted together
 //! with its session `state.json` and the root `session_index.jsonl`. This module
-//! certifies that compound observation while leaving generation lifecycle and
+//! validates that compound input while leaving generation lifecycle and
 //! publication to the shared coordinator.
 
 use std::{
@@ -14,37 +14,29 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, EventHydrationRequest,
-    EventIdentityInput, EventType, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    PositionStability, ProjectionContractError, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceObservation, SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
+    EventIdentityInput, EventType, NativeItemKey, NativeSessionKey, PositionStability,
+    ProjectionContractError, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId,
+    TypedKey,
 };
-use ctx_history_index::{IndexError, LexicalDocument};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::source_backed::family::jsonl::{
-        JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyHydrator, JsonlFamilyInventory,
-        JsonlFamilyLeaf, JsonlFamilyProjector, JsonlRecordRef,
+        JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
+        JsonlFamilyProjector, JsonlRecordRef,
     },
     provider::{
         file_touches::{
             event_type_supports_structured_file_touches,
             visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
         },
-        normalization::{
-            provider_local_preview, provider_output_event_is_failure,
-            provider_result_outcome_evidence,
-        },
         tool_input,
     },
-    CaptureError, OutputObservationKind, OutputOutcome, KIMI_CODE_CLI_SOURCE_FORMAT,
-    MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_TEXT_CHARS,
+    CaptureError, OutputObservationKind, KIMI_CODE_CLI_SOURCE_FORMAT,
 };
 
 use super::super::{
@@ -53,8 +45,8 @@ use super::super::{
         kimi_output_content, kimi_record_timestamp,
     },
     layout::{
-        canonical_source_root_for_wire, complete_content_auxiliary_paths, KimiFrozenFileMetadata,
-        KimiWireRoute, KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES,
+        auxiliary_paths, canonical_source_root_for_wire, KimiWireRoute,
+        KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES,
     },
     source::KimiWireObservation,
 };
@@ -65,11 +57,7 @@ const KIMI_NATIVE_SESSION_NAMESPACE: &str = "kimi-code-cli-session-v1";
 const KIMI_NATIVE_EVENT_POSITION_KIND: &str = "kimi-code-cli-wire-ordinal-v1";
 const KIMI_LOGICAL_SESSION_KIND: &str = "agent-session";
 const KIMI_LOGICAL_EVENT_KIND: &str = "wire-event";
-const KIMI_SOURCE_REVISION_KIND: &str = "kimi-code-cli-compound-leaf-sha256-v1";
-const KIMI_SOURCE_PARSER_REVISION: &str = "kimi-code-cli-source-backed-v1";
-const KIMI_REVISION_DOMAIN: &[u8] = b"ctx.kimi.source-backed.revision.v1\0";
-const KIMI_ABSENT_AUXILIARY_DIGEST: [u8; 32] = [0; 32];
-const MAX_KIMI_HYDRATED_RECORD_BYTES: u64 = MAX_PROVIDER_JSONL_LINE_BYTES as u64 + 2;
+const KIMI_SOURCE_PARSER_REVISION: &str = "kimi-code-cli-source-backed-v2";
 const KIMI_DISCOVERY_MAX_DEPTH: usize = 16;
 const KIMI_DISCOVERY_MAX_ENTRIES: usize = 65_536;
 
@@ -88,21 +76,13 @@ pub(crate) enum KimiSourceBackedError {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
-    #[error(transparent)]
-    Index(#[from] IndexError),
+    Core(#[from] CoreRecordError),
     #[error("the Kimi source inventory changed while it was being certified")]
     InventoryChanged,
     #[error("the Kimi source changed while it was being scanned")]
     SourceChanged,
     #[error("duplicate Kimi provider session lineage {0}")]
     DuplicateLineage(String),
-    #[error("the Kimi source-backed locator is invalid")]
-    InvalidLocator,
-    #[error("the Kimi source-backed locator range is too large")]
-    LocatorRangeTooLarge,
-    #[error("the Kimi source-backed record evidence is stale")]
-    StaleRecordEvidence,
     #[error("Kimi source-backed accounting overflowed")]
     CountOverflow,
 }
@@ -111,57 +91,13 @@ pub(crate) type KimiSourceBackedResult<T> = std::result::Result<T, KimiSourceBac
 
 mod records;
 
-use records::{
-    decode_locator, hydration_failure, kimi_lexical_body, lexical_document, map_hydration_error,
-};
-
-#[derive(Clone, Debug)]
-struct AuxiliarySnapshot {
-    length: u64,
-    digest: [u8; 32],
-    revision: Option<String>,
-}
-
-impl AuxiliarySnapshot {
-    fn absent() -> Self {
-        Self {
-            length: 0,
-            digest: KIMI_ABSENT_AUXILIARY_DIGEST,
-            revision: None,
-        }
-    }
-
-    fn feed_revision(&self, digest: &mut Sha256, label: &[u8]) {
-        digest.update((label.len() as u64).to_be_bytes());
-        digest.update(label);
-        digest.update(self.length.to_be_bytes());
-        digest.update(self.digest);
-        match &self.revision {
-            Some(revision) => {
-                digest.update(1_u8.to_be_bytes());
-                digest.update((revision.len() as u64).to_be_bytes());
-                digest.update(revision.as_bytes());
-            }
-            None => digest.update(0_u8.to_be_bytes()),
-        }
-    }
-}
+use records::core_record;
 
 #[derive(Clone, Debug)]
 struct KimiCompoundObservation {
     native: KimiWireObservation,
     source: SourceKey,
-    observation: SourceObservation,
     relative_file_key: Vec<u8>,
-}
-
-impl KimiCompoundObservation {
-    fn source_revision_digest(&self) -> KimiSourceBackedResult<[u8; 32]> {
-        self.observation
-            .revision()
-            .try_into()
-            .map_err(|_| KimiSourceBackedError::SourceChanged)
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -274,42 +210,10 @@ impl JsonlFamilyAdapter for KimiJsonlAdapter {
             .session
             .started_at
             .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
-        let revision_digest = compound.source_revision_digest().map_err(capture_error)?;
         Ok(Box::new(KimiProjector {
             compound,
             session_id,
             fallback_timestamp,
-            revision_digest,
-            authority: Arc::clone(leaf.authority()),
-            state,
-            index,
-        }))
-    }
-
-    fn hydrator(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        source_file: Arc<OpenedProviderSourceFile>,
-    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
-        let binding = decode_family_leaf(leaf).map_err(map_family_hydration)?;
-        let admitted = admit_compound_leaf_from_opened(
-            leaf.authority(),
-            &binding.relative_path,
-            source_file.as_ref(),
-        )
-        .map_err(map_hydration_error)?;
-        if !admitted.compound.source.exact_descriptor_eq(leaf.source()) {
-            return Err(map_hydration_error(KimiSourceBackedError::SourceChanged));
-        }
-        let AdmittedKimiCompound {
-            compound,
-            state,
-            index,
-        } = admitted;
-        Ok(Box::new(KimiHydrator {
-            binding,
-            compound,
-            source_file,
             authority: Arc::clone(leaf.authority()),
             state,
             index,
@@ -321,7 +225,6 @@ struct KimiProjector {
     compound: KimiCompoundObservation,
     session_id: StableEntityId,
     fallback_timestamp: DateTime<Utc>,
-    revision_digest: [u8; 32],
     authority: Arc<ProviderSourceRoot>,
     state: Option<OpenedProviderSourceFile>,
     index: Option<OpenedProviderSourceFile>,
@@ -331,7 +234,7 @@ impl JsonlFamilyProjector for KimiProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
-        emit: &mut dyn FnMut(LexicalDocument) -> crate::Result<()>,
+        emit: &mut dyn FnMut(CoreRecord) -> crate::Result<()>,
     ) -> crate::Result<()> {
         let bytes = record.bytes();
         if bytes.iter().all(u8::is_ascii_whitespace) {
@@ -344,21 +247,12 @@ impl JsonlFamilyProjector for KimiProjector {
             return Ok(());
         }
         let evidence = record.evidence();
-        if let Some(document) = lexical_document(
+        if let Some(document) = core_record(
             &self.compound,
             self.session_id,
             evidence.physical_ordinal(),
-            evidence.byte_start(),
-            evidence
-                .byte_end_exclusive()
-                .checked_sub(evidence.byte_start())
-                .ok_or(CaptureError::SystemInvariant(
-                    "Kimi record range underflowed",
-                ))?,
-            bytes,
             &value,
             self.fallback_timestamp,
-            self.revision_digest,
         )
         .map_err(capture_error)?
         {
@@ -378,99 +272,6 @@ impl JsonlFamilyProjector for KimiProjector {
     }
 }
 
-struct KimiHydrator {
-    binding: KimiSourceLeaf,
-    compound: KimiCompoundObservation,
-    source_file: Arc<OpenedProviderSourceFile>,
-    authority: Arc<ProviderSourceRoot>,
-    state: Option<OpenedProviderSourceFile>,
-    index: Option<OpenedProviderSourceFile>,
-}
-
-impl JsonlFamilyHydrator for KimiHydrator {
-    fn hydrate(
-        &mut self,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
-        let coordinate =
-            decode_locator(&self.binding, request.locator()).map_err(map_hydration_error)?;
-        if request
-            .locator()
-            .certified_source_revision_digest()
-            .copied()
-            != Some(
-                self.compound
-                    .source_revision_digest()
-                    .map_err(map_hydration_error)?,
-            )
-        {
-            return Err(hydration_failure(
-                HydrationFailureKind::StaleSourceEvidence,
-                "Kimi compound source revision changed",
-            ));
-        }
-        let length = usize::try_from(coordinate.byte_length)
-            .map_err(|_| map_hydration_error(KimiSourceBackedError::LocatorRangeTooLarge))?;
-        let wire = self
-            .source_file
-            .read_exact_range(
-                coordinate.byte_offset,
-                length,
-                MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
-            )
-            .map_err(|_| map_hydration_error(KimiSourceBackedError::StaleRecordEvidence))?;
-        let record_bytes = json_record_bytes(&wire);
-        if Sha256::digest(record_bytes).as_slice() != request.locator().record_digest() {
-            return Err(map_hydration_error(
-                KimiSourceBackedError::StaleRecordEvidence,
-            ));
-        }
-        let value: Value = serde_json::from_slice(record_bytes)
-            .map_err(|_| map_hydration_error(KimiSourceBackedError::StaleRecordEvidence))?;
-        let record_type = value
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let line_number = usize::try_from(coordinate.physical_ordinal)
-            .ok()
-            .and_then(|ordinal| ordinal.checked_add(1))
-            .ok_or_else(|| map_hydration_error(KimiSourceBackedError::InvalidLocator))?;
-        if kimi_legacy_provider_event_hash(record_type, &value, line_number)
-            != coordinate.native_event_id
-        {
-            return Err(map_hydration_error(
-                KimiSourceBackedError::StaleRecordEvidence,
-            ));
-        }
-        let (_, body) = kimi_lexical_body(
-            &value,
-            coordinate.physical_ordinal,
-            self.compound.native.session.cwd.as_deref(),
-        )
-        .map_err(map_hydration_error)?
-        .ok_or_else(|| {
-            hydration_failure(
-                HydrationFailureKind::UnsupportedParserRevision,
-                "Kimi exact record has no selected display text",
-            )
-        })?;
-        Ok(HydratedProviderRecord {
-            event_id: request.event_id(),
-            provider_bytes: body.into_bytes(),
-        })
-    }
-
-    fn finish(&mut self) -> std::result::Result<(), HydrationFailure> {
-        if let Some(state) = &self.state {
-            state.revalidate().map_err(map_family_hydration)?;
-        }
-        if let Some(index) = &self.index {
-            index.revalidate().map_err(map_family_hydration)?;
-        }
-        self.authority.revalidate().map_err(map_family_hydration)
-    }
-}
-
 fn decode_family_leaf(leaf: &JsonlFamilyLeaf) -> crate::Result<KimiSourceLeaf> {
     let TypedKey::Bytes(bytes) = leaf.binding() else {
         return Err(CaptureError::InvalidPayload(
@@ -482,13 +283,6 @@ fn decode_family_leaf(leaf: &JsonlFamilyLeaf) -> crate::Result<KimiSourceLeaf> {
 
 fn capture_error(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
-}
-
-fn map_family_hydration(error: impl std::fmt::Display) -> HydrationFailure {
-    hydration_failure(
-        HydrationFailureKind::TemporarilyUnavailable,
-        &error.to_string(),
-    )
 }
 
 pub(crate) struct KimiSourceBackedCatalog;
@@ -606,11 +400,6 @@ fn discover_kimi_directory(
     Ok(())
 }
 
-fn json_record_bytes(bytes: &[u8]) -> &[u8] {
-    let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
-    bytes.strip_suffix(b"\r").unwrap_or(bytes)
-}
-
 fn bind_snapshot(
     inventory: KimiInventory,
     authority: &ProviderSourceRoot,
@@ -659,7 +448,7 @@ fn admit_compound_leaf_from_opened(
     wire: &OpenedProviderSourceFile,
 ) -> KimiSourceBackedResult<AdmittedKimiCompound> {
     let display_path = authority.named_path().join(relative_path);
-    let (state_path, index_path) = complete_content_auxiliary_paths(&display_path)?;
+    let (state_path, index_path) = auxiliary_paths(&display_path)?;
     let state_relative = state_path
         .strip_prefix(authority.named_path())
         .map_err(|_| KimiSourceBackedError::SourceChanged)?;
@@ -688,28 +477,10 @@ fn admit_compound_leaf_from_opened(
         return Err(KimiSourceBackedError::SourceChanged);
     }
     let source = source_key(&native.session.provider_session_id)?;
-    let state_snapshot = auxiliary_snapshot(state.as_ref(), state_bytes.as_deref())?;
-    let index_snapshot = auxiliary_snapshot(index.as_ref(), index_bytes.as_deref())?;
-    let mut revision = Sha256::new();
-    revision.update(KIMI_REVISION_DOMAIN);
-    revision.update(source.exact_descriptor_digest());
-    revision.update((relative_file_key.len() as u64).to_be_bytes());
-    revision.update(&relative_file_key);
-    let wire_revision = native.wire().revision_component();
-    revision.update((wire_revision.len() as u64).to_be_bytes());
-    revision.update(wire_revision.as_bytes());
-    state_snapshot.feed_revision(&mut revision, b"state.json");
-    index_snapshot.feed_revision(&mut revision, b"session_index.jsonl");
-    let observation = SourceObservation::new(
-        source.clone(),
-        KIMI_SOURCE_REVISION_KIND,
-        revision.finalize().to_vec(),
-    )?;
     Ok(AdmittedKimiCompound {
         compound: KimiCompoundObservation {
             native,
             source,
-            observation,
             relative_file_key,
         },
         state,
@@ -745,22 +516,6 @@ fn read_auxiliary_bytes(
     ))
 }
 
-fn auxiliary_snapshot(
-    file: Option<&OpenedProviderSourceFile>,
-    bytes: Option<&[u8]>,
-) -> KimiSourceBackedResult<AuxiliarySnapshot> {
-    let (Some(file), Some(bytes)) = (file, bytes) else {
-        return Ok(AuxiliarySnapshot::absent());
-    };
-    Ok(AuxiliarySnapshot {
-        length: file.len(),
-        digest: Sha256::digest(bytes).into(),
-        revision: Some(
-            KimiFrozenFileMetadata::from_metadata(file.metadata())?.revision_component(),
-        ),
-    })
-}
-
 fn source_key(provider_session_id: &str) -> KimiSourceBackedResult<SourceKey> {
     let anchor = SourceAnchor::provider_native(
         KIMI_SOURCE_ANCHOR_NAMESPACE,
@@ -794,6 +549,3 @@ fn lineage_session_identity(provider_session_id: &str) -> KimiSourceBackedResult
     let source = source_key(provider_session_id)?;
     session_identity(&source, provider_session_id)
 }
-
-#[cfg(test)]
-mod tests;
