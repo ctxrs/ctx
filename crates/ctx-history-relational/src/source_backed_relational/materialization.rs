@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ctx_history_core::{
-    CoreContentPolicyStatus, CoreRecord, ProjectionContractError, RepositoryBinding, SourceKey,
+    CoreContentPolicyStatus, CoreRecord, ProjectionContractError, RepositoryBinding,
+    RepositoryVcsObservationKind, SourceKey,
 };
 use rusqlite::{params, Connection, OptionalExtension, Statement};
 use serde::Serialize;
@@ -450,7 +451,7 @@ impl<'conn> MaterializationStatements<'conn> {
                 event_key,
                 repository_binding_key,
                 sqlite_i64(ordinal as u64, "VCS observation ordinal")?,
-                enum_text(&observation.kind)?,
+                repository_vcs_observation_kind_text(&observation.kind),
                 observation
                     .object_id
                     .as_ref()
@@ -955,6 +956,18 @@ fn content_policy_status(status: &CoreContentPolicyStatus) -> &'static str {
         CoreContentPolicyStatus::Selected => "selected",
         CoreContentPolicyStatus::Redacted { .. } => "redacted",
         CoreContentPolicyStatus::Omitted { .. } => "omitted",
+    }
+}
+
+fn repository_vcs_observation_kind_text(kind: &RepositoryVcsObservationKind) -> &'static str {
+    match kind {
+        RepositoryVcsObservationKind::Head => "head",
+        RepositoryVcsObservationKind::Commit => "commit",
+        RepositoryVcsObservationKind::Branch => "branch",
+        RepositoryVcsObservationKind::Worktree => "worktree",
+        RepositoryVcsObservationKind::Change => "change",
+        RepositoryVcsObservationKind::Reference => "reference",
+        RepositoryVcsObservationKind::Outcome(_) => "outcome",
     }
 }
 
