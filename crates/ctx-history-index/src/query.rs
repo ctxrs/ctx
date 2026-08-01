@@ -63,6 +63,8 @@ thread_local! {
     static SESSION_EVENT_ORDER_VISITED_SEQUENCES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     static QUERY_METADATA_CHUNK_READS: Cell<usize> = const { Cell::new(0) };
     static QUERY_METADATA_EXACT_ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
+    static LEXICAL_QUERY_CONSTRUCTIONS: Cell<usize> = const { Cell::new(0) };
+    static LEXICAL_QUERY_EXECUTIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -126,6 +128,87 @@ pub(crate) fn query_metadata_chunk_reads() -> usize {
 pub(crate) fn query_metadata_exact_allocated_bytes() -> usize {
     QUERY_METADATA_EXACT_ALLOCATED_BYTES.get()
 }
+
+#[cfg(test)]
+pub(crate) fn reset_lexical_query_work() {
+    LEXICAL_QUERY_CONSTRUCTIONS.set(0);
+    LEXICAL_QUERY_EXECUTIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn lexical_query_constructions() -> usize {
+    LEXICAL_QUERY_CONSTRUCTIONS.get()
+}
+
+#[cfg(test)]
+pub(crate) fn lexical_query_executions() -> usize {
+    LEXICAL_QUERY_EXECUTIONS.get()
+}
+
+#[cfg(test)]
+fn record_lexical_query_construction() {
+    LEXICAL_QUERY_CONSTRUCTIONS.set(LEXICAL_QUERY_CONSTRUCTIONS.get().saturating_add(1));
+}
+
+#[cfg(test)]
+fn record_lexical_query_execution() {
+    LEXICAL_QUERY_EXECUTIONS.set(LEXICAL_QUERY_EXECUTIONS.get().saturating_add(1));
+}
+
+/// Fixed admission ceilings for one lexical search request.
+///
+/// Raw admission happens before analyzer lookup or query construction. The
+/// analyzed-token ceiling bounds coverage ranking to at most 32 Tantivy search
+/// tiers and 1,024 term-query nodes. Empty alternatives still count because
+/// callers must not turn repeated empty inputs into unbounded pre-search work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LexicalQueryLimits {
+    /// Maximum aggregate UTF-8 bytes across all supplied alternatives.
+    pub maximum_aggregate_bytes: usize,
+    /// Maximum number of supplied positional or repeated-term alternatives.
+    pub maximum_alternatives: usize,
+    /// Maximum distinct terms retained after lexical analysis.
+    pub maximum_unique_tokens: usize,
+}
+
+impl LexicalQueryLimits {
+    /// Validates raw alternatives without allocating a normalized copy.
+    pub fn validate_texts<'a, I>(self, texts: I) -> Result<()>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut alternatives = 0_usize;
+        let mut aggregate_bytes = 0_usize;
+        for text in texts {
+            alternatives = alternatives.saturating_add(1);
+            if alternatives > self.maximum_alternatives {
+                return Err(IndexError::LexicalQueryAlternativesTooMany {
+                    observed: alternatives,
+                    maximum: self.maximum_alternatives,
+                });
+            }
+            aggregate_bytes = aggregate_bytes.saturating_add(text.len());
+            if aggregate_bytes > self.maximum_aggregate_bytes {
+                return Err(IndexError::LexicalQueryBytesTooLarge {
+                    actual: aggregate_bytes,
+                    maximum: self.maximum_aggregate_bytes,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Generous fixed limits for public and programmatic lexical queries.
+///
+/// The 64 KiB byte ceiling bounds tokenizer input and normalization copies;
+/// the two 32-item ceilings bound repeated-query fanout and the quadratic
+/// coverage-ranking plan while leaving ample room for ordinary user queries.
+pub const LEXICAL_QUERY_LIMITS: LexicalQueryLimits = LexicalQueryLimits {
+    maximum_aggregate_bytes: 64 * 1024,
+    maximum_alternatives: 32,
+    maximum_unique_tokens: 32,
+};
 
 /// Maximum number of complete semantic event records retained in one page.
 pub const MAX_SEMANTIC_EVENT_PAGE_ITEMS: usize = 64;

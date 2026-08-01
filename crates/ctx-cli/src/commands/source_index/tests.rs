@@ -13,7 +13,8 @@ mod tests {
         SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
     };
     use ctx_history_index::{
-        EventSearchFilters, GenerationWriter, SessionRecord, WriterOptions,
+        EventSearchFilters, GenerationWriter, IndexError, SessionRecord, WriterOptions,
+        LEXICAL_QUERY_LIMITS,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -338,6 +339,61 @@ mod tests {
             NormalizedSearchQuery::from_request(&source_request).shell_arguments(),
             "--term=--option-like"
         );
+    }
+
+    #[test]
+    fn oversized_single_query_is_rejected_before_refresh_coordination() {
+        let mut source_request = request(RefreshArg::Off);
+        source_request.query =
+            "x".repeat(LEXICAL_QUERY_LIMITS.maximum_aggregate_bytes + 1);
+        let coordinated = Cell::new(false);
+
+        let error = refresh_for_search_with(
+            &source_request,
+            Path::new("/query-limit-test-does-not-open"),
+            |_, _| {
+                coordinated.set(true);
+                panic!("oversized query must fail before refresh coordination")
+            },
+        )
+        .err()
+        .expect("oversized query must be rejected");
+
+        assert!(matches!(
+            error.downcast_ref::<IndexError>(),
+            Some(IndexError::LexicalQueryBytesTooLarge { actual, maximum })
+                if *actual == LEXICAL_QUERY_LIMITS.maximum_aggregate_bytes + 1
+                    && *maximum == LEXICAL_QUERY_LIMITS.maximum_aggregate_bytes
+        ));
+        assert!(!coordinated.get());
+    }
+
+    #[test]
+    fn repeated_terms_are_rejected_before_refresh_coordination() {
+        let mut source_request = request(RefreshArg::Off);
+        source_request.query.clear();
+        source_request.terms =
+            vec!["bounded".to_owned(); LEXICAL_QUERY_LIMITS.maximum_alternatives + 1];
+        let coordinated = Cell::new(false);
+
+        let error = refresh_for_search_with(
+            &source_request,
+            Path::new("/query-limit-test-does-not-open"),
+            |_, _| {
+                coordinated.set(true);
+                panic!("repeated terms must fail before refresh coordination")
+            },
+        )
+        .err()
+        .expect("repeated terms must be rejected");
+
+        assert!(matches!(
+            error.downcast_ref::<IndexError>(),
+            Some(IndexError::LexicalQueryAlternativesTooMany { observed, maximum })
+                if *observed == LEXICAL_QUERY_LIMITS.maximum_alternatives + 1
+                    && *maximum == LEXICAL_QUERY_LIMITS.maximum_alternatives
+        ));
+        assert!(!coordinated.get());
     }
 
     #[test]

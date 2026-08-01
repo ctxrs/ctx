@@ -373,19 +373,18 @@ impl VerifiedIndex {
         filters: &EventSearchFilters,
         limit: usize,
     ) -> Result<Vec<EventSearchCandidate>> {
+        LEXICAL_QUERY_LIMITS.validate_texts(natural_texts.iter().copied())?;
         if limit == 0 {
             return Ok(Vec::new());
         }
         let fields = fields_from_schema(self.searcher.schema())?;
-        let mut query_terms = BTreeSet::new();
-        for natural_text in natural_texts {
-            query_terms.extend(self.body_query_terms(natural_text, fields)?);
-        }
-        if query_terms.is_empty() {
+        let ranking_terms = self.body_query_terms(natural_texts, fields)?;
+        if ranking_terms.is_empty() {
             return Ok(Vec::new());
         }
-        let ranking_terms = query_terms.into_iter().collect::<Vec<_>>();
         if ranking_terms.len() == 1 {
+            #[cfg(test)]
+            record_lexical_query_construction();
             let body_query = Box::new(TermQuery::new(
                 ranking_terms[0].clone(),
                 IndexRecordOption::WithFreqs,
@@ -402,6 +401,8 @@ impl VerifiedIndex {
         let mut candidates = Vec::with_capacity(limit);
         let mut seen = BTreeSet::new();
         for minimum_required in (1..=ranking_terms.len()).rev() {
+            #[cfg(test)]
+            record_lexical_query_construction();
             let alternatives = ranking_terms
                 .iter()
                 .cloned()
@@ -475,6 +476,8 @@ impl VerifiedIndex {
             }
         });
         type ScoredDocAddress = ((Score, Reverse<(u64, u64)>), DocAddress);
+        #[cfg(test)]
+        record_lexical_query_execution();
         let hits: Vec<ScoredDocAddress> = self.searcher.search(query.as_ref(), &collector)?;
         let mut candidates = Vec::with_capacity(hits.len());
         for ((score, _), address) in hits {
@@ -1333,22 +1336,30 @@ impl VerifiedIndex {
         Ok(Some((records, stored_core_bytes)))
     }
 
-    fn body_query_terms(&self, natural_text: &str, fields: Fields) -> Result<Vec<Term>> {
+    fn body_query_terms(&self, natural_texts: &[&str], fields: Fields) -> Result<Vec<Term>> {
         let mut analyzer = self
             .searcher
             .index()
             .tokenizers()
             .get(BODY_ANALYZER)
             .ok_or(IndexError::MissingAnalyzer(BODY_ANALYZER))?;
-        let mut stream = analyzer.token_stream(natural_text);
-        let mut tokens = BTreeMap::<String, ()>::new();
-        while stream.advance() {
-            tokens.insert(stream.token().text.clone(), ());
+        let mut terms = BTreeSet::new();
+        for natural_text in natural_texts {
+            let mut stream = analyzer.token_stream(natural_text);
+            while stream.advance() {
+                terms.insert(Term::from_field_text(
+                    fields.body_search,
+                    &stream.token().text,
+                ));
+                if terms.len() > LEXICAL_QUERY_LIMITS.maximum_unique_tokens {
+                    return Err(IndexError::LexicalQueryTokensTooMany {
+                        observed: terms.len(),
+                        maximum: LEXICAL_QUERY_LIMITS.maximum_unique_tokens,
+                    });
+                }
+            }
         }
-        Ok(tokens
-            .into_keys()
-            .map(|token| Term::from_field_text(fields.body_search, &token))
-            .collect())
+        Ok(terms.into_iter().collect())
     }
 
     fn event_records_for_query(

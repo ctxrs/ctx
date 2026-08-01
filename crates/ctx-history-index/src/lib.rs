@@ -55,9 +55,9 @@ pub(crate) use publication::{
 pub use query::{
     AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRecord, CoreSemanticEventPage,
     CoreSourceEventPage, EventRecord, EventSearchCandidate, EventSearchFilters,
-    ExcludedSessionTree, SemanticEligibility, SemanticEventCursor, SemanticEventPage,
-    SessionEventCoordinate, SessionRecord, SourceEventCursor, SourceEventPage,
-    DEFAULT_CORE_EVENT_PAGE_BUDGET, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+    ExcludedSessionTree, LexicalQueryLimits, SemanticEligibility, SemanticEventCursor,
+    SemanticEventPage, SessionEventCoordinate, SessionRecord, SourceEventCursor, SourceEventPage,
+    DEFAULT_CORE_EVENT_PAGE_BUDGET, LEXICAL_QUERY_LIMITS, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
     MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS, MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
     MAX_SOURCE_EVENT_PAGE_ITEMS,
 };

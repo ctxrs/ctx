@@ -168,6 +168,14 @@ pub enum IndexError {
         actual: usize,
         maximum: usize,
     },
+    #[error("lexical query text is too large: {actual} aggregate bytes, maximum {maximum}")]
+    LexicalQueryBytesTooLarge { actual: usize, maximum: usize },
+    #[error("lexical query has too many alternatives: observed {observed}, maximum {maximum}")]
+    LexicalQueryAlternativesTooMany { observed: usize, maximum: usize },
+    #[error(
+        "lexical query has too many unique analyzed tokens: observed {observed}, maximum {maximum}"
+    )]
+    LexicalQueryTokensTooMany { observed: usize, maximum: usize },
     #[error(
         "semantic event page size must be between 1 and {maximum} items, requested {requested}"
     )]
