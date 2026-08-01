@@ -18,7 +18,7 @@ pub(super) const SOURCE_ACKNOWLEDGEMENT_STATE: &str = "core_semantic_acknowledge
 pub(super) const SOURCE_CONTRACT_VERSION: u16 = 5;
 const SOURCE_CONTRACT_DOMAIN: &[u8] = b"ctx-source-backed-semantic-contract-v1\0";
 const SOURCE_BUILD_DOMAIN: &[u8] = b"ctx-source-backed-semantic-build-v1\0";
-pub(super) const SOURCE_INPUT_LEXICAL_SCHEMA_VERSION: u32 = 14;
+pub(super) const SOURCE_INPUT_LEXICAL_SCHEMA_VERSION: u32 = 15;
 const SHA256_HEX_BYTES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

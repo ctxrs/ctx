@@ -61,6 +61,11 @@ const SOURCE_INDEX_MACHINE_ERROR: TestOwner = TestOwner::behavioral(
     &["src/commands/source_index/shared.rs"],
     &["render_show_error", "render_search_error", "from_str"],
 );
+const SOURCE_INDEX_STREAM: TestOwner = TestOwner::behavioral(
+    "src/commands/source_index/tests.rs::unbounded_cli_show_streams_valid_json_beyond_4096_events_in_order",
+    &["src/commands/source_index/show.rs"],
+    &["stream_cli_session", "events_returned", "from_slice"],
+);
 const STATS: TestOwner = TestOwner::behavioral(
     "src/commands/stats.rs::stats_plain_output_matches_ansi_stripped_output",
     &["src/commands/stats.rs"],
@@ -171,6 +176,7 @@ const ANALYTICS_SENDER: &str = "src/analytics/sender.rs";
 const BLAME: &str = "src/commands/blame.rs";
 const INDEX_COMMAND: &str = "src/commands/index.rs";
 const SQL: &str = "src/commands/sql.rs";
+const SOURCE_INDEX_SHOW: &str = "src/commands/source_index/show.rs";
 const SOURCE_INDEX_SHARED: &str = "src/commands/source_index/shared.rs";
 const STATS_COMMAND: &str = "src/commands/stats.rs";
 const STATUS_USAGE: &str = "src/commands/status/usage.rs";
@@ -415,6 +421,14 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         MachineProtocol,
         MACHINE_BODY,
         SEARCH_SQL
+    ),
+    allow!(
+        SOURCE_INDEX_SHOW,
+        "stream_cli_session#1@1b29ac2997edb0f6",
+        UiRawWriter,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        SOURCE_INDEX_STREAM
     ),
     allow!(
         SOURCE_INDEX_SHARED,
