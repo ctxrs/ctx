@@ -23,6 +23,7 @@ pub struct SourceBackedRefreshExecutor {
     registry: SourceBackedProviderRegistry,
     writer_options: WriterOptions,
     discovery_duration: Duration,
+    work_budget: usize,
 }
 
 impl SourceBackedRefreshExecutor {
@@ -35,10 +36,12 @@ impl SourceBackedRefreshExecutor {
         writer_options: WriterOptions,
         discovery_duration: Duration,
     ) -> Self {
+        let work_budget = source_backed_refresh_work_budget(writer_options.indexer_threads);
         Self {
             registry,
             writer_options,
             discovery_duration,
+            work_budget,
         }
     }
 
@@ -56,6 +59,7 @@ impl SourceBackedRefreshExecutor {
             &self.registry,
             self.writer_options.clone(),
             self.discovery_duration,
+            self.work_budget,
             report_progress,
         )
     }
@@ -101,11 +105,13 @@ pub fn refresh_source_backed_generation_with_progress(
     writer_options: WriterOptions,
     report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
 ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+    let work_budget = source_backed_refresh_work_budget(writer_options.indexer_threads);
     refresh_source_backed_generation_with_progress_and_discovery_timing(
         index_root,
         registry,
         writer_options,
         Duration::ZERO,
+        work_budget,
         report_progress,
     )
 }
@@ -115,6 +121,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
     registry: &SourceBackedProviderRegistry,
     writer_options: WriterOptions,
     discovery_duration: Duration,
+    work_budget: usize,
     mut report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
 ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
     let scanned_routes = registry
@@ -144,7 +151,6 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         .map(|route| route.metadata.clone())
         .collect();
 
-    let leaf_worker_budget = source_backed_leaf_worker_budget(writer_options.indexer_threads);
     let scan_started = Instant::now();
     let mut writer = GenerationWriter::open(index_root.as_ref(), writer_options)?;
     let automatic_missing_observed_at_unix_ms = source_missing_observation_time();
@@ -171,7 +177,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             owners: &mut owners,
             complete_inventories: &mut complete_inventory_owners,
             route_index,
-            leaf_worker_budget,
+            leaf_worker_budget: work_budget,
             automatic_missing_observed_at_unix_ms: (route.metadata.selection
                 == Some(SourceBackedRouteSelection::Automatic))
             .then_some(automatic_missing_observed_at_unix_ms),
@@ -200,6 +206,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         &mut owners,
         &complete_inventory_owners,
     )?;
+    require_complete_base_source_ownership(&writer, &owners)?;
     let scan_stage_duration = scan_started.elapsed();
     let commit_started = Instant::now();
     let commit = writer.commit_with_complete_inventory_revalidation(
@@ -284,6 +291,31 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         certified_source_count,
         certified_source_bytes,
     })
+}
+
+fn require_complete_base_source_ownership(
+    writer: &GenerationWriter,
+    owners: &HashMap<[u8; 32], SourceOwner>,
+) -> SourceBackedCoordinatorResult<()> {
+    let Some(base) = writer.base_manifest() else {
+        return Ok(());
+    };
+    for source in base
+        .sources
+        .iter()
+        .map(|source| source.observation().source())
+        .chain(base.removals.iter().map(GenerationRemoval::source))
+    {
+        let claimed = owners
+            .get(&source.identity().digest())
+            .is_some_and(|owner| owner.source.exact_descriptor_eq(source));
+        if !claimed {
+            return Err(SourceBackedCoordinatorError::UnclaimedBaseSource {
+                source_id: source.identity().to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn source_missing_observation_time() -> u64 {

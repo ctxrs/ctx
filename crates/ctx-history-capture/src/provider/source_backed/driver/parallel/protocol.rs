@@ -258,6 +258,12 @@ where
 {
     #[error("parallel leaf scan requested zero workers for {job_count} jobs")]
     InvalidWorkerCount { job_count: usize },
+    #[error("failed to spawn parallel leaf worker {worker_index}: {source}")]
+    WorkerSpawn {
+        worker_index: usize,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("parallel leaf worker {worker_index} failed on job {job_index}: {source}")]
     Worker {
         worker_index: usize,

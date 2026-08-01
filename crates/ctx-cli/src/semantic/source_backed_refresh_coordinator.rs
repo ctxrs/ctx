@@ -9,7 +9,8 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_capture::{
-    build_automatic_source_backed_registry_from_report, discover_provider_sources_with_context,
+    build_automatic_source_backed_registry_from_report,
+    discover_provider_sources_with_context_and_work_budget, source_backed_refresh_work_budget,
     validate_provider_source_roots_outside_data_root, CaptureError, DiscoveryContext,
     DiscoveryReport, ProviderSourceStatus, SourceBackedAutomaticRegistryIssue,
     SourceBackedAutomaticUnavailableReason, SourceBackedProviderRegistry,
@@ -66,6 +67,7 @@ const LEXICAL_DIRECTORY: &str = "lexical";
 const SOURCE_REFRESH_REQUEST_OP: &str = "source_refresh_request";
 const SOURCE_REFRESH_STATUS_OP: &str = "source_refresh_status";
 const SOURCE_REFRESH_ATTEMPT_HISTORY: usize = 64;
+const SOURCE_REFRESH_ACTIVE_PENDING_LIMIT: usize = 8;
 const SOURCE_REFRESH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
 const SOURCE_REFRESH_IPC_TIMEOUT: StdDuration = StdDuration::from_secs(2);
 const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 64 * 1024;

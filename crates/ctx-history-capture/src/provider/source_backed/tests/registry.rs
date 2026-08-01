@@ -43,6 +43,44 @@ fn heterogeneous_routes_publish_one_core_generation() {
 }
 
 #[test]
+fn mutating_refresh_rejects_an_unclaimed_base_source_from_the_same_family() {
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(fixture_route(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        40,
+    ));
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+    let initial_generation = initial.commit.generation_id.clone();
+    let initial_source = initial.sources[0].observation().source().clone();
+
+    let mut incomplete_registry = SourceBackedProviderRegistry::new();
+    incomplete_registry.register(fixture_route(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        41,
+    ));
+    let error = refresh_source_backed_generation(
+        temp.path(),
+        &incomplete_registry,
+        WriterOptions::default(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::UnclaimedBaseSource { ref source_id }
+            if source_id == &initial_source.identity().to_string()
+    ));
+    let retained = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(retained.generation_id(), initial_generation);
+    assert_eq!(retained.manifest().sources, initial.sources);
+}
+
+#[test]
 fn refresh_receipt_stays_bound_to_commit_when_current_generation_advances() {
     let (g1_route, g1_certificate) = revisioned_receipt_route(1);
     let (g2_route, g2_certificate) = revisioned_receipt_route(2);

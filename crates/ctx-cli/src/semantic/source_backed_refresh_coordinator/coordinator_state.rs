@@ -110,6 +110,41 @@ pub(in crate::semantic) struct SourceBackedRefreshRun {
     pub(in crate::semantic) failed: bool,
 }
 
+#[derive(Debug)]
+struct SourceBackedRefreshQueueFull {
+    active_pending_requests: usize,
+}
+
+impl SourceBackedRefreshQueueFull {
+    fn to_json(&self) -> Value {
+        compact_json(json!({
+            "ok": false,
+            "schema_version": 1,
+            "owner": "daemon",
+            "status": "busy",
+            "error_code": "source_refresh_queue_full",
+            "reason": "queue_full",
+            "retryable": true,
+            "active_pending_requests": self.active_pending_requests,
+            "max_active_pending_requests": SOURCE_REFRESH_ACTIVE_PENDING_LIMIT,
+            "error": self.to_string(),
+        }))
+    }
+}
+
+impl fmt::Display for SourceBackedRefreshQueueFull {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "daemon source refresh queue is full ({}/{} active or pending requests); retry after a refresh finishes",
+            self.active_pending_requests,
+            SOURCE_REFRESH_ACTIVE_PENDING_LIMIT,
+        )
+    }
+}
+
+impl std::error::Error for SourceBackedRefreshQueueFull {}
+
 impl CoreRefreshEngine {
     pub(in crate::semantic) fn new() -> Self {
         Self::with_executor(Arc::new(CaptureOwnedSourceBackedRefreshExecutor))
@@ -163,12 +198,22 @@ impl CoreRefreshEngine {
                 } else {
                     source_refresh_runtime_metadata(data_root)
                 };
-                let response = self.enqueue_with_catalog_metadata(
+                let response = match self.enqueue_with_catalog_metadata(
                     previous_generation,
                     metadata,
                     requested_catalog,
                     mode == "wait",
-                )?;
+                ) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if let Some(queue_full) =
+                            error.downcast_ref::<SourceBackedRefreshQueueFull>()
+                        {
+                            return Ok(Some(queue_full.to_json()));
+                        }
+                        return Err(error);
+                    }
+                };
                 let request_id = response
                     .get("request_id")
                     .and_then(Value::as_str)
@@ -387,6 +432,14 @@ impl CoreRefreshEngine {
             }
         }
 
+        let active_pending_requests = active_attempt_count(&state);
+        if active_pending_requests >= SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
+            return Err(SourceBackedRefreshQueueFull {
+                active_pending_requests,
+            }
+            .into());
+        }
+
         let attempt = SourceBackedRefreshAttempt {
             request_id: Uuid::now_v7().to_string(),
             state: SourceBackedRefreshState::Queued,
@@ -427,7 +480,7 @@ impl CoreRefreshEngine {
             state.active_request_id = Some(attempt.request_id.clone());
         }
         state.attempts.push_back(attempt);
-        trim_attempt_history(&mut state);
+        trim_terminal_attempt_history(&mut state);
         Ok(response)
     }
 
@@ -633,6 +686,7 @@ impl CoreRefreshEngine {
                 }
             }
         }
+        trim_terminal_attempt_history(&mut state);
         drop(state);
 
         if !failed_run {
@@ -705,15 +759,29 @@ fn coalesce_attempt(
     attempt.to_json()
 }
 
-fn trim_attempt_history(state: &mut CoreRefreshEngineState) {
-    while state.attempts.len() > SOURCE_REFRESH_ATTEMPT_HISTORY {
-        if state
+fn active_attempt_count(state: &CoreRefreshEngineState) -> usize {
+    state
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.state.is_active())
+        .count()
+}
+
+fn trim_terminal_attempt_history(state: &mut CoreRefreshEngineState) {
+    let mut terminal_count = state
+        .attempts
+        .iter()
+        .filter(|attempt| !attempt.state.is_active())
+        .count();
+    while terminal_count > SOURCE_REFRESH_ATTEMPT_HISTORY {
+        let Some(oldest_terminal) = state
             .attempts
-            .front()
-            .is_some_and(|attempt| attempt.state.is_active())
-        {
+            .iter()
+            .position(|attempt| !attempt.state.is_active())
+        else {
             break;
-        }
-        state.attempts.pop_front();
+        };
+        state.attempts.remove(oldest_terminal);
+        terminal_count = terminal_count.saturating_sub(1);
     }
 }
