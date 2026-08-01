@@ -1,3 +1,4 @@
+#[path = "shell/outcome_plan.rs"]
 mod outcome_plan;
 
 use std::path::{Component, Path, PathBuf};
@@ -5,8 +6,8 @@ use std::path::{Component, Path, PathBuf};
 #[cfg(test)]
 use outcome_plan::bounded_outcome_operation;
 pub(crate) use outcome_plan::{
-    bounded_outcome_evidence_relevant, bounded_outcome_plan, BoundedOutcomeOperation,
-    BoundedOutcomePlan, BoundedOutcomePlanDisposition,
+    bounded_outcome_evidence_relevant, bounded_outcome_plan, BoundedCommitProducer,
+    BoundedOutcomeOperation, BoundedOutcomePlan, BoundedOutcomePlanDisposition,
 };
 
 use ctx_history_core::{RepositoryAbstentionReason, RepositoryEvidenceKind};
@@ -57,6 +58,19 @@ pub(crate) fn lexical_absolute(value: &str, base: Option<&Path>) -> Option<PathB
         base?.join(value)
     };
     normalize_absolute(&joined)
+}
+
+fn literal_cd_destination(value: &str, base: Option<&Path>) -> Option<PathBuf> {
+    let path = Path::new(value);
+    if !path.is_absolute()
+        && value != "."
+        && value != ".."
+        && !value.starts_with("./")
+        && !value.starts_with("../")
+    {
+        return None;
+    }
+    lexical_absolute(value, base)
 }
 
 fn normalize_absolute(path: &Path) -> Option<PathBuf> {
@@ -113,8 +127,10 @@ pub(super) fn analyze(command: Option<&str>, base: Option<&Path>) -> CommandAnal
     for segment in tokenization.segments {
         if segment.first().is_some_and(|token| token == "cd") {
             let destination = match segment.as_slice() {
-                [_, path] => lexical_absolute(path, current.as_deref()),
-                [_, option, path] if option == "--" => lexical_absolute(path, current.as_deref()),
+                [_, path] => literal_cd_destination(path, current.as_deref()),
+                [_, option, path] if option == "--" => {
+                    literal_cd_destination(path, current.as_deref())
+                }
                 _ => None,
             };
             let Some(destination) = destination else {
@@ -737,13 +753,21 @@ fn known_git_builtin(value: &str) -> bool {
 
 #[cfg(test)]
 mod outcome_tests {
-    use super::{bounded_outcome_operation, BoundedOutcomeOperation};
+    use std::path::Path;
+
+    use ctx_history_core::RepositoryAbstentionReason;
+
+    use super::{
+        analyze, bounded_outcome_operation, bounded_outcome_plan, BoundedCommitProducer,
+        BoundedOutcomeOperation, BoundedOutcomePlanDisposition,
+    };
 
     #[test]
     fn outcome_recognition_is_bounded_and_alias_free() {
         assert_eq!(
             bounded_outcome_operation("git commit -m exact && git rev-parse --verify HEAD"),
             Some(BoundedOutcomeOperation::Commit {
+                producer: BoundedCommitProducer::Commit,
                 rewrites_history: false,
                 exact_oid_output: true,
             })
@@ -754,6 +778,7 @@ mod outcome_tests {
         assert_eq!(
             bounded_outcome_operation("git add file && git commit -m $'line one\\nline two'"),
             Some(BoundedOutcomeOperation::Commit {
+                producer: BoundedCommitProducer::Commit,
                 rewrites_history: false,
                 exact_oid_output: false,
             })
@@ -761,10 +786,139 @@ mod outcome_tests {
         assert_eq!(
             bounded_outcome_operation("git merge --no-ff feature"),
             Some(BoundedOutcomeOperation::Commit {
+                producer: BoundedCommitProducer::Merge,
                 rewrites_history: false,
                 exact_oid_output: false,
             })
         );
         assert!(bounded_outcome_operation("git merge feature").is_none());
+    }
+
+    #[test]
+    fn cd_routing_ignores_ambient_cdpath_by_construction() {
+        let base = Path::new("/workspace/control");
+        for (command, expected) in [
+            ("cd /repo && git status", "/repo"),
+            ("cd ./repo && git status", "/workspace/control/repo"),
+            ("cd ../repo && git status", "/workspace/repo"),
+            ("cd -- ./repo && git status", "/workspace/control/repo"),
+        ] {
+            let analysis = analyze(Some(command), Some(base));
+            assert_eq!(
+                analysis.derived_effective_cwd.as_deref(),
+                Some(Path::new(expected)),
+                "{command}"
+            );
+            assert_eq!(analysis.repository_paths.len(), 1, "{command}");
+            assert!(analysis.abstentions.is_empty(), "{command}");
+        }
+
+        for command in ["cd repo && git status", "cd -- repo && git status"] {
+            let analysis = analyze(Some(command), Some(base));
+            assert!(analysis.derived_effective_cwd.is_none(), "{command}");
+            assert!(analysis.repository_paths.is_empty(), "{command}");
+            assert!(analysis.abstentions.iter().any(|abstention| {
+                abstention.reason == RepositoryAbstentionReason::DynamicPath
+                    && abstention.detail == "unsupported_or_dynamic_cd"
+            }));
+        }
+    }
+
+    #[test]
+    fn literal_git_c_and_wrappers_are_candidates_but_wrappers_are_not_authority() {
+        let base = Path::new("/workspace/control");
+        for command in [
+            "git -C repo status",
+            "env -- A=1 git -C ../repo status",
+            "command -- git -C ../repo status",
+            "time -p git -C ../repo status",
+            "timeout 5s git -C ../repo status",
+        ] {
+            let analysis = analyze(Some(command), Some(base));
+            assert_eq!(analysis.repository_paths.len(), 1, "{command}");
+            assert!(analysis.abstentions.is_empty(), "{command}");
+        }
+
+        assert!(matches!(
+            bounded_outcome_plan(
+                "git -C ../repo commit -m exact && git -C ../repo rev-parse HEAD",
+                base,
+            ),
+            BoundedOutcomePlanDisposition::Planned(_)
+        ));
+        assert!(matches!(
+            bounded_outcome_plan(
+                "env -- git -C ../repo commit -m exact && git -C ../repo rev-parse HEAD",
+                base,
+            ),
+            BoundedOutcomePlanDisposition::Abstained {
+                reason: RepositoryAbstentionReason::UnknownWrapper,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn exact_oid_plan_rejects_dry_runs_and_unsafe_intervening_commands() {
+        let base = Path::new("/repo");
+        assert!(matches!(
+            bounded_outcome_plan("git commit --dry-run && git rev-parse --verify HEAD", base,),
+            BoundedOutcomePlanDisposition::Abstained {
+                reason: RepositoryAbstentionReason::OutcomeResultInadmissible,
+                ..
+            }
+        ));
+        assert!(matches!(
+            bounded_outcome_plan(
+                "git commit --dry-run=true && git rev-parse --verify HEAD",
+                base,
+            ),
+            BoundedOutcomePlanDisposition::Abstained {
+                reason: RepositoryAbstentionReason::OutcomeResultInadmissible,
+                ..
+            }
+        ));
+
+        for command in [
+            "git commit -m exact && git reset --hard HEAD^ && git rev-parse HEAD",
+            "git commit -m exact && git checkout other && git rev-parse HEAD",
+            "git commit -m exact && git switch other && git rev-parse HEAD",
+            "git commit -m exact && git pull && git rev-parse HEAD",
+            "git commit -m exact && git branch --show-current && git rev-parse HEAD",
+            "git commit -m exact && git commit --allow-empty -m second && git rev-parse HEAD",
+            "git commit -m exact && custom-command && git rev-parse HEAD",
+        ] {
+            assert!(
+                matches!(
+                    bounded_outcome_plan(command, base),
+                    BoundedOutcomePlanDisposition::Abstained {
+                        reason: RepositoryAbstentionReason::Ambiguous,
+                        ..
+                    }
+                ),
+                "{command}"
+            );
+        }
+
+        assert_eq!(
+            bounded_outcome_operation(
+                "git commit -m exact && git status --short && git rev-parse --verify HEAD"
+            ),
+            Some(BoundedOutcomeOperation::Commit {
+                producer: BoundedCommitProducer::Commit,
+                rewrites_history: false,
+                exact_oid_output: true,
+            })
+        );
+        assert_eq!(
+            bounded_outcome_operation(
+                "git commit -m exact -- --dry-run && git rev-parse --verify HEAD"
+            ),
+            Some(BoundedOutcomeOperation::Commit {
+                producer: BoundedCommitProducer::Commit,
+                rewrites_history: false,
+                exact_oid_output: true,
+            })
+        );
     }
 }
