@@ -22,6 +22,7 @@ pub(crate) enum CursorEventBody {
         text: String,
     },
     ToolCall {
+        native_content: serde_json::Value,
         call_id: Option<String>,
         tool_name: Option<String>,
         command: Option<String>,
@@ -30,6 +31,7 @@ pub(crate) enum CursorEventBody {
         ambiguous_native_fields: bool,
     },
     ToolOutput {
+        native_content: serde_json::Value,
         call_id: Option<String>,
         ambiguous_linkage: bool,
     },
@@ -69,6 +71,7 @@ pub(super) fn project_cursor_record(
                 } => (event_type, role, CursorEventBody::Text { text }),
                 CursorSafePart::ToolUse {
                     role,
+                    native_content,
                     call_id,
                     tool_name,
                     command,
@@ -79,6 +82,7 @@ pub(super) fn project_cursor_record(
                     EventType::ToolCall,
                     role,
                     CursorEventBody::ToolCall {
+                        native_content,
                         call_id,
                         tool_name,
                         command,
@@ -89,19 +93,25 @@ pub(super) fn project_cursor_record(
                 ),
                 CursorSafePart::ToolResult {
                     role,
+                    native_content,
                     call_id,
                     ambiguous_linkage,
                 } => (
                     EventType::ToolOutput,
                     role,
                     CursorEventBody::ToolOutput {
+                        native_content,
                         call_id,
                         ambiguous_linkage,
                     },
                 ),
             };
-            let encoded =
-                serde_json::to_vec(&("cursor-event-payload-v1", event_type, role, &body))?;
+            let provider_event_hash = cursor_logical_event_hash(
+                event_type,
+                role,
+                occurred_at.map(|value| value.timestamp_millis()),
+                &body,
+            )?;
             Ok(CursorNativeEvent {
                 native_order: CursorNativeOrder {
                     semantic_ordinal: record.semantic_ordinal,
@@ -115,8 +125,51 @@ pub(super) fn project_cursor_record(
                 record_byte_start: record.byte_start,
                 record_byte_end_exclusive: record.byte_end_exclusive,
                 record_sha256: record.record_sha256,
-                provider_event_hash: format!("{:x}", Sha256::digest(encoded)),
+                provider_event_hash,
             })
         })
         .collect()
+}
+
+fn cursor_logical_event_hash(
+    event_type: EventType,
+    role: EventRole,
+    occurred_at_unix_ms: Option<i64>,
+    body: &CursorEventBody,
+) -> serde_json::Result<String> {
+    let encoded = match body {
+        CursorEventBody::None => serde_json::to_vec(&(
+            "cursor-logical-event-v2",
+            event_type,
+            role,
+            occurred_at_unix_ms,
+            "none",
+            serde_json::Value::Null,
+        )),
+        CursorEventBody::Text { text } => serde_json::to_vec(&(
+            "cursor-logical-event-v2",
+            event_type,
+            role,
+            occurred_at_unix_ms,
+            "text",
+            text,
+        )),
+        CursorEventBody::ToolCall { native_content, .. } => serde_json::to_vec(&(
+            "cursor-logical-event-v2",
+            event_type,
+            role,
+            occurred_at_unix_ms,
+            "tool_call",
+            native_content,
+        )),
+        CursorEventBody::ToolOutput { native_content, .. } => serde_json::to_vec(&(
+            "cursor-logical-event-v2",
+            event_type,
+            role,
+            occurred_at_unix_ms,
+            "tool_output",
+            native_content,
+        )),
+    }?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
 }
