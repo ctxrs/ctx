@@ -192,12 +192,10 @@ pub struct CoreRecord {
     pub repository_vcs_observations: Vec<RepositoryVcsObservation>,
 }
 
-/// Provider-owned additions applied while the transitional lexical ingestion
-/// seam constructs a complete Core record.
+/// Provider-owned additions applied while constructing a complete Core record.
 ///
-/// This keeps provider normalization out of the index writer while allowing a
-/// single provider to adopt the Core contract without changing every legacy
-/// `LexicalDocument` constructor at once.
+/// This keeps provider normalization and repository attribution out of the
+/// index writer while sharing one bounded annotation shape across adapters.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CoreRecordAnnotation {
     pub structured_content: Option<serde_json::Value>,

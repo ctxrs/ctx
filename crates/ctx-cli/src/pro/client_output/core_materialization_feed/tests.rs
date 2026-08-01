@@ -2,12 +2,11 @@ use std::collections::BTreeMap;
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceDeletion,
-    CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceInventoryObservation, SourceKey, SourceObservation, SourceRecordLocator,
-    TypedKey,
+    CertifiedSourceInventory, CoreRecord, EventIdentityInput, NativeItemKey, NativeSessionKey,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey,
+    SourceObservation, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, LexicalDocument, WriterOptions};
+use ctx_history_index::{GenerationWriter, WriterOptions};
 use tempfile::tempdir;
 
 use super::*;
@@ -41,7 +40,7 @@ fn certificate(source: &SourceKey, revision: u8, documents: u64) -> CertifiedSou
     .unwrap()
 }
 
-fn document(source: &SourceKey, sequence: u64, body: String) -> LexicalDocument {
+fn record(source: &SourceKey, sequence: u64, body: String) -> CoreRecord {
     let native_session = TypedKey::utf8("session").unwrap();
     let session_id = derive_session_id(SessionIdentityInput {
         source,
@@ -58,40 +57,28 @@ fn document(source: &SourceKey, sequence: u64, body: String) -> LexicalDocument 
         subrecord_selector: None,
     })
     .unwrap();
-    LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator: SourceRecordLocator::new(
-            source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset: sequence.saturating_mul(100),
-                byte_length: u64::try_from(body.len()).unwrap(),
-                physical_ordinal: sequence,
-                native_session_key: Some(native_session),
-                native_event_key: Some(TypedKey::U64(sequence)),
-            },
-            LocatorRevisionPolicy::StableRecordEvidence,
-            None,
-            [sequence as u8; 32],
-        )
-        .unwrap(),
-        provider_session_id: Some("session".to_owned()),
-        branch: Some("main".to_owned()),
-        source_path: Some("/provider-is-not-needed/session.jsonl".to_owned()),
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: sequence,
-        occurred_at_unix_ms: Some(1_700_000_000_000 + sequence as i64),
-        event_type: "message".to_owned(),
-        role: Some("assistant".to_owned()),
+        session_id,
+        source.clone(),
+        sequence,
+        "message",
+        "primary",
+        true,
+        "core-materialization-feed-test-v1",
         body,
-        workspace: Some("ctx".to_owned()),
-        cwd: Some("/work/ctx".to_owned()),
-        touched_files: vec!["src/lib.rs".to_owned()],
-    }
+    )
+    .unwrap();
+    record.provider_session_id = Some("session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(sequence));
+    record.branch = Some("main".to_owned());
+    record.occurred_at_unix_ms = Some(1_700_000_000_000 + sequence as i64);
+    record.role = Some("assistant".to_owned());
+    record.workspace = Some("ctx".to_owned());
+    record.cwd = Some("/work/ctx".to_owned());
+    record.validate_contract().unwrap();
+    record
 }
 
 fn add_source_with_count(
@@ -104,7 +91,7 @@ fn add_source_with_count(
     writer.begin_source(source.clone()).unwrap();
     for (index, body) in bodies.into_iter().enumerate() {
         writer
-            .add_document(document(source, u64::try_from(index + 1).unwrap(), body))
+            .add_core_record(record(source, u64::try_from(index + 1).unwrap(), body))
             .unwrap();
     }
     writer
@@ -566,14 +553,9 @@ fn record_page_cas_mismatch_fails_closed_after_one_exchange() {
 }
 
 #[test]
-fn producer_has_no_provider_resolver_or_hydration_dependency() {
+fn producer_reads_only_pinned_core_records() {
     let source = include_str!("../core_materialization_feed.rs");
-    for forbidden in [
-        "ctx_history_capture",
-        "SourceBackedResolver",
-        "hydrate",
-        "reread_source",
-    ] {
+    for forbidden in ["ctx_history_capture", "reread_source"] {
         assert!(!source.contains(forbidden), "producer contains {forbidden}");
     }
     assert!(source.contains("core_source_event_page_with_budget"));

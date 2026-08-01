@@ -1,13 +1,12 @@
 use std::{collections::HashSet, fs, time::Instant};
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, EventIdentityInput,
-    EventRole, EventType, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceObservation, SourceRecordLocator, TypedKey,
+    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CoreRecord,
+    EventIdentityInput, EventRole, EventType, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
 };
 use ctx_history_index::{
-    CoreEventRecord, EventRecord, GenerationWriter, LexicalDocument, VerifiedIndex, WriterOptions,
+    CoreEventRecord, EventRecord, GenerationWriter, VerifiedIndex, WriterOptions,
 };
 use tempfile::TempDir;
 
@@ -123,7 +122,7 @@ impl Fixture {
         })
     }
 
-    fn document(&self, sequence: u64, body: impl Into<String>) -> Result<LexicalDocument> {
+    fn core_record(&self, sequence: u64, body: impl Into<String>) -> Result<CoreRecord> {
         let item = NativeItemKey::native_id("message", TypedKey::U64(sequence))?;
         let event_id = derive_event_id(EventIdentityInput {
             source: &self.source,
@@ -132,80 +131,62 @@ impl Fixture {
             native_item_key: &item,
             subrecord_selector: None,
         })?;
-        Ok(LexicalDocument {
+        let mut record = CoreRecord::new_selected(
             event_id,
-            session_id: self.session_id,
-            parent_session_id: None,
-            root_session_id: self.session_id,
-            source: self.source.clone(),
-            locator: SourceRecordLocator::new(
-                self.source.clone(),
-                NativeRecordCoordinate::Jsonl {
-                    byte_offset: sequence * 100,
-                    byte_length: 50,
-                    physical_ordinal: sequence,
-                    native_session_key: Some(TypedKey::utf8("fixture-session")?),
-                    native_event_key: Some(TypedKey::U64(sequence)),
-                },
-                LocatorRevisionPolicy::ExactSourceRevision,
-                Some([9; 32]),
-                [sequence as u8; 32],
-            )?,
-            provider_session_id: Some("fixture-session".to_owned()),
-            branch: Some("main".to_owned()),
-            source_path: Some(
-                self.data_root
-                    .join("provider-source-removed.jsonl")
-                    .display()
-                    .to_string(),
-            ),
-            agent_type: "primary".to_owned(),
-            is_primary: true,
-            event_sequence: sequence,
-            occurred_at_unix_ms: Some(sequence as i64),
-            event_type: "message".to_owned(),
-            role: Some("user".to_owned()),
-            body: body.into(),
-            workspace: Some("/workspace".to_owned()),
-            cwd: Some("/workspace".to_owned()),
-            touched_files: Vec::new(),
-        })
+            self.session_id,
+            self.session_id,
+            self.source.clone(),
+            sequence,
+            "message",
+            "primary",
+            true,
+            "semantic-source-projection-test-v1",
+            body,
+        )?;
+        record.provider_session_id = Some("fixture-session".to_owned());
+        record.native_event_id = Some(TypedKey::U64(sequence));
+        record.branch = Some("main".to_owned());
+        record.occurred_at_unix_ms = Some(sequence as i64);
+        record.role = Some("user".to_owned());
+        record.workspace = Some("/workspace".to_owned());
+        record.cwd = Some("/workspace".to_owned());
+        record.validate_contract()?;
+        Ok(record)
     }
 
     fn record(&self, sequence: u64, body: impl Into<String>) -> Result<CoreEventRecord> {
-        let document = self.document(sequence, body)?;
-        let core_record = document.to_core_record()?;
+        let core_record = self.core_record(sequence, body)?;
         let event = EventRecord {
-            event_id: document.event_id,
-            session_id: document.session_id,
-            parent_session_id: document.parent_session_id,
-            root_session_id: document.root_session_id,
-            source: document.source.clone(),
-            provider: document.source.provider().to_owned(),
-            source_format: document.source.source_format().to_owned(),
-            provider_session_id: document.provider_session_id,
+            event_id: core_record.event_id,
+            session_id: core_record.session_id,
+            parent_session_id: core_record.parent_session_id,
+            root_session_id: core_record.root_session_id,
+            source: core_record.source.clone(),
+            provider: core_record.source.provider().to_owned(),
+            source_format: core_record.source.source_format().to_owned(),
+            provider_session_id: core_record.provider_session_id.clone(),
             native_event_id: core_record.native_event_id.clone(),
-            branch: document.branch,
-            source_path: document.source_path,
-            agent_type: document.agent_type,
-            is_primary: document.is_primary,
-            event_sequence: document.event_sequence,
-            occurred_at_unix_ms: document.occurred_at_unix_ms,
-            event_type: document.event_type,
-            role: document.role,
-            workspace: document.workspace,
-            cwd: document.cwd,
-            touched_files: document.touched_files,
+            branch: core_record.branch.clone(),
+            source_path: None,
+            agent_type: core_record.agent_type.clone(),
+            is_primary: core_record.is_primary,
+            event_sequence: core_record.event_sequence,
+            occurred_at_unix_ms: core_record.occurred_at_unix_ms,
+            event_type: core_record.event_type.clone(),
+            role: core_record.role.clone(),
+            workspace: core_record.workspace.clone(),
+            cwd: core_record.cwd.clone(),
+            touched_files: Vec::new(),
         };
         Ok(CoreEventRecord { event, core_record })
     }
 
-    fn publish(&self, documents: Vec<LexicalDocument>) -> Result<VerifiedIndex> {
-        let count = documents.len() as u64;
+    fn publish(&self, records: Vec<CoreRecord>) -> Result<VerifiedIndex> {
+        let count = records.len() as u64;
         let mut writer = GenerationWriter::open(&self.index_root, WriterOptions::default())?;
         writer.begin_source(self.source.clone())?;
-        for document in documents {
-            writer.add_document(document)?;
+        for record in records {
+            writer.add_core_record(record)?;
         }
         let observation = SourceObservation::new(self.source.clone(), "fixture-v1", vec![1])?;
         writer.certify_source(CertifiedSource::certify(
@@ -374,7 +355,7 @@ fn tail_beyond_sixteen_kib_is_paged_embedded_searchable_and_never_stored_plainte
     let fixture = Fixture::new()?;
     let body = format!("{} {TAIL_TOKEN}", "prefix ".repeat(2_500));
     assert!(body.len() > 16 * 1024);
-    let index = fixture.publish(vec![fixture.document(1, body)?])?;
+    let index = fixture.publish(vec![fixture.core_record(1, body)?])?;
     assert!(!fixture
         .data_root
         .join("provider-source-removed.jsonl")
@@ -421,7 +402,7 @@ fn tail_beyond_sixteen_kib_is_paged_embedded_searchable_and_never_stored_plainte
 fn no_op_and_policy_receipt_mismatch_are_automatic_and_bounded() -> Result<()> {
     let fixture = Fixture::new()?;
     let documents = (0..65)
-        .map(|sequence| fixture.document(sequence + 1, format!("record {sequence}")))
+        .map(|sequence| fixture.core_record(sequence + 1, format!("record {sequence}")))
         .collect::<Result<Vec<_>>>()?;
     let index = fixture.publish(documents)?;
     let mut store = SemanticVectorStore::open(&fixture.path)?;

@@ -121,7 +121,6 @@ pub mod projection;
 pub mod provider;
 mod result_compaction;
 pub mod source;
-pub mod source_resolver;
 pub mod sync;
 
 pub use archive::SessionHistoryArchive;
@@ -163,10 +162,10 @@ pub use paths::{
 pub use projection::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend,
     CertifiedSourceDeletion, CertifiedSourceInventory, EventIdentityInput, NativeItemKey,
-    NativeLocator, NativeSessionKey, PositionStability, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
-    SourceInventoryObservation, SourceKey, SourceObservation, StableEntityId, StableEntityKind,
-    SubrecordSelector, TypedKey, IDENTITY_VERSION,
+    NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey,
+    SourceObservation, StableEntityId, StableEntityKind, SubrecordSelector, TypedKey,
+    IDENTITY_VERSION,
 };
 pub use provider::{
     provider_support_matrix_schema_version, ProviderArtifactDescriptor, ProviderCursorCheckpoint,
@@ -176,12 +175,6 @@ pub use provider::{
 };
 pub use result_compaction::compact_result_payload;
 pub use source::{CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind};
-pub use source_resolver::{
-    BatchHydrationRequest, BatchHydrationResult, ContentSourceResolver, EventHydrationRequest,
-    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
-    NativeRecordCoordinate, SessionHydrationRequest, SourceRecordLocator,
-    SourceResolverContractError, MAX_BATCH_HYDRATION_EVENTS, NATIVE_LOCATOR_VERSION,
-};
 pub use sync::{
     AuditActorKind, AuditLogEntry, EntityTimestamps, Fidelity, RedactionState, SyncAlias,
     SyncBatch, SyncBatchStatus, SyncCursor, SyncDirection, SyncMetadata, SyncOutboxItem,

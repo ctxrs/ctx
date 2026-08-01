@@ -1,10 +1,10 @@
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceDeletion,
-    CertifiedSourceInventory, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceInventoryObservation, SourceObservation, SourceRecordLocator, TypedKey,
+    CertifiedSourceInventory, CoreRecord, EventIdentityInput, NativeItemKey, NativeSessionKey,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceInventoryObservation,
+    SourceObservation, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, LexicalDocument, WriterOptions};
+use ctx_history_index::{GenerationWriter, WriterOptions};
 use ctx_history_relational::{
     RawSqlOptions, RawSqlValue, RelationalProjectionStatus, RELATIONAL_MATERIALIZER_REVISION,
 };
@@ -48,7 +48,7 @@ fn certificate(source: &SourceKey, revision: u8, documents: u64) -> CertifiedSou
     .unwrap()
 }
 
-fn document(source: &SourceKey, sequence: u64, provider_file: &Path) -> LexicalDocument {
+fn record(source: &SourceKey, sequence: u64, _provider_file: &Path) -> CoreRecord {
     let native_session = TypedKey::utf8("provider-session").unwrap();
     let session_key = NativeSessionKey::native_id("session", native_session.clone()).unwrap();
     let session_id = derive_session_id(SessionIdentityInput {
@@ -66,57 +66,45 @@ fn document(source: &SourceKey, sequence: u64, provider_file: &Path) -> LexicalD
         subrecord_selector: None,
     })
     .unwrap();
-    LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator: SourceRecordLocator::new(
-            source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset: sequence * 100,
-                byte_length: 100,
-                physical_ordinal: sequence,
-                native_session_key: Some(native_session),
-                native_event_key: Some(TypedKey::U64(sequence)),
-            },
-            LocatorRevisionPolicy::StableRecordEvidence,
-            None,
-            [sequence as u8; 32],
-        )
-        .unwrap(),
-        provider_session_id: Some("provider-session".to_owned()),
-        branch: Some("main".to_owned()),
-        source_path: Some(provider_file.to_string_lossy().into_owned()),
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: sequence,
-        occurred_at_unix_ms: Some(1_700_000_000_000 + sequence as i64),
-        event_type: "message".to_owned(),
-        role: Some("user".to_owned()),
-        body: format!("{BODY_SENTINEL}-{sequence}"),
-        workspace: Some("ctx".to_owned()),
-        cwd: Some("/work/ctx".to_owned()),
-        touched_files: vec!["unscoped/legacy-path-must-not-project.rs".to_owned()],
-    }
+        session_id,
+        source.clone(),
+        sequence,
+        "message",
+        "primary",
+        true,
+        "relational-catch-up-test-v1",
+        format!("{BODY_SENTINEL}-{sequence}"),
+    )
+    .unwrap();
+    record.provider_session_id = Some("provider-session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(sequence));
+    record.branch = Some("main".to_owned());
+    record.occurred_at_unix_ms = Some(1_700_000_000_000 + sequence as i64);
+    record.role = Some("user".to_owned());
+    record.workspace = Some("ctx".to_owned());
+    record.cwd = Some("/work/ctx".to_owned());
+    record.validate_contract().unwrap();
+    record
 }
 
 fn replace_generation(
     data_root: &Path,
     source: &SourceKey,
     revision: u8,
-    documents: Vec<LexicalDocument>,
+    records: Vec<CoreRecord>,
 ) -> String {
-    let count = documents.len() as u64;
+    let count = records.len() as u64;
     let mut writer = GenerationWriter::open(
         source_backed_index_root(data_root),
         WriterOptions::default(),
     )
     .unwrap();
     writer.begin_source(source.clone()).unwrap();
-    for document in documents {
-        writer.add_document(document).unwrap();
+    for record in records {
+        writer.add_core_record(record).unwrap();
     }
     writer
         .certify_source(certificate(source, revision, count))
@@ -243,11 +231,7 @@ fn first_publish_seals_syncs_and_reopens_exact_generation() {
         temp.path(),
         &source,
         1,
-        vec![document(
-            &source,
-            1,
-            &temp.path().join("first-publish.jsonl"),
-        )],
+        vec![record(&source, 1, &temp.path().join("first-publish.jsonl"))],
     );
     let destination = sql_compatibility_path(temp.path());
     let candidate = candidate_projection_path(&destination);
@@ -272,22 +256,14 @@ fn replace_existing_projection_publishes_only_the_new_generation() {
     let temp = tempfile::tempdir().unwrap();
     let source = source();
     let provider = temp.path().join("replace-existing.jsonl");
-    let first_generation = replace_generation(
-        temp.path(),
-        &source,
-        1,
-        vec![document(&source, 1, &provider)],
-    );
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
     run_after_core_publication(temp.path(), &first_generation).unwrap();
     let destination = sql_compatibility_path(temp.path());
     let first_bytes = fs::read(&destination).unwrap();
 
-    let replacement_generation = replace_generation(
-        temp.path(),
-        &source,
-        2,
-        vec![document(&source, 2, &provider)],
-    );
+    let replacement_generation =
+        replace_generation(temp.path(), &source, 2, vec![record(&source, 2, &provider)]);
     let run = run_after_core_publication(temp.path(), &replacement_generation).unwrap();
 
     assert!(run.did_work);
@@ -314,12 +290,8 @@ fn replacement_removes_stale_destination_and_candidate_sidecars() {
     let temp = tempfile::tempdir().unwrap();
     let source = source();
     let provider = temp.path().join("stale-sidecars.jsonl");
-    let first_generation = replace_generation(
-        temp.path(),
-        &source,
-        1,
-        vec![document(&source, 1, &provider)],
-    );
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
     run_after_core_publication(temp.path(), &first_generation).unwrap();
     let destination = sql_compatibility_path(temp.path());
     let candidate = candidate_projection_path(&destination);
@@ -337,12 +309,8 @@ fn replacement_removes_stale_destination_and_candidate_sidecars() {
     )
     .unwrap();
 
-    let replacement_generation = replace_generation(
-        temp.path(),
-        &source,
-        2,
-        vec![document(&source, 2, &provider)],
-    );
+    let replacement_generation =
+        replace_generation(temp.path(), &source, 2, vec![record(&source, 2, &provider)]);
     let run = run_after_core_publication(temp.path(), &replacement_generation).unwrap();
 
     assert!(run.did_work);
@@ -365,20 +333,12 @@ fn prepublication_replacement_failure_keeps_prior_projection_visible() {
     let temp = tempfile::tempdir().unwrap();
     let source = source();
     let provider = temp.path().join("injected-replace-failure.jsonl");
-    let first_generation = replace_generation(
-        temp.path(),
-        &source,
-        1,
-        vec![document(&source, 1, &provider)],
-    );
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
     run_after_core_publication(temp.path(), &first_generation).unwrap();
     let destination = sql_compatibility_path(temp.path());
-    let replacement_generation = replace_generation(
-        temp.path(),
-        &source,
-        2,
-        vec![document(&source, 2, &provider)],
-    );
+    let replacement_generation =
+        replace_generation(temp.path(), &source, 2, vec![record(&source, 2, &provider)]);
     let (projection, candidate, generation, receipt) =
         build_candidate(temp.path(), &replacement_generation);
 
@@ -421,19 +381,11 @@ fn published_projection_is_reopened_and_wrong_generation_is_rejected() {
     let temp = tempfile::tempdir().unwrap();
     let source = source();
     let provider = temp.path().join("reopen-generation.jsonl");
-    let first_generation = replace_generation(
-        temp.path(),
-        &source,
-        1,
-        vec![document(&source, 1, &provider)],
-    );
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
     run_after_core_publication(temp.path(), &first_generation).unwrap();
-    let expected_generation = replace_generation(
-        temp.path(),
-        &source,
-        2,
-        vec![document(&source, 2, &provider)],
-    );
+    let expected_generation =
+        replace_generation(temp.path(), &source, 2, vec![record(&source, 2, &provider)]);
     let (projection, candidate, generation, receipt) =
         build_candidate(temp.path(), &expected_generation);
     let destination = sql_compatibility_path(temp.path());
@@ -443,7 +395,7 @@ fn published_projection_is_reopened_and_wrong_generation_is_rejected() {
         impostor_root.path(),
         &source,
         3,
-        vec![document(
+        vec![record(
             &source,
             3,
             &impostor_root.path().join("impostor.jsonl"),
@@ -497,7 +449,7 @@ fn relational_stream_reads_bounded_complete_core_pages() {
         &source,
         1,
         (1..=7)
-            .map(|sequence| document(&source, sequence, &provider_file))
+            .map(|sequence| record(&source, sequence, &provider_file))
             .collect(),
     );
     let index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
@@ -527,7 +479,7 @@ fn initial_noop_replacement_and_deletion_need_no_provider_file_and_store_no_body
         temp.path(),
         &source,
         1,
-        vec![document(&source, 1, &provider_file)],
+        vec![record(&source, 1, &provider_file)],
     );
     fs::remove_file(&provider_file).unwrap();
 
@@ -570,7 +522,7 @@ fn initial_noop_replacement_and_deletion_need_no_provider_file_and_store_no_body
         temp.path(),
         &source,
         2,
-        vec![document(&source, 2, &provider_file)],
+        vec![record(&source, 2, &provider_file)],
     );
     assert!(
         run_after_core_publication(temp.path(), &replacement_generation)
@@ -609,7 +561,7 @@ fn materializer_revision_mismatch_rebuilds_from_the_same_pinned_core_generation(
         temp.path(),
         &source,
         1,
-        vec![document(&source, 1, &provider_file)],
+        vec![record(&source, 1, &provider_file)],
     );
     run_after_core_publication(temp.path(), &generation).unwrap();
     let path = sql_compatibility_path(temp.path());
@@ -647,7 +599,7 @@ fn generation_mismatch_reports_lag_without_creating_a_projection() {
         temp.path(),
         &source,
         1,
-        vec![document(&source, 1, &provider_file)],
+        vec![record(&source, 1, &provider_file)],
     );
     let wrong_generation = "f".repeat(64);
     assert_ne!(wrong_generation, generation);

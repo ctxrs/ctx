@@ -132,7 +132,7 @@ fn command_only_plugin_is_discoverable_but_typed_unsupported_and_never_runs() {
 }
 
 #[test]
-fn durable_plugin_path_indexes_in_place_and_hydrates_exact_content() {
+fn durable_plugin_path_indexes_in_place_and_renders_complete_core_content() {
     let temp = tempdir();
     let (manifest_dir, source_path) = write_durable_plugin(&temp);
     let sources = json_output(
