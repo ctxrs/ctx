@@ -259,6 +259,9 @@
         "role": { "type": ["string", "null"] },
         "occurredAt": { "type": ["string", "null"] },
         "text": { "type": ["string", "null"] },
+        "structuredContent": {
+          "description": "Optional Core structured content. Any JSON value, including null, is preserved without a narrowed SDK-specific schema."
+        },
         "content": { "$ref": "#/$defs/coreContentMetadata" },
         "citations": {
           "type": "array",

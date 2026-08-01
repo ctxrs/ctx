@@ -343,6 +343,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
     public var role: String?
     public var occurredAt: String?
     public var text: String?
+    public var structuredContent: JSONValue?
     public var content: CoreContentMetadata?
     public var citations: [AgentHistoryCitation]?
 
@@ -357,6 +358,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         role: String? = nil,
         occurredAt: String? = nil,
         text: String? = nil,
+        structuredContent: JSONValue? = nil,
         content: CoreContentMetadata? = nil,
         citations: [AgentHistoryCitation]? = nil
     ) {
@@ -370,6 +372,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         self.role = role
         self.occurredAt = occurredAt
         self.text = text
+        self.structuredContent = structuredContent
         self.content = content
         self.citations = citations
     }

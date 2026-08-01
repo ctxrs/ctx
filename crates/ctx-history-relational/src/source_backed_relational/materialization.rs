@@ -7,8 +7,8 @@ use rusqlite::{params, Connection, Statement};
 use serde::Serialize;
 
 use super::{
-    manifest::ValidatedGeneration, sqlite_i64, sqlite_u64, RelationalProjectionError,
-    RelationalProjectionRecord, RelationalSourceMetadata, Result,
+    manifest::ValidatedGeneration, sqlite_i64, sqlite_u64, sqlite_u64_ordered_text,
+    RelationalProjectionError, RelationalProjectionRecord, RelationalSourceMetadata, Result,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -301,7 +301,7 @@ impl<'conn> MaterializationStatements<'conn> {
             record.branch,
             record.workspace,
             record.cwd,
-            sqlite_i64(record.event_sequence, "session first event sequence")?,
+            sqlite_u64_ordered_text(record.event_sequence),
             record.occurred_at_unix_ms,
         ])?;
         if changed == 0 {
@@ -323,7 +323,7 @@ impl<'conn> MaterializationStatements<'conn> {
             record.session_id.as_uuid().to_string(),
             identity_bytes(record.session_id)?,
             native_event_id,
-            sqlite_i64(record.event_sequence, "event sequence")?,
+            sqlite_u64_ordered_text(record.event_sequence),
             record.event_type,
             record.role,
             record.occurred_at_unix_ms,

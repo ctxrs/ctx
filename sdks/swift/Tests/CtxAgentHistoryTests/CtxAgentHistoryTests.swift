@@ -191,6 +191,10 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertEqual(event.event.event?.sourceFormat, "codex_session_jsonl")
         XCTAssertEqual(event.event.event?.content?.complete, true)
         XCTAssertEqual(event.event.event?.content?.policyStatus, .selected)
+        XCTAssertEqual(event.event.event?.structuredContent?["kind"]?.stringValue, "toolResult")
+        let structuredItems = event.event.event?.structuredContent?["payload"]?["items"]?.arrayValue
+        let nestedStructuredValues = structuredItems?[2]["nested"]?.arrayValue
+        XCTAssertEqual(nestedStructuredValues?[1], .bool(false))
 
         let session = try client.showSession("22222222-2222-4222-8222-222222222222")
         XCTAssertEqual(session.session.session?.providerSessionId, "codex-fixture-session")
@@ -363,10 +367,20 @@ final class CtxAgentHistoryTests: XCTestCase {
                 XCTAssertEqual(envelope.event?.events.first?.ctxEventId, "11111111-1111-4111-8111-111111111111", url.lastPathComponent)
                 XCTAssertEqual(envelope.event?.events.first?.content?.complete, true, url.lastPathComponent)
                 XCTAssertEqual(envelope.event?.events.first?.content?.policyStatus, .selected, url.lastPathComponent)
+                XCTAssertEqual(
+                    envelope.event?.event?.structuredContent?["kind"]?.stringValue,
+                    "toolResult",
+                    url.lastPathComponent
+                )
             case .showSession:
                 XCTAssertEqual(envelope.session?.session?.title, "Fixture session", url.lastPathComponent)
                 XCTAssertEqual(envelope.session?.session?.providerSessionId, "codex-fixture-session", url.lastPathComponent)
                 XCTAssertEqual(envelope.session?.session?.sourceFormat, "codex_session_jsonl", url.lastPathComponent)
+                XCTAssertEqual(
+                    envelope.session?.events.first?.structuredContent?.arrayValue?[1]["complete"],
+                    .bool(true),
+                    url.lastPathComponent
+                )
             case .initialize, .sync, .error:
                 break
             }
@@ -375,7 +389,7 @@ final class CtxAgentHistoryTests: XCTestCase {
 
     private static let statusJSON = #"{"initialized":true,"local_only":true,"data_root":"/tmp/ctx-sdk-test","indexed_items":3,"indexed_sources":1,"cataloged_sessions":1}"#
     private static let searchJSON = #"{"query":"local agent history","filters":{"provider":"codex"},"freshness":{"mode":"off","status":"skipped","source_count":0,"totals":{"imported_events":0}},"generated_at":"2026-07-01T12:00:00Z","retrieval":{"requested_mode":"hybrid","effective_mode":"lexical","semantic_weight":0.0,"semantic_fallback_code":"semantic_retrieval_failed","semantic_fallback":"semantic_retrieval_failed","coverage":{"embedded_items":4,"indexed_now":1},"diagnostics":{"query_embed_ms":2}},"results":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","event_seq":1,"title":"Fixture session","snippet":"local agent history search result","rank":1,"retrieval_score":0.98,"result_type":"event","result_scope":"event","provider":"codex","timestamp":"2026-07-01T12:00:00Z","cwd":"/workspace/ctx","why_matched":["text"],"citations":[{"target_type":"event","ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","label":"codex event","provider":"codex"}],"suggested_next_commands":["ctx show event 11111111-1111-4111-8111-111111111111 --window 10","ctx search 'local agent history' --session 22222222-2222-4222-8222-222222222222","ctx show session 22222222-2222-4222-8222-222222222222"],"visibility":"local_only"}],"result_window":{"limit":1,"returned":1,"more_available":true},"truncation":{"truncated":false}}"#
-    private static let eventJSON = #"{"event":{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result","content":{"complete":true,"policy_status":"selected"}},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result","content":{"complete":true,"policy_status":"selected"}}]}"#
+    private static let eventJSON = #"{"event":{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result","structured_content":{"kind":"toolResult","payload":{"items":["alpha",null,{"nested":[1,false]}]}},"content":{"complete":true,"policy_status":"selected"}},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result","structured_content":null,"content":{"complete":true,"policy_status":"selected"}}]}"#
     private static let sessionJSON = #"{"session":{"ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","title":"Fixture session"},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","text":"local agent history search result","content":{"complete":true,"policy_status":"selected"}}],"mode":"lite","format":"json"}"#
 }
 

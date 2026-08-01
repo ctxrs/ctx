@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS core_sessions (
     branch TEXT,
     workspace TEXT,
     cwd TEXT,
-    first_event_seq INTEGER NOT NULL,
+    first_event_seq TEXT NOT NULL
+        CHECK (length(first_event_seq) = 20 AND first_event_seq NOT GLOB '*[^0-9]*'),
     started_at_ms INTEGER,
     ended_at_ms INTEGER,
     health TEXT NOT NULL
@@ -75,7 +76,8 @@ CREATE TABLE IF NOT EXISTS core_events (
     ctx_session_id TEXT NOT NULL REFERENCES core_sessions(ctx_session_id) ON DELETE CASCADE,
     session_identity BLOB NOT NULL,
     native_event_id_json TEXT,
-    event_seq INTEGER NOT NULL,
+    event_seq TEXT NOT NULL
+        CHECK (length(event_seq) = 20 AND event_seq NOT GLOB '*[^0-9]*'),
     event_type TEXT NOT NULL,
     role TEXT,
     occurred_at_ms INTEGER,
@@ -374,14 +376,7 @@ pub(super) fn initialize(conn: &Connection) -> Result<()> {
 }
 
 pub(super) fn verify(conn: &Connection) -> Result<()> {
-    let state = conn
-        .query_row(
-            "SELECT schema_version, contract_version FROM core_relational_state WHERE singleton = 1",
-            [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .optional()?
-        .ok_or(RelationalProjectionError::MissingSchema)?;
+    let state = existing_schema_versions(conn)?.ok_or(RelationalProjectionError::MissingSchema)?;
     if state.0 != i64::from(RELATIONAL_PROJECTION_SCHEMA_VERSION)
         || state.1 != i64::from(RELATIONAL_PROJECTION_CONTRACT_VERSION)
     {

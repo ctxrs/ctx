@@ -1,5 +1,7 @@
 package ctxagenthistory
 
+import "encoding/json"
+
 // Object stores JSON sub-documents whose shape can grow across ctx releases.
 type Object map[string]any
 
@@ -343,6 +345,7 @@ type Event struct {
 	Role              string               `json:"role,omitempty"`
 	OccurredAt        string               `json:"occurredAt,omitempty"`
 	Text              string               `json:"text,omitempty"`
+	StructuredContent json.RawMessage      `json:"structuredContent,omitempty"`
 	Content           *CoreContentMetadata `json:"content,omitempty"`
 	Citations         []Citation           `json:"citations,omitempty"`
 }

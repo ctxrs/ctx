@@ -402,6 +402,8 @@ pub struct AgentHistoryEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<CoreContentMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub citations: Vec<Citation>,
@@ -621,6 +623,15 @@ mod tests {
                     );
                     assert_eq!(event.source_format.as_deref(), Some("codex_session_jsonl"));
                     assert_eq!(
+                        event.structured_content.as_ref().unwrap()["kind"],
+                        "toolResult"
+                    );
+                    assert_eq!(
+                        event.structured_content.as_ref().unwrap()["payload"]["items"][2]["nested"]
+                            [1],
+                        false
+                    );
+                    assert_eq!(
                         event
                             .content
                             .as_ref()
@@ -642,6 +653,13 @@ mod tests {
                     assert_eq!(
                         summary.source_format.as_deref(),
                         Some("codex_session_jsonl")
+                    );
+                    assert_eq!(
+                        envelope.session.as_ref().unwrap().events[0]
+                            .structured_content
+                            .as_ref()
+                            .unwrap()[1]["complete"],
+                        true
                     );
                 }
                 AgentHistoryOperation::Error => {
