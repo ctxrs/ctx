@@ -113,7 +113,7 @@ fn exact_produced_object_hits_precede_twelve_mentions_and_deduplicate() {
         ),
         object_id.clone(),
     );
-    let producer_ids = vec![first_producer.event_id, second_producer.event_id];
+    let producer_ids = [first_producer.event_id, second_producer.event_id];
     let mut records = (1..=12)
         .map(|sequence| {
             document(

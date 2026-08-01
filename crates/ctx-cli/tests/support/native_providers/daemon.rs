@@ -106,7 +106,16 @@ pub(super) fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
             .output()
             .unwrap();
         if output.status.success() {
-            break serde_json::from_slice::<Value>(&output.stdout).unwrap();
+            let packet = serde_json::from_slice::<Value>(&output.stdout).unwrap();
+            if packet["snapshot"]["stale"] == true && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+            assert_ne!(
+                packet["snapshot"]["stale"], true,
+                "source-backed SQL projection stayed stale for `{sql}`: {packet:#}"
+            );
+            break packet;
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
         if (stderr.contains("Core SQL projection")
