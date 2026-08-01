@@ -453,7 +453,7 @@ fn source_backed_platform_unit(
     else {
         return Ok((None, None, row_sha256, None));
     };
-    let session = platform_session_fact(&row, link);
+    let session = platform_session_fact(row, link);
     let role = if row.sender_id.as_deref() == row.user_id.as_deref() {
         Some(EventRole::User)
     } else {

@@ -111,9 +111,9 @@ pub(super) fn next_candidate_batch(
     rows.map(|row| {
         let (rowid, retained) = row?;
         if rowid <= 0 || retained < 0 {
-            return Err(CaptureError::InvalidPayload(format!(
-                "Crush message keyset metadata is invalid"
-            )));
+            return Err(CaptureError::InvalidPayload(
+                "Crush message keyset metadata is invalid".to_owned(),
+            ));
         }
         let retained = u64::try_from(retained).map_err(|_| {
             CaptureError::InvalidPayload("Crush retained byte count is invalid".to_owned())
