@@ -373,7 +373,8 @@ fn stale_schema_manifest_fails_closed_at_generation_boundary() {
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
     let mut stale_manifest = index.manifest().clone();
-    stale_manifest.lexical_schema_version = 3;
+    const PRE_SESSION_EVENT_ORDER_SCHEMA: u32 = 8;
+    stale_manifest.lexical_schema_version = PRE_SESSION_EVENT_ORDER_SCHEMA;
     let stale_generation_id = stale_manifest.generation_id().unwrap();
     write_manifest(temp.path(), &stale_generation_id, &stale_manifest).unwrap();
     let mut stale_metas = index.searcher.index().load_metas().unwrap();
@@ -390,7 +391,7 @@ fn stale_schema_manifest_fails_closed_at_generation_boundary() {
         error,
         IndexError::GenerationContractMismatch {
             identity: IDENTITY_VERSION,
-            schema: 3,
+            schema: PRE_SESSION_EVENT_ORDER_SCHEMA,
             analyzer: LEXICAL_ANALYZER_VERSION,
             core_record: ctx_history_core::CORE_RECORD_VERSION,
         }

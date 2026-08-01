@@ -42,6 +42,7 @@ pub(crate) struct Fields {
     pub(crate) core_content_bytes: Field,
     pub(crate) core_record: Field,
     pub(crate) source_event_order: Field,
+    pub(crate) session_event_order: Field,
 }
 
 pub(crate) fn validate_schema(schema: &Schema) -> Result<()> {
@@ -97,6 +98,7 @@ pub(crate) fn lexical_schema() -> Schema {
     builder.add_u64_field("core_content_bytes", FAST | STORED);
     builder.add_bytes_field("core_record", STORED);
     builder.add_bytes_field("source_event_order", INDEXED);
+    builder.add_bytes_field("session_event_order", INDEXED);
     builder.build()
 }
 
@@ -138,6 +140,7 @@ pub(crate) fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         core_content_bytes: required_field(schema, "core_content_bytes")?,
         core_record: required_field(schema, "core_record")?,
         source_event_order: required_field(schema, "source_event_order")?,
+        session_event_order: required_field(schema, "session_event_order")?,
     })
 }
 

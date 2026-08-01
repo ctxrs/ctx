@@ -557,6 +557,100 @@ impl VerifiedIndex {
             .and_then(|mut events| events.pop()))
     }
 
+    /// Streams forward from one semantic user anchor until the next user and
+    /// returns the latest nonempty assistant text in that turn.
+    ///
+    /// Session coordinates are sought directly in fixed-size term pages. Tool
+    /// records remain metadata-only, assistant Core bodies are decoded one at
+    /// a time, and no session-wide collector or retained session cache is used.
+    pub fn semantic_lite_turn_assistant(
+        &self,
+        anchor: &CoreEventRecord,
+        page_items: usize,
+        pairing_budget: CoreEventPageBudget,
+    ) -> Result<Option<(String, i64)>> {
+        if !(1..=MAX_SEMANTIC_PAIRING_PAGE_ITEMS).contains(&page_items) {
+            return Err(IndexError::InvalidSessionEventCoordinateLimit {
+                requested: page_items,
+                maximum: MAX_SEMANTIC_PAIRING_PAGE_ITEMS,
+            });
+        }
+        validate_core_event_page_budget(pairing_budget)?;
+        if !SemanticEligibility::CURRENT.includes(&anchor.event)
+            || anchor.event_id != anchor.core_record.event_id
+            || anchor.session_id != anchor.core_record.session_id
+        {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_EVENT_ORDER_FIELD,
+            ));
+        }
+
+        let session_id = anchor.session_id;
+        let mut after = SessionEventOrderKey::for_core_record(&anchor.core_record)?;
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let anchor_query = TermQuery::new(
+            Term::from_field_bytes(fields.session_event_order, after.as_bytes()),
+            IndexRecordOption::Basic,
+        );
+        if self.searcher.search(&anchor_query, &Count)? != 1 {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_EVENT_ORDER_FIELD,
+            ));
+        }
+
+        let mut latest_assistant = None;
+        loop {
+            let candidates = self.session_event_addresses_after(session_id, after, page_items)?;
+            if candidates.is_empty() {
+                return Ok(latest_assistant);
+            }
+
+            for candidate in candidates {
+                after = candidate.order;
+                let event = stored_event_record(&self.searcher, candidate.address, fields)?;
+                if event.session_id != session_id
+                    || event.event_id.as_uuid() != candidate.order.event_id()
+                    || event.event_sequence != candidate.order.event_sequence()
+                    || event.occurred_at_unix_ms != candidate.order.occurred_at_unix_ms()
+                {
+                    return Err(IndexError::InvalidStoredDocumentField(
+                        SESSION_EVENT_ORDER_FIELD,
+                    ));
+                }
+                if event.event_type == "message" && event.role.as_deref() == Some("user") {
+                    return Ok(latest_assistant);
+                }
+                if event.event_type != "message" || event.role.as_deref() != Some("assistant") {
+                    continue;
+                }
+
+                let Some(batch) = self.core_events_by_ids_with_strict_budget(
+                    &[event.event_id.as_uuid()],
+                    1,
+                    pairing_budget,
+                )?
+                else {
+                    return Ok(None);
+                };
+                let assistant = batch.items.into_iter().next().ok_or(
+                    IndexError::InvalidStoredDocumentField(SESSION_EVENT_ORDER_FIELD),
+                )?;
+                if assistant.session_id != session_id {
+                    return Err(IndexError::InvalidStoredDocumentField(
+                        SESSION_EVENT_ORDER_FIELD,
+                    ));
+                }
+                let text = assistant.core_record.content.meaningful_text().trim();
+                if !text.is_empty() {
+                    latest_assistant = Some((
+                        text.to_owned(),
+                        assistant.occurred_at_unix_ms.unwrap_or_default(),
+                    ));
+                }
+            }
+        }
+    }
+
     /// Returns a complete requested-order body-free metadata mapping when the
     /// caller's count bound admits it and every compact event ID is present.
     pub fn events_by_ids_if_bounded(
@@ -1382,6 +1476,64 @@ impl VerifiedIndex {
                 ));
             }
         }
+        Ok(candidates)
+    }
+
+    fn session_event_addresses_after(
+        &self,
+        session_id: StableEntityId,
+        after: SessionEventOrderKey,
+        capacity: usize,
+    ) -> Result<Vec<SessionEventAddressCandidate>> {
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let range_end = SessionEventOrderKey::session_range_end(session_id)?;
+        let candidate_capacity = capacity
+            .checked_mul(self.searcher.segment_readers().len())
+            .ok_or(IndexError::CountOverflow)?;
+        let mut candidates = Vec::with_capacity(candidate_capacity);
+
+        for (segment_ord, segment) in self.searcher.segment_readers().iter().enumerate() {
+            let inverted = segment.inverted_index(fields.session_event_order)?;
+            let terms = inverted.terms();
+            let mut stream = terms
+                .range()
+                .gt(after.as_bytes())
+                .lt(&range_end)
+                .into_stream()?;
+            let mut segment_candidates = 0_usize;
+            while segment_candidates < capacity && stream.advance() {
+                #[cfg(test)]
+                SESSION_EVENT_ORDER_TERM_VISITS
+                    .set(SESSION_EVENT_ORDER_TERM_VISITS.get().saturating_add(1));
+                let order = SessionEventOrderKey::decode_for_session(session_id, stream.key())?;
+                let mut postings = inverted
+                    .read_postings_from_terminfo(stream.value(), IndexRecordOption::Basic)?;
+                let mut doc_id = postings.doc();
+                while doc_id != TERMINATED && segment_candidates < capacity {
+                    if !segment.is_deleted(doc_id) {
+                        candidates.push(SessionEventAddressCandidate {
+                            order,
+                            address: DocAddress::new(segment_ord as u32, doc_id),
+                        });
+                        segment_candidates = segment_candidates
+                            .checked_add(1)
+                            .ok_or(IndexError::CountOverflow)?;
+                    }
+                    doc_id = postings.advance();
+                }
+            }
+        }
+
+        candidates.sort_by_key(|candidate| candidate.order);
+        if candidates
+            .windows(2)
+            .any(|pair| pair[0].order == pair[1].order)
+        {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_EVENT_ORDER_FIELD,
+            ));
+        }
+        candidates.truncate(capacity);
         Ok(candidates)
     }
 

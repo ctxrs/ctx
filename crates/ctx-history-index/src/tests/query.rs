@@ -103,6 +103,155 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
 }
 
 #[test]
+fn core_valid_escape_heavy_query_metadata_indexes_without_a_narrower_json_bound() {
+    const ESCAPED_FIELD_BYTES: usize = 17 * 1024;
+    const NATIVE_ID_BYTES: usize = 60 * 1024;
+
+    let temp = tempdir().unwrap();
+    let source = source("escape-heavy-query-metadata.jsonl");
+    let mut record = document(&source, 1, "small searchable body");
+    let escaped = "\u{0001}".repeat(ESCAPED_FIELD_BYTES);
+    record.provider_session_id = Some(escaped.clone());
+    record.branch = Some(escaped.clone());
+    record.agent_type = escaped.clone();
+    record.event_type = escaped.clone();
+    record.role = Some(escaped.clone());
+    record.workspace = Some(escaped.clone());
+    record.cwd = Some(escaped);
+    record.native_event_id = Some(TypedKey::utf8("\u{0002}".repeat(NATIVE_ID_BYTES)).unwrap());
+    record.validate_contract().unwrap();
+    let encoded_core = record.encode_stored().unwrap();
+    let query_metadata =
+        crate::index_document::StoredQueryMetadata::encode(&record, encoded_core.len()).unwrap();
+    assert!(query_metadata.len() > 1024 * 1024);
+    assert!(query_metadata.len() <= encoded_core.len());
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(record.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let indexed = index
+        .event_by_id(record.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(indexed.provider_session_id, record.provider_session_id);
+    assert_eq!(indexed.native_event_id, record.native_event_id);
+    assert_eq!(indexed.cwd, record.cwd);
+}
+
+#[test]
+fn semantic_pairing_many_user_turns_uses_bounded_direct_session_pages() {
+    const TURNS: u64 = 256;
+    const PAIRING_PAGE_ITEMS: usize = 4;
+
+    let temp = tempdir().unwrap();
+    let source = source("many-semantic-turns.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for turn in 0..TURNS {
+        let user_sequence = turn * 2 + 1;
+        writer
+            .add_core_record(document(
+                &source,
+                user_sequence,
+                &format!("question {turn}"),
+            ))
+            .unwrap();
+        let mut assistant = document(&source, user_sequence + 1, &format!("answer {turn}"));
+        assistant.role = Some("assistant".to_owned());
+        writer.add_core_record(assistant).unwrap();
+    }
+    writer
+        .certify_source(certificate(&source, 1, TURNS * 2))
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let anchors = index
+        .core_events_for_session(document(&source, 1, "anchor").session_id.as_uuid())
+        .unwrap()
+        .into_iter()
+        .filter(|record| record.role.as_deref() == Some("user"))
+        .collect::<Vec<_>>();
+    assert_eq!(anchors.len(), TURNS as usize);
+    crate::query::reset_session_event_order_term_visits();
+    for anchor in &anchors {
+        let turn = (anchor.event_sequence - 1) / 2;
+        let paired = index
+            .semantic_lite_turn_assistant(
+                anchor,
+                PAIRING_PAGE_ITEMS,
+                DEFAULT_CORE_EVENT_PAGE_BUDGET,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(paired.0, format!("answer {turn}"));
+    }
+    let term_visits = crate::query::session_event_order_term_visits();
+    assert!(
+        term_visits <= TURNS as usize * PAIRING_PAGE_ITEMS * crate::LEXICAL_SEGMENT_MERGE_FAN_IN,
+        "direct pairing term visits must stay linear in user turns: {term_visits}"
+    );
+    assert!(term_visits < (TURNS * TURNS) as usize);
+}
+
+#[test]
+fn semantic_pairing_crosses_more_than_sixty_four_tool_events_body_free() {
+    const TOOL_EVENTS: u64 = 96;
+
+    let temp = tempdir().unwrap();
+    let source = source("tool-heavy-semantic-turn.jsonl");
+    let user = document(&source, 1, "tool-heavy question");
+    let mut assistant = document(&source, TOOL_EVENTS + 2, "answer beyond old window");
+    assistant.role = Some("assistant".to_owned());
+    let next_user = document(&source, TOOL_EVENTS + 3, "next question");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(user.clone()).unwrap();
+    for sequence in 2..=TOOL_EVENTS + 1 {
+        let mut tool = document(&source, sequence, "large tool body is not hydrated");
+        tool.event_type = "tool_output".to_owned();
+        tool.role = Some("tool".to_owned());
+        writer.add_core_record(tool).unwrap();
+    }
+    writer.add_core_record(assistant.clone()).unwrap();
+    writer.add_core_record(next_user).unwrap();
+    writer
+        .certify_source(certificate(&source, 1, TOOL_EVENTS + 3))
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let anchor = index
+        .core_event_by_id(user.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    crate::query::reset_stored_core_event_record_materializations();
+    crate::query::reset_session_event_order_term_visits();
+    let paired = index
+        .semantic_lite_turn_assistant(&anchor, 64, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(paired.0, "answer beyond old window");
+    assert_eq!(paired.1, assistant.occurred_at_unix_ms.unwrap());
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        1,
+        "tool metadata traversal must hydrate only the paired assistant body"
+    );
+    let term_visits = crate::query::session_event_order_term_visits();
+    assert!(term_visits > 64);
+    assert!(
+        term_visits <= 2 * 64 * crate::LEXICAL_SEGMENT_MERGE_FAN_IN,
+        "tool-heavy pairing must remain page bounded: {term_visits}"
+    );
+}
+
+#[test]
 fn metadata_hot_paths_and_ambiguity_collectors_are_body_free_and_bounded() {
     const EVENT_COUNT: u64 = 64;
     const AMBIGUITY_LIMIT: usize = 2;

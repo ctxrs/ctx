@@ -31,7 +31,9 @@ use uuid::Uuid;
 
 use super::{fields_from_schema, hex, source_token, Fields, IndexError, Result, VerifiedIndex};
 use crate::index_document::{
-    core_content_bytes, SourceEventOrderKey, StoredQueryMetadata, MAX_QUERY_METADATA_BYTES,
+    core_content_bytes, SessionEventOrderKey, SourceEventOrderKey, StoredQueryMetadata,
+    MAX_QUERY_METADATA_BYTES, QUERY_METADATA_CHUNK_HEADER_BYTES, QUERY_METADATA_CHUNK_MAGIC,
+    QUERY_METADATA_CHUNK_PAYLOAD_BYTES,
 };
 
 const ID_PREFIX_MATCH_LIMIT: usize = 2;
@@ -47,12 +49,14 @@ const SOURCE_KEY_FIELD: &str = "source_key";
 const QUERY_METADATA_FIELD: &str = "query_metadata";
 const CORE_CONTENT_BYTES_FIELD: &str = "core_content_bytes";
 const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
+const SESSION_EVENT_ORDER_FIELD: &str = "session_event_order";
 
 #[cfg(test)]
 thread_local! {
     static STORED_EVENT_RECORD_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static STORED_CORE_EVENT_RECORD_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SOURCE_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
+    static SESSION_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -85,8 +89,21 @@ pub(crate) fn source_event_order_term_visits() -> usize {
     SOURCE_EVENT_ORDER_TERM_VISITS.get()
 }
 
+#[cfg(test)]
+pub(crate) fn reset_session_event_order_term_visits() {
+    SESSION_EVENT_ORDER_TERM_VISITS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn session_event_order_term_visits() -> usize {
+    SESSION_EVENT_ORDER_TERM_VISITS.get()
+}
+
 /// Maximum number of complete semantic event records retained in one page.
 pub const MAX_SEMANTIC_EVENT_PAGE_ITEMS: usize = 64;
+
+/// Maximum metadata records retained by one forward semantic pairing page.
+pub const MAX_SEMANTIC_PAIRING_PAGE_ITEMS: usize = 64;
 
 /// Maximum number of complete records retained for one exact source page.
 pub const MAX_SOURCE_EVENT_PAGE_ITEMS: usize = 4_096;
@@ -477,15 +494,75 @@ pub(super) fn stored_event_record(
         .fast_fields()
         .bytes(QUERY_METADATA_FIELD)?
         .ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?;
-    let mut term_ords = column.term_ords(address.doc_id);
-    let term_ord = term_ords
-        .next()
-        .ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?;
-    if term_ords.next().is_some() {
-        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+    let maximum_chunks = MAX_QUERY_METADATA_BYTES.div_ceil(QUERY_METADATA_CHUNK_PAYLOAD_BYTES);
+    let mut encoded = None;
+    let mut seen = Vec::new();
+    let mut expected_chunk_count = None;
+    let mut chunk = Vec::new();
+    for (observed_chunks, term_ord) in column.term_ords(address.doc_id).enumerate() {
+        if observed_chunks >= maximum_chunks {
+            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+        }
+        chunk.clear();
+        if !column.ord_to_bytes(term_ord, &mut chunk)?
+            || chunk.len() < QUERY_METADATA_CHUNK_HEADER_BYTES
+            || chunk[..4] != QUERY_METADATA_CHUNK_MAGIC
+        {
+            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+        }
+        let chunk_index = usize::from(u16::from_be_bytes([chunk[4], chunk[5]]));
+        let chunk_count = usize::from(u16::from_be_bytes([chunk[6], chunk[7]]));
+        let total_bytes = u32::from_be_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]) as usize;
+        let calculated_chunk_count = total_bytes.div_ceil(QUERY_METADATA_CHUNK_PAYLOAD_BYTES);
+        if total_bytes == 0
+            || total_bytes > MAX_QUERY_METADATA_BYTES
+            || chunk_count == 0
+            || chunk_count != calculated_chunk_count
+            || chunk_index >= chunk_count
+        {
+            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+        }
+        match expected_chunk_count {
+            None => {
+                expected_chunk_count = Some(chunk_count);
+                encoded = Some(vec![0_u8; total_bytes]);
+                seen = vec![false; chunk_count];
+            }
+            Some(expected) if expected != chunk_count => {
+                return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+            }
+            Some(_)
+                if encoded
+                    .as_ref()
+                    .is_none_or(|value| value.len() != total_bytes) =>
+            {
+                return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+            }
+            Some(_) => {}
+        }
+        if seen[chunk_index] {
+            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+        }
+        let start = chunk_index
+            .checked_mul(QUERY_METADATA_CHUNK_PAYLOAD_BYTES)
+            .ok_or(IndexError::CountOverflow)?;
+        let end = start
+            .checked_add(chunk.len() - QUERY_METADATA_CHUNK_HEADER_BYTES)
+            .ok_or(IndexError::CountOverflow)?;
+        let expected_end = start
+            .saturating_add(QUERY_METADATA_CHUNK_PAYLOAD_BYTES)
+            .min(total_bytes);
+        if end != expected_end {
+            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
+        }
+        encoded
+            .as_mut()
+            .ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?[start..end]
+            .copy_from_slice(&chunk[QUERY_METADATA_CHUNK_HEADER_BYTES..]);
+        seen[chunk_index] = true;
     }
-    let mut encoded = Vec::new();
-    if !column.ord_to_bytes(term_ord, &mut encoded)? {
+    let encoded = encoded.ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?;
+    if seen.iter().any(|present| !present) {
         return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
     }
     let event = query_metadata_event_record(&encoded)?;
@@ -682,6 +759,12 @@ struct EventAddressCandidate {
     identity_digest: [u8; 32],
     address: DocAddress,
     source_order: Option<SourceEventOrderKey>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionEventAddressCandidate {
+    order: SessionEventOrderKey,
+    address: DocAddress,
 }
 
 impl From<&EventRecord> for SessionRecord {
