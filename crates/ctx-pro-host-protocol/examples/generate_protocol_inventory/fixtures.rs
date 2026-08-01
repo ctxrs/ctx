@@ -1,9 +1,9 @@
 use super::*;
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CoreContent, CoreContentPolicyStatus, EventIdentityInput,
-    NativeItemKey, NativeSessionKey, RepositoryCandidateEvidence, SessionIdentityInput,
-    SourceAnchor, TypedKey, CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION,
-    CORE_RECORD_VERSION,
+    core_record_contract_fingerprint, derive_event_id, derive_session_id, CoreContent,
+    CoreContentPolicyStatus, EventIdentityInput, NativeItemKey, NativeSessionKey,
+    RepositoryCandidateEvidence, SessionIdentityInput, SourceAnchor, TypedKey,
+    CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
 };
 
 pub(super) fn source(lineage: u8) -> SourceKey {
@@ -46,7 +46,7 @@ pub(super) fn head() -> CoreGenerationHead {
         "a".repeat(64),
         4,
         1,
-        "b".repeat(64),
+        core_record_contract_fingerprint(),
         3,
         2,
         "c".repeat(64),
