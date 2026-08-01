@@ -10,7 +10,6 @@ use crate::{
     native_source::NativeSqliteValue,
     provider::{
         native_ingestion::NATIVE_INGESTION_PAGE_MAX_BYTES,
-        provider_path_identity,
         sqlite::{ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists},
     },
     CaptureError, Result,
@@ -25,14 +24,17 @@ mod tests;
 pub(crate) use source_backed::register_source_backed_route;
 
 const FIREBENDER_NATIVE_PARSER_REVISION: u32 = 1;
+const FIREBENDER_SOURCE_IDENTITY_REVISION: u32 = 2;
 const FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES: usize = NATIVE_INGESTION_PAGE_MAX_BYTES;
 const FIREBENDER_PAGE_OVERHEAD_BYTES: usize = 4 * 1024;
 
-#[derive(Debug)]
-struct FirebenderPathIdentity {
-    canonical_database_path: PathBuf,
-    route_identity: String,
-}
+// SHA-256("ctx.firebender.selected-chat-history.default-catalog-lineage.v1").
+// This is the logical discovery slot, not a digest or reversible encoding of
+// the user-specific database path.
+const FIREBENDER_SELECTED_CATALOG_LINEAGE_V1: [u8; 32] = [
+    0xe4, 0x31, 0x55, 0xce, 0xe7, 0x9c, 0x55, 0x3e, 0x4a, 0xb6, 0x4a, 0xc7, 0xca, 0x41, 0xbf, 0x45,
+    0x76, 0xbb, 0x44, 0x68, 0xcf, 0x3e, 0x38, 0xfd, 0x89, 0xa4, 0x30, 0xbb, 0x4a, 0xe9, 0x4f, 0x7f,
+];
 
 #[derive(Debug)]
 struct FirebenderRow {
@@ -59,13 +61,8 @@ impl FirebenderRow {
     }
 }
 
-fn firebender_path_identity(path: &Path) -> Result<FirebenderPathIdentity> {
-    let canonical_database_path = absolute_path(&firebender_chat_history_db_path(path)?)?;
-    let route_identity = provider_path_identity(&canonical_database_path)?;
-    Ok(FirebenderPathIdentity {
-        canonical_database_path,
-        route_identity,
-    })
+fn firebender_database_path(path: &Path) -> Result<PathBuf> {
+    absolute_path(&firebender_chat_history_db_path(path)?)
 }
 
 fn validate_schema(conn: &Connection, _path: &Path) -> Result<()> {

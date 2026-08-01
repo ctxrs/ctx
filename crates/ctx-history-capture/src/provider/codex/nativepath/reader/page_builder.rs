@@ -158,7 +158,11 @@ impl CodexNativeScanner {
         page.next_safe_frontier = self.frontier();
         debug_assert!(page.physical_records <= MAX_CODEX_SOURCE_BACKED_PAGE_RECORDS);
         debug_assert!(page.units() <= MAX_CODEX_PAGE_UNITS);
-        debug_assert!(page.serialized_bytes <= MAX_CODEX_PAGE_BYTES);
+        debug_assert!(
+            page.serialized_bytes <= MAX_CODEX_PAGE_BYTES
+                || (page.source_backed_rows.len() == 1
+                    && page.serialized_bytes <= MAX_CODEX_SOURCE_BACKED_SINGLE_ROW_PAGE_BYTES)
+        );
         self.counters.emitted_pages = self.counters.emitted_pages.saturating_add(1);
         self.counters.peak_page_rows = self.counters.peak_page_rows.max(page.units());
         self.counters.peak_page_bytes = self.counters.peak_page_bytes.max(page.serialized_bytes);

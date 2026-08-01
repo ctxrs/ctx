@@ -186,6 +186,29 @@ mod repository_tests {
             RepositoryAbstentionReason::UnscopedFileActivity
         ));
     }
+
+    #[test]
+    fn cursor_checkpoint_byte_overflow_is_a_typed_capacity_abstention() {
+        let mut projector = projector();
+        projector.remember_tool_context(
+            "oversized-call",
+            CursorToolContextState::Exact(CursorToolContext {
+                command: Some("x".repeat(MAX_CURSOR_CHECKPOINT_BYTES)),
+                declared_workdir: Some("/tmp/project".to_owned()),
+                input_paths: Vec::new(),
+            }),
+        );
+        assert!(projector.tool_contexts.is_empty());
+        assert!(projector.linkage_capacity_exceeded);
+        assert!(encode_cursor_checkpoint(&projector).is_ok());
+
+        let result = r#"{"role":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"oversized-call","content":"exact output"}]}}"#;
+        let annotation = projector.attribution_for_event(&event(result, 2));
+        assert!(has_reason(
+            &annotation,
+            RepositoryAbstentionReason::LinkageCapacityExceeded
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -500,13 +523,13 @@ mod fidelity_identity_tests {
 
     #[test]
     fn cursor_unknown_checkpoint_and_occurrence_overflow_fail_closed() {
-        assert_eq!(projector().provider_checkpoint().unwrap(), None);
+        assert!(projector().provider_checkpoint().unwrap().is_some());
         let unknown_checkpoint = TypedKey::utf8("cursor.unknown-checkpoint").unwrap();
         let checkpoint_error =
-            validate_cursor_provider_checkpoint(Some(&unknown_checkpoint)).unwrap_err();
+            decode_cursor_checkpoint(&unknown_checkpoint, "cursor-fidelity-test").unwrap_err();
         assert!(checkpoint_error
             .to_string()
-            .contains("unexpected provider checkpoint state"));
+            .contains("version is unsupported"));
 
         let native_session_id = "cursor-overflow-test";
         let source = source_key(native_session_id).unwrap();
@@ -521,6 +544,46 @@ mod fidelity_identity_tests {
         assert!(occurrence_error
             .to_string()
             .contains("duplicate event occurrence overflowed"));
+    }
+
+    #[test]
+    fn cursor_append_checkpoint_restores_pending_call_for_suffix_result() {
+        let call = json!({
+            "timestamp": "2026-07-31T12:00:00Z",
+            "role": "assistant",
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "id": "append-call",
+                "name": "run_shell_command",
+                "input": {"command": "git status", "workdir": "/tmp/project"}
+            }]}
+        });
+        let result = json!({
+            "timestamp": "2026-07-31T12:00:01Z",
+            "role": "user",
+            "message": {"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": "append-call",
+                "content": "exact append output"
+            }]}
+        });
+        let mut initial = projector();
+        initial.attribution_for_event(&event(&call, 0));
+        let checkpoint = encode_cursor_checkpoint(&initial).unwrap();
+        let restored = decode_cursor_checkpoint(&checkpoint, &initial.native_session_id).unwrap();
+        let mut appended = projector();
+        appended.tool_contexts = restored.tool_contexts;
+        appended.linkage_capacity_exceeded = restored.linkage_capacity_exceeded;
+
+        let annotation = appended.attribution_for_event(&event(&result, 1));
+        assert!(!annotation.repository_abstentions.iter().any(|abstention| {
+            matches!(
+                abstention.reason,
+                RepositoryAbstentionReason::ProviderOutputUnjoined
+                    | RepositoryAbstentionReason::LinkageCapacityExceeded
+            )
+        }));
+        assert!(appended.tool_contexts.is_empty());
     }
 
     #[test]

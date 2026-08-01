@@ -209,6 +209,7 @@ impl CodexNativeScanner {
         loop {
             let core_is_full = self.active_core_page.as_ref().is_some_and(|page| {
                 page.units() >= MAX_CODEX_PAGE_UNITS
+                    || page.serialized_bytes > MAX_CODEX_PAGE_BYTES
                     || page.physical_records >= MAX_CODEX_SOURCE_BACKED_PAGE_RECORDS
                     || self
                         .offset
@@ -300,7 +301,12 @@ impl CodexNativeScanner {
             let next_bytes = page
                 .serialized_bytes
                 .saturating_add(projection.core_serialized_bytes);
-            if next_units > MAX_CODEX_PAGE_UNITS || next_bytes > MAX_CODEX_PAGE_BYTES {
+            let next_byte_limit = if page.units() == 0 && projection.core_units() == 1 {
+                MAX_CODEX_SOURCE_BACKED_SINGLE_ROW_PAGE_BYTES
+            } else {
+                MAX_CODEX_PAGE_BYTES
+            };
+            if next_units > MAX_CODEX_PAGE_UNITS || next_bytes > next_byte_limit {
                 if page.has_progress() {
                     self.restore(position)?;
                     return self.emit_active_core_page().map(Some);

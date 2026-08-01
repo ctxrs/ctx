@@ -102,15 +102,13 @@ pub(super) struct KiroSourceBackedScan {
 
 pub(super) fn scan_kiro_snapshot(
     connection: &Connection,
-    source_path: &Path,
     source: SourceKey,
     terminal_fence: SqliteSourceEvidence,
     emit: &mut dyn FnMut(Vec<CoreRecord>) -> KiroSourceBackedResultV0<()>,
 ) -> KiroSourceBackedResultV0<KiroSourceBackedScan> {
     let tables = KiroTables::probe(connection)?;
     let schema_evidence = relevant_schema_evidence(connection, tables)?;
-    let indexed_source_path = source_path.display().to_string();
-    let mut scanner = KiroLogicalScan::new(source.clone(), tables, indexed_source_path, emit)?;
+    let mut scanner = KiroLogicalScan::new(source.clone(), tables, emit)?;
     scanner.scan(connection)?;
     let streamed = scanner.finish()?;
     let certificate = SqliteLogicalSnapshot::new(
@@ -291,7 +289,6 @@ struct KiroLogicalScan<'emit> {
     counts: ScannedSourceCounts,
     content_digest: Sha256,
     seen_keys: HashSet<(&'static str, String)>,
-    indexed_source_path: String,
     page: Vec<CoreRecord>,
     emit: &'emit mut dyn FnMut(Vec<CoreRecord>) -> KiroSourceBackedResultV0<()>,
     emitted_pages: u64,
@@ -304,7 +301,6 @@ impl<'emit> KiroLogicalScan<'emit> {
     fn new(
         source: SourceKey,
         tables: KiroTables,
-        indexed_source_path: String,
         emit: &'emit mut dyn FnMut(Vec<CoreRecord>) -> KiroSourceBackedResultV0<()>,
     ) -> KiroSourceBackedResultV0<Self> {
         let mut scan = Self {
@@ -313,7 +309,6 @@ impl<'emit> KiroLogicalScan<'emit> {
             counts: ScannedSourceCounts::default(),
             content_digest: Sha256::new(),
             seen_keys: HashSet::new(),
-            indexed_source_path,
             page: Vec::with_capacity(SOURCE_BACKED_PAGE_ROWS),
             emit,
             emitted_pages: 0,
@@ -405,7 +400,6 @@ impl<'emit> KiroLogicalScan<'emit> {
                     session_id,
                     &row,
                     &provider_session_id,
-                    &self.indexed_source_path,
                     entry,
                     native.event,
                     native.complete_text,
@@ -518,7 +512,6 @@ fn kiro_core_record(
     session_id: StableEntityId,
     row: &KiroConversationRow,
     provider_session_id: &str,
-    _source_path: &str,
     entry: &Value,
     event: super::super::event::KiroNativeEvent,
     complete_text: String,

@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) struct NativeToolCall<'a> {
     pub(super) block: &'a Value,
+    pub(super) block_index: usize,
     pub(super) call_id: Option<&'a str>,
     pub(super) command: Option<String>,
     pub(super) declared_workdir: Option<String>,
@@ -18,13 +19,20 @@ pub(super) struct NativeToolResult<'a> {
     pub(super) running_process_session_id: Option<&'a str>,
 }
 
-pub(super) fn native_tool_call(value: &Value) -> Option<NativeToolCall<'_>> {
+pub(super) fn native_tool_calls(value: &Value) -> Vec<NativeToolCall<'_>> {
     let message = value.get("message").unwrap_or(value);
-    let block = message
-        .get("content")?
-        .as_array()?
-        .iter()
-        .find(|block| block.get("type").and_then(Value::as_str) == Some("toolCall"))?;
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter(|(_, block)| block.get("type").and_then(Value::as_str) == Some("toolCall"))
+        .map(|(block_index, block)| native_tool_call_block(block, block_index))
+        .collect()
+}
+
+fn native_tool_call_block(block: &Value, block_index: usize) -> NativeToolCall<'_> {
     let arguments = block.get("arguments").and_then(Value::as_object);
     let string = |keys: &[&str]| {
         keys.iter()
@@ -55,8 +63,9 @@ pub(super) fn native_tool_call(value: &Value) -> Option<NativeToolCall<'_>> {
             kind,
         })
         .collect();
-    Some(NativeToolCall {
+    NativeToolCall {
         block,
+        block_index,
         call_id: block.get("id").and_then(Value::as_str),
         command,
         declared_workdir,
@@ -64,7 +73,7 @@ pub(super) fn native_tool_call(value: &Value) -> Option<NativeToolCall<'_>> {
         process_session_id: arguments
             .and_then(|arguments| arguments.get("sessionId"))
             .and_then(Value::as_str),
-    })
+    }
 }
 
 pub(super) fn native_tool_result(value: &Value) -> Option<NativeToolResult<'_>> {

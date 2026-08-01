@@ -53,6 +53,11 @@ pub(crate) const MAX_CODEX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(test)]
 pub(crate) const MAX_CODEX_PAGE_ROWS: usize = MAX_CODEX_PAGE_UNITS;
 pub(crate) const MAX_CODEX_PAGE_BYTES: usize = 8 * 1024 * 1024;
+// One source-backed row may retain both decoded text and structured/path data
+// derived from a single 16 MiB provider record. The ordinary page bound is a
+// rollover target; this larger envelope is valid only for a singleton row.
+pub(crate) const MAX_CODEX_SOURCE_BACKED_SINGLE_ROW_PAGE_BYTES: usize =
+    PAGE_FIXED_WIRE_BYTES + (MAX_CODEX_RECORD_BYTES * 2) + (1024 * 1024);
 // These stay wire-identical to provider_sources::ordinary_file so a catalog
 // observation can be certified against identity read from the scanner's handle.
 const ORDINARY_FILE_TOKEN_DOMAIN: &[u8] = b"ctx-ordinary-file-observation-v2\0";

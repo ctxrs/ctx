@@ -160,6 +160,60 @@ fn active_source_family_contract_jsonl_physical_lifecycle_matrix_is_fail_closed(
 }
 
 #[test]
+fn jsonl_page_bytes_are_a_rollover_target_not_a_record_limit() {
+    const PAGE_TARGET_BYTES: usize = 8 * 1024 * 1024;
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("large-events.jsonl");
+    let large_record = vec![b'x'; PAGE_TARGET_BYTES + 1024];
+    let mut contents = large_record.clone();
+    contents.extend_from_slice(b"\nsmall\n");
+    fs::write(&path, contents).unwrap();
+
+    let source = opened(&path);
+    let mut reader = JsonlReader::open(identity(&path), source, None, None).unwrap();
+    let mut first_page = Vec::new();
+    assert!(reader
+        .visit_page(&mut |record| -> crate::Result<()> {
+            first_page.push(record.bytes().len());
+            Ok(())
+        })
+        .unwrap()
+        .is_some());
+    assert_eq!(first_page, vec![large_record.len()]);
+
+    let mut second_page = Vec::new();
+    assert!(reader
+        .visit_page(&mut |record| -> crate::Result<()> {
+            second_page.push(record.bytes().to_vec());
+            Ok(())
+        })
+        .unwrap()
+        .is_some());
+    assert_eq!(second_page, vec![b"small".to_vec()]);
+    assert!(reader
+        .visit_page(&mut |_record| -> crate::Result<()> { Ok(()) })
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn jsonl_record_above_the_sixteen_mib_contract_is_rejected() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("oversized-events.jsonl");
+    let mut contents = vec![b'x'; crate::MAX_PROVIDER_JSONL_LINE_BYTES + 1];
+    contents.push(b'\n');
+    fs::write(&path, contents).unwrap();
+
+    let source = opened(&path);
+    let mut reader = JsonlReader::open(identity(&path), source, None, None).unwrap();
+    let error = reader
+        .visit_page(&mut |_record| -> crate::Result<()> { Ok(()) })
+        .unwrap_err();
+    assert!(error.to_string().contains("JSONL record limit"));
+}
+
+#[test]
 fn active_source_family_contract_jsonl_probe_and_scan_share_one_growing_source() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("events.jsonl");

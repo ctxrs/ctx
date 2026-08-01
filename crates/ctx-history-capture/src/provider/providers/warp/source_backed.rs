@@ -199,7 +199,6 @@ impl ReplacementDocumentTree for WarpReplacementTreeAdapter {
         let terminal = scan_warp_logical_snapshot(
             snapshot.connection().map_err(route_error)?,
             &self.source,
-            self.selection.path(),
             sink,
         )
         .map_err(route_error)?;
@@ -480,15 +479,13 @@ fn observe_warp_task_rows(
 fn scan_warp_logical_snapshot(
     connection: &Connection,
     source: &SourceKey,
-    path: &Path,
     sink: &mut ChangedDocumentSink<'_, '_>,
 ) -> WarpSourceBackedResultV0<DocumentSourceTerminal> {
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
     connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
-    let mut projection =
-        WarpProjectionSink::new(source.clone(), path.to_string_lossy().into_owned(), sink);
+    let mut projection = WarpProjectionSink::new(source.clone(), sink);
     let native_scan = scan_warp_source_backed_connection(connection, &mut projection)?;
     let counts = scan_counts(&native_scan, &projection)?;
     let content_digest = parse_hex_digest(&native_scan.source_integrity_digest)?;
@@ -511,7 +508,6 @@ fn scan_warp_logical_snapshot(
 
 struct WarpProjectionSink<'changed, 'sink, 'writer> {
     source: SourceKey,
-    source_path: String,
     session_lineage: BTreeMap<String, WarpSessionLineage>,
     sink: &'changed mut ChangedDocumentSink<'sink, 'writer>,
     indexed_documents: u64,
@@ -525,14 +521,9 @@ struct WarpSessionLineage {
 }
 
 impl<'changed, 'sink, 'writer> WarpProjectionSink<'changed, 'sink, 'writer> {
-    fn new(
-        source: SourceKey,
-        source_path: String,
-        sink: &'changed mut ChangedDocumentSink<'sink, 'writer>,
-    ) -> Self {
+    fn new(source: SourceKey, sink: &'changed mut ChangedDocumentSink<'sink, 'writer>) -> Self {
         Self {
             source,
-            source_path,
             session_lineage: BTreeMap::new(),
             sink,
             indexed_documents: 0,
@@ -589,8 +580,8 @@ impl WarpNativeSink for WarpProjectionSink<'_, '_, '_> {
                 .ok_or(CaptureError::SystemInvariant(
                     "Warp event has no session lineage",
                 ))?;
-            let document = core_record(&self.source, &self.source_path, lineage, event)
-                .map_err(source_backed_capture_error)?;
+            let document =
+                core_record(&self.source, lineage, event).map_err(source_backed_capture_error)?;
             self.sink
                 .emit_core_record(document)
                 .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
@@ -616,7 +607,6 @@ impl From<WarpNativeSession> for WarpSessionLineage {
 
 fn core_record(
     source: &SourceKey,
-    _source_path: &str,
     lineage: &WarpSessionLineage,
     event: WarpNativeEvent,
 ) -> WarpSourceBackedResultV0<CoreRecord> {

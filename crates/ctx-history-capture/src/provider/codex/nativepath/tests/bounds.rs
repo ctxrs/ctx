@@ -23,6 +23,35 @@ fn retained_rows_stream_in_pages_bounded_by_64_units_and_8_mib() {
 }
 
 #[test]
+fn one_valid_source_backed_record_may_roll_past_the_eight_mib_page_target() {
+    let full_body = format!(
+        "{}codex-full-body-tail",
+        "x".repeat(MAX_CODEX_PAGE_BYTES + 64 * 1024)
+    );
+    let contents = [
+        session_meta("source-backed-full-body-owner"),
+        message("user", &full_body),
+    ]
+    .concat();
+    assert!(contents.len() < MAX_CODEX_RECORD_BYTES);
+    let (_temp, path) = write_source(&contents);
+    let (scan, sink) = scan_collect(discover_one(&path, "source-backed-full-body-owner"), None);
+
+    assert_eq!(sink.rows.len(), 1);
+    assert_eq!(sink.rows[0].lexical_body, full_body);
+    assert!(sink.rows[0].lexical_body.ends_with("codex-full-body-tail"));
+    let oversized_page = sink
+        .pages
+        .iter()
+        .find(|(rows, bytes)| *rows == 1 && *bytes > MAX_CODEX_PAGE_BYTES)
+        .copied()
+        .expect("singleton source-backed page above the rollover target");
+    assert!(oversized_page.1 <= MAX_CODEX_SOURCE_BACKED_SINGLE_ROW_PAGE_BYTES);
+    assert_eq!(scan.counters.retained_records, 1);
+    assert_eq!(scan.counters.rejected_complete_records, 0);
+}
+
+#[test]
 fn records_over_16_mib_are_stream_skipped_without_losing_physical_ordinals() {
     let mut contents = session_meta("oversized-owner");
     contents.push_str(

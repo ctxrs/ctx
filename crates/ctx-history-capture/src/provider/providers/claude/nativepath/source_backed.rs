@@ -7,7 +7,6 @@ use std::{
     sync::Arc,
 };
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CoreRecord, EventIdentityInput,
@@ -53,9 +52,10 @@ const LOGICAL_EVENT_KIND: &str = "claude-event";
 const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v6";
 const PARSER_REVISION: &str = "claude-shared-jsonl-v3";
 const MAX_PENDING_CALLS: usize = 4096;
-const PROJECTOR_CHECKPOINT_VERSION: u32 = 1;
-const PROJECTOR_CHECKPOINT_PREFIX: &str = "claude.projector-checkpoint.v1:";
-const MAX_PROJECTOR_CHECKPOINT_BYTES: usize = 40 * 1024;
+
+mod checkpoint;
+
+use checkpoint::*;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ClaudeJsonlAdapter;
@@ -268,19 +268,22 @@ impl FallbackEventIdentityState {
     }
 }
 
-struct RestoredProjectorCheckpoint {
-    session: ClaudeSessionMetadata,
-    pending_calls: HashMap<String, PendingCallState>,
-    linkage_capacity_exceeded: bool,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProjectorCheckpoint {
-    version: u32,
-    session: ClaudeSessionMetadata,
-    pending_calls: Vec<(String, PendingCallState)>,
-    linkage_capacity_exceeded: bool,
+impl ClaudeProjector {
+    fn remember_pending_call(&mut self, call_id: &str, state: PendingCallState) {
+        if let Some(existing) = self.pending_calls.get_mut(call_id) {
+            *existing = PendingCallState::Ambiguous;
+            return;
+        }
+        if self.pending_calls.len() >= MAX_PENDING_CALLS {
+            self.linkage_capacity_exceeded = true;
+            return;
+        }
+        self.pending_calls.insert(call_id.to_owned(), state);
+        if !projector_checkpoint_fits(self) {
+            self.pending_calls.remove(call_id);
+            self.linkage_capacity_exceeded = true;
+        }
+    }
 }
 
 impl JsonlFamilyProjector for ClaudeProjector {
@@ -345,9 +348,7 @@ impl JsonlFamilyProjector for ClaudeProjector {
                     })
                     .collect();
                 if let Some(call_id) = call.call_id.as_deref().filter(|id| !id.is_empty()) {
-                    remember_pending_call(
-                        &mut self.pending_calls,
-                        &mut self.linkage_capacity_exceeded,
+                    self.remember_pending_call(
                         call_id,
                         PendingCallState::Exact(PendingCall {
                             command: call.command.clone(),
@@ -357,9 +358,8 @@ impl JsonlFamilyProjector for ClaudeProjector {
                     );
                 }
             }
-            let mut outcome_relevant = false;
             if let Some(result) = &row.tool_result {
-                let (context, linkage_abstained) = resolve_pending_call(
+                let (context, _linkage_abstained) = resolve_pending_call(
                     &mut self.pending_calls,
                     result.call_id.as_deref(),
                     self.linkage_capacity_exceeded,
@@ -397,7 +397,6 @@ impl JsonlFamilyProjector for ClaudeProjector {
                             structured_commit_oid: structured_oid,
                             output_repository_path: output_workdir,
                         }) {
-                            outcome_relevant = true;
                             input.provider_native_repository_aliases =
                                 linked.provider_native_repository_aliases;
                             input.outcome_operation_repository_path =
@@ -408,9 +407,6 @@ impl JsonlFamilyProjector for ClaudeProjector {
                             input.outcome_abstentions = linked.abstentions;
                         }
                     }
-                }
-                if !retain_result_event(outcome_relevant, linkage_abstained, result.outcome) {
-                    continue;
                 }
             }
             let fallback_identity = next_fallback_event_identity(
@@ -536,14 +532,6 @@ fn claude_output_outcome(outcome: ClaudeOutputOutcome) -> OutputOutcome {
     }
 }
 
-fn retain_result_event(
-    outcome_relevant: bool,
-    linkage_abstained: bool,
-    outcome: ClaudeOutputOutcome,
-) -> bool {
-    outcome_relevant || linkage_abstained || outcome != ClaudeOutputOutcome::Unknown
-}
-
 fn identities(binding: &Binding) -> Result<Identities> {
     let native_session_key = session_typed_key(&binding.key)?;
     let source = source_key(&binding.key)?;
@@ -658,6 +646,7 @@ fn native_event_typed_key(
     TypedKey::composite(fallback_event_key_parts(fallback_identity)?).map_err(contract)
 }
 
+#[cfg(test)]
 fn remember_pending_call(
     pending_calls: &mut HashMap<String, PendingCallState>,
     linkage_capacity_exceeded: &mut bool,
@@ -840,86 +829,6 @@ fn fallback_event_key_parts(identity: FallbackEventIdentity) -> Result<Vec<Typed
         TypedKey::bytes(identity.digest.to_vec()).map_err(contract)?,
         TypedKey::U64(identity.duplicate_occurrence),
     ])
-}
-
-fn encode_projector_checkpoint(projector: &ClaudeProjector) -> Result<TypedKey> {
-    let mut pending_calls = projector
-        .pending_calls
-        .iter()
-        .map(|(call_id, state)| (call_id.clone(), state.clone()))
-        .collect::<Vec<_>>();
-    pending_calls.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    let bytes = serde_json::to_vec(&ProjectorCheckpoint {
-        version: PROJECTOR_CHECKPOINT_VERSION,
-        session: projector.session.clone(),
-        pending_calls,
-        linkage_capacity_exceeded: projector.linkage_capacity_exceeded,
-    })?;
-    if bytes.len() > MAX_PROJECTOR_CHECKPOINT_BYTES {
-        return Err(CaptureError::InvalidPayload(
-            "Claude projector checkpoint exceeds its bounded encoding".to_owned(),
-        ));
-    }
-    TypedKey::utf8(format!(
-        "{PROJECTOR_CHECKPOINT_PREFIX}{}",
-        BASE64_STANDARD.encode(bytes)
-    ))
-    .map_err(contract)
-}
-
-fn decode_projector_checkpoint(
-    checkpoint: &TypedKey,
-    binding: &Binding,
-) -> Result<RestoredProjectorCheckpoint> {
-    let TypedKey::Utf8(encoded) = checkpoint else {
-        return Err(CaptureError::InvalidPayload(
-            "Claude projector checkpoint is not an opaque string".to_owned(),
-        ));
-    };
-    let encoded = encoded
-        .strip_prefix(PROJECTOR_CHECKPOINT_PREFIX)
-        .ok_or_else(|| {
-            CaptureError::InvalidPayload(
-                "Claude projector checkpoint version is unsupported".to_owned(),
-            )
-        })?;
-    if encoded.len() > MAX_PROJECTOR_CHECKPOINT_BYTES.div_ceil(3) * 4 {
-        return Err(CaptureError::InvalidPayload(
-            "Claude projector checkpoint exceeds its bounded encoding".to_owned(),
-        ));
-    }
-    let bytes = BASE64_STANDARD.decode(encoded).map_err(|_| {
-        CaptureError::InvalidPayload("Claude projector checkpoint is malformed".to_owned())
-    })?;
-    if bytes.len() > MAX_PROJECTOR_CHECKPOINT_BYTES {
-        return Err(CaptureError::InvalidPayload(
-            "Claude projector checkpoint exceeds its bounded encoding".to_owned(),
-        ));
-    }
-    let checkpoint: ProjectorCheckpoint = serde_json::from_slice(&bytes)?;
-    if checkpoint.version != PROJECTOR_CHECKPOINT_VERSION || checkpoint.session.key != binding.key {
-        return Err(CaptureError::InvalidPayload(
-            "Claude projector checkpoint does not match its source binding".to_owned(),
-        ));
-    }
-    if checkpoint.pending_calls.len() > MAX_PENDING_CALLS {
-        return Err(CaptureError::InvalidPayload(
-            "Claude projector checkpoint exceeds its state capacity".to_owned(),
-        ));
-    }
-    let mut pending_calls = HashMap::with_capacity(checkpoint.pending_calls.len());
-    for (call_id, state) in checkpoint.pending_calls {
-        if call_id.is_empty() || pending_calls.insert(call_id, state).is_some() {
-            return Err(CaptureError::InvalidPayload(
-                "Claude projector checkpoint repeats a call identity".to_owned(),
-            ));
-        }
-    }
-    Ok(RestoredProjectorCheckpoint {
-        session: checkpoint.session,
-        pending_calls,
-        linkage_capacity_exceeded: checkpoint.linkage_capacity_exceeded,
-    })
 }
 
 fn lexical_body(row: &ClaudeRetainedRow) -> String {

@@ -9,13 +9,24 @@ impl GeminiRawJson<'_> {
         }
         self.whitespace();
         match self.peek() {
-            Some(b'"') => Ok(GeminiRawOutput {
-                content: GeminiSelectedContent::String {
-                    sha256: self.string(0)?.sha256,
-                },
-                ..GeminiRawOutput::default()
-            }),
-            Some(b'{') => self.output_object(depth.saturating_add(1)),
+            Some(b'"') => {
+                let value = self.string(MAX_PROVIDER_JSONL_LINE_BYTES)?;
+                Ok(GeminiRawOutput {
+                    content: GeminiSelectedContent::String {
+                        value: value.retained,
+                        sha256: value.sha256,
+                    },
+                    ..GeminiRawOutput::default()
+                })
+            }
+            Some(b'{') => {
+                let start = self.offset;
+                let mut output = self.output_object(depth.saturating_add(1))?;
+                if matches!(output.content, GeminiSelectedContent::Absent) {
+                    output.content = structured_content(&self.bytes[start..self.offset])?;
+                }
+                Ok(output)
+            }
             Some(b'n') => {
                 self.consume_literal(b"null")?;
                 Ok(GeminiRawOutput {
@@ -28,10 +39,12 @@ impl GeminiRawJson<'_> {
                 self.skip_value(depth)?;
                 let encoded = &self.bytes[start..self.offset];
                 let mut hasher = Sha256::new();
-                hasher.update(RESULT_UNSUPPORTED_HASH_DOMAIN);
+                hasher.update(RESULT_STRUCTURED_HASH_DOMAIN);
                 hasher.update(encoded);
                 Ok(GeminiRawOutput {
-                    content: GeminiSelectedContent::Unsupported {
+                    content: GeminiSelectedContent::Structured {
+                        value: serde_json::from_slice(encoded)
+                            .map_err(|error| format!("invalid Gemini result value: {error}"))?,
                         sha256: hasher.finalize().into(),
                     },
                     ..GeminiRawOutput::default()
@@ -194,8 +207,11 @@ impl GeminiRawJson<'_> {
     ) -> std::result::Result<GeminiSelectedContent, String> {
         self.whitespace();
         match self.peek() {
-            Some(b'"') => self.string(0).map(|content| GeminiSelectedContent::String {
-                sha256: content.sha256,
+            Some(b'"') => self.string(MAX_PROVIDER_JSONL_LINE_BYTES).map(|content| {
+                GeminiSelectedContent::String {
+                    value: content.retained,
+                    sha256: content.sha256,
+                }
             }),
             Some(b'n') => {
                 self.consume_literal(b"null")?;
@@ -206,9 +222,11 @@ impl GeminiRawJson<'_> {
                 self.skip_value(depth)?;
                 let encoded = &self.bytes[start..self.offset];
                 let mut hasher = Sha256::new();
-                hasher.update(RESULT_UNSUPPORTED_HASH_DOMAIN);
+                hasher.update(RESULT_STRUCTURED_HASH_DOMAIN);
                 hasher.update(encoded);
-                Ok(GeminiSelectedContent::Unsupported {
+                Ok(GeminiSelectedContent::Structured {
+                    value: serde_json::from_slice(encoded)
+                        .map_err(|error| format!("invalid Gemini result value: {error}"))?,
                     sha256: hasher.finalize().into(),
                 })
             }
@@ -528,11 +546,13 @@ pub(super) fn finish_probed_output(
     outer_outcome: &GeminiOutputOutcomeDto,
     result: GeminiRawOutput,
 ) -> ProbedGeminiOutput {
-    let (content_kind, content_sha256) = match result.content {
-        GeminiSelectedContent::String { sha256 } => (b"string".as_slice(), Some(sha256)),
+    let (content_kind, content_sha256) = match &result.content {
+        GeminiSelectedContent::String { sha256, .. } => (b"string".as_slice(), Some(*sha256)),
         GeminiSelectedContent::Absent => (b"absent".as_slice(), None),
         GeminiSelectedContent::Null => (b"null".as_slice(), None),
-        GeminiSelectedContent::Unsupported { sha256 } => (b"unsupported".as_slice(), Some(sha256)),
+        GeminiSelectedContent::Structured { sha256, .. } => {
+            (b"structured".as_slice(), Some(*sha256))
+        }
     };
     let outcome = outer_outcome.combined_metadata(&result.outcome);
     let fallback_identity_sha256 = result_fallback_identity_sha256(
@@ -542,7 +562,14 @@ pub(super) fn finish_probed_output(
         content_kind,
         content_sha256.as_ref(),
     );
+    let result_value = match result.content {
+        GeminiSelectedContent::Absent => None,
+        GeminiSelectedContent::String { value, .. } => Some(Value::String(value)),
+        GeminiSelectedContent::Null => Some(Value::Null),
+        GeminiSelectedContent::Structured { value, .. } => Some(value),
+    };
     ProbedGeminiOutput {
+        result: result_value,
         call_id,
         tool_name,
         command: repository_args.command,
@@ -553,6 +580,17 @@ pub(super) fn finish_probed_output(
         redacted: record_redacted || outer_outcome.redacted_with(&result.outcome),
         fallback_identity_sha256,
     }
+}
+
+fn structured_content(encoded: &[u8]) -> std::result::Result<GeminiSelectedContent, String> {
+    let mut hasher = Sha256::new();
+    hasher.update(RESULT_STRUCTURED_HASH_DOMAIN);
+    hasher.update(encoded);
+    Ok(GeminiSelectedContent::Structured {
+        value: serde_json::from_slice(encoded)
+            .map_err(|error| format!("invalid Gemini result value: {error}"))?,
+        sha256: hasher.finalize().into(),
+    })
 }
 
 pub(super) fn result_fallback_identity_sha256(
@@ -584,6 +622,7 @@ pub(super) fn result_fallback_identity_sha256(
 pub(super) fn result_event_identity(
     native_record_id: Option<&str>,
     output: &ProbedGeminiOutput,
+    output_index: usize,
 ) -> GeminiEventIdentity {
     let fallback = hex_sha256(output.fallback_identity_sha256);
     let identity = if let Some(native_record_id) = native_record_id {
@@ -592,11 +631,11 @@ pub(super) fn result_event_identity(
             |call_id| format!("call:{}:{call_id}", call_id.len()),
         );
         format!(
-            "gemini-result-v1:record:{}:{native_record_id}:subrecord:{subrecord}",
+            "gemini-result-v2:record:{}:{native_record_id}:subrecord:{subrecord}:index:{output_index}",
             native_record_id.len()
         )
     } else {
-        format!("gemini-result-v1:fallback-sha256:{fallback}")
+        format!("gemini-result-v2:fallback-sha256:{fallback}:index:{output_index}")
     };
     GeminiEventIdentity::NativeRecordId(identity)
 }

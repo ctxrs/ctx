@@ -33,7 +33,7 @@ use crate::{
 };
 
 use super::super::{
-    firebender_path_identity, firebender_raw_row_digest, validate_schema, FirebenderRow,
+    firebender_database_path, firebender_raw_row_digest, validate_schema, FirebenderRow,
     FIREBENDER_PAGE_OVERHEAD_BYTES, FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES,
 };
 pub(super) use super::direct_snapshot::{open_database_leaf, OpenDatabaseLeaf};
@@ -644,12 +644,12 @@ fn hash_decoded_row(hasher: &mut Sha256, decoded: &DecodedRow) {
     }
 }
 
-pub(super) fn firebender_database_path_and_source(
+pub(in crate::provider::providers::firebender::native_path) fn firebender_database_path_and_source(
     explicit_path: &Path,
 ) -> FirebenderSourceBackedResult<(PathBuf, SourceKey)> {
-    let identity = firebender_path_identity(explicit_path)?;
-    let source = firebender_source_key(&identity.route_identity)?;
-    Ok((identity.canonical_database_path, source))
+    let database_path = firebender_database_path(explicit_path)?;
+    let source = firebender_source_key()?;
+    Ok((database_path, source))
 }
 
 fn firebender_scan_error(error: FirebenderSourceBackedError) -> SourceBackedRouteError {

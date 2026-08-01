@@ -110,7 +110,6 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
         sink.begin_source(leaf.clone())?;
         let scan = scan_kiro_snapshot(
             database.connection(&path).map_err(route_error)?,
-            &path,
             leaf.clone(),
             authority.opening_evidence.clone(),
             &mut |page| {

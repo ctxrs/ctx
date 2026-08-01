@@ -110,7 +110,10 @@ impl CodexNativeScanner {
                     return Ok(CodexRecordProjection::default());
                 }
                 let row_bytes = built.row.estimated_owned_bytes().unwrap_or(usize::MAX);
-                if row_bytes > MAX_CODEX_PAGE_BYTES.saturating_sub(PAGE_FIXED_WIRE_BYTES) {
+                if row_bytes
+                    > MAX_CODEX_SOURCE_BACKED_SINGLE_ROW_PAGE_BYTES
+                        .saturating_sub(PAGE_FIXED_WIRE_BYTES)
+                {
                     self.reject(false);
                     return Ok(CodexRecordProjection::default());
                 }
@@ -305,7 +308,10 @@ impl CodexNativeScanner {
         let context_mutation = match core_row {
             Some(row) => {
                 let row_bytes = row.estimated_owned_bytes().unwrap_or(usize::MAX);
-                if row_bytes > MAX_CODEX_PAGE_BYTES.saturating_sub(PAGE_FIXED_WIRE_BYTES) {
+                if row_bytes
+                    > MAX_CODEX_SOURCE_BACKED_SINGLE_ROW_PAGE_BYTES
+                        .saturating_sub(PAGE_FIXED_WIRE_BYTES)
+                {
                     self.reject(false);
                     return Ok(CodexRecordProjection::default());
                 }

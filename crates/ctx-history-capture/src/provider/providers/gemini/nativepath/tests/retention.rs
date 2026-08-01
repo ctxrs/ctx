@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn gemini_nativepath_result_only_failure_retains_only_a_sparse_core_diagnostic() {
+fn gemini_nativepath_result_only_failure_retains_exact_result_text() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
     let path = write_transcript(
@@ -33,7 +33,7 @@ fn gemini_nativepath_result_only_failure_retains_only_a_sparse_core_diagnostic()
     assert!(rows[0].preview.is_empty());
     assert!(rows[0].searchable_text.is_empty());
     let serialized = serde_json::to_string(&rows).unwrap();
-    assert!(!serialized.contains("result-only-secret"));
+    assert!(serialized.contains("result-only-secret"));
     assert!(!serialized.contains("failure is excluded too"));
     assert!(!serialized.contains("locator"));
     assert!(!outcome.signals.emitted_zero_rows);
@@ -92,7 +92,7 @@ fn gemini_nativepath_matches_c0_retention_counts_without_header_notices() {
     let path = write_transcript(&root, &baseline);
     let source = rediscover(&root, &path);
     let (baseline_outcome, baseline_rows) = scan_collect(&source, None);
-    assert_eq!(baseline_rows.len(), 17);
+    assert_eq!(baseline_rows.len(), 20);
     assert_eq!(baseline_outcome.metrics.header_records, 1);
     assert_eq!(baseline_outcome.metrics.native_result_records_observed, 3);
     assert_eq!(baseline_outcome.metrics.retained_messages, 11);
@@ -132,7 +132,7 @@ fn gemini_nativepath_matches_c0_retention_counts_without_header_notices() {
     fs::write(&path, jsonl(&output_heavy)).unwrap();
     let source = rediscover(&root, &path);
     let (output_outcome, output_rows) = scan_collect(&source, None);
-    assert_eq!(output_rows.len(), 12);
+    assert_eq!(output_rows.len(), 20);
     assert_eq!(output_outcome.metrics.header_records, 1);
     assert_eq!(output_outcome.metrics.native_result_records_observed, 8);
     assert_eq!(output_outcome.metrics.retained_messages, 4);
@@ -140,7 +140,7 @@ fn gemini_nativepath_matches_c0_retention_counts_without_header_notices() {
     assert_eq!(output_outcome.metrics.retained_notices, 0);
     assert!(output_rows
         .iter()
-        .all(|row| !format!("{row:?}").contains("NATIVEPATH_SYNTHETIC_OUTPUT")));
+        .any(|row| format!("{row:?}").contains("NATIVEPATH_SYNTHETIC_OUTPUT")));
 }
 
 #[test]
@@ -339,7 +339,7 @@ fn gemini_nativepath_streams_local_scale_without_accumulating_rows_or_results() 
             .all(|path| !path.contains("output-only")));
     }
 
-    assert_eq!(retained.len(), PAIRS);
+    assert_eq!(retained.len(), PAIRS * 2);
     assert_eq!(outcome.metrics.retained_tool_calls, PAIRS as u64);
     assert_eq!(outcome.metrics.native_result_records_observed, PAIRS as u64);
     assert!(

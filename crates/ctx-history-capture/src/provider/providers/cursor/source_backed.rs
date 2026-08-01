@@ -44,9 +44,13 @@ const NATIVE_EVENT_LOGICAL_KIND: &str = "cursor.logical-event-v3";
 const LOGICAL_SESSION_KIND: &str = "cursor-session";
 const LOGICAL_EVENT_KIND: &str = "cursor-event";
 const SOURCE_SCHEMA_VARIANT: &str = "cursor-agent-transcript-jsonl-v1";
-const PARSER_REVISION: &str = "cursor-shared-jsonl-v5-complete-logical-occurrence";
+const PARSER_REVISION: &str = "cursor-shared-jsonl-v6-bounded-append-linkage";
 const EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
 const MAX_CURSOR_TOOL_CONTEXTS: usize = 256;
+
+mod checkpoint;
+
+use checkpoint::*;
 
 #[cfg(test)]
 static CURSOR_PROJECTED_RECORDS: AtomicU64 = AtomicU64::new(0);
@@ -216,29 +220,26 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
         checkpoint: Option<&TypedKey>,
         base_event_lookup: Option<BaseEventIdentityLookup>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
-        validate_cursor_provider_checkpoint(checkpoint)?;
         let binding = decode_binding(leaf)?;
         validate_binding(leaf, &binding, source_file.as_ref())?;
         let session_id = session_id(leaf.source(), &binding.native_session_id)?;
+        let restored = checkpoint
+            .map(|checkpoint| decode_cursor_checkpoint(checkpoint, &binding.native_session_id))
+            .transpose()?;
+        let (tool_contexts, linkage_capacity_exceeded) = restored.map_or_else(
+            || (BTreeMap::new(), false),
+            |restored| (restored.tool_contexts, restored.linkage_capacity_exceeded),
+        );
         Ok(Box::new(CursorProjector {
             source: leaf.source().clone(),
             native_session_id: binding.native_session_id,
             session_id,
             repository_attributor: crate::repository_attribution::RepositoryAttributor::default(),
-            tool_contexts: BTreeMap::new(),
-            linkage_capacity_exceeded: false,
+            tool_contexts,
+            linkage_capacity_exceeded,
             event_identities: CursorEventIdentityState::new(base_event_lookup),
         }))
     }
-}
-
-fn validate_cursor_provider_checkpoint(checkpoint: Option<&TypedKey>) -> Result<()> {
-    if checkpoint.is_some() {
-        return Err(CaptureError::InvalidPayload(
-            "Cursor received unexpected provider checkpoint state".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 struct CursorProjector {
@@ -287,14 +288,16 @@ impl CursorLogicalEventIdentity {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CursorToolContext {
     command: Option<String>,
     declared_workdir: Option<String>,
     input_paths: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum CursorToolContextState {
     Exact(CursorToolContext),
     Ambiguous,
@@ -340,9 +343,29 @@ impl JsonlFamilyProjector for CursorProjector {
         }
         Ok(())
     }
+
+    fn provider_checkpoint(&self) -> Result<Option<TypedKey>> {
+        encode_cursor_checkpoint(self).map(Some)
+    }
 }
 
 impl CursorProjector {
+    fn remember_tool_context(&mut self, call_id: &str, state: CursorToolContextState) {
+        if let Some(existing) = self.tool_contexts.get_mut(call_id) {
+            *existing = CursorToolContextState::Ambiguous;
+            return;
+        }
+        if self.tool_contexts.len() >= MAX_CURSOR_TOOL_CONTEXTS {
+            self.linkage_capacity_exceeded = true;
+            return;
+        }
+        self.tool_contexts.insert(call_id.to_owned(), state);
+        if !cursor_checkpoint_fits(self) {
+            self.tool_contexts.remove(call_id);
+            self.linkage_capacity_exceeded = true;
+        }
+    }
+
     fn attribution_for_event(
         &mut self,
         event: &CursorNativeEvent,
@@ -384,19 +407,12 @@ impl CursorProjector {
                     ));
                 }
                 if let Some(call_id) = call_id.as_ref() {
-                    if self.tool_contexts.contains_key(call_id) {
-                        self.tool_contexts
-                            .insert(call_id.clone(), CursorToolContextState::Ambiguous);
-                    } else if self.tool_contexts.len() < MAX_CURSOR_TOOL_CONTEXTS {
-                        let state = if *ambiguous_native_fields {
-                            CursorToolContextState::Ambiguous
-                        } else {
-                            CursorToolContextState::Exact(context)
-                        };
-                        self.tool_contexts.insert(call_id.clone(), state);
+                    let state = if *ambiguous_native_fields {
+                        CursorToolContextState::Ambiguous
                     } else {
-                        self.linkage_capacity_exceeded = true;
-                    }
+                        CursorToolContextState::Exact(context)
+                    };
+                    self.remember_tool_context(call_id, state);
                 } else {
                     adapter_abstentions.push((
                         RepositoryEvidenceKind::ProviderNativeResult,

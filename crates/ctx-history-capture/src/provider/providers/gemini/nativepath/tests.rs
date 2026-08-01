@@ -20,6 +20,7 @@ use super::parser::{
     read_gemini_transcript_pages_from_frontier, reset_gemini_parse_counters, GeminiNativeEventIds,
     MAX_GEMINI_FILE_TOUCHES_PER_EVENT, MAX_GEMINI_FILE_TOUCH_BYTES_PER_EVENT,
     MAX_GEMINI_NATIVE_PAGE_BYTES, MAX_GEMINI_NATIVE_PAGE_RECORDS,
+    MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES,
 };
 use super::source_backed::project_gemini_test_events;
 use crate::{CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES};

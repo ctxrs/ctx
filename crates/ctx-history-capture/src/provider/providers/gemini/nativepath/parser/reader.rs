@@ -171,7 +171,11 @@ impl<'a> GeminiNativePageReader<'a> {
             )))?;
             let too_many_units = next_units > MAX_GEMINI_NATIVE_PAGE_RECORDS;
             let too_many_bytes = next_page_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES;
-            if too_many_units || too_many_bytes {
+            let too_large_for_singleton = next_page_bytes > MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES;
+            if too_many_units
+                || too_large_for_singleton
+                || (too_many_bytes && page.physical_records != 0)
+            {
                 let raw_ordinal = position.raw_ordinal;
                 let byte_start = position.offset;
                 let byte_end_exclusive = self.offset;
@@ -245,7 +249,12 @@ impl<'a> GeminiNativePageReader<'a> {
             );
             debug_assert!(page.physical_records <= MAX_GEMINI_NATIVE_PAGE_RECORDS);
             debug_assert!(page.logical_units <= MAX_GEMINI_NATIVE_PAGE_RECORDS);
-            debug_assert!(page.conservative_serialized_bytes <= MAX_GEMINI_NATIVE_PAGE_BYTES);
+            debug_assert!(
+                page.conservative_serialized_bytes <= MAX_GEMINI_NATIVE_PAGE_BYTES
+                    || (page.physical_records == 1
+                        && page.conservative_serialized_bytes
+                            <= MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES)
+            );
             Ok(Some(page))
         }
     }
@@ -514,13 +523,13 @@ impl<'a> GeminiNativePageReader<'a> {
                     }
                 };
                 for (event, event_bytes) in &decoded.events {
-                    if *event_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES {
+                    if *event_bytes > MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES {
                         return Ok(Some(self.reject_completed_record(
                             byte_start,
                             byte_end_exclusive,
                             format!(
                                 "Gemini retained output diagnostic exceeds the \
-                                 {MAX_GEMINI_NATIVE_PAGE_BYTES} byte page limit"
+                                 {MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES} byte singleton limit"
                             ),
                             record.terminated,
                         )));
@@ -560,12 +569,14 @@ impl<'a> GeminiNativePageReader<'a> {
                                         record.terminated,
                                     )));
                                 }
-                                Ok(event_bytes) if event_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES => {
+                                Ok(event_bytes)
+                                    if event_bytes > MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES =>
+                                {
                                     return Ok(Some(self.reject_completed_record(
                                         byte_start,
                                         byte_end_exclusive,
                                         format!(
-                                            "Gemini retained event exceeds the {MAX_GEMINI_NATIVE_PAGE_BYTES} byte page limit"
+                                            "Gemini retained event exceeds the {MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES} byte singleton limit"
                                         ),
                                         record.terminated,
                                     )));

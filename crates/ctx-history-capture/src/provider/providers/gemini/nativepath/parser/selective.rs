@@ -425,10 +425,12 @@ enum GeminiSelectedContent {
     #[default]
     Absent,
     String {
+        value: String,
         sha256: [u8; 32],
     },
     Null,
-    Unsupported {
+    Structured {
+        value: Value,
         sha256: [u8; 32],
     },
 }
@@ -442,6 +444,7 @@ pub(super) struct GeminiRepositoryArgs {
 }
 
 struct ProbedGeminiOutput {
+    result: Option<Value>,
     call_id: Option<String>,
     tool_name: Option<String>,
     command: Option<String>,
