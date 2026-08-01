@@ -470,7 +470,14 @@ fn codex_provider_identity_stays_complete_while_conflicting_route_abstains() {
             ["provider_native_tool_result"]["result"],
         "https://github.com/other/repository/pull/9"
     );
-    assert!(core.repository_bindings.is_empty());
+    assert_eq!(core.repository_bindings.len(), 1);
+    assert_eq!(
+        core.repository_bindings[0].logical_repository_id,
+        "forge:github.com/other/repository"
+    );
+    assert!(core.repository_bindings[0]
+        .local_root_authorization
+        .is_none());
     assert!(core.repository_vcs_observations.is_empty());
     assert!(core.repository_abstentions.iter().any(|abstention| {
         abstention.reason == RepositoryAbstentionReason::OutcomeRepositoryUnbound

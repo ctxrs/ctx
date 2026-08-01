@@ -181,16 +181,26 @@ fn gemini_nativepath_discovery_handles_large_bounded_directories() {
         fs::write(chats.join(format!("{index:04}.jsonl")), b"{}\n").unwrap();
     }
     #[cfg(target_os = "linux")]
-    let descriptors_before = fs::read_dir("/proc/self/fd").unwrap().count();
+    let descriptors_before = descriptors_open_under(&root);
 
     let discovery = discover_gemini_transcripts(&root).unwrap();
 
     assert_eq!(discovery.transcripts.len(), TRANSCRIPTS);
     #[cfg(target_os = "linux")]
     assert!(
-        fs::read_dir("/proc/self/fd").unwrap().count() <= descriptors_before + 64,
+        descriptors_open_under(&root) <= descriptors_before + 4,
         "the resident Gemini catalog must not retain one descriptor per transcript"
     );
+}
+
+#[cfg(target_os = "linux")]
+fn descriptors_open_under(root: &Path) -> usize {
+    fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| fs::read_link(entry.path()).ok())
+        .filter(|target| target.starts_with(root))
+        .count()
 }
 
 #[test]
