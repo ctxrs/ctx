@@ -47,6 +47,12 @@ pub enum IndexError {
     Tantivy(#[from] tantivy::TantivyError),
     #[error("the lexical index has no ctx generation payload")]
     MissingCommitPayload,
+    #[error("the lexical index has no active generation pointer")]
+    MissingActiveGenerationPointer,
+    #[error("unsupported active generation pointer version {0}")]
+    UnsupportedActiveGenerationPointer(u32),
+    #[error("the active generation pointer is malformed or non-canonical")]
+    InvalidActiveGenerationPointer,
     #[error("unsupported commit payload version {0}")]
     UnsupportedCommitPayload(u32),
     #[error("unsupported generation manifest version {0}")]

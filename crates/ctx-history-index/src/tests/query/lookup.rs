@@ -270,7 +270,7 @@ fn query_metadata_rejects_valid_json_after_equal_sized_chunk_payloads_are_swappe
         forged.add_bytes(fields.query_metadata, &chunk);
     }
     drop(searcher);
-    let directory = DurableMmapDirectory::open(temp.path()).unwrap();
+    let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
     let index = Index::open(directory).unwrap();
     publish_unchecked_generation(
         temp.path(),
@@ -337,7 +337,7 @@ fn query_metadata_tiny_declared_maximum_header_fails_before_exact_allocation() {
     }
     forged.add_bytes(fields.query_metadata, &tiny_header);
     drop(searcher);
-    let directory = DurableMmapDirectory::open(temp.path()).unwrap();
+    let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
     let index = Index::open(directory).unwrap();
     publish_unchecked_generation(
         temp.path(),
@@ -636,7 +636,7 @@ fn metadata_hot_paths_and_ambiguity_collectors_are_body_free_and_bounded() {
 
     crate::query::reset_stored_event_record_materializations();
     crate::query::reset_stored_core_event_record_materializations();
-    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
 
     session_ids.sort();
@@ -753,13 +753,12 @@ fn metadata_hot_paths_and_ambiguity_collectors_are_body_free_and_bounded() {
 }
 
 #[test]
-fn metadata_lookup_does_not_read_or_validate_the_stored_core_body() {
+fn exhaustive_open_rejects_an_unreadable_stored_core_body() {
     use tantivy::schema::Document as _;
 
     let temp = tempdir().unwrap();
     let source = source("body-free-metadata.jsonl");
     let event = document(&source, 1, "metadata survives an unreadable Core body");
-    let event_id = event.event_id;
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(event).unwrap();
@@ -784,7 +783,7 @@ fn metadata_lookup_does_not_read_or_validate_the_stored_core_body() {
     malformed.add_bytes(fields.core_record, b"{");
     drop(searcher);
 
-    let directory = DurableMmapDirectory::open(temp.path()).unwrap();
+    let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
     let index = Index::open(directory).unwrap();
     publish_unchecked_generation(
         temp.path(),
@@ -794,17 +793,10 @@ fn metadata_lookup_does_not_read_or_validate_the_stored_core_body() {
         vec![malformed],
     );
 
-    crate::query::reset_stored_core_event_record_materializations();
-    let verified = VerifiedIndex::open(temp.path()).unwrap();
-    let metadata = verified.event_by_id(event_id.as_uuid()).unwrap().unwrap();
-    assert_eq!(metadata.event_id, event_id);
-    assert_eq!(
-        crate::query::stored_core_event_record_materializations(),
-        0,
-        "generation verification and metadata lookup must not touch Core bodies"
-    );
-    assert!(verified.core_event_by_id(event_id.as_uuid()).is_err());
-    assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
+    assert!(matches!(
+        VerifiedIndex::open(temp.path()),
+        Err(IndexError::CoreRecord(_))
+    ));
 }
 
 #[test]

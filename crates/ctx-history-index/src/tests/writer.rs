@@ -1,6 +1,5 @@
 use super::*;
-use std::{io::Write as _, sync::Arc};
-use tantivy::directory::TerminatingWrite as _;
+use std::sync::Arc;
 
 #[test]
 fn commit_binds_manifest_and_searchable_documents() {
@@ -203,8 +202,9 @@ fn unchanged_commit_returns_the_verified_base_without_republication() {
         .unwrap();
     let initial_receipt = initial.commit(|_| true).unwrap();
 
-    let meta_path = temp.path().join("meta.json");
-    let managed_path = temp.path().join(".managed.json");
+    let active_path = active_generation_path(temp.path());
+    let meta_path = active_path.join("meta.json");
+    let managed_path = active_path.join(".managed.json");
     let manifest_path = manifest_path(temp.path(), &initial_receipt.generation_id);
     let meta_before = fs::read(&meta_path).unwrap();
     let meta_metadata_before = fs::metadata(&meta_path).unwrap();
@@ -335,7 +335,8 @@ fn logical_rescan_retains_nonappendable_source_without_tantivy_artifacts() {
     initial.certify_source(certificate.clone()).unwrap();
     let initial_receipt = initial.commit(|_| true).unwrap();
 
-    let root_files_before = fs::read_dir(temp.path())
+    let active_path = active_generation_path(temp.path());
+    let root_files_before = fs::read_dir(&active_path)
         .unwrap()
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.path().is_file())
@@ -344,7 +345,7 @@ fn logical_rescan_retains_nonappendable_source_without_tantivy_artifacts() {
             (entry.file_name(), fs::read(path).unwrap())
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    let managed_metadata_before = fs::metadata(temp.path().join(".managed.json")).unwrap();
+    let managed_metadata_before = fs::metadata(active_path.join(".managed.json")).unwrap();
 
     let mut retained = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     let constructions = Arc::clone(&retained.index_writer_constructions);
@@ -365,7 +366,7 @@ fn logical_rescan_retains_nonappendable_source_without_tantivy_artifacts() {
         )
         .unwrap();
 
-    let root_files_after = fs::read_dir(temp.path())
+    let root_files_after = fs::read_dir(&active_path)
         .unwrap()
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.path().is_file())
@@ -374,7 +375,7 @@ fn logical_rescan_retains_nonappendable_source_without_tantivy_artifacts() {
             (entry.file_name(), fs::read(path).unwrap())
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    let managed_metadata_after = fs::metadata(temp.path().join(".managed.json")).unwrap();
+    let managed_metadata_after = fs::metadata(active_path.join(".managed.json")).unwrap();
     assert_eq!(constructions.load(Ordering::SeqCst), 0);
     assert_eq!(receipt.generation_id, initial_receipt.generation_id);
     assert_eq!(receipt.opstamp, initial_receipt.opstamp);
@@ -398,7 +399,7 @@ fn logically_identical_one_pass_replacement_is_discarded_without_publication() {
     initial.certify_source(certificate.clone()).unwrap();
     let initial_receipt = initial.commit(|_| true).unwrap();
 
-    let meta_path = temp.path().join("meta.json");
+    let meta_path = active_generation_path(temp.path()).join("meta.json");
     let meta_before = fs::read(&meta_path).unwrap();
     let meta_metadata_before = fs::metadata(&meta_path).unwrap();
     let manifests_before = fs::read_dir(temp.path().join(MANIFEST_DIRECTORY))
@@ -1090,7 +1091,7 @@ fn writer_exposes_the_base_manifest_captured_under_its_lock() {
 }
 
 #[test]
-fn orphaned_managed_files_are_reclaimed_before_exact_noop_without_index_writer() {
+fn orphaned_inactive_generation_is_reclaimed_before_exact_noop_without_index_writer() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -1104,15 +1105,13 @@ fn orphaned_managed_files_are_reclaimed_before_exact_noop_without_index_writer()
     let initial_receipt = initial.commit(|_| true).unwrap();
     let pinned = VerifiedIndex::open(temp.path()).unwrap();
 
-    let orphan_relative =
-        Path::new("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.store");
-    let orphan_path = temp.path().join(orphan_relative);
-    let directory = DurableMmapDirectory::open(temp.path()).unwrap();
-    let index = Index::open(directory).unwrap();
-    let mut orphan = index.directory().open_write(orphan_relative).unwrap();
-    orphan.write_all(b"abandoned candidate segment").unwrap();
-    orphan.terminate().unwrap();
-    drop(index);
+    let orphan_directory = temp
+        .path()
+        .join(INDEX_GENERATIONS_DIRECTORY)
+        .join("generation-00000000000000000000000000000000");
+    fs::create_dir(&orphan_directory).unwrap();
+    let orphan_path = orphan_directory.join("abandoned.store");
+    fs::write(&orphan_path, b"abandoned candidate segment").unwrap();
     assert!(orphan_path.is_file());
 
     let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -1185,7 +1184,7 @@ fn abandoned_publication_reclamation_does_not_construct_index_writer() {
 }
 
 #[test]
-fn lazy_writer_handoff_rejects_a_generation_published_in_the_lock_gap() {
+fn root_writer_lock_closes_the_lazy_writer_handoff_gap() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -1199,30 +1198,38 @@ fn lazy_writer_handoff_rejects_a_generation_published_in_the_lock_gap() {
     initial.commit(|_| true).unwrap();
 
     let mut stale = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    stale.begin_source_append(source.clone()).unwrap();
+    let base = stale.begin_source_append(source.clone()).unwrap().clone();
     let competing_root = temp.path().to_path_buf();
-    let competing_source = source.clone();
     stale.before_writer_handoff = Some(Box::new(move || {
-        let mut competing =
-            GenerationWriter::open(&competing_root, WriterOptions::default()).unwrap();
-        competing.begin_source(competing_source.clone()).unwrap();
-        competing
-            .add_core_record(document(&competing_source, 1, "competing generation"))
-            .unwrap();
-        competing
-            .certify_source(appendable_certificate(&competing_source, 2, 1, 10))
-            .unwrap();
-        competing.commit(|_| true).unwrap();
+        let error = match GenerationWriter::open(&competing_root, WriterOptions::default()) {
+            Ok(_) => panic!("competing writer acquired the root publication lock"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            IndexError::Tantivy(tantivy::TantivyError::LockFailure(_, _))
+        ));
     }));
 
-    let error = stale
-        .add_core_record(document(&source, 2, "stale delta"))
-        .unwrap_err();
-    assert!(matches!(error, IndexError::ConcurrentGenerationChange));
+    stale
+        .add_core_record(document(&source, 2, "serialized delta"))
+        .unwrap();
+    stale
+        .certify_source_append(
+            CertifiedSourceAppend::certify(
+                &base,
+                appendable_certificate(&source, 2, 2, 20),
+                10,
+                [1; 32],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    stale.commit(|_| true).unwrap();
 
     let current = VerifiedIndex::open(temp.path()).unwrap();
-    assert_eq!(current.count_term("competing").unwrap(), 1);
-    assert_eq!(current.count_term("stale").unwrap(), 0);
+    assert_eq!(current.count_term("serialized").unwrap(), 1);
+    assert_eq!(current.document_count(), 2);
 }
 
 #[test]
@@ -1285,7 +1292,7 @@ fn writer_rejects_a_nonempty_payloadless_index() {
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     first.commit(|_| true).unwrap();
 
-    let directory = DurableMmapDirectory::open(temp.path()).unwrap();
+    let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
     let index = Index::open(directory.clone()).unwrap();
     let mut metas = index.load_metas().unwrap();
     metas.payload = None;

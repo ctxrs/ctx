@@ -14,6 +14,7 @@ mod query;
 mod reader;
 mod schema;
 mod staging;
+mod writer_publication;
 mod writer_support;
 
 pub use durable_directory::durable_atomic_replace_file;
@@ -49,9 +50,12 @@ pub use policy::{
 #[cfg(test)]
 pub(crate) use publication::manifest_path;
 pub(crate) use publication::{
-    classify_publication_failure, load_manifest_for_metas, meta_generation, payload_generation_id,
+    create_candidate_generation, load_active_generation_pointer, load_manifest_for_metas,
+    meta_generation, migrate_legacy_generation, open_slot_index, payload_generation_id,
+    publish_active_generation_pointer, reclaim_inactive_generation_directories,
     reclaim_unreferenced_manifests, reconcile_commit_error, searcher_generation, sync_directory,
-    verify_searcher, verify_searcher_structure, write_manifest,
+    sync_generation, verify_searcher, verify_searcher_structure, write_manifest,
+    ActiveGenerationPointer, GenerationSlot, INDEX_GENERATIONS_DIRECTORY,
 };
 pub use query::{
     AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRecord, CoreSemanticEventPage,
@@ -63,9 +67,9 @@ pub use query::{
     MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
 pub use reader::VerifiedIndex;
-pub(crate) use schema::{
-    fields_from_schema, lexical_schema, required_field, validate_schema, Fields,
-};
+#[cfg(test)]
+pub(crate) use schema::required_field;
+pub(crate) use schema::{fields_from_schema, lexical_schema, validate_schema, Fields};
 pub use writer_support::BaseEventIdentityLookup;
 
 use std::{
@@ -89,7 +93,7 @@ use tantivy::{
     indexer::LogMergePolicy,
     query::TermQuery,
     schema::{Field, IndexRecordOption},
-    Index, IndexMeta, IndexSettings, IndexWriter, ReloadPolicy, Searcher, Term,
+    Index, IndexWriter, ReloadPolicy, Searcher, Term,
 };
 use uuid::Uuid;
 
@@ -97,13 +101,15 @@ use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
 use index_document::{core_content_bytes, IndexDocument, IndexSourceFields, SourceToken};
 use staging::{finish_identical_staging, PendingSource as StagedPendingSource, PendingSourceMode};
 use writer_support::{
-    acquire_preflight_writer_lock_with_retry, construct_index_writer_with_retry,
-    reclaim_orphaned_managed_files, ExactReplayInventoryWitness, PendingSource,
+    acquire_generation_writer_lock_with_retry, acquire_preflight_writer_lock_with_retry,
+    construct_index_writer_with_retry, ExactReplayInventoryWitness, PendingSource,
 };
 
 pub struct GenerationWriter {
     root: PathBuf,
     index: Index,
+    active_pointer: Option<ActiveGenerationPointer>,
+    candidate_directory_name: Option<String>,
     preflight_lock: Option<DirectoryLock>,
     writer: Option<IndexWriter<IndexDocument>>,
     writer_options: WriterOptions,
@@ -123,6 +129,12 @@ pub struct GenerationWriter {
     index_writer_constructions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     before_writer_handoff: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(test)]
+    after_candidate_commit: Option<Box<dyn FnOnce(&Path) + Send>>,
+    #[cfg(test)]
+    before_pointer_switch: Option<Box<dyn FnOnce(&Path) + Send>>,
+    #[cfg(test)]
+    after_pointer_switch: Option<Box<dyn FnOnce(&Path) + Send>>,
 }
 
 impl GenerationWriter {
@@ -149,42 +161,58 @@ impl GenerationWriter {
             DurableMmapDirectory::open(&requested_root).map_err(tantivy::TantivyError::from)?;
         let root = directory.root_path().to_path_buf();
         fs::create_dir_all(root.join(MANIFEST_DIRECTORY))?;
-        // Index::create replaces any prior index state. Serialize the initial
-        // exists/create decision under a ctx-owned lock so two first-run
-        // daemons cannot both decide that `meta.json` is absent.
-        let initialization_lock = Lock {
-            filepath: PathBuf::from(".ctx-index-initialization.lock"),
-            is_blocking: true,
+        let generation_writer_lock = Lock {
+            filepath: PathBuf::from(".ctx-generation-writer.lock"),
+            is_blocking: false,
         };
-        let initialization_guard =
-            directory
-                .acquire_lock(&initialization_lock)
-                .map_err(|error| {
-                    tantivy::TantivyError::LockFailure(
-                        error,
-                        Some("failed to acquire ctx index initialization lock".to_owned()),
-                    )
-                })?;
-        let mut index = if Index::exists(&directory).map_err(tantivy::TantivyError::from)? {
-            Index::open(directory.clone())?
+        let preflight_lock =
+            acquire_generation_writer_lock_with_retry(&directory, &generation_writer_lock)?;
+        reclaim_abandoned_atomic_writes(&root)?;
+        reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
+
+        let mut active_pointer = load_active_generation_pointer(&root)?;
+        if active_pointer.is_none()
+            && Index::exists(&directory).map_err(tantivy::TantivyError::from)?
+        {
+            let legacy_lock = acquire_preflight_writer_lock_with_retry(&directory)?;
+            let legacy_index = Index::open(directory.clone())?;
+            analyzer::register_body_analyzer(&legacy_index);
+            validate_schema(&legacy_index.schema())?;
+            let legacy_metas = legacy_index.load_metas()?;
+            if legacy_metas.payload.is_some() {
+                let manifest = load_manifest_for_metas(&root, &legacy_metas)?;
+                active_pointer = Some(migrate_legacy_generation(&root, &legacy_index, &manifest)?);
+            } else if !legacy_metas.segments.is_empty() {
+                return Err(IndexError::UnboundIndexState);
+            }
+            drop(legacy_lock);
+        }
+        reclaim_inactive_generation_directories(&root, active_pointer.as_ref())?;
+        let retained_manifests = active_pointer
+            .iter()
+            .flat_map(|pointer| {
+                std::iter::once(pointer.active()).chain(pointer.previous().into_iter())
+            })
+            .map(|slot| slot.generation_id().to_owned())
+            .collect::<Vec<_>>();
+        reclaim_unreferenced_manifests(&root, &retained_manifests)?;
+
+        let (index, candidate_directory_name) = if let Some(pointer) = &active_pointer {
+            (open_slot_index(&root, pointer.active())?, None)
         } else {
-            Index::create(
-                directory.clone(),
-                lexical_schema(),
-                IndexSettings::default(),
-            )?
+            let candidate = create_candidate_generation(&root, None)?;
+            (candidate.index, Some(candidate.directory_name))
         };
-        analyzer::register_body_analyzer(&index);
-        drop(initialization_guard);
         let fields = fields_from_schema(&index.schema())?;
         validate_schema(&index.schema())?;
-        // Hold Tantivy's real writer lock while capturing and staging against
-        // the base, but defer construction of IndexWriter and its worker/memory
-        // floor until the first actual mutation.
-        let preflight_lock = acquire_preflight_writer_lock_with_retry(&directory)?;
         let base_metas = index.load_metas()?;
         let (base_manifest, base_searcher) = if base_metas.payload.is_some() {
             let manifest = load_manifest_for_metas(&root, &base_metas)?;
+            if let Some(pointer) = &active_pointer {
+                if pointer.active().generation_id() != manifest.generation_id()? {
+                    return Err(IndexError::InvalidActiveGenerationPointer);
+                }
+            }
             let reader = index
                 .reader_builder()
                 .reload_policy(ReloadPolicy::Manual)
@@ -200,15 +228,6 @@ impl GenerationWriter {
         } else {
             return Err(IndexError::UnboundIndexState);
         };
-        // Base verification above and both reclamation paths run while holding
-        // Tantivy's real writer lock. Interrupted publications are safe to
-        // remove only after the visible base has been proven. The managed-file
-        // path remains completely idle for a healthy exact replay.
-        reclaim_abandoned_atomic_writes(&root)?;
-        reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
-        let visible_generation_id = payload_generation_id(&base_metas)?;
-        reclaim_unreferenced_manifests(&root, visible_generation_id.as_deref())?;
-        reclaim_orphaned_managed_files(&mut index, &base_metas)?;
         let mut source_identities = HashMap::new();
         if let Some(manifest) = &base_manifest {
             for source in &manifest.sources {
@@ -231,6 +250,8 @@ impl GenerationWriter {
         Ok(Self {
             root,
             index,
+            active_pointer,
+            candidate_directory_name,
             preflight_lock: Some(preflight_lock),
             writer: None,
             writer_options: WriterOptions {
@@ -253,6 +274,12 @@ impl GenerationWriter {
             index_writer_constructions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             before_writer_handoff: None,
+            #[cfg(test)]
+            after_candidate_commit: None,
+            #[cfg(test)]
+            before_pointer_switch: None,
+            #[cfg(test)]
+            after_pointer_switch: None,
         })
     }
 
@@ -285,59 +312,6 @@ impl GenerationWriter {
         }
         self.complete_inventories.push(inventory);
         Ok(())
-    }
-
-    fn writer_mut(&mut self) -> Result<&mut IndexWriter<IndexDocument>> {
-        if self.writer.is_none() {
-            let preflight_lock = self
-                .preflight_lock
-                .take()
-                .ok_or(IndexError::WriterInvariant(
-                    "missing preflight lock before lazy writer construction",
-                ))?;
-            drop(preflight_lock);
-
-            #[cfg(test)]
-            if let Some(hook) = self.before_writer_handoff.take() {
-                hook();
-            }
-
-            let writer = construct_index_writer_with_retry(&self.index, &self.writer_options)?;
-            #[cfg(test)]
-            self.index_writer_constructions
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let current_metas = self.index.load_metas()?;
-            let expected_generation = self
-                .base_manifest
-                .as_ref()
-                .map(GenerationManifest::generation_id)
-                .transpose()?;
-            let current_generation = payload_generation_id(&current_metas)?;
-            let expected_segments = self
-                .base_searcher
-                .as_ref()
-                .map(searcher_generation)
-                .unwrap_or_default();
-            if current_metas.opstamp != self.base_opstamp
-                || current_generation != expected_generation
-                || meta_generation(&current_metas) != expected_segments
-            {
-                return Err(IndexError::ConcurrentGenerationChange);
-            }
-
-            let mut merge_policy = LogMergePolicy::default();
-            merge_policy.set_min_num_segments(LEXICAL_SEGMENT_MERGE_FAN_IN);
-            writer.set_merge_policy(Box::new(merge_policy));
-
-            // Mutation now owns Tantivy's writer lock. Managed-file garbage
-            // collection is intentionally lazy so a healthy exact replay does
-            // no IndexWriter or segment-inventory work.
-            let _ = writer.garbage_collect_files().wait()?;
-            self.writer = Some(writer);
-        }
-        self.writer.as_mut().ok_or(IndexError::WriterInvariant(
-            "lazy writer construction completed without a writer",
-        ))
     }
 
     fn exact_replay_inventory_witness(&self) -> Result<Option<ExactReplayInventoryWitness<'_>>> {
@@ -777,199 +751,6 @@ impl GenerationWriter {
         }
         self.observed_missing.insert(source, state);
         Ok(false)
-    }
-
-    /// Publishes one atomic lexical generation.
-    ///
-    /// `revalidate` runs after Tantivy has flushed all staged indexing workers
-    /// and immediately before the immutable manifest and `meta.json` commit.
-    pub fn commit<F>(self, revalidate: F) -> Result<CommitReceipt>
-    where
-        F: FnMut(RevalidationTarget<'_>) -> bool,
-    {
-        self.commit_with_complete_inventory_revalidation(revalidate, |_| false)
-    }
-
-    /// Publishes one atomic lexical generation with terminal revalidation for
-    /// each current complete-inventory certificate registered on the writer.
-    ///
-    /// The second callback is a distinct target because an authoritative
-    /// inventory remains meaningful when it contains zero retained sources
-    /// and zero removals.
-    pub fn commit_with_complete_inventory_revalidation<F, I>(
-        mut self,
-        mut revalidate: F,
-        mut revalidate_inventory: I,
-    ) -> Result<CommitReceipt>
-    where
-        F: FnMut(RevalidationTarget<'_>) -> bool,
-        I: FnMut(&CertifiedSourceInventory) -> bool,
-    {
-        if let Some(witness) = self.exact_replay_inventory_witness()? {
-            for certificate in &witness.base.sources {
-                if !revalidate(RevalidationTarget::Source(certificate)) {
-                    return Err(IndexError::SourceInvalidated(
-                        certificate.observation().source().identity().to_string(),
-                    ));
-                }
-            }
-            for inventory in &self.complete_inventories {
-                if !revalidate_inventory(inventory) {
-                    return Err(IndexError::CompleteInventoryInvalidated {
-                        provider: inventory.observation().provider().to_owned(),
-                        authority_namespace: inventory
-                            .observation()
-                            .authority_namespace()
-                            .to_owned(),
-                    });
-                }
-            }
-            return CommitReceipt::from_manifest(self.base_opstamp, witness.base.clone());
-        }
-
-        for pending in self.pending.values() {
-            if pending.certificate.is_none() {
-                return Err(IndexError::SourceNotCertified(
-                    pending.source.identity().to_string(),
-                ));
-            }
-        }
-
-        let manifest = self.next_manifest()?;
-        if let Some(receipt) = finish_identical_staging(
-            &mut self,
-            &manifest,
-            &mut revalidate,
-            &mut revalidate_inventory,
-        )? {
-            return Ok(receipt);
-        }
-
-        self.writer_mut()?;
-        let previous_generation_id = self
-            .base_manifest
-            .as_ref()
-            .map(GenerationManifest::generation_id)
-            .transpose()?;
-        let root = self.root.clone();
-        let mut prepared = self
-            .writer
-            .as_mut()
-            .ok_or(IndexError::WriterInvariant(
-                "mutating commit is missing its lazy writer",
-            ))?
-            .prepare_commit()?;
-        for pending in self.pending.values() {
-            let certificate = pending.certificate.as_ref().ok_or_else(|| {
-                IndexError::SourceNotCertified(pending.source.identity().to_string())
-            })?;
-            if !revalidate(RevalidationTarget::Source(certificate)) {
-                let source = pending.source.identity().to_string();
-                prepared.abort()?;
-                return Err(IndexError::SourceInvalidated(source));
-            }
-        }
-        for removal in self.deletions.values() {
-            if !revalidate(RevalidationTarget::Deletion(removal.deletion())) {
-                let source = removal.source().identity().to_string();
-                prepared.abort()?;
-                return Err(IndexError::SourceInvalidated(source));
-            }
-        }
-        for inventory in &self.complete_inventories {
-            if !revalidate_inventory(inventory) {
-                let error = IndexError::CompleteInventoryInvalidated {
-                    provider: inventory.observation().provider().to_owned(),
-                    authority_namespace: inventory.observation().authority_namespace().to_owned(),
-                };
-                prepared.abort()?;
-                return Err(error);
-            }
-        }
-
-        let generation_id = manifest.generation_id()?;
-        if let Err(error) = write_manifest(&root, &generation_id, &manifest) {
-            let _ = prepared.abort();
-            return Err(error);
-        }
-        let payload = serde_json::to_string(&CommitPayload {
-            version: COMMIT_PAYLOAD_VERSION,
-            generation_id: generation_id.clone(),
-        })?;
-        prepared.set_payload(&payload);
-        let commit_result = prepared.commit();
-        let writer = self.writer.take().ok_or(IndexError::WriterInvariant(
-            "published commit is missing its lazy writer",
-        ))?;
-        if let Err(error) = writer.wait_merging_threads() {
-            return Err(classify_publication_failure(
-                &self.index,
-                &generation_id,
-                previous_generation_id.as_deref(),
-                "merge completion",
-                error,
-            ));
-        }
-        let opstamp = match commit_result {
-            Ok(opstamp) => opstamp,
-            Err(error) => reconcile_commit_error(
-                &self.index,
-                &root,
-                &generation_id,
-                previous_generation_id.as_deref(),
-                error,
-            )?,
-        };
-        if let Err(error) = sync_directory(&root) {
-            return Err(IndexError::CommittedGenerationNeedsRecovery {
-                generation_id,
-                stage: "root durability",
-                detail: error.to_string(),
-            });
-        }
-
-        CommitReceipt::from_manifest(opstamp, manifest)
-    }
-
-    fn next_manifest(&self) -> Result<GenerationManifest> {
-        let mut sources = HashMap::<SourceKey, CertifiedSource>::new();
-        let mut removals = HashMap::<SourceKey, GenerationRemoval>::new();
-        let mut missing_sources = HashMap::<SourceKey, SourceCatalogMissingState>::new();
-        if let Some(base) = &self.base_manifest {
-            for source in &base.sources {
-                sources.insert(source.observation().source().clone(), source.clone());
-            }
-            for removal in &base.removals {
-                removals.insert(removal.source().clone(), removal.clone());
-            }
-            for missing in base.source_catalog().missing_sources() {
-                missing_sources.insert(missing.source().clone(), missing.clone());
-            }
-        }
-        for (source, removal) in &self.deletions {
-            sources.remove(source);
-            removals.insert(source.clone(), removal.clone());
-            missing_sources.remove(source);
-        }
-        for pending in self.pending.values() {
-            let certificate = pending.certificate.as_ref().ok_or_else(|| {
-                IndexError::SourceNotCertified(pending.source.identity().to_string())
-            })?;
-            sources.insert(pending.source.clone(), certificate.clone());
-            removals.remove(&pending.source);
-            missing_sources.remove(&pending.source);
-        }
-        for (source, missing) in &self.observed_missing {
-            missing_sources.insert(source.clone(), missing.clone());
-        }
-        let sources = sources.into_values().collect::<Vec<_>>();
-        let record_aggregates = staging::manifest_record_aggregates(self, &sources)?;
-        GenerationManifest::from_catalog_parts_with_record_aggregates(
-            sources,
-            record_aggregates,
-            removals.into_values().collect(),
-            SourceCatalogCheckpoint::from_missing_sources(missing_sources.into_values().collect())?,
-        )
     }
 }
 

@@ -510,7 +510,7 @@ fn source_event_page_rejects_a_forged_order_size_suffix_before_returning_record(
     forged.add_bytes(fields.source_event_order, &forged_order);
     drop(searcher);
 
-    let directory = DurableMmapDirectory::open(temp.path()).unwrap();
+    let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
     let index = Index::open(directory).unwrap();
     publish_unchecked_generation(
         temp.path(),

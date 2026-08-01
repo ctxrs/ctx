@@ -12,7 +12,10 @@ use records::{
     SessionEventAddressCandidate,
 };
 
-pub(super) use verification::{stored_verification_record, validate_verification_projection};
+pub(super) use verification::{
+    stored_identity_record, stored_verification_record, validate_verification_projection,
+    IdentityFieldRole,
+};
 
 #[cfg(test)]
 use std::cell::{Cell, RefCell};

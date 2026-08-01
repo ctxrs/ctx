@@ -30,6 +30,132 @@ fn failed_final_revalidation_keeps_the_previous_generation() {
 }
 
 #[test]
+fn crash_after_candidate_commit_before_verification_keeps_old_pointer_and_restarts() {
+    let temp = tempdir().unwrap();
+    let source = source("candidate-crash.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "audited baseline"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    let baseline = initial.commit(|_| true).unwrap();
+    let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
+
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    candidate.begin_source(source.clone()).unwrap();
+    candidate
+        .add_core_record(document(&source, 1, "unverified candidate"))
+        .unwrap();
+    candidate
+        .certify_source(certificate(&source, 2, 1))
+        .unwrap();
+    candidate.after_candidate_commit = Some(Box::new(|_| {
+        panic!("simulated process death after candidate meta commit")
+    }));
+    let crash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = candidate.commit(|_| true);
+    }));
+    assert!(crash.is_err());
+    assert_eq!(
+        fs::read(temp.path().join("active-generation.json")).unwrap(),
+        pointer_before
+    );
+    let still_active = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(still_active.generation_id(), baseline.generation_id);
+    assert_eq!(still_active.count_term("baseline").unwrap(), 1);
+    assert_eq!(still_active.count_term("unverified").unwrap(), 0);
+
+    let restarted = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    assert_eq!(
+        restarted.base_manifest().unwrap().generation_id().unwrap(),
+        baseline.generation_id
+    );
+}
+
+#[test]
+fn exact_verification_fault_never_switches_the_active_pointer() {
+    let temp = tempdir().unwrap();
+    let source = source("candidate-verification-fault.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "verified baseline"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    let baseline = initial.commit(|_| true).unwrap();
+    let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
+
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    candidate.begin_source(source.clone()).unwrap();
+    candidate
+        .add_core_record(document(&source, 1, "corrupt candidate"))
+        .unwrap();
+    candidate
+        .certify_source(certificate(&source, 2, 1))
+        .unwrap();
+    candidate.after_candidate_commit = Some(Box::new(|candidate_path| {
+        fs::write(candidate_path.join("meta.json"), b"{").unwrap();
+    }));
+    assert!(candidate.commit(|_| true).is_err());
+    assert_eq!(
+        fs::read(temp.path().join("active-generation.json")).unwrap(),
+        pointer_before
+    );
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        baseline.generation_id
+    );
+    drop(GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap());
+}
+
+#[test]
+fn crash_immediately_after_pointer_switch_reopens_new_and_retains_previous() {
+    let temp = tempdir().unwrap();
+    let source = source("pointer-switch-crash.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "previous generation"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    let baseline = initial.commit(|_| true).unwrap();
+
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    candidate.begin_source(source.clone()).unwrap();
+    candidate
+        .add_core_record(document(&source, 1, "switched generation"))
+        .unwrap();
+    candidate
+        .certify_source(certificate(&source, 2, 1))
+        .unwrap();
+    candidate.after_pointer_switch = Some(Box::new(|_| {
+        panic!("simulated process death after active pointer switch")
+    }));
+    let crash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = candidate.commit(|_| true);
+    }));
+    assert!(crash.is_err());
+
+    let switched = VerifiedIndex::open(temp.path()).unwrap();
+    assert_ne!(switched.generation_id(), baseline.generation_id);
+    assert_eq!(switched.count_term("switched").unwrap(), 1);
+    assert_eq!(switched.count_term("previous").unwrap(), 0);
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pointer.previous().unwrap().generation_id(),
+        baseline.generation_id
+    );
+    let restarted = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    assert_eq!(
+        restarted.base_manifest().unwrap().generation_id().unwrap(),
+        switched.generation_id()
+    );
+}
+
+#[test]
 fn deletion_requires_final_inventory_revalidation() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
@@ -637,13 +763,12 @@ fn verified_generation_rejects_forged_source_ownership() {
 }
 
 #[test]
-fn verified_generation_defers_malformed_stored_core_validation_until_exact_read() {
+fn verified_generation_rejects_malformed_stored_core_during_exhaustive_audit() {
     let temp = tempdir().unwrap();
     let source = source("malformed-core.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
     let event = document(&source, 1, "complete body");
-    let event_id = event.event_id.as_uuid();
     writer.add_core_record(event).unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
     writer.commit(|_| true).unwrap();
@@ -674,10 +799,8 @@ fn verified_generation_defers_malformed_stored_core_validation_until_exact_read(
         vec![forged],
     );
 
-    let verified = VerifiedIndex::open(temp.path()).unwrap();
-    assert!(verified.event_by_id(event_id).unwrap().is_some());
     assert!(matches!(
-        verified.core_event_by_id(event_id),
+        VerifiedIndex::open(temp.path()),
         Err(IndexError::CoreRecord(_))
     ));
 }
@@ -876,7 +999,10 @@ fn one_pass_verifier_matches_reference_for_source_count_corruption() {
         std::mem::discriminant(&reference),
         std::mem::discriminant(&one_pass)
     );
-    assert!(matches!(one_pass, IndexError::SourceCountMismatch { .. }));
+    assert!(matches!(
+        one_pass,
+        IndexError::CoreRecordAggregateCountMismatch { .. }
+    ));
 }
 
 #[test]
