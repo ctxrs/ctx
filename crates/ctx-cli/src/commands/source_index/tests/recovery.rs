@@ -9,7 +9,7 @@ use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext, Ui};
 
 use super::super::{
     search::{render_search_error, MISSING_INDEX_ERROR},
-    shared::{resolve_event, resolve_lookup_for_output, resolve_session},
+    shared::{resolve_core_event, resolve_lookup_for_output, resolve_session},
 };
 use super::*;
 
@@ -61,13 +61,13 @@ fn missing_lookup_machine_errors_keep_exact_bytes_and_no_human_output() {
 
     for (error, expected) in [
         (
-            resolve_event(&index, MISSING_EVENT_ID).unwrap_err(),
-            format!("event {MISSING_EVENT_ID} was not found in the source-backed Core generation"),
+            resolve_core_event(&index, MISSING_EVENT_ID).unwrap_err(),
+            format!("event {MISSING_EVENT_ID} was not found in the Core generation"),
         ),
         (
             resolve_session(&index, MISSING_SESSION_ID).unwrap_err(),
             format!(
-                "session {MISSING_SESSION_ID} was not found in the source-backed Core generation"
+                "session {MISSING_SESSION_ID} was not found in the Core generation"
             ),
         ),
     ] {
@@ -120,7 +120,7 @@ fn show_missing_session_is_titled_actionable_and_preserves_the_requested_id() {
 }
 
 #[test]
-fn locate_missing_event_is_titled_actionable_and_preserves_the_requested_id() {
+fn show_missing_event_is_titled_actionable_and_preserves_the_requested_id() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
     let index = open_index(temp.path()).unwrap();
@@ -128,9 +128,9 @@ fn locate_missing_event_is_titled_actionable_and_preserves_the_requested_id() {
     for width in [32, 48, 80, 100] {
         let (mut ui, captured) = test_ui(width);
         let error = resolve_lookup_for_output(
-            resolve_event(&index, MISSING_EVENT_ID),
+            resolve_core_event(&index, MISSING_EVENT_ID),
             true,
-            r#"ctx search "<query>" --events --verbose"#,
+            r#"ctx search "<query>" --verbose"#,
             &mut ui,
         )
         .unwrap_err();
@@ -143,7 +143,7 @@ fn locate_missing_event_is_titled_actionable_and_preserves_the_requested_id() {
         );
         assert_eq!(rendered.matches(MISSING_EVENT_ID).count(), 1, "{rendered}");
         assert!(
-            rendered.contains("Next\n  ctx search \"<query>\" --events --verbose\n"),
+            rendered.contains("Next\n  ctx search \"<query>\" --verbose\n"),
             "{rendered}"
         );
         assert!(!rendered.contains("source-backed Core"), "{rendered}");

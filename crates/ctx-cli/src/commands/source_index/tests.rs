@@ -3,7 +3,7 @@ mod tests {
     mod semantic_fallback;
 
     use std::{
-        cell::{Cell, RefCell},
+        cell::Cell,
         collections::HashMap,
         fs,
     };
