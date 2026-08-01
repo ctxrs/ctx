@@ -45,7 +45,7 @@ use crate::{
 
 const SOURCE_ANCHOR_KEY: &str = "active-database";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const PARSER_REVISION: &str = "opencode-family-source-backed-v3";
+const PARSER_REVISION: &str = "opencode-family-source-backed-v4-repository-attribution";
 const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
@@ -344,6 +344,7 @@ fn stream_logical_rows(
     let mut rows = statement.query([max_json_bytes])?;
     let mut counts = ScannedSourceCounts::default();
     let mut session_sequences = HashMap::<String, u64>::new();
+    let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
 
     while let Some(row) = rows.next()? {
         let event = decode_source_event_row(row, schema, dialect)?;
@@ -380,6 +381,7 @@ fn stream_logical_rows(
             session_sequences
                 .entry(session.native_identity.clone())
                 .or_default(),
+            &mut repository_attributor,
         )?;
         emit(OpenCodeScanOutput::Document(document))?;
     }

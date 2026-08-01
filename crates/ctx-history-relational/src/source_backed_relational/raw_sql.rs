@@ -7,7 +7,7 @@ use std::{
 
 use rusqlite::{ffi, limits::Limit, types::ValueRef, Connection, ErrorCode};
 
-use super::{RelationalProjectionError, Result};
+use super::{RawSqlSnapshot, RelationalProjectionError, Result};
 
 pub const RAW_SQL_DEFAULT_MAX_ROWS: usize = 100;
 pub const RAW_SQL_MAX_ROWS_CAP: usize = 10_000;
@@ -84,6 +84,7 @@ pub struct RawSqlLimits {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawSqlResult {
+    pub snapshot: Option<RawSqlSnapshot>,
     pub columns: Vec<RawSqlColumn>,
     pub rows: Vec<Vec<RawSqlValue>>,
     pub returned_rows: usize,
@@ -112,10 +113,16 @@ pub(super) fn raw_sql_query_connection(
     }
     validate_raw_sql_options(&options)?;
     validate_raw_sql_statement_bytes(sql, &options)?;
-    reject_sql_tail(conn, sql)?;
     let _limits = RawSqlLimitGuard::apply(conn, &options)?;
+    let started = Instant::now();
+    let _progress = RawSqlProgressGuard::apply(conn, started, options.timeout);
+    reject_sql_tail(conn, sql)
+        .map_err(|error| classify_raw_sql_timeout(error, started, options.timeout))?;
 
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(RelationalProjectionError::from)
+        .map_err(|error| classify_raw_sql_timeout(error, started, options.timeout))?;
     if stmt.parameter_count() > 0 {
         return Err(RelationalProjectionError::RawSqlHasParameters);
     }
@@ -141,10 +148,6 @@ pub(super) fn raw_sql_query_connection(
             name: name.to_owned(),
         })
         .collect::<Vec<_>>();
-    let started = Instant::now();
-    let timeout = options.timeout;
-    let progress_started = started;
-    conn.progress_handler(1_000, Some(move || progress_started.elapsed() >= timeout));
 
     let query_result = (|| -> Result<RawSqlResult> {
         let mut rows = stmt.query([])?;
@@ -169,6 +172,7 @@ pub(super) fn raw_sql_query_connection(
         }
 
         Ok(RawSqlResult {
+            snapshot: None,
             returned_rows: output_rows.len(),
             columns,
             rows: output_rows,
@@ -187,18 +191,41 @@ pub(super) fn raw_sql_query_connection(
         })
     })();
 
-    conn.progress_handler(0, None::<fn() -> bool>);
+    query_result.map_err(|error| classify_raw_sql_timeout(error, started, options.timeout))
+}
 
-    match query_result {
-        Err(RelationalProjectionError::Sql(rusqlite::Error::SqliteFailure(error, _)))
-            if error.code == ErrorCode::OperationInterrupted
-                && started.elapsed() >= options.timeout =>
-        {
-            Err(RelationalProjectionError::RawSqlTimedOut {
-                timeout_ms: duration_ms(options.timeout),
-            })
+fn classify_raw_sql_timeout(
+    error: RelationalProjectionError,
+    started: Instant,
+    timeout: Duration,
+) -> RelationalProjectionError {
+    if matches!(
+        &error,
+        RelationalProjectionError::Sql(rusqlite::Error::SqliteFailure(sqlite, _))
+            if sqlite.code == ErrorCode::OperationInterrupted && started.elapsed() >= timeout
+    ) {
+        RelationalProjectionError::RawSqlTimedOut {
+            timeout_ms: duration_ms(timeout),
         }
-        other => other,
+    } else {
+        error
+    }
+}
+
+struct RawSqlProgressGuard<'a> {
+    conn: &'a Connection,
+}
+
+impl<'a> RawSqlProgressGuard<'a> {
+    fn apply(conn: &'a Connection, started: Instant, timeout: Duration) -> Self {
+        conn.progress_handler(1_000, Some(move || started.elapsed() >= timeout));
+        Self { conn }
+    }
+}
+
+impl Drop for RawSqlProgressGuard<'_> {
+    fn drop(&mut self) {
+        self.conn.progress_handler(0, None::<fn() -> bool>);
     }
 }
 
@@ -281,10 +308,14 @@ impl<'a> RawSqlLimitGuard<'a> {
                 max: RAW_SQL_MAX_SQL_BYTES_CAP,
             }
         })?;
-        let column_limit = i32::try_from(options.max_columns).map_err(|_| {
+        // `max_columns` constrains the public result shape below, after SQLite
+        // has expanded stable views. Keep preparation complexity independently
+        // bounded by the product-wide hard cap so a narrow SELECT over a wider
+        // stable view is not rejected during view expansion.
+        let column_limit = i32::try_from(RAW_SQL_MAX_COLUMNS_CAP).map_err(|_| {
             RelationalProjectionError::RawSqlLimitOutOfRange {
                 field: "max_columns",
-                value: options.max_columns,
+                value: RAW_SQL_MAX_COLUMNS_CAP,
                 min: 1,
                 max: RAW_SQL_MAX_COLUMNS_CAP,
             }
@@ -344,6 +375,11 @@ fn reject_sql_tail(conn: &Connection, sql: &str) -> Result<()> {
         unsafe {
             ffi::sqlite3_finalize(stmt);
         }
+    }
+    if rc == ffi::SQLITE_INTERRUPT {
+        return Err(RelationalProjectionError::Sql(
+            rusqlite::Error::SqliteFailure(ffi::Error::new(rc), None),
+        ));
     }
     if rc != ffi::SQLITE_OK || tail.is_null() {
         return Ok(());

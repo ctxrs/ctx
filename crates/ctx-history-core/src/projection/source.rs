@@ -111,6 +111,16 @@ impl SourceKey {
             && self.identity == other.identity
     }
 
+    /// Classifies an exact descriptor transition within one canonical source.
+    ///
+    /// This is intentionally narrower than `PartialEq`: exact replay is not a
+    /// replacement, and a descriptor from another lineage cannot replace this
+    /// source. Callers must still certify and terminally revalidate the new
+    /// descriptor before publishing it.
+    pub fn is_same_lineage_descriptor_replacement(&self, replacement: &Self) -> bool {
+        self.identity == replacement.identity && !self.exact_descriptor_eq(replacement)
+    }
+
     /// Requires both values to describe the exact same source generation
     /// contract while preserving a distinct error for different lineages.
     pub fn validate_exact_descriptor(&self, other: &Self) -> ProjectionContractResult<()> {

@@ -2,7 +2,13 @@
 mod tests {
     mod semantic_fallback;
 
-    use std::{cell::Cell, collections::HashMap, fs};
+    use std::{
+        cell::Cell,
+        collections::HashMap,
+        fs,
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
 
     use ctx_history_capture::{
         provider_source_for_path, refresh_source_backed_generation,
@@ -18,19 +24,20 @@ mod tests {
         EventSearchFilters, GenerationWriter, IndexError, SessionRecord, WriterOptions,
         LEXICAL_QUERY_LIMITS,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use tempfile::tempdir;
 
     use crate::{
         commands::show::{ShowEventArgs, ShowSessionArgs},
         output::OutputFormat,
         transcript::TranscriptMode,
+        ui::{RenderContext, StreamKind, TestContext, Ui},
         ShowTarget,
     };
 
     use super::*;
     use super::{
-        render::{render_show_document, search_json},
+        render::{render_show_document, search_json, SearchCorePresentation},
         search::{
             core_records_for_search_hits_with_budget, NormalizedSearchQuery, SearchCollection,
             SearchCoreHydrationBudget, SearchCoreHydrationBudgetExceeded,
@@ -40,10 +47,10 @@ mod tests {
         },
         show::{
             canonical_show_output_bytes, core_events_by_ids_with_presentation_limits, event_window,
-            event_window_value, render_event_value, render_event_values, session_json,
-            session_json_with_event_cap, session_transcript_value,
+            event_window_value, mcp_show_session, render_event_value, render_event_values,
+            render_show_error, session_transcript_value, stream_cli_session,
             take_core_presentation_fetch_ids, validate_show_target,
-            EncodedCorePresentationLimitError, SessionJsonOptions,
+            EncodedCorePresentationLimitError,
         },
     };
 
@@ -52,276 +59,7 @@ mod tests {
     const TEST_SESSION_ID: &str = "019fa000-0000-7000-8000-0000000000d1";
     const TEST_QUERY: &str = "pinnedgenerationrouting";
 
-    fn fixture_event(
-        provider: CaptureProvider,
-        source_format: &str,
-        lineage: u8,
-        sequence: u64,
-    ) -> EventRecord {
-        let source = SourceKey::derive(
-            provider.as_str(),
-            source_format,
-            "fixture",
-            1,
-            SourceAnchor::CatalogLineage([lineage; 32]),
-        )
-        .unwrap();
-        let native_session_key = NativeSessionKey::native_id(
-            "session",
-            TypedKey::utf8(format!("fixture-session-{lineage}")).unwrap(),
-        )
-        .unwrap();
-        let session_id = derive_session_id(SessionIdentityInput {
-            source: &source,
-            logical_session_kind: "thread",
-            native_session_key: &native_session_key,
-        })
-        .unwrap();
-        let native_item_key = NativeItemKey::native_id("message", TypedKey::U64(sequence)).unwrap();
-        let event_id = derive_event_id(EventIdentityInput {
-            source: &source,
-            session_id,
-            logical_item_kind: "message",
-            native_item_key: &native_item_key,
-            subrecord_selector: None,
-        })
-        .unwrap();
-        EventRecord {
-            event_id,
-            session_id,
-            parent_session_id: None,
-            root_session_id: session_id,
-            source,
-            provider: provider.as_str().to_owned(),
-            source_format: source_format.to_owned(),
-            provider_session_id: Some(format!("fixture-session-{lineage}")),
-            native_event_id: Some(TypedKey::U64(sequence)),
-            branch: None,
-            agent_type: "primary".to_owned(),
-            is_primary: true,
-            event_sequence: sequence,
-            occurred_at_unix_ms: None,
-            event_type: "message".to_owned(),
-            role: Some("assistant".to_owned()),
-            workspace: None,
-            cwd: None,
-            touched_files: Vec::new(),
-        }
-    }
-
-    fn fixture_core_event(event: &EventRecord, body: impl Into<String>) -> CoreEventRecord {
-        let mut core_record = CoreRecord::new_selected(
-            event.event_id,
-            event.session_id,
-            event.root_session_id,
-            event.source.clone(),
-            event.event_sequence,
-            event.event_type.clone(),
-            event.agent_type.clone(),
-            event.is_primary,
-            "source-index-test-v1",
-            body,
-        )
-        .unwrap();
-        core_record.parent_session_id = event.parent_session_id;
-        core_record.provider_session_id = event.provider_session_id.clone();
-        core_record.native_event_id = event.native_event_id.clone();
-        core_record.occurred_at_unix_ms = event.occurred_at_unix_ms;
-        core_record.role = event.role.clone();
-        core_record.workspace = event.workspace.clone();
-        core_record.branch = event.branch.clone();
-        core_record.cwd = event.cwd.clone();
-        core_record.validate_contract().unwrap();
-        CoreEventRecord {
-            event: event.clone(),
-            core_record,
-        }
-    }
-
-    fn request(refresh: RefreshArg) -> SourceSearchRequest {
-        SourceSearchRequest {
-            query: TEST_QUERY.to_owned(),
-            terms: Vec::new(),
-            limit: 10,
-            provider: Some(CaptureProvider::Codex),
-            history_source: None,
-            provider_key: None,
-            source_id: None,
-            source_format: None,
-            workspace: None,
-            since: None,
-            primary_only: false,
-            include_subagents: false,
-            event_type: None,
-            file: None,
-            session: None,
-            events: false,
-            include_current_session: true,
-            backend: Some(SearchBackendArg::Lexical),
-            semantic_weight: 0.35,
-            semantic_enabled: true,
-            refresh,
-        }
-    }
-
-    fn write_test_generation(data_root: &Path) {
-        let sessions = data_root.join("sessions");
-        let source = sessions.join(format!("rollout-{TEST_SESSION_ID}.jsonl"));
-        fs::create_dir_all(&sessions).unwrap();
-        let records = [
-            json!({
-                "timestamp": "2026-07-28T12:00:00Z",
-                "type": "session_meta",
-                "payload": {
-                    "id": TEST_SESSION_ID,
-                    "timestamp": "2026-07-28T12:00:00Z",
-                    "cwd": "/workspace/pinned",
-                    "originator": "codex_cli_rs",
-                    "cli_version": "0.1.0",
-                    "source": "cli",
-                    "model_provider": "openai"
-                }
-            }),
-            json!({
-                "timestamp": "2026-07-28T12:00:01Z",
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{
-                        "type": "input_text",
-                        "text": format!("{TEST_QUERY} sentinel")
-                    }]
-                }
-            }),
-        ];
-        let body = records
-            .iter()
-            .map(|record| format!("{}\n", serde_json::to_string(record).unwrap()))
-            .collect::<String>();
-        fs::write(source, body).unwrap();
-        let mut registry = SourceBackedProviderRegistry::new();
-        register_landed_source_backed_route(
-            &mut registry,
-            provider_source_for_path(CaptureProvider::Codex, sessions),
-            SourceBackedRouteSelection::ExplicitManual,
-        )
-        .unwrap();
-        refresh_source_backed_generation(
-            index_root(data_root),
-            &registry,
-            WriterOptions::default(),
-        )
-        .unwrap();
-    }
-
-    fn append_fixture_event(data_root: &Path, event: EventRecord, revision: u8) {
-        let source = event.source.clone();
-        let core_record =
-            fixture_core_event(&event, "ambiguous provider session fixture").core_record;
-        let mut writer = GenerationWriter::open(
-            index_root(data_root),
-            WriterOptions {
-                indexer_threads: 1,
-                memory_bytes: 32 * 1024 * 1024,
-            },
-        )
-        .unwrap();
-        writer.begin_source(source.clone()).unwrap();
-        writer.add_core_record(core_record).unwrap();
-        let observation =
-            SourceObservation::new(source, "fixture-revision-v1", vec![revision]).unwrap();
-        writer
-            .certify_source(
-                CertifiedSource::certify(
-                    observation.clone(),
-                    observation,
-                    "fixture-parser-v1",
-                    [revision; 32],
-                    ScannedSourceCounts {
-                        complete_records: 1,
-                        retained_records: 1,
-                        indexed_documents: 1,
-                        certified_bytes: 1,
-                        ..ScannedSourceCounts::default()
-                    },
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        writer.commit(|_| true).unwrap();
-    }
-
-    fn append_fixture_session(data_root: &Path, events: &[CoreEventRecord], revision: u8) {
-        let source = events.first().unwrap().source.clone();
-        assert!(events.iter().all(|event| event.source == source));
-        let mut writer = GenerationWriter::open(
-            index_root(data_root),
-            WriterOptions {
-                indexer_threads: 1,
-                memory_bytes: 32 * 1024 * 1024,
-            },
-        )
-        .unwrap();
-        writer.begin_source(source.clone()).unwrap();
-        for event in events {
-            writer.add_core_record(event.core_record.clone()).unwrap();
-        }
-        let observation =
-            SourceObservation::new(source, "fixture-session-revision-v1", vec![revision]).unwrap();
-        writer
-            .certify_source(
-                CertifiedSource::certify(
-                    observation.clone(),
-                    observation,
-                    "fixture-parser-v1",
-                    [revision; 32],
-                    ScannedSourceCounts {
-                        complete_records: events.len() as u64,
-                        retained_records: events.len() as u64,
-                        indexed_documents: events.len() as u64,
-                        certified_bytes: 1,
-                        ..ScannedSourceCounts::default()
-                    },
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        writer.commit(|_| true).unwrap();
-    }
-
-    fn sorted_json_keys(value: &serde_json::Value) -> Vec<String> {
-        let mut keys = value
-            .as_object()
-            .expect("schema snapshot target must be an object")
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        keys.sort();
-        keys
-    }
-
-    fn show_session_args(id: Option<&str>, provider_session: Option<&str>) -> ShowSessionArgs {
-        ShowSessionArgs {
-            id: id.map(str::to_owned),
-            provider: None,
-            provider_session: provider_session.map(str::to_owned),
-            mode: TranscriptMode::Lite,
-            max_events: None,
-            format: OutputFormat::Json,
-            out: None,
-        }
-    }
-
-    fn show_event_args(id: &str) -> ShowEventArgs {
-        ShowEventArgs {
-            id: id.to_owned(),
-            before: 0,
-            after: 0,
-            window: None,
-            format: OutputFormat::Json,
-        }
-    }
+    include!("tests/fixtures.rs");
 
     #[test]
     fn normalized_query_representation_covers_terms_echo_and_safe_follow_up_arguments() {
@@ -451,7 +189,13 @@ mod tests {
             &index,
             &collection,
             &EventSearchFilters::default(),
-            &HashMap::from([(event_id, core_event)]),
+            &HashMap::from([(
+                event_id,
+                SearchCorePresentation {
+                    record: core_event,
+                    snippet_truncated: false,
+                },
+            )]),
             "existing_generation",
             1,
             std::time::Duration::ZERO,
@@ -561,7 +305,22 @@ mod tests {
             &index,
             &collection,
             &EventSearchFilters::default(),
-            &HashMap::from([(first_id, first_core), (second_id, second_core)]),
+            &HashMap::from([
+                (
+                    first_id,
+                    SearchCorePresentation {
+                        record: first_core,
+                        snippet_truncated: false,
+                    },
+                ),
+                (
+                    second_id,
+                    SearchCorePresentation {
+                        record: second_core,
+                        snippet_truncated: false,
+                    },
+                ),
+            ]),
             "existing_generation",
             1,
             std::time::Duration::ZERO,
@@ -897,12 +656,9 @@ mod tests {
     }
 
     #[test]
-    fn limit_200_search_retains_only_bounded_core_snippet_projections() {
+    fn limit_200_search_retains_compact_query_centered_core_projections() {
         let temp = tempdir().unwrap();
-        let body = format!(
-            "{} {TEST_QUERY}",
-            "🦀".repeat(SEARCH_CORE_BODY_PREFIX_CHARS)
-        );
+        let body = format!("{} {TEST_QUERY}", "🦀".repeat(4_100));
         let body_bytes = body.len();
         let events = (1..=crate::MAX_SEARCH_LIMIT)
             .map(|sequence| {
@@ -932,10 +688,12 @@ mod tests {
         .unwrap();
         assert_eq!(collection.result_window.hits.len(), crate::MAX_SEARCH_LIMIT);
         assert!(!collection.result_window.more_available);
+        let normalized_query = NormalizedSearchQuery::from_request(&source_request);
 
         let core_records = core_records_for_search_hits_with_budget(
             &index,
             &collection.result_window.hits,
+            &normalized_query,
             SEARCH_CORE_HYDRATION_BUDGET,
         )
         .unwrap();
@@ -943,6 +701,7 @@ mod tests {
             .values()
             .map(|record| {
                 record
+                    .record
                     .core_record
                     .content
                     .normalized_body
@@ -950,16 +709,33 @@ mod tests {
                     .map_or(0, String::len)
             })
             .sum::<usize>();
-        assert_eq!(
-            retained_body_bytes, SEARCH_CORE_MAX_RETAINED_BODY_BYTES,
-            "200 maximum-width UTF-8 lookahead prefixes should exactly reach the retained-body budget"
-        );
+        assert!(retained_body_bytes <= SEARCH_CORE_MAX_RETAINED_BODY_BYTES);
         assert!(core_records.values().all(|record| {
-            record.core_record.content.structured_content.is_none()
-                && record.core_record.metadata.is_empty()
-                && record.core_record.repository_bindings.is_empty()
-                && record.core_record.repository_file_observations.is_empty()
-                && record.core_record.repository_vcs_observations.is_empty()
+            let projected = record.record.core_record.content.normalized_body.as_deref();
+            record.snippet_truncated
+                && projected.is_some_and(|projected| {
+                    projected.chars().count() == SEARCH_CORE_BODY_PREFIX_CHARS
+                        && projected.contains(TEST_QUERY)
+                        && projected.len() < body_bytes
+                })
+                && record
+                    .record
+                    .core_record
+                    .content
+                    .structured_content
+                    .is_none()
+                && record.record.core_record.metadata.is_empty()
+                && record.record.core_record.repository_bindings.is_empty()
+                && record
+                    .record
+                    .core_record
+                    .repository_file_observations
+                    .is_empty()
+                && record
+                    .record
+                    .core_record
+                    .repository_vcs_observations
+                    .is_empty()
         }));
 
         let value = search_json(
@@ -977,8 +753,10 @@ mod tests {
         let results = value["results"].as_array().unwrap();
         assert_eq!(results.len(), crate::MAX_SEARCH_LIMIT);
         assert!(results.iter().all(|result| {
-            result["snippet"].as_str().unwrap().chars().count() == 2_048
+            result["snippet"].as_str().unwrap().chars().count() == SEARCH_CORE_BODY_PREFIX_CHARS
+                && result["snippet"].as_str().unwrap().contains(TEST_QUERY)
                 && result["snippet_truncated"] == true
+                && result["snippet_max_chars"] == SEARCH_CORE_BODY_PREFIX_CHARS
         }));
         assert_eq!(value["result_window"]["returned"], crate::MAX_SEARCH_LIMIT);
         assert_eq!(value["result_window"]["more_available"], false);
@@ -986,6 +764,7 @@ mod tests {
         let decode_error = core_records_for_search_hits_with_budget(
             &index,
             &collection.result_window.hits,
+            &normalized_query,
             SearchCoreHydrationBudget {
                 maximum_encoded_core_bytes: SEARCH_CORE_HYDRATION_BUDGET.maximum_encoded_core_bytes,
                 maximum_content_bytes: body_bytes.checked_mul(crate::MAX_SEARCH_LIMIT).unwrap() - 1,
@@ -1006,8 +785,9 @@ mod tests {
         let retention_error = core_records_for_search_hits_with_budget(
             &index,
             &collection.result_window.hits,
+            &normalized_query,
             SearchCoreHydrationBudget {
-                maximum_retained_body_bytes: SEARCH_CORE_MAX_RETAINED_BODY_BYTES - 1,
+                maximum_retained_body_bytes: retained_body_bytes - 1,
                 ..SEARCH_CORE_HYDRATION_BUDGET
             },
         )
@@ -1016,10 +796,7 @@ mod tests {
             .downcast_ref::<SearchCoreHydrationBudgetExceeded>()
             .expect("aggregate retention failure must stay typed");
         assert_eq!(typed.stage, SearchCoreHydrationBudgetStage::Retention);
-        assert_eq!(
-            typed.retained_body_bytes,
-            SEARCH_CORE_MAX_RETAINED_BODY_BYTES
-        );
+        assert_eq!(typed.retained_body_bytes, retained_body_bytes);
     }
 
     #[test]
@@ -1235,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_show_selects_session_prefix_and_event_window_before_core_bodies() {
+    fn bounded_mcp_show_returns_prefix_and_event_window_stays_body_bounded() {
         let temp = tempdir().unwrap();
         write_test_generation(temp.path());
         let first = fixture_core_event(
@@ -1250,16 +1027,13 @@ mod tests {
         let index = open_index(temp.path()).unwrap();
         let session = SessionRecord::from(&first.event);
 
-        take_core_presentation_fetch_ids();
-        let session_value = session_json(
-            &index,
-            &session,
-            SessionJsonOptions {
-                mode: TranscriptMode::Log,
-                format: OutputFormat::Json,
-                max_events: Some(1),
-                output_limit_bytes: 2 * 1024,
-            },
+        let session_value = mcp_show_session(
+            temp.path(),
+            &session.session_id.as_uuid().to_string(),
+            TranscriptMode::Log,
+            1,
+            None,
+            4 * 1024,
         )
         .unwrap();
         assert_eq!(session_value["events"].as_array().unwrap().len(), 1);
@@ -1267,12 +1041,7 @@ mod tests {
             session_value["events"][0]["ctx_event_id"],
             first.event_id.as_uuid().to_string()
         );
-        assert_eq!(session_value["truncated"]["max_events"], 1);
-        assert_eq!(
-            take_core_presentation_fetch_ids(),
-            vec![first.event_id.as_uuid()],
-            "the nonselected large session body must never be requested for Core decode"
-        );
+        assert_eq!(session_value["pagination"]["has_more"], true);
 
         take_core_presentation_fetch_ids();
         let window = event_window(&index, &first, 0, 0, None, 2 * 1024).unwrap();
@@ -1282,47 +1051,6 @@ mod tests {
             take_core_presentation_fetch_ids(),
             vec![first.event_id.as_uuid()],
             "the nonselected large window body must never be requested for Core decode"
-        );
-    }
-
-    #[test]
-    fn bounded_show_clamps_an_explicit_overlarge_max_to_the_absolute_cli_cap() {
-        assert_eq!(
-            ctx_history_index::MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS - 1,
-            4_096
-        );
-        let temp = tempdir().unwrap();
-        write_test_generation(temp.path());
-        let first = fixture_core_event(
-            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 73, 1),
-            "first bounded body",
-        );
-        let nonselected = fixture_core_event(
-            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 73, 2),
-            "second nonselected body",
-        );
-        append_fixture_session(temp.path(), &[first.clone(), nonselected], 73);
-        let index = open_index(temp.path()).unwrap();
-        let session = SessionRecord::from(&first.event);
-
-        take_core_presentation_fetch_ids();
-        let value = session_json_with_event_cap(
-            &index,
-            &session,
-            SessionJsonOptions {
-                mode: TranscriptMode::Log,
-                format: OutputFormat::Json,
-                max_events: Some(usize::MAX),
-                output_limit_bytes: 2 * 1024,
-            },
-            1,
-        )
-        .unwrap();
-        assert_eq!(value["events"].as_array().unwrap().len(), 1);
-        assert_eq!(value["truncated"]["max_events"], 1);
-        assert_eq!(
-            take_core_presentation_fetch_ids(),
-            vec![first.event_id.as_uuid()]
         );
     }
 
@@ -1339,19 +1067,32 @@ mod tests {
             format!("SELECTED-LARGE-{}", "y".repeat(8 * 1024)),
         );
         append_fixture_session(temp.path(), &[first.clone(), oversized.clone()], 71);
-        let index = open_index(temp.path()).unwrap();
         let session = SessionRecord::from(&first.event);
 
+        let first_page = mcp_show_session(
+            temp.path(),
+            &session.session_id.as_uuid().to_string(),
+            TranscriptMode::Log,
+            2,
+            None,
+            4 * 1024,
+        )
+        .unwrap();
+        assert_eq!(first_page["pagination"]["returned"], 1);
+        assert_eq!(first_page["pagination"]["has_more"], true);
+        let cursor = first_page["pagination"]["next_cursor"]
+            .as_str()
+            .expect("the bounded prefix should include a continuation cursor")
+            .to_owned();
+
         for error in (0..2).map(|_| {
-            session_json(
-                &index,
-                &session,
-                SessionJsonOptions {
-                    mode: TranscriptMode::Log,
-                    format: OutputFormat::Json,
-                    max_events: Some(2),
-                    output_limit_bytes: 2 * 1024,
-                },
+            mcp_show_session(
+                temp.path(),
+                &session.session_id.as_uuid().to_string(),
+                TranscriptMode::Log,
+                2,
+                Some(&cursor),
+                4 * 1024,
             )
             .unwrap_err()
         }) {
@@ -1359,7 +1100,7 @@ mod tests {
                 .downcast_ref::<crate::presentation_limit::PresentationOutputLimitError>()
                 .expect("oversized selected Core body should preserve the presentation error");
             assert_eq!(typed.event_id, oversized.event_id.as_uuid());
-            assert_eq!(typed.maximum_bytes, 2 * 1024);
+            assert_eq!(typed.maximum_bytes, 4 * 1024);
             assert!(typed.actual_bytes > typed.maximum_bytes);
         }
     }
@@ -1406,6 +1147,203 @@ mod tests {
         assert_eq!(typed.event_id, second.event_id.as_uuid());
         assert_eq!(typed.actual_bytes, cumulative_encoded_bytes);
         assert_eq!(typed.maximum_bytes, encoded_limit);
+    }
+
+    #[test]
+    fn unbounded_cli_show_streams_valid_json_beyond_4096_events_in_order() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let events = (1..=4_105)
+            .map(|sequence| {
+                let event =
+                    fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 74, sequence);
+                fixture_core_event(&event, format!("huge-event-{sequence}"))
+            })
+            .collect::<Vec<_>>();
+        append_fixture_session(temp.path(), &events, 74);
+        let index = open_index(temp.path()).unwrap();
+        let session = SessionRecord::from(&events[0].event);
+        let (mut ui, stdout) = test_ui();
+
+        let result = stream_cli_session(
+            &index,
+            &session,
+            TranscriptMode::Log,
+            OutputFormat::Json,
+            None,
+            None,
+            &mut ui,
+        )
+        .unwrap();
+        ui.flush().unwrap();
+
+        assert_eq!(result.events_returned, 4_105);
+        let transcript: Value = serde_json::from_slice(&stdout.bytes()).unwrap();
+        let rendered = transcript["events"].as_array().unwrap();
+        assert_eq!(rendered.len(), 4_105);
+        assert_eq!(rendered[0]["text"], "huge-event-1");
+        assert_eq!(rendered[4_104]["text"], "huge-event-4105");
+        assert!(transcript.get("truncated").is_none());
+    }
+
+    #[test]
+    fn max_events_does_not_claim_truncation_for_only_filtered_raw_events() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let events = (1..=205)
+            .map(|sequence| {
+                let mut event =
+                    fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 75, sequence);
+                if sequence == 1 {
+                    event.role = Some("user".to_owned());
+                } else {
+                    event.event_type = "tool_call".to_owned();
+                }
+                fixture_core_event(&event, format!("filtered-event-{sequence}"))
+            })
+            .collect::<Vec<_>>();
+        append_fixture_session(temp.path(), &events, 75);
+        let index = open_index(temp.path()).unwrap();
+        let session = SessionRecord::from(&events[0].event);
+        let (mut ui, stdout) = test_ui();
+
+        let result = stream_cli_session(
+            &index,
+            &session,
+            TranscriptMode::Full,
+            OutputFormat::Json,
+            Some(1),
+            None,
+            &mut ui,
+        )
+        .unwrap();
+        ui.flush().unwrap();
+
+        assert_eq!(result.events_returned, 1);
+        let transcript: Value = serde_json::from_slice(&stdout.bytes()).unwrap();
+        assert_eq!(transcript["events"].as_array().unwrap().len(), 1);
+        assert!(transcript.get("truncated").is_none(), "{transcript:#}");
+    }
+
+    #[test]
+    fn lite_selection_carries_the_pending_assistant_across_a_page_boundary() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let events = (1..=202)
+            .map(|sequence| {
+                let mut event =
+                    fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 76, sequence);
+                match sequence {
+                    1 | 202 => event.role = Some("user".to_owned()),
+                    201 => event.event_type = "tool_call".to_owned(),
+                    _ => {}
+                }
+                fixture_core_event(&event, format!("lite-event-{sequence}"))
+            })
+            .collect::<Vec<_>>();
+        append_fixture_session(temp.path(), &events, 76);
+        let index = open_index(temp.path()).unwrap();
+        let session = SessionRecord::from(&events[0].event);
+        let (mut ui, stdout) = test_ui();
+
+        stream_cli_session(
+            &index,
+            &session,
+            TranscriptMode::Lite,
+            OutputFormat::Jsonl,
+            None,
+            None,
+            &mut ui,
+        )
+        .unwrap();
+        ui.flush().unwrap();
+
+        let lines = stdout
+            .bytes()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 4, "three events plus completion metadata");
+        assert_eq!(lines[0]["event"]["text"], "lite-event-1");
+        assert_eq!(lines[1]["event"]["text"], "lite-event-200");
+        assert_eq!(lines[2]["event"]["text"], "lite-event-202");
+        assert_eq!(lines[3]["payload_type"], "session_transcript_completion");
+        assert_eq!(lines[3]["complete"], true);
+    }
+
+    #[test]
+    fn mcp_show_session_continues_selected_events_without_overlap() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let events = (1..=5)
+            .map(|sequence| {
+                let event =
+                    fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 77, sequence);
+                fixture_core_event(&event, format!("mcp-page-event-{sequence}"))
+            })
+            .collect::<Vec<_>>();
+        append_fixture_session(temp.path(), &events, 77);
+        let session_id = events[0].session_id.as_uuid().to_string();
+
+        let first = mcp_show_session(
+            temp.path(),
+            &session_id,
+            TranscriptMode::Log,
+            2,
+            None,
+            crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(first["pagination"]["limit"], 2);
+        assert_eq!(first["pagination"]["returned"], 2);
+        assert_eq!(first["pagination"]["has_more"], true);
+        assert_eq!(first["events"][0]["text"], "mcp-page-event-1");
+        assert_eq!(first["events"][1]["text"], "mcp-page-event-2");
+        let first_cursor = first["pagination"]["next_cursor"].as_str().unwrap();
+
+        let second = mcp_show_session(
+            temp.path(),
+            &session_id,
+            TranscriptMode::Log,
+            2,
+            Some(first_cursor),
+            crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(second["pagination"]["returned"], 2);
+        assert_eq!(second["pagination"]["has_more"], true);
+        assert_eq!(second["events"][0]["text"], "mcp-page-event-3");
+        assert_eq!(second["events"][1]["text"], "mcp-page-event-4");
+        let second_cursor = second["pagination"]["next_cursor"].as_str().unwrap();
+
+        let terminal = mcp_show_session(
+            temp.path(),
+            &session_id,
+            TranscriptMode::Log,
+            2,
+            Some(second_cursor),
+            crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(terminal["pagination"]["returned"], 1);
+        assert_eq!(terminal["pagination"]["has_more"], false);
+        assert!(terminal["pagination"]["next_cursor"].is_null());
+        assert_eq!(terminal["events"][0]["text"], "mcp-page-event-5");
+
+        let malformed = mcp_show_session(
+            temp.path(),
+            &session_id,
+            TranscriptMode::Log,
+            2,
+            Some("not-a-valid-cursor"),
+            crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            malformed.downcast_ref::<IndexError>(),
+            Some(IndexError::InvalidSessionEventCursorCoordinate)
+        ));
     }
 
     #[test]

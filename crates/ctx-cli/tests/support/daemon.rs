@@ -88,6 +88,23 @@ pub(crate) fn wait_for_test_daemon_source_refresh(temp: &TempDir) {
     }
 }
 
+pub(crate) fn wait_for_test_lexical_projection(temp: &TempDir, generation: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = json_output(ctx(temp).args(["status", "--format=json"]));
+        if status["lexical"]["status"] == "ready"
+            && status["lexical"]["generation_id"] == generation
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for lexical projection at generation {generation}: {status:#}"
+        );
+        thread::sleep(DAEMON_STOP_POLL_INTERVAL);
+    }
+}
+
 pub(crate) fn wait_for_test_relational_projection(temp: &TempDir, generation: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {

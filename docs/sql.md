@@ -10,10 +10,16 @@ generation, refresh provider history, import files, return Core event bodies,
 or populate the projection. Run `ctx setup` or `ctx import` when you need
 history rows or daemon-owned projection maintenance.
 
-When an active Core generation exists, SQL admits only a ready relational
-projection bound to that exact generation. When Core is absent, only the
-canonical empty projection is accepted; a populated or generation-bound
-projection fails closed instead of exposing stale rows.
+When an active Core generation exists, SQL uses the latest coherent relational
+projection. Core may already be newer, or a later catch-up may have failed:
+that published projection remains queryable, and JSON results report the
+relational generation, the observed Core generation, `stale: true`, and a
+projection status of `ready` or `behind`. A `behind` projection contains the
+complete prior generation, never partially updated rows. Each invocation pins
+one internally consistent SQLite read transaction; a later invocation may
+observe a newer coherent projection. When Core is absent, only the canonical
+empty projection is accepted; a populated or generation-bound projection fails
+closed.
 
 The projection contains metadata only. It does not store event bodies,
 previews, command or result payloads, structured content, or transcript text.
@@ -270,6 +276,10 @@ Formats:
 - no query parameters;
 - default row, column, SQL byte, and value byte caps;
 - a timeout for long-running queries.
+
+`--max-columns` limits the final selected result columns. SQLite view expansion
+uses the separate fixed product cap, so a two-column query over wider stable
+views does not fail merely because those views expose more than two columns.
 
 Increase limits only when a local script needs them:
 

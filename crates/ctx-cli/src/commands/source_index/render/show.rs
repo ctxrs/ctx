@@ -12,37 +12,89 @@ pub(in crate::commands::source_index) fn render_show_document(
     value: &Value,
     context: &RenderContext,
 ) -> Document {
+    match value["_stream_part"].as_str() {
+        Some("session_header") => return render_session_header_document(value, context),
+        Some("session_event") => {
+            let position = value["position"]
+                .as_u64()
+                .and_then(|position| usize::try_from(position).ok())
+                .unwrap_or(1);
+            return render_session_event_document(&value["event"], context, position);
+        }
+        Some("session_empty") => return render_session_empty_document(),
+        Some("session_truncated") => {
+            return render_session_truncated_document(value["max_events"].as_u64(), context);
+        }
+        _ => {}
+    }
     let mut document = Document::new();
     if value["target"].as_str() == Some("session") {
-        render_session_header(&mut document, context, value);
+        document.append(render_session_header_document(value, context));
     } else {
         render_event_header(&mut document, context, value);
     }
 
     let events = value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     if events.is_empty() {
-        document.push_blank();
-        push_heading(&mut document, "No transcript events.", Token::Warning);
+        document.append(render_session_empty_document());
         return document;
     }
 
     for (position, event) in events.iter().enumerate() {
-        document.push_blank();
-        render_event(&mut document, context, position + 1, event);
+        document.append(render_session_event_document(event, context, position + 1));
     }
 
     if value.get("truncated").is_some_and(Value::is_object) {
-        document.push_blank();
-        push_heading(&mut document, "Transcript is truncated.", Token::Warning);
-        if let Some(max_events) = value["truncated"]["max_events"].as_u64() {
-            push_wrapped(
-                &mut document,
-                context,
-                2,
-                &format!("Showing the first {max_events} events."),
-                Token::Text,
-            );
-        }
+        document.append(render_session_truncated_document(
+            value["truncated"]["max_events"].as_u64(),
+            context,
+        ));
+    }
+    document
+}
+
+pub(in crate::commands::source_index) fn render_session_header_document(
+    value: &Value,
+    context: &RenderContext,
+) -> Document {
+    let mut document = Document::new();
+    render_session_header(&mut document, context, value);
+    document
+}
+
+pub(in crate::commands::source_index) fn render_session_event_document(
+    event: &Value,
+    context: &RenderContext,
+    position: usize,
+) -> Document {
+    let mut document = Document::new();
+    document.push_blank();
+    render_event(&mut document, context, position, event);
+    document
+}
+
+pub(in crate::commands::source_index) fn render_session_empty_document() -> Document {
+    let mut document = Document::new();
+    document.push_blank();
+    push_heading(&mut document, "No transcript events.", Token::Warning);
+    document
+}
+
+pub(in crate::commands::source_index) fn render_session_truncated_document(
+    max_events: Option<u64>,
+    context: &RenderContext,
+) -> Document {
+    let mut document = Document::new();
+    document.push_blank();
+    push_heading(&mut document, "Transcript is truncated.", Token::Warning);
+    if let Some(max_events) = max_events {
+        push_wrapped(
+            &mut document,
+            context,
+            2,
+            &format!("Showing the first {max_events} events."),
+            Token::Text,
+        );
     }
     document
 }

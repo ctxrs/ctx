@@ -4,10 +4,63 @@ const CODEX_SESSION_TREE_UNION_INVENTORY_REVISION_KIND: &str =
     "codex-session-tree-union-inventory-v0";
 const CODEX_SESSION_TREE_UNION_DISCOVERY_REVISION: &str = "codex-session-tree-union-catalog-v0";
 
-#[derive(Debug)]
-pub(crate) struct CodexRootInventoryV0 {
-    pub(crate) sources: Vec<(CodexCatalogSource, SourceKey, String)>,
-    pub(crate) certificate: CertifiedSourceInventory,
+#[cfg(test)]
+type CodexDirectoryVisitHook = (PathBuf, Box<dyn FnOnce()>);
+
+#[cfg(test)]
+std::thread_local! {
+    static AFTER_CODEX_METADATA_INVENTORY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    static AFTER_CODEX_DIRECTORY_VISIT_HOOK:
+        std::cell::RefCell<Option<CodexDirectoryVisitHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn install_after_codex_metadata_inventory_hook(hook: impl FnOnce() + 'static) {
+    AFTER_CODEX_METADATA_INVENTORY_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "Codex metadata-inventory hook is already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_after_codex_metadata_inventory_hook() {
+    let hook = AFTER_CODEX_METADATA_INVENTORY_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_after_codex_directory_visit_hook(
+    relative_directory: PathBuf,
+    hook: impl FnOnce() + 'static,
+) {
+    AFTER_CODEX_DIRECTORY_VISIT_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "Codex directory-visit hook is already installed"
+        );
+        *slot.borrow_mut() = Some((relative_directory, Box::new(hook)));
+    });
+}
+
+#[cfg(test)]
+fn run_after_codex_directory_visit_hook(relative_directory: &Path) {
+    AFTER_CODEX_DIRECTORY_VISIT_HOOK.with(|slot| {
+        let pending = slot.borrow_mut().take();
+        if let Some((target, hook)) = pending {
+            if target == relative_directory {
+                hook();
+            } else {
+                *slot.borrow_mut() = Some((target, hook));
+            }
+        }
+    });
 }
 
 #[derive(Debug, Clone)]
@@ -246,23 +299,6 @@ fn absolute_lexical_path(path: &Path) -> CodexSourceBackedResultV0<PathBuf> {
     Ok(normalized)
 }
 
-pub(super) fn bind_catalog_capabilities(
-    mut sources: Vec<CodexCatalogSource>,
-    root: &ProviderSourceRoot,
-    session_root: &Path,
-) -> CodexSourceBackedResultV0<Vec<CodexCatalogSource>> {
-    for source in &mut sources {
-        let relative_path = source.source_path.strip_prefix(session_root).map_err(|_| {
-            CodexSourceBackedErrorV0::Capture(CaptureError::SystemInvariant(
-                "Codex catalog source escaped its retained root authority",
-            ))
-        })?;
-        source.authority_root = Some(root.clone());
-        source.authority_relative_path = Some(relative_path.to_path_buf());
-    }
-    Ok(sources)
-}
-
 pub(super) fn bind_source_keys(
     sources: Vec<CodexCatalogSource>,
 ) -> CodexSourceBackedResultV0<Vec<(CodexCatalogSource, SourceKey, String)>> {
@@ -297,52 +333,10 @@ pub(crate) fn discover_codex_session_tree_inventory_from_base_v0(
     discover_codex_session_tree_inventory_incremental_v0(session_roots, &seeds)
 }
 
-pub(crate) fn discover_codex_root_inventory_v0(
-    session_root: &Path,
-) -> CodexSourceBackedResultV0<CodexRootInventoryV0> {
-    let retained = discover_codex_session_catalog_retained(session_root)?;
-    build_codex_root_inventory_v0(session_root, retained)
-}
-
 pub(crate) fn discover_codex_session_tree_inventory_v0(
     session_roots: &[PathBuf],
 ) -> CodexSourceBackedResultV0<CodexSessionTreeInventoryV0> {
     discover_codex_session_tree_inventory_incremental_v0(session_roots, &[])
-}
-
-fn build_codex_root_inventory_v0(
-    session_root: &Path,
-    retained: crate::provider::codex::catalog::RetainedCodexSessionCatalog,
-) -> CodexSourceBackedResultV0<CodexRootInventoryV0> {
-    let root_revision = codex_root_revision_v0(session_root)?;
-    let discovery = super::discover_codex_catalog_sources(&retained.sessions);
-    if retained.summary.failed_sessions != 0 || !discovery.rejections.is_empty() {
-        return Err(CodexSourceBackedErrorV0::IncompleteCatalog {
-            rejected: discovery.rejections.len(),
-            failed: retained.summary.failed_sessions,
-        });
-    }
-    let sources = bind_source_keys(bind_catalog_capabilities(
-        discovery.sources,
-        &retained.root,
-        session_root,
-    )?)?;
-    retained.root.revalidate()?;
-    let observation = codex_inventory_observation_v0(session_root, &root_revision, &sources)?;
-    let source_keys = sources
-        .iter()
-        .map(|(_, source_key, _)| source_key.clone())
-        .collect::<Vec<_>>();
-    let certificate = CertifiedSourceInventory::certify(
-        observation.clone(),
-        observation,
-        CODEX_DISCOVERY_REVISION,
-        source_keys,
-    )?;
-    Ok(CodexRootInventoryV0 {
-        sources,
-        certificate,
-    })
 }
 
 #[cfg(test)]
@@ -455,6 +449,9 @@ fn discover_codex_session_tree_inventory_incremental_v0(
         authorities.push(root);
     }
 
+    #[cfg(test)]
+    run_after_codex_metadata_inventory_hook();
+
     let candidates = exact_seed_candidates(&leaves, seeds);
     let mut catalog_sources = Vec::with_capacity(leaves.len());
     for (leaf, seed_index) in leaves.into_iter().zip(candidates) {
@@ -512,6 +509,7 @@ fn discover_codex_metadata_inventory_root_v0(
     let authority = ProviderSourceRoot::open(session_root)?;
     let mut leaves = Vec::new();
     let mut pending = vec![(PathBuf::new(), 0_usize)];
+    let mut directory_observations = Vec::new();
     let mut visited_directories = 0_usize;
     let mut visited_entries = 0_usize;
     while let Some((relative_directory, depth)) = pending.pop() {
@@ -583,8 +581,27 @@ fn discover_codex_metadata_inventory_root_v0(
             }
         }
         directory.revalidate()?;
+        directory_observations.push((
+            relative_directory.clone(),
+            directory.authority_fingerprint(),
+        ));
+        #[cfg(test)]
+        run_after_codex_directory_visit_hook(&relative_directory);
         child_directories.reverse();
         pending.extend(child_directories);
+    }
+    // Reopen every visited directory after the complete walk and compare its
+    // exact metadata stamp. This bounded second pass catches a nested source
+    // that reappears after its directory was enumerated without retaining up
+    // to 32,768 directory descriptors for the duration of discovery.
+    for (relative_directory, expected) in directory_observations {
+        let current = authority.open_directory(&relative_directory)?;
+        if current.authority_fingerprint() != expected {
+            return Err(CodexSourceBackedErrorV0::Capture(
+                CaptureError::SourceChangedDuringCapture,
+            ));
+        }
+        current.revalidate()?;
     }
     authority.revalidate()?;
     let source_observations =
@@ -708,7 +725,15 @@ fn catalog_source_from_body(
             rejected: 1,
             failed: 0,
         })?;
-    if source.catalog_observation != leaf.observation {
+    // Metadata discovery and session-meta parsing are separate bounded reads.
+    // A live Codex session may append between them. Keep the newer
+    // observation when it is the same retained ordinary file with monotonic
+    // growth; the scanner will freeze and certify that newer prefix. Rewrites,
+    // truncation, and object replacement still fail closed here.
+    if !leaf
+        .observation
+        .admits_append_only_growth(&source.catalog_observation)
+    {
         return Err(CodexSourceBackedErrorV0::Capture(
             CaptureError::SourceChangedDuringCapture,
         ));

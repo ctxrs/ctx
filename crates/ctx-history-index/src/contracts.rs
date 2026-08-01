@@ -15,6 +15,10 @@ use crate::{
     sha256_hex, source_sort_key,
 };
 
+mod digest;
+
+use digest::{decode_sha256_hex, is_sha256_hex};
+
 pub const GENERATION_MANIFEST_VERSION: u32 = 6;
 pub const LEXICAL_SCHEMA_VERSION: u32 = LEXICAL_SCHEMA_REVISION;
 pub const LEXICAL_ANALYZER_VERSION: u32 = LEXICAL_TOKENIZER_REVISION;
@@ -28,8 +32,18 @@ pub(crate) const MAX_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
 ///
 /// A merge therefore retires at least `LEXICAL_SEGMENT_MERGE_FAN_IN - 1`
 /// active segments, bounding merge publications amortized over tiny appends
-/// while avoiding a full-index rewrite for each append.
+/// while avoiding a full-index rewrite for each append. Delete-heavy segments
+/// use the independent reclamation threshold in the lexical merge policy.
 pub const LEXICAL_SEGMENT_MERGE_FAN_IN: usize = 8;
+
+/// Published active segments may contain at most 1/4 deleted documents.
+///
+/// The merge policy compares this ratio with integer arithmetic and expunges
+/// any segment above it independently of Tantivy's append-merge size ceiling.
+/// Exact no-ops never construct a writer, so they intentionally do not perform
+/// storage maintenance.
+pub(crate) const LEXICAL_DELETED_DOCUMENT_RECLAIM_NUMERATOR: u64 = 1;
+pub(crate) const LEXICAL_DELETED_DOCUMENT_RECLAIM_DENOMINATOR: u64 = 4;
 
 pub type Result<T> = std::result::Result<T, IndexError>;
 
@@ -193,6 +207,10 @@ pub enum IndexError {
     #[error("source event page size must be between 1 and {maximum} items, requested {requested}")]
     InvalidSourceEventPageSize { requested: usize, maximum: usize },
     #[error(
+        "session event page size must be between 1 and {maximum} items, requested {requested}"
+    )]
+    InvalidSessionEventPageSize { requested: usize, maximum: usize },
+    #[error(
         "session event coordinate selection must be between 1 and {maximum} items, requested {requested}"
     )]
     InvalidSessionEventCoordinateLimit { requested: usize, maximum: usize },
@@ -220,6 +238,22 @@ pub enum IndexError {
     SourceEventCursorSourceMismatch,
     #[error("source event cursor does not contain a valid event identity for its exact source")]
     InvalidSourceEventCursorIdentity,
+    #[error("session {0} is not present in the pinned generation")]
+    SessionEventSessionNotFound(Uuid),
+    #[error(
+        "session event cursor belongs to generation {cursor_generation}, \
+         not pinned generation {pinned_generation}"
+    )]
+    SessionEventCursorGenerationMismatch {
+        cursor_generation: String,
+        pinned_generation: String,
+    },
+    #[error("session event cursor belongs to a different full session identity")]
+    SessionEventCursorSessionMismatch,
+    #[error("session event cursor does not contain a valid full session identity")]
+    InvalidSessionEventCursorSessionIdentity,
+    #[error("session event cursor does not name a valid deterministic session coordinate")]
+    InvalidSessionEventCursorCoordinate,
     #[error(
         "semantic event cursor belongs to generation {cursor_generation}, \
          not pinned generation {pinned_generation}"
@@ -251,6 +285,14 @@ pub enum IndexError {
     },
     #[error("document count mismatch: manifest {manifest}, index {index}")]
     DocumentCountMismatch { manifest: u64, index: u64 },
+    #[error(
+        "candidate lexical segment retains {deleted_documents} deleted documents out of \
+         {max_documents}, exceeding the 25% publication bound"
+    )]
+    CandidateDeletionDensityExceeded {
+        deleted_documents: u64,
+        max_documents: u64,
+    },
     #[error("source {source_id} count mismatch: manifest {manifest}, index {index}")]
     SourceCountMismatch {
         source_id: String,
@@ -907,34 +949,6 @@ impl GenerationManifest {
             });
         }
         Ok(())
-    }
-}
-
-fn is_sha256_hex(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn decode_sha256_hex(value: &str) -> Result<[u8; 32]> {
-    if !is_sha256_hex(value) {
-        return Err(IndexError::InvalidGenerationId);
-    }
-    let mut decoded = [0_u8; 32];
-    for (output, pair) in decoded.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
-        let high = hex_nibble(pair[0]).ok_or(IndexError::InvalidGenerationId)?;
-        let low = hex_nibble(pair[1]).ok_or(IndexError::InvalidGenerationId)?;
-        *output = (high << 4) | low;
-    }
-    Ok(decoded)
-}
-
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
     }
 }
 

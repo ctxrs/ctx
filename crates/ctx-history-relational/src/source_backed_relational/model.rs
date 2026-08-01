@@ -204,3 +204,13 @@ pub struct RelationalProjectionReceipt {
     pub file_touch_count: u64,
     pub vcs_observation_count: u64,
 }
+
+/// Generation frontiers for one internally consistent SQL read transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawSqlSnapshot {
+    pub relational_core_generation_id: Option<String>,
+    pub relational_build_generation: u64,
+    pub observed_core_generation_id: Option<String>,
+    pub projection_status: RelationalProjectionStatus,
+    pub stale: bool,
+}

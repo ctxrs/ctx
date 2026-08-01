@@ -928,4 +928,25 @@ mod outcome_tests {
             })
         );
     }
+
+    #[test]
+    fn exact_oid_inspection_commands_are_never_commit_producers() {
+        let base = Path::new("/repo");
+        let oid = "d50d84a3e609d1ed30a435adbf2c19db35448b52";
+
+        for command in [
+            format!("git show --no-patch --format=%H {oid}"),
+            format!("git log -1 --format=%H {oid}"),
+            format!("git rev-parse --verify {oid}^{{commit}}"),
+            format!("git branch --contains {oid}"),
+        ] {
+            assert!(
+                !matches!(
+                    bounded_outcome_plan(&command, base),
+                    BoundedOutcomePlanDisposition::Planned(_)
+                ),
+                "inspection command was recognized as a producer: {command}"
+            );
+        }
+    }
 }

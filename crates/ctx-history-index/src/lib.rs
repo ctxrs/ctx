@@ -8,6 +8,7 @@ mod contracts;
 mod durable_directory;
 mod identity;
 mod index_document;
+mod merge_policy;
 pub mod policy;
 mod publication;
 mod query;
@@ -57,12 +58,13 @@ pub(crate) use publication::{
 };
 pub use query::{
     AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRecord, CoreSemanticEventPage,
-    CoreSourceEventPage, EventRecord, EventSearchCandidate, EventSearchFilters,
-    ExcludedSessionTree, LexicalQueryLimits, SemanticEligibility, SemanticEventCursor,
-    SemanticEventPage, SessionEventCoordinate, SessionRecord, SourceEventCursor, SourceEventPage,
-    DEFAULT_CORE_EVENT_PAGE_BUDGET, LEXICAL_QUERY_LIMITS, MAX_LEXICAL_QUERY_RESULTS,
-    MAX_SEMANTIC_EVENT_PAGE_ITEMS, MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS,
-    MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
+    CoreSessionEventPage, CoreSourceEventPage, EventRecord, EventSearchCandidate,
+    EventSearchFilters, ExcludedSessionTree, LexicalQueryLimits, SemanticEligibility,
+    SemanticEventCursor, SemanticEventPage, SessionEventCoordinate, SessionEventCursor,
+    SessionRecord, SourceEventCursor, SourceEventPage, DEFAULT_CORE_EVENT_PAGE_BUDGET,
+    LEXICAL_QUERY_LIMITS, MAX_LEXICAL_QUERY_RESULTS, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+    MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS, MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
+    MAX_SESSION_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
 pub use reader::VerifiedIndex;
 #[cfg(test)]
@@ -90,7 +92,6 @@ use tantivy::TantivyDocument;
 use tantivy::{
     collector::Count,
     directory::{error::LockError, Directory, DirectoryLock, Lock},
-    indexer::LogMergePolicy,
     query::TermQuery,
     schema::{Field, IndexRecordOption},
     Index, IndexWriter, ReloadPolicy, Searcher, Term,
@@ -99,6 +100,7 @@ use uuid::Uuid;
 
 use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
 use index_document::{core_content_bytes, IndexDocument, IndexSourceFields, SourceToken};
+use merge_policy::LexicalMergePolicy;
 use staging::{finish_identical_staging, PendingSource as StagedPendingSource, PendingSourceMode};
 use writer_support::{
     acquire_generation_writer_lock_with_retry, clear_active_generation_rebuild_marker,

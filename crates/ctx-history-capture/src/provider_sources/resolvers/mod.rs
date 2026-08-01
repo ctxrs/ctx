@@ -364,10 +364,10 @@ mod tests {
         let dangling = temp.path().join("dangling");
         symlink(temp.path().join("absent-target"), &dangling).unwrap();
         assert_eq!(path_presence(&dangling), PathPresence::Unsupported);
-        assert!(matches!(
+        assert_eq!(
             path_presence(&dangling.join("child")),
-            PathPresence::Unknown(ErrorKind::NotADirectory)
-        ));
+            PathPresence::Unsupported
+        );
 
         let loop_link = temp.path().join("loop");
         symlink(&loop_link, &loop_link).unwrap();

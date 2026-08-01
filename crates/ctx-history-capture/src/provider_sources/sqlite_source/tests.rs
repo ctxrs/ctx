@@ -467,27 +467,41 @@ fn bounded_active_wal_copy_has_one_retained_snapshot_lifecycle() {
 
 #[cfg(unix)]
 #[test]
-fn snapshot_budget_admits_sparse_main_over_512_mib_within_cumulative_limit() {
+fn snapshot_budget_admits_reported_large_main_plus_one_main_sized_wal() {
     use std::os::unix::fs::MetadataExt;
 
-    const FORMER_COMPONENT_LIMIT: u64 = 512 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    const REPORTED_MAIN_BYTES: u64 = 943 * MIB;
+    const BOUNDED_WAL_BYTES: u64 = REPORTED_MAIN_BYTES;
+    const FORMER_TOTAL_LIMIT: u64 = 1024 * MIB;
+    const SELECTED_TOTAL_LIMIT: u64 = 2 * 1024 * MIB;
 
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
+    let wal = database.with_file_name("provider.sqlite-wal");
     create_database(&database, "large-valid-main");
-    let expected_length = FORMER_COMPONENT_LIMIT + 4_096;
     OpenOptions::new()
         .write(true)
         .open(&database)
         .unwrap()
-        .set_len(expected_length)
+        .set_len(REPORTED_MAIN_BYTES)
         .unwrap();
-    let metadata = fs::metadata(&database).unwrap();
-    assert_eq!(metadata.len(), expected_length);
-    assert!(
-        metadata.blocks().saturating_mul(512) < 1024 * 1024,
-        "the regression fixture must remain physically sparse"
-    );
+    File::create(&wal)
+        .unwrap()
+        .set_len(BOUNDED_WAL_BYTES)
+        .unwrap();
+    for (path, expected_length) in [(&database, REPORTED_MAIN_BYTES), (&wal, BOUNDED_WAL_BYTES)] {
+        let metadata = fs::metadata(path).unwrap();
+        assert_eq!(metadata.len(), expected_length);
+        assert!(
+            metadata.blocks().saturating_mul(512) < MIB,
+            "the GiB-scale regression fixture must remain physically sparse"
+        );
+    }
+    let expected_total = REPORTED_MAIN_BYTES + BOUNDED_WAL_BYTES;
+    assert_eq!(SQLITE_SNAPSHOT_MAX_TOTAL_BYTES, SELECTED_TOTAL_LIMIT);
+    assert!(expected_total > FORMER_TOTAL_LIMIT);
+    assert!(expected_total <= SQLITE_SNAPSHOT_MAX_TOTAL_BYTES);
     let parent = retain_parent(temp.path());
 
     let admitted = certify_root_handle_sqlite_source_snapshot_copy_budget_for_test(
@@ -495,7 +509,7 @@ fn snapshot_budget_admits_sparse_main_over_512_mib_within_cumulative_limit() {
         OsStr::new("provider.sqlite"),
     )
     .unwrap();
-    assert_eq!(admitted, expected_length);
+    assert_eq!(admitted, expected_total);
 }
 
 #[test]

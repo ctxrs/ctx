@@ -1,6 +1,8 @@
 use super::*;
 use std::sync::Arc;
 
+mod merge_policy;
+
 #[test]
 fn commit_binds_manifest_and_searchable_documents() {
     let temp = tempdir().unwrap();
@@ -940,92 +942,6 @@ fn empty_inventory_requires_terminal_witness_and_rejects_discovered_source_race(
     assert_eq!(
         VerifiedIndex::open(temp.path()).unwrap().generation_id(),
         unwitnessed_receipt.generation_id
-    );
-}
-
-#[test]
-fn production_merge_policy_bounds_repeated_tiny_appends_amortized() {
-    let temp = tempdir().unwrap();
-    let source = source("tiny-appends.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    initial.begin_source(source.clone()).unwrap();
-    initial
-        .add_core_record(document(&source, 1, "tiny append 1"))
-        .unwrap();
-    initial
-        .certify_source(appendable_certificate(&source, 1, 1, 10))
-        .unwrap();
-    initial.commit(|_| true).unwrap();
-
-    let initial_segments = VerifiedIndex::open(temp.path())
-        .unwrap()
-        .searcher
-        .segment_readers()
-        .len();
-    let append_count = LEXICAL_SEGMENT_MERGE_FAN_IN * 2 + 1;
-    let mut previous_segments = initial_segments;
-    let mut peak_segments = initial_segments;
-    let mut saw_coalescing = false;
-
-    for append_ordinal in 1..=append_count {
-        let sequence = append_ordinal as u64 + 1;
-        let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-        let base = append.begin_source_append(source.clone()).unwrap().clone();
-        append
-            .add_core_record(document(
-                &source,
-                sequence,
-                &format!("tiny append {sequence}"),
-            ))
-            .unwrap();
-        let frontier = base.frontier().unwrap();
-        let current = appendable_certificate(&source, sequence as u8, sequence, sequence * 10);
-        append
-            .certify_source_append(
-                CertifiedSourceAppend::certify(
-                    &base,
-                    current,
-                    frontier.certified_prefix_bytes(),
-                    *frontier.certified_prefix_digest(),
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        append.commit(|_| true).unwrap();
-
-        let current_segments = VerifiedIndex::open(temp.path())
-            .unwrap()
-            .searcher
-            .segment_readers()
-            .len();
-        assert!(
-            current_segments <= previous_segments + 1,
-            "one tiny append exposed more than one additional active segment: \
-             before={previous_segments}, after={current_segments}"
-        );
-        saw_coalescing |= current_segments <= previous_segments;
-        peak_segments = peak_segments.max(current_segments);
-        previous_segments = current_segments;
-    }
-
-    assert!(
-        saw_coalescing,
-        "the repeated append run crossed fan-in {LEXICAL_SEGMENT_MERGE_FAN_IN} \
-         without an observable coalescing publication"
-    );
-    assert!(
-        peak_segments < initial_segments + LEXICAL_SEGMENT_MERGE_FAN_IN,
-        "same-tier tiny segments exceeded the configured fan-in bound: \
-         initial={initial_segments}, peak={peak_segments}"
-    );
-    let index = VerifiedIndex::open(temp.path()).unwrap();
-    assert_eq!(index.document_count(), append_count as u64 + 1);
-    assert_eq!(
-        fs::read_dir(temp.path().join(MANIFEST_DIRECTORY))
-            .unwrap()
-            .count(),
-        4,
-        "publication should retain one manifest and integrity receipt for the visible and grace generations"
     );
 }
 

@@ -81,6 +81,33 @@ fn mutating_refresh_rejects_an_unclaimed_base_source_from_the_same_family() {
 }
 
 #[test]
+fn cross_route_duplicate_source_ownership_remains_rejected() {
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(fixture_route(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        42,
+    ));
+    registry.register(fixture_route(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        42,
+    ));
+    let temp = tempdir().unwrap();
+
+    assert!(matches!(
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()),
+        Err(SourceBackedCoordinatorError::RouteScan {
+            source: SourceBackedRouteError {
+                kind: SourceBackedRouteErrorKind::Internal,
+                detail,
+            },
+            ..
+        }) if detail.contains("staged by more than one provider route")
+    ));
+}
+
+#[test]
 fn refresh_receipt_stays_bound_to_commit_when_current_generation_advances() {
     let (g1_route, g1_certificate) = revisioned_receipt_route(1);
     let (g2_route, g2_certificate) = revisioned_receipt_route(2);

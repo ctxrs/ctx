@@ -52,6 +52,18 @@ impl SourceBackedRelationalProjection {
         &self.path
     }
 
+    pub fn begin_read_snapshot(&self) -> Result<()> {
+        if !self.read_only {
+            return Err(RelationalProjectionError::IncompatibleState(
+                "only a read-only projection can pin a SQL read snapshot".to_owned(),
+            ));
+        }
+        if self.conn.is_autocommit() {
+            self.conn.execute_batch("BEGIN DEFERRED")?;
+        }
+        Ok(())
+    }
+
     pub fn metadata(&self) -> Result<RelationalProjectionMetadata> {
         let row = self.conn.query_row(
             "SELECT build_generation, active_generation_id, active_manifest_version,
