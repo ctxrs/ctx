@@ -673,8 +673,8 @@ is product state independent of analytics.
 
 `operation_completed@1` reports one terminal outcome for eligible foreground
 operations. Current CLI coverage includes setup, explicit import, status,
-index, sources, show, locate, search, read-only SQL, docs, integrations,
-upgrade, and doctor. Help, version output, and command-line parse errors are not
+index, sources, show, search, read-only SQL, docs, integrations, upgrade, and
+doctor. Help, version output, and command-line parse errors are not
 observed. MCP and the daemon are first-class reporting surfaces rather than
 being labeled as CLI traffic. Pro reporting is limited to the public host
 surface; private Pro graph, entitlement, and query internals are not telemetry

@@ -626,13 +626,11 @@ request and is not reported remotely.
 ```bash
 ctx show session <ctx-session-id>
 ctx show session <ctx-session-id> --mode full --format text
-ctx show session <ctx-session-id> --content complete --format text
 ctx show session <ctx-session-id> --mode log --format jsonl
 ctx show session <ctx-session-id> --format markdown --out transcript.md
 ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
 ctx show event <ctx-event-id> --window 3 --format text
 ctx show event <ctx-event-id> --before 5 --after 10 --format json
-ctx show event <ctx-event-id> --content complete --format json
 ```
 
 `show session` renders one transcript by ctx-owned session ID. It defaults to
@@ -647,12 +645,10 @@ transcript artifact to that path and prints nothing on success.
 neighboring events in the same session; `--window N` is shorthand for
 `--before N --after N`. It accepts the same output formats as `show session`.
 
-Both commands render complete normalized content from the active verified Core
-generation. They do not reopen provider transcript files at query time. The
-`indexed` and `complete` selectors apply Core presentation policy; neither
-reads a provider file. Show preserves event order and never expands
-payload classes excluded by import policy, such as binary data or
-provider-private blobs.
+Both commands render policy-selected normalized content from the active verified
+Core generation. They do not reopen provider transcript files at query time.
+Show preserves event order and never expands payload classes excluded by import
+policy, such as binary data or provider-private blobs.
 
 Provider-owned IDs are metadata, not positional IDs. Positional session and
 event arguments are ctx-owned IDs. To look up a provider-owned session, use an

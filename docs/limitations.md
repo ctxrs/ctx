@@ -68,12 +68,11 @@ shipped.
 - Search output is retrieval material, not generated analysis.
 - Token counts are estimates.
 - JSON is local/private and can include sensitive content.
-- Complete message retrieval reads policy-selected normalized content from the
-  active Core generation and does not require provider files at query time.
-- Complete retrieval applies only to eligible truncated user, assistant, and
-  system message text. It does not recover omitted tool output, command output,
-  patches, diffs, binary payloads, secret-marked fields, or arbitrary provider
-  blobs.
+- Show reads policy-selected normalized content from the active Core generation
+  and does not require provider files at query time.
+- Core presentation does not recover tool output, command output, patches,
+  diffs, binary payloads, secret-marked fields, or arbitrary provider blobs that
+  import policy omitted.
 
 ## Operations
 

@@ -948,9 +948,8 @@ Continuation cursors are authenticated and bound to the request and graph
 state. Tampering returns `invalid_request`; a changed snapshot returns
 `stale_snapshot`.
 
-OSS `show` and `locate` JSON for session/event retrieval is unchanged. There
-are no Pro `show`, `locate`, `timeline`, `facts`, or `related` payloads or
-compatibility aliases.
+Core `show` JSON remains the session/event retrieval contract. There are no Pro
+`show`, `timeline`, `facts`, or `related` payloads or compatibility aliases.
 
 CLI failures exit nonzero with a stable error token on stderr. MCP failures set
 `isError: true` and return `error` plus `error_code` in `structuredContent`.
