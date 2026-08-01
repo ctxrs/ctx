@@ -469,7 +469,7 @@ fn full_initial_projection_uses_only_intentional_core_metadata() {
 }
 
 #[test]
-fn every_public_view_keeps_the_exact_v7_column_contract() {
+fn every_public_view_keeps_the_exact_v9_column_contract() {
     let (_temp, projection) = projection();
     let contracts: [(&str, &[&str]); 8] = [
         (
@@ -570,6 +570,7 @@ fn every_public_view_keeps_the_exact_v7_column_contract() {
                 "object_id",
                 "reference_name",
                 "relative_path",
+                "outcome_json",
                 "observed_at_ms",
             ],
         ),
@@ -884,33 +885,35 @@ fn repository_file_and_vcs_rows_cannot_cross_repository_bindings() {
 }
 
 #[test]
-fn repository_outcome_variant_materializes_as_a_typed_vcs_kind() {
+fn structured_repository_outcomes_are_projected_without_losing_the_payload() {
     let (_temp, mut projection) = projection();
     let source = source("repository-outcome");
     let metadata = source_metadata(&source, 1, 1);
-    let generation = generation(5, vec![metadata.clone()]);
-    let mut event = repository_record(&source, 1);
+    let generation = generation(6, vec![metadata.clone()]);
+    let mut event = record(&source, 1);
+    event.repository_bindings = vec![repository_binding("repo", "ctx")];
+    let outcome = RepositoryOutcomeObservation {
+        kind: RepositoryOutcomeKind::Commit,
+        produced_object_ids: vec![GitObjectId {
+            format: GitObjectFormat::Sha1,
+            hex: "a".repeat(40),
+        }],
+        replacement_lineage: Vec::new(),
+        pull_request: None,
+        observed_at_unix_ms: 1_700_000_000_001,
+        linkage: RepositoryOutcomeLinkage {
+            provider: "codex".to_owned(),
+            origin_call_id: "call-1".to_owned(),
+            result_call_id: "result-1".to_owned(),
+            origin_event_sequence: 1,
+            continuation_call_id_sha256: Vec::new(),
+            result_record_sha256: [7; 32],
+        },
+        outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    };
     event.repository_vcs_observations = vec![RepositoryVcsObservation {
-        repository_binding_id: "repo-shared".to_owned(),
-        kind: RepositoryVcsObservationKind::Outcome(Box::new(RepositoryOutcomeObservation {
-            kind: RepositoryOutcomeKind::Commit,
-            produced_object_ids: vec![GitObjectId {
-                format: GitObjectFormat::Sha1,
-                hex: "a".repeat(40),
-            }],
-            replacement_lineage: Vec::new(),
-            pull_request: None,
-            observed_at_unix_ms: 1_700_000_000_000,
-            linkage: RepositoryOutcomeLinkage {
-                provider: "codex".to_owned(),
-                origin_call_id: "call-origin".to_owned(),
-                result_call_id: "call-result".to_owned(),
-                origin_event_sequence: 7,
-                continuation_call_id_sha256: Vec::new(),
-                result_record_sha256: [4; 32],
-            },
-            outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
-        })),
+        repository_binding_id: "repo".to_owned(),
+        kind: RepositoryVcsObservationKind::Outcome(Box::new(outcome.clone())),
         object_id: None,
         parent_object_ids: Vec::new(),
         reference: None,
@@ -924,9 +927,13 @@ fn repository_outcome_variant_materializes_as_a_typed_vcs_kind() {
     assert_eq!(
         query_rows(
             &projection,
-            "SELECT observation_kind FROM ctx_vcs_observations"
+            "SELECT observation_kind, outcome_json, object_id FROM ctx_vcs_observations"
         ),
-        vec![vec![text_value("outcome")]]
+        vec![vec![
+            text_value("outcome"),
+            text_value(&serde_json::to_string(&outcome).unwrap()),
+            RawSqlValue::Null,
+        ]]
     );
 }
 
