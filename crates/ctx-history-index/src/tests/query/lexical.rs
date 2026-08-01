@@ -97,6 +97,34 @@ fn assert_no_lexical_query_was_constructed_or_executed() {
 }
 
 #[test]
+fn lexical_result_limits_reject_oversized_and_usize_max_before_query_work() {
+    let (_temp, index) = lexical_query_limit_fixture();
+    for requested in [MAX_LEXICAL_QUERY_RESULTS + 1, usize::MAX] {
+        crate::query::reset_lexical_query_work();
+        let error = index
+            .search_event_candidates("bounded", requested)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            IndexError::InvalidLexicalResultLimit { requested: actual, maximum }
+                if actual == requested && maximum == MAX_LEXICAL_QUERY_RESULTS
+        ));
+        assert_no_lexical_query_was_constructed_or_executed();
+
+        crate::query::reset_lexical_query_work();
+        let error = index
+            .list_event_candidates_with_filters(&EventSearchFilters::default(), requested)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            IndexError::InvalidLexicalResultLimit { requested: actual, maximum }
+                if actual == requested && maximum == MAX_LEXICAL_QUERY_RESULTS
+        ));
+        assert_no_lexical_query_was_constructed_or_executed();
+    }
+}
+
+#[test]
 fn oversized_single_query_is_rejected_before_query_construction() {
     let (_temp, index) = lexical_query_limit_fixture();
     let oversized = "x".repeat(LEXICAL_QUERY_LIMITS.maximum_aggregate_bytes + 1);

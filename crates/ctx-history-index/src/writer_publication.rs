@@ -9,6 +9,11 @@ impl GenerationWriter {
             }
 
             if self.candidate_directory_name.is_none() {
+                if self.base_manifest.is_some() {
+                    // Validate before cloning: hard-linking immutable segment
+                    // files legitimately changes their inode ctime on Unix.
+                    self.validate_base_integrity_for_reuse()?;
+                }
                 let candidate = create_candidate_generation(
                     &self.root,
                     self.active_pointer
@@ -83,6 +88,7 @@ impl GenerationWriter {
             ));
         }
         if let Some(witness) = self.exact_replay_inventory_witness()? {
+            self.validate_base_integrity_for_reuse()?;
             for certificate in &witness.base.sources {
                 if !revalidate(RevalidationTarget::Source(certificate)) {
                     return Err(IndexError::SourceInvalidated(
@@ -198,6 +204,7 @@ impl GenerationWriter {
         }
         self.verify_candidate(&manifest, &generation_id)?;
         sync_generation(&candidate_path)?;
+        writer_support::write_generation_integrity_receipt(&root, &generation_id, &candidate_path)?;
 
         let directory_name =
             self.candidate_directory_name
@@ -223,12 +230,23 @@ impl GenerationWriter {
         if let Some(hook) = self.after_pointer_switch.take() {
             hook(&candidate_path);
         }
-        let retained_manifests = std::iter::once(next_pointer.active())
+        let retained_generation_ids = std::iter::once(next_pointer.active())
             .chain(next_pointer.previous().into_iter())
             .map(|slot| slot.generation_id().to_owned())
             .collect::<Vec<_>>();
-        if let Err(error) = reclaim_inactive_generation_directories(&root, Some(&next_pointer))
-            .and_then(|()| reclaim_unreferenced_manifests(&root, &retained_manifests))
+        let retained_generation_directories = std::iter::once(next_pointer.active())
+            .chain(next_pointer.previous().into_iter())
+            .map(|slot| slot.directory().to_owned())
+            .collect::<Vec<_>>();
+        if let Err(error) = clear_active_generation_rebuild_marker(&root)
+            .and_then(|()| reclaim_inactive_generation_directories(&root, Some(&next_pointer)))
+            .and_then(|()| reclaim_unreferenced_manifests(&root, &retained_generation_ids))
+            .and_then(|()| {
+                writer_support::reclaim_generation_integrity_receipts(
+                    &root,
+                    &retained_generation_directories,
+                )
+            })
         {
             return Err(IndexError::CommittedGenerationNeedsRecovery {
                 generation_id,
@@ -262,6 +280,48 @@ impl GenerationWriter {
             return Err(IndexError::ChecksumMismatch);
         }
         verify_searcher(&searcher, manifest)
+    }
+
+    fn validate_base_integrity_for_reuse(&self) -> Result<()> {
+        let base = self
+            .base_manifest
+            .as_ref()
+            .ok_or(IndexError::WriterInvariant(
+                "no-op integrity validation is missing its base manifest",
+            ))?;
+        let generation_id = base.generation_id()?;
+        let active = self
+            .active_pointer
+            .as_ref()
+            .map(ActiveGenerationPointer::active)
+            .ok_or(IndexError::WriterInvariant(
+                "no-op integrity validation is missing its active generation",
+            ))?;
+        if active.generation_id() != generation_id {
+            return Err(IndexError::ConcurrentGenerationChange);
+        }
+        let generation_path = self
+            .root
+            .join(INDEX_GENERATIONS_DIRECTORY)
+            .join(active.directory());
+        if let Err(error) = writer_support::validate_generation_integrity_receipt(
+            &self.root,
+            &generation_id,
+            &generation_path,
+        ) {
+            let detail =
+                match writer_support::mark_active_generation_for_rebuild(&self.root, active) {
+                    Ok(()) => error.to_string(),
+                    Err(marker_error) => format!(
+                        "{error}; persisting the rebuild decision also failed: {marker_error}"
+                    ),
+                };
+            return Err(IndexError::ActiveGenerationNeedsRebuild {
+                generation_id,
+                detail,
+            });
+        }
+        Ok(())
     }
 
     fn classify_pointer_failure(

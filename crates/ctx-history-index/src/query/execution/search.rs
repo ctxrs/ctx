@@ -43,6 +43,7 @@ impl VerifiedIndex {
         filters: &EventSearchFilters,
         limit: usize,
     ) -> Result<Vec<EventSearchCandidate>> {
+        validate_lexical_result_limit(limit)?;
         LEXICAL_QUERY_LIMITS.validate_texts(natural_texts.iter().copied())?;
         if limit == 0 {
             return Ok(Vec::new());
@@ -87,7 +88,9 @@ impl VerifiedIndex {
             // Lower-coverage tiers also contain every prior higher-coverage
             // hit. Bounded over-collection by exactly the number already seen
             // guarantees enough unique lookahead without a total-count scan.
-            let tier_limit = limit.saturating_add(seen.len());
+            let tier_limit = limit
+                .checked_add(seen.len())
+                .ok_or(IndexError::CountOverflow)?;
             for candidate in
                 self.collect_event_candidates(body_query, filters, tier_limit, fields)?
             {
@@ -108,6 +111,7 @@ impl VerifiedIndex {
         filters: &EventSearchFilters,
         limit: usize,
     ) -> Result<Vec<EventSearchCandidate>> {
+        validate_lexical_result_limit(limit)?;
         if limit == 0 {
             return Ok(Vec::new());
         }

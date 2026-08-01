@@ -1022,8 +1022,8 @@ fn production_merge_policy_bounds_repeated_tiny_appends_amortized() {
         fs::read_dir(temp.path().join(MANIFEST_DIRECTORY))
             .unwrap()
             .count(),
-        2,
-        "publication should retain only the visible generation and one grace generation"
+        4,
+        "publication should retain one manifest and integrity receipt for the visible and grace generations"
     );
 }
 
@@ -1138,6 +1138,108 @@ fn orphaned_inactive_generation_is_reclaimed_before_exact_noop_without_index_wri
     assert_eq!(receipt.opstamp, initial_receipt.opstamp);
     assert_eq!(pinned.generation_id(), initial_receipt.generation_id);
     assert_eq!(pinned.count_term("stable").unwrap(), 1);
+}
+
+#[test]
+fn post_publication_mutation_fails_exact_noop_then_forces_fresh_rebuild() {
+    let temp = tempdir().unwrap();
+    let source = source("scrub-rebuild.jsonl");
+    let certificate = appendable_certificate(&source, 1, 1, 10);
+    let inventory = complete_inventory(&source, 1, vec![source.clone()]);
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "stable searchable body"))
+        .unwrap();
+    initial.certify_source(certificate.clone()).unwrap();
+    let initial_receipt = initial.commit(|_| true).unwrap();
+    let original_generation_path = active_generation_path(temp.path());
+
+    // Recommit only the stored fields. This produces a structurally valid
+    // generation with the same logical manifest but silently drops the
+    // indexed-only lexical body after publication.
+    let pinned = VerifiedIndex::open(temp.path()).unwrap();
+    let address = pinned
+        .searcher
+        .search(&AllQuery, &DocSetCollector)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let stored_only = pinned.searcher.doc::<TantivyDocument>(address).unwrap();
+    let index = pinned.searcher.index().clone();
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        initial_receipt.manifest().clone(),
+        std::slice::from_ref(&source),
+        vec![stored_only],
+    );
+    drop(pinned);
+    assert_eq!(
+        VerifiedIndex::open(temp.path())
+            .unwrap()
+            .count_term("searchable")
+            .unwrap(),
+        0
+    );
+
+    let mut noop = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    noop.certify_complete_inventory(inventory.clone()).unwrap();
+    stage_exact_replay(&mut noop, &source);
+    let error = noop
+        .commit_with_complete_inventory_revalidation(|_| true, |current| current == &inventory)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        IndexError::ActiveGenerationNeedsRebuild { generation_id, .. }
+            if generation_id == initial_receipt.generation_id
+    ));
+    assert_eq!(
+        active_generation_path(temp.path()),
+        original_generation_path
+    );
+
+    let mut rebuild = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    assert!(
+        rebuild.base_manifest().is_none(),
+        "a marked physical generation must not be exposed as reusable base state"
+    );
+    rebuild
+        .certify_complete_inventory(inventory.clone())
+        .unwrap();
+    rebuild.begin_source(source.clone()).unwrap();
+    rebuild
+        .add_core_record(document(&source, 1, "stable searchable body"))
+        .unwrap();
+    rebuild.certify_source(certificate.clone()).unwrap();
+    let rebuilt = rebuild
+        .commit_with_complete_inventory_revalidation(|_| true, |current| current == &inventory)
+        .unwrap();
+
+    let rebuilt_generation_path = active_generation_path(temp.path());
+    assert_ne!(rebuilt_generation_path, original_generation_path);
+    assert!(!original_generation_path.exists());
+    assert_eq!(rebuilt.generation_id, initial_receipt.generation_id);
+    assert_eq!(
+        VerifiedIndex::open(temp.path())
+            .unwrap()
+            .count_term("searchable")
+            .unwrap(),
+        1
+    );
+
+    let mut second_noop = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let constructions = Arc::clone(&second_noop.index_writer_constructions);
+    second_noop
+        .certify_complete_inventory(inventory.clone())
+        .unwrap();
+    stage_exact_replay(&mut second_noop, &source);
+    second_noop
+        .commit_with_complete_inventory_revalidation(|_| true, |current| current == &inventory)
+        .unwrap();
+    assert_eq!(constructions.load(Ordering::SeqCst), 0);
 }
 
 #[test]

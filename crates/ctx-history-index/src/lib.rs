@@ -32,10 +32,8 @@ pub use contracts::{
 };
 pub use ctx_history_core::CoreRecord;
 pub(crate) use identity::{
-    hex, prior_core_record, register_compact_identity, register_event_identity,
-    register_session_identity, sha256_hex, source_sort_key, source_token,
-    validate_event_identity_against_base, validate_referenced_session_identity_against_base,
-    validate_session_identity_against_base,
+    hex, is_generation_id, prior_core_record, register_compact_identity, sha256_hex,
+    source_sort_key, source_token,
 };
 pub use policy::{
     current_source_generation_policy, current_source_generation_policy_hash,
@@ -62,9 +60,9 @@ pub use query::{
     CoreSourceEventPage, EventRecord, EventSearchCandidate, EventSearchFilters,
     ExcludedSessionTree, LexicalQueryLimits, SemanticEligibility, SemanticEventCursor,
     SemanticEventPage, SessionEventCoordinate, SessionRecord, SourceEventCursor, SourceEventPage,
-    DEFAULT_CORE_EVENT_PAGE_BUDGET, LEXICAL_QUERY_LIMITS, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
-    MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS, MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
-    MAX_SOURCE_EVENT_PAGE_ITEMS,
+    DEFAULT_CORE_EVENT_PAGE_BUDGET, LEXICAL_QUERY_LIMITS, MAX_LEXICAL_QUERY_RESULTS,
+    MAX_SEMANTIC_EVENT_PAGE_ITEMS, MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS,
+    MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
 pub use reader::VerifiedIndex;
 #[cfg(test)]
@@ -103,8 +101,9 @@ use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
 use index_document::{core_content_bytes, IndexDocument, IndexSourceFields, SourceToken};
 use staging::{finish_identical_staging, PendingSource as StagedPendingSource, PendingSourceMode};
 use writer_support::{
-    acquire_generation_writer_lock_with_retry, construct_index_writer_with_retry,
-    ExactReplayInventoryWitness, PendingSource,
+    acquire_generation_writer_lock_with_retry, clear_active_generation_rebuild_marker,
+    construct_index_writer_with_retry, load_active_generation_rebuild_marker,
+    reclaim_generation_integrity_receipts, ExactReplayInventoryWitness, PendingSource,
 };
 
 pub struct GenerationWriter {
@@ -124,9 +123,6 @@ pub struct GenerationWriter {
     deletions: HashMap<SourceKey, GenerationRemoval>,
     observed_missing: HashMap<SourceKey, SourceCatalogMissingState>,
     source_identities: HashMap<Uuid, [u8; 32]>,
-    checked_base_sessions: HashSet<Uuid>,
-    staged_event_identities: HashMap<Uuid, [u8; 32]>,
-    staged_session_identities: HashMap<Uuid, [u8; 32]>,
     #[cfg(test)]
     index_writer_constructions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
@@ -172,16 +168,41 @@ impl GenerationWriter {
         reclaim_abandoned_atomic_writes(&root)?;
         reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
 
-        let active_pointer = load_active_generation_pointer(&root)?;
+        let mut active_pointer = load_active_generation_pointer(&root)?;
         reclaim_inactive_generation_directories(&root, active_pointer.as_ref())?;
-        let retained_manifests = active_pointer
+        let retained_generation_ids = active_pointer
             .iter()
             .flat_map(|pointer| {
                 std::iter::once(pointer.active()).chain(pointer.previous().into_iter())
             })
             .map(|slot| slot.generation_id().to_owned())
             .collect::<Vec<_>>();
-        reclaim_unreferenced_manifests(&root, &retained_manifests)?;
+        let retained_generation_directories = active_pointer
+            .iter()
+            .flat_map(|pointer| {
+                std::iter::once(pointer.active()).chain(pointer.previous().into_iter())
+            })
+            .map(|slot| slot.directory().to_owned())
+            .collect::<Vec<_>>();
+        reclaim_unreferenced_manifests(&root, &retained_generation_ids)?;
+        reclaim_generation_integrity_receipts(&root, &retained_generation_directories)?;
+
+        if let Some(marker) = load_active_generation_rebuild_marker(&root)? {
+            if active_pointer.as_ref().is_some_and(|pointer| {
+                pointer.active().generation_id() == marker.generation_id
+                    && pointer.active().directory() == marker.directory
+            }) {
+                // The prior physical integrity check failed. Keep serving the
+                // old pointer until a fresh source-authoritative candidate is
+                // verified and atomically replaces it, but do not expose the
+                // corrupt generation as reusable base state.
+                active_pointer = None;
+            } else {
+                // Publication completed after the marker was written but before
+                // its cleanup. It no longer applies to the active generation.
+                clear_active_generation_rebuild_marker(&root)?;
+            }
+        }
 
         let (index, candidate_directory_name) = if let Some(pointer) = &active_pointer {
             (open_slot_index(&root, pointer.active())?, None)
@@ -253,9 +274,6 @@ impl GenerationWriter {
             deletions: HashMap::new(),
             observed_missing: HashMap::new(),
             source_identities,
-            checked_base_sessions: HashSet::new(),
-            staged_event_identities: HashMap::new(),
-            staged_session_identities: HashMap::new(),
             #[cfg(test)]
             index_writer_constructions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
@@ -528,51 +546,9 @@ impl GenerationWriter {
         let record_leaf = staging::core_record_leaf(record.event_id, &core_record_bytes)?;
         let core_content_bytes = core_content_bytes(&record.content)?;
         let index_fields = pending_source.index_fields.clone();
-        if let Some(base_searcher) = &self.base_searcher {
-            validate_event_identity_against_base(
-                base_searcher,
-                self.fields,
-                record.event_id,
-                token,
-                !is_append,
-            )?;
-            if self
-                .checked_base_sessions
-                .insert(record.session_id.as_uuid())
-            {
-                validate_session_identity_against_base(
-                    base_searcher,
-                    self.fields,
-                    record.session_id,
-                    token,
-                )?;
-            }
-            for related_session_id in record
-                .parent_session_id
-                .into_iter()
-                .chain(std::iter::once(record.root_session_id))
-            {
-                if related_session_id != record.session_id
-                    && self
-                        .checked_base_sessions
-                        .insert(related_session_id.as_uuid())
-                {
-                    validate_referenced_session_identity_against_base(
-                        base_searcher,
-                        self.fields,
-                        related_session_id,
-                    )?;
-                }
-            }
-        } else if is_append {
+        if is_append && self.base_searcher.is_none() {
             return Err(IndexError::AppendBaseMismatch);
         }
-        register_session_identity(&mut self.staged_session_identities, record.session_id)?;
-        if let Some(parent_session_id) = record.parent_session_id {
-            register_session_identity(&mut self.staged_session_identities, parent_session_id)?;
-        }
-        register_session_identity(&mut self.staged_session_identities, record.root_session_id)?;
-        register_event_identity(&mut self.staged_event_identities, record.event_id)?;
         let target = IndexDocument::from_core(
             self.fields,
             record,

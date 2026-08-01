@@ -385,7 +385,7 @@ fn certified_append_indexes_only_the_delta() {
 }
 
 #[test]
-fn append_rejects_an_identity_already_in_the_base() {
+fn append_candidate_verifier_rejects_an_identity_already_in_the_base() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -397,11 +397,23 @@ fn append_rejects_an_identity_already_in_the_base() {
     first.commit(|_| true).unwrap();
 
     let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    append.begin_source_append(source.clone()).unwrap();
-    let error = append
+    let base = append.begin_source_append(source.clone()).unwrap().clone();
+    append
         .add_core_record(document(&source, 1, "duplicate"))
-        .unwrap_err();
-    assert!(matches!(error, IndexError::DuplicateEventIdentity(_)));
+        .unwrap();
+    let proof = CertifiedSourceAppend::certify(
+        &base,
+        appendable_certificate(&source, 2, 2, 20),
+        10,
+        [1; 32],
+    )
+    .unwrap();
+    append.certify_source_append(proof).unwrap();
+    let error = append.commit(|_| true).unwrap_err();
+    assert!(
+        matches!(error, IndexError::DuplicateEventIdentity(_)),
+        "unexpected append verification error: {error:?}"
+    );
 }
 
 #[test]
@@ -654,14 +666,16 @@ fn certificate_count_mismatch_is_rejected_before_commit() {
 }
 
 #[test]
-fn duplicate_event_identity_is_rejected_before_commit() {
+fn duplicate_event_identity_is_rejected_by_streaming_candidate_verifier() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
     let duplicate = document(&source, 1, "first");
     writer.add_core_record(duplicate.clone()).unwrap();
-    let error = writer.add_core_record(duplicate).unwrap_err();
+    writer.add_core_record(duplicate).unwrap();
+    writer.certify_source(certificate(&source, 1, 2)).unwrap();
+    let error = writer.commit(|_| true).unwrap_err();
     assert!(matches!(error, IndexError::DuplicateEventIdentity(_)));
 }
 
@@ -890,18 +904,8 @@ fn one_pass_verifier_matches_reference_with_bounded_parallel_segment_state() {
     assert!(one_pass.segment_tasks < reference.segment_query_visits);
 
     assert_eq!(one_pass.max_buffered_segments, one_pass.worker_budget);
-    assert!(
-        one_pass.max_buffered_event_identities
-            <= one_pass.worker_budget * DOCUMENTS_PER_SOURCE as usize
-    );
-    assert!(
-        one_pass.max_buffered_session_identities <= one_pass.worker_budget,
-        "one fixture session identity per segment should be buffered"
-    );
-    assert!(
-        one_pass.max_buffered_event_identities < expected_documents,
-        "temporary segment maps must be bounded below full-generation cardinality"
-    );
+    assert_eq!(one_pass.max_buffered_event_identities, 1);
+    assert_eq!(one_pass.max_buffered_session_identities, 1);
 }
 
 #[test]
