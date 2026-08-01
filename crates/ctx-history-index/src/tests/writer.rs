@@ -1158,10 +1158,11 @@ fn post_publication_mutation_fails_exact_noop_then_forces_fresh_rebuild() {
     let initial_receipt = initial.commit(|_| true).unwrap();
     let original_generation_path = active_generation_path(temp.path());
 
-    // Recommit only the stored fields. This produces a structurally valid
-    // generation with the same logical manifest but silently drops the
-    // indexed-only lexical body after publication.
+    // Recommit every canonical projection except the indexed-only lexical
+    // body. This produces a structurally valid generation with the same
+    // logical manifest but silently drops searchable text after publication.
     let pinned = VerifiedIndex::open(temp.path()).unwrap();
+    let fields = fields_from_schema(pinned.searcher.schema()).unwrap();
     let address = pinned
         .searcher
         .search(&AllQuery, &DocSetCollector)
@@ -1169,14 +1170,20 @@ fn post_publication_mutation_fails_exact_noop_then_forces_fresh_rebuild() {
         .into_iter()
         .next()
         .unwrap();
-    let stored_only = pinned.searcher.doc::<TantivyDocument>(address).unwrap();
+    let complete = indexed_document(decoded_stored_core(&pinned.searcher, address));
+    let mut bodyless = TantivyDocument::default();
+    for (field, value) in complete.field_values() {
+        if field != fields.body_search {
+            bodyless.add_field_value(field, value);
+        }
+    }
     let index = pinned.searcher.index().clone();
     publish_unchecked_generation(
         temp.path(),
         &index,
         initial_receipt.manifest().clone(),
         std::slice::from_ref(&source),
-        vec![stored_only],
+        vec![bodyless],
     );
     drop(pinned);
     assert_eq!(
@@ -1412,7 +1419,7 @@ fn writer_rejects_a_nonempty_payloadless_index() {
 }
 
 #[test]
-fn stored_document_identities_use_canonical_fixed_bytes() {
+fn stored_document_contains_exactly_one_canonical_core_record() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let expected = document(&source, 1, "body");
@@ -1432,25 +1439,12 @@ fn stored_document_identities_use_canonical_fixed_bytes() {
         .next()
         .unwrap();
     let stored: TantivyDocument = index.searcher.doc(address).unwrap();
-    let event_bytes = stored
-        .get_first(fields.event_identity)
-        .and_then(|value| value.as_bytes())
-        .unwrap();
-    let session_bytes = stored
-        .get_first(fields.session_identity)
-        .and_then(|value| value.as_bytes())
-        .unwrap();
+    let values = stored.field_values().collect::<Vec<_>>();
 
-    assert_eq!(event_bytes.len(), StableEntityId::CANONICAL_LEN);
-    assert_eq!(
-        event_bytes,
-        expected.event_id.encode_canonical().unwrap().as_slice()
-    );
-    assert_eq!(session_bytes.len(), StableEntityId::CANONICAL_LEN);
-    assert_eq!(
-        session_bytes,
-        expected.session_id.encode_canonical().unwrap().as_slice()
-    );
+    assert_eq!(values.len(), 1);
+    assert_eq!(values[0].0, fields.core_record);
+    let encoded = values[0].1.as_bytes().unwrap();
+    assert_eq!(CoreRecord::decode_stored(encoded).unwrap(), expected);
     assert_eq!(
         index
             .event_by_id(expected.event_id.as_uuid())

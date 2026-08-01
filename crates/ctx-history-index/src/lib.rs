@@ -77,12 +77,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+use ctx_history_core::IDENTITY_VERSION;
 use ctx_history_core::{
     CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory,
     SourceKey, CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION,
 };
-#[cfg(test)]
-use ctx_history_core::{StableEntityId, IDENTITY_VERSION};
 #[cfg(test)]
 use tantivy::directory::INDEX_WRITER_LOCK;
 #[cfg(test)]

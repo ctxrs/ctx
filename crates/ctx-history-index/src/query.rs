@@ -30,7 +30,6 @@ use ctx_history_core::{
     MAX_ENCODED_CORE_RECORD_BYTES,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tantivy::{
     collector::{Collector, Count, DocSetCollector, SegmentCollector, TopDocs},
     query::{
@@ -49,12 +48,7 @@ use super::{
     fields_from_schema, hex, source_token, Fields, IndexError, Result, VerifiedIndex,
     MAX_DOCUMENT_METADATA_BYTES,
 };
-use crate::index_document::{
-    core_content_bytes, SessionEventOrderKey, SourceEventOrderKey, StoredQueryMetadata,
-    MAX_QUERY_METADATA_BYTES, QUERY_METADATA_CHUNK_BYTES, QUERY_METADATA_CHUNK_DIGEST_BYTES,
-    QUERY_METADATA_CHUNK_HEADER_BYTES, QUERY_METADATA_CHUNK_MAGIC,
-    QUERY_METADATA_CHUNK_PAYLOAD_BYTES, QUERY_METADATA_DIGEST_DOMAIN,
-};
+use crate::index_document::{core_content_bytes, SessionEventOrderKey, SourceEventOrderKey};
 
 const ID_PREFIX_MATCH_LIMIT: usize = 2;
 use crate::analyzer::BODY_ANALYZER;
@@ -66,7 +60,6 @@ const EVENT_SEQUENCE_FIELD: &str = "event_sequence";
 const OCCURRED_AT_UNIX_MS_FIELD: &str = "occurred_at_unix_ms";
 const EVENT_IDENTITY_DIGEST_FIELD: &str = "event_identity_digest";
 const SOURCE_KEY_FIELD: &str = "source_key";
-const QUERY_METADATA_FIELD: &str = "query_metadata";
 const CORE_CONTENT_BYTES_FIELD: &str = "core_content_bytes";
 const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
 const SESSION_EVENT_ORDER_FIELD: &str = "session_event_order";
@@ -78,8 +71,6 @@ thread_local! {
     static SOURCE_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
     static SESSION_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
     static SESSION_EVENT_ORDER_VISITED_SEQUENCES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-    static QUERY_METADATA_CHUNK_READS: Cell<usize> = const { Cell::new(0) };
-    static QUERY_METADATA_EXACT_ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
     static LEXICAL_QUERY_CONSTRUCTIONS: Cell<usize> = const { Cell::new(0) };
     static LEXICAL_QUERY_EXECUTIONS: Cell<usize> = const { Cell::new(0) };
 }
@@ -128,22 +119,6 @@ pub(crate) fn session_event_order_term_visits() -> usize {
 #[cfg(test)]
 pub(crate) fn session_event_order_visited_sequences() -> Vec<u64> {
     SESSION_EVENT_ORDER_VISITED_SEQUENCES.with(|sequences| sequences.borrow().clone())
-}
-
-#[cfg(test)]
-pub(crate) fn reset_query_metadata_decode_work() {
-    QUERY_METADATA_CHUNK_READS.set(0);
-    QUERY_METADATA_EXACT_ALLOCATED_BYTES.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn query_metadata_chunk_reads() -> usize {
-    QUERY_METADATA_CHUNK_READS.get()
-}
-
-#[cfg(test)]
-pub(crate) fn query_metadata_exact_allocated_bytes() -> usize {
-    QUERY_METADATA_EXACT_ALLOCATED_BYTES.get()
 }
 
 #[cfg(test)]
