@@ -1,0 +1,212 @@
+use std::{collections::BTreeMap, fmt::Write};
+
+use ctx_history_core::{
+    CoreRecordAnnotation, RepositoryAbstention, RepositoryAbstentionReason, RepositoryAlias,
+    RepositoryAliasKind, RepositoryBinding, RepositoryEvidence, RepositoryEvidenceConfidence,
+    RepositoryEvidenceKind, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+};
+use sha2::{Digest, Sha256};
+
+use super::{git::CertifiedCandidate, outcome::UnscopedOutcomeObservation};
+
+const MAX_PROVIDER_NATIVE_IDENTITIES: usize = 16;
+
+pub(super) enum ProviderIdentityResolution {
+    Absent,
+    Binding(Box<RepositoryBinding>),
+    Abstained,
+}
+
+impl ProviderIdentityResolution {
+    pub(super) fn was_attempted(&self) -> bool {
+        !matches!(self, Self::Absent)
+    }
+
+    pub(super) fn binds_all_outcomes(&self, outcomes: &[UnscopedOutcomeObservation]) -> bool {
+        let Self::Binding(binding) = self else {
+            return false;
+        };
+        !outcomes.is_empty()
+            && outcomes.iter().all(|outcome| {
+                let UnscopedOutcomeObservation::Exact(outcome) = outcome else {
+                    return false;
+                };
+                outcome.pull_request.as_ref().is_some_and(|pull_request| {
+                    binding.aliases.contains(&pull_request.forge_repository)
+                })
+            })
+    }
+}
+
+pub(super) fn resolve_provider_native_identity(
+    aliases: Vec<RepositoryAlias>,
+    annotation: &mut CoreRecordAnnotation,
+) -> ProviderIdentityResolution {
+    if aliases.is_empty() {
+        return ProviderIdentityResolution::Absent;
+    }
+    if aliases.len() > MAX_PROVIDER_NATIVE_IDENTITIES {
+        push_abstention(
+            annotation,
+            RepositoryEvidenceKind::ProviderNativeProject,
+            RepositoryAbstentionReason::Ambiguous,
+            "provider_native_identity_limit_exceeded",
+        );
+        return ProviderIdentityResolution::Abstained;
+    }
+
+    let mut by_logical_id = BTreeMap::<String, Vec<RepositoryAlias>>::new();
+    for mut alias in aliases {
+        if alias.kind != RepositoryAliasKind::Forge {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::ProviderNativeProject,
+                RepositoryAbstentionReason::Unsafe,
+                "provider_native_identity_is_not_forge_structured",
+            );
+            return ProviderIdentityResolution::Abstained;
+        }
+        alias.host.make_ascii_lowercase();
+        let logical_id = logical_repository_id(&alias);
+        let validation = logical_only_binding(logical_id.clone(), vec![alias.clone()]);
+        if validation.validate_contract().is_err() {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::ProviderNativeProject,
+                RepositoryAbstentionReason::Unsafe,
+                "invalid_provider_native_repository_alias",
+            );
+            return ProviderIdentityResolution::Abstained;
+        }
+        let values = by_logical_id.entry(logical_id).or_default();
+        if !values.contains(&alias) {
+            values.push(alias);
+        }
+    }
+    if by_logical_id.len() != 1 {
+        push_abstention(
+            annotation,
+            RepositoryEvidenceKind::ProviderNativeProject,
+            RepositoryAbstentionReason::ConflictingIdentity,
+            "provider_native_repository_identities_conflict",
+        );
+        return ProviderIdentityResolution::Abstained;
+    }
+    let (logical_id, aliases) = by_logical_id.into_iter().next().expect("one identity");
+    let binding = logical_only_binding(logical_id, aliases);
+    if binding.validate_contract().is_err() {
+        push_abstention(
+            annotation,
+            RepositoryEvidenceKind::ProviderNativeProject,
+            RepositoryAbstentionReason::Unsafe,
+            "invalid_provider_native_repository_binding",
+        );
+        ProviderIdentityResolution::Abstained
+    } else {
+        ProviderIdentityResolution::Binding(Box::new(binding))
+    }
+}
+
+pub(super) fn reconcile_provider_identity(
+    annotation: &mut CoreRecordAnnotation,
+    certified: &mut [CertifiedCandidate],
+    resolution: ProviderIdentityResolution,
+) {
+    let provider = match resolution {
+        ProviderIdentityResolution::Absent => return,
+        // Invalid or ambiguous provider metadata is an abstention for that
+        // evidence lane only. Independently certified structured activity
+        // remains valid and must not be erased.
+        ProviderIdentityResolution::Abstained => return,
+        ProviderIdentityResolution::Binding(provider) => provider,
+    };
+    let mut matched = false;
+    for certificate in certified.iter_mut().filter(|certificate| {
+        certificate.binding.logical_repository_id == provider.logical_repository_id
+    }) {
+        matched = true;
+        for alias in &provider.aliases {
+            if !certificate.binding.aliases.contains(alias) {
+                certificate.binding.aliases.push(alias.clone());
+            }
+        }
+        for evidence in &provider.evidence {
+            if !certificate.binding.evidence.contains(evidence) {
+                certificate.binding.evidence.push(evidence.clone());
+            }
+        }
+    }
+    if matched {
+        return;
+    }
+    if !certified.is_empty() {
+        push_abstention(
+            annotation,
+            RepositoryEvidenceKind::ProviderNativeProject,
+            RepositoryAbstentionReason::ConflictingIdentity,
+            "provider_native_identity_does_not_match_local_certificate",
+        );
+        // Provider-native identity has precedence for its own exact outcome
+        // segment. Other structured activity lanes remain independent and may
+        // certify additional repositories in the same event.
+        annotation.repository_bindings.push(*provider);
+        return;
+    }
+    annotation.repository_bindings.push(*provider);
+}
+
+fn logical_only_binding(
+    logical_repository_id: String,
+    aliases: Vec<RepositoryAlias>,
+) -> RepositoryBinding {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.repository.provider-binding.v1");
+    digest.update(logical_repository_id.as_bytes());
+    let digest = digest.finalize();
+    RepositoryBinding {
+        binding_id: format!("binding:{}", hex_digest(&digest)),
+        logical_repository_id,
+        checkout_id: None,
+        worktree_id: None,
+        aliases,
+        git_object_format: None,
+        local_root_authorization: None,
+        evidence: vec![RepositoryEvidence {
+            kind: RepositoryEvidenceKind::ProviderNativeProject,
+            confidence: RepositoryEvidenceConfidence::Explicit,
+        }],
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
+}
+
+fn logical_repository_id(alias: &RepositoryAlias) -> String {
+    let mut path = alias.namespace.join("/");
+    path.push('/');
+    path.push_str(&alias.name);
+    format!("forge:{}/{path}", alias.host)
+}
+
+pub(super) fn push_abstention(
+    annotation: &mut CoreRecordAnnotation,
+    evidence_kind: RepositoryEvidenceKind,
+    reason: RepositoryAbstentionReason,
+    detail: &str,
+) {
+    let abstention = RepositoryAbstention {
+        evidence_kind,
+        reason,
+        detail: Some(detail.to_owned()),
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    };
+    if !annotation.repository_abstentions.contains(&abstention) {
+        annotation.repository_abstentions.push(abstention);
+    }
+}
