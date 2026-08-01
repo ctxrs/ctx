@@ -84,15 +84,20 @@ const MCP_SERVER: TestOwner = TestOwner::behavioral(
     "src/mcp/response_bound/tests.rs::final_mcp_serialization_is_bounded_after_json_expansion",
     &["src/mcp.rs"],
     &[
-        "bound_complete_content_mcp_response",
+        "bound_show_mcp_response",
         "serialized_json_line_bytes",
         "TEST_OUTPUT_LIMIT",
     ],
 );
 const PRO: TestOwner = TestOwner::behavioral(
-    "src/pro/referral.rs::create_and_status_json_preserve_the_exact_machine_contract",
+    "src/pro/referral.rs::success_json_preserves_the_exact_machine_contract",
     &["src/pro/"],
     &["create_output", "status_output"],
+);
+const PRO_MACHINE_ERROR: TestOwner = TestOwner::behavioral(
+    "src/pro/tests.rs::stable_machine_errors_are_exact_json_without_untrusted_detail_or_ansi",
+    &["src/dispatch.rs"],
+    &["write_stable_error_json", "from_slice", "output"],
 );
 const SKILL: TestOwner = TestOwner::behavioral(
     "src/skill/install.rs::human_install_and_status_results_use_the_typed_ui",
@@ -172,6 +177,7 @@ const MCP_MODULE: &str = "src/mcp.rs";
 const OUTPUT: &str = "src/output.rs";
 const PRO_LIFECYCLE: &str = "src/pro/lifecycle_commands.rs";
 const PRO_SETUP_REPLAY: &str = "src/pro/lifecycle_commands/setup_replay.rs";
+const PRO_UNINSTALL: &str = "src/pro/lifecycle_commands/uninstall.rs";
 const PRO_PENDING: &str = "src/pro/pending_materialization.rs";
 const PRO_REFERRAL: &str = "src/pro/referral.rs";
 const PRO_RENDER: &str = "src/pro/render.rs";
@@ -373,6 +379,14 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         INDEX
     ),
     allow!(
+        INDEX_COMMAND,
+        "render#1@257ffe0fafbffd46",
+        DocumentRender,
+        Infrastructure,
+        UI_INFRASTRUCTURE,
+        INDEX
+    ),
+    allow!(
         SQL,
         "print_sql_truncation_notice#1@ea873e086cbe48d0",
         PrintMacro,
@@ -454,6 +468,14 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
+        "render_stable_pro_error_json#1@58d077696a0c7270",
+        StderrConstructor,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        PRO_MACHINE_ERROR
+    ),
+    allow!(
+        DISPATCH,
         "run#1@e980ea9ca2d818d3",
         PrintMacro,
         JustifiedPlainHuman,
@@ -478,15 +500,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "run_cli#1@f717b63dfef0aa35",
-        PrintMacro,
-        MachineProtocol,
-        JSON_PROTOCOL,
-        UNIT
-    ),
-    allow!(
-        DISPATCH,
-        "run_cli#3@638b02f9a8248d06",
+        "run_cli#1@64c8afd2f04c16a3",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -502,7 +516,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "run_cli#4@1f99826fdc74e99b",
+        "run_cli#3@1f99826fdc74e99b",
         PrintMacro,
         MachineProtocol,
         "generic machine-mode command error",
@@ -510,7 +524,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "write_clap_output#1@a446ef88164d6fbc",
+        "write_clap_output_with_line_ends#1@a446ef88164d6fbc",
         UiRawWriter,
         Infrastructure,
         "Clap owns parser/help framing while Ui owns the selected stream adapter",
@@ -518,7 +532,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "write_clap_output#1@51c2e2ff74f6375a",
+        "write_clap_output_with_line_ends#1@b8f99857faf49882",
         DirectWrite,
         Infrastructure,
         "Clap owns parser/help framing while Ui owns the selected stream adapter",
@@ -526,7 +540,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "write_clap_output#2@1c5cb2fdc96ae200",
+        "write_clap_output_with_line_ends#2@17a79ef591783ebd",
         UiRawWriter,
         Infrastructure,
         "Clap owns parser/help framing while Ui owns the selected stream adapter",
@@ -534,39 +548,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "write_clap_output#2@cb06e2483385337e",
-        DirectWrite,
-        Infrastructure,
-        "Clap owns parser/help framing while Ui owns the selected stream adapter",
-        CLAP_OUTPUT
-    ),
-    allow!(
-        DISPATCH,
-        "write_clap_output#3@337d1d5a221bb1e9",
-        UiRawWriter,
-        Infrastructure,
-        "Clap owns parser/help framing while Ui owns the selected stream adapter",
-        CLAP_OUTPUT
-    ),
-    allow!(
-        DISPATCH,
-        "write_clap_output#3@f25a8d0be1a22441",
-        DirectWrite,
-        Infrastructure,
-        "Clap owns parser/help framing while Ui owns the selected stream adapter",
-        CLAP_OUTPUT
-    ),
-    allow!(
-        DISPATCH,
-        "write_clap_output#4@17a79ef591783ebd",
-        UiRawWriter,
-        Infrastructure,
-        "Clap owns parser/help framing while Ui owns the selected stream adapter",
-        CLAP_OUTPUT
-    ),
-    allow!(
-        DISPATCH,
-        "write_clap_output#4@737a4b274061e165",
+        "write_clap_output_with_line_ends#2@737a4b274061e165",
         DirectWrite,
         Infrastructure,
         "Clap owns parser/help framing while Ui owns the selected stream adapter",
@@ -813,7 +795,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         UNIT
     ),
     allow!(
-        PRO_LIFECYCLE,
+        PRO_UNINSTALL,
         "emit_uninstall_result#1@79342920bb593fd0",
         PrintMacro,
         MachineProtocol,
