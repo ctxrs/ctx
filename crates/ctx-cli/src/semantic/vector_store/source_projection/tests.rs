@@ -55,7 +55,6 @@ impl SourceBackedSemanticDocumentBuilder for CoreBuilder {
             agent_type: None,
             session_is_primary: Some(record.is_primary),
             cwd: record.cwd.clone(),
-            raw_source_path: None,
             record_title: None,
             record_kind: Some("message".to_owned()),
             record_workspace: record.workspace.clone(),

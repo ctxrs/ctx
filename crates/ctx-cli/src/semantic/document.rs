@@ -20,7 +20,6 @@ pub(in crate::semantic) struct SemanticEventDocument {
     pub(in crate::semantic) agent_type: Option<AgentType>,
     pub(in crate::semantic) session_is_primary: Option<bool>,
     pub(in crate::semantic) cwd: Option<String>,
-    pub(in crate::semantic) raw_source_path: Option<String>,
     pub(in crate::semantic) record_title: Option<String>,
     pub(in crate::semantic) record_kind: Option<String>,
     pub(in crate::semantic) record_workspace: Option<String>,

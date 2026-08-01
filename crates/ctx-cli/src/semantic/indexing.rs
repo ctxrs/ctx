@@ -121,12 +121,6 @@ pub(super) fn semantic_document_header(doc: &SemanticEventDocument) -> String {
     if let Some(cwd) = doc.cwd.as_deref().and_then(path_basename) {
         lines.push(format!("cwd_hint: {}", semantic_header_value(cwd, 120)));
     }
-    if let Some(path) = doc.raw_source_path.as_deref().and_then(path_basename) {
-        lines.push(format!(
-            "source_file_hint: {}",
-            semantic_header_value(path, 120)
-        ));
-    }
     if let Some(title) = doc.record_title.as_deref() {
         lines.push(format!("title_hint: {}", semantic_header_value(title, 180)));
     }

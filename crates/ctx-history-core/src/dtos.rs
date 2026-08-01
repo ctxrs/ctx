@@ -358,20 +358,6 @@ text_enum! {
     default Related
 }
 
-text_enum! {
-    pub enum ContextCitationType {
-        HistoryRecord => "history_record",
-        Session => "session",
-        Run => "run",
-        Event => "event",
-        VcsChange => "vcs_change",
-        Artifact => "artifact",
-        Summary => "summary",
-        File => "file",
-    }
-    default Event
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryRecord {
     pub id: Uuid,
@@ -736,46 +722,4 @@ pub struct RecordEdge {
     pub timestamps: EntityTimestamps,
     #[serde(flatten)]
     pub sync: SyncMetadata,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextCitation {
-    #[serde(rename = "type")]
-    pub citation_type: ContextCitationType,
-    pub id: Uuid,
-    pub label: String,
-    pub time: DateTime<Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<CaptureProvider>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub event_seq: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_source_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_source_exists: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextLinks {}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextPagination {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-    #[serde(default)]
-    pub has_more: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextTruncation {
-    #[serde(default)]
-    pub truncated: bool,
-    #[serde(default)]
-    pub omitted_results: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
 }

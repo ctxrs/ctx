@@ -354,7 +354,6 @@ impl SourceBackedSemanticDocumentBuilder for CoreSemanticDocumentBuilder<'_> {
             agent_type: Some(parse_core_agent_type(&record.agent_type)?),
             session_is_primary: Some(record.is_primary),
             cwd: record.cwd.clone(),
-            raw_source_path: None,
             record_title: None,
             record_kind: Some(record.event_type.clone()),
             record_workspace: record.workspace.clone(),
