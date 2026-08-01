@@ -193,6 +193,10 @@ pub enum IndexError {
     #[error("source event page size must be between 1 and {maximum} items, requested {requested}")]
     InvalidSourceEventPageSize { requested: usize, maximum: usize },
     #[error(
+        "session event page size must be between 1 and {maximum} items, requested {requested}"
+    )]
+    InvalidSessionEventPageSize { requested: usize, maximum: usize },
+    #[error(
         "session event coordinate selection must be between 1 and {maximum} items, requested {requested}"
     )]
     InvalidSessionEventCoordinateLimit { requested: usize, maximum: usize },
@@ -220,6 +224,22 @@ pub enum IndexError {
     SourceEventCursorSourceMismatch,
     #[error("source event cursor does not contain a valid event identity for its exact source")]
     InvalidSourceEventCursorIdentity,
+    #[error("session {0} is not present in the pinned generation")]
+    SessionEventSessionNotFound(Uuid),
+    #[error(
+        "session event cursor belongs to generation {cursor_generation}, \
+         not pinned generation {pinned_generation}"
+    )]
+    SessionEventCursorGenerationMismatch {
+        cursor_generation: String,
+        pinned_generation: String,
+    },
+    #[error("session event cursor belongs to a different full session identity")]
+    SessionEventCursorSessionMismatch,
+    #[error("session event cursor does not contain a valid full session identity")]
+    InvalidSessionEventCursorSessionIdentity,
+    #[error("session event cursor does not name a valid deterministic session coordinate")]
+    InvalidSessionEventCursorCoordinate,
     #[error(
         "semantic event cursor belongs to generation {cursor_generation}, \
          not pinned generation {pinned_generation}"
