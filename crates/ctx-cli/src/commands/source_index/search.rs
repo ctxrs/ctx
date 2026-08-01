@@ -2,14 +2,16 @@ mod query;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    fmt,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Result};
+use ctx_history_core::{CoreRecord, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES};
 use ctx_history_index::{
-    CoreEventRecord, EventRecord, EventSearchCandidate, EventSearchFilters, VerifiedIndex,
-    MAX_LEXICAL_QUERY_RESULTS,
+    CoreEventPageBudget, CoreEventRecord, EventRecord, EventSearchCandidate, EventSearchFilters,
+    VerifiedIndex, MAX_LEXICAL_QUERY_RESULTS,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -30,7 +32,7 @@ use crate::{
         canonical_human_output_bytes, diagnostic, Action, Diagnostic, DiagnosticLevel, Document,
         RenderContext, Ui,
     },
-    RefreshArg, SearchArgs, SearchBackendArg,
+    RefreshArg, SearchArgs, SearchBackendArg, MAX_SEARCH_LIMIT,
 };
 
 use super::{
@@ -50,10 +52,69 @@ const MIN_CANDIDATE_BATCH: usize = 256;
 const CANDIDATE_OVERSAMPLE: usize = 8;
 const SOURCE_FUSION_CANDIDATES: usize = 1_600;
 const MAX_USAGE_CONTEXT_EVENTS_PER_SESSION: usize = 256;
+// Search renders 2,048 characters and needs one more character to preserve a
+// truthful truncation bit. Four bytes is the maximum UTF-8 width of one char.
+pub(super) const SEARCH_CORE_BODY_PREFIX_CHARS: usize = 2_049;
+const MAX_UTF8_CHAR_BYTES: usize = 4;
+pub(super) const SEARCH_CORE_MAX_RETAINED_BODY_BYTES: usize =
+    MAX_SEARCH_LIMIT * SEARCH_CORE_BODY_PREFIX_CHARS * MAX_UTF8_CHAR_BYTES;
+const SEARCH_CORE_MAX_AGGREGATE_ENCODED_BYTES: usize = 64 * 1024 * 1024;
+const SEARCH_CORE_MAX_AGGREGATE_CONTENT_BYTES: usize = 64 * 1024 * 1024;
 pub(super) const MISSING_INDEX_ERROR: &str =
     "the Core index does not exist; retry with daemon refresh enabled";
 const QUEUED_WITHOUT_GENERATION_ERROR: &str =
     "daemon source refresh was queued but no published generation exists; retry with --refresh wait";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SearchCoreHydrationBudget {
+    pub(super) maximum_encoded_core_bytes: usize,
+    pub(super) maximum_content_bytes: usize,
+    pub(super) maximum_retained_body_bytes: usize,
+}
+
+pub(super) const SEARCH_CORE_HYDRATION_BUDGET: SearchCoreHydrationBudget =
+    SearchCoreHydrationBudget {
+        maximum_encoded_core_bytes: SEARCH_CORE_MAX_AGGREGATE_ENCODED_BYTES,
+        maximum_content_bytes: SEARCH_CORE_MAX_AGGREGATE_CONTENT_BYTES,
+        maximum_retained_body_bytes: SEARCH_CORE_MAX_RETAINED_BODY_BYTES,
+    };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SearchCoreHydrationBudgetStage {
+    Decode,
+    Retention,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SearchCoreHydrationBudgetExceeded {
+    pub(super) event_id: Uuid,
+    pub(super) stage: SearchCoreHydrationBudgetStage,
+    pub(super) admitted_encoded_core_bytes: usize,
+    pub(super) maximum_encoded_core_bytes: usize,
+    pub(super) admitted_content_bytes: usize,
+    pub(super) maximum_content_bytes: usize,
+    pub(super) retained_body_bytes: usize,
+    pub(super) maximum_retained_body_bytes: usize,
+}
+
+impl fmt::Display for SearchCoreHydrationBudgetExceeded {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Core search event {} cannot fit the aggregate search {:?} budget (encoded Core: {}/{}, decoded content: {}/{}, retained snippet bodies: {}/{})",
+            self.event_id,
+            self.stage,
+            self.admitted_encoded_core_bytes,
+            self.maximum_encoded_core_bytes,
+            self.admitted_content_bytes,
+            self.maximum_content_bytes,
+            self.retained_body_bytes,
+            self.maximum_retained_body_bytes,
+        )
+    }
+}
+
+impl std::error::Error for SearchCoreHydrationBudgetExceeded {}
 
 #[derive(Debug)]
 pub(super) struct SearchCollection {
@@ -422,22 +483,189 @@ fn core_records_for_search_hits(
     index: &VerifiedIndex,
     hits: &[SearchHit],
 ) -> Result<HashMap<Uuid, CoreEventRecord>> {
-    let event_ids = hits
-        .iter()
-        .map(|hit| hit.event.event_id.as_uuid())
-        .collect::<Vec<_>>();
-    let decoded = index
-        .core_events_by_ids_if_bounded(&event_ids, event_ids.len(), usize::MAX)?
-        .ok_or_else(|| {
-            anyhow!("a selected search event is absent from the pinned Core generation")
-        })?;
+    core_records_for_search_hits_with_budget(index, hits, SEARCH_CORE_HYDRATION_BUDGET)
+}
+
+pub(super) fn core_records_for_search_hits_with_budget(
+    index: &VerifiedIndex,
+    hits: &[SearchHit],
+    budget: SearchCoreHydrationBudget,
+) -> Result<HashMap<Uuid, CoreEventRecord>> {
+    if budget.maximum_encoded_core_bytes == 0
+        || budget.maximum_content_bytes == 0
+        || budget.maximum_retained_body_bytes == 0
+    {
+        return Err(anyhow!("Core search hydration budgets must be positive"));
+    }
+
     let mut records = HashMap::with_capacity(hits.len());
-    for (event_id, record) in event_ids.into_iter().zip(decoded) {
+    let mut admitted_encoded_core_bytes = 0_usize;
+    let mut admitted_content_bytes = 0_usize;
+    let mut retained_body_bytes = 0_usize;
+    for hit in hits {
+        let event_id = hit.event.event_id.as_uuid();
+        let remaining_encoded_core_bytes = budget
+            .maximum_encoded_core_bytes
+            .saturating_sub(admitted_encoded_core_bytes);
+        let remaining_content_bytes = budget
+            .maximum_content_bytes
+            .saturating_sub(admitted_content_bytes);
+        if remaining_encoded_core_bytes == 0 || remaining_content_bytes == 0 {
+            return Err(search_core_hydration_budget_error(
+                event_id,
+                SearchCoreHydrationBudgetStage::Decode,
+                admitted_encoded_core_bytes,
+                admitted_content_bytes,
+                retained_body_bytes,
+                budget,
+            ));
+        }
+
+        // Decode exactly one selected record at a time. The strict lookup
+        // declines an oversized singleton, so a pathological result cannot be
+        // admitted merely to make progress. The complete record is reduced to
+        // its bounded presentation projection before the next decode begins.
+        let page_budget = CoreEventPageBudget::new(
+            remaining_encoded_core_bytes.min(MAX_ENCODED_CORE_RECORD_BYTES),
+            remaining_content_bytes.min(MAX_CORE_CONTENT_BYTES),
+        );
+        let batch = index
+            .core_events_by_ids_with_strict_budget(&[event_id], 1, page_budget)?
+            .ok_or_else(|| {
+                search_core_hydration_budget_error(
+                    event_id,
+                    SearchCoreHydrationBudgetStage::Decode,
+                    admitted_encoded_core_bytes,
+                    admitted_content_bytes,
+                    retained_body_bytes,
+                    budget,
+                )
+            })?;
+        admitted_encoded_core_bytes = admitted_encoded_core_bytes
+            .checked_add(batch.encoded_core_bytes)
+            .ok_or_else(|| {
+                search_core_hydration_budget_error(
+                    event_id,
+                    SearchCoreHydrationBudgetStage::Decode,
+                    admitted_encoded_core_bytes,
+                    admitted_content_bytes,
+                    retained_body_bytes,
+                    budget,
+                )
+            })?;
+        admitted_content_bytes = admitted_content_bytes
+            .checked_add(batch.content_bytes)
+            .ok_or_else(|| {
+                search_core_hydration_budget_error(
+                    event_id,
+                    SearchCoreHydrationBudgetStage::Decode,
+                    admitted_encoded_core_bytes,
+                    admitted_content_bytes,
+                    retained_body_bytes,
+                    budget,
+                )
+            })?;
+        let mut items = batch.items.into_iter();
+        let record = items.next().ok_or_else(|| {
+            anyhow!("pinned Core lookup omitted selected search event {event_id}")
+        })?;
+        if items.next().is_some() || record.event_id.as_uuid() != event_id {
+            return Err(anyhow!(
+                "pinned Core lookup returned an invalid singleton for search event {event_id}"
+            ));
+        }
+        let (record, body_bytes) = search_core_presentation_projection(record)?;
+        let next_retained_body_bytes =
+            retained_body_bytes.checked_add(body_bytes).ok_or_else(|| {
+                search_core_hydration_budget_error(
+                    event_id,
+                    SearchCoreHydrationBudgetStage::Retention,
+                    admitted_encoded_core_bytes,
+                    admitted_content_bytes,
+                    retained_body_bytes,
+                    budget,
+                )
+            })?;
+        if next_retained_body_bytes > budget.maximum_retained_body_bytes {
+            return Err(search_core_hydration_budget_error(
+                event_id,
+                SearchCoreHydrationBudgetStage::Retention,
+                admitted_encoded_core_bytes,
+                admitted_content_bytes,
+                next_retained_body_bytes,
+                budget,
+            ));
+        }
+        retained_body_bytes = next_retained_body_bytes;
         if records.insert(event_id, record).is_some() {
             return Err(anyhow!("search result duplicated Core event {event_id}"));
         }
     }
     Ok(records)
+}
+
+fn search_core_presentation_projection(
+    record: CoreEventRecord,
+) -> Result<(CoreEventRecord, usize)> {
+    let CoreEventRecord {
+        event,
+        mut core_record,
+    } = record;
+    let body = core_record
+        .content
+        .normalized_body
+        .take()
+        .filter(|body| !body.is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "Core search event {} has no normalized body",
+                event.event_id
+            )
+        })?;
+    let body_prefix = body
+        .chars()
+        .take(SEARCH_CORE_BODY_PREFIX_CHARS)
+        .collect::<String>();
+    let retained_body_bytes = body_prefix.len();
+
+    // The renderer currently accepts CoreEventRecord. Construct a valid,
+    // ephemeral Core-owned presentation record so the complete body,
+    // structured content, annotations, and repository observations are
+    // dropped before the next result is decoded. This projection is never
+    // exposed as complete Core data.
+    let core_record = CoreRecord::new_selected(
+        core_record.event_id,
+        core_record.session_id,
+        core_record.root_session_id,
+        core_record.source,
+        core_record.event_sequence,
+        core_record.event_type,
+        core_record.agent_type,
+        core_record.is_primary,
+        "search-presentation-v1",
+        body_prefix,
+    )?;
+    Ok((CoreEventRecord { event, core_record }, retained_body_bytes))
+}
+
+fn search_core_hydration_budget_error(
+    event_id: Uuid,
+    stage: SearchCoreHydrationBudgetStage,
+    admitted_encoded_core_bytes: usize,
+    admitted_content_bytes: usize,
+    retained_body_bytes: usize,
+    budget: SearchCoreHydrationBudget,
+) -> anyhow::Error {
+    anyhow::Error::new(SearchCoreHydrationBudgetExceeded {
+        event_id,
+        stage,
+        admitted_encoded_core_bytes,
+        maximum_encoded_core_bytes: budget.maximum_encoded_core_bytes,
+        admitted_content_bytes,
+        maximum_content_bytes: budget.maximum_content_bytes,
+        retained_body_bytes,
+        maximum_retained_body_bytes: budget.maximum_retained_body_bytes,
+    })
 }
 
 pub(super) fn collect_search_hits_with_backend(
