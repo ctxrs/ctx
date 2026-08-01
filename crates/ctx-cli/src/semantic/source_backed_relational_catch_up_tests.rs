@@ -214,7 +214,8 @@ fn build_candidate(
         ),
         RelationalProjectionPlan::NoOp(_) => panic!("candidate unexpectedly became a no-op"),
     };
-    let records = RelationalRecordStream::new(&index, selection, MAX_SOURCE_EVENT_PAGE_ITEMS);
+    let records =
+        relational_record_stream(&index, selection, &generation, MAX_SOURCE_EVENT_PAGE_ITEMS);
     let receipt = if rebuild {
         projection.rebuild_stream(&generation, records)
     } else {
@@ -291,6 +292,42 @@ fn replace_existing_projection_publishes_only_the_new_generation() {
     );
     assert!(!candidate_projection_path(&destination).exists());
     assert_no_sqlite_sidecars(&destination);
+}
+
+#[test]
+fn equal_count_core_aggregate_change_replays_the_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("aggregate-only-change.jsonl");
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    let first_index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
+    let first_certificate = first_index.manifest().sources[0].clone();
+    let first_aggregate = first_index.manifest().core_record_aggregates[0].clone();
+    let first_revision = committed_generation(&first_index).unwrap().sources[0].revision_digest;
+    drop(first_index);
+
+    let replacement_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 2, &provider)]);
+    let replacement_index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
+    assert_eq!(replacement_index.manifest().sources[0], first_certificate);
+    assert_ne!(
+        replacement_index.manifest().core_record_aggregates[0],
+        first_aggregate
+    );
+    let replacement_revision =
+        committed_generation(&replacement_index).unwrap().sources[0].revision_digest;
+    assert_ne!(replacement_revision, first_revision);
+    drop(replacement_index);
+
+    let run = run_after_core_publication(temp.path(), &replacement_generation).unwrap();
+
+    assert!(run.did_work);
+    assert_eq!(
+        query(temp.path(), "SELECT event_seq FROM ctx_events"),
+        vec![vec![sequence_value(2)]]
+    );
 }
 
 #[test]

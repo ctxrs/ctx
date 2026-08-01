@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 pub const RELATIONAL_PROJECTION_SCHEMA_VERSION: u32 = 7;
 pub const RELATIONAL_PROJECTION_CONTRACT_VERSION: u32 = 7;
-pub const RELATIONAL_MATERIALIZER_REVISION: u32 = 2;
+pub const RELATIONAL_MATERIALIZER_REVISION: u32 = 3;
 
 pub type Result<T> = std::result::Result<T, RelationalProjectionError>;
 

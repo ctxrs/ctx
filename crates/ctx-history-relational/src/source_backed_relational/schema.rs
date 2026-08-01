@@ -202,8 +202,8 @@ DROP VIEW IF EXISTS ctx_sessions;
 CREATE VIEW ctx_sessions AS
 SELECT
     s.ctx_session_id,
-    parent.ctx_session_id AS parent_ctx_session_id,
-    root.ctx_session_id AS root_ctx_session_id,
+    s.parent_ctx_session_id,
+    s.root_ctx_session_id,
     src.source_id,
     src.provider,
     src.source_format,
@@ -217,13 +217,7 @@ SELECT
     s.ended_at_ms,
     s.health
 FROM core_sessions s
-JOIN core_sources src ON src.source_id = s.source_id
-LEFT JOIN core_sessions parent
-    ON parent.ctx_session_id = s.parent_ctx_session_id
-   AND parent.session_identity = s.parent_session_identity
-LEFT JOIN core_sessions root
-    ON root.ctx_session_id = s.root_ctx_session_id
-   AND root.session_identity = s.root_session_identity;
+JOIN core_sources src ON src.source_id = s.source_id;
 
 DROP VIEW IF EXISTS ctx_events;
 CREATE VIEW ctx_events AS
