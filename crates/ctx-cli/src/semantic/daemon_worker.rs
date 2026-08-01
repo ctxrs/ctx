@@ -337,11 +337,9 @@ impl SourceBackedSemanticDocumentBuilder for CoreSemanticDocumentBuilder<'_> {
         }
         Ok(Some(SemanticEventDocument {
             event_id: record.event_id.as_uuid(),
-            history_record_id: None,
             session_id: Some(record.session_id.as_uuid()),
             seq: record.event_sequence,
             occurred_at_ms,
-            anchor_occurred_at_ms: record.occurred_at_unix_ms.unwrap_or_default(),
             event_type: parse_core_event_type(&record.event_type)?,
             role: record
                 .role
