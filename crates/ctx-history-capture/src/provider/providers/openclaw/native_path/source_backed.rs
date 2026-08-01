@@ -1,10 +1,13 @@
 //! Thin OpenClaw legacy-session adapter for the shared borrowed JSONL family.
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, EventIdentityInput,
-    EventType, NativeItemKey, NativeSessionKey, PositionStability, RepositoryFileObservationKind,
-    SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
+    EventType, NativeItemKey, NativeSessionKey, RepositoryAbstentionReason,
+    RepositoryFileObservationKind, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId,
+    TypedKey,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -37,12 +40,17 @@ use crate::{
 const SOURCE_ANCHOR_NAMESPACE: &str = "openclaw.legacy-session";
 const NATIVE_SESSION_NAMESPACE: &str = "openclaw.legacy-session";
 const NATIVE_EVENT_NAMESPACE: &str = "openclaw.legacy-event";
-const NATIVE_EVENT_POSITION_KIND: &str = "openclaw.legacy-jsonl.raw-ordinal";
+const FALLBACK_EVENT_ID_VERSION: &str = "openclaw.fallback-event.v1";
+const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-openclaw-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "openclaw-legacy-session";
 const LOGICAL_EVENT_KIND: &str = "openclaw-legacy-event";
 const SOURCE_SCHEMA_VARIANT: &str = "openclaw-legacy-jsonl-v2";
-const PARSER_REVISION: &str = "openclaw-source-backed-v1";
-const SOURCE_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx-complete-content-source-revision-v1\0";
+const PARSER_REVISION: &str = "openclaw-source-backed-v2";
+const MAX_PENDING_CALLS: usize = 4096;
+const MAX_RUNNING_PROCESSES: usize = 256;
+const PROJECTOR_CHECKPOINT_VERSION: u32 = 1;
+const PROJECTOR_CHECKPOINT_PREFIX: &str = "openclaw.projector-checkpoint.v1:";
+const MAX_PROJECTOR_CHECKPOINT_BYTES: usize = 40 * 1024;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct OpenClawJsonlAdapter;
@@ -56,7 +64,6 @@ pub(crate) fn openclaw_source_backed_adapter_v0() -> Arc<dyn JsonlFamilyAdapter>
 struct Binding {
     index_relative_path: PathBuf,
     native_session_id: String,
-    revision_digest: [u8; 32],
     index: Value,
     parent_native_session_id: Option<String>,
     root_native_session_id: Option<String>,
@@ -80,7 +87,7 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
-        JsonlFamilyAppendMode::Replacement
+        JsonlFamilyAppendMode::CertifiedSuffix
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
@@ -135,7 +142,6 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
             let binding = Binding {
                 index_relative_path,
                 native_session_id,
-                revision_digest: compound.revision_digest,
                 index: compound.index,
                 parent_native_session_id: compound.parent_native_session_id,
                 root_native_session_id: compound.root_native_session_id,
@@ -157,6 +163,17 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
         source_file: Arc<OpenedProviderSourceFile>,
         imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        self.projector_with_provider_checkpoint(leaf, source_file, imported_at, None, None)
+    }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
         let binding = decode_binding(leaf)?;
         let compound = admit_compound(
             leaf.authority(),
@@ -164,14 +181,14 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
             &binding.index_relative_path,
             source_file.as_ref(),
         )?;
-        if compound.revision_digest != binding.revision_digest
+        if compound.index != binding.index
             || compound.parent_native_session_id != binding.parent_native_session_id
             || compound.root_native_session_id != binding.root_native_session_id
         {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
         let session_id = session_identity(leaf.source(), &binding.native_session_id)?;
-        let session = SessionState::new(
+        let mut session = SessionState::new(
             leaf.source_path(),
             &binding.native_session_id,
             &binding.index,
@@ -180,37 +197,120 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
             imported_at,
             session_id,
         )?;
+        let restored = checkpoint
+            .map(|checkpoint| decode_projector_checkpoint(checkpoint, &binding))
+            .transpose()?;
+        let (pending_calls, running_processes, linkage_capacity_exceeded) = restored.map_or_else(
+            || (HashMap::new(), HashMap::new(), false),
+            |restored| {
+                session.restore(restored.session);
+                (
+                    restored.pending_calls,
+                    restored.running_processes,
+                    restored.linkage_capacity_exceeded,
+                )
+            },
+        );
         Ok(Box::new(OpenClawProjector {
             source: leaf.source().clone(),
+            native_session_id: binding.native_session_id,
             session_id,
             session,
             index_file: compound.index_file,
             authority: Arc::clone(leaf.authority()),
             attributor: RepositoryAttributor::default(),
-            pending_calls: HashMap::new(),
-            running_processes: HashMap::new(),
+            pending_calls,
+            running_processes,
+            linkage_capacity_exceeded,
+            fallback_identities: FallbackEventIdentityState::new(base_event_lookup),
         }))
     }
 }
 
 struct OpenClawProjector {
     source: SourceKey,
+    native_session_id: String,
     session_id: StableEntityId,
     session: SessionState,
     index_file: Option<OpenedProviderSourceFile>,
     authority: Arc<ProviderSourceRoot>,
     attributor: RepositoryAttributor,
-    pending_calls: HashMap<String, PendingCall>,
-    running_processes: HashMap<String, PendingCall>,
+    pending_calls: HashMap<String, PendingCallState>,
+    running_processes: HashMap<String, PendingCallState>,
+    linkage_capacity_exceeded: bool,
+    fallback_identities: FallbackEventIdentityState,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PendingCall {
     origin_call_id: String,
     command: Option<String>,
     declared_workdir: Option<String>,
     event_sequence: u64,
     continuation_call_id_sha256: Vec<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PendingCallState {
+    Exact(PendingCall),
+    Ambiguous,
+}
+
+#[derive(Debug)]
+enum PendingCallLookup {
+    Exact(PendingCall),
+    Ambiguous,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FallbackEventIdentity {
+    digest: [u8; 32],
+    duplicate_occurrence: u64,
+}
+
+#[derive(Default)]
+struct FallbackEventIdentityState {
+    base_lookup: Option<BaseEventIdentityLookup>,
+    next_occurrences: HashMap<[u8; 32], u64>,
+}
+
+impl FallbackEventIdentityState {
+    fn new(base_lookup: Option<BaseEventIdentityLookup>) -> Self {
+        Self {
+            base_lookup,
+            next_occurrences: HashMap::new(),
+        }
+    }
+}
+
+struct RestoredProjectorCheckpoint {
+    session: SessionCheckpoint,
+    pending_calls: HashMap<String, PendingCallState>,
+    running_processes: HashMap<String, PendingCallState>,
+    linkage_capacity_exceeded: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionCheckpoint {
+    provider_session_id: String,
+    started_at: DateTime<Utc>,
+    cwd: Option<String>,
+    branch: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectorCheckpoint {
+    version: u32,
+    native_session_id: String,
+    session: SessionCheckpoint,
+    pending_calls: Vec<(String, PendingCallState)>,
+    running_processes: Vec<(String, PendingCallState)>,
+    linkage_capacity_exceeded: bool,
 }
 
 impl JsonlFamilyProjector for OpenClawProjector {
@@ -266,13 +366,17 @@ impl JsonlFamilyProjector for OpenClawProjector {
                     .as_ref()
                     .and_then(|result| serde_json::to_string(result.message).ok())
             })
-            .unwrap_or(event.lexical_text);
+            .unwrap_or_else(|| event.lexical_text.clone());
         if body.trim().is_empty() {
             return Ok(());
         }
         let (native_item_key, native_event_key) = native_event_keys(
             event.provider_event_hash.as_deref(),
-            evidence.physical_ordinal(),
+            &value,
+            &event,
+            &self.source,
+            self.session_id,
+            &mut self.fallback_identities,
         )?;
         let event_id = derive_event_id(EventIdentityInput {
             source: &self.source,
@@ -320,45 +424,58 @@ impl JsonlFamilyProjector for OpenClawProjector {
             input.declared_tool_workdir = call.declared_workdir.clone();
             input.file_observations = call.file_observations.clone();
             if let Some(call_id) = call.call_id.filter(|id| !id.is_empty()) {
-                if self.pending_calls.len() < 4096 && !self.pending_calls.contains_key(call_id) {
-                    let pending = call
-                        .process_session_id
-                        .and_then(|session_id| self.running_processes.get(session_id))
-                        .cloned()
-                        .map(|mut pending| {
-                            if pending.continuation_call_id_sha256.len() < 64 {
-                                pending
-                                    .continuation_call_id_sha256
-                                    .push(Sha256::digest(call_id.as_bytes()).into());
-                            }
+                let state = match call
+                    .process_session_id
+                    .and_then(|session_id| self.running_processes.get(session_id))
+                {
+                    Some(PendingCallState::Exact(pending)) => {
+                        let mut pending = pending.clone();
+                        if pending.continuation_call_id_sha256.len() < 64 {
                             pending
-                        })
-                        .unwrap_or_else(|| PendingCall {
-                            origin_call_id: call_id.to_owned(),
-                            command: call.command.clone(),
-                            declared_workdir: call.declared_workdir.clone(),
-                            event_sequence,
-                            continuation_call_id_sha256: Vec::new(),
-                        });
+                                .continuation_call_id_sha256
+                                .push(Sha256::digest(call_id.as_bytes()).into());
+                        }
+                        PendingCallState::Exact(pending)
+                    }
+                    Some(PendingCallState::Ambiguous) => PendingCallState::Ambiguous,
+                    None => PendingCallState::Exact(PendingCall {
+                        origin_call_id: call_id.to_owned(),
+                        command: call.command.clone(),
+                        declared_workdir: call.declared_workdir.clone(),
+                        event_sequence,
+                        continuation_call_id_sha256: Vec::new(),
+                    }),
+                };
+                if let PendingCallState::Exact(pending) = &state {
                     input.command = pending.command.clone();
                     input.declared_tool_workdir = pending.declared_workdir.clone();
-                    self.pending_calls.insert(call_id.to_owned(), pending);
                 }
+                remember_pending_call(
+                    &mut self.pending_calls,
+                    &mut self.linkage_capacity_exceeded,
+                    MAX_PENDING_CALLS,
+                    call_id,
+                    state,
+                );
             }
         }
         let mut outcome_relevant = false;
         if let (Some(result), Some(output)) = (&tool_result, &output) {
-            if let Some(context) = result
-                .call_id
-                .and_then(|call_id| self.pending_calls.remove(call_id))
-            {
+            let (context, linkage_abstained) = resolve_pending_call(
+                &mut self.pending_calls,
+                result.call_id,
+                self.linkage_capacity_exceeded,
+                &mut input,
+            );
+            if let Some(context) = context {
                 if let Some(process_session_id) = result.running_process_session_id {
-                    if self.running_processes.len() < 256
-                        && !self.running_processes.contains_key(process_session_id)
-                    {
-                        self.running_processes
-                            .insert(process_session_id.to_owned(), context);
-                    }
+                    remember_pending_call(
+                        &mut self.running_processes,
+                        &mut self.linkage_capacity_exceeded,
+                        MAX_RUNNING_PROCESSES,
+                        process_session_id,
+                        PendingCallState::Exact(context),
+                    );
                     return Ok(());
                 }
                 input.command = context.command.clone();
@@ -394,12 +511,7 @@ impl JsonlFamilyProjector for OpenClawProjector {
                     }
                 }
             }
-            if !outcome_relevant
-                && !matches!(
-                    output.outcome.outcome,
-                    OutputOutcome::Failure | OutputOutcome::Timeout
-                )
-            {
+            if !retain_result_event(outcome_relevant, linkage_abstained, output.outcome.outcome) {
                 return Ok(());
             }
         }
@@ -414,6 +526,10 @@ impl JsonlFamilyProjector for OpenClawProjector {
             index.revalidate()?;
         }
         self.authority.revalidate()
+    }
+
+    fn provider_checkpoint(&self) -> Result<Option<TypedKey>> {
+        encode_projector_checkpoint(self).map(Some)
     }
 }
 
@@ -519,7 +635,6 @@ fn native_tool_result(value: &Value) -> Option<NativeToolResult<'_>> {
 }
 
 struct CompoundAdmission {
-    revision_digest: [u8; 32],
     index: Value,
     index_file: Option<OpenedProviderSourceFile>,
     parent_native_session_id: Option<String>,
@@ -552,14 +667,12 @@ fn admit_compound(
             .zip(index_bytes.as_deref())
             .map(|(index, bytes)| (index.metadata(), bytes)),
     )?;
-    let revision_digest = source_revision_digest(&observation.source_revision());
     let (parent_native_session_id, root_native_session_id) = index_bytes
         .as_deref()
         .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
         .map(|index| native_session_family(path, &index))
         .unwrap_or((None, None));
     Ok(CompoundAdmission {
-        revision_digest,
         index: observation.index,
         index_file,
         parent_native_session_id,
@@ -652,6 +765,22 @@ impl SessionState {
             .map(super::capped_text);
         self.branch = self.branch.clone().or_else(|| explicit_branch(value));
     }
+
+    fn restore(&mut self, checkpoint: SessionCheckpoint) {
+        self.provider_session_id = checkpoint.provider_session_id;
+        self.started_at = checkpoint.started_at;
+        self.cwd = checkpoint.cwd;
+        self.branch = checkpoint.branch;
+    }
+
+    fn checkpoint(&self) -> SessionCheckpoint {
+        SessionCheckpoint {
+            provider_session_id: self.provider_session_id.clone(),
+            started_at: self.started_at,
+            cwd: self.cwd.clone(),
+            branch: self.branch.clone(),
+        }
+    }
 }
 
 fn source_key(native_session_id: &str) -> Result<SourceKey> {
@@ -698,7 +827,11 @@ fn related_session_identity(
 
 fn native_event_keys(
     native_record_id: Option<&str>,
-    ordinal: u64,
+    value: &Value,
+    event: &normalization::OpenClawEventFact,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    state: &mut FallbackEventIdentityState,
 ) -> Result<(NativeItemKey, TypedKey)> {
     match native_record_id {
         Some(id) => {
@@ -708,16 +841,305 @@ fn native_event_keys(
                 key,
             ))
         }
-        None => Ok((
-            NativeItemKey::certified_position(
-                NATIVE_EVENT_POSITION_KIND,
-                TypedKey::U64(ordinal),
-                PositionStability::AppendStable,
-            )
-            .map_err(contract)?,
-            TypedKey::U64(ordinal),
-        )),
+        None => {
+            let identity = next_fallback_event_identity(value, event, source, session_id, state)?;
+            let parts = fallback_event_key_parts(identity)?;
+            Ok((
+                NativeItemKey::composite(NATIVE_EVENT_NAMESPACE, parts.clone())
+                    .map_err(contract)?,
+                TypedKey::composite(parts).map_err(contract)?,
+            ))
+        }
     }
+}
+
+fn remember_pending_call(
+    pending_calls: &mut HashMap<String, PendingCallState>,
+    linkage_capacity_exceeded: &mut bool,
+    capacity: usize,
+    call_id: &str,
+    state: PendingCallState,
+) {
+    if let Some(existing) = pending_calls.get_mut(call_id) {
+        *existing = PendingCallState::Ambiguous;
+    } else if pending_calls.len() < capacity {
+        pending_calls.insert(call_id.to_owned(), state);
+    } else {
+        *linkage_capacity_exceeded = true;
+    }
+}
+
+fn take_pending_call(
+    pending_calls: &mut HashMap<String, PendingCallState>,
+    call_id: Option<&str>,
+) -> PendingCallLookup {
+    match call_id.and_then(|call_id| pending_calls.remove(call_id)) {
+        Some(PendingCallState::Exact(context)) => PendingCallLookup::Exact(context),
+        Some(PendingCallState::Ambiguous) => PendingCallLookup::Ambiguous,
+        None => PendingCallLookup::Missing,
+    }
+}
+
+fn resolve_pending_call(
+    pending_calls: &mut HashMap<String, PendingCallState>,
+    call_id: Option<&str>,
+    linkage_capacity_exceeded: bool,
+    input: &mut AttributionInput,
+) -> (Option<PendingCall>, bool) {
+    match take_pending_call(pending_calls, call_id) {
+        PendingCallLookup::Exact(context) => (Some(context), false),
+        PendingCallLookup::Ambiguous => {
+            input.outcome_abstentions.push((
+                RepositoryAbstentionReason::ProviderOutputUnjoined,
+                "openclaw_tool_result_call_id_is_ambiguous",
+            ));
+            (None, true)
+        }
+        PendingCallLookup::Missing => {
+            let (reason, detail) = if linkage_capacity_exceeded {
+                (
+                    RepositoryAbstentionReason::LinkageCapacityExceeded,
+                    "openclaw_tool_result_linkage_capacity_exceeded",
+                )
+            } else {
+                (
+                    RepositoryAbstentionReason::ProviderOutputUnjoined,
+                    "openclaw_tool_result_has_no_exact_unique_call_link",
+                )
+            };
+            input.outcome_abstentions.push((reason, detail));
+            (None, true)
+        }
+    }
+}
+
+fn retain_result_event(
+    outcome_relevant: bool,
+    linkage_abstained: bool,
+    outcome: OutputOutcome,
+) -> bool {
+    outcome_relevant || linkage_abstained || outcome != OutputOutcome::Unknown
+}
+
+fn next_fallback_event_identity(
+    value: &Value,
+    event: &normalization::OpenClawEventFact,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    state: &mut FallbackEventIdentityState,
+) -> Result<FallbackEventIdentity> {
+    let digest = fallback_event_digest(value, event)?;
+    let occurrence = match state.next_occurrences.get(&digest).copied() {
+        Some(occurrence) => occurrence,
+        None => {
+            first_unused_base_occurrence(state.base_lookup.as_ref(), source, session_id, digest)?
+        }
+    };
+    let identity = FallbackEventIdentity {
+        digest,
+        duplicate_occurrence: occurrence,
+    };
+    state.next_occurrences.insert(
+        digest,
+        occurrence
+            .checked_add(1)
+            .ok_or(CaptureError::SystemInvariant(
+                "OpenClaw fallback duplicate occurrence overflowed",
+            ))?,
+    );
+    Ok(identity)
+}
+
+fn first_unused_base_occurrence(
+    base_lookup: Option<&BaseEventIdentityLookup>,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    digest: [u8; 32],
+) -> Result<u64> {
+    let Some(base_lookup) = base_lookup else {
+        return Ok(0);
+    };
+    if !base_occurrence_exists(base_lookup, source, session_id, digest, 0)? {
+        return Ok(0);
+    }
+
+    let mut present = 0_u64;
+    let mut missing = 1_u64;
+    while base_occurrence_exists(base_lookup, source, session_id, digest, missing)? {
+        present = missing;
+        missing = match missing.checked_mul(2) {
+            Some(next) => next,
+            None if missing != u64::MAX => u64::MAX,
+            None => {
+                return Err(CaptureError::SystemInvariant(
+                    "OpenClaw fallback duplicate occurrence overflowed",
+                ));
+            }
+        };
+    }
+    while present.saturating_add(1) < missing {
+        let candidate = present + (missing - present) / 2;
+        if base_occurrence_exists(base_lookup, source, session_id, digest, candidate)? {
+            present = candidate;
+        } else {
+            missing = candidate;
+        }
+    }
+    Ok(missing)
+}
+
+fn base_occurrence_exists(
+    base_lookup: &BaseEventIdentityLookup,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    digest: [u8; 32],
+    occurrence: u64,
+) -> Result<bool> {
+    let identity = FallbackEventIdentity {
+        digest,
+        duplicate_occurrence: occurrence,
+    };
+    let native_item_key =
+        NativeItemKey::composite(NATIVE_EVENT_NAMESPACE, fallback_event_key_parts(identity)?)
+            .map_err(contract)?;
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })
+    .map_err(contract)?;
+    base_lookup
+        .contains(event_id.as_uuid())
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
+}
+
+fn fallback_event_digest(
+    value: &Value,
+    event: &normalization::OpenClawEventFact,
+) -> Result<[u8; 32]> {
+    let logical = serde_json::to_vec(&(
+        event.event_type.as_str(),
+        event.role.map(|role| role.as_str()),
+        value,
+    ))?;
+    let mut hasher = Sha256::new();
+    hasher.update(FALLBACK_EVENT_ID_DOMAIN);
+    hasher.update((logical.len() as u64).to_be_bytes());
+    hasher.update(logical);
+    Ok(hasher.finalize().into())
+}
+
+fn fallback_event_key_parts(identity: FallbackEventIdentity) -> Result<Vec<TypedKey>> {
+    Ok(vec![
+        TypedKey::utf8(FALLBACK_EVENT_ID_VERSION).map_err(contract)?,
+        TypedKey::bytes(identity.digest.to_vec()).map_err(contract)?,
+        TypedKey::U64(identity.duplicate_occurrence),
+    ])
+}
+
+fn encode_projector_checkpoint(projector: &OpenClawProjector) -> Result<TypedKey> {
+    let mut pending_calls = projector
+        .pending_calls
+        .iter()
+        .map(|(call_id, state)| (call_id.clone(), state.clone()))
+        .collect::<Vec<_>>();
+    pending_calls.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let mut running_processes = projector
+        .running_processes
+        .iter()
+        .map(|(session_id, state)| (session_id.clone(), state.clone()))
+        .collect::<Vec<_>>();
+    running_processes.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let bytes = serde_json::to_vec(&ProjectorCheckpoint {
+        version: PROJECTOR_CHECKPOINT_VERSION,
+        native_session_id: projector.native_session_id.clone(),
+        session: projector.session.checkpoint(),
+        pending_calls,
+        running_processes,
+        linkage_capacity_exceeded: projector.linkage_capacity_exceeded,
+    })?;
+    if bytes.len() > MAX_PROJECTOR_CHECKPOINT_BYTES {
+        return Err(CaptureError::InvalidPayload(
+            "OpenClaw projector checkpoint exceeds its bounded encoding".to_owned(),
+        ));
+    }
+    TypedKey::utf8(format!(
+        "{PROJECTOR_CHECKPOINT_PREFIX}{}",
+        BASE64_STANDARD.encode(bytes)
+    ))
+    .map_err(contract)
+}
+
+fn decode_projector_checkpoint(
+    checkpoint: &TypedKey,
+    binding: &Binding,
+) -> Result<RestoredProjectorCheckpoint> {
+    let TypedKey::Utf8(encoded) = checkpoint else {
+        return Err(CaptureError::InvalidPayload(
+            "OpenClaw projector checkpoint is not an opaque string".to_owned(),
+        ));
+    };
+    let encoded = encoded
+        .strip_prefix(PROJECTOR_CHECKPOINT_PREFIX)
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload(
+                "OpenClaw projector checkpoint version is unsupported".to_owned(),
+            )
+        })?;
+    if encoded.len() > MAX_PROJECTOR_CHECKPOINT_BYTES.div_ceil(3) * 4 {
+        return Err(CaptureError::InvalidPayload(
+            "OpenClaw projector checkpoint exceeds its bounded encoding".to_owned(),
+        ));
+    }
+    let bytes = BASE64_STANDARD.decode(encoded).map_err(|_| {
+        CaptureError::InvalidPayload("OpenClaw projector checkpoint is malformed".to_owned())
+    })?;
+    if bytes.len() > MAX_PROJECTOR_CHECKPOINT_BYTES {
+        return Err(CaptureError::InvalidPayload(
+            "OpenClaw projector checkpoint exceeds its bounded encoding".to_owned(),
+        ));
+    }
+    let checkpoint: ProjectorCheckpoint = serde_json::from_slice(&bytes)?;
+    if checkpoint.version != PROJECTOR_CHECKPOINT_VERSION
+        || checkpoint.native_session_id != binding.native_session_id
+    {
+        return Err(CaptureError::InvalidPayload(
+            "OpenClaw projector checkpoint does not match its source binding".to_owned(),
+        ));
+    }
+    if checkpoint.pending_calls.len() > MAX_PENDING_CALLS
+        || checkpoint.running_processes.len() > MAX_RUNNING_PROCESSES
+    {
+        return Err(CaptureError::InvalidPayload(
+            "OpenClaw projector checkpoint exceeds its state capacity".to_owned(),
+        ));
+    }
+    let pending_calls = restore_pending_states(checkpoint.pending_calls, "call")?;
+    let running_processes =
+        restore_pending_states(checkpoint.running_processes, "process session")?;
+    Ok(RestoredProjectorCheckpoint {
+        session: checkpoint.session,
+        pending_calls,
+        running_processes,
+        linkage_capacity_exceeded: checkpoint.linkage_capacity_exceeded,
+    })
+}
+
+fn restore_pending_states(
+    entries: Vec<(String, PendingCallState)>,
+    identity_kind: &str,
+) -> Result<HashMap<String, PendingCallState>> {
+    let mut restored = HashMap::with_capacity(entries.len());
+    for (identity, state) in entries {
+        if identity.is_empty() || restored.insert(identity, state).is_some() {
+            return Err(CaptureError::InvalidPayload(format!(
+                "OpenClaw projector checkpoint repeats a {identity_kind} identity"
+            )));
+        }
+    }
+    Ok(restored)
 }
 
 fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<Binding> {
@@ -816,14 +1238,6 @@ fn explicit_branch(value: &Value) -> Option<String> {
         .map(super::capped_text)
 }
 
-fn source_revision_digest(source_revision: &str) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(SOURCE_REVISION_DIGEST_DOMAIN);
-    digest.update((source_revision.len() as u64).to_be_bytes());
-    digest.update(source_revision.as_bytes());
-    digest.finalize().into()
-}
-
 fn contract(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
 }
@@ -831,11 +1245,138 @@ fn contract(error: impl std::fmt::Display) -> CaptureError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ctx_history_core::{CertifiedSource, ScannedSourceCounts, SourceObservation};
+    use ctx_history_index::{GenerationWriter, WriterOptions};
 
     const HISTORY: &str =
         include_str!("../../../../../tests/fixtures/repository_attribution/openclaw-native.jsonl");
     const SESSIONS: &str =
         include_str!("../../../../../tests/fixtures/repository_attribution/openclaw-sessions.json");
+
+    fn fallback_event_ids(bodies: &[&str]) -> Vec<StableEntityId> {
+        let native_session_id = "main/fallback-session";
+        let source = source_key(native_session_id).unwrap();
+        let session_id = session_identity(&source, native_session_id).unwrap();
+        let occurred_at = "2026-07-31T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mut state = FallbackEventIdentityState::default();
+        bodies
+            .iter()
+            .enumerate()
+            .map(|(ordinal, body)| {
+                let value = serde_json::json!({
+                    "type": "message",
+                    "timestamp": "2026-07-31T12:00:00Z",
+                    "message": {"role": "user", "content": body},
+                });
+                let event =
+                    normalization::event_fact(ordinal as u64, ordinal + 1, &value, occurred_at);
+                let (native_item_key, _) =
+                    native_event_keys(None, &value, &event, &source, session_id, &mut state)
+                        .unwrap();
+                derive_event_id(EventIdentityInput {
+                    source: &source,
+                    session_id,
+                    logical_item_kind: LOGICAL_EVENT_KIND,
+                    native_item_key: &native_item_key,
+                    subrecord_selector: None,
+                })
+                .unwrap()
+            })
+            .collect()
+    }
+
+    fn fallback_event_id(
+        body: &str,
+        ordinal: u64,
+        source: &SourceKey,
+        session_id: StableEntityId,
+        state: &mut FallbackEventIdentityState,
+    ) -> (StableEntityId, TypedKey) {
+        let occurred_at = "2026-07-31T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let value = serde_json::json!({
+            "type": "message",
+            "timestamp": "2026-07-31T12:00:00Z",
+            "message": {"role": "user", "content": body},
+        });
+        let event = normalization::event_fact(
+            ordinal,
+            usize::try_from(ordinal).unwrap() + 1,
+            &value,
+            occurred_at,
+        );
+        let (native_item_key, native_event_id) =
+            native_event_keys(None, &value, &event, source, session_id, state).unwrap();
+        let event_id = derive_event_id(EventIdentityInput {
+            source,
+            session_id,
+            logical_item_kind: LOGICAL_EVENT_KIND,
+            native_item_key: &native_item_key,
+            subrecord_selector: None,
+        })
+        .unwrap();
+        (event_id, native_event_id)
+    }
+
+    fn base_lookup_with_events(
+        source: &SourceKey,
+        session_id: StableEntityId,
+        events: &[(StableEntityId, TypedKey)],
+    ) -> (tempfile::TempDir, BaseEventIdentityLookup) {
+        let temp = tempfile::tempdir().unwrap();
+        let options = WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        };
+        let mut writer = GenerationWriter::open(temp.path(), options.clone()).unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        for (index, (event_id, native_event_id)) in events.iter().enumerate() {
+            let event_sequence = u64::try_from(index).unwrap() + 1;
+            let mut record = CoreRecord::new_selected(
+                *event_id,
+                session_id,
+                session_id,
+                source.clone(),
+                event_sequence,
+                "message",
+                "primary",
+                true,
+                PARSER_REVISION,
+                "OpenClaw fallback lookup test",
+            )
+            .unwrap();
+            record.provider_session_id = Some("main/fallback-session".to_owned());
+            record.native_event_id = Some(native_event_id.clone());
+            record.occurred_at_unix_ms = Some(i64::try_from(event_sequence).unwrap());
+            record.role = Some("user".to_owned());
+            writer.add_core_record(record).unwrap();
+        }
+        let observation =
+            SourceObservation::new(source.clone(), "fallback-test-source-v1", vec![1]).unwrap();
+        let count = u64::try_from(events.len()).unwrap();
+        writer
+            .certify_source(
+                CertifiedSource::certify(
+                    observation.clone(),
+                    observation,
+                    PARSER_REVISION,
+                    [1; 32],
+                    ScannedSourceCounts {
+                        complete_records: count,
+                        retained_records: count,
+                        indexed_documents: count,
+                        certified_bytes: count,
+                        ..ScannedSourceCounts::default()
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        writer.commit(|_| true).unwrap();
+        let writer = GenerationWriter::open(temp.path(), options).unwrap();
+        let lookup = writer.base_event_identity_lookup();
+        drop(writer);
+        (temp, lookup)
+    }
 
     #[test]
     fn native_tool_call_result_and_spawned_family_are_exact() {
@@ -866,6 +1407,213 @@ mod tests {
                 Some("main/parent-session".to_owned()),
                 Some("main/parent-session".to_owned())
             )
+        );
+    }
+
+    #[test]
+    fn duplicate_call_ids_are_ambiguous_and_result_linkage_abstains() {
+        let mut pending_calls = HashMap::new();
+        let mut capacity_exceeded = false;
+        for command in ["git commit -m first", "git commit -m second"] {
+            remember_pending_call(
+                &mut pending_calls,
+                &mut capacity_exceeded,
+                MAX_PENDING_CALLS,
+                "duplicate-call",
+                PendingCallState::Exact(PendingCall {
+                    origin_call_id: "duplicate-call".to_owned(),
+                    command: Some(command.to_owned()),
+                    declared_workdir: Some("/tmp/repository".to_owned()),
+                    event_sequence: 1,
+                    continuation_call_id_sha256: Vec::new(),
+                }),
+            );
+        }
+        assert!(matches!(
+            pending_calls.get("duplicate-call"),
+            Some(PendingCallState::Ambiguous)
+        ));
+
+        let mut input = AttributionInput::default();
+        let (context, abstained) = resolve_pending_call(
+            &mut pending_calls,
+            Some("duplicate-call"),
+            capacity_exceeded,
+            &mut input,
+        );
+        assert!(context.is_none());
+        assert!(abstained);
+        let annotation = RepositoryAttributor::default().attribute(input);
+        assert!(annotation.repository_vcs_observations.is_empty());
+        assert!(annotation.repository_abstentions.iter().any(|abstention| {
+            abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
+                && abstention.detail.as_deref() == Some("openclaw_tool_result_call_id_is_ambiguous")
+        }));
+
+        let success = serde_json::json!({
+            "type": "message",
+            "message": {
+                "role": "tool",
+                "toolCallId": "success",
+                "content": "ok",
+                "details": {"exitCode": 0},
+            },
+        });
+        let failure = serde_json::json!({
+            "type": "message",
+            "message": {
+                "role": "tool",
+                "toolCallId": "failure",
+                "content": "failed",
+                "details": {"exitCode": 1},
+            },
+        });
+        let success = openclaw_output_metadata(&success).unwrap().outcome.outcome;
+        let failure = openclaw_output_metadata(&failure).unwrap().outcome.outcome;
+        assert_eq!(success, OutputOutcome::Success);
+        assert_eq!(failure, OutputOutcome::Failure);
+        assert!(retain_result_event(false, abstained, success));
+        assert!(retain_result_event(false, false, failure));
+    }
+
+    #[test]
+    fn fallback_event_ids_survive_insert_and_delete_before_with_stable_duplicates() {
+        let baseline = fallback_event_ids(&["prefix", "target", "suffix"]);
+        let inserted = fallback_event_ids(&["inserted", "prefix", "target", "suffix"]);
+        let deleted = fallback_event_ids(&["target", "suffix"]);
+        assert_eq!(baseline[1], inserted[2]);
+        assert_eq!(baseline[1], deleted[0]);
+        assert_eq!(baseline[2], inserted[3]);
+        assert_eq!(baseline[2], deleted[1]);
+
+        let duplicates = fallback_event_ids(&["duplicate", "duplicate"]);
+        let replayed = fallback_event_ids(&["duplicate", "duplicate"]);
+        assert_ne!(duplicates[0], duplicates[1]);
+        assert_eq!(duplicates, replayed);
+    }
+
+    #[test]
+    fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
+        let temp = tempfile::tempdir().unwrap();
+        let authority = Arc::new(ProviderSourceRoot::open(temp.path()).unwrap());
+        let native_session_id = "main/fallback-session";
+        let binding = Binding {
+            index_relative_path: PathBuf::from("sessions.json"),
+            native_session_id: native_session_id.to_owned(),
+            index: Value::Null,
+            parent_native_session_id: None,
+            root_native_session_id: None,
+        };
+        let source = source_key(native_session_id).unwrap();
+        let session_id = session_identity(&source, native_session_id).unwrap();
+        let source_path = PathBuf::from("/agents/main/sessions/fallback-session.jsonl");
+        let session = SessionState::new(
+            &source_path,
+            native_session_id,
+            &binding.index,
+            None,
+            None,
+            DateTime::<Utc>::UNIX_EPOCH,
+            session_id,
+        )
+        .unwrap();
+        let mut cold_identity_state = FallbackEventIdentityState::default();
+        let prefix_events = [0, 1]
+            .into_iter()
+            .map(|ordinal| {
+                fallback_event_id(
+                    "duplicate",
+                    ordinal,
+                    &source,
+                    session_id,
+                    &mut cold_identity_state,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (_base, base_lookup) = base_lookup_with_events(&source, session_id, &prefix_events);
+        let mut pending_calls = HashMap::new();
+        let mut linkage_capacity_exceeded = false;
+        remember_pending_call(
+            &mut pending_calls,
+            &mut linkage_capacity_exceeded,
+            MAX_PENDING_CALLS,
+            "cross-append-call",
+            PendingCallState::Exact(PendingCall {
+                origin_call_id: "cross-append-call".to_owned(),
+                command: Some("git commit -m prefix".to_owned()),
+                declared_workdir: Some("/tmp/project".to_owned()),
+                event_sequence: 0,
+                continuation_call_id_sha256: Vec::new(),
+            }),
+        );
+        let mut projector = OpenClawProjector {
+            source: source.clone(),
+            native_session_id: native_session_id.to_owned(),
+            session_id,
+            session,
+            index_file: None,
+            authority,
+            attributor: RepositoryAttributor::default(),
+            pending_calls,
+            running_processes: HashMap::new(),
+            linkage_capacity_exceeded,
+            fallback_identities: FallbackEventIdentityState::default(),
+        };
+        let checkpoint = encode_projector_checkpoint(&projector).unwrap();
+        for occurrence in 0_u64..1_024 {
+            let mut digest = [0; 32];
+            digest[..8].copy_from_slice(&occurrence.to_be_bytes());
+            projector
+                .fallback_identities
+                .next_occurrences
+                .insert(digest, occurrence + 1);
+        }
+        assert_eq!(encode_projector_checkpoint(&projector).unwrap(), checkpoint);
+        let mut restored = decode_projector_checkpoint(&checkpoint, &binding).unwrap();
+
+        let mut append_identity_state = FallbackEventIdentityState::new(Some(base_lookup));
+        let suffix_event = fallback_event_id(
+            "duplicate",
+            2,
+            &source,
+            session_id,
+            &mut append_identity_state,
+        );
+        let replayed = fallback_event_ids(&["duplicate", "duplicate", "duplicate"]);
+        assert_eq!(prefix_events[0].0, replayed[0]);
+        assert_eq!(prefix_events[1].0, replayed[1]);
+        assert_eq!(suffix_event.0, replayed[2]);
+        assert_ne!(prefix_events[0].0, suffix_event.0);
+        assert_ne!(prefix_events[1].0, suffix_event.0);
+
+        remember_pending_call(
+            &mut restored.pending_calls,
+            &mut restored.linkage_capacity_exceeded,
+            MAX_PENDING_CALLS,
+            "cross-append-call",
+            PendingCallState::Exact(PendingCall {
+                origin_call_id: "cross-append-call".to_owned(),
+                command: Some("git commit -m suffix".to_owned()),
+                declared_workdir: Some("/tmp/project".to_owned()),
+                event_sequence: 1_u64 << 16,
+                continuation_call_id_sha256: Vec::new(),
+            }),
+        );
+        let mut input = AttributionInput::default();
+        let (context, abstained) = resolve_pending_call(
+            &mut restored.pending_calls,
+            Some("cross-append-call"),
+            restored.linkage_capacity_exceeded,
+            &mut input,
+        );
+        assert!(context.is_none());
+        assert!(abstained);
+        assert_eq!(
+            input.outcome_abstentions,
+            vec![(
+                RepositoryAbstentionReason::ProviderOutputUnjoined,
+                "openclaw_tool_result_call_id_is_ambiguous"
+            )]
         );
     }
 }

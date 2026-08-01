@@ -657,19 +657,33 @@ mod tests {
 
     #[test]
     fn multiple_native_results_keep_independent_exact_outcomes() {
-        let bytes = br#"{"type":"user","uuid":"result-2","sessionId":"claude-session","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu-ok","is_error":false,"content":"ok"},{"type":"tool_result","tool_use_id":"toolu-fail","is_error":true,"content":"failed"}]}}"#;
+        let bytes = br#"{"type":"user","uuid":"result-2","sessionId":"claude-session","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu-duplicate","is_error":false,"content":"ok"},{"type":"tool_result","tool_use_id":"toolu-duplicate","is_error":true,"content":"failed"}]}}"#;
         let record = parse_native_record(bytes, 2, &locator()).unwrap();
         let outcomes = record
             .rows
             .iter()
             .filter_map(|row| row.tool_result.as_ref())
-            .map(|result| (result.call_id.as_deref(), result.outcome))
+            .map(|result| {
+                (
+                    result.call_id.as_deref(),
+                    result.outcome,
+                    result.content.as_str(),
+                )
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             outcomes,
             vec![
-                (Some("toolu-ok"), ClaudeOutputOutcome::Success),
-                (Some("toolu-fail"), ClaudeOutputOutcome::Failure),
+                (
+                    Some("toolu-duplicate"),
+                    ClaudeOutputOutcome::Success,
+                    Some("ok")
+                ),
+                (
+                    Some("toolu-duplicate"),
+                    ClaudeOutputOutcome::Failure,
+                    Some("failed")
+                ),
             ]
         );
     }

@@ -11,6 +11,7 @@ use ctx_history_core::{
     CaptureProvider, CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory,
     CoreRecord, SourceInventoryObservation, SourceKey, TypedKey,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -186,6 +187,12 @@ pub(crate) trait JsonlFamilyProjector: Send {
     fn rejected_records(&self) -> u64 {
         0
     }
+
+    /// Opaque, contract-bounded provider state to carry into the next certified
+    /// suffix projection. The family persists the value without interpreting it.
+    fn provider_checkpoint(&self) -> Result<Option<TypedKey>> {
+        Ok(None)
+    }
 }
 
 pub(crate) trait JsonlFamilyAdapter: Send + Sync {
@@ -207,6 +214,26 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
         source_file: Arc<OpenedProviderSourceFile>,
         imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>>;
+
+    /// Constructs a projector for a cold/replacement scan or from the opaque
+    /// provider state persisted at the validated prefix frontier. Certified
+    /// suffix scans also receive an exact event-identity lookup pinned to the
+    /// writer base; cold and replacement scans receive no lookup.
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        _base_event_lookup: Option<BaseEventIdentityLookup>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        if checkpoint.is_some() {
+            return Err(CaptureError::InvalidPayload(
+                "JSONL adapter does not accept provider checkpoint state".to_owned(),
+            ));
+        }
+        self.projector(leaf, source_file, imported_at)
+    }
 
     fn owns(&self, source: &SourceKey) -> bool {
         source.provider() == self.provider().as_str()
@@ -554,10 +581,11 @@ struct FamilyCheckpoint {
     represented_physical_records: u64,
     rejected_records: u64,
     indexed_documents: u64,
+    provider_checkpoint: Option<TypedKey>,
 }
 
 impl FamilyCheckpoint {
-    const VERSION: u32 = 3;
+    const VERSION: u32 = 4;
 
     fn valid_for(&self, adapter: &dyn JsonlFamilyAdapter, leaf: &JsonlFamilyLeaf) -> bool {
         self.version == Self::VERSION
@@ -565,6 +593,10 @@ impl FamilyCheckpoint {
             && binding_digest(leaf).is_ok_and(|digest| self.binding_digest == digest)
             && self.physical.is_internally_consistent()
             && self.physical.identity() == &physical_identity(adapter, leaf)
+            && self
+                .provider_checkpoint
+                .as_ref()
+                .is_none_or(|checkpoint| checkpoint.validate_contract().is_ok())
             && self
                 .represented_physical_records
                 .checked_add(self.rejected_records)
@@ -697,7 +729,14 @@ fn capture(
         }
     }
     let bases_by_descriptor = bases_by_descriptor(&bases)?;
-    let terminal_sources = scan_leaves(adapter, opening.leaves(), &bases_by_descriptor, sink)?;
+    let base_event_lookup = sink.writer.base_event_identity_lookup();
+    let terminal_sources = scan_leaves(
+        adapter,
+        opening.leaves(),
+        &bases_by_descriptor,
+        base_event_lookup,
+        sink,
+    )?;
 
     let closing = adapter
         .discover(root)

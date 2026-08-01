@@ -13,12 +13,26 @@ pub(super) fn complete_output_rows(
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default();
+    let result_blocks = blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .collect::<Vec<_>>();
+    let mut consumed_result_blocks = vec![false; result_blocks.len()];
     outputs
         .iter()
         .map(|output| {
-            let block = blocks.iter().find(|block| {
-                block.get("type").and_then(Value::as_str) == Some("tool_result")
-                    && block.get("tool_use_id").and_then(Value::as_str) == output.call_id.as_deref()
+            let block = output.call_id.as_deref().and_then(|call_id| {
+                result_blocks
+                    .iter()
+                    .enumerate()
+                    .find(|(index, block)| {
+                        !consumed_result_blocks[*index]
+                            && block.get("tool_use_id").and_then(Value::as_str) == Some(call_id)
+                    })
+                    .map(|(index, block)| {
+                        consumed_result_blocks[index] = true;
+                        *block
+                    })
             });
             let outcome = match output.outcome.outcome {
                 OutputOutcome::Success => ClaudeOutputOutcome::Success,
