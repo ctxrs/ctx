@@ -10,9 +10,9 @@ impl GeminiRawJson<'_> {
         self.whitespace();
         match self.peek() {
             Some(b'"') => Ok(GeminiRawOutput {
-                content: GeminiSelectedContent::String(
-                    self.string(PROVIDER_MAX_PREVIEW_CHARS)?.bounded_content(),
-                ),
+                content: GeminiSelectedContent::String {
+                    sha256: self.string(0)?.sha256,
+                },
                 ..GeminiRawOutput::default()
             }),
             Some(b'{') => self.output_object(depth.saturating_add(1)),
@@ -194,10 +194,9 @@ impl GeminiRawJson<'_> {
     ) -> std::result::Result<GeminiSelectedContent, String> {
         self.whitespace();
         match self.peek() {
-            Some(b'"') => self
-                .string(PROVIDER_MAX_PREVIEW_CHARS)
-                .map(GeminiRawString::bounded_content)
-                .map(GeminiSelectedContent::String),
+            Some(b'"') => self.string(0).map(|content| GeminiSelectedContent::String {
+                sha256: content.sha256,
+            }),
             Some(b'n') => {
                 self.consume_literal(b"null")?;
                 Ok(GeminiSelectedContent::Null)
@@ -529,15 +528,11 @@ pub(super) fn finish_probed_output(
     outer_outcome: &GeminiOutputOutcomeDto,
     result: GeminiRawOutput,
 ) -> ProbedGeminiOutput {
-    let (retained, content_kind, content_sha256) = match result.content {
-        GeminiSelectedContent::String(content) => {
-            (content.preview, b"string".as_slice(), Some(content.sha256))
-        }
-        GeminiSelectedContent::Absent => (None, b"absent".as_slice(), None),
-        GeminiSelectedContent::Null => (None, b"null".as_slice(), None),
-        GeminiSelectedContent::Unsupported { sha256 } => {
-            (None, b"unsupported".as_slice(), Some(sha256))
-        }
+    let (content_kind, content_sha256) = match result.content {
+        GeminiSelectedContent::String { sha256 } => (b"string".as_slice(), Some(sha256)),
+        GeminiSelectedContent::Absent => (b"absent".as_slice(), None),
+        GeminiSelectedContent::Null => (b"null".as_slice(), None),
+        GeminiSelectedContent::Unsupported { sha256 } => (b"unsupported".as_slice(), Some(sha256)),
     };
     let outcome = outer_outcome.combined_metadata(&result.outcome);
     let fallback_identity_sha256 = result_fallback_identity_sha256(
@@ -547,12 +542,6 @@ pub(super) fn finish_probed_output(
         content_kind,
         content_sha256.as_ref(),
     );
-    let released_diagnostic_preview = retained.as_deref().map(|content| {
-        content
-            .chars()
-            .take(PROVIDER_MAX_PREVIEW_CHARS)
-            .collect::<String>()
-    });
     ProbedGeminiOutput {
         call_id,
         tool_name,
@@ -562,7 +551,6 @@ pub(super) fn finish_probed_output(
         ambiguous_native_fields: repository_args.ambiguous_native_fields,
         outcome,
         redacted: record_redacted || outer_outcome.redacted_with(&result.outcome),
-        released_diagnostic_preview,
         fallback_identity_sha256,
     }
 }

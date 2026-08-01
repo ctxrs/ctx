@@ -39,10 +39,6 @@ fn gemini_nativepath_result_only_failure_retains_only_a_sparse_core_diagnostic()
     assert!(!outcome.signals.emitted_zero_rows);
     assert!(!outcome.signals.source_has_zero_retained_rows);
     assert_eq!(outcome.metrics.native_result_records_observed, 1);
-    assert!(outcome.metrics.result_body_bytes_decoded_or_allocated > 0);
-    assert_eq!(outcome.metrics.result_body_hashes_created, 1);
-    assert_eq!(outcome.metrics.result_previews_created, 1);
-    assert_eq!(outcome.metrics.result_file_touches_created, 0);
 }
 
 #[test]
@@ -349,9 +345,5 @@ fn gemini_nativepath_streams_local_scale_without_accumulating_rows_or_results() 
     assert!(
         outcome.metrics.native_result_record_bytes_observed > (PAIRS as u64).saturating_mul(1_024)
     );
-    assert_eq!(outcome.metrics.result_body_bytes_decoded_or_allocated, 0);
-    assert_eq!(outcome.metrics.result_body_hashes_created, 0);
-    assert_eq!(outcome.metrics.result_previews_created, 0);
-    assert_eq!(outcome.metrics.result_file_touches_created, 0);
     assert_eq!(outcome.checkpoint.next_raw_ordinal, 1 + (PAIRS as u64 * 2));
 }

@@ -420,17 +420,13 @@ impl StatusMarker {
     }
 }
 
-#[derive(Debug, Default, Clone)]
-struct GeminiBoundedContent {
-    preview: Option<String>,
-    sha256: [u8; 32],
-}
-
 #[derive(Default)]
 enum GeminiSelectedContent {
     #[default]
     Absent,
-    String(GeminiBoundedContent),
+    String {
+        sha256: [u8; 32],
+    },
     Null,
     Unsupported {
         sha256: [u8; 32],
@@ -454,7 +450,6 @@ struct ProbedGeminiOutput {
     ambiguous_native_fields: bool,
     outcome: OutputOutcomeMetadata,
     redacted: bool,
-    released_diagnostic_preview: Option<String>,
     fallback_identity_sha256: [u8; 32],
 }
 
@@ -466,9 +461,6 @@ struct ProbedGeminiResult {
 
 pub(super) struct DecodedGeminiResult {
     pub(super) events: Vec<(GeminiRetainedEvent, usize)>,
-    pub(super) decoded_body_bytes: u64,
-    pub(super) failure_diagnostics: usize,
-    pub(super) failure_previews: usize,
 }
 
 const MAX_GEMINI_STRUCTURAL_DEPTH: usize = 128;
@@ -489,13 +481,6 @@ struct GeminiRawString {
 }
 
 impl GeminiRawString {
-    fn bounded_content(self) -> GeminiBoundedContent {
-        GeminiBoundedContent {
-            preview: Some(self.retained),
-            sha256: self.sha256,
-        }
-    }
-
     fn exact(self) -> Option<String> {
         (!self.truncated).then_some(self.retained)
     }

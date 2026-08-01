@@ -132,9 +132,6 @@ pub(crate) struct GeminiToolCall {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct GeminiRetainedEvent {
     pub(crate) identity: GeminiEventIdentity,
-    /// Exact identity string emitted by the released positional v5/p3
-    /// publisher. Kept transiently so upgrades can recognize only that shape.
-    pub(crate) released_identity: String,
     pub(crate) native_order: GeminiNativeOrder,
     pub(crate) source_record: GeminiSourceRecordEvidence,
     pub(crate) event_type: EventType,
@@ -142,10 +139,6 @@ pub(crate) struct GeminiRetainedEvent {
     pub(crate) occurred_at: Option<DateTime<Utc>>,
     pub(crate) body: GeminiEventBody,
     pub(crate) body_sha256: [u8; 32],
-    /// Exact hash emitted by the released positional publisher. It is used
-    /// only to migrate an already-committed v5/p3 event to the current
-    /// normalized-payload hash authority and is never published as content.
-    pub(crate) released_body_sha256: [u8; 32],
     pub(crate) preview: String,
     pub(crate) searchable_text: String,
     pub(crate) safe_file_touches: Vec<String>,
@@ -228,11 +221,6 @@ pub(crate) struct GeminiParserMetrics {
     pub(crate) native_record_bytes_observed: u64,
     pub(crate) native_result_records_observed: u64,
     pub(crate) native_result_record_bytes_observed: u64,
-    pub(crate) result_body_bytes_decoded_or_allocated: u64,
-    pub(crate) result_body_hashes_created: u64,
-    pub(crate) result_previews_created: u64,
-    pub(crate) result_file_touches_created: u64,
-    pub(crate) result_fts_documents_created: u64,
     pub(crate) retained_messages: u64,
     pub(crate) retained_tool_calls: u64,
     pub(crate) retained_notices: u64,
