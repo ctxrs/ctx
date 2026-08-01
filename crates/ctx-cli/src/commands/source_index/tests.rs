@@ -1,10 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use std::{
-        cell::Cell,
-        collections::HashMap,
-        fs,
-    };
+    use std::{cell::Cell, collections::HashMap, fs};
 
     use ctx_history_capture::ingest_codex_source_backed_v0;
     use ctx_history_core::{
@@ -29,13 +25,11 @@ mod tests {
     use super::*;
     use super::{
         render::{render_show_document, search_json},
-        search::{
-            NormalizedSearchQuery, SearchCollection, SearchHit, SearchResultWindow,
-        },
+        search::{NormalizedSearchQuery, SearchCollection, SearchHit, SearchResultWindow},
         show::{
-            canonical_show_output_bytes, core_events_by_ids_with_presentation_limits,
-            event_window, event_window_value, render_event_value, render_event_values,
-            session_json, session_json_with_event_cap, session_transcript_value,
+            canonical_show_output_bytes, core_events_by_ids_with_presentation_limits, event_window,
+            event_window_value, render_event_value, render_event_values, session_json,
+            session_json_with_event_cap, session_transcript_value,
             take_core_presentation_fetch_ids, validate_show_target,
             EncodedCorePresentationLimitError, SessionJsonOptions,
         },
@@ -197,7 +191,8 @@ mod tests {
 
     fn append_fixture_event(data_root: &Path, event: EventRecord, revision: u8) {
         let source = event.source.clone();
-        let core_record = fixture_core_event(&event, "ambiguous provider session fixture").core_record;
+        let core_record =
+            fixture_core_event(&event, "ambiguous provider session fixture").core_record;
         let mut writer = GenerationWriter::open(
             index_root(data_root),
             WriterOptions {
@@ -231,11 +226,7 @@ mod tests {
         writer.commit(|_| true).unwrap();
     }
 
-    fn append_fixture_session(
-        data_root: &Path,
-        events: &[CoreEventRecord],
-        revision: u8,
-    ) {
+    fn append_fixture_session(data_root: &Path, events: &[CoreEventRecord], revision: u8) {
         let source = events.first().unwrap().source.clone();
         assert!(events.iter().all(|event| event.source == source));
         let mut writer = GenerationWriter::open(
@@ -344,8 +335,7 @@ mod tests {
     #[test]
     fn oversized_single_query_is_rejected_before_refresh_coordination() {
         let mut source_request = request(RefreshArg::Off);
-        source_request.query =
-            "x".repeat(LEXICAL_QUERY_LIMITS.maximum_aggregate_bytes + 1);
+        source_request.query = "x".repeat(LEXICAL_QUERY_LIMITS.maximum_aggregate_bytes + 1);
         let coordinated = Cell::new(false);
 
         let error = refresh_for_search_with(
@@ -544,10 +534,7 @@ mod tests {
             &index,
             &collection,
             &EventSearchFilters::default(),
-            &HashMap::from([
-                (first_id, first_core),
-                (second_id, second_core),
-            ]),
+            &HashMap::from([(first_id, first_core), (second_id, second_core)]),
             "existing_generation",
             1,
             std::time::Duration::ZERO,
@@ -583,10 +570,7 @@ mod tests {
             &session,
             TranscriptMode::Log,
             OutputFormat::Json,
-            events
-                .iter()
-                .map(render_event_value)
-                .collect(),
+            events.iter().map(render_event_value).collect(),
             false,
             None,
         );
@@ -678,7 +662,10 @@ mod tests {
         )))
         .unwrap_err()
         .to_string();
-        assert!(session_identity.contains("session id must be"), "{session_identity}");
+        assert!(
+            session_identity.contains("session id must be"),
+            "{session_identity}"
+        );
         assert!(!session_identity.contains("index is not initialized"));
 
         let provider_identity =
@@ -877,7 +864,12 @@ mod tests {
             .unwrap()
             .iter()
             .map(|event| {
-                event.core_record.content.normalized_body.as_ref().map_or(0, String::len)
+                event
+                    .core_record
+                    .content
+                    .normalized_body
+                    .as_ref()
+                    .map_or(0, String::len)
                     + event
                         .core_record
                         .content
@@ -1049,8 +1041,7 @@ mod tests {
         .unwrap();
         assert_eq!(rendered[0]["text"], body);
 
-        let error = render_event_values(&[&core_event], 1024)
-            .unwrap_err();
+        let error = render_event_values(&[&core_event], 1024).unwrap_err();
         let typed = error
             .downcast_ref::<crate::presentation_limit::PresentationOutputLimitError>()
             .expect("Core body should be bounded before event JSON construction");
@@ -1283,7 +1274,9 @@ mod tests {
         )
         .unwrap();
         assert!(
-            crate::presentation_limit::enforce_presentation_output_limit(narrow, expected, event_id)
+            crate::presentation_limit::enforce_presentation_output_limit(
+                narrow, expected, event_id
+            )
             .is_err(),
             "a live-width count would incorrectly reject the same logical output"
         );

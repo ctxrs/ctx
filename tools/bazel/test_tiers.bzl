@@ -40,6 +40,7 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-cli:upgrade_tests",
     "//crates/ctx-cli:upgrade_analytics_tests",
     "//crates/ctx-history-capture:unit_tests",
+    "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests",
     "//crates/ctx-history-core:unit_tests",
     "//crates/ctx-history-index:source_backed_recovery_tests",
     "//crates/ctx-history-index:unit_tests",
@@ -64,6 +65,7 @@ _CI_PROVIDER_TESTS = [
     "//crates/ctx-cli:setup_sources_import_tests",
     "//crates/ctx-cli:self_contained_core_content_tests",
     "//crates/ctx-history-capture:active_source_family_contract_tests",
+    "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests",
     "//crates/ctx-history-capture:unit_tests",
 ]
 

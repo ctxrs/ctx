@@ -588,7 +588,7 @@ ctx_cli_integration_test(
 
 ctx_cli_integration_test(
     name = "self_contained_core_content_tests",
-    src = "tests/source_backed_content.rs",
+    src = "tests/self_contained_core_content.rs",
     extra_deps = ["//crates/ctx-history-capture:lib"],
 )
 

@@ -4,7 +4,7 @@ use ctx_history_core::{core_record_contract_fingerprint, CORE_RECORD_VERSION};
 
 use super::{CommittedCoreGeneration, RelationalProjectionError, RelationalSourceMetadata, Result};
 
-pub(super) const GENERATION_MANIFEST_VERSION: u32 = 4;
+pub(super) const GENERATION_MANIFEST_VERSION: u32 = 5;
 
 pub(super) struct ValidatedGeneration {
     pub(super) sources: BTreeMap<String, RelationalSourceMetadata>,

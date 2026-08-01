@@ -53,7 +53,8 @@
     "ctx-history-capture": {
       "manifest": "crates/ctx-history-capture/Cargo.toml",
       "targets": {
-        "lib:ctx_history_capture": "//crates/ctx-history-capture:lib"
+        "lib:ctx_history_capture": "//crates/ctx-history-capture:lib",
+        "test:self_contained_core_final_locator_removal": "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests"
       },
       "native_unit": "//crates/ctx-history-capture:unit_tests"
     },
