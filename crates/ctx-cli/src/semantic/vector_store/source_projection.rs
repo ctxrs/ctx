@@ -197,6 +197,10 @@ impl SemanticVectorStore {
             let mut frontier = self.begin_or_resume_source_generation(generation)?;
             validate_page(&frontier, &page)?;
 
+            // Page records are strictly unique and identity ordered. Pinning
+            // their reuse lookup once keeps every decision on the same flat
+            // generation even when this page publishes replacement segments.
+            let existing_events = self.flat_active_event_lookup()?;
             let mut outcome = SourceBackedSemanticOutcome::default();
             for record in page.records {
                 if frontier.processed_documents >= frontier.semantic_documents {
@@ -258,10 +262,11 @@ impl SemanticVectorStore {
                     &source_text,
                     &generation.semantic_policy_fingerprint,
                 );
-                let existing_hash = self
-                    .existing_hashes_for_event_ids(&[document.event_id])?
-                    .remove(&document.event_id);
-                let reusable = existing_hash.as_deref() == Some(source_text_sha256.as_str());
+                let reusable = existing_events
+                    .event(document.event_id)
+                    .is_some_and(|event| {
+                        event.source_text_hash.to_hex().as_str() == source_text_sha256.as_str()
+                    });
                 if reusable {
                     outcome.records_reused = outcome.records_reused.saturating_add(1);
                 } else {

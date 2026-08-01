@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
 use uuid::Uuid;
@@ -6,7 +6,10 @@ use uuid::Uuid;
 use super::{
     model_contract::SEMANTIC_DIMENSIONS,
     vector_store::{
-        flat_segments::{FlatChunk, FlatEventReplacement, FlatSourceHash, PinnedFlatGeneration},
+        flat_segments::{
+            FlatActiveEventLookup, FlatChunk, FlatEventReplacement, FlatSourceHash,
+            PinnedFlatGeneration,
+        },
         SemanticChunkDocument, SemanticStoredEvent, SemanticVectorStore,
     },
     vector_store_schema::{semantic_owned_sidecar_result, SemanticVectorStoreError},
@@ -15,11 +18,8 @@ use super::{
 const COMPACT_SEGMENT_THRESHOLD: usize = 16;
 
 impl SemanticVectorStore {
-    pub(super) fn existing_hashes_for_event_ids(
-        &self,
-        event_ids: &[Uuid],
-    ) -> Result<HashMap<Uuid, String>> {
-        semantic_owned_sidecar_result(self.flat_existing_hashes(event_ids))
+    pub(super) fn flat_active_event_lookup(&self) -> Result<FlatActiveEventLookup> {
+        semantic_owned_sidecar_result(self.flat.active_event_lookup().map_err(anyhow::Error::new))
     }
 
     pub(super) fn upsert_chunk_embeddings(
@@ -67,21 +67,6 @@ impl SemanticVectorStore {
 
     pub(super) fn flat_pin_generation(&self) -> Result<Option<PinnedFlatGeneration>> {
         self.flat.pin_generation().map_err(anyhow::Error::new)
-    }
-
-    fn flat_existing_hashes(&self, event_ids: &[Uuid]) -> Result<HashMap<Uuid, String>> {
-        if event_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let requested = event_ids.iter().copied().collect::<HashSet<_>>();
-        Ok(self
-            .flat
-            .active_events()
-            .map_err(anyhow::Error::new)?
-            .into_iter()
-            .filter(|event| requested.contains(&event.event_id))
-            .map(|event| (event.event_id, event.source_text_hash.to_hex()))
-            .collect())
     }
 
     fn flat_publish_upsert(&mut self, items: &[(SemanticChunkDocument, Vec<f32>)]) -> Result<()> {
@@ -168,6 +153,16 @@ impl SemanticVectorStore {
                 })
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset_flat_active_event_snapshot_count(&self) {
+        self.flat.reset_active_event_snapshot_count();
+    }
+
+    #[cfg(test)]
+    pub(super) fn flat_active_event_snapshot_count(&self) -> u64 {
+        self.flat.active_event_snapshot_count()
     }
 
     fn flat_compact_if_needed(&mut self) -> Result<()> {
