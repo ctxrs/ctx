@@ -519,7 +519,9 @@ fn render_session_text(value: &Value) -> String {
     );
     push_key_value(&mut out, "mode", value.get("mode"));
     out.push_str(&format!("events: {}\n", events.len()));
-    if let Some(max_events) = value
+    if let Some(pagination) = value.get("pagination") {
+        push_session_pagination(&mut out, value, pagination);
+    } else if let Some(max_events) = value
         .get("truncated")
         .and_then(|truncated| truncated.get("max_events"))
         .and_then(Value::as_u64)
@@ -532,6 +534,39 @@ fn render_session_text(value: &Value) -> String {
     }
     push_omitted_line(&mut out, events.len(), MCP_TEXT_MAX_EVENTS, "events");
     out
+}
+
+fn push_session_pagination(out: &mut String, value: &Value, pagination: &Value) {
+    let limit = pagination.get("limit").and_then(Value::as_u64);
+    let returned = pagination.get("returned").and_then(Value::as_u64);
+    let has_more = pagination.get("has_more").and_then(Value::as_bool);
+    if let (Some(limit), Some(returned), Some(has_more)) = (limit, returned, has_more) {
+        out.push_str(&format!(
+            "page: limit={limit}, returned={returned}, has_more={has_more}\n"
+        ));
+    }
+
+    match has_more {
+        Some(true) => {
+            let session_id = value.get("ctx_session_id").and_then(Value::as_str);
+            let mode = value.get("mode").and_then(Value::as_str);
+            let cursor = pagination.get("next_cursor").and_then(Value::as_str);
+            if let (Some(session_id), Some(mode), Some(limit), Some(cursor)) =
+                (session_id, mode, limit, cursor)
+            {
+                out.push_str(&format!(
+                    "continue: call show_session with ctx_session_id={}, mode={}, limit={limit}, cursor={}\n",
+                    Value::String(session_id.to_owned()),
+                    Value::String(mode.to_owned()),
+                    Value::String(cursor.to_owned()),
+                ));
+            } else {
+                out.push_str("more events remain, but continuation metadata is incomplete\n");
+            }
+        }
+        Some(false) => out.push_str("terminal page: no more events\n"),
+        None => {}
+    }
 }
 
 fn render_event_window_text(value: &Value) -> String {
@@ -787,6 +822,52 @@ mod tests {
             }
         });
         assert!(!render_tool_text(&complete).contains("More results available."));
+    }
+
+    #[test]
+    fn session_text_gives_an_exact_continuation_call_for_a_bounded_page() {
+        let value = json!({
+            "payload_type": "session_transcript",
+            "ctx_session_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "provider": "codex",
+            "provider_session_id": "provider-session",
+            "mode": "log",
+            "events": [{"ctx_event_id": "event-1"}, {"ctx_event_id": "event-2"}],
+            "pagination": {
+                "limit": 2,
+                "returned": 2,
+                "has_more": true,
+                "next_cursor": "opaque-page-2"
+            }
+        });
+
+        let rendered = render_tool_text(&value);
+        assert!(rendered.contains("page: limit=2, returned=2, has_more=true\n"));
+        assert!(rendered.contains(
+            "continue: call show_session with ctx_session_id=\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\", mode=\"log\", limit=2, cursor=\"opaque-page-2\"\n"
+        ));
+        assert!(!rendered.contains("terminal page"));
+    }
+
+    #[test]
+    fn session_text_marks_a_terminal_page_without_a_continuation_call() {
+        let value = json!({
+            "payload_type": "session_transcript",
+            "ctx_session_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "mode": "full",
+            "events": [{"ctx_event_id": "event-3"}],
+            "pagination": {
+                "limit": 2,
+                "returned": 1,
+                "has_more": false,
+                "next_cursor": null
+            }
+        });
+
+        let rendered = render_tool_text(&value);
+        assert!(rendered.contains("page: limit=2, returned=1, has_more=false\n"));
+        assert!(rendered.contains("terminal page: no more events\n"));
+        assert!(!rendered.contains("continue: call show_session"));
     }
 
     #[test]

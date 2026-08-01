@@ -18,6 +18,60 @@ fn mcp_tool_input_validation_returns_stable_invalid_request_and_server_recovers(
             "invalid ctx_event_id",
         ),
         (
+            "bad-show-session-limit-type",
+            "show_session",
+            json!({
+                "ctx_session_id": "00000000-0000-0000-0000-000000000000",
+                "limit": "two"
+            }),
+            "limit must be a non-negative integer",
+        ),
+        (
+            "bad-show-session-limit-zero",
+            "show_session",
+            json!({
+                "ctx_session_id": "00000000-0000-0000-0000-000000000000",
+                "limit": 0
+            }),
+            "limit must be between 1 and 4096",
+        ),
+        (
+            "bad-show-session-limit-large",
+            "show_session",
+            json!({
+                "ctx_session_id": "00000000-0000-0000-0000-000000000000",
+                "limit": 4097
+            }),
+            "limit must be between 1 and 4096",
+        ),
+        (
+            "bad-show-session-cursor-type",
+            "show_session",
+            json!({
+                "ctx_session_id": "00000000-0000-0000-0000-000000000000",
+                "cursor": 7
+            }),
+            "cursor must be a string",
+        ),
+        (
+            "bad-show-session-cursor-empty",
+            "show_session",
+            json!({
+                "ctx_session_id": "00000000-0000-0000-0000-000000000000",
+                "cursor": ""
+            }),
+            "cursor must contain 1 to 4096 ASCII bytes",
+        ),
+        (
+            "bad-show-session-cursor-encoding",
+            "show_session",
+            json!({
+                "ctx_session_id": "00000000-0000-0000-0000-000000000000",
+                "cursor": "é"
+            }),
+            "cursor must contain 1 to 4096 ASCII bytes",
+        ),
+        (
             "removed-show-content",
             "show_event",
             json!({

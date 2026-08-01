@@ -2,7 +2,13 @@
 mod tests {
     mod semantic_fallback;
 
-    use std::{cell::Cell, collections::HashMap, fs};
+    use std::{
+        cell::Cell,
+        collections::HashMap,
+        fs,
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
 
     use ctx_history_capture::{
         provider_source_for_path, refresh_source_backed_generation,
@@ -18,13 +24,14 @@ mod tests {
         EventSearchFilters, GenerationWriter, IndexError, SessionRecord, WriterOptions,
         LEXICAL_QUERY_LIMITS,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use tempfile::tempdir;
 
     use crate::{
         commands::show::{ShowEventArgs, ShowSessionArgs},
         output::OutputFormat,
         transcript::TranscriptMode,
+        ui::{RenderContext, StreamKind, TestContext, Ui},
         ShowTarget,
     };
 
@@ -40,10 +47,9 @@ mod tests {
         },
         show::{
             canonical_show_output_bytes, core_events_by_ids_with_presentation_limits, event_window,
-            event_window_value, render_event_value, render_event_values, session_json,
-            session_json_with_event_cap, session_transcript_value,
-            take_core_presentation_fetch_ids, validate_show_target,
-            EncodedCorePresentationLimitError, SessionJsonOptions,
+            event_window_value, mcp_show_session, render_event_value, render_event_values,
+            session_transcript_value, stream_cli_session, take_core_presentation_fetch_ids,
+            validate_show_target, EncodedCorePresentationLimitError,
         },
     };
 
@@ -51,6 +57,42 @@ mod tests {
 
     const TEST_SESSION_ID: &str = "019fa000-0000-7000-8000-0000000000d1";
     const TEST_QUERY: &str = "pinnedgenerationrouting";
+
+    #[derive(Clone, Default)]
+    struct SharedWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedWriter {
+        fn bytes(&self) -> Vec<u8> {
+            self.bytes.lock().unwrap().clone()
+        }
+    }
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.bytes
+                .lock()
+                .map_err(|_| io::Error::other("shared test writer was poisoned"))?
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_ui() -> (Ui, SharedWriter) {
+        let stdout = SharedWriter::default();
+        let copy = stdout.clone();
+        let context = RenderContext::for_test(TestContext::pipe(StreamKind::Stdout));
+        let stderr_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stderr));
+        (
+            Ui::with_writers(stdout, context, SharedWriter::default(), stderr_context),
+            copy,
+        )
+    }
 
     fn fixture_event(
         provider: CaptureProvider,
@@ -1235,7 +1277,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_show_selects_session_prefix_and_event_window_before_core_bodies() {
+    fn bounded_mcp_show_returns_prefix_and_event_window_stays_body_bounded() {
         let temp = tempdir().unwrap();
         write_test_generation(temp.path());
         let first = fixture_core_event(
@@ -1250,16 +1292,13 @@ mod tests {
         let index = open_index(temp.path()).unwrap();
         let session = SessionRecord::from(&first.event);
 
-        take_core_presentation_fetch_ids();
-        let session_value = session_json(
-            &index,
-            &session,
-            SessionJsonOptions {
-                mode: TranscriptMode::Log,
-                format: OutputFormat::Json,
-                max_events: Some(1),
-                output_limit_bytes: 2 * 1024,
-            },
+        let session_value = mcp_show_session(
+            temp.path(),
+            &session.session_id.as_uuid().to_string(),
+            TranscriptMode::Log,
+            1,
+            None,
+            4 * 1024,
         )
         .unwrap();
         assert_eq!(session_value["events"].as_array().unwrap().len(), 1);
@@ -1267,12 +1306,7 @@ mod tests {
             session_value["events"][0]["ctx_event_id"],
             first.event_id.as_uuid().to_string()
         );
-        assert_eq!(session_value["truncated"]["max_events"], 1);
-        assert_eq!(
-            take_core_presentation_fetch_ids(),
-            vec![first.event_id.as_uuid()],
-            "the nonselected large session body must never be requested for Core decode"
-        );
+        assert_eq!(session_value["pagination"]["has_more"], true);
 
         take_core_presentation_fetch_ids();
         let window = event_window(&index, &first, 0, 0, None, 2 * 1024).unwrap();
@@ -1282,47 +1316,6 @@ mod tests {
             take_core_presentation_fetch_ids(),
             vec![first.event_id.as_uuid()],
             "the nonselected large window body must never be requested for Core decode"
-        );
-    }
-
-    #[test]
-    fn bounded_show_clamps_an_explicit_overlarge_max_to_the_absolute_cli_cap() {
-        assert_eq!(
-            ctx_history_index::MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS - 1,
-            4_096
-        );
-        let temp = tempdir().unwrap();
-        write_test_generation(temp.path());
-        let first = fixture_core_event(
-            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 73, 1),
-            "first bounded body",
-        );
-        let nonselected = fixture_core_event(
-            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 73, 2),
-            "second nonselected body",
-        );
-        append_fixture_session(temp.path(), &[first.clone(), nonselected], 73);
-        let index = open_index(temp.path()).unwrap();
-        let session = SessionRecord::from(&first.event);
-
-        take_core_presentation_fetch_ids();
-        let value = session_json_with_event_cap(
-            &index,
-            &session,
-            SessionJsonOptions {
-                mode: TranscriptMode::Log,
-                format: OutputFormat::Json,
-                max_events: Some(usize::MAX),
-                output_limit_bytes: 2 * 1024,
-            },
-            1,
-        )
-        .unwrap();
-        assert_eq!(value["events"].as_array().unwrap().len(), 1);
-        assert_eq!(value["truncated"]["max_events"], 1);
-        assert_eq!(
-            take_core_presentation_fetch_ids(),
-            vec![first.event_id.as_uuid()]
         );
     }
 
@@ -1339,19 +1332,32 @@ mod tests {
             format!("SELECTED-LARGE-{}", "y".repeat(8 * 1024)),
         );
         append_fixture_session(temp.path(), &[first.clone(), oversized.clone()], 71);
-        let index = open_index(temp.path()).unwrap();
         let session = SessionRecord::from(&first.event);
 
+        let first_page = mcp_show_session(
+            temp.path(),
+            &session.session_id.as_uuid().to_string(),
+            TranscriptMode::Log,
+            2,
+            None,
+            4 * 1024,
+        )
+        .unwrap();
+        assert_eq!(first_page["pagination"]["returned"], 1);
+        assert_eq!(first_page["pagination"]["has_more"], true);
+        let cursor = first_page["pagination"]["next_cursor"]
+            .as_str()
+            .expect("the bounded prefix should include a continuation cursor")
+            .to_owned();
+
         for error in (0..2).map(|_| {
-            session_json(
-                &index,
-                &session,
-                SessionJsonOptions {
-                    mode: TranscriptMode::Log,
-                    format: OutputFormat::Json,
-                    max_events: Some(2),
-                    output_limit_bytes: 2 * 1024,
-                },
+            mcp_show_session(
+                temp.path(),
+                &session.session_id.as_uuid().to_string(),
+                TranscriptMode::Log,
+                2,
+                Some(&cursor),
+                4 * 1024,
             )
             .unwrap_err()
         }) {
@@ -1359,7 +1365,7 @@ mod tests {
                 .downcast_ref::<crate::presentation_limit::PresentationOutputLimitError>()
                 .expect("oversized selected Core body should preserve the presentation error");
             assert_eq!(typed.event_id, oversized.event_id.as_uuid());
-            assert_eq!(typed.maximum_bytes, 2 * 1024);
+            assert_eq!(typed.maximum_bytes, 4 * 1024);
             assert!(typed.actual_bytes > typed.maximum_bytes);
         }
     }
@@ -1406,6 +1412,203 @@ mod tests {
         assert_eq!(typed.event_id, second.event_id.as_uuid());
         assert_eq!(typed.actual_bytes, cumulative_encoded_bytes);
         assert_eq!(typed.maximum_bytes, encoded_limit);
+    }
+
+    #[test]
+    fn unbounded_cli_show_streams_valid_json_beyond_4096_events_in_order() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let events = (1..=4_105)
+            .map(|sequence| {
+                let event =
+                    fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 74, sequence);
+                fixture_core_event(&event, format!("huge-event-{sequence}"))
+            })
+            .collect::<Vec<_>>();
+        append_fixture_session(temp.path(), &events, 74);
+        let index = open_index(temp.path()).unwrap();
+        let session = SessionRecord::from(&events[0].event);
+        let (mut ui, stdout) = test_ui();
+
+        let result = stream_cli_session(
+            &index,
+            &session,
+            TranscriptMode::Log,
+            OutputFormat::Json,
+            None,
+            None,
+            &mut ui,
+        )
+        .unwrap();
+        ui.flush().unwrap();
+
+        assert_eq!(result.events_returned, 4_105);
+        let transcript: Value = serde_json::from_slice(&stdout.bytes()).unwrap();
+        let rendered = transcript["events"].as_array().unwrap();
+        assert_eq!(rendered.len(), 4_105);
+        assert_eq!(rendered[0]["text"], "huge-event-1");
+        assert_eq!(rendered[4_104]["text"], "huge-event-4105");
+        assert!(transcript.get("truncated").is_none());
+    }
+
+    #[test]
+    fn max_events_does_not_claim_truncation_for_only_filtered_raw_events() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let events = (1..=205)
+            .map(|sequence| {
+                let mut event =
+                    fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 75, sequence);
+                if sequence == 1 {
+                    event.role = Some("user".to_owned());
+                } else {
+                    event.event_type = "tool_call".to_owned();
+                }
+                fixture_core_event(&event, format!("filtered-event-{sequence}"))
+            })
+            .collect::<Vec<_>>();
+        append_fixture_session(temp.path(), &events, 75);
+        let index = open_index(temp.path()).unwrap();
+        let session = SessionRecord::from(&events[0].event);
+        let (mut ui, stdout) = test_ui();
+
+        let result = stream_cli_session(
+            &index,
+            &session,
+            TranscriptMode::Full,
+            OutputFormat::Json,
+            Some(1),
+            None,
+            &mut ui,
+        )
+        .unwrap();
+        ui.flush().unwrap();
+
+        assert_eq!(result.events_returned, 1);
+        let transcript: Value = serde_json::from_slice(&stdout.bytes()).unwrap();
+        assert_eq!(transcript["events"].as_array().unwrap().len(), 1);
+        assert!(transcript.get("truncated").is_none(), "{transcript:#}");
+    }
+
+    #[test]
+    fn lite_selection_carries_the_pending_assistant_across_a_page_boundary() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let events = (1..=202)
+            .map(|sequence| {
+                let mut event =
+                    fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 76, sequence);
+                match sequence {
+                    1 | 202 => event.role = Some("user".to_owned()),
+                    201 => event.event_type = "tool_call".to_owned(),
+                    _ => {}
+                }
+                fixture_core_event(&event, format!("lite-event-{sequence}"))
+            })
+            .collect::<Vec<_>>();
+        append_fixture_session(temp.path(), &events, 76);
+        let index = open_index(temp.path()).unwrap();
+        let session = SessionRecord::from(&events[0].event);
+        let (mut ui, stdout) = test_ui();
+
+        stream_cli_session(
+            &index,
+            &session,
+            TranscriptMode::Lite,
+            OutputFormat::Jsonl,
+            None,
+            None,
+            &mut ui,
+        )
+        .unwrap();
+        ui.flush().unwrap();
+
+        let lines = stdout
+            .bytes()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 4, "three events plus completion metadata");
+        assert_eq!(lines[0]["event"]["text"], "lite-event-1");
+        assert_eq!(lines[1]["event"]["text"], "lite-event-200");
+        assert_eq!(lines[2]["event"]["text"], "lite-event-202");
+        assert_eq!(lines[3]["payload_type"], "session_transcript_completion");
+        assert_eq!(lines[3]["complete"], true);
+    }
+
+    #[test]
+    fn mcp_show_session_continues_selected_events_without_overlap() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let events = (1..=5)
+            .map(|sequence| {
+                let event =
+                    fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 77, sequence);
+                fixture_core_event(&event, format!("mcp-page-event-{sequence}"))
+            })
+            .collect::<Vec<_>>();
+        append_fixture_session(temp.path(), &events, 77);
+        let session_id = events[0].session_id.as_uuid().to_string();
+
+        let first = mcp_show_session(
+            temp.path(),
+            &session_id,
+            TranscriptMode::Log,
+            2,
+            None,
+            crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(first["pagination"]["limit"], 2);
+        assert_eq!(first["pagination"]["returned"], 2);
+        assert_eq!(first["pagination"]["has_more"], true);
+        assert_eq!(first["events"][0]["text"], "mcp-page-event-1");
+        assert_eq!(first["events"][1]["text"], "mcp-page-event-2");
+        let first_cursor = first["pagination"]["next_cursor"].as_str().unwrap();
+
+        let second = mcp_show_session(
+            temp.path(),
+            &session_id,
+            TranscriptMode::Log,
+            2,
+            Some(first_cursor),
+            crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(second["pagination"]["returned"], 2);
+        assert_eq!(second["pagination"]["has_more"], true);
+        assert_eq!(second["events"][0]["text"], "mcp-page-event-3");
+        assert_eq!(second["events"][1]["text"], "mcp-page-event-4");
+        let second_cursor = second["pagination"]["next_cursor"].as_str().unwrap();
+
+        let terminal = mcp_show_session(
+            temp.path(),
+            &session_id,
+            TranscriptMode::Log,
+            2,
+            Some(second_cursor),
+            crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(terminal["pagination"]["returned"], 1);
+        assert_eq!(terminal["pagination"]["has_more"], false);
+        assert!(terminal["pagination"]["next_cursor"].is_null());
+        assert_eq!(terminal["events"][0]["text"], "mcp-page-event-5");
+
+        let malformed = mcp_show_session(
+            temp.path(),
+            &session_id,
+            TranscriptMode::Log,
+            2,
+            Some("not-a-valid-cursor"),
+            crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            malformed.downcast_ref::<IndexError>(),
+            Some(IndexError::InvalidSessionEventCursorCoordinate)
+        ));
     }
 
     #[test]
