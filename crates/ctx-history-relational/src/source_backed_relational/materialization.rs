@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use ctx_history_core::{
     CoreContentPolicyStatus, CoreRecord, ProjectionContractError, SourceKey, StableEntityId,
+    StableEntityKind,
 };
 use rusqlite::{params, Connection, Statement};
 use serde::Serialize;
@@ -478,34 +479,59 @@ pub(super) fn validate_projected_generation(
         [],
         |row| row.get(0),
     )?;
-    let invalid_relationships: i64 = conn.query_row(
-        "SELECT
-            (SELECT COUNT(*) FROM core_events event
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM core_sessions session
-                 WHERE session.ctx_session_id = event.ctx_session_id
-                   AND session.session_identity = event.session_identity
-             ))
-          + (SELECT COUNT(*) FROM core_sessions child
-             WHERE child.parent_ctx_session_id IS NOT NULL
-               AND NOT EXISTS (
-                   SELECT 1 FROM core_sessions parent
-                   WHERE parent.ctx_session_id = child.parent_ctx_session_id
-                     AND parent.session_identity = child.parent_session_identity
-               ))
-          + (SELECT COUNT(*) FROM core_sessions child
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM core_sessions root
-                 WHERE root.ctx_session_id = child.root_ctx_session_id
-                   AND root.session_identity = child.root_session_identity
-             ))",
+    let invalid_event_relationships: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM core_events event
+         WHERE NOT EXISTS (
+             SELECT 1 FROM core_sessions session
+             WHERE session.ctx_session_id = event.ctx_session_id
+               AND session.session_identity = event.session_identity
+         )",
         [],
         |row| row.get(0),
     )?;
-    if invalid_sources != 0 || invalid_relationships != 0 {
+    if invalid_sources != 0 || invalid_event_relationships != 0 {
         return invalid_record("projected Core identities or counts are incoherent");
     }
+    validate_session_relationships(conn)?;
     Ok(counts)
+}
+
+fn validate_session_relationships(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT child.parent_ctx_session_id, child.parent_session_identity,
+                parent.session_identity
+         FROM core_sessions child
+         LEFT JOIN core_sessions parent
+           ON parent.ctx_session_id = child.parent_ctx_session_id
+         WHERE child.parent_ctx_session_id IS NOT NULL
+            OR child.parent_session_identity IS NOT NULL
+         UNION ALL
+         SELECT child.root_ctx_session_id, child.root_session_identity,
+                root.session_identity
+         FROM core_sessions child
+         LEFT JOIN core_sessions root
+           ON root.ctx_session_id = child.root_ctx_session_id",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let target_id: Option<String> = row.get(0)?;
+        let reference_identity: Option<Vec<u8>> = row.get(1)?;
+        let target_identity: Option<Vec<u8>> = row.get(2)?;
+        let (Some(target_id), Some(reference_identity)) = (target_id, reference_identity) else {
+            return invalid_record("projected Core session lineage identities are incoherent");
+        };
+        let identity =
+            StableEntityId::decode_canonical(&reference_identity).map_err(contract_record_error)?;
+        if identity.entity_kind() != StableEntityKind::Session
+            || identity.as_uuid().to_string() != target_id
+            || target_identity
+                .as_deref()
+                .is_some_and(|target| target != reference_identity)
+        {
+            return invalid_record("projected Core session lineage identities are incoherent");
+        }
+    }
+    Ok(())
 }
 
 fn identity_bytes(identity: StableEntityId) -> Result<Vec<u8>> {

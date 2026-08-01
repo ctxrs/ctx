@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -11,13 +12,12 @@ use ctx_history_core::CertifiedSource;
 #[cfg(test)]
 use ctx_history_core::SourceKey;
 use ctx_history_index::{durable_atomic_replace_file, VerifiedIndex, MAX_SOURCE_EVENT_PAGE_ITEMS};
-#[cfg(test)]
-use ctx_history_relational::RelationalProjectionRecord;
 use ctx_history_relational::{
     CommittedCoreGeneration, RelationalProjectionError, RelationalProjectionMetadata,
-    RelationalProjectionPlan, RelationalProjectionReceipt, RelationalProjectionStatus,
-    RelationalSourceHealth, RelationalSourceMetadata, SourceBackedRelationalProjection,
-    RELATIONAL_MATERIALIZER_REVISION, RELATIONAL_PROJECTION_SCHEMA_VERSION,
+    RelationalProjectionPlan, RelationalProjectionReceipt, RelationalProjectionRecord,
+    RelationalProjectionStatus, RelationalSourceHealth, RelationalSourceMetadata,
+    SourceBackedRelationalProjection, RELATIONAL_MATERIALIZER_REVISION,
+    RELATIONAL_PROJECTION_SCHEMA_VERSION,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -427,7 +427,8 @@ fn project_exact_core_generation(
             ));
         }
     };
-    let records = RelationalRecordStream::new(&index, selection, MAX_SOURCE_EVENT_PAGE_ITEMS);
+    let records =
+        relational_record_stream(&index, selection, &generation, MAX_SOURCE_EVENT_PAGE_ITEMS);
     let receipt = if rebuild {
         projection.rebuild_stream(&generation, records)
     } else {
@@ -461,7 +462,12 @@ fn committed_generation(
     let sources = manifest
         .sources
         .iter()
-        .map(relational_source_metadata)
+        .zip(&manifest.core_record_aggregates)
+        .map(|(certificate, aggregate)| {
+            // Certification alone does not change when a Core projector rewrites
+            // an equal-count source. Bind the exact stored-record aggregate too.
+            relational_source_metadata_for_revision(certificate, &(certificate, aggregate))
+        })
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(CommittedCoreGeneration {
         generation_id: index.generation_id().to_owned(),
@@ -478,7 +484,14 @@ fn committed_generation(
 fn relational_source_metadata(
     certificate: &CertifiedSource,
 ) -> std::result::Result<RelationalSourceMetadata, SourceBackedRelationalCatchUpError> {
-    let encoded = serde_json::to_vec(certificate).map_err(|error| {
+    relational_source_metadata_for_revision(certificate, certificate)
+}
+
+fn relational_source_metadata_for_revision(
+    certificate: &CertifiedSource,
+    revision: &impl serde::Serialize,
+) -> std::result::Result<RelationalSourceMetadata, SourceBackedRelationalCatchUpError> {
+    let encoded = serde_json::to_vec(revision).map_err(|error| {
         SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
             "serialize Core source revision: {error}"
         ))
@@ -489,6 +502,41 @@ fn relational_source_metadata(
         revision_digest: Sha256::digest(encoded).into(),
         indexed_event_count: certificate.counts().indexed_documents,
         health: RelationalSourceHealth::Ready,
+    })
+}
+
+fn relational_record_stream<'a>(
+    index: &'a VerifiedIndex,
+    selection: RelationalSourceSelection<'a>,
+    generation: &CommittedCoreGeneration,
+    page_size: usize,
+) -> impl Iterator<Item = std::result::Result<RelationalProjectionRecord, RelationalProjectionError>> + 'a
+{
+    let expected_sources = generation
+        .sources
+        .iter()
+        .map(|metadata| {
+            (
+                metadata.source.identity().as_uuid().to_string(),
+                metadata.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    // The page stream constructs metadata from this same verified manifest.
+    // Replace only its revision identity with the aggregate-bound value.
+    RelationalRecordStream::new(index, selection, page_size).map(move |record| match record? {
+        RelationalProjectionRecord::BeginSource(actual) => {
+            let source_id = actual.source.identity().as_uuid().to_string();
+            let expected = expected_sources.get(&source_id).ok_or_else(|| {
+                RelationalProjectionError::InvalidRecord(format!(
+                    "source {source_id} is absent from the pinned Core generation"
+                ))
+            })?;
+            Ok(RelationalProjectionRecord::BeginSource(Box::new(
+                expected.clone(),
+            )))
+        }
+        record => Ok(record),
     })
 }
 

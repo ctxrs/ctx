@@ -403,6 +403,54 @@ fn event_replacement_and_source_deletion_are_atomic_and_deterministic() {
 }
 
 #[test]
+fn deleting_cross_source_parent_retains_external_lineage_without_fabricating_rows() {
+    let (_temp, mut projection) = projection();
+    let parent_source = source("lineage-parent");
+    let child_source = source("lineage-child");
+    let parent_record = record(&parent_source, 1);
+    let parent_session_id = parent_record.session_id;
+    let mut child_record = record(&child_source, 1);
+    child_record.parent_session_id = Some(parent_session_id);
+    child_record.root_session_id = parent_session_id;
+    child_record.validate_contract().unwrap();
+
+    let parent_metadata = source_metadata(&parent_source, 1, 1);
+    let child_metadata = source_metadata(&child_source, 1, 1);
+    let initial = generation(22, vec![parent_metadata.clone(), child_metadata.clone()]);
+    let mut initial_records = records(parent_metadata, vec![parent_record]);
+    initial_records.extend(records(child_metadata.clone(), vec![child_record]));
+    projection.rebuild(&initial, initial_records).unwrap();
+
+    let deletion = generation(23, vec![child_metadata]);
+    let receipt = projection.catch_up(&deletion, Vec::new()).unwrap();
+
+    assert_eq!(
+        (
+            receipt.source_count,
+            receipt.session_count,
+            receipt.event_count
+        ),
+        (1, 1, 1)
+    );
+    let lineage_id = parent_session_id.as_uuid().to_string();
+    assert_eq!(
+        query_rows(
+            &projection,
+            "SELECT parent_ctx_session_id, root_ctx_session_id FROM ctx_sessions"
+        ),
+        vec![vec![text_value(&lineage_id), text_value(&lineage_id)]]
+    );
+    assert_eq!(
+        query_rows(
+            &projection,
+            "SELECT (SELECT COUNT(*) FROM core_sessions),
+                    (SELECT COUNT(*) FROM core_events)"
+        ),
+        vec![vec![RawSqlValue::Integer(1), RawSqlValue::Integer(1)]]
+    );
+}
+
+#[test]
 fn crush_high_bit_event_sequences_round_trip_and_keep_unsigned_order() {
     let (_temp, mut projection) = projection();
     let source = source_for("crush", "crush_sqlite", "high-bit-sequence");
