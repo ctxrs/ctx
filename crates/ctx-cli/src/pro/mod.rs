@@ -24,6 +24,8 @@ mod setup_validation;
 mod test_control;
 mod verified_executable;
 mod workos_device;
+use std::io;
+
 use crate::ui::{hint, outcome, Action, Document, Hint, Outcome, OutcomeState, RenderContext, Ui};
 pub(crate) use client::{
     blame, preflight_source_manifest_materialization, stable_error_code, stable_error_diagnostic,
@@ -37,7 +39,32 @@ pub(crate) use referral::{run as run_referral, show_cta_once, ReferralArgs};
 pub(crate) use render::{blame_result_json, print_blame_result};
 
 use anyhow::{anyhow, Result};
+use serde::Serialize;
 pub(crate) const DEFAULT_BLAME_LIMIT: u32 = 20;
+
+#[derive(Serialize)]
+struct StableErrorOutput {
+    error: &'static str,
+    error_code: &'static str,
+}
+
+pub(crate) fn write_stable_error_json(
+    output: &mut impl io::Write,
+    error: &anyhow::Error,
+) -> Result<bool> {
+    let Some(code) = stable_error_code(error) else {
+        return Ok(false);
+    };
+    serde_json::to_writer(
+        &mut *output,
+        &StableErrorOutput {
+            error: code,
+            error_code: code,
+        },
+    )?;
+    writeln!(output)?;
+    Ok(true)
+}
 
 pub(crate) fn actionable_error(error: anyhow::Error) -> anyhow::Error {
     let Some(code) = stable_error_code(&error) else {
@@ -248,7 +275,7 @@ fn human_error_presentation<'a>(
         },
         "helper_timeout" => HumanErrorPresentation {
             title: "The ctx Pro helper did not respond in time",
-            detail: Some("The request stopped at its bounded timeout."),
+            detail: Some("No helper response was accepted."),
             hint: "Try the command again.",
             action: Some(retry_command),
         },
@@ -275,7 +302,7 @@ fn human_error_presentation<'a>(
         "checkout_timeout" => HumanErrorPresentation {
             title: "Checkout did not finish in time",
             detail: Some(
-                "The checkout may still be open, but ctx stopped waiting after the bounded timeout.",
+                "The checkout may still be open, but ctx stopped waiting after 30 minutes.",
             ),
             hint: "Resume ctx Pro setup to check access or continue checkout.",
             action: Some("ctx pro"),
@@ -566,6 +593,45 @@ mod tests {
         RenderContext::for_test(
             crate::ui::TestContext::tty(crate::ui::StreamKind::Stderr, width).color(color),
         )
+    }
+
+    #[test]
+    fn timeout_human_copy_is_exact_in_plain_and_ansi_modes() {
+        for (raw, expected_plain, expected_ansi) in [
+            (
+                "helper_timeout: untrusted helper detail",
+                "✗ The ctx Pro helper did not respond in time\nNo helper response was accepted.\n\nHint: Try the command again.\n\nNext\n  ctx pro\n",
+                "\u{1b}[31m✗\u{1b}[0m \u{1b}[1mThe ctx Pro helper did not respond in time\u{1b}[0m\nNo helper response was accepted.\n\n\u{1b}[2mHint\u{1b}[0m: Try the command again.\n\n\u{1b}[2mNext\u{1b}[0m\n  \u{1b}[36mctx pro\u{1b}[0m\n",
+            ),
+            (
+                "checkout_timeout: untrusted checkout detail",
+                "✗ Checkout did not finish in time\nThe checkout may still be open, but ctx stopped waiting after 30 minutes.\n\nHint: Resume ctx Pro setup to check access or continue checkout.\n\nNext\n  ctx pro\n",
+                "\u{1b}[31m✗\u{1b}[0m \u{1b}[1mCheckout did not finish in time\u{1b}[0m\nThe checkout may still be open, but ctx stopped waiting after 30 minutes.\n\n\u{1b}[2mHint\u{1b}[0m: Resume ctx Pro setup to check access or continue checkout.\n\n\u{1b}[2mNext\u{1b}[0m\n  \u{1b}[36mctx pro\u{1b}[0m\n",
+            ),
+        ] {
+            let plain_context = context(120, crate::ui::ColorMode::Never);
+            let plain = human_actionable_error_document(
+                &plain_context,
+                &anyhow!(raw),
+                "ctx pro",
+            )
+            .unwrap()
+            .render(&plain_context);
+            assert_eq!(plain, expected_plain);
+
+            let ansi_context = context(120, crate::ui::ColorMode::Always);
+            let ansi = human_actionable_error_document(
+                &ansi_context,
+                &anyhow!(raw),
+                "ctx pro",
+            )
+            .unwrap()
+            .render(&ansi_context);
+            assert_eq!(ansi, expected_ansi);
+            assert_eq!(strip_ansi(&ansi), expected_plain);
+            assert!(!plain.contains("untrusted"));
+            assert!(!ansi.contains("untrusted"));
+        }
     }
 
     #[test]
@@ -966,6 +1032,41 @@ mod tests {
                     .unwrap_err();
             assert_eq!(error.to_string(), raw);
         }
+    }
+
+    #[test]
+    fn stable_machine_errors_are_exact_json_without_untrusted_detail_or_ansi() {
+        for (raw, code) in [
+            (
+                "authentication_required: token secret at /private/session",
+                "authentication_required",
+            ),
+            (
+                "referral_not_eligible: private payout ledger detail",
+                "referral_not_eligible",
+            ),
+            (
+                "referral_payout_unavailable: Stripe request id secret",
+                "referral_payout_unavailable",
+            ),
+        ] {
+            let mut output = Vec::new();
+            assert!(write_stable_error_json(&mut output, &anyhow!(raw)).unwrap());
+            assert_eq!(
+                output,
+                format!("{{\"error\":\"{code}\",\"error_code\":\"{code}\"}}\n").as_bytes()
+            );
+            assert!(!output.contains(&0x1b));
+            let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(value["error"], code);
+            assert_eq!(value["error_code"], code);
+            assert!(!String::from_utf8_lossy(&output).contains("secret"));
+            assert!(!String::from_utf8_lossy(&output).contains("private"));
+        }
+
+        let mut output = Vec::new();
+        assert!(!write_stable_error_json(&mut output, &anyhow!("unclassified detail")).unwrap());
+        assert!(output.is_empty());
     }
 
     #[test]

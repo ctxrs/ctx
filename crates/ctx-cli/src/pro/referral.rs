@@ -51,7 +51,7 @@ enum ReferralCommand {
 struct ReferralCreateArgs {
     #[arg(
         value_parser = parse_referral_codename_unchecked,
-        help = "Stable public name to include in your referral link"
+        help = "Public codename used in the share command"
     )]
     codename: ReferralCodename,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
@@ -743,6 +743,19 @@ mod tests {
     }
 
     #[test]
+    fn referral_create_help_describes_the_public_share_command_codename() {
+        let mut command = Cli::command();
+        let create = command
+            .find_subcommand_mut("referral")
+            .expect("referral subcommand")
+            .find_subcommand_mut("create")
+            .expect("referral create subcommand");
+        let help = create.render_long_help().to_string();
+        assert!(help.contains("Public codename used in the share command"));
+        assert!(!help.contains("referral link"));
+    }
+
+    #[test]
     fn codename_and_payout_identity_inputs_are_strictly_bounded_ascii() {
         for valid in ["abc", "agent-smith", "a1b2", &"a".repeat(32)] {
             assert!(parse_referral_codename(valid).is_ok(), "{valid:?}");
@@ -769,8 +782,15 @@ mod tests {
     }
 
     #[test]
-    fn create_and_status_json_preserve_the_exact_machine_contract() {
+    fn success_json_preserves_the_exact_machine_contract() {
         let create = create_result();
+        let mut create_bytes = Vec::new();
+        write_json(&mut create_bytes, &create_output(&create)).unwrap();
+        assert_eq!(
+            create_bytes,
+            br#"{"schema_version":1,"payload_type":"referral_create","codename":"agent-smith","share_command":"ctx pro --referral agent-smith","disposition":"created"}
+"#
+        );
         assert_eq!(
             serde_json::to_value(create_output(&create)).unwrap(),
             serde_json::json!({
@@ -783,6 +803,13 @@ mod tests {
         );
 
         let status = status_result();
+        let mut status_bytes = Vec::new();
+        write_json(&mut status_bytes, &status_output(&status)).unwrap();
+        assert_eq!(
+            status_bytes,
+            br#"{"schema_version":1,"payload_type":"referral_status","codename":"agent-smith","share_command":"ctx pro --referral agent-smith","attributed":4,"subscribed":3,"earned_cents":7000,"pending_cents":2000,"manual_review_cents":2000,"payable_cents":2000,"processing_cents":1000,"paid_cents":2000,"debt_cents":2000,"currency":"usd","payout_state":"paused"}
+"#
+        );
         assert_eq!(
             serde_json::to_value(status_output(&status)).unwrap(),
             serde_json::json!({
@@ -802,6 +829,20 @@ mod tests {
                 "currency": "usd",
                 "payout_state": "paused",
             })
+        );
+
+        let payout = ReferralPayoutResult {
+            kind: "payout_onboarding_created".to_owned(),
+            payout_state: "onboarding_pending".to_owned(),
+            url: "https://connect.stripe.com/setup/s/test".to_owned(),
+            expires_at_unix: 1_800_000_000,
+        };
+        let mut payout_bytes = Vec::new();
+        write_json(&mut payout_bytes, &payout_output(&payout, false)).unwrap();
+        assert_eq!(
+            payout_bytes,
+            br#"{"schema_version":1,"payload_type":"referral_payout","payout_state":"onboarding_pending","onboarding_url":"https://connect.stripe.com/setup/s/test","expires_at_unix":1800000000,"browser_opened":false}
+"#
         );
     }
 
