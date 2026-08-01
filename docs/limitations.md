@@ -70,9 +70,9 @@ shipped.
 - JSON is local/private and can include sensitive content.
 - Show reads policy-selected normalized content from the active Core generation
   and does not require provider files at query time.
-- Core presentation does not recover tool output, command output, patches,
-  diffs, binary payloads, secret-marked fields, or arbitrary provider blobs that
-  import policy omitted.
+- Core presentation includes accepted structured tool input, tool output,
+  command output, patch, and diff content. Explicitly redacted content,
+  unsupported binary payloads, and provider-private blobs remain unavailable.
 
 ## Operations
 
