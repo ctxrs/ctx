@@ -279,7 +279,7 @@ try {
     }
     if ($sourceManifestRequired) {
         $lexicalRoot = Join-Path $dataRoot "search\lexical"
-        if (-not (Test-Path -LiteralPath (Join-Path $lexicalRoot "meta.json") -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $lexicalRoot "active-generation.json") -PathType Leaf)) {
             Fail "candidate did not publish the fresh lexical generation"
         }
         $manifestRoot = Join-Path $lexicalRoot "ctx-generations"

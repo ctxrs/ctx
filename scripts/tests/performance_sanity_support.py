@@ -336,6 +336,21 @@ def directory_bytes(path: Path) -> int:
     return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
 
 
+def active_generation_meta_path(index_root: Path, expected_generation: str) -> Path:
+    pointer_path = index_root / "active-generation.json"
+    pointer = json.loads(pointer_path.read_bytes())
+    active = pointer["active"]
+    if active["generation_id"] != expected_generation:
+        raise RuntimeError(
+            "active generation pointer disagrees with the queried generation: "
+            f"expected={expected_generation!r}, pointer={pointer!r}"
+        )
+    directory = active["directory"]
+    if not isinstance(directory, str):
+        raise RuntimeError(f"active generation directory is invalid: {pointer!r}")
+    return index_root / "index-generations" / directory / "meta.json"
+
+
 def refresh_snapshot(
     search: dict[str, object], root: Path, env: dict[str, str]
 ) -> RefreshSnapshot:
@@ -381,7 +396,9 @@ def refresh_snapshot(
         )
 
     index_root = Path(env["CTX_DATA_ROOT"]) / "search" / "lexical"
-    meta = published_file_state(index_root / "meta.json")
+    meta = published_file_state(
+        active_generation_meta_path(index_root, generation_id)
+    )
     meta_packet = json.loads(meta.body)
     segments = tuple(
         sorted(segment["segment_id"] for segment in meta_packet["segments"])

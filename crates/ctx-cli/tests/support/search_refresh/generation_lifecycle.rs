@@ -691,7 +691,7 @@ fn search_refresh_wait_publishes_verified_empty_source_generation() {
     assert_eq!(status["refresh"]["source_count"], 0, "{status:#}");
     assert!(status.get("prior_epoch").is_none(), "{status:#}");
     assert!(search_refresh_data_root(&temp)
-        .join("search/lexical/meta.json")
+        .join("search/lexical/active-generation.json")
         .is_file());
     assert_eq!(generation_manifest_paths(&temp).len(), 1);
 }

@@ -451,7 +451,7 @@ fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projecti
     assert_eq!(native_status["lexical"]["indexed_documents"], 1);
     assert_eq!(native_status["relational"]["event_count"], 1);
     assert!(data_root(&native)
-        .join("search/lexical/meta.json")
+        .join("search/lexical/active-generation.json")
         .is_file());
     assert!(data_root(&native).join("relational.sqlite").is_file());
     let native_search = json_output(ctx(&native).args([
@@ -543,7 +543,7 @@ fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projecti
     assert_eq!(explicit_status["lexical"]["indexed_documents"], 1);
     assert_eq!(explicit_status["relational"]["event_count"], 1);
     assert!(data_root(&explicit)
-        .join("search/lexical/meta.json")
+        .join("search/lexical/active-generation.json")
         .is_file());
     assert!(data_root(&explicit).join("relational.sqlite").is_file());
     let explicit_search = json_output(ctx(&explicit).args([
@@ -1104,7 +1104,9 @@ fn fresh_setup_publishes_provider_sources_to_tantivy_and_relational() {
     assert_eq!(status["relational"]["source_count"], 1, "{status:#}");
     assert_eq!(status["relational"]["session_count"], 1, "{status:#}");
     assert_eq!(status["relational"]["event_count"], 1, "{status:#}");
-    assert!(data_root(&temp).join("search/lexical/meta.json").is_file());
+    assert!(data_root(&temp)
+        .join("search/lexical/active-generation.json")
+        .is_file());
     assert!(data_root(&temp).join("relational.sqlite").is_file());
 
     let projection = provider_projection_snapshot(&temp, "codex");

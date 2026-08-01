@@ -25,7 +25,7 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
     let initial_current = initial_job["receipt"]["current"].clone();
 
     let index_root = search_refresh_data_root(&temp).join("search/lexical");
-    let meta_path = index_root.join("meta.json");
+    let meta_path = active_generation_meta_path(&index_root, &initial_generation);
     let manifest_path = index_root
         .join("ctx-generations")
         .join(format!("{initial_generation}.json"));
@@ -150,7 +150,8 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
             "{append_job:#}"
         );
 
-        let append_meta = published_file_state(&meta_path);
+        let append_meta_path = active_generation_meta_path(&index_root, &append_generation);
+        let append_meta = published_file_state(&append_meta_path);
         let (append_opstamp, append_segments) = tantivy_meta_facts(&append_meta);
         assert!(append_opstamp > previous_opstamp);
         assert!(
@@ -290,7 +291,7 @@ fn machine_readable_search_attempts_enabled_daemon_self_healing() {
         "{autostart_status:#}"
     );
     assert!(!search_refresh_data_root(&temp)
-        .join("search/lexical/meta.json")
+        .join("search/lexical/active-generation.json")
         .exists());
     assert!(!search_refresh_data_root(&temp).join("work.sqlite").exists());
 
@@ -691,7 +692,7 @@ fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
     );
     assert!(
         !search_refresh_data_root(&temp)
-            .join("search/lexical/meta.json")
+            .join("search/lexical/active-generation.json")
             .exists(),
         "overlap rejection must happen before Tantivy initialization"
     );
@@ -937,4 +938,25 @@ fn search_refresh_imports_fresh_work_after_large_source_backed_generation() {
     );
     assert_daemon_publication(&temp, &fresh_generation, 2, &["codex", "codex", "codex"]);
     assert!(!search_refresh_data_root(&temp).join("work.sqlite").exists());
+}
+
+fn active_generation_meta_path(index_root: &Path, expected_generation: &str) -> PathBuf {
+    let pointer_path = index_root.join("active-generation.json");
+    let pointer: Value = serde_json::from_slice(
+        &fs::read(&pointer_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", pointer_path.display())),
+    )
+    .unwrap_or_else(|error| panic!("parse {}: {error}", pointer_path.display()));
+    assert_eq!(
+        pointer["active"]["generation_id"].as_str(),
+        Some(expected_generation),
+        "{pointer:#}"
+    );
+    let directory = pointer["active"]["directory"]
+        .as_str()
+        .expect("active generation pointer directory");
+    index_root
+        .join("index-generations")
+        .join(directory)
+        .join("meta.json")
 }
