@@ -5,9 +5,7 @@ use ctx_history_core::default_data_root;
 
 use crate::{
     analytics::{self, ClientOperationDraft},
-    cli::{
-        Cli, CommandRoot, DaemonCommand, DaemonTriggerCommandArg, ImportArgs, ShowArgs, ShowTarget,
-    },
+    cli::{CommandRoot, DaemonCommand, DaemonTriggerCommandArg, ImportArgs, ShowArgs, ShowTarget},
     commands::{
         doctor::run_doctor,
         import::{run_import, ProviderRefreshCollector},

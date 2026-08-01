@@ -294,7 +294,7 @@ fn disabled_status_is_clear_and_enable_is_the_only_action() {
         "Daemon is disabled\nAutomatic history refresh and semantic serving are off.\n"
     ));
     assert!(rendered.contains("Service\nStatus  disabled\n"));
-    assert!(rendered.contains("Core refresh\nStatus  disabled\n"));
+    assert!(rendered.contains("History refresh\nStatus  disabled\n"));
     assert!(rendered.contains("Semantic\nStatus  disabled\n"));
     assert_eq!(rendered.matches("ctx daemon enable").count(), 1);
 }
@@ -423,11 +423,10 @@ fn enabled_daemon_without_observed_lifecycle_is_not_a_failure() {
         "semantic_runtime_active": false,
         "config_reload": {"status": "unknown"},
         "jobs": {
-            "history_refresh": {
+            "core_refresh": {
                 "status": "disabled",
-                "reason": "history_epoch_source_backed"
+                "reason": "not_started"
             },
-            "source_backed_refresh": {"status": "unknown"},
             "semantic_index": {"status": "disabled"}
         }
     });
@@ -480,7 +479,7 @@ fn failed_source_refresh_is_bounded_actionable_and_never_leaks_backend_details()
         "running": false,
         "last_error": format!("source-backed refresh failed: {backend_error}"),
         "jobs": {
-            "source_backed_refresh": {
+            "core_refresh": {
                 "status": "failed",
                 "last_error": backend_error,
                 "certified_source_count": 0
