@@ -4,7 +4,6 @@ case "$-" in
   *x*) set +x ;;
 esac
 
-EXPECTED_AUTHORITY="Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)"
 EXPECTED_TEAM_ID="SJSNARH4TG"
 
 usage() {
@@ -20,6 +19,20 @@ USAGE
 die() {
   printf 'error: %s\n' "$*" >&2
   exit 1
+}
+
+authority_matches_expected_team() {
+  case "$1" in
+    "Developer ID Application: "*" (${EXPECTED_TEAM_ID})") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+subject_authority() {
+  local subject="$1"
+  [[ "${subject}" == *",CN="* ]] || return 1
+  subject="${subject#*,CN=}"
+  printf '%s\n' "${subject%%,*}"
 }
 
 require_command() {
@@ -276,7 +289,9 @@ openssl pkey -in "${cert_private_key_path}" -noout >/dev/null 2>&1 || \
 certificate_subject="$(openssl x509 \
   -in "${cert_pem_path}" -noout -subject -nameopt RFC2253 2>/dev/null || true)"
 certificate_subject=",${certificate_subject#subject=},"
-[[ "${certificate_subject}" == *",CN=${EXPECTED_AUTHORITY},"* ]] || \
+certificate_authority="$(subject_authority "${certificate_subject}")" || \
+  die "APPLE_CODESIGN_CERT_P12_B64 is missing a Developer ID common name"
+authority_matches_expected_team "${certificate_authority}" || \
   die "APPLE_CODESIGN_CERT_P12_B64 is not the pinned ctx Developer ID identity"
 [[ "${certificate_subject}" == *",OU=${EXPECTED_TEAM_ID},"* ]] || \
   die "APPLE_CODESIGN_CERT_P12_B64 does not have the pinned ctx Apple Team ID"
@@ -316,7 +331,7 @@ codesign --verify --strict --verbose=4 "${artifact}" >/dev/null 2>&1 || \
 codesign -d --verbose=4 "${artifact}" >"${codesign_details}" 2>&1 || \
   die "could not inspect Developer ID signature for ${platform} ${kind}"
 chmod 0644 "${codesign_details}"
-grep -Fqx "Authority=${EXPECTED_AUTHORITY}" "${codesign_details}" || \
+grep -Fqx "Authority=${certificate_authority}" "${codesign_details}" || \
   die "signed ${platform} ${kind} does not have the pinned ctx Apple authority"
 grep -Fqx "TeamIdentifier=${EXPECTED_TEAM_ID}" "${codesign_details}" || \
   die "signed ${platform} ${kind} does not have the pinned ctx Apple Team ID"
@@ -376,7 +391,8 @@ python3 "${root_dir}/scripts/macos-release-signing-evidence.py" create-attestati
   --kind "${kind}" \
   --artifact "${artifact}" \
   --notary-submit "${submit_json}" \
-  --source-commit "$(git -C "${root_dir}" rev-parse --verify HEAD)"
+  --source-commit "$(git -C "${root_dir}" rev-parse --verify HEAD)" \
+  --codesign-authority "${certificate_authority}"
 if ! openssl cms -sign \
   -binary \
   -in "${attestation_json}" \

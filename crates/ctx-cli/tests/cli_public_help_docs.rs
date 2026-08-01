@@ -823,14 +823,11 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     let unmanaged =
         json_output(ctx(&temp).args(["docs", "show", "unmanaged-installs", "--format", "json"]));
     let unmanaged_body = unmanaged["body"].as_str().unwrap();
-    assert!(unmanaged_body
-        .contains("Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)"));
     assert!(unmanaged_body.contains("codesign --verify --strict --verbose=4 \"$(command -v ctx)\""));
     assert!(
         unmanaged_body.contains("spctl --assess --verbose=4 --type install \"$(command -v ctx)\"")
     );
     assert!(unmanaged_body.contains("codesign -d --verbose=4 \"$(command -v ctx)\""));
-    assert!(unmanaged_body.contains("Apple Team ID `SJSNARH4TG`"));
 
     let missing_topic = failure_stderr(ctx(&temp).args(["--color=always", "docs", "show", "cli"]));
     assert!(missing_topic.contains("Unknown ctx docs topic: cli"));

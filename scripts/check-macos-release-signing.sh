@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXPECTED_AUTHORITY="Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)"
 EXPECTED_TEAM_ID="SJSNARH4TG"
 
 usage() {
@@ -17,6 +16,13 @@ USAGE
 die() {
   printf 'error: %s\n' "$*" >&2
   exit 1
+}
+
+authority_matches_expected_team() {
+  case "$1" in
+    "Developer ID Application: "*" (${EXPECTED_TEAM_ID})") return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 require_command() {
@@ -63,13 +69,27 @@ if [[ -z "${evidence}" ]]; then
 fi
 [[ -s "${evidence}" ]] || die "macOS signing evidence missing: ${evidence}"
 [[ -s "${artifact}.sha256" ]] || die "macOS release checksum missing: ${artifact}.sha256"
-evidence_dir="$(cd "$(dirname "${evidence}")" && pwd)"
-attestation_json="${evidence_dir}/${evidence_prefix}.attestation.json"
-attestation_cms="${evidence_dir}/${evidence_prefix}.attestation.cms"
-
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 require_command codesign
 require_command python3
+evidence_authority="$(python3 - "${evidence}" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        value = json.load(source)["codesign"]["authority"]
+except (OSError, KeyError, TypeError, json.JSONDecodeError):
+    value = ""
+if isinstance(value, str):
+    print(value, end="")
+PY
+)"
+authority_matches_expected_team "${evidence_authority}" || \
+  die "macOS signing evidence does not contain the pinned ctx Apple authority"
+evidence_dir="$(cd "$(dirname "${evidence}")" && pwd)"
+attestation_json="${evidence_dir}/${evidence_prefix}.attestation.json"
+attestation_cms="${evidence_dir}/${evidence_prefix}.attestation.cms"
 
 verify_macho() {
   local path="$1"
@@ -83,7 +103,7 @@ verify_macho() {
     rm -f "${details}"
     die "could not inspect Developer ID signature: ${path}"
   fi
-  grep -Fqx "Authority=${EXPECTED_AUTHORITY}" "${details}" || {
+  grep -Fqx "Authority=${evidence_authority}" "${details}" || {
     rm -f "${details}"
     die "artifact does not have the pinned ctx Apple authority: ${path}"
   }

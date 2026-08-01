@@ -4,12 +4,25 @@ case "$-" in
   *x*) set +x ;;
 esac
 
-EXPECTED_AUTHORITY="Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)"
 EXPECTED_TEAM_ID="SJSNARH4TG"
 
 die() {
   printf 'error: %s\n' "$*" >&2
   exit 1
+}
+
+authority_matches_expected_team() {
+  case "$1" in
+    "Developer ID Application: "*" (${EXPECTED_TEAM_ID})") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+subject_authority() {
+  local subject="$1"
+  [[ "${subject}" == *",CN="* ]] || return 1
+  subject="${subject#*,CN=}"
+  printf '%s\n' "${subject%%,*}"
 }
 
 path_mode() {
@@ -124,7 +137,9 @@ openssl pkey -in "${key_path}" -noout >/dev/null 2>&1 || \
 
 subject="$(openssl x509 -in "${cert_path}" -noout -subject -nameopt RFC2253 2>/dev/null || true)"
 subject=",${subject#subject=},"
-[[ "${subject}" == *",CN=${EXPECTED_AUTHORITY},"* ]] || \
+certificate_authority="$(subject_authority "${subject}")" || \
+  die "runtime archive attester certificate is missing a Developer ID common name"
+authority_matches_expected_team "${certificate_authority}" || \
   die "runtime archive attester is not the pinned ctx Developer ID identity"
 [[ "${subject}" == *",OU=${EXPECTED_TEAM_ID},"* ]] || \
   die "runtime archive attester does not have the pinned ctx Apple Team ID"
@@ -150,7 +165,8 @@ python3 "${root_dir}/scripts/macos-release-signing-evidence.py" \
   --archive "${archive}" \
   --nested-artifact "${nested_artifact}" \
   --notary-submit "${notary_submit}" \
-  --source-commit "$(git -C "${root_dir}" rev-parse --verify HEAD)"
+  --source-commit "$(git -C "${root_dir}" rev-parse --verify HEAD)" \
+  --codesign-authority "${certificate_authority}"
 openssl cms -sign -binary \
   -in "${statement}" \
   -signer "${cert_path}" \

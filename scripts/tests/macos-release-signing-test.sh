@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+expected_authority="Developer ID Application: Example Publisher LLC (SJSNARH4TG)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/ctx-macos-signing-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT
 fake_bin="${test_root}/bin"
@@ -50,7 +51,7 @@ case "${1:-}" in
     elif [[ -e "${TMPDIR}/fake-coherent-wrong-identity" ]]; then
       printf '%s\n' 'subject=CN=Developer ID Application: Other Corp (OTHERTEAM),OU=OTHERTEAM,O=Other Corp'
     else
-      printf '%s\n' 'subject=CN=Developer ID Application: Legacy Publisher LLC (SJSNARH4TG),OU=SJSNARH4TG,O=Legacy Publisher LLC'
+      printf '%s\n' 'subject=CN=Developer ID Application: Example Publisher LLC (SJSNARH4TG),OU=SJSNARH4TG,O=Example Publisher LLC'
     fi
     ;;
   pkey) ;;
@@ -146,7 +147,7 @@ if [[ "${1:-}" == "-d" ]]; then
     authority='Developer ID Application: Other Corp (OTHERTEAM)'
     team='OTHERTEAM'
   else
-    authority='Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)'
+    authority='Developer ID Application: Example Publisher LLC (SJSNARH4TG)'
     team='SJSNARH4TG'
   fi
   if [[ -e "${TMPDIR}/fake-missing-runtime" ]]; then
@@ -718,7 +719,8 @@ python3 "${evidence_tool}" create-attestation \
   --output "${substitution_dir}/ctx-macos-arm64.attestation.json" \
   --platform macos-arm64 --kind cli --artifact "${substituted}" \
   --notary-submit "${substitution_dir}/ctx-macos-arm64.notary-submit.json" \
-  --source-commit "$(git -C "${repo_root}" rev-parse HEAD)"
+  --source-commit "$(git -C "${repo_root}" rev-parse HEAD)" \
+  --codesign-authority "${expected_authority}"
 expect_failure 'CMS signature verification failed' "${test_root}/substitution.log" \
   "${attestation_check}" macos-arm64 cli "${substituted}" \
   "${substitution_dir}/ctx-macos-arm64.attestation.json" \
@@ -870,18 +872,18 @@ write_key(root / "ca.key", ca_key)
 leaf("wrong", "Developer ID Application: Wrong Signer (WRONGTEAM)", "WRONGTEAM")
 leaf(
     "decoy",
-    "Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)",
+    "Developer ID Application: Example Publisher LLC (SJSNARH4TG)",
     "SJSNARH4TG",
 )
 leaf(
     "wrong-eku",
-    "Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)",
+    "Developer ID Application: Example Publisher LLC (SJSNARH4TG)",
     "SJSNARH4TG",
     ExtendedKeyUsageOID.SERVER_AUTH,
 )
 leaf(
     "wrong-key-usage",
-    "Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)",
+    "Developer ID Application: Example Publisher LLC (SJSNARH4TG)",
     "SJSNARH4TG",
     digital_signature=False,
 )
@@ -934,7 +936,8 @@ PY
   /usr/bin/python3 "${decoy_root}/scripts/macos-release-signing-evidence.py" \
     create-attestation --output "${decoy_cli_statement}" --platform macos-arm64 \
     --kind cli --artifact "${decoy_cli}" --notary-submit "${decoy_cli_notary}" \
-    --source-commit "${decoy_commit}"
+    --source-commit "${decoy_commit}" \
+    --codesign-authority "${expected_authority}"
   decoy_valid_cms="${decoy_root}/ctx-macos-arm64.valid-attestation.cms"
   /usr/bin/openssl cms -sign -binary -in "${decoy_cli_statement}" \
     -signer "${decoy_root}/decoy.pem" -inkey "${decoy_root}/decoy.key" \
@@ -996,7 +999,8 @@ PY
     create-runtime-archive-attestation --output "${decoy_archive_statement}" \
     --platform macos-arm64 --archive "${decoy_archive}" \
     --nested-artifact "${decoy_nested}" --notary-submit "${decoy_archive_notary}" \
-    --source-commit "${decoy_commit}"
+    --source-commit "${decoy_commit}" \
+    --codesign-authority "${expected_authority}"
   /usr/bin/openssl cms -sign -binary -in "${decoy_archive_statement}" \
     -signer "${decoy_root}/wrong.pem" -inkey "${decoy_root}/wrong.key" \
     -certfile "${decoy_root}/decoy.pem" -outform DER -out "${decoy_archive_cms}" \
@@ -1025,7 +1029,8 @@ if [[ -x /usr/bin/openssl ]] && /usr/bin/openssl cms -help >/dev/null 2>&1; then
     --output "${forged_statement}" --platform macos-arm64 --kind cli \
     --artifact "${forged_artifact}" \
     --notary-submit "${forged_notary}" \
-    --source-commit "$(git -C "${repo_root}" rev-parse HEAD)"
+    --source-commit "$(git -C "${repo_root}" rev-parse HEAD)" \
+    --codesign-authority "${expected_authority}"
   /usr/bin/openssl cms -sign -binary -in "${forged_statement}" \
     -signer "${forged_root}/cert.pem" -inkey "${forged_root}/key.pem" \
     -outform DER -out "${forged_cms}" -md sha256 -noattr >/dev/null 2>&1

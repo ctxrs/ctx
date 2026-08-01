@@ -11,10 +11,19 @@ import re
 from pathlib import Path
 from typing import Any
 
-EXPECTED_AUTHORITY = (
-    "Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)"
-)
 EXPECTED_TEAM_ID = "SJSNARH4TG"
+
+
+def is_expected_authority(value: object) -> bool:
+    if not isinstance(value, str) or "\n" in value or "\r" in value:
+        return False
+    prefix = "Developer ID Application: "
+    suffix = f" ({EXPECTED_TEAM_ID})"
+    return (
+        value.startswith(prefix)
+        and value.endswith(suffix)
+        and len(value) > len(prefix + suffix)
+    )
 
 
 def sha256(path: Path) -> str:
@@ -97,7 +106,7 @@ def require_base_document(
     verification = document.get("artifact_verification")
     if not isinstance(signing, dict) or signing.get("verified") is not True:
         raise SystemExit("signing evidence does not record strict codesign verification")
-    if signing.get("authority") != EXPECTED_AUTHORITY:
+    if not is_expected_authority(signing.get("authority")):
         raise SystemExit("signing evidence does not record the pinned ctx Apple authority")
     if signing.get("team_identifier") != EXPECTED_TEAM_ID:
         raise SystemExit("signing evidence does not record the pinned ctx Apple Team ID")
@@ -152,7 +161,7 @@ def command_write(args: argparse.Namespace) -> None:
     authority = detail_value(details, "Authority")
     identifier = detail_value(details, "Identifier")
     team_identifier = detail_value(details, "TeamIdentifier")
-    if authority != EXPECTED_AUTHORITY:
+    if not is_expected_authority(authority):
         raise SystemExit(f"unexpected codesign authority: {authority}")
     if team_identifier != EXPECTED_TEAM_ID:
         raise SystemExit(f"unexpected codesign TeamIdentifier: {team_identifier}")
@@ -288,11 +297,13 @@ def command_verify_archive(args: argparse.Namespace) -> None:
 def command_create_attestation(args: argparse.Namespace) -> None:
     if not re.fullmatch(r"[0-9a-f]{40}", args.source_commit):
         raise SystemExit("attestation source commit must be a lowercase 40-character git SHA")
+    if not is_expected_authority(args.codesign_authority):
+        raise SystemExit("attestation codesign authority is not a ctx Developer ID identity")
     document = {
         "artifact_kind": args.kind,
         "artifact_name": args.artifact.name,
         "artifact_sha256": sha256(args.artifact),
-        "codesign_authority": EXPECTED_AUTHORITY,
+        "codesign_authority": args.codesign_authority,
         "platform": args.platform,
         "schema_version": 2,
         "source_commit": args.source_commit,
@@ -303,12 +314,14 @@ def command_create_attestation(args: argparse.Namespace) -> None:
 
 
 def command_verify_attestation(args: argparse.Namespace) -> None:
+    if not is_expected_authority(args.codesign_authority):
+        raise SystemExit("attestation codesign authority is not a ctx Developer ID identity")
     document = read_json(args.attestation)
     expected = {
         "artifact_kind": args.kind,
         "artifact_name": args.artifact.name,
         "artifact_sha256": sha256(args.artifact),
-        "codesign_authority": EXPECTED_AUTHORITY,
+        "codesign_authority": args.codesign_authority,
         "platform": args.platform,
         "schema_version": 2,
         "source_commit": args.source_commit,
@@ -322,11 +335,13 @@ def command_verify_attestation(args: argparse.Namespace) -> None:
 def runtime_archive_attestation_document(args: argparse.Namespace) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9a-f]{40}", args.source_commit):
         raise SystemExit("attestation source commit must be a lowercase 40-character git SHA")
+    if not is_expected_authority(args.codesign_authority):
+        raise SystemExit("attestation codesign authority is not a ctx Developer ID identity")
     document = {
         "archive_name": args.archive.name,
         "archive_sha256": sha256(args.archive),
         "artifact_kind": "runtime-release-archive",
-        "codesign_authority": EXPECTED_AUTHORITY,
+        "codesign_authority": args.codesign_authority,
         "nested_artifact_name": "libonnxruntime.dylib",
         "nested_artifact_sha256": sha256(args.nested_artifact),
         "platform": args.platform,
@@ -411,6 +426,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_attestation.add_argument("--artifact", required=True, type=Path)
     create_attestation.add_argument("--notary-submit", required=True, type=Path)
     create_attestation.add_argument("--source-commit", required=True)
+    create_attestation.add_argument("--codesign-authority", required=True)
     create_attestation.set_defaults(handler=command_create_attestation)
 
     verify_attestation = subparsers.add_parser("verify-attestation")
@@ -422,6 +438,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify_attestation.add_argument("--artifact", required=True, type=Path)
     verify_attestation.add_argument("--notary-submit", required=True, type=Path)
     verify_attestation.add_argument("--source-commit", required=True)
+    verify_attestation.add_argument("--codesign-authority", required=True)
     verify_attestation.set_defaults(handler=command_verify_attestation)
 
     create_archive_attestation = subparsers.add_parser(
@@ -437,6 +454,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--notary-submit", required=True, type=Path
     )
     create_archive_attestation.add_argument("--source-commit", required=True)
+    create_archive_attestation.add_argument("--codesign-authority", required=True)
     create_archive_attestation.set_defaults(
         handler=command_create_runtime_archive_attestation
     )
@@ -456,6 +474,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--notary-submit", required=True, type=Path
     )
     verify_archive_attestation.add_argument("--source-commit", required=True)
+    verify_archive_attestation.add_argument("--codesign-authority", required=True)
     verify_archive_attestation.set_defaults(
         handler=command_verify_runtime_archive_attestation
     )

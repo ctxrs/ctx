@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXPECTED_AUTHORITY="Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)"
 EXPECTED_TEAM_ID="SJSNARH4TG"
 EXPECTED_CA_SHA256="F1:6C:D3:C5:4C:7F:83:CE:A4:BF:1A:3E:6A:08:19:C8:AA:A8:E4:A1:52:8F:D1:44:71:5F:35:06:43:D2:DF:3A"
 
@@ -19,6 +18,20 @@ USAGE
 die() {
   printf 'error: %s\n' "$*" >&2
   exit 1
+}
+
+authority_matches_expected_team() {
+  case "$1" in
+    "Developer ID Application: "*" (${EXPECTED_TEAM_ID})") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+subject_authority() {
+  local subject="$1"
+  [[ "${subject}" == *",CN="* ]] || return 1
+  subject="${subject#*,CN=}"
+  printf '%s\n' "${subject%%,*}"
 }
 
 mode=artifact
@@ -94,7 +107,9 @@ signer_count="$(grep -c '^-----BEGIN CERTIFICATE-----$' "${signer_cert}" || true
 subject="$(openssl x509 \
   -in "${signer_cert}" -noout -subject -nameopt RFC2253 2>/dev/null || true)"
 subject=",${subject#subject=},"
-[[ "${subject}" == *",CN=${EXPECTED_AUTHORITY},"* ]] || \
+signer_authority="$(subject_authority "${subject}")" || \
+  die "macOS attestation actual signer is missing a Developer ID common name"
+authority_matches_expected_team "${signer_authority}" || \
   die "macOS attestation actual signer does not have the pinned ctx Apple authority"
 [[ "${subject}" == *",OU=${EXPECTED_TEAM_ID},"* ]] || \
   die "macOS attestation actual signer does not have the pinned ctx Apple Team ID"
@@ -126,7 +141,8 @@ if [[ "${mode}" == "runtime_archive" ]]; then
     --archive "${artifact}" \
     --nested-artifact "${nested_artifact}" \
     --notary-submit "${notary_submit}" \
-    --source-commit "${source_commit}"
+    --source-commit "${source_commit}" \
+    --codesign-authority "${signer_authority}"
   printf 'macOS release attestation ok: %s runtime release archive\n' "${platform}"
 else
   python3 "${root_dir}/scripts/macos-release-signing-evidence.py" verify-attestation \
@@ -135,6 +151,7 @@ else
     --kind "${kind}" \
     --artifact "${artifact}" \
     --notary-submit "${notary_submit}" \
-    --source-commit "${source_commit}"
+    --source-commit "${source_commit}" \
+    --codesign-authority "${signer_authority}"
   printf 'macOS release attestation ok: %s %s\n' "${platform}" "${kind}"
 fi

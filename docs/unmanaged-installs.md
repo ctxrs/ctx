@@ -102,13 +102,6 @@ binaries and ONNX Runtime DLLs remain unsigned by Authenticode; signed release
 metadata and checksums authenticate their bytes, but they are not OS-native
 application signatures.
 
-The exact macOS signing identity is
-`Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)`, with
-Apple Team ID `SJSNARH4TG`. Legacy Publisher LLC is the legacy legal
-name still attached to ctx engineering, inc.'s Apple Developer account, not a
-different publisher. Until Apple reflects the current legal name, macOS may
-show the legacy name in Login Items or background-activity notices.
-
 On macOS, verify an installed official release binary's integrity and Apple
 trust, then inspect its signing identity with:
 
@@ -118,12 +111,9 @@ spctl --assess --verbose=4 --type install "$(command -v ctx)"
 codesign -d --verbose=4 "$(command -v ctx)" 2>&1 | grep -E '^(Authority|TeamIdentifier)='
 ```
 
-The first authority line must be
-`Authority=Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)`
-and `TeamIdentifier` must be `SJSNARH4TG`. If a package manager installed a
-wrapper or source build instead of the official release binary, run these
-commands against a downloaded `ctx-macos-arm64` or `ctx-macos-x64` release
-asset.
+If a package manager installed a wrapper or source build instead of the
+official release binary, run these commands against a downloaded
+`ctx-macos-arm64` or `ctx-macos-x64` release asset.
 
 Official Linux release binaries are checked to require no newer than glibc
 2.35 and are built from pinned Ubuntu 22.04 container inputs rather than the
