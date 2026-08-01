@@ -20,8 +20,10 @@ use super::git::ProbeFailure;
 use super::{
     attribute,
     git::{CandidateKind, GitCertifier},
-    AttributionInput, RepositoryAttributor, UnscopedFileObservation, UnscopedVcsObservation,
+    linked_outcome_evidence, AttributionInput, LinkedOutcomeInput, RepositoryAttributor,
+    UnscopedFileObservation, UnscopedVcsObservation,
 };
+use crate::OutputOutcome;
 
 #[cfg(unix)]
 mod local_root_authorization;
@@ -36,6 +38,19 @@ fn run_git(path: &Path, arguments: &[&str]) {
         .status()
         .unwrap();
     assert!(status.success(), "git {:?} failed", arguments);
+}
+
+fn git_output(path: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(path)
+        .args(arguments)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {:?} failed", arguments);
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn repository(parent: &Path, name: &str, remote: Option<&str>) -> PathBuf {
@@ -619,6 +634,174 @@ fn exact_pull_request_outcome(alias: RepositoryAlias) -> RepositoryOutcomeObserv
     }
 }
 
+fn linked_short_commit(
+    repository: &Path,
+    command: &str,
+    output: String,
+) -> super::LinkedOutcomeEvidence {
+    let repository = repository.to_string_lossy().into_owned();
+    let output = serde_json::Value::String(output);
+    linked_outcome_evidence(LinkedOutcomeInput {
+        provider: "fixture",
+        command,
+        session_cwd: Some(&repository),
+        declared_workdir: Some(&repository),
+        origin_call_id: "call-origin",
+        result_call_id: "call-result",
+        origin_event_sequence: 7,
+        continuation_call_id_sha256: &[],
+        result_record_sha256: [9; 32],
+        observed_at_unix_ms: 10,
+        result_outcome: OutputOutcome::Success,
+        result_output: &output,
+        structured_commit_oid: None,
+        output_repository_path: Some(&repository),
+    })
+    .unwrap()
+}
+
+#[test]
+fn public_ctx_short_commit_resolves_full_oid_parents_and_changed_files() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(
+        temp.path(),
+        "public-ctx",
+        Some("https://github.com/ctxrs/ctx.git"),
+    );
+    fs::create_dir(repo.join("src")).unwrap();
+    fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
+    fs::write(repo.join("src/new.rs"), "pub fn added() {}\n").unwrap();
+    run_git(&repo, &["add", "tracked.txt", "src/new.rs"]);
+    run_git(&repo, &["commit", "-qm", "Capture public ctx outcome"]);
+    let oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    let short = git_output(&repo, &["rev-parse", "--short=7", "HEAD"]);
+    let parent = git_output(&repo, &["rev-parse", "HEAD^"]);
+    let linked = linked_short_commit(
+        &repo,
+        "git commit -m 'Capture public ctx outcome'",
+        format!(
+            "[main {short}] Capture public ctx outcome\n 2 files changed, 2 insertions(+), 1 deletion(-)\n"
+        ),
+    );
+    let annotation = attribute(AttributionInput {
+        activity_at_unix_ms: Some(10),
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        command: Some("git commit -m 'Capture public ctx outcome'".to_owned()),
+        outcome_operation_repository_path: linked.outcome_operation_repository_path,
+        outcome_output_repository_path: linked.outcome_output_repository_path,
+        outcome_observations: linked.outcomes,
+        outcome_abstentions: linked.abstentions,
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_bindings.len(), 1);
+    assert_eq!(
+        annotation.repository_bindings[0].logical_repository_id,
+        "forge:github.com/ctxrs/ctx"
+    );
+    let commit = annotation
+        .repository_vcs_observations
+        .iter()
+        .find(|observation| observation.kind == RepositoryVcsObservationKind::Commit)
+        .unwrap();
+    assert_eq!(commit.object_id.as_ref().unwrap().hex, oid);
+    assert_eq!(commit.parent_object_ids.len(), 1);
+    assert_eq!(commit.parent_object_ids[0].hex, parent);
+    let mut files = annotation
+        .repository_file_observations
+        .iter()
+        .map(|observation| observation.relative_path.as_str())
+        .collect::<Vec<_>>();
+    files.sort_unstable();
+    assert_eq!(files, ["src/new.rs", "tracked.txt"]);
+    assert!(annotation.repository_abstentions.is_empty());
+}
+
+#[test]
+fn short_merge_resolves_ordered_parents_and_first_parent_files() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "merge", None);
+    let primary = git_output(&repo, &["branch", "--show-current"]);
+    run_git(&repo, &["checkout", "-qb", "docs"]);
+    fs::write(repo.join("docs.md"), "docs\n").unwrap();
+    run_git(&repo, &["add", "docs.md"]);
+    run_git(&repo, &["commit", "-qm", "Add docs"]);
+    run_git(&repo, &["checkout", "-q", &primary]);
+    run_git(&repo, &["merge", "--no-ff", "docs", "-m", "Merge docs"]);
+    let oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    let short = git_output(&repo, &["rev-parse", "--short=7", "HEAD"]);
+    let parents = git_output(&repo, &["show", "-s", "--format=%P", "HEAD"]);
+    let linked = linked_short_commit(
+        &repo,
+        "git merge --no-ff docs",
+        format!("Merge made by the 'ort' strategy.\n*   {short} Merge docs\n"),
+    );
+    let annotation = attribute(AttributionInput {
+        activity_at_unix_ms: Some(10),
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        command: Some("git merge --no-ff docs".to_owned()),
+        outcome_operation_repository_path: linked.outcome_operation_repository_path,
+        outcome_output_repository_path: linked.outcome_output_repository_path,
+        outcome_observations: linked.outcomes,
+        outcome_abstentions: linked.abstentions,
+        ..AttributionInput::default()
+    });
+    let commit = annotation
+        .repository_vcs_observations
+        .iter()
+        .find(|observation| observation.kind == RepositoryVcsObservationKind::Commit)
+        .unwrap();
+    assert_eq!(commit.object_id.as_ref().unwrap().hex, oid);
+    assert_eq!(
+        commit
+            .parent_object_ids
+            .iter()
+            .map(|parent| parent.hex.as_str())
+            .collect::<Vec<_>>(),
+        parents.split(' ').collect::<Vec<_>>()
+    );
+    assert_eq!(annotation.repository_file_observations.len(), 1);
+    assert_eq!(
+        annotation.repository_file_observations[0].relative_path,
+        "docs.md"
+    );
+}
+
+#[test]
+fn rewritten_unreachable_short_commit_remains_inadmissible() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "rewritten", None);
+    fs::write(repo.join("tracked.txt"), "transient\n").unwrap();
+    run_git(&repo, &["add", "tracked.txt"]);
+    run_git(&repo, &["commit", "-qm", "Transient outcome"]);
+    let short = git_output(&repo, &["rev-parse", "--short=7", "HEAD"]);
+    run_git(&repo, &["commit", "--amend", "-qm", "Final outcome"]);
+    let linked = linked_short_commit(
+        &repo,
+        "git commit -m 'Transient outcome'",
+        format!("[main {short}] Transient outcome\n"),
+    );
+    let annotation = attribute(AttributionInput {
+        activity_at_unix_ms: Some(10),
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        command: Some("git commit -m 'Transient outcome'".to_owned()),
+        outcome_operation_repository_path: linked.outcome_operation_repository_path,
+        outcome_output_repository_path: linked.outcome_output_repository_path,
+        outcome_observations: linked.outcomes,
+        outcome_abstentions: linked.abstentions,
+        ..AttributionInput::default()
+    });
+    assert!(annotation
+        .repository_vcs_observations
+        .iter()
+        .all(|observation| observation.kind != RepositoryVcsObservationKind::Commit));
+    assert!(annotation.repository_file_observations.is_empty());
+    assert!(has_reason(
+        &annotation,
+        RepositoryAbstentionReason::OutcomeResultInadmissible
+    ));
+}
+
 #[test]
 fn opaque_command_routes_block_outcomes_but_retain_structured_workdir() {
     let temp = TempDir::new().unwrap();
@@ -647,7 +830,7 @@ fn opaque_command_routes_block_outcomes_but_retain_structured_workdir() {
             command: Some(command.to_owned()),
             outcome_operation_repository_path: Some(path.clone()),
             outcome_output_repository_path: Some(path.clone()),
-            outcome_observations: vec![exact_commit_outcome()],
+            outcome_observations: vec![exact_commit_outcome().into()],
             ..AttributionInput::default()
         });
         assert_eq!(annotation.repository_bindings.len(), 1, "{command}");
@@ -683,7 +866,7 @@ fn failed_explicit_outcome_route_never_uses_sole_provider_logical_binding() {
         )),
         outcome_operation_repository_path: Some(path.clone()),
         outcome_output_repository_path: Some(path),
-        outcome_observations: vec![exact_commit_outcome()],
+        outcome_observations: vec![exact_commit_outcome().into()],
         ..AttributionInput::default()
     });
     assert_eq!(annotation.repository_bindings.len(), 1);
@@ -707,7 +890,7 @@ fn exact_pull_request_outcome_uses_provider_binding_without_a_live_local_route()
         command: Some("gh pr create --repo acme/provider-only".to_owned()),
         outcome_operation_repository_path: Some(missing.to_string_lossy().into_owned()),
         outcome_output_repository_path: Some(missing.to_string_lossy().into_owned()),
-        outcome_observations: vec![exact_pull_request_outcome(alias)],
+        outcome_observations: vec![exact_pull_request_outcome(alias).into()],
         ..AttributionInput::default()
     });
 

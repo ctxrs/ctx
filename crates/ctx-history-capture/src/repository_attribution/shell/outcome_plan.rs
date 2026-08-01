@@ -7,7 +7,7 @@ use super::{
     tokenize, unwrap_command_wrappers, MAX_COMMAND_BYTES,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum BoundedCommitProducer {
     Commit,
     Merge,
