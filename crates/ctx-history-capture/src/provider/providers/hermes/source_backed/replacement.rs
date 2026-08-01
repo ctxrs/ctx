@@ -48,7 +48,6 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
             observe_hermes_logical_snapshot(snapshot.connection().map_err(route_error)?)
                 .map_err(route_error)?;
         snapshot.revalidate().map_err(route_error)?;
-        record_logical_observation();
         let fingerprint = DocumentLeafFingerprint::new(fingerprint);
         Ok(CompleteDocumentTree::new(
             fingerprint.as_bytes(),
@@ -117,7 +116,6 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
         }
         snapshot.revalidate().map_err(route_error)?;
         restore_snapshot(&authority.snapshot, snapshot)?;
-        record_projection();
         Ok(document_terminal(scan.certificate))
     }
 
@@ -134,17 +132,6 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
             )));
         }
         (tree.authority.terminal_revalidate)().map_err(route_error)?;
-        #[cfg(test)]
-        {
-            let counters = tree.authority._sqlite_authority.snapshot_counters();
-            record_snapshot_counters(
-                counters.immutable_snapshot_opens(),
-                counters.copied_snapshot_opens(),
-                counters.source_bytes_copied(),
-                counters.terminal_fences(),
-                counters.terminal_revalidations(),
-            );
-        }
         Ok(tree.tree_fingerprint)
     }
 }
@@ -171,68 +158,6 @@ fn restore_snapshot(
         ));
     }
     Ok(())
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct HermesRouteWorkCounters {
-    pub(crate) logical_observation_passes: u64,
-    pub(crate) projection_passes: u64,
-    pub(crate) immutable_snapshot_opens: u64,
-    pub(crate) copied_snapshot_opens: u64,
-    pub(crate) source_bytes_copied: u64,
-    pub(crate) terminal_fences: u64,
-    pub(crate) terminal_revalidations: u64,
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static HERMES_ROUTE_WORK: std::cell::RefCell<HermesRouteWorkCounters> =
-        std::cell::RefCell::new(HermesRouteWorkCounters::default());
-}
-
-#[cfg(test)]
-pub(crate) fn reset_route_work_counters() {
-    HERMES_ROUTE_WORK.with(|work| *work.borrow_mut() = HermesRouteWorkCounters::default());
-}
-
-#[cfg(test)]
-pub(crate) fn route_work_counters() -> HermesRouteWorkCounters {
-    HERMES_ROUTE_WORK.with(|work| *work.borrow())
-}
-
-fn record_logical_observation() {
-    #[cfg(test)]
-    HERMES_ROUTE_WORK.with(|work| {
-        let mut work = work.borrow_mut();
-        work.logical_observation_passes = work.logical_observation_passes.saturating_add(1);
-    });
-}
-
-fn record_projection() {
-    #[cfg(test)]
-    HERMES_ROUTE_WORK.with(|work| {
-        let mut work = work.borrow_mut();
-        work.projection_passes = work.projection_passes.saturating_add(1);
-    });
-}
-
-#[cfg(test)]
-fn record_snapshot_counters(
-    immutable_snapshot_opens: u64,
-    copied_snapshot_opens: u64,
-    source_bytes_copied: u64,
-    terminal_fences: u64,
-    terminal_revalidations: u64,
-) {
-    HERMES_ROUTE_WORK.with(|work| {
-        let mut work = work.borrow_mut();
-        work.immutable_snapshot_opens = immutable_snapshot_opens;
-        work.copied_snapshot_opens = copied_snapshot_opens;
-        work.source_bytes_copied = source_bytes_copied;
-        work.terminal_fences = terminal_fences;
-        work.terminal_revalidations = terminal_revalidations;
-    });
 }
 
 fn document_terminal(certificate: CertifiedSource) -> DocumentSourceTerminal {

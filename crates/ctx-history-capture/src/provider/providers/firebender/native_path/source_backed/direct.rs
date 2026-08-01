@@ -59,30 +59,6 @@ pub(crate) struct FirebenderDirectScan {
     max_rows_per_set: u64,
 }
 
-#[cfg(test)]
-impl FirebenderDirectScan {
-    pub(crate) fn certificate(&self) -> &CertifiedSource {
-        &self.certificate
-    }
-
-    pub(crate) fn work_counters(&self) -> (u64, u64, u64, u64) {
-        (
-            self.row_decode_passes,
-            self.decoded_rows,
-            self.emitted_pages,
-            self.peak_buffered_documents,
-        )
-    }
-
-    pub(crate) fn set_read_counters(&self) -> (u64, u64, u64) {
-        (
-            self.candidate_query_batches,
-            self.row_set_queries,
-            self.max_rows_per_set,
-        )
-    }
-}
-
 enum FirebenderTreeAuthority {
     Present(Box<FirebenderPresentAuthority>),
     Missing(MissingLeafFence),
@@ -133,7 +109,6 @@ impl ReplacementDocumentTree for FirebenderDocumentTreeAdapter {
                 )
                 .map_err(route_error)?;
                 snapshot.revalidate().map_err(route_error)?;
-                record_logical_observation();
                 Ok(CompleteDocumentTree::new(
                     fingerprint,
                     vec![ObservedDocumentLeaf::new(
@@ -191,7 +166,6 @@ impl ReplacementDocumentTree for FirebenderDocumentTreeAdapter {
         }
         snapshot.revalidate().map_err(route_error)?;
         restore_opened_snapshot(&authority.snapshot, snapshot)?;
-        record_projection();
         Ok(document_terminal(scan))
     }
 
@@ -209,17 +183,6 @@ impl ReplacementDocumentTree for FirebenderDocumentTreeAdapter {
                     ));
                 }
                 (authority.terminal_revalidate)().map_err(route_error)?;
-                #[cfg(test)]
-                {
-                    let counters = authority._sqlite_authority.snapshot_counters();
-                    record_snapshot_counters(
-                        counters.immutable_snapshot_opens(),
-                        counters.copied_snapshot_opens(),
-                        counters.source_bytes_copied(),
-                        counters.terminal_fences(),
-                        counters.terminal_revalidations(),
-                    );
-                }
             }
             FirebenderTreeAuthority::Missing(fence) if !fence.revalidate() => {
                 return Err(source_changed(
@@ -269,68 +232,6 @@ fn restore_opened_snapshot(
     Ok(())
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct FirebenderRouteWorkCounters {
-    pub(crate) logical_observation_passes: u64,
-    pub(crate) projection_passes: u64,
-    pub(crate) immutable_snapshot_opens: u64,
-    pub(crate) copied_snapshot_opens: u64,
-    pub(crate) source_bytes_copied: u64,
-    pub(crate) terminal_fences: u64,
-    pub(crate) terminal_revalidations: u64,
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static FIREBENDER_ROUTE_WORK: std::cell::RefCell<FirebenderRouteWorkCounters> =
-        std::cell::RefCell::new(FirebenderRouteWorkCounters::default());
-}
-
-#[cfg(test)]
-pub(crate) fn reset_route_work_counters() {
-    FIREBENDER_ROUTE_WORK.with(|work| *work.borrow_mut() = FirebenderRouteWorkCounters::default());
-}
-
-#[cfg(test)]
-pub(crate) fn route_work_counters() -> FirebenderRouteWorkCounters {
-    FIREBENDER_ROUTE_WORK.with(|work| *work.borrow())
-}
-
-fn record_logical_observation() {
-    #[cfg(test)]
-    FIREBENDER_ROUTE_WORK.with(|work| {
-        let mut work = work.borrow_mut();
-        work.logical_observation_passes = work.logical_observation_passes.saturating_add(1);
-    });
-}
-
-fn record_projection() {
-    #[cfg(test)]
-    FIREBENDER_ROUTE_WORK.with(|work| {
-        let mut work = work.borrow_mut();
-        work.projection_passes = work.projection_passes.saturating_add(1);
-    });
-}
-
-#[cfg(test)]
-fn record_snapshot_counters(
-    immutable_snapshot_opens: u64,
-    copied_snapshot_opens: u64,
-    source_bytes_copied: u64,
-    terminal_fences: u64,
-    terminal_revalidations: u64,
-) {
-    FIREBENDER_ROUTE_WORK.with(|work| {
-        let mut work = work.borrow_mut();
-        work.immutable_snapshot_opens = immutable_snapshot_opens;
-        work.copied_snapshot_opens = copied_snapshot_opens;
-        work.source_bytes_copied = source_bytes_copied;
-        work.terminal_fences = terminal_fences;
-        work.terminal_revalidations = terminal_revalidations;
-    });
-}
-
 fn document_terminal(scan: FirebenderDirectScan) -> DocumentSourceTerminal {
     let observation = scan.certificate.observation().clone();
     DocumentSourceTerminal {
@@ -361,29 +262,6 @@ fn validate_scan_receipt(scan: &FirebenderDirectScan) -> SourceBackedRouteResult
         ));
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn scan_source(
-    data_root: &Path,
-    explicit_path: &Path,
-    emit: &mut dyn FnMut(Vec<CoreRecord>) -> FirebenderSourceBackedResult<()>,
-) -> FirebenderSourceBackedResult<Option<FirebenderDirectScan>> {
-    let identity = firebender_path_identity(explicit_path)?;
-    let source = firebender_source_key(&identity.route_identity)?;
-    let database_path = identity.canonical_database_path;
-    let snapshot = match open_database_leaf(data_root, &database_path)? {
-        OpenDatabaseLeaf::Present(snapshot) => snapshot,
-        OpenDatabaseLeaf::Missing(_) => return Ok(None),
-    };
-    let scan = scan_opened_snapshot(&snapshot, &database_path, source, emit)?;
-    let closing_evidence = snapshot.finish()?;
-    if closing_evidence != scan.terminal_fence {
-        return Err(FirebenderSourceBackedError::Capture(
-            CaptureError::SourceChangedDuringCapture,
-        ));
-    }
-    Ok(Some(scan))
 }
 
 fn scan_opened_snapshot(
@@ -787,34 +665,4 @@ fn source_changed(detail: impl Into<String>) -> SourceBackedRouteError {
 
 fn internal_error(detail: impl Into<String>) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
-}
-
-#[cfg(test)]
-pub(crate) fn scan_for_test(
-    explicit_path: &Path,
-    emit: &mut dyn FnMut(Vec<CoreRecord>) -> FirebenderSourceBackedResult<()>,
-) -> FirebenderSourceBackedResult<FirebenderDirectScan> {
-    scan_source(crate::test_provider_sqlite_data_root(), explicit_path, emit)?.ok_or_else(|| {
-        FirebenderSourceBackedError::Capture(CaptureError::InvalidPayload(
-            "expected present Firebender test source".to_owned(),
-        ))
-    })
-}
-
-#[cfg(test)]
-pub(crate) fn revalidate_missing_after_for_test(
-    explicit_path: &Path,
-    mutate: impl FnOnce(),
-) -> FirebenderSourceBackedResult<bool> {
-    let (database_path, _) = firebender_database_path_and_source(explicit_path)?;
-    let OpenDatabaseLeaf::Missing(fence) =
-        open_database_leaf(crate::test_provider_sqlite_data_root(), &database_path)?
-    else {
-        return Err(CaptureError::InvalidPayload(
-            "expected missing Firebender test source".to_owned(),
-        )
-        .into());
-    };
-    mutate();
-    Ok(fence.revalidate())
 }

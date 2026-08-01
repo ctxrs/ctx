@@ -36,11 +36,6 @@ impl HermesSourceCandidate {
         &self.path
     }
 
-    #[cfg(test)]
-    pub(crate) fn source(&self) -> &SourceKey {
-        &self.source
-    }
-
     pub(crate) fn automatic(
         data_root: impl Into<PathBuf>,
         source: ProviderSource,

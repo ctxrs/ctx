@@ -6,9 +6,6 @@ use std::{
     sync::Mutex,
 };
 
-#[cfg(test)]
-use std::cell::Cell;
-
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
@@ -67,49 +64,6 @@ const GOOSE_LOGICAL_EVENT_KIND: &str = "goose-event";
 const GOOSE_LOGICAL_RELATION: &str = "goose-messages-native-id-v4";
 const GOOSE_MAX_EXPLICIT_RETAINED_ROUTES: usize = 32;
 const GOOSE_MISSING_TREE_DOMAIN: &[u8] = b"ctx.goose.missing-logical-tree.v1\0";
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct GooseSourceBackedWork {
-    pub(super) snapshot_opens: u64,
-    pub(super) source_bytes_copied: u64,
-    pub(super) terminal_fences: u64,
-    pub(super) terminal_revalidations: u64,
-    pub(super) active_snapshots: u64,
-    pub(super) max_active_snapshots: u64,
-    pub(super) logical_observations: u64,
-    pub(super) logical_observation_queries: u64,
-    pub(super) logical_rows_hashed: u64,
-    pub(super) peak_logical_page_rows: u64,
-    pub(super) peak_retained_digest_rows: u64,
-    pub(super) provider_projections: u64,
-    pub(super) projection_queries: u64,
-}
-
-#[cfg(test)]
-thread_local! {
-    static GOOSE_SOURCE_BACKED_WORK: Cell<GooseSourceBackedWork> =
-        Cell::new(GooseSourceBackedWork::default());
-}
-
-#[cfg(test)]
-pub(super) fn reset_goose_source_backed_work() {
-    GOOSE_SOURCE_BACKED_WORK.set(GooseSourceBackedWork::default());
-}
-
-#[cfg(test)]
-pub(super) fn goose_source_backed_work() -> GooseSourceBackedWork {
-    GOOSE_SOURCE_BACKED_WORK.get()
-}
-
-#[cfg(test)]
-fn update_goose_source_backed_work(update: impl FnOnce(&mut GooseSourceBackedWork)) {
-    GOOSE_SOURCE_BACKED_WORK.set({
-        let mut work = GOOSE_SOURCE_BACKED_WORK.get();
-        update(&mut work);
-        work
-    });
-}
 
 #[derive(Debug, Error)]
 pub(crate) enum GooseSourceBackedErrorV0 {
@@ -354,8 +308,6 @@ fn finish_present_authority(
             "Goose retained terminal fence changed before publication",
         ));
     }
-    #[cfg(test)]
-    authority.retained.record_snapshot_work();
     Ok(())
 }
 
@@ -416,104 +368,38 @@ impl RetainedGooseDirectory {
             .map_err(sqlite_access_error)
             .map_err(route_error)
     }
-
-    #[cfg(test)]
-    fn record_snapshot_work(&self) {
-        let counters = self.sqlite.snapshot_counters();
-        update_goose_source_backed_work(|work| {
-            work.snapshot_opens = work
-                .snapshot_opens
-                .saturating_add(counters.immutable_snapshot_opens())
-                .saturating_add(counters.copied_snapshot_opens());
-            work.source_bytes_copied = work
-                .source_bytes_copied
-                .saturating_add(counters.source_bytes_copied());
-            work.terminal_fences = work
-                .terminal_fences
-                .saturating_add(counters.terminal_fences());
-            work.terminal_revalidations = work
-                .terminal_revalidations
-                .saturating_add(counters.terminal_revalidations());
-            work.active_snapshots = work
-                .active_snapshots
-                .saturating_add(counters.active_snapshots());
-            work.max_active_snapshots = work
-                .max_active_snapshots
-                .max(counters.max_active_snapshots());
-        });
-    }
 }
 
 fn observe_goose_logical_fingerprint(
     connection: &Connection,
 ) -> GooseSourceBackedResultV0<[u8; 32]> {
-    #[cfg(test)]
-    update_goose_source_backed_work(|work| {
-        work.logical_observations = work.logical_observations.saturating_add(1);
-    });
     let schema = GooseNativeSchema::probe(connection)?;
     let limits = GooseNativePageLimits::default();
     goose_require_canonical_native_order(connection)?;
-    #[cfg(test)]
-    update_goose_source_backed_work(|work| {
-        work.logical_observation_queries = work.logical_observation_queries.saturating_add(1);
-    });
     let mut fingerprint = GooseLogicalFingerprint::new(&schema);
     let mut session_keyset = GooseNativeSessionKeyset::Unstarted;
     loop {
-        #[cfg(test)]
-        update_goose_source_backed_work(|work| {
-            work.logical_observation_queries = work.logical_observation_queries.saturating_add(1);
-        });
         let rows = goose_fetch_native_session_page(connection, &schema, &session_keyset, limits)?;
-        #[cfg(test)]
-        record_goose_logical_page(rows.len());
         let Some(last) = rows.last().map(|row| row.native_identity.clone()) else {
             break;
         };
         session_keyset = GooseNativeSessionKeyset::After(last);
         for row in &rows {
             fingerprint.record_session(row)?;
-            #[cfg(test)]
-            record_goose_logical_row();
         }
     }
     let mut message_keyset = GooseNativeRowKeyset::Unstarted;
     loop {
-        #[cfg(test)]
-        update_goose_source_backed_work(|work| {
-            work.logical_observation_queries = work.logical_observation_queries.saturating_add(1);
-        });
         let rows = goose_fetch_native_message_page(connection, &schema, message_keyset, limits)?;
-        #[cfg(test)]
-        record_goose_logical_page(rows.len());
         let Some(last) = rows.last().map(|row| row.native_order) else {
             break;
         };
         message_keyset = GooseNativeRowKeyset::After(last);
         for row in &rows {
             fingerprint.record_message(row)?;
-            #[cfg(test)]
-            record_goose_logical_row();
         }
     }
     fingerprint.finish()
-}
-
-#[cfg(test)]
-fn record_goose_logical_page(rows: usize) {
-    let rows = u64::try_from(rows).unwrap_or(u64::MAX);
-    update_goose_source_backed_work(|work| {
-        work.peak_logical_page_rows = work.peak_logical_page_rows.max(rows);
-    });
-}
-
-#[cfg(test)]
-fn record_goose_logical_row() {
-    update_goose_source_backed_work(|work| {
-        work.logical_rows_hashed = work.logical_rows_hashed.saturating_add(1);
-        work.peak_retained_digest_rows = work.peak_retained_digest_rows.max(1);
-    });
 }
 
 #[derive(Clone)]
@@ -527,17 +413,9 @@ fn scan_goose_logical_snapshot(
     source: &SourceKey,
     sink: &mut ChangedDocumentSink<'_, '_>,
 ) -> GooseSourceBackedResultV0<DocumentSourceTerminal> {
-    #[cfg(test)]
-    update_goose_source_backed_work(|work| {
-        work.provider_projections = work.provider_projections.saturating_add(1);
-    });
     let schema = GooseNativeSchema::probe(connection)?;
     let limits = GooseNativePageLimits::default();
     goose_require_canonical_native_order(connection)?;
-    #[cfg(test)]
-    update_goose_source_backed_work(|work| {
-        work.projection_queries = work.projection_queries.saturating_add(1);
-    });
     let mut sessions = BTreeMap::new();
     let mut fingerprint = GooseLogicalFingerprint::new(&schema);
     let mut complete_records = 0_u64;
@@ -548,10 +426,6 @@ fn scan_goose_logical_snapshot(
 
     let mut session_keyset = GooseNativeSessionKeyset::Unstarted;
     loop {
-        #[cfg(test)]
-        update_goose_source_backed_work(|work| {
-            work.projection_queries = work.projection_queries.saturating_add(1);
-        });
         let rows = goose_fetch_native_session_page(connection, &schema, &session_keyset, limits)?;
         let Some(last) = rows.last().map(|row| row.native_identity.clone()) else {
             break;
@@ -582,10 +456,6 @@ fn scan_goose_logical_snapshot(
 
     let mut message_keyset = GooseNativeRowKeyset::Unstarted;
     loop {
-        #[cfg(test)]
-        update_goose_source_backed_work(|work| {
-            work.projection_queries = work.projection_queries.saturating_add(1);
-        });
         let rows = goose_fetch_native_message_page(connection, &schema, message_keyset, limits)?;
         let Some(last) = rows.last().map(|row| row.native_order) else {
             break;
