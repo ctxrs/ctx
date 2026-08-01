@@ -379,8 +379,7 @@ pub struct EventRecord {
 
 /// One verified event plus its complete generation-owned Core data.
 ///
-/// The wrapper preserves the compact query metadata alongside the complete
-/// self-contained record.
+/// The event projection is derived from the complete self-contained record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreEventRecord {
     pub event: EventRecord,

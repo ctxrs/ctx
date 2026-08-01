@@ -492,9 +492,8 @@ fn source_event_page_rejects_a_forged_order_size_suffix_before_returning_record(
         .into_iter()
         .next()
         .unwrap();
-    let mut forged: TantivyDocument = searcher.doc(address).unwrap();
-    add_query_metadata_fast_values(&searcher, address, &mut forged);
-    let encoded_core = forged
+    let stored: TantivyDocument = searcher.doc(address).unwrap();
+    let encoded_core = stored
         .get_first(fields.core_record)
         .and_then(|value| value.as_bytes())
         .unwrap()
@@ -508,6 +507,13 @@ fn source_event_page_rejects_a_forged_order_size_suffix_before_returning_record(
     .into_bytes();
     let last = forged_order.last_mut().unwrap();
     *last ^= 1;
+    let complete = indexed_document(core_record);
+    let mut forged = TantivyDocument::default();
+    for (field, value) in complete.field_values() {
+        if field != fields.source_event_order {
+            forged.add_field_value(field, value);
+        }
+    }
     forged.add_bytes(fields.source_event_order, &forged_order);
     drop(searcher);
 

@@ -20,7 +20,7 @@ impl VerifiedIndex {
 
     /// Searches policy-selected event text with conjunctive metadata filters.
     ///
-    /// Exact-value fields use their canonical stored spelling. Workspace and
+    /// Exact-value fields use their canonical indexed spelling. Workspace and
     /// touched-file filters use case-insensitive substring matching over
     /// bounded indexed metadata.
     pub fn search_event_candidates_with_filters(

@@ -1,216 +1,16 @@
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct QueryMetadataChunkHeader {
-    chunk_index: usize,
-    chunk_count: usize,
-    total_bytes: usize,
-    payload_bytes: usize,
-    encoded_digest: [u8; QUERY_METADATA_CHUNK_DIGEST_BYTES],
-}
-
-fn query_metadata_chunk_header(chunk: &[u8]) -> Result<QueryMetadataChunkHeader> {
-    const HEADER_PREFIX_BYTES: usize = 12;
-    if chunk.len() < QUERY_METADATA_CHUNK_HEADER_BYTES
-        || chunk.len() > QUERY_METADATA_CHUNK_BYTES
-        || chunk[..4] != QUERY_METADATA_CHUNK_MAGIC
-    {
-        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-    }
-    let chunk_index = usize::from(u16::from_be_bytes([chunk[4], chunk[5]]));
-    let chunk_count = usize::from(u16::from_be_bytes([chunk[6], chunk[7]]));
-    let total_bytes = u32::from_be_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]) as usize;
-    let calculated_chunk_count = total_bytes.div_ceil(QUERY_METADATA_CHUNK_PAYLOAD_BYTES);
-    if total_bytes == 0
-        || total_bytes > MAX_QUERY_METADATA_BYTES
-        || chunk_count == 0
-        || chunk_count != calculated_chunk_count
-        || chunk_index >= chunk_count
-    {
-        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-    }
-    let start = chunk_index
-        .checked_mul(QUERY_METADATA_CHUNK_PAYLOAD_BYTES)
-        .ok_or(IndexError::CountOverflow)?;
-    let end = start
-        .checked_add(QUERY_METADATA_CHUNK_PAYLOAD_BYTES)
-        .ok_or(IndexError::CountOverflow)?
-        .min(total_bytes);
-    let payload_bytes = chunk.len() - QUERY_METADATA_CHUNK_HEADER_BYTES;
-    if payload_bytes != end.saturating_sub(start) {
-        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-    }
-    let encoded_digest: [u8; QUERY_METADATA_CHUNK_DIGEST_BYTES] = chunk
-        [HEADER_PREFIX_BYTES..QUERY_METADATA_CHUNK_HEADER_BYTES]
-        .try_into()
-        .map_err(|_| IndexError::InvalidStoredDocumentField("query_metadata"))?;
-    Ok(QueryMetadataChunkHeader {
-        chunk_index,
-        chunk_count,
-        total_bytes,
-        payload_bytes,
-        encoded_digest,
-    })
-}
-
-fn note_query_metadata_chunk_read() {
-    #[cfg(test)]
-    QUERY_METADATA_CHUNK_READS.set(QUERY_METADATA_CHUNK_READS.get().saturating_add(1));
-}
-
-fn note_query_metadata_exact_allocation(bytes: usize) {
-    #[cfg(test)]
-    QUERY_METADATA_EXACT_ALLOCATED_BYTES.set(
-        QUERY_METADATA_EXACT_ALLOCATED_BYTES
-            .get()
-            .saturating_add(bytes),
-    );
-    #[cfg(not(test))]
-    let _ = bytes;
-}
-
 pub(crate) fn stored_event_record(
     searcher: &tantivy::Searcher,
     address: DocAddress,
-    _fields: Fields,
+    fields: Fields,
 ) -> Result<EventRecord> {
     #[cfg(test)]
     STORED_EVENT_RECORD_MATERIALIZATIONS
         .set(STORED_EVENT_RECORD_MATERIALIZATIONS.get().saturating_add(1));
-    let segment = searcher
-        .segment_readers()
-        .get(address.segment_ord as usize)
-        .ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?;
-    let column = segment
-        .fast_fields()
-        .bytes(QUERY_METADATA_FIELD)?
-        .ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?;
-    let maximum_chunks = MAX_QUERY_METADATA_BYTES.div_ceil(QUERY_METADATA_CHUNK_PAYLOAD_BYTES);
-    let mut chunks_by_index = BTreeMap::new();
-    let mut expected_layout = None;
-    let mut observed_payload_bytes = 0_usize;
-    let mut chunk = Vec::new();
-    for (observed_chunks, term_ord) in column.term_ords(address.doc_id).enumerate() {
-        if observed_chunks >= maximum_chunks {
-            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-        }
-        chunk.clear();
-        note_query_metadata_chunk_read();
-        if !column.ord_to_bytes(term_ord, &mut chunk)? {
-            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-        }
-        let header = query_metadata_chunk_header(&chunk)?;
-        match expected_layout {
-            None => {
-                expected_layout = Some((
-                    header.chunk_count,
-                    header.total_bytes,
-                    header.encoded_digest,
-                ));
-            }
-            Some(expected)
-                if expected
-                    != (
-                        header.chunk_count,
-                        header.total_bytes,
-                        header.encoded_digest,
-                    ) =>
-            {
-                return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-            }
-            Some(_) => {}
-        }
-        if chunks_by_index
-            .insert(header.chunk_index, term_ord)
-            .is_some()
-        {
-            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-        }
-        observed_payload_bytes = observed_payload_bytes
-            .checked_add(header.payload_bytes)
-            .ok_or(IndexError::CountOverflow)?;
-    }
-    let (chunk_count, total_bytes, expected_digest) =
-        expected_layout.ok_or(IndexError::InvalidStoredDocumentField("query_metadata"))?;
-    if chunks_by_index.len() != chunk_count || observed_payload_bytes != total_bytes {
-        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-    }
-
-    // Authenticate the complete ordered payload before trusting the declared
-    // total for its one exact allocation.
-    let mut payload_digest = Sha256::new();
-    payload_digest.update(QUERY_METADATA_DIGEST_DOMAIN);
-    for (expected_index, (chunk_index, term_ord)) in chunks_by_index.iter().enumerate() {
-        if *chunk_index != expected_index {
-            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-        }
-        chunk.clear();
-        note_query_metadata_chunk_read();
-        if !column.ord_to_bytes(*term_ord, &mut chunk)? {
-            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-        }
-        let header = query_metadata_chunk_header(&chunk)?;
-        if header.chunk_index != expected_index
-            || header.chunk_count != chunk_count
-            || header.total_bytes != total_bytes
-            || header.encoded_digest != expected_digest
-        {
-            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-        }
-        payload_digest.update(&chunk[QUERY_METADATA_CHUNK_HEADER_BYTES..]);
-    }
-    let actual_digest: [u8; QUERY_METADATA_CHUNK_DIGEST_BYTES] = payload_digest.finalize().into();
-    if actual_digest != expected_digest {
-        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-    }
-
-    let mut encoded = Vec::new();
-    encoded
-        .try_reserve_exact(total_bytes)
-        .map_err(|_| IndexError::InvalidStoredDocumentField("query_metadata"))?;
-    note_query_metadata_exact_allocation(total_bytes);
-    for (expected_index, (chunk_index, term_ord)) in chunks_by_index.into_iter().enumerate() {
-        if chunk_index != expected_index {
-            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-        }
-        chunk.clear();
-        note_query_metadata_chunk_read();
-        if !column.ord_to_bytes(term_ord, &mut chunk)? {
-            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-        }
-        let header = query_metadata_chunk_header(&chunk)?;
-        if header.chunk_index != expected_index
-            || header.chunk_count != chunk_count
-            || header.total_bytes != total_bytes
-            || header.encoded_digest != expected_digest
-        {
-            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-        }
-        encoded.extend_from_slice(&chunk[QUERY_METADATA_CHUNK_HEADER_BYTES..]);
-    }
-    if encoded.len() != total_bytes {
-        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-    }
-    let event = query_metadata_event_record(&encoded)?;
-    if fast_uuid(
-        segment,
-        address.doc_id,
-        EVENT_ID_HIGH_FIELD,
-        EVENT_ID_LOW_FIELD,
-    )? != event.event_id.as_uuid()
-        || fast_uuid(
-            segment,
-            address.doc_id,
-            SESSION_ID_HIGH_FIELD,
-            SESSION_ID_LOW_FIELD,
-        )? != event.session_id.as_uuid()
-        || fast_string(segment, address.doc_id, EVENT_IDENTITY_DIGEST_FIELD)?
-            != hex(&event.event_id.digest())
-        || fast_string(segment, address.doc_id, SOURCE_KEY_FIELD)? != source_token(&event.source)
-    {
-        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-    }
-    Ok(event)
+    let document: TantivyDocument = searcher.doc(address)?;
+    let (core_record, _) = decode_core_document(searcher, address, &document, fields)?;
+    Ok(event_record_from_owned_core(core_record))
 }
 
 fn fast_uuid(
@@ -264,9 +64,12 @@ pub(super) fn stored_core_event_record_with_size(
     address: DocAddress,
     fields: Fields,
 ) -> Result<(CoreEventRecord, usize)> {
-    let event = stored_event_record(searcher, address, fields)?;
+    note_stored_core_event_record_materialization();
     let document: TantivyDocument = searcher.doc(address)?;
-    stored_core_event_record_from_document(&document, fields, event)
+    let (core_record, stored_core_bytes) =
+        decode_core_document(searcher, address, &document, fields)?;
+    let event = event_record_from_core(&core_record);
+    Ok((CoreEventRecord { event, core_record }, stored_core_bytes))
 }
 
 pub(super) fn stored_core_verification_record(
@@ -274,36 +77,13 @@ pub(super) fn stored_core_verification_record(
     address: DocAddress,
     fields: Fields,
 ) -> Result<(CoreEventRecord, [u8; 32])> {
-    let event = stored_event_record(searcher, address, fields)?;
+    note_stored_core_event_record_materialization();
     let document: TantivyDocument = searcher.doc(address)?;
     let encoded_core_record = unique_required_bytes(&document, fields.core_record, "core_record")?;
-    let leaf = crate::staging::core_record_leaf(event.event_id, encoded_core_record)?;
-    let (record, _) = stored_core_event_record_from_document(&document, fields, event)?;
-    verify_identity_field(
-        &document,
-        fields.event_identity,
-        Some(record.event_id),
-        "event_identity",
-    )?;
-    verify_identity_field(
-        &document,
-        fields.session_identity,
-        Some(record.session_id),
-        "session_identity",
-    )?;
-    verify_identity_field(
-        &document,
-        fields.parent_session_identity,
-        record.parent_session_id,
-        "parent_session_identity",
-    )?;
-    verify_identity_field(
-        &document,
-        fields.root_session_identity,
-        Some(record.root_session_id),
-        "root_session_identity",
-    )?;
-    Ok((record, leaf))
+    let core_record = decode_core_bytes(searcher, address, encoded_core_record)?;
+    let leaf = crate::staging::core_record_leaf(core_record.event_id, encoded_core_record)?;
+    let event = event_record_from_core(&core_record);
+    Ok((CoreEventRecord { event, core_record }, leaf))
 }
 
 fn unique_required_bytes<'a>(
@@ -322,28 +102,6 @@ fn unique_required_bytes<'a>(
     Ok(value)
 }
 
-fn verify_identity_field(
-    document: &TantivyDocument,
-    field: tantivy::schema::Field,
-    expected: Option<StableEntityId>,
-    field_name: &'static str,
-) -> Result<()> {
-    let mut values = document.get_all(field);
-    let actual = values
-        .next()
-        .map(|value| {
-            value
-                .as_bytes()
-                .ok_or(IndexError::InvalidStoredDocumentField(field_name))
-                .and_then(|encoded| StableEntityId::decode_canonical(encoded).map_err(Into::into))
-        })
-        .transpose()?;
-    if values.next().is_some() || actual != expected {
-        return Err(IndexError::InvalidStoredDocumentField(field_name));
-    }
-    Ok(())
-}
-
 fn note_stored_core_event_record_materialization() {
     #[cfg(test)]
     STORED_CORE_EVENT_RECORD_MATERIALIZATIONS.set(
@@ -353,104 +111,51 @@ fn note_stored_core_event_record_materialization() {
     );
 }
 
-fn query_metadata_event_record(encoded: &[u8]) -> Result<EventRecord> {
-    if encoded.is_empty() || encoded.len() > MAX_QUERY_METADATA_BYTES {
-        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-    }
-    let metadata: StoredQueryMetadata = serde_json::from_slice(encoded)?;
-    metadata.source.validate_contract()?;
-    metadata.event_id.validate_contract()?;
-    metadata.session_id.validate_contract()?;
-    metadata.root_session_id.validate_contract()?;
-    if let Some(parent_session_id) = metadata.parent_session_id {
-        parent_session_id.validate_contract()?;
-        if parent_session_id.entity_kind() != StableEntityKind::Session {
-            return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-        }
-    }
-    if let Some(native_event_id) = metadata.native_event_id.as_ref() {
-        native_event_id.validate_contract()?;
-    }
-    let invalid_text = metadata.agent_type.is_empty()
-        || metadata.event_type.is_empty()
-        || metadata.agent_type.len() > super::MAX_DOCUMENT_METADATA_BYTES
-        || metadata.event_type.len() > super::MAX_DOCUMENT_METADATA_BYTES
-        || [
-            metadata.provider_session_id.as_deref(),
-            metadata.branch.as_deref(),
-            metadata.role.as_deref(),
-            metadata.workspace.as_deref(),
-            metadata.cwd.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|value| value.is_empty() || value.len() > super::MAX_DOCUMENT_METADATA_BYTES);
-    if metadata.event_id.entity_kind() != StableEntityKind::Event
-        || metadata.session_id.entity_kind() != StableEntityKind::Session
-        || metadata.root_session_id.entity_kind() != StableEntityKind::Session
-        || metadata.event_id.source_digest() != metadata.source.identity().digest()
-        || metadata.event_id.source_descriptor_digest() != metadata.source.exact_descriptor_digest()
-        || metadata.session_id.source_digest() != metadata.source.identity().digest()
-        || metadata.session_id.source_descriptor_digest()
-            != metadata.source.exact_descriptor_digest()
-        || invalid_text
-    {
-        return Err(IndexError::InvalidStoredDocumentField("query_metadata"));
-    }
-    let provider = metadata.source.provider().to_owned();
-    let source_format = metadata.source.source_format().to_owned();
-    Ok(EventRecord {
-        event_id: metadata.event_id,
-        session_id: metadata.session_id,
-        parent_session_id: metadata.parent_session_id,
-        root_session_id: metadata.root_session_id,
-        source: metadata.source,
-        provider,
-        source_format,
-        provider_session_id: metadata.provider_session_id,
-        native_event_id: metadata.native_event_id,
-        branch: metadata.branch,
-        agent_type: metadata.agent_type,
-        is_primary: metadata.is_primary,
-        event_sequence: metadata.event_sequence,
-        occurred_at_unix_ms: metadata.occurred_at_unix_ms,
-        event_type: metadata.event_type,
-        role: metadata.role,
-        workspace: metadata.workspace,
-        cwd: metadata.cwd,
-        touched_files: Vec::new(),
-    })
-}
-
-fn stored_core_event_record_from_document(
+fn decode_core_document(
+    searcher: &tantivy::Searcher,
+    address: DocAddress,
     document: &TantivyDocument,
     fields: Fields,
-    mut event: EventRecord,
-) -> Result<(CoreEventRecord, usize)> {
-    note_stored_core_event_record_materialization();
-    let encoded_core_record = required_bytes(document, fields.core_record, "core_record")?;
+) -> Result<(CoreRecord, usize)> {
+    let encoded_core_record = unique_required_bytes(document, fields.core_record, "core_record")?;
     let stored_core_bytes = encoded_core_record.len();
+    let core_record = decode_core_bytes(searcher, address, encoded_core_record)?;
+    Ok((core_record, stored_core_bytes))
+}
+
+fn decode_core_bytes(
+    searcher: &tantivy::Searcher,
+    address: DocAddress,
+    encoded_core_record: &[u8],
+) -> Result<CoreRecord> {
     let core_record = CoreRecord::decode_stored(encoded_core_record)?;
-    if event.event_id != core_record.event_id
-        || event.session_id != core_record.session_id
-        || event.parent_session_id != core_record.parent_session_id
-        || event.root_session_id != core_record.root_session_id
-        || event.source != core_record.source
-        || event.native_event_id != core_record.native_event_id
-        || event.provider_session_id != core_record.provider_session_id
-        || event.branch != core_record.branch
-        || event.agent_type != core_record.agent_type
-        || event.is_primary != core_record.is_primary
-        || event.event_sequence != core_record.event_sequence
-        || event.occurred_at_unix_ms != core_record.occurred_at_unix_ms
-        || event.event_type != core_record.event_type
-        || event.role != core_record.role
-        || event.workspace != core_record.workspace
-        || event.cwd != core_record.cwd
+    let segment = searcher
+        .segment_readers()
+        .get(address.segment_ord as usize)
+        .ok_or(IndexError::InvalidStoredDocumentField("core_record"))?;
+    if fast_uuid(
+        segment,
+        address.doc_id,
+        EVENT_ID_HIGH_FIELD,
+        EVENT_ID_LOW_FIELD,
+    )? != core_record.event_id.as_uuid()
+        || fast_uuid(
+            segment,
+            address.doc_id,
+            SESSION_ID_HIGH_FIELD,
+            SESSION_ID_LOW_FIELD,
+        )? != core_record.session_id.as_uuid()
+        || fast_string(segment, address.doc_id, EVENT_IDENTITY_DIGEST_FIELD)?
+            != hex(&core_record.event_id.digest())
+        || fast_string(segment, address.doc_id, SOURCE_KEY_FIELD)?
+            != source_token(&core_record.source)
     {
         return Err(IndexError::InvalidStoredDocumentField("core_record"));
     }
+    Ok(core_record)
+}
 
+fn touched_files(core_record: &CoreRecord) -> Vec<String> {
     let mut touched_files = BTreeSet::new();
     for observation in &core_record.repository_file_observations {
         touched_files.insert(observation.relative_path.clone());
@@ -458,9 +163,59 @@ fn stored_core_event_record_from_document(
             touched_files.insert(prior_relative_path.clone());
         }
     }
-    event.touched_files = touched_files.into_iter().collect();
+    touched_files.into_iter().collect()
+}
 
-    Ok((CoreEventRecord { event, core_record }, stored_core_bytes))
+fn event_record_from_core(core_record: &CoreRecord) -> EventRecord {
+    EventRecord {
+        event_id: core_record.event_id,
+        session_id: core_record.session_id,
+        parent_session_id: core_record.parent_session_id,
+        root_session_id: core_record.root_session_id,
+        source: core_record.source.clone(),
+        provider: core_record.source.provider().to_owned(),
+        source_format: core_record.source.source_format().to_owned(),
+        provider_session_id: core_record.provider_session_id.clone(),
+        native_event_id: core_record.native_event_id.clone(),
+        branch: core_record.branch.clone(),
+        agent_type: core_record.agent_type.clone(),
+        is_primary: core_record.is_primary,
+        event_sequence: core_record.event_sequence,
+        occurred_at_unix_ms: core_record.occurred_at_unix_ms,
+        event_type: core_record.event_type.clone(),
+        role: core_record.role.clone(),
+        workspace: core_record.workspace.clone(),
+        cwd: core_record.cwd.clone(),
+        touched_files: touched_files(core_record),
+    }
+}
+
+fn event_record_from_owned_core(core_record: CoreRecord) -> EventRecord {
+    let provider = core_record.source.provider().to_owned();
+    let source_format = core_record.source.source_format().to_owned();
+    let touched_files = touched_files(&core_record);
+
+    EventRecord {
+        event_id: core_record.event_id,
+        session_id: core_record.session_id,
+        parent_session_id: core_record.parent_session_id,
+        root_session_id: core_record.root_session_id,
+        source: core_record.source,
+        provider,
+        source_format,
+        provider_session_id: core_record.provider_session_id,
+        native_event_id: core_record.native_event_id,
+        branch: core_record.branch,
+        agent_type: core_record.agent_type,
+        is_primary: core_record.is_primary,
+        event_sequence: core_record.event_sequence,
+        occurred_at_unix_ms: core_record.occurred_at_unix_ms,
+        event_type: core_record.event_type,
+        role: core_record.role,
+        workspace: core_record.workspace,
+        cwd: core_record.cwd,
+        touched_files,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

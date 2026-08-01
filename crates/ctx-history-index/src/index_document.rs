@@ -9,11 +9,10 @@ use ctx_history_core::{
     CoreContent, CoreRecord, SourceKey, StableEntityId, StableEntityKind, TypedKey,
     MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
 };
-use sha2::{Digest, Sha256};
 
 use crate::{Fields, IndexError, Result};
 
-const BASE_FIELD_VALUES: usize = 34;
+const BASE_FIELD_VALUES: usize = 27;
 pub(crate) const SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN: usize = 64;
 pub(crate) const SOURCE_EVENT_ORDER_KEY_LEN: usize = 104;
 const SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET: usize = SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN;
@@ -21,17 +20,6 @@ const SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET: usize = SOURCE_EVENT_ORDER_EVENT_
 const SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET: usize = SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET + 4;
 const SOURCE_EVENT_ORDER_SIZE_SUFFIX_LEN: usize = 8;
 const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
-/// Query metadata is a structural subset of the stored Core record encoded by
-/// the same serializer. Its only independent read-time ceiling is therefore
-/// the Core record ceiling, not a narrower escape-sensitive JSON limit.
-pub(crate) const MAX_QUERY_METADATA_BYTES: usize = MAX_ENCODED_CORE_RECORD_BYTES;
-pub(crate) const QUERY_METADATA_CHUNK_BYTES: usize = 60 * 1024;
-pub(crate) const QUERY_METADATA_CHUNK_DIGEST_BYTES: usize = 32;
-pub(crate) const QUERY_METADATA_CHUNK_HEADER_BYTES: usize = 12 + QUERY_METADATA_CHUNK_DIGEST_BYTES;
-pub(crate) const QUERY_METADATA_CHUNK_PAYLOAD_BYTES: usize =
-    QUERY_METADATA_CHUNK_BYTES - QUERY_METADATA_CHUNK_HEADER_BYTES;
-pub(crate) const QUERY_METADATA_CHUNK_MAGIC: [u8; 4] = *b"QMD2";
-pub(crate) const QUERY_METADATA_DIGEST_DOMAIN: &[u8] = b"ctx-query-metadata-v2\0";
 
 pub(crate) const SESSION_EVENT_ORDER_SESSION_PREFIX_LEN: usize = StableEntityId::CANONICAL_LEN;
 pub(crate) const SESSION_EVENT_ORDER_KEY_LEN: usize =
@@ -40,103 +28,6 @@ const SESSION_EVENT_ORDER_SEQUENCE_OFFSET: usize = SESSION_EVENT_ORDER_SESSION_P
 const SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET: usize = SESSION_EVENT_ORDER_SEQUENCE_OFFSET + 8;
 const SESSION_EVENT_ORDER_EVENT_ID_OFFSET: usize = SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 9;
 const SESSION_EVENT_ORDER_FIELD: &str = "session_event_order";
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct StoredQueryMetadata {
-    pub(crate) event_id: StableEntityId,
-    pub(crate) session_id: StableEntityId,
-    pub(crate) parent_session_id: Option<StableEntityId>,
-    pub(crate) root_session_id: StableEntityId,
-    pub(crate) source: SourceKey,
-    pub(crate) provider_session_id: Option<String>,
-    pub(crate) native_event_id: Option<TypedKey>,
-    pub(crate) branch: Option<String>,
-    pub(crate) agent_type: String,
-    pub(crate) is_primary: bool,
-    pub(crate) event_sequence: u64,
-    pub(crate) occurred_at_unix_ms: Option<i64>,
-    pub(crate) event_type: String,
-    pub(crate) role: Option<String>,
-    pub(crate) workspace: Option<String>,
-    pub(crate) cwd: Option<String>,
-}
-
-impl StoredQueryMetadata {
-    pub(crate) fn encode(record: &CoreRecord, encoded_core_record_bytes: usize) -> Result<Vec<u8>> {
-        let encoded = serde_json::to_vec(&Self {
-            event_id: record.event_id,
-            session_id: record.session_id,
-            parent_session_id: record.parent_session_id,
-            root_session_id: record.root_session_id,
-            source: record.source.clone(),
-            provider_session_id: record.provider_session_id.clone(),
-            native_event_id: record.native_event_id.clone(),
-            branch: record.branch.clone(),
-            agent_type: record.agent_type.clone(),
-            is_primary: record.is_primary,
-            event_sequence: record.event_sequence,
-            occurred_at_unix_ms: record.occurred_at_unix_ms,
-            event_type: record.event_type.clone(),
-            role: record.role.clone(),
-            workspace: record.workspace.clone(),
-            cwd: record.cwd.clone(),
-        })?;
-        if encoded.len() > MAX_QUERY_METADATA_BYTES {
-            return Err(IndexError::DocumentFieldTooLarge {
-                field: "query_metadata",
-                actual: encoded.len(),
-                maximum: MAX_QUERY_METADATA_BYTES,
-            });
-        }
-        if encoded.len() > encoded_core_record_bytes {
-            return Err(IndexError::WriterInvariant(
-                "query metadata exceeded its accepted encoded Core record",
-            ));
-        }
-        Ok(encoded)
-    }
-}
-
-fn encode_query_metadata_chunks(encoded: &[u8]) -> Result<Vec<Vec<u8>>> {
-    if encoded.is_empty() || encoded.len() > MAX_QUERY_METADATA_BYTES {
-        return Err(IndexError::DocumentFieldTooLarge {
-            field: "query_metadata",
-            actual: encoded.len(),
-            maximum: MAX_QUERY_METADATA_BYTES,
-        });
-    }
-    let chunk_count = encoded.len().div_ceil(QUERY_METADATA_CHUNK_PAYLOAD_BYTES);
-    let chunk_count = u16::try_from(chunk_count)
-        .map_err(|_| IndexError::WriterInvariant("query metadata chunk count overflowed"))?;
-    let encoded_len = u32::try_from(encoded.len())
-        .map_err(|_| IndexError::WriterInvariant("query metadata size did not fit u32"))?;
-    let encoded_digest = query_metadata_digest(encoded);
-    let mut chunks = Vec::with_capacity(usize::from(chunk_count));
-    for (index, payload) in encoded
-        .chunks(QUERY_METADATA_CHUNK_PAYLOAD_BYTES)
-        .enumerate()
-    {
-        let index = u16::try_from(index)
-            .map_err(|_| IndexError::WriterInvariant("query metadata chunk index overflowed"))?;
-        let mut chunk = Vec::with_capacity(QUERY_METADATA_CHUNK_HEADER_BYTES + payload.len());
-        chunk.extend_from_slice(&QUERY_METADATA_CHUNK_MAGIC);
-        chunk.extend_from_slice(&index.to_be_bytes());
-        chunk.extend_from_slice(&chunk_count.to_be_bytes());
-        chunk.extend_from_slice(&encoded_len.to_be_bytes());
-        chunk.extend_from_slice(&encoded_digest);
-        chunk.extend_from_slice(payload);
-        chunks.push(chunk);
-    }
-    Ok(chunks)
-}
-
-fn query_metadata_digest(encoded: &[u8]) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(QUERY_METADATA_DIGEST_DOMAIN);
-    digest.update(encoded);
-    digest.finalize().into()
-}
 
 /// Exact session-coordinate term used for bounded forward traversal.
 ///
@@ -530,6 +421,21 @@ impl IndexDocument {
         self.fields.push((field, IndexValue::I64(value)));
     }
 
+    #[cfg(test)]
+    pub(super) fn into_tantivy_document(self) -> tantivy::TantivyDocument {
+        let mut document = tantivy::TantivyDocument::default();
+        for (field, value) in self.fields {
+            match value {
+                IndexValue::Text(value) => document.add_text(field, value),
+                IndexValue::SharedText(value) => document.add_text(field, value),
+                IndexValue::Bytes(value) => document.add_bytes(field, &value),
+                IndexValue::U64(value) => document.add_u64(field, value),
+                IndexValue::I64(value) => document.add_i64(field, value),
+            }
+        }
+        document
+    }
+
     pub(super) fn from_core(
         fields: Fields,
         record: CoreRecord,
@@ -544,14 +450,6 @@ impl IndexDocument {
             core_content_bytes,
         )?;
         let session_event_order = SessionEventOrderKey::for_core_record(&record)?;
-        let query_metadata = StoredQueryMetadata::encode(&record, core_record_bytes.len())?;
-        let event_identity = record.event_id.encode_canonical()?;
-        let session_identity = record.session_id.encode_canonical()?;
-        let parent_session_identity = record
-            .parent_session_id
-            .map(ctx_history_core::StableEntityId::encode_canonical)
-            .transpose()?;
-        let root_session_identity = record.root_session_id.encode_canonical()?;
         let repository_path_values = record
             .repository_file_observations
             .iter()
@@ -563,33 +461,20 @@ impl IndexDocument {
             fields.event_identity_digest,
             crate::hex(&record.event_id.digest()),
         );
-        target.add_bytes(fields.event_identity, event_identity);
         let event_uuid = record.event_id.as_uuid().as_u128();
         target.add_u64(fields.event_id_high, (event_uuid >> 64) as u64);
         target.add_u64(fields.event_id_low, event_uuid as u64);
         target.add_text(fields.session_id, record.session_id.to_string());
-        target.add_text(
-            fields.session_identity_digest,
-            crate::hex(&record.session_id.digest()),
-        );
-        target.add_bytes(fields.session_identity, session_identity);
         let session_uuid = record.session_id.as_uuid().as_u128();
         target.add_u64(fields.session_id_high, (session_uuid >> 64) as u64);
         target.add_u64(fields.session_id_low, session_uuid as u64);
-        if let (Some(parent_session_id), Some(parent_session_identity)) =
-            (record.parent_session_id, parent_session_identity)
-        {
+        if let Some(parent_session_id) = record.parent_session_id {
             target.add_text(fields.parent_session_id, parent_session_id.to_string());
-            target.add_bytes(fields.parent_session_identity, parent_session_identity);
         }
         target.add_text(fields.root_session_id, record.root_session_id.to_string());
-        target.add_bytes(fields.root_session_identity, root_session_identity);
         target.add_shared_text(fields.source_key, source.token);
         target.add_shared_text(fields.provider, source.provider);
         target.add_shared_text(fields.source_format, source.source_format);
-        for chunk in encode_query_metadata_chunks(&query_metadata)? {
-            target.add_bytes(fields.query_metadata, chunk);
-        }
         if record.source.provider() == "custom" {
             if let Some(TypedKey::Composite(values)) = record.native_event_id.as_ref() {
                 if let [TypedKey::Utf8(provider_key), TypedKey::Utf8(source_id), TypedKey::Utf8(_)] =
@@ -621,11 +506,9 @@ impl IndexDocument {
         }
         if let Some(workspace) = record.workspace {
             target.add_text(fields.workspace_filter, workspace.to_lowercase());
-            target.add_text(fields.workspace, workspace);
         }
         if let Some(cwd) = record.cwd {
             target.add_text(fields.workspace_filter, cwd.to_lowercase());
-            target.add_text(fields.cwd, cwd);
         }
         for observation in record.repository_file_observations {
             target.add_text(

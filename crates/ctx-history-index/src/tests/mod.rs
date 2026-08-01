@@ -212,32 +212,25 @@ fn sorted_uuids(mut ids: Vec<Uuid>) -> Vec<Uuid> {
     ids
 }
 
-fn query_metadata_fast_values(searcher: &Searcher, address: tantivy::DocAddress) -> Vec<Vec<u8>> {
-    let segment = &searcher.segment_readers()[address.segment_ord as usize];
-    let column = segment
-        .fast_fields()
-        .bytes("query_metadata")
+fn indexed_document(record: CoreRecord) -> TantivyDocument {
+    let schema = lexical_schema();
+    let fields = fields_from_schema(&schema).unwrap();
+    let encoded = record.encode_stored().unwrap();
+    let content_bytes = core_content_bytes(&record.content).unwrap();
+    let source_fields = IndexSourceFields::new(&record.source, &source_token(&record.source));
+    IndexDocument::from_core(fields, record, encoded, content_bytes, source_fields)
         .unwrap()
-        .unwrap();
-    column
-        .term_ords(address.doc_id)
-        .map(|term_ord| {
-            let mut value = Vec::new();
-            assert!(column.ord_to_bytes(term_ord, &mut value).unwrap());
-            value
-        })
-        .collect()
+        .into_tantivy_document()
 }
 
-fn add_query_metadata_fast_values(
-    searcher: &Searcher,
-    address: tantivy::DocAddress,
-    document: &mut TantivyDocument,
-) {
-    let field = searcher.schema().get_field("query_metadata").unwrap();
-    for value in query_metadata_fast_values(searcher, address) {
-        document.add_bytes(field, &value);
-    }
+fn decoded_stored_core(searcher: &Searcher, address: tantivy::DocAddress) -> CoreRecord {
+    let fields = fields_from_schema(searcher.schema()).unwrap();
+    let document: TantivyDocument = searcher.doc(address).unwrap();
+    let encoded = document
+        .get_first(fields.core_record)
+        .and_then(|value| value.as_bytes())
+        .unwrap();
+    CoreRecord::decode_stored(encoded).unwrap()
 }
 
 fn collect_source_pages(

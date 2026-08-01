@@ -274,17 +274,6 @@ pub(super) fn escape_regex_literal(value: &str) -> String {
     escaped
 }
 
-pub(super) fn required_bytes<'a>(
-    document: &'a TantivyDocument,
-    field: tantivy::schema::Field,
-    field_name: &'static str,
-) -> Result<&'a [u8]> {
-    document
-        .get_first(field)
-        .and_then(|value| value.as_bytes())
-        .ok_or(IndexError::InvalidStoredDocumentField(field_name))
-}
-
 pub(super) fn canonical_uuid_prefix(prefix: &str) -> Result<String> {
     let mut digits = String::with_capacity(32);
     for character in prefix.chars() {

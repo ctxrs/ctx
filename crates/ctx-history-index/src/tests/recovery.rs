@@ -512,8 +512,8 @@ fn stale_schema_manifest_fails_closed_at_generation_boundary() {
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
     let mut stale_manifest = index.manifest().clone();
-    const PRE_AUTHENTICATED_QUERY_METADATA_SCHEMA: u32 = 9;
-    stale_manifest.lexical_schema_version = PRE_AUTHENTICATED_QUERY_METADATA_SCHEMA;
+    const STALE_LEXICAL_SCHEMA: u32 = 9;
+    stale_manifest.lexical_schema_version = STALE_LEXICAL_SCHEMA;
     let stale_generation_id = stale_manifest.generation_id().unwrap();
     write_manifest(temp.path(), &stale_generation_id, &stale_manifest).unwrap();
     let mut stale_metas = index.searcher.index().load_metas().unwrap();
@@ -530,7 +530,7 @@ fn stale_schema_manifest_fails_closed_at_generation_boundary() {
         error,
         IndexError::GenerationContractMismatch {
             identity: IDENTITY_VERSION,
-            schema: PRE_AUTHENTICATED_QUERY_METADATA_SCHEMA,
+            schema: STALE_LEXICAL_SCHEMA,
             analyzer: LEXICAL_ANALYZER_VERSION,
             core_record: ctx_history_core::CORE_RECORD_VERSION,
         }
@@ -696,8 +696,7 @@ fn verified_generation_rejects_a_forged_duplicate_event_identity() {
     let pinned = VerifiedIndex::open(temp.path()).unwrap();
     let addresses = pinned.searcher.search(&AllQuery, &DocSetCollector).unwrap();
     let address = addresses.into_iter().next().unwrap();
-    let mut duplicate = pinned.searcher.doc(address).unwrap();
-    add_query_metadata_fast_values(&pinned.searcher, address, &mut duplicate);
+    let duplicate = indexed_document(decoded_stored_core(&pinned.searcher, address));
     let index = pinned.searcher.index().clone();
     publish_unchecked_generation(
         temp.path(),
@@ -742,7 +741,7 @@ fn verified_generation_rejects_forged_source_ownership() {
         .into_iter()
         .next()
         .unwrap();
-    let document = pinned.searcher.doc::<TantivyDocument>(address).unwrap();
+    let document = indexed_document(decoded_stored_core(&pinned.searcher, address));
     let mut forged = TantivyDocument::default();
     for (field, value) in document.field_values() {
         if field != fields.source_key {
@@ -750,7 +749,6 @@ fn verified_generation_rejects_forged_source_ownership() {
         }
     }
     forged.add_text(fields.source_key, source_token(&second));
-    add_query_metadata_fast_values(&pinned.searcher, address, &mut forged);
     let index = pinned.searcher.index().clone();
     publish_unchecked_generation(
         temp.path(),
@@ -774,7 +772,7 @@ fn verified_generation_rejects_forged_source_ownership() {
     };
     assert!(matches!(
         error,
-        IndexError::InvalidStoredDocumentField("query_metadata")
+        IndexError::InvalidStoredDocumentField("core_record")
     ));
 }
 
@@ -806,7 +804,6 @@ fn verified_generation_rejects_malformed_stored_core_during_exhaustive_audit() {
         }
     }
     forged.add_bytes(fields.core_record, b"{");
-    add_query_metadata_fast_values(&pinned.searcher, address, &mut forged);
     let index = pinned.searcher.index().clone();
     publish_unchecked_generation(
         temp.path(),
@@ -932,7 +929,7 @@ fn one_pass_verifier_matches_reference_for_identity_digest_corruption() {
         .into_iter()
         .next()
         .unwrap();
-    let document = pinned.searcher.doc::<TantivyDocument>(address).unwrap();
+    let document = indexed_document(decoded_stored_core(&pinned.searcher, address));
     let mut forged = TantivyDocument::default();
     for (field, value) in document.field_values() {
         if field != fields.event_identity_digest {
@@ -940,7 +937,6 @@ fn one_pass_verifier_matches_reference_for_identity_digest_corruption() {
         }
     }
     forged.add_text(fields.event_identity_digest, "00");
-    add_query_metadata_fast_values(&pinned.searcher, address, &mut forged);
     let index = pinned.searcher.index().clone();
     publish_unchecked_generation(
         temp.path(),
@@ -960,7 +956,7 @@ fn one_pass_verifier_matches_reference_for_identity_digest_corruption() {
     );
     assert!(matches!(
         one_pass,
-        IndexError::InvalidStoredDocumentField("query_metadata")
+        IndexError::InvalidStoredDocumentField("core_record")
     ));
 }
 

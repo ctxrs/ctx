@@ -179,12 +179,12 @@ fn decoded_core_event_reports_searchable_touched_files_deterministically() {
 }
 
 #[test]
-fn core_valid_escape_heavy_query_metadata_indexes_without_a_narrower_json_bound() {
+fn escape_heavy_metadata_round_trips_from_the_single_stored_core_record() {
     const ESCAPED_FIELD_BYTES: usize = 17 * 1024;
     const NATIVE_ID_BYTES: usize = 60 * 1024;
 
     let temp = tempdir().unwrap();
-    let source = source("escape-heavy-query-metadata.jsonl");
+    let source = source("escape-heavy-core-metadata.jsonl");
     let mut record = document(&source, 1, "small searchable body");
     let escaped = "\u{0001}".repeat(ESCAPED_FIELD_BYTES);
     record.provider_session_id = Some(escaped.clone());
@@ -196,11 +196,7 @@ fn core_valid_escape_heavy_query_metadata_indexes_without_a_narrower_json_bound(
     record.cwd = Some(escaped);
     record.native_event_id = Some(TypedKey::utf8("\u{0002}".repeat(NATIVE_ID_BYTES)).unwrap());
     record.validate_contract().unwrap();
-    let encoded_core = record.encode_stored().unwrap();
-    let query_metadata =
-        crate::index_document::StoredQueryMetadata::encode(&record, encoded_core.len()).unwrap();
-    assert!(query_metadata.len() > 1024 * 1024);
-    assert!(query_metadata.len() <= encoded_core.len());
+    assert!(record.encode_stored().unwrap().len() > 1024 * 1024);
 
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
@@ -213,229 +209,16 @@ fn core_valid_escape_heavy_query_metadata_indexes_without_a_narrower_json_bound(
         .event_by_id(record.event_id.as_uuid())
         .unwrap()
         .unwrap();
+    let core = index
+        .core_event_by_id(record.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(indexed, core.event);
+    assert_eq!(core.core_record, record);
     assert_eq!(indexed.provider_session_id, record.provider_session_id);
     assert_eq!(indexed.native_event_id, record.native_event_id);
     assert_eq!(indexed.cwd, record.cwd);
-}
-
-#[test]
-fn query_metadata_rejects_valid_json_after_equal_sized_chunk_payloads_are_swapped() {
-    use tantivy::schema::Document as _;
-
-    fn encoded_query_metadata(record: &CoreRecord) -> Vec<u8> {
-        let encoded_core = record.encode_stored().unwrap();
-        crate::index_document::StoredQueryMetadata::encode(record, encoded_core.len()).unwrap()
-    }
-
-    fn string_content_offset(encoded: &[u8], field: &str) -> usize {
-        let marker = format!("\"{field}\":\"");
-        encoded
-            .windows(marker.len())
-            .position(|window| window == marker.as_bytes())
-            .unwrap()
-            + marker.len()
-    }
-
-    let temp = tempdir().unwrap();
-    let source = source("authenticated-query-metadata.jsonl");
-    let payload_bytes = crate::index_document::QUERY_METADATA_CHUNK_PAYLOAD_BYTES;
-    let mut event = document(&source, 1, "query metadata authentication");
-    event.provider_session_id = Some("p".to_owned());
-    event.branch = Some("A".repeat(payload_bytes));
-    event.role = Some("r".to_owned());
-    event.workspace = Some("B".repeat(payload_bytes));
-
-    let encoded = encoded_query_metadata(&event);
-    let branch_offset = string_content_offset(&encoded, "branch");
-    let branch_padding = (payload_bytes - branch_offset % payload_bytes) % payload_bytes;
-    event.provider_session_id = Some("p".repeat(1 + branch_padding));
-    let encoded = encoded_query_metadata(&event);
-    assert_eq!(string_content_offset(&encoded, "branch") % payload_bytes, 0);
-
-    let workspace_offset = string_content_offset(&encoded, "workspace");
-    let workspace_padding = (payload_bytes - workspace_offset % payload_bytes) % payload_bytes;
-    event.role = Some("r".repeat(1 + workspace_padding));
-    event.validate_contract().unwrap();
-    let encoded = encoded_query_metadata(&event);
-    let branch_offset = string_content_offset(&encoded, "branch");
-    let workspace_offset = string_content_offset(&encoded, "workspace");
-    assert_eq!(branch_offset % payload_bytes, 0);
-    assert_eq!(workspace_offset % payload_bytes, 0);
-    assert!(encoded[branch_offset..branch_offset + payload_bytes]
-        .iter()
-        .all(|byte| *byte == b'A'));
-    assert!(encoded[workspace_offset..workspace_offset + payload_bytes]
-        .iter()
-        .all(|byte| *byte == b'B'));
-
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    writer.begin_source(source.clone()).unwrap();
-    writer.add_core_record(event.clone()).unwrap();
-    writer.certify_source(certificate(&source, 1, 1)).unwrap();
-    writer.commit(|_| true).unwrap();
-
-    let (searcher, manifest) = open_unverified_generation(temp.path());
-    let fields = fields_from_schema(searcher.schema()).unwrap();
-    let address = searcher
-        .search(&AllQuery, &DocSetCollector)
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
-    let original: TantivyDocument = searcher.doc(address).unwrap();
-    let mut chunks = query_metadata_fast_values(&searcher, address);
-    let branch_chunk = branch_offset / payload_bytes;
-    let workspace_chunk = workspace_offset / payload_bytes;
-    assert_ne!(branch_chunk, workspace_chunk);
-    let chunk_index = |chunk: &[u8]| usize::from(u16::from_be_bytes([chunk[4], chunk[5]]));
-    let branch_position = chunks
-        .iter()
-        .position(|chunk| chunk_index(chunk) == branch_chunk)
-        .unwrap();
-    let workspace_position = chunks
-        .iter()
-        .position(|chunk| chunk_index(chunk) == workspace_chunk)
-        .unwrap();
-    let branch_payload = chunks[branch_position]
-        [crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES..]
-        .to_vec();
-    let workspace_payload = chunks[workspace_position]
-        [crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES..]
-        .to_vec();
-    assert_eq!(branch_payload.len(), payload_bytes);
-    assert_eq!(workspace_payload.len(), payload_bytes);
-    chunks[branch_position][crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES..]
-        .copy_from_slice(&workspace_payload);
-    chunks[workspace_position][crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES..]
-        .copy_from_slice(&branch_payload);
-
-    let mut ordered_chunks = chunks.iter().collect::<Vec<_>>();
-    ordered_chunks.sort_by_key(|chunk| chunk_index(chunk));
-    let altered_encoded = ordered_chunks
-        .into_iter()
-        .flat_map(|chunk| {
-            chunk[crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES..]
-                .iter()
-                .copied()
-        })
-        .collect::<Vec<_>>();
-    let altered: crate::index_document::StoredQueryMetadata =
-        serde_json::from_slice(&altered_encoded).unwrap();
-    assert_eq!(altered.event_id, event.event_id);
-    assert_eq!(altered.session_id, event.session_id);
-    assert!(altered.source.exact_descriptor_eq(&event.source));
-    assert_eq!(
-        altered.branch.as_deref(),
-        Some("B".repeat(payload_bytes).as_str())
-    );
-    assert_eq!(
-        altered.workspace.as_deref(),
-        Some("A".repeat(payload_bytes).as_str())
-    );
-
-    let mut forged = TantivyDocument::default();
-    for (field, value) in original.iter_fields_and_values() {
-        if field != fields.query_metadata {
-            forged.add_field_value(field, value);
-        }
-    }
-    for chunk in chunks {
-        forged.add_bytes(fields.query_metadata, &chunk);
-    }
-    drop(searcher);
-    let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
-    let index = Index::open(directory).unwrap();
-    publish_unchecked_generation(
-        temp.path(),
-        &index,
-        manifest,
-        std::slice::from_ref(&source),
-        vec![forged],
-    );
-
-    let error = match VerifiedIndex::open(temp.path()) {
-        Ok(_) => panic!("swapped query metadata payloads unexpectedly verified"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error,
-        IndexError::InvalidStoredDocumentField("query_metadata")
-    ));
-}
-
-#[test]
-fn query_metadata_tiny_declared_maximum_header_fails_before_exact_allocation() {
-    use tantivy::schema::Document as _;
-
-    let temp = tempdir().unwrap();
-    let source = source("tiny-query-metadata-header.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    writer.begin_source(source.clone()).unwrap();
-    writer
-        .add_core_record(document(&source, 1, "bounded malformed metadata"))
-        .unwrap();
-    writer.certify_source(certificate(&source, 1, 1)).unwrap();
-    writer.commit(|_| true).unwrap();
-
-    let (searcher, manifest) = open_unverified_generation(temp.path());
-    let fields = fields_from_schema(searcher.schema()).unwrap();
-    let address = searcher
-        .search(&AllQuery, &DocSetCollector)
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
-    let original: TantivyDocument = searcher.doc(address).unwrap();
-    let total_bytes = crate::index_document::MAX_QUERY_METADATA_BYTES;
-    let chunk_count =
-        total_bytes.div_ceil(crate::index_document::QUERY_METADATA_CHUNK_PAYLOAD_BYTES);
-    let mut tiny_header =
-        Vec::with_capacity(crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES);
-    tiny_header.extend_from_slice(&crate::index_document::QUERY_METADATA_CHUNK_MAGIC);
-    tiny_header.extend_from_slice(&0_u16.to_be_bytes());
-    tiny_header.extend_from_slice(&u16::try_from(chunk_count).unwrap().to_be_bytes());
-    tiny_header.extend_from_slice(&u32::try_from(total_bytes).unwrap().to_be_bytes());
-    tiny_header
-        .extend_from_slice(&[0_u8; crate::index_document::QUERY_METADATA_CHUNK_DIGEST_BYTES]);
-    assert_eq!(
-        tiny_header.len(),
-        crate::index_document::QUERY_METADATA_CHUNK_HEADER_BYTES
-    );
-
-    let mut forged = TantivyDocument::default();
-    for (field, value) in original.iter_fields_and_values() {
-        if field != fields.query_metadata {
-            forged.add_field_value(field, value);
-        }
-    }
-    forged.add_bytes(fields.query_metadata, &tiny_header);
-    drop(searcher);
-    let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
-    let index = Index::open(directory).unwrap();
-    publish_unchecked_generation(
-        temp.path(),
-        &index,
-        manifest,
-        std::slice::from_ref(&source),
-        vec![forged],
-    );
-
-    let (searcher, _) = open_unverified_generation(temp.path());
-    let fields = fields_from_schema(searcher.schema()).unwrap();
-    let address = searcher
-        .search(&AllQuery, &DocSetCollector)
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
-    crate::query::reset_query_metadata_decode_work();
-    let error = crate::query::stored_event_record(&searcher, address, fields).unwrap_err();
-    assert!(matches!(
-        error,
-        IndexError::InvalidStoredDocumentField("query_metadata")
-    ));
-    assert_eq!(crate::query::query_metadata_chunk_reads(), 1);
-    assert_eq!(crate::query::query_metadata_exact_allocated_bytes(), 0);
+    assert!(index.searcher.schema().get_field("query_metadata").is_err());
 }
 
 #[test]
@@ -677,7 +460,7 @@ fn semantic_pairing_many_segments_merges_each_order_term_once_across_pages_and_r
 }
 
 #[test]
-fn metadata_hot_paths_and_ambiguity_collectors_are_body_free_and_bounded() {
+fn candidate_collectors_decode_core_only_for_bounded_selected_results() {
     const EVENT_COUNT: u64 = 64;
     const AMBIGUITY_LIMIT: usize = 2;
 
@@ -729,7 +512,7 @@ fn metadata_hot_paths_and_ambiguity_collectors_are_body_free_and_bounded() {
     assert_eq!(
         crate::query::stored_event_record_materializations(),
         AMBIGUITY_LIMIT,
-        "provider-session ambiguity lookup must decode only one metadata record per retained session"
+        "provider-session ambiguity lookup must decode only one Core record per retained session"
     );
 
     let session_prefix = session_ids
@@ -826,12 +609,12 @@ fn metadata_hot_paths_and_ambiguity_collectors_are_body_free_and_bounded() {
 }
 
 #[test]
-fn exhaustive_open_rejects_an_unreadable_stored_core_body() {
+fn corrupt_stored_core_fails_closed_during_exhaustive_open() {
     use tantivy::schema::Document as _;
 
     let temp = tempdir().unwrap();
-    let source = source("body-free-metadata.jsonl");
-    let event = document(&source, 1, "metadata survives an unreadable Core body");
+    let source = source("corrupt-stored-core.jsonl");
+    let event = document(&source, 1, "complete Core body");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(event).unwrap();
@@ -854,7 +637,6 @@ fn exhaustive_open_rejects_an_unreadable_stored_core_body() {
         }
     }
     malformed.add_bytes(fields.core_record, b"{");
-    add_query_metadata_fast_values(&searcher, address, &mut malformed);
     drop(searcher);
 
     let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
@@ -1166,6 +948,8 @@ fn session_event_budget_declines_before_materializing_an_oversized_session() {
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
     let session_id = document(&source, 1, "bounded body").session_id.as_uuid();
+    crate::query::reset_stored_event_record_materializations();
+    crate::query::reset_stored_core_event_record_materializations();
     assert!(index
         .events_for_session_if_bounded(session_id, 2)
         .unwrap()
@@ -1174,6 +958,8 @@ fn session_event_budget_declines_before_materializing_an_oversized_session() {
         .core_events_for_session_if_bounded(session_id, 2)
         .unwrap()
         .is_none());
+    assert_eq!(crate::query::stored_event_record_materializations(), 0);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
     assert_eq!(
         index
             .events_for_session_if_bounded(session_id, 3)
@@ -1182,11 +968,13 @@ fn session_event_budget_declines_before_materializing_an_oversized_session() {
             .len(),
         3
     );
+    assert_eq!(crate::query::stored_event_record_materializations(), 3);
     let core = index
         .core_events_for_session_if_bounded(session_id, 3)
         .unwrap()
         .unwrap();
     assert_eq!(core.len(), 3);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 3);
     assert!(core.iter().all(|record| {
         record.core_record.content.normalized_body.as_deref() == Some("bounded body")
     }));
