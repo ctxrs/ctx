@@ -92,7 +92,6 @@ impl ForgeCodeScanner {
                 terminal: true,
                 row: None,
                 events: Vec::new(),
-                ignored_output_records: 0,
                 touches: Vec::new(),
                 rejections: Vec::new(),
                 retained_bytes: 512,
@@ -264,7 +263,6 @@ impl ForgeCodeScanner {
             next_frontier,
             row: None,
             events: Vec::new(),
-            ignored_output_records: 0,
             touches: Vec::new(),
             rejections: vec![ProviderImportFailure { line, error }],
             retained_bytes: 1024,
@@ -368,7 +366,6 @@ impl ForgeCodeScanner {
                 .map(|value| provider_capped_json_value(value, PROVIDER_MAX_PREVIEW_CHARS)),
         };
         let mut events = Vec::new();
-        let mut ignored_output_records = 0_usize;
         let mut touches = Vec::new();
         let mut retained_core_bytes = 2_048_usize
             .saturating_add(estimated_row_bytes(&row))
@@ -394,50 +391,46 @@ impl ForgeCodeScanner {
             let entry_bytes = serde_json::to_vec(entry)?.len();
             let parts = forgecode_message_parts(entry);
             let event_type = forgecode_event_type(parts);
-            let is_output = event_type == EventType::ToolOutput;
             let provider_event_index = u64::try_from(next_index)
                 .unwrap_or(u64::MAX)
                 .saturating_add(1);
             let occurred_at =
                 started_at + Duration::milliseconds(i64::try_from(next_index).unwrap_or(i64::MAX));
-            let retained_failure = is_output && forgecode_tool_result_is_error(parts) == Some(true);
             let mut message_event = None;
             let mut message_touches = Vec::new();
             let mut message_rejections = Vec::new();
-            if !is_output || retained_failure {
-                if entry_bytes > FORGECODE_NATIVE_MAX_EVENT_BYTES {
-                    message_rejections.push(ProviderImportFailure {
-                        line: provider_line_from_index(provider_event_index),
-                        error: format!(
-                            "ForgeCode message {provider_event_index} exceeds the {FORGECODE_NATIVE_MAX_EVENT_BYTES}-byte retained-event limit"
-                        ),
-                    });
-                } else {
-                    let mut event = forgecode_event(
-                        &row.conversation_id,
-                        entry,
-                        provider_event_index,
-                        occurred_at,
+            if entry_bytes > FORGECODE_NATIVE_MAX_EVENT_BYTES {
+                message_rejections.push(ProviderImportFailure {
+                    line: provider_line_from_index(provider_event_index),
+                    error: format!(
+                        "ForgeCode message {provider_event_index} exceeds the {FORGECODE_NATIVE_MAX_EVENT_BYTES}-byte retained-event limit"
+                    ),
+                });
+            } else {
+                let mut event = forgecode_event(
+                    &row.conversation_id,
+                    entry,
+                    provider_event_index,
+                    occurred_at,
+                );
+                if let Some(metadata) = event.metadata.as_object_mut() {
+                    metadata.insert(
+                        "source_record_ordinal".to_owned(),
+                        Value::from(ordered_rowid(rowid)),
                     );
-                    if let Some(metadata) = event.metadata.as_object_mut() {
-                        metadata.insert(
-                            "source_record_ordinal".to_owned(),
-                            Value::from(ordered_rowid(rowid)),
-                        );
-                        metadata.insert(
-                            "source_record_subrecord_index".to_owned(),
-                            Value::from(u32::try_from(next_index).map_err(|_| {
-                                CaptureError::InvalidPayload(
-                                    "ForgeCode message index exceeds u32".to_owned(),
-                                )
-                            })?),
-                        );
-                    }
-                    message_event = Some(ForgeCodeRetainedEvent {
-                        event,
-                        provider_event_index,
-                    });
+                    metadata.insert(
+                        "source_record_subrecord_index".to_owned(),
+                        Value::from(u32::try_from(next_index).map_err(|_| {
+                            CaptureError::InvalidPayload(
+                                "ForgeCode message index exceeds u32".to_owned(),
+                            )
+                        })?),
+                    );
                 }
+                message_event = Some(ForgeCodeRetainedEvent {
+                    event,
+                    provider_event_index,
+                });
             }
             let touch_outcome = visit_provider_file_touch_drafts_with_limit(
                 entry,
@@ -498,9 +491,6 @@ impl ForgeCodeScanner {
                 rejections.push(rejection);
                 next_index = next_index.saturating_add(1);
                 continue;
-            }
-            if is_output && message_event.is_none() {
-                ignored_output_records = ignored_output_records.saturating_add(1);
             }
             if let Some(event) = message_event {
                 events.push(event);
@@ -576,7 +566,6 @@ impl ForgeCodeScanner {
             next_frontier,
             row: Some(row),
             events,
-            ignored_output_records,
             touches,
             rejections,
             retained_bytes,

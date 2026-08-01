@@ -153,26 +153,16 @@ impl CodexNativeScanner {
 
     /// Applies the counter-only projection the prefilter proved sufficient.
     ///
-    /// Each arm mirrors the corresponding arm of the parsed path exactly: the
-    /// ignored-record counter, or the two native-result counters that
-    /// [`Self::process_output`] advances before it consults the probe.
+    /// The arm mirrors the ignored-record counter in the parsed path exactly.
     fn project_without_parse(
         &mut self,
         projection: CodexSkipProjection,
-        start_byte: u64,
-        end_byte: u64,
+        _start_byte: u64,
+        _end_byte: u64,
     ) {
         match projection {
             CodexSkipProjection::Ignored => {
                 self.counters.ignored_records = self.counters.ignored_records.saturating_add(1);
-            }
-            CodexSkipProjection::NativeResult => {
-                self.counters.native_result_records =
-                    self.counters.native_result_records.saturating_add(1);
-                self.counters.native_result_record_bytes = self
-                    .counters
-                    .native_result_record_bytes
-                    .saturating_add(end_byte.saturating_sub(start_byte));
             }
         }
     }
@@ -192,10 +182,6 @@ impl CodexNativeScanner {
             .native_result_record_bytes
             .saturating_add(end_byte.saturating_sub(start_byte));
 
-        if !result_kind.is_eligible_output() {
-            return Ok(CodexRecordProjection::default());
-        }
-
         self.counters.structural_output_probes =
             self.counters.structural_output_probes.saturating_add(1);
         let Some(structural) = probe.output.as_ref() else {
@@ -203,10 +189,26 @@ impl CodexNativeScanner {
                 "eligible Codex output is missing its structural outcome probe",
             ));
         };
-        let sparse_core_diagnostic = matches!(
-            structural.outcome.outcome,
-            OutputOutcome::Failure | OutputOutcome::Timeout
-        );
+        let call_id = probe.call_id.as_deref();
+        let context = call_id
+            .and_then(|call_id| self.tool_contexts.get(call_id))
+            .cloned();
+        match source_backed_output_eligibility(result_kind, structural) {
+            CodexSourceBackedDocumentEligibility::Eligible(()) => {}
+            CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay => {
+                return Ok(CodexRecordProjection {
+                    context_mutation: call_id.map(|call_id| {
+                        CodexContextMutation::Remove(linked_call_ids(call_id, context.as_ref()))
+                    }),
+                    ..CodexRecordProjection::default()
+                });
+            }
+            CodexSourceBackedDocumentEligibility::ParserRevisionGap => {
+                return Err(CaptureError::SystemInvariant(
+                    "Codex output eligibility has an unsupported parser revision",
+                ));
+            }
+        }
         let Some(owner) = self.owner.clone() else {
             self.reject(false);
             return Ok(CodexRecordProjection::default());
@@ -216,23 +218,8 @@ impl CodexNativeScanner {
             return Ok(CodexRecordProjection::default());
         };
 
-        let call_id = probe.call_id.as_deref();
-        let context = call_id
-            .and_then(|call_id| self.tool_contexts.get(call_id))
-            .cloned();
-        let needs_repository_payload = context.as_ref().is_some_and(|context| {
-            context.continuation_cell_id.is_some()
-                || context
-                    .exact_command
-                    .as_deref()
-                    .is_some_and(crate::repository_attribution::bounded_outcome_evidence_relevant)
-        });
-        let decoded = if needs_repository_payload || sparse_core_diagnostic {
-            self.counters.typed_json_parses = self.counters.typed_json_parses.saturating_add(1);
-            parse_decoded_record(record, &owner)
-        } else {
-            None
-        };
+        self.counters.typed_json_parses = self.counters.typed_json_parses.saturating_add(1);
+        let decoded = parse_decoded_record(record, &owner);
 
         if let (Some(call_id), Some(context), Some(decoded)) =
             (call_id, context.as_ref(), decoded.as_ref())
@@ -275,61 +262,40 @@ impl CodexNativeScanner {
             )
         });
 
-        if sparse_core_diagnostic {
-            match source_backed_output_eligibility(result_kind, structural) {
-                CodexSourceBackedDocumentEligibility::Eligible(()) => {}
-                CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay => {
-                    return Ok(CodexRecordProjection {
-                        context_mutation: call_id.map(|call_id| {
-                            CodexContextMutation::Remove(linked_call_ids(call_id, context.as_ref()))
-                        }),
-                        ..CodexRecordProjection::default()
-                    });
-                }
-                CodexSourceBackedDocumentEligibility::ParserRevisionGap => {
-                    return Err(CaptureError::SystemInvariant(
-                        "Codex output eligibility has an unsupported parser revision",
-                    ));
-                }
+        let decoded = decoded.as_ref().ok_or(CaptureError::SystemInvariant(
+            "Codex output could not be decoded for complete Core publication",
+        ))?;
+        let normalized_body = match source_backed_display_text(probe, &decoded.payload) {
+            CodexSourceBackedDocumentEligibility::Eligible(body) => body,
+            CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay => {
+                return Err(CaptureError::SystemInvariant(
+                    "Codex output lost its selected Core body",
+                ));
             }
-        } else if repository_result.is_none() {
-            return Ok(CodexRecordProjection {
-                context_mutation: call_id.map(|call_id| {
-                    CodexContextMutation::Remove(linked_call_ids(call_id, context.as_ref()))
-                }),
-                ..CodexRecordProjection::default()
-            });
-        }
-        let normalized_body = if sparse_core_diagnostic {
-            let decoded = decoded.as_ref().ok_or(CaptureError::SystemInvariant(
-                "Codex diagnostic output could not be decoded for direct Core publication",
-            ))?;
-            match source_backed_display_text(probe, &decoded.payload) {
-                CodexSourceBackedDocumentEligibility::Eligible(body) => body,
-                CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay => {
-                    return Err(CaptureError::SystemInvariant(
-                        "Codex diagnostic output lost its selected Core body",
-                    ));
-                }
-                CodexSourceBackedDocumentEligibility::ParserRevisionGap => {
-                    return Err(CaptureError::SystemInvariant(
-                        "Codex diagnostic output has an unsupported Core body shape",
-                    ));
-                }
+            CodexSourceBackedDocumentEligibility::ParserRevisionGap => {
+                return Err(CaptureError::SystemInvariant(
+                    "Codex output has an unsupported Core body shape",
+                ));
             }
-        } else {
-            String::new()
         };
+        let structured_content = codex_result_value(&decoded.payload).cloned().map(|result| {
+            serde_json::json!({
+                "provider_native_tool_result": {
+                    "item_type": result_kind.item_type(),
+                    "call_id": call_id,
+                    "result": result,
+                }
+            })
+        });
         let core_row = build_source_backed_sparse_output_row(
             self.raw_ordinal,
-            decoded
-                .as_ref()
-                .and_then(|decoded| provider_event_identity(&decoded.payload)),
+            provider_event_identity(&decoded.payload),
             occurred_at,
             result_kind,
             context.as_ref(),
             &structural.outcome,
             normalized_body,
+            structured_content,
             repository_result,
             context
                 .as_ref()

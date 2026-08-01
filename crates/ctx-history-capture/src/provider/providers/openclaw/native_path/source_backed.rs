@@ -23,6 +23,8 @@ use crate::repository_attribution::{
     apply_annotation, linked_outcome_evidence, AttributionInput, LinkedOutcomeInput,
     RepositoryAttributor, UnscopedFileObservation,
 };
+#[cfg(test)]
+use crate::OutputOutcome;
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::{
@@ -33,7 +35,7 @@ use crate::{
         },
     },
     provider_sources::{provider_source_for_path, ProviderSourceStatus},
-    CaptureError, OutputObservationKind, OutputOutcome, Result, MAX_OPENCLAW_SESSION_INDEX_BYTES,
+    CaptureError, OutputObservationKind, Result, MAX_OPENCLAW_SESSION_INDEX_BYTES,
     OPENCLAW_SOURCE_FORMAT,
 };
 
@@ -459,9 +461,8 @@ impl JsonlFamilyProjector for OpenClawProjector {
                 );
             }
         }
-        let mut outcome_relevant = false;
         if let (Some(result), Some(output)) = (&tool_result, &output) {
-            let (context, linkage_abstained) = resolve_pending_call(
+            let (context, _linkage_abstained) = resolve_pending_call(
                 &mut self.pending_calls,
                 result.call_id,
                 self.linkage_capacity_exceeded,
@@ -499,7 +500,6 @@ impl JsonlFamilyProjector for OpenClawProjector {
                         structured_commit_oid: result.structured_commit_oid,
                         output_repository_path: result.output_workdir,
                     }) {
-                        outcome_relevant = true;
                         input.provider_native_repository_aliases =
                             linked.provider_native_repository_aliases;
                         input.outcome_operation_repository_path =
@@ -510,9 +510,6 @@ impl JsonlFamilyProjector for OpenClawProjector {
                         input.outcome_abstentions = linked.abstentions;
                     }
                 }
-            }
-            if !retain_result_event(outcome_relevant, linkage_abstained, output.outcome.outcome) {
-                return Ok(());
             }
         }
         let annotation = self.attributor.attribute(input);
@@ -911,14 +908,6 @@ fn resolve_pending_call(
             (None, true)
         }
     }
-}
-
-fn retain_result_event(
-    outcome_relevant: bool,
-    linkage_abstained: bool,
-    outcome: OutputOutcome,
-) -> bool {
-    outcome_relevant || linkage_abstained || outcome != OutputOutcome::Unknown
 }
 
 fn next_fallback_event_identity(
@@ -1472,8 +1461,6 @@ mod tests {
         let failure = openclaw_output_metadata(&failure).unwrap().outcome.outcome;
         assert_eq!(success, OutputOutcome::Success);
         assert_eq!(failure, OutputOutcome::Failure);
-        assert!(retain_result_event(false, abstained, success));
-        assert!(retain_result_event(false, false, failure));
     }
 
     #[test]
@@ -1615,5 +1602,30 @@ mod tests {
                 "openclaw_tool_result_call_id_is_ambiguous"
             )]
         );
+    }
+
+    #[test]
+    fn successful_textual_result_over_16k_remains_in_native_core_body() {
+        let tail = "openclaw_success_result_tail_complete";
+        let output = format!("{} {tail}", "successful openclaw output ".repeat(700));
+        assert!(output.len() > 16_000);
+        let value = serde_json::json!({
+            "type": "message",
+            "id": "complete-result",
+            "timestamp": "2026-07-31T12:00:02Z",
+            "message": {
+                "role": "toolResult",
+                "toolCallId": "complete-call",
+                "toolName": "exec",
+                "content": [{"type": "text", "text": output}],
+                "details": {"status": "completed", "exitCode": 0}
+            }
+        });
+        let result = native_tool_result(&value).unwrap();
+        let body = serde_json::to_string(result.message).unwrap();
+
+        assert!(body.len() > 16_000);
+        assert!(body.contains(tail));
+        assert_eq!(result.message["content"][0]["text"], output);
     }
 }

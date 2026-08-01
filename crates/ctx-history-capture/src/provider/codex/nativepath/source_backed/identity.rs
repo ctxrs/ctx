@@ -237,6 +237,7 @@ pub(super) fn codex_core_record(
         role,
         session_cwd,
         lexical_body,
+        structured_content,
         touched_paths,
         repository_tools,
         repository_result,
@@ -296,11 +297,17 @@ pub(super) fn codex_core_record(
         });
         merge_repository_annotation(&mut annotation, activity);
     }
-    if !native_tool_activities.is_empty() {
-        annotation.structured_content = Some(serde_json::json!({
+    annotation.structured_content = match (structured_content, native_tool_activities.is_empty()) {
+        (Some(provider_content), false) => Some(serde_json::json!({
+            "provider_content": provider_content,
             "provider_native_tool_activities": native_tool_activities,
-        }));
-    }
+        })),
+        (Some(provider_content), true) => Some(provider_content),
+        (None, false) => Some(serde_json::json!({
+            "provider_native_tool_activities": native_tool_activities,
+        })),
+        (None, true) => None,
+    };
     annotation.metadata.insert(
         "codex_session".to_owned(),
         serde_json::json!({

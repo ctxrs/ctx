@@ -2,7 +2,6 @@ use super::*;
 
 struct KimiOutputClassification {
     kind: OutputObservationKind,
-    outcome: OutputOutcome,
 }
 
 pub(super) fn core_record(
@@ -78,14 +77,23 @@ pub(super) fn core_record(
         .or_else(|| event.get("call_id"))
         .or_else(|| event.get("id"))
         .cloned();
-    let structured_content =
-        (!touched_files.is_empty() || tool_name.is_some() || call_id.is_some()).then(|| {
-            serde_json::json!({
-                "tool_name": tool_name,
-                "call_id": call_id,
-                "file_touches": touched_files,
-            })
-        });
+    let provider_tool_content = matches!(
+        event_type,
+        EventType::ToolCall | EventType::ToolOutput | EventType::CommandOutput
+    )
+    .then(|| event.clone());
+    let structured_content = (!touched_files.is_empty()
+        || tool_name.is_some()
+        || call_id.is_some()
+        || provider_tool_content.is_some())
+    .then(|| {
+        serde_json::json!({
+            "tool_name": tool_name,
+            "call_id": call_id,
+            "file_touches": touched_files,
+            "provider_tool_content": provider_tool_content,
+        })
+    });
     let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
@@ -122,12 +130,6 @@ pub(super) fn kimi_lexical_body(
     let mut event_type = kimi_event_type(record_type, value);
     let body = if event_type == EventType::ToolOutput {
         let output = kimi_output_classification(value);
-        if !matches!(
-            output.outcome,
-            OutputOutcome::Failure | OutputOutcome::Timeout
-        ) {
-            return Ok(None);
-        }
         if output.kind == OutputObservationKind::Command {
             event_type = EventType::CommandOutput;
         }
@@ -182,36 +184,32 @@ fn kimi_output_classification(value: &Value) -> KimiOutputClassification {
     } else {
         OutputObservationKind::Tool
     };
-    let outcome = if kimi_value_timed_out(event) {
-        OutputOutcome::Timeout
-    } else if provider_output_event_is_failure(event) {
-        OutputOutcome::Failure
-    } else if provider_result_outcome_evidence(EventType::ToolOutput, event).as_str()
-        == Some("success")
-    {
-        OutputOutcome::Success
-    } else {
-        OutputOutcome::Unknown
-    };
-    KimiOutputClassification { kind, outcome }
+    KimiOutputClassification { kind }
 }
 
-fn kimi_value_timed_out(value: &Value) -> bool {
-    match value {
-        Value::Array(values) => values.iter().any(kimi_value_timed_out),
-        Value::Object(values) => {
-            values.iter().any(|(key, value)| {
-                matches!(key.as_str(), "timed_out" | "timedOut" | "timeout")
-                    && value.as_bool().unwrap_or(false)
-                    || matches!(key.as_str(), "status" | "state" | "outcome")
-                        && value.as_str().is_some_and(|value| {
-                            matches!(
-                                value.trim().to_ascii_lowercase().as_str(),
-                                "timeout" | "timed_out" | "timedout"
-                            )
-                        })
-            }) || values.values().any(kimi_value_timed_out)
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn successful_textual_result_over_16k_is_complete() {
+        let tail = "kimi_success_result_tail_complete";
+        let output = format!("{} {tail}", "successful kimi output ".repeat(800));
+        assert!(output.len() > 16_000);
+        let value = serde_json::json!({
+            "type": "context.append_loop_event",
+            "event": {
+                "type": "tool.result",
+                "toolName": "bash",
+                "call_id": "complete-success",
+                "exit_code": 0,
+                "output": output,
+            }
+        });
+
+        let (event_type, body) = kimi_lexical_body(&value, 0, None).unwrap().unwrap();
+        assert_eq!(event_type, EventType::CommandOutput);
+        assert_eq!(body, output);
+        assert!(body.ends_with(tail));
     }
 }

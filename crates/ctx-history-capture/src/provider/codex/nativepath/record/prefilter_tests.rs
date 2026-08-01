@@ -211,20 +211,20 @@ fn prefilter_skips_realistic_ignored_bodies() {
     }
 }
 
-/// Result envelopes whose only projection is a counter are skipped too.
+/// Result envelopes always reach the structural content probe.
 #[test]
-fn prefilter_skips_counter_only_result_envelopes() {
-    let skipped = [
+fn prefilter_probes_result_envelopes_for_complete_content() {
+    let probed = [
         r#"{"type":"event_msg","payload":{"type":"patch_apply_end","success":true}}"#,
         r#"{"type":"event_msg","payload":{"type":"exec_command_end","exit_code":0}}"#,
         r#"{"type":"event_msg","payload":{"type":"mcp_tool_call_end","result":{}}}"#,
         r#"{"type":"response_item","payload":{"type":"tool_result","output":"x"}}"#,
     ];
-    for raw in skipped {
+    for raw in probed {
         assert_eq!(
             prefilter_codex_record(raw.as_bytes()),
-            CodexRecordAdmission::NoProjection(CodexSkipProjection::NativeResult),
-            "prefilter should have skipped: {raw}"
+            CodexRecordAdmission::Probe,
+            "prefilter should have probed: {raw}"
         );
     }
 }

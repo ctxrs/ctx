@@ -30,10 +30,6 @@ pub(super) enum CodexResultKind {
 }
 
 impl CodexResultKind {
-    pub(super) const fn is_eligible_output(self) -> bool {
-        !matches!(self, Self::OtherResult)
-    }
-
     pub(super) const fn item_type(self) -> &'static str {
         match self {
             Self::FunctionCallOutput => "function_call_output",
@@ -278,9 +274,7 @@ pub(super) fn classify_codex_record(line: &[u8]) -> serde_json::Result<CodexReco
         .and_then(|payload| payload.item_type.as_deref());
     let class = codex_record_class(envelope.record_type.as_ref(), item_type);
     let output = match class {
-        CodexRecordClass::ExcludedResult(kind) if kind.is_eligible_output() => {
-            Some(probe_structural_output(line)?)
-        }
+        CodexRecordClass::ExcludedResult(_) => Some(probe_structural_output(line)?),
         _ => None,
     };
     Ok(CodexRecordProbe {

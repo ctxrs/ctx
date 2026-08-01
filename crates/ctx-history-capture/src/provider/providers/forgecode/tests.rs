@@ -10,11 +10,11 @@ use super::nativepath::source::{
     discover_forgecode_source, ForgeCodeDiscovery, ForgeCodeFrontier, ForgeCodeScanner,
 };
 
-const SUCCESS_SENTINEL: &str = "forgecode-success-body-must-stay-out-of-core";
+const SUCCESS_TAIL_SENTINEL: &str = "forgecode-success-tail-retained-in-core";
 const FAILURE_SENTINEL: &str = "forgecode-failure-evidence-must-stay-in-core";
 
 #[test]
-fn scanner_pages_messages_and_counts_ignored_success_output() {
+fn scanner_pages_messages_and_retains_complete_outputs() {
     let directory = crate::test_support_paths::tempdir().unwrap();
     let source_path = directory.path().join(".forge.db");
     let mut messages = (0..18)
@@ -29,7 +29,12 @@ fn scanner_pages_messages_and_counts_ignored_success_output() {
             })
         })
         .collect::<Vec<_>>();
-    messages.push(success_output(SUCCESS_SENTINEL));
+    let success_body = format!(
+        "{} {SUCCESS_TAIL_SENTINEL}",
+        "forgecode successful output ".repeat(700)
+    );
+    assert!(success_body.len() > 16_000);
+    messages.push(success_output(&success_body));
     messages.push(failure_output(FAILURE_SENTINEL));
     write_source(&source_path, "conversation-pages", Value::Array(messages));
 
@@ -43,19 +48,19 @@ fn scanner_pages_messages_and_counts_ignored_success_output() {
 
     assert_eq!(pages.len(), 2);
     assert_eq!(pages[0].events.len(), 16);
-    assert_eq!(pages[1].events.len(), 3);
-    assert_eq!(pages[1].ignored_output_records, 1);
+    assert_eq!(pages[1].events.len(), 4);
     let failure = pages[1]
         .events
         .iter()
-        .find(|event| event.event.event_type == ctx_history_core::EventType::ToolOutput)
+        .find(|event| event.event.payload.to_string().contains(FAILURE_SENTINEL))
         .unwrap();
     assert_eq!(failure.event.payload["result_outcome"], "failure");
     assert!(failure.event.payload.to_string().contains(FAILURE_SENTINEL));
-    assert!(pages
-        .iter()
-        .flat_map(|page| &page.events)
-        .all(|event| !event.event.payload.to_string().contains(SUCCESS_SENTINEL)));
+    assert!(pages.iter().flat_map(|page| &page.events).any(|event| event
+        .event
+        .payload
+        .to_string()
+        .contains(SUCCESS_TAIL_SENTINEL)));
     assert!(pages
         .iter()
         .filter_map(|page| page.row.as_ref())

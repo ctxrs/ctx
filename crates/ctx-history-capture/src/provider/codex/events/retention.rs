@@ -1,5 +1,5 @@
 use ctx_history_core::EventRole;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::provider::file_touches::visit_all_file_touch_drafts;
 use crate::provider::normalization::capped_text;
@@ -67,20 +67,20 @@ pub(crate) fn codex_tool_arguments_preview(value: &Value) -> (String, bool, bool
     if file_touch_count != 0 {
         return codex_file_touch_arguments_preview(retained_paths, file_touch_count);
     }
-    let (retained, fields_omitted) = codex_tool_argument_value_with_omissions(parsed, None);
-    let (preview, truncated) = codex_value_preview(&retained, PROVIDER_MAX_PREVIEW_CHARS);
-    (preview, truncated, !fields_omitted)
+    let (preview, truncated) = codex_value_preview(parsed, PROVIDER_MAX_PREVIEW_CHARS);
+    (preview, truncated, false)
 }
 pub(crate) fn codex_tool_arguments_text(value: &Value) -> (String, bool) {
-    let parsed = codex_parse_embedded_json(value);
-    let parsed = parsed.as_ref().unwrap_or(value);
-    let (retained, fields_omitted) = codex_tool_argument_value_with_omissions(parsed, None);
+    let retained = codex_tool_arguments_value(value);
     let rendered = match retained {
         Value::String(text) => text,
         Value::Null => String::new(),
         other => serde_json::to_string(&other).unwrap_or_else(|_| other.to_string()),
     };
-    (rendered, fields_omitted)
+    (rendered, false)
+}
+pub(crate) fn codex_tool_arguments_value(value: &Value) -> Value {
+    codex_parse_embedded_json(value).unwrap_or_else(|| value.clone())
 }
 fn codex_file_touch_arguments_preview(
     retained_paths: Vec<String>,
@@ -94,108 +94,6 @@ fn codex_file_touch_arguments_preview(
         format!(", +{omitted} more")
     };
     (format!("file touches: {paths}{suffix}"), omitted > 0, false)
-}
-pub(crate) fn codex_tool_argument_value_with_omissions(
-    value: &Value,
-    key: Option<&str>,
-) -> (Value, bool) {
-    if key.is_some_and(|key| codex_tool_argument_key_should_omit(key, value)) {
-        return (codex_omitted_argument_value(value), true);
-    }
-    match value {
-        Value::Array(items) => {
-            let mut fields_omitted = false;
-            let items = items
-                .iter()
-                .map(|item| {
-                    let (item, item_omitted) = codex_tool_argument_value_with_omissions(item, key);
-                    fields_omitted |= item_omitted;
-                    item
-                })
-                .collect();
-            (Value::Array(items), fields_omitted)
-        }
-        Value::Object(object) => {
-            let mut fields_omitted = false;
-            let object = object
-                .iter()
-                .map(|(key, value)| {
-                    let (value, value_omitted) =
-                        codex_tool_argument_value_with_omissions(value, Some(key));
-                    fields_omitted |= value_omitted;
-                    (key.clone(), value)
-                })
-                .collect();
-            (Value::Object(object), fields_omitted)
-        }
-        _ => (value.clone(), false),
-    }
-}
-pub(crate) fn codex_tool_argument_key_should_omit(key: &str, value: &Value) -> bool {
-    let key = codex_normalized_key(key);
-    matches!(
-        key.as_str(),
-        "content"
-            | "text"
-            | "body"
-            | "diff"
-            | "patch"
-            | "oldstring"
-            | "newstring"
-            | "oldcontent"
-            | "newcontent"
-            | "beforecontent"
-            | "aftercontent"
-            | "beforetext"
-            | "aftertext"
-            | "replacement"
-            | "oldstr"
-            | "newstr"
-            | "inputtext"
-            | "outputtext"
-    ) || (matches!(key.as_str(), "input" | "arguments" | "args" | "params")
-        && codex_value_contains_patch_or_diff(value))
-}
-pub(crate) fn codex_omitted_argument_value(value: &Value) -> Value {
-    json!({
-        "field_retention": {
-            "mode": "omitted",
-            "original_bytes": codex_value_approx_bytes(value),
-            "contained_patch_or_diff": codex_value_contains_patch_or_diff(value),
-        },
-    })
-}
-pub(crate) fn codex_normalized_key(key: &str) -> String {
-    key.chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-pub(crate) fn codex_value_approx_bytes(value: &Value) -> usize {
-    match value {
-        Value::String(text) => text.len(),
-        _ => serde_json::to_string(value)
-            .map(|text| text.len())
-            .unwrap_or_default(),
-    }
-}
-pub(crate) fn codex_value_contains_patch_or_diff(value: &Value) -> bool {
-    match value {
-        Value::String(text) => codex_text_contains_patch_or_diff(text),
-        Value::Array(items) => items.iter().any(codex_value_contains_patch_or_diff),
-        Value::Object(object) => object.values().any(codex_value_contains_patch_or_diff),
-        _ => false,
-    }
-}
-pub(crate) fn codex_text_contains_patch_or_diff(text: &str) -> bool {
-    text.contains("*** Begin Patch")
-        || text.contains("diff --git ")
-        || text.starts_with("@@")
-        || text.starts_with("+++ ")
-        || text.starts_with("--- ")
-        || text.contains("\n@@")
-        || text.contains("\n+++ ")
-        || text.contains("\n--- ")
 }
 pub(crate) fn codex_local_preview(value: &str, max_chars: usize) -> (String, bool) {
     capped_text(value, max_chars)

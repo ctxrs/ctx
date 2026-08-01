@@ -11,6 +11,8 @@ use routes::*;
 
 pub(crate) use source_backed::openclaw_source_backed_adapter_v0;
 
+const OPENCLAW_IDENTITY_TEXT_MAX_CHARS: usize = 16_000;
+
 pub(super) fn qualify_session_id(agent_id: Option<&str>, session_id: &str) -> String {
     let session_id = capped_text(session_id);
     match agent_id {
@@ -20,5 +22,5 @@ pub(super) fn qualify_session_id(agent_id: Option<&str>, session_id: &str) -> St
 }
 
 pub(super) fn capped_text(value: &str) -> String {
-    provider_local_preview(value, crate::PROVIDER_MAX_TEXT_CHARS).0
+    provider_local_preview(value, OPENCLAW_IDENTITY_TEXT_MAX_CHARS).0
 }
