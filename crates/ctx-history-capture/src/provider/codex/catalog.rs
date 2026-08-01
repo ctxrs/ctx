@@ -456,7 +456,21 @@ fn catalog_codex_session_opened(
         .and_then(|payload| payload.get("source"))
         .cloned()
         .unwrap_or(Value::Null);
-    let parent_external_session_id = codex_parent_session_id(&source);
+    let parent_external_session_id = codex_parent_session_id(&source)
+        .or_else(|| {
+            payload
+                .and_then(|payload| payload.get("parent_thread_id"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            payload
+                .and_then(|payload| payload.get("forked_from_id"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned)
+        });
     let external_session_id = payload
         .and_then(|payload| payload.get("id"))
         .and_then(Value::as_str)
