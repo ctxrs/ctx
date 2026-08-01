@@ -26,8 +26,18 @@ fault_args=()
 if [[ -n "${fault_filter}" ]]; then
   fault_args=("${fault_filter}")
 fi
-CTX_SOURCE_RECOVERY_FAULT_SHIM="${shim}" \
-  cargo test -p ctx-history-index --test source_backed_recovery "${fault_args[@]}" -- \
-    --ignored \
-    --nocapture \
-    --test-threads=1
+if (( "${#fault_args[@]}" > 0 )); then
+  CTX_SOURCE_RECOVERY_FAULT_SHIM="${shim}" \
+    cargo test -p ctx-history-index --test source_backed_recovery "${fault_args[@]}" -- \
+      --exact \
+      --ignored \
+      --nocapture \
+      --test-threads=1
+else
+  CTX_SOURCE_RECOVERY_FAULT_SHIM="${shim}" \
+    cargo test -p ctx-history-index --test source_backed_recovery -- \
+      --ignored \
+      --skip actual_bounded_filesystem_enospc_preserves_previous_generation \
+      --nocapture \
+      --test-threads=1
+fi

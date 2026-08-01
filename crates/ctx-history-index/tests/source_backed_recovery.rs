@@ -292,26 +292,12 @@ fn active_segment_corruption_is_detected_and_rebuild_is_deterministic() {
 
 #[test]
 #[ignore = "requires scripts/source-backed-recovery/run-linux-fault-tests.sh"]
-fn exact_manifest_and_tantivy_swap_process_death_matrix() {
+fn inactive_generation_and_atomic_pointer_process_death_matrix() {
     let shim = required_fault_shim();
     let cases = [
         FaultCase::stop("sync", "manifest_temp", "after", None, Visibility::Old),
         FaultCase::stop("rename", "manifest_final", "before", None, Visibility::Old),
         FaultCase::stop("rename", "manifest_final", "after", None, Visibility::Old),
-        FaultCase::stop(
-            "rename",
-            "meta_final",
-            "before",
-            Some("manifest_rename"),
-            Visibility::Old,
-        ),
-        FaultCase::stop(
-            "rename",
-            "meta_final",
-            "after",
-            Some("manifest_rename"),
-            Visibility::New,
-        ),
         FaultCase::stop(
             "sync",
             "manifest_dir",
@@ -321,9 +307,58 @@ fn exact_manifest_and_tantivy_swap_process_death_matrix() {
         ),
         FaultCase::stop(
             "sync",
+            "generation_temp",
+            "after",
+            Some("manifest_rename"),
+            Visibility::Old,
+        ),
+        FaultCase::stop(
+            "rename",
+            "generation_meta_final",
+            "before",
+            Some("manifest_rename"),
+            Visibility::Old,
+        ),
+        FaultCase::stop(
+            "rename",
+            "generation_meta_final",
+            "after",
+            Some("manifest_rename"),
+            Visibility::Old,
+        ),
+        FaultCase::stop(
+            "sync",
+            "generation_dir",
+            "after",
+            Some("generation_meta_rename"),
+            Visibility::Old,
+        ),
+        FaultCase::stop(
+            "sync",
+            "pointer_temp",
+            "after",
+            Some("generation_meta_rename"),
+            Visibility::Old,
+        ),
+        FaultCase::stop(
+            "rename",
+            "pointer_final",
+            "before",
+            Some("generation_meta_rename"),
+            Visibility::Old,
+        ),
+        FaultCase::stop(
+            "rename",
+            "pointer_final",
+            "after",
+            Some("generation_meta_rename"),
+            Visibility::New,
+        ),
+        FaultCase::stop(
+            "sync",
             "root_dir",
             "after",
-            Some("meta_rename"),
+            Some("pointer_rename"),
             Visibility::New,
         ),
     ];
@@ -335,24 +370,28 @@ fn exact_manifest_and_tantivy_swap_process_death_matrix() {
 
 #[test]
 #[ignore = "requires scripts/source-backed-recovery/run-linux-fault-tests.sh"]
-fn retry_after_pre_meta_crash_reclaims_tantivy_candidate_files() {
+fn retry_after_pre_pointer_crash_reclaims_inactive_generation() {
     let shim = required_fault_shim();
     let fixture = RecoveryFixture::new();
     let pinned_reader = VerifiedIndex::open(&fixture.root).unwrap();
     let case = FaultCase::stop(
         "rename",
-        "meta_final",
+        "pointer_final",
         "before",
-        Some("manifest_rename"),
+        Some("generation_meta_rename"),
         Visibility::Old,
     );
     let mut child = fixture.spawn_stopped_child("commit", Some((&shim, case)));
     fixture.kill_at_marker(&mut child);
-    let orphaned_before = orphaned_managed_files(&fixture.root);
-    let orphaned_bytes_before = managed_file_bytes(&fixture.root, &orphaned_before);
+    let inactive_before = inactive_generation_directories(&fixture.root);
     assert!(
-        orphaned_bytes_before > 0,
-        "the pre-meta crash left no orphaned managed bytes: {orphaned_before:?}"
+        inactive_before.len() == 1,
+        "the pre-pointer crash did not leave exactly one inactive generation: {inactive_before:?}"
+    );
+    let inactive_bytes_before = directory_file_bytes(&inactive_before[0]);
+    assert!(
+        inactive_bytes_before > 0,
+        "the pre-pointer crash left an empty inactive generation: {inactive_before:?}"
     );
     assert_generation(
         &fixture.root,
@@ -361,9 +400,12 @@ fn retry_after_pre_meta_crash_reclaims_tantivy_candidate_files() {
         "candidate",
     );
 
-    let meta_path = fixture.root.join("meta.json");
+    let pointer_path = fixture.root.join("active-generation.json");
+    let pointer_before = fs::read(&pointer_path).unwrap();
+    let active_path = active_generation_path(&fixture.root);
+    let meta_path = active_path.join("meta.json");
     let meta_before = fs::read(&meta_path).unwrap();
-    let opstamp_before = Index::open_in_dir(&fixture.root)
+    let opstamp_before = Index::open_in_dir(&active_path)
         .unwrap()
         .load_metas()
         .unwrap()
@@ -387,14 +429,16 @@ fn retry_after_pre_meta_crash_reclaims_tantivy_candidate_files() {
     assert_eq!(receipt.generation_id, fixture.baseline.generation_id);
     assert_eq!(receipt.opstamp, fixture.baseline.opstamp);
     assert_eq!(receipt.opstamp, opstamp_before);
+    assert_eq!(fs::read(pointer_path).unwrap(), pointer_before);
+    assert_eq!(active_generation_path(&fixture.root), active_path);
     assert_eq!(fs::read(meta_path).unwrap(), meta_before);
     assert!(
-        orphaned_managed_files(&fixture.root).is_empty(),
-        "exact replay left orphaned managed files"
+        inactive_generation_directories(&fixture.root).is_empty(),
+        "exact replay left an inactive generation"
     );
     assert!(
-        orphaned_before.iter().all(|path| !path.exists()),
-        "exact replay did not reclaim every candidate file: {orphaned_before:?}"
+        inactive_before.iter().all(|path| !path.exists()),
+        "exact replay did not reclaim every inactive generation: {inactive_before:?}"
     );
     assert!(
         atomic_temporary_files(&fixture.root).is_empty(),
@@ -413,11 +457,17 @@ fn injected_enospc_and_write_sync_failures_preserve_previous_generation() {
         FaultCase::fail("sync", "manifest_temp", "EIO", None),
         FaultCase::fail(
             "write",
-            "root_atomic_temp",
+            "pointer_temp",
             "ENOSPC",
-            Some("manifest_rename"),
+            Some("generation_meta_rename"),
         ),
-        FaultCase::fail("sync", "root_atomic_temp", "EIO", Some("manifest_rename")),
+        FaultCase::fail(
+            "sync",
+            "pointer_temp",
+            "EIO",
+            Some("generation_meta_rename"),
+        ),
+        FaultCase::fail("sync", "index_data", "EIO", Some("generation_meta_rename")),
         FaultCase::fail("sync", "manifest_dir", "EIO", Some("manifest_rename")),
     ];
 
@@ -527,12 +577,26 @@ fn writer_reopen_reclaims_abandoned_atomic_write_files() {
 
 #[test]
 #[ignore = "requires scripts/source-backed-recovery/run-linux-fault-tests.sh"]
-fn retry_resynchronizes_a_reused_manifest_before_meta_publication() {
+fn retry_republishes_a_reclaimed_manifest_before_pointer_publication() {
     let shim = required_fault_shim();
     let fixture = RecoveryFixture::new();
     let first_crash = FaultCase::stop("rename", "manifest_final", "after", None, Visibility::Old);
     let mut child = fixture.spawn_stopped_child("commit", Some((&shim, first_crash)));
     fixture.kill_at_marker(&mut child);
+    let baseline_manifest = format!("{}.json", fixture.baseline.generation_id);
+    let manifest_directory = fixture.root.join("ctx-generations");
+    let candidate_manifests = fs::read_dir(&manifest_directory)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_name() != OsStr::new(&baseline_manifest))
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert!(
+        candidate_manifests.len() == 1,
+        "first crash did not leave exactly one candidate manifest: {candidate_manifests:?}"
+    );
+    let candidate_manifest = &candidate_manifests[0];
+    let candidate_manifest_bytes = fs::read(candidate_manifest).unwrap();
     assert_generation(
         &fixture.root,
         &fixture.baseline.generation_id,
@@ -540,10 +604,17 @@ fn retry_resynchronizes_a_reused_manifest_before_meta_publication() {
         "candidate",
     );
 
-    let retry_file_fence =
-        FaultCase::stop("sync", "manifest_final", "after", None, Visibility::Old);
-    let mut file_retry = fixture.spawn_stopped_child("commit", Some((&shim, retry_file_fence)));
-    fixture.kill_at_marker(&mut file_retry);
+    let retry_temp_fence = FaultCase::stop("sync", "manifest_temp", "after", None, Visibility::Old);
+    let mut temp_retry = fixture.spawn_stopped_child("commit", Some((&shim, retry_temp_fence)));
+    fixture.kill_at_marker(&mut temp_retry);
+    assert!(
+        !candidate_manifest.exists(),
+        "writer preflight did not reclaim the unreferenced candidate manifest"
+    );
+    assert!(
+        !atomic_temporary_files(&manifest_directory).is_empty(),
+        "retry did not leave its synchronized manifest staging witness"
+    );
     assert_generation(
         &fixture.root,
         &fixture.baseline.generation_id,
@@ -551,11 +622,15 @@ fn retry_resynchronizes_a_reused_manifest_before_meta_publication() {
         "candidate",
     );
 
-    let retry_directory_fence =
-        FaultCase::stop("sync", "manifest_dir", "after", None, Visibility::Old);
-    let mut directory_retry =
-        fixture.spawn_stopped_child("commit", Some((&shim, retry_directory_fence)));
-    fixture.kill_at_marker(&mut directory_retry);
+    let retry_publish_fence =
+        FaultCase::stop("rename", "manifest_final", "after", None, Visibility::Old);
+    let mut publish_retry =
+        fixture.spawn_stopped_child("commit", Some((&shim, retry_publish_fence)));
+    fixture.kill_at_marker(&mut publish_retry);
+    assert_eq!(
+        fs::read(candidate_manifest).unwrap(),
+        candidate_manifest_bytes
+    );
     assert_generation(
         &fixture.root,
         &fixture.baseline.generation_id,
@@ -817,36 +892,37 @@ fn complete_inventory(
         .unwrap()
 }
 
-fn orphaned_managed_files(root: &Path) -> Vec<PathBuf> {
-    let index = Index::open_in_dir(root).unwrap();
-    let metas = index.load_metas().unwrap();
-    let mut living = metas
-        .segments
-        .iter()
-        .flat_map(|segment| segment.list_files())
-        .collect::<HashSet<_>>();
-    living.insert(PathBuf::from("meta.json"));
-    let mut orphaned = index
-        .directory()
-        .list_managed_files()
+fn inactive_generation_directories(root: &Path) -> Vec<PathBuf> {
+    let pointer: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("active-generation.json")).unwrap()).unwrap();
+    let retained = ["active", "previous"]
         .into_iter()
-        .filter(|path| !living.contains(path))
-        .map(|path| root.join(path))
-        .filter(|path| path.is_file())
+        .filter_map(|slot| pointer.get(slot))
+        .filter_map(|slot| slot.get("directory"))
+        .filter_map(serde_json::Value::as_str)
+        .collect::<HashSet<_>>();
+    let generations = root.join("index-generations");
+    let mut inactive = fs::read_dir(generations)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_dir()))
+        .filter(|entry| !retained.contains(entry.file_name().to_string_lossy().as_ref()))
+        .map(|entry| entry.path())
         .collect::<Vec<_>>();
-    orphaned.sort();
-    orphaned
+    inactive.sort();
+    inactive
 }
 
-fn managed_file_bytes(root: &Path, files: &[PathBuf]) -> u64 {
-    files
-        .iter()
-        .map(|path| {
-            assert!(
-                path.starts_with(root),
-                "managed file escaped the index root: {path:?}"
-            );
-            fs::metadata(path).unwrap().len()
+fn directory_file_bytes(directory: &Path) -> u64 {
+    fs::read_dir(directory)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|entry| {
+            if entry.file_type().unwrap().is_dir() {
+                directory_file_bytes(&entry.path())
+            } else {
+                entry.metadata().unwrap().len()
+            }
         })
         .sum()
 }
