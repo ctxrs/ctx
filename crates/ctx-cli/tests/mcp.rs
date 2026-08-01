@@ -283,10 +283,7 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
     );
     assert_eq!(status["daemon"]["enabled"], true);
     assert_eq!(status["daemon"]["running"], true, "{status:#}");
-    assert_eq!(
-        status["daemon"]["source_refresh_endpoint"]["available"],
-        true
-    );
+    assert_eq!(status["daemon"]["core_refresh_endpoint"]["available"], true);
     assert_eq!(status["daemon"]["start_mode"], "auto");
     assert_eq!(status["daemon"]["supervisor"]["status"], "fallback");
     let initialized_text = format!("initialized: {initialized}");
@@ -802,7 +799,7 @@ fn mcp_search_returns_structured_json_without_refresh() {
     );
     assert_eq!(recovered["daemon"]["running"], true, "{recovered:#}");
     assert_eq!(
-        recovered["daemon"]["source_refresh_endpoint"]["available"], true,
+        recovered["daemon"]["core_refresh_endpoint"]["available"], true,
         "{recovered:#}"
     );
     assert_ne!(

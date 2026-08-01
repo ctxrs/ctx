@@ -307,7 +307,7 @@ fn machine_readable_search_attempts_enabled_daemon_self_healing() {
     );
     assert_eq!(status["daemon"]["running"], false, "{status:#}");
     assert_eq!(
-        status["daemon"]["source_refresh_endpoint"]["available"], false,
+        status["daemon"]["core_refresh_endpoint"]["available"], false,
         "{status:#}"
     );
     assert!(status.get("prior_epoch").is_none(), "{status:#}");

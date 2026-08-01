@@ -706,15 +706,11 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             0,
             "the metadata-only relational projection must expose no payload column"
         );
-        if provider == "openhands" {
-            assert!(
-                source_backed_count(
-                    &temp,
-                    "SELECT COUNT(*) FROM ctx_files_touched \
-                     WHERE path = 'openhands-cli-native-oracle.txt'",
-                ) > 0
-            );
-        }
+        assert_eq!(
+            source_backed_count(&temp, "SELECT COUNT(*) FROM ctx_files_touched"),
+            0,
+            "unscoped file paths must not cross the Core repository boundary"
+        );
     }
 }
 

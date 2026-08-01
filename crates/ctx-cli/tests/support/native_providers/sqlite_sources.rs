@@ -379,7 +379,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
         } else {
             Some(fixture)
         };
-        let _daemon = (stored_provider != "crush").then(|| start_isolated_provider_daemon(&temp));
+        let _daemon = start_isolated_provider_daemon(&temp);
 
         let mut first_command = ctx(&temp);
         if stored_provider == "crush" {

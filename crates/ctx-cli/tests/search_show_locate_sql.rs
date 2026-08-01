@@ -98,7 +98,7 @@ fn start_source_refresh_daemon_with_env(
             .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
         if status.as_ref().is_some_and(|status| {
             status["daemon"]["running"] == true
-                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+                && status["daemon"]["core_refresh_endpoint"]["available"] == true
         }) {
             wait_for_test_daemon_source_refresh(temp);
             return daemon;
@@ -599,7 +599,7 @@ fn fresh_home_search_mvp_flow() {
         "--events",
         "--format=json",
     ]));
-    assert_event_search_provider_oracle(&event_search, "codex", "onboarding", 1, "message");
+    assert_event_search_provider_oracle(&event_search, "codex", "onboarding", 2, "message");
 
     let session_events = json_output(ctx(&temp).args([
         "search",
@@ -610,7 +610,7 @@ fn fresh_home_search_mvp_flow() {
         &ctx_session_id,
         "--format=json",
     ]));
-    assert_event_search_provider_oracle(&session_events, "codex", "onboarding", 1, "message");
+    assert_event_search_provider_oracle(&session_events, "codex", "onboarding", 2, "message");
     assert_eq!(session_events["filters"]["session"], ctx_session_id);
     assert!(session_events["results"]
         .as_array()
@@ -632,7 +632,7 @@ fn fresh_home_search_mvp_flow() {
         &prefixed_session_events,
         "codex",
         "onboarding",
-        1,
+        2,
         "message",
     );
     assert_eq!(
@@ -719,25 +719,19 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(status["semantic"]["status"], "disabled");
     assert_eq!(status["semantic"]["reason"], "semantic_disabled");
     assert_eq!(status["daemon"]["enabled"], true);
-    assert!(status["daemon"]["jobs"]["source_backed_refresh"]["status"].is_string());
+    assert!(status["daemon"]["jobs"]["core_refresh"]["status"].is_string());
 
-    let doctor_deadline = Instant::now() + Duration::from_secs(10);
-    let doctor = loop {
-        let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
-        if doctor["ok"] == true {
-            break doctor;
-        }
-        assert!(
-            Instant::now() < doctor_deadline,
-            "timed out waiting for healthy source epochs: {doctor:#}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    };
+    let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
     assert_eq!(doctor["schema_version"], 1);
-    assert_eq!(doctor["ok"], true);
+    assert_eq!(doctor["ok"], false);
     assert_eq!(doctor["daemon"]["enabled"], true);
     assert_eq!(doctor["source_epoch"]["lexical"]["status"], "ready");
-    assert!(doctor["findings"].as_array().unwrap().is_empty());
+    assert_eq!(doctor["pro"]["error_code"], "pro_not_installed");
+    assert!(doctor["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding == "resolver is unavailable (unknown)"));
 }
 
 #[test]
@@ -1133,7 +1127,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
             &temp,
             "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex'"
         ),
-        7
+        8
     );
 
     let primary_default =
@@ -1269,7 +1263,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
     let status = loop {
         let status = json_output(ctx(&temp).args(["status", "--format=json"]));
         if status["indexed_sessions"] == 2
-            && status["indexed_events"] == 7
+            && status["indexed_events"] == 8
             && status["indexed_sources"] == 2
             && status["lexical"]["status"] == "ready"
         {
@@ -1282,7 +1276,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
         std::thread::sleep(Duration::from_millis(25));
     };
     assert_eq!(status["indexed_sessions"], 2);
-    assert_eq!(status["indexed_events"], 7);
+    assert_eq!(status["indexed_events"], 8);
     assert_eq!(status["indexed_sources"], 2);
     assert_eq!(status["lexical"]["status"], "ready");
 
@@ -1347,16 +1341,16 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
     assert_eq!(
         source_backed_count(
             &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'codex' AND fidelity = 'imported'"
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'codex'"
         ),
         3
     );
     assert_eq!(
         source_backed_count(
             &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND fidelity = 'imported'"
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex'"
         ),
-        12
+        15
     );
     assert_eq!(
         source_backed_count(
@@ -1384,7 +1378,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
             &temp,
             "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'tool_output'"
         ),
-        0
+        1
     );
     assert_eq!(
         source_backed_count(

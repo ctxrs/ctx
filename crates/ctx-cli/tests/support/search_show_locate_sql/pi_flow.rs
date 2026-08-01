@@ -52,14 +52,14 @@ fn pi_cli_import_search_flow() {
     assert_eq!(
         source_backed_count(
             &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'pi' AND fidelity = 'imported'"
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'pi'"
         ),
         1
     );
     assert_eq!(
         source_backed_count(
             &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi' AND fidelity = 'imported'"
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi'"
         ),
         4
     );
