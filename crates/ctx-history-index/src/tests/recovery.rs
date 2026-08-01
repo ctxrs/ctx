@@ -174,6 +174,89 @@ fn crash_immediately_after_pointer_switch_reopens_new_and_retains_previous() {
 }
 
 #[test]
+fn post_pointer_cleanup_failure_preserves_success_and_runs_later_cleanup() {
+    let temp = tempdir().unwrap();
+    let source = source("post-pointer-cleanup.jsonl");
+
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    first.begin_source(source.clone()).unwrap();
+    first
+        .add_core_record(document(&source, 1, "first generation"))
+        .unwrap();
+    first.certify_source(certificate(&source, 1, 1)).unwrap();
+    let first_receipt = first.commit(|_| true).unwrap();
+    let first_slot = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap()
+        .active()
+        .clone();
+    let first_generation_path = temp
+        .path()
+        .join(INDEX_GENERATIONS_DIRECTORY)
+        .join(first_slot.directory());
+    let first_manifest_path = manifest_path(temp.path(), &first_receipt.generation_id);
+    let first_integrity_receipt_path = temp
+        .path()
+        .join(MANIFEST_DIRECTORY)
+        .join(format!("{}.integrity.json", first_slot.directory()));
+
+    let mut second = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    second.begin_source(source.clone()).unwrap();
+    second
+        .add_core_record(document(&source, 1, "second generation"))
+        .unwrap();
+    second.certify_source(certificate(&source, 2, 1)).unwrap();
+    second.commit(|_| true).unwrap();
+    assert!(first_generation_path.exists());
+    assert!(first_manifest_path.exists());
+    assert!(first_integrity_receipt_path.exists());
+
+    let mut third = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    third.begin_source(source.clone()).unwrap();
+    third
+        .add_core_record(document(&source, 1, "third generation"))
+        .unwrap();
+    third.certify_source(certificate(&source, 3, 1)).unwrap();
+
+    let prior_pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    writer_support::mark_active_generation_for_rebuild(temp.path(), prior_pointer.active())
+        .unwrap();
+    let rebuild_marker = temp.path().join("active-generation-rebuild-required.json");
+    let stale_marker_bytes = fs::read(&rebuild_marker).unwrap();
+    let obstructed_marker = rebuild_marker.clone();
+    third.after_pointer_switch = Some(Box::new(move |_| {
+        fs::remove_file(&obstructed_marker).unwrap();
+        fs::create_dir(&obstructed_marker).unwrap();
+        fs::write(obstructed_marker.join("obstruction"), b"test fault").unwrap();
+    }));
+
+    let third_receipt = third.commit(|_| true).unwrap();
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        third_receipt.generation_id
+    );
+    assert!(rebuild_marker.is_dir());
+    assert!(!first_generation_path.exists());
+    assert!(!first_manifest_path.exists());
+    assert!(
+        !first_integrity_receipt_path.exists(),
+        "an earlier cleanup failure skipped integrity receipt reclamation"
+    );
+
+    fs::remove_file(rebuild_marker.join("obstruction")).unwrap();
+    fs::remove_dir(&rebuild_marker).unwrap();
+    fs::write(&rebuild_marker, stale_marker_bytes).unwrap();
+    let reopened = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    assert_eq!(
+        reopened.base_manifest().unwrap().generation_id().unwrap(),
+        third_receipt.generation_id
+    );
+    assert!(!rebuild_marker.exists());
+}
+
+#[test]
 fn deletion_requires_final_inventory_revalidation() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");

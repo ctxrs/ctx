@@ -240,22 +240,17 @@ impl GenerationWriter {
             .chain(next_pointer.previous())
             .map(|slot| slot.directory().to_owned())
             .collect::<Vec<_>>();
-        if let Err(error) = clear_active_generation_rebuild_marker(&root)
-            .and_then(|()| reclaim_inactive_generation_directories(&root, Some(&next_pointer)))
-            .and_then(|()| reclaim_unreferenced_manifests(&root, &retained_generation_ids))
-            .and_then(|()| {
-                writer_support::reclaim_generation_integrity_receipts(
-                    &root,
-                    &retained_generation_directories,
-                )
-            })
-        {
-            return Err(IndexError::CommittedGenerationNeedsRecovery {
-                generation_id,
-                stage: "retired generation reclamation",
-                detail: error.to_string(),
-            });
-        }
+        // The durable pointer is authoritative now. Writer open retries every
+        // cleanup below, so treat each attempt independently and never turn a
+        // published generation into a failed refresh because reclamation was
+        // temporarily obstructed.
+        let _ = clear_active_generation_rebuild_marker(&root);
+        let _ = reclaim_inactive_generation_directories(&root, Some(&next_pointer));
+        let _ = reclaim_unreferenced_manifests(&root, &retained_generation_ids);
+        let _ = writer_support::reclaim_generation_integrity_receipts(
+            &root,
+            &retained_generation_directories,
+        );
 
         CommitReceipt::from_manifest(opstamp, manifest)
     }
