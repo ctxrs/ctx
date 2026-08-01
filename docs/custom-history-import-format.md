@@ -210,7 +210,7 @@ Example:
 ## Incremental Semantics
 
 v1 imports are explicit, local, and idempotent. On each file import, ctx
-rescans the file through its explicit source-backed route. A selected plugin
+rescans the file through its explicit provider-source route. A selected plugin
 manifest may point at the same kind of durable provider-owned file; ctx
 validates the declared source identity, registers the path in place, and waits
 for an authoritative daemon-owned publication receipt.

@@ -45,13 +45,13 @@ health-check and recover the persistent daemon before returning.
 `--no-daemon` opt-out reports `status: "not_requested"` and reason
 `explicit_opt_out`; a durable disabled configuration uses reason
 `daemon_disabled`. `refresh_request` separately reports whether setup queued
-or waited for a daemon-owned source publication. A completed `--wait` request
+or waited for daemon-owned Core publication. A completed `--wait` request
 also includes its request-bound terminal `receipt`; callers should use that
 receipt rather than a later periodic daemon job when reporting the setup run.
 
 Setup does not perform a foreground provider import. `--wait` waits for the
-daemon-owned source refresh; without it, setup requests background refresh.
-The deprecated `--catalog-only` flag is reported by
+daemon-owned Core refresh; without it, setup requests a background Core
+refresh. The deprecated `--catalog-only` flag is reported by
 `deprecated_catalog_only_ignored` and does not change the persistent lifecycle.
 Use `ctx daemon status --format json` for the complete process and applied
 configuration state.
@@ -348,7 +348,7 @@ ctx import --format json
 ctx import --format json --no-daemon
 ```
 
-Requests source-backed publication and returns:
+Requests Core generation publication and returns:
 
 - `schema_version`;
 - `outcome`;
@@ -386,7 +386,7 @@ accepted content while rejecting other records. `resume_mode` is currently `idem
 Imports may opportunistically start the ctx-owned daemon maintenance profile
 when `[daemon].enabled` is true. Explicit custom JSONL and history-source
 imports require its source-refresh endpoint even with JSON output. Set
-`ctx import --no-daemon` to prevent autostart; those explicit source-backed
+`ctx import --no-daemon` to prevent autostart; those explicit provider-source
 routes then require an already-running endpoint. The daemon, when started, reports
 `start_mode: "auto"` and `trigger_command: "import"` through status surfaces.
 Import result schema version 2 does not embed daemon process state. Use
@@ -642,8 +642,8 @@ ctx sql "SELECT COUNT(*) AS sessions FROM ctx_sessions" --format json
 ctx sql --file query.sql --format json
 ```
 
-Runs one read-only SQL statement against the existing local SQLite index and
-returns:
+Runs one read-only SQL statement against the existing local SQLite metadata
+projection and returns:
 
 - `schema_version`;
 - `payload_type: "sql_result"`;

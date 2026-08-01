@@ -1,15 +1,18 @@
 # Search
 
 `ctx search` finds agent-history records imported into Core. The v0.26 search
-epoch has three independent, rebuildable consumers:
+epoch has one self-contained Core generation and two rebuildable derived
+projections:
 
-- Tantivy lexical generations under `search/lexical`;
-- flat-F32 semantic generations under `search/semantic`;
+- immutable Core/Tantivy generations under `search/lexical`, containing complete
+  normalized stored records and lexical fields;
+- flat-F32 semantic projections under `search/semantic`;
 - the optional read-only SQL metadata projection in `relational.sqlite`.
 
-The lexical index contains the full policy-selected meaningful text and the
-metadata needed to match it to imported Core events. Search snippets come from
-those Core events; search does not reopen provider transcript files.
+The Core/Tantivy generation contains the full policy-selected meaningful text
+and the metadata needed to match and present imported Core events. Search
+snippets come from those stored records; search does not reopen provider
+transcript files.
 
 Default results are session-diverse: ctx shows the strongest matching event
 from each session, then lets you drill into dense event-level results.
@@ -146,7 +149,7 @@ On a fresh root, background mode asks the daemon to publish the first lexical
 generation. If daemon maintenance is disabled, search performs no hidden
 bootstrap or fallback import and can query only an already committed
 generation. Enabled auto-refresh history-source plugins run through the same
-daemon-owned, bounded source-backed route; explicit-only sources still require
+daemon-owned, bounded Core refresh route; explicit-only sources still require
 an explicit import.
 
 `--refresh wait` wakes the daemon and waits for the requested source frontier

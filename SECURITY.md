@@ -11,8 +11,8 @@ Security review for the current product covers:
 
 - the `ctx` CLI commands documented in `docs/cli-reference.md`;
 - the default data root `${CTX_DATA_ROOT:-~/.ctx}`;
-- the disposable Tantivy lexical index in `search/lexical`, the optional flat
-  F32 semantic projection in `search/semantic`, and metadata-only
+- the immutable Core/Tantivy generations in `search/lexical`, the optional
+  flat-F32 semantic projection in `search/semantic`, and metadata-only
   `relational.sqlite`;
 - local `config.toml` and diagnostic logs when present;
 - read-only discovery of known provider history paths;

@@ -1,6 +1,7 @@
 # Threat Model
 
-The current CLI protects a local search index for developer agent history.
+The current CLI protects locally imported Core history and its derived search
+and metadata projections.
 
 ## Assets
 
@@ -13,15 +14,15 @@ The current CLI protects a local search index for developer agent history.
 
 ## Boundaries
 
-The default-enabled persistent daemon and explicit source-backed import route
-write derived history state only under the configured ctx data root. Search and
-MCP may send a bounded, content-free daemon wake, but query processes do not
-become foreground history writers. Show, sources, SQL, and doctor do not write
-provider data or repositories. `ctx status` does not mutate Core history or
-local Pro graph data and does not initialize or migrate local storage; Pro
-entitlement authorization may advance nonsecret anti-clock-rollback security
-metadata. `ctx show session --out` writes only the explicit output path
-requested by the user.
+The default-enabled persistent daemon and explicit provider-source import route
+write Core generations and derived state only under the configured ctx data
+root. Search and MCP may send a bounded, content-free daemon wake, but query
+processes do not become foreground history writers. Show, sources, SQL, and
+doctor do not write provider data or repositories. `ctx status` does not mutate
+Core history or local Pro graph data and does not initialize or migrate local
+storage; Pro entitlement authorization may advance nonsecret
+anti-clock-rollback security metadata. `ctx show session --out` writes only the
+explicit output path requested by the user.
 
 Show reads policy-selected normalized content from the active Core generation.
 It does not scan for replacement transcripts or use a network fallback.

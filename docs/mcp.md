@@ -37,7 +37,7 @@ failures are returned in `structuredContent` with the same stable error codes as
 the CLI JSON contract.
 
 The `status` tool returns the CLI JSON status read model unchanged in
-`structuredContent`: the source-backed history report plus `upgrade`, `pro`,
+`structuredContent`: the Core history report plus `upgrade`, `pro`,
 compact `local_usage`, and `read_only: true`. The added facts remain
 machine-only and do not expand the MCP text fallback. The status read does not
 import, initialize, refresh, or mutate source, Pro, upgrade, or usage state;

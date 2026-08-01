@@ -17,11 +17,11 @@ ctx search "sqlite migration failed" --workspace ctx
 ctx show event <ctx-event-id> --window 5
 ```
 
-Normal `ctx search` uses `--refresh background`, which serves existing indexes
-while default-on daemon maintenance refreshes history. Semantic coverage remains
-disabled unless explicitly enabled.
+Normal `ctx search` uses `--refresh background`, which serves the active Core
+generation while default-on daemon maintenance requests a Core refresh.
+Semantic coverage remains disabled unless explicitly enabled.
 Rerun the same search with `--refresh off` when the task requires a strictly
-read-only query over the existing index.
+read-only query over the active Core generation.
 
 Use `ctx sql` only when normal search does not express the question, such as
 exact counts, joins, audits, or scripting over stable `ctx_*` views. It is

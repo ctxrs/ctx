@@ -55,7 +55,7 @@ ctx search --file crates/foo/src/lib.rs
 # Or search multiple terms
 ctx search --term "failed migration" --term rollback --term "cursor rename"
 
-# Advanced: inspect exact local index data with read-only SQL
+# Advanced: inspect the local metadata projection with read-only SQL
 ctx sql "SELECT provider, COUNT(*) AS sessions FROM ctx_sessions GROUP BY provider"
 
 # Results include matching sessions, snippets, and ctx IDs
@@ -93,7 +93,7 @@ For the full pipeline, see [How ctx works](https://ctx.rs/concepts/how-it-works)
 
 ## Supported agent histories
 
-Support means ctx can discover or read that harness's persisted local history and import it into the local search index. Use `ctx sources --json` on your machine to see which sources are currently `importable`.
+Support means ctx can discover or read that harness's persisted local history and import it into a local Core generation. Use `ctx sources --format json` on your machine to see which sources are currently `importable`.
 
 | Agent harness | Support |
 | --- | --- |
