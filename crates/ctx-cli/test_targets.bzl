@@ -66,6 +66,7 @@ _CTX_CLI_TEST_SUPPORT = {
         crates = [
             "libc",
             "rusqlite",
+            "sha2",
             "windows-sys",
         ],
         deps = [
@@ -110,6 +111,10 @@ def _ctx_cli_test_support(groups):
     rustc_flags = []
     srcs = []
     seen = {}
+    seen_crates = {}
+    seen_deps = {}
+    seen_rustc_flags = {}
+    seen_srcs = {}
     for group in groups:
         if group not in _CTX_CLI_TEST_SUPPORT:
             fail("unknown ctx CLI test support group %r; expected one of %s" % (
@@ -120,10 +125,22 @@ def _ctx_cli_test_support(groups):
             fail("duplicate ctx CLI test support group %r" % group)
         seen[group] = True
         support = _CTX_CLI_TEST_SUPPORT[group]
-        crates.extend(support.crates)
-        deps.extend(support.deps)
-        rustc_flags.extend(support.rustc_flags)
-        srcs.extend(support.srcs)
+        for crate in support.crates:
+            if crate not in seen_crates:
+                seen_crates[crate] = True
+                crates.append(crate)
+        for dep in support.deps:
+            if dep not in seen_deps:
+                seen_deps[dep] = True
+                deps.append(dep)
+        for flag in support.rustc_flags:
+            if flag not in seen_rustc_flags:
+                seen_rustc_flags[flag] = True
+                rustc_flags.append(flag)
+        for src in support.srcs:
+            if src not in seen_srcs:
+                seen_srcs[src] = True
+                srcs.append(src)
     return struct(
         deps = crate_deps(crates) + deps,
         rustc_flags = rustc_flags,
