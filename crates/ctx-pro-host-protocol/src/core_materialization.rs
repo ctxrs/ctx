@@ -23,7 +23,7 @@ pub const MAX_CORE_MATERIALIZER_REVISION_BYTES: usize = 256;
 #[serde(deny_unknown_fields)]
 pub struct CoreSourceState {
     pub source: SourceKey,
-    pub source_revision_sha256: String,
+    pub core_record_accumulator: String,
     pub event_count: u64,
 }
 
@@ -32,7 +32,10 @@ impl CoreSourceState {
         self.source
             .validate_contract()
             .map_err(|error| invalid_contract("Core source identity", error))?;
-        validate_sha256(&self.source_revision_sha256, "Core source revision")
+        validate_sha256(
+            &self.core_record_accumulator,
+            "Core source record accumulator",
+        )
     }
 }
 
@@ -556,7 +559,6 @@ impl CoreSourceDeltaPageApplied {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoreSourceReconciliation {
-    pub source_index: u32,
     pub delta: CoreSourceDelta,
 }
 
@@ -859,7 +861,7 @@ impl ApplyCoreEventDeltaPageRequest {
 pub struct CoreEventDeltaPageApplied {
     pub materialization_id: String,
     pub core_generation_id: String,
-    pub source_index: u32,
+    pub source: SourceKey,
     pub page_index: u32,
     pub additions: u32,
     pub replacements: u32,
@@ -871,6 +873,9 @@ pub struct CoreEventDeltaPageApplied {
 impl CoreEventDeltaPageApplied {
     pub fn validate_for(&self, page: &CoreEventDeltaPage) -> Result<(), ProtocolError> {
         page.validate()?;
+        self.source
+            .validate_contract()
+            .map_err(|error| invalid_contract("Core event delta acknowledgement source", error))?;
         let additions = page
             .deltas
             .iter()
@@ -888,7 +893,9 @@ impl CoreEventDeltaPageApplied {
             .count();
         if self.materialization_id != page.materialization_id
             || self.core_generation_id != page.core_generation_id
-            || self.source_index != page.reconciliation.source_index
+            || !self
+                .source
+                .exact_descriptor_eq(page.reconciliation.delta.source())
             || self.page_index != page.page_index
             || usize::try_from(self.additions).ok() != Some(additions)
             || usize::try_from(self.replacements).ok() != Some(replacements)
@@ -1010,7 +1017,7 @@ fn validate_source_states(sources: &[CoreSourceState]) -> Result<(), ProtocolErr
 
 fn core_source_state_exact_eq(left: &CoreSourceState, right: &CoreSourceState) -> bool {
     left.source.exact_descriptor_eq(&right.source)
-        && left.source_revision_sha256 == right.source_revision_sha256
+        && left.core_record_accumulator == right.core_record_accumulator
         && left.event_count == right.event_count
 }
 

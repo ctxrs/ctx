@@ -26,7 +26,7 @@ fn source(lineage: u8) -> SourceKey {
 fn state(source: SourceKey, revision: u8, event_count: u64) -> CoreSourceState {
     CoreSourceState {
         source,
-        source_revision_sha256: format!("{revision:064x}"),
+        core_record_accumulator: format!("{revision:064x}"),
         event_count,
     }
 }
@@ -168,7 +168,6 @@ fn complete_core_event_delta_page_transports_long_body_and_two_repository_scopes
         materialization_id: "d".repeat(64),
         core_generation_id: "a".repeat(64),
         reconciliation: CoreSourceReconciliation {
-            source_index: 0,
             delta: CoreSourceDelta::Present(source_state),
         },
         page_index: 0,
@@ -214,7 +213,6 @@ fn event_delta_acknowledgement_uses_compact_identity_after_request_moves() {
         materialization_id: "d".repeat(64),
         core_generation_id: "a".repeat(64),
         reconciliation: CoreSourceReconciliation {
-            source_index: 3,
             delta: CoreSourceDelta::Present(source_state),
         },
         page_index: 7,
@@ -230,7 +228,7 @@ fn event_delta_acknowledgement_uses_compact_identity_after_request_moves() {
     let mut acknowledgement = CoreEventDeltaPageApplied {
         materialization_id: request.page.materialization_id.clone(),
         core_generation_id: request.page.core_generation_id.clone(),
-        source_index: request.page.reconciliation.source_index,
+        source: request.page.reconciliation.delta.source().clone(),
         page_index: request.page.page_index,
         additions: 1,
         replacements: 0,
@@ -275,7 +273,6 @@ fn delta_ack_selects_only_exact_changed_revisions_for_record_materialization() {
         changed_sources: 1,
         removed_sources: 0,
         reconcile_sources: vec![CoreSourceReconciliation {
-            source_index: 1,
             delta: CoreSourceDelta::Present(changed.clone()),
         }],
         replayed: false,
@@ -284,7 +281,7 @@ fn delta_ack_selects_only_exact_changed_revisions_for_record_materialization() {
     .unwrap();
 
     let mut stale = changed;
-    stale.source_revision_sha256 = "f".repeat(64);
+    stale.core_record_accumulator = "f".repeat(64);
     let invalid = CoreSourceDeltaPageApplied {
         materialization_id: page.materialization_id.clone(),
         core_generation_id: page.core_generation_id.clone(),
@@ -292,7 +289,6 @@ fn delta_ack_selects_only_exact_changed_revisions_for_record_materialization() {
         changed_sources: 1,
         removed_sources: 0,
         reconcile_sources: vec![CoreSourceReconciliation {
-            source_index: 1,
             delta: CoreSourceDelta::Present(stale),
         }],
         replayed: false,
@@ -300,6 +296,20 @@ fn delta_ack_selects_only_exact_changed_revisions_for_record_materialization() {
     assert_eq!(
         invalid.validate_for_identity(&identity).unwrap_err().class,
         ErrorClass::Sequence
+    );
+}
+
+#[test]
+fn source_snapshot_changes_with_exact_core_record_accumulator() {
+    let first = state(source(1), 1, 4);
+    let mut changed = first.clone();
+    changed.core_record_accumulator = "f".repeat(64);
+
+    let first_head = head(&[first]);
+    let changed_head = head(&[changed]);
+    assert_ne!(
+        first_head.source_snapshot_sha256,
+        changed_head.source_snapshot_sha256
     );
 }
 
@@ -327,13 +337,11 @@ fn source_delta_pages_require_stable_order_and_exact_page_cas() {
         reconcile_sources: page
             .deltas
             .iter()
-            .enumerate()
             .filter_map(|delta| match delta {
-                (source_index, CoreSourceDelta::Present(state)) => Some(CoreSourceReconciliation {
-                    source_index: u32::try_from(source_index).unwrap(),
+                CoreSourceDelta::Present(state) => Some(CoreSourceReconciliation {
                     delta: CoreSourceDelta::Present(state.clone()),
                 }),
-                (_, CoreSourceDelta::Removed(_)) => None,
+                CoreSourceDelta::Removed(_) => None,
             })
             .collect(),
         replayed: false,
