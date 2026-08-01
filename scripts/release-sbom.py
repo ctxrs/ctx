@@ -672,7 +672,7 @@ def verify_bundle_only(args: argparse.Namespace) -> str:
         != tantivy.get("dependency_closure_sha256")
         or ("tantivy", TANTIVY_VERSION)
         not in {(name, version) for name, version, _ in closure_identities}
-        or {"fs4", "lz4_flex", "memmap2", "tempfile", "zstd"}
+        or {"fs4", "memmap2", "tempfile", "zstd"}
         - {name for name, _, _ in closure_identities}
         or any(name == "rust-stemmers" for name, _, _ in closure_identities)
     ):

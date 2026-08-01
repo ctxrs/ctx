@@ -24,17 +24,17 @@ BUILD_INFO_CLASSIFICATION = "sanitized-release-evidence-not-slsa-provenance"
 TANTIVY_VERSION = "0.26.1"
 TANTIVY_FEATURES = [
     "columnar-zstd-compression",
-    "lz4-compression",
     "mmap",
+    "zstd-compression",
 ]
 TANTIVY_RESOLVED_FEATURES = [
     "columnar-zstd-compression",
     "fs4",
-    "lz4-compression",
-    "lz4_flex",
     "memmap2",
     "mmap",
     "tempfile",
+    "zstd",
+    "zstd-compression",
 ]
 WORKSPACE_RELEASE_PACKAGES = {
     "ctx-history-core",
@@ -595,7 +595,7 @@ def tantivy_closure(
             if dependency not in closure:
                 closure.add(dependency)
                 pending.append(dependency)
-    required = {"fs4", "lz4_flex", "memmap2", "tempfile", "zstd"}
+    required = {"fs4", "memmap2", "tempfile", "zstd"}
     present = {identity[0] for identity in closure}
     if not required.issubset(present):
         raise ValueError(

@@ -47,7 +47,7 @@ serde_yaml = { version = "0.9", default-features = false }
 semver = "1.0"
 sha2 = "0.10"
 supports-unicode = "3.0"
-tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression", "zstd-compression", "columnar-zstd-compression"] }
+tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "zstd-compression", "columnar-zstd-compression"] }
 tempfile = "3.10"
 terminal_size = "0.4"
 thiserror = "1.0"
