@@ -24,11 +24,11 @@ use url::Url;
 use super::shell::lexical_absolute;
 mod geometry;
 
-pub(super) use geometry::negative_route_geometry_state;
+pub(super) use geometry::{negative_route_geometry_state, validate_candidate_route};
 use geometry::{
     path_identity_fingerprint, repository_geometry_state,
     repository_local_root_authorization_fingerprint, repository_mutable_evidence_state,
-    route_fingerprint, validate_candidate_route,
+    route_fingerprint,
 };
 
 const MAX_PARENT_COMPONENTS: usize = 64;
@@ -53,6 +53,7 @@ pub(super) enum ProbeFailure {
     AmbiguousRemote,
     Failed(&'static str),
     ConcurrentDrift,
+    ConflictingEventTimeIdentity,
     PlatformUnsupported,
     BudgetExceeded,
 }
@@ -510,6 +511,50 @@ impl CertifiedCandidate {
         path.starts_with(&self.repository_root)
     }
 
+    pub(super) fn observed_at_unix_ms(&self) -> i64 {
+        self.binding.local_root_authorization.as_ref().map_or(
+            ctx_history_core::CORE_MISSING_ACTIVITY_TIME_UNIX_MS,
+            |authorization| authorization.observed_at_unix_ms,
+        )
+    }
+
+    pub(super) fn same_binding_identity(&self, other: &Self) -> bool {
+        self.binding.binding_id == other.binding.binding_id
+            && self.binding.logical_repository_id == other.binding.logical_repository_id
+            && self.binding.checkout_id == other.binding.checkout_id
+            && self.binding.worktree_id == other.binding.worktree_id
+            && self.binding.git_object_format == other.binding.git_object_format
+    }
+
+    pub(super) fn same_local_root_authorization_identity(&self, other: &Self) -> bool {
+        self.binding
+            .local_root_authorization
+            .as_ref()
+            .zip(other.binding.local_root_authorization.as_ref())
+            .is_some_and(|(left, right)| {
+                left.local_root_authorization_fingerprint_revision
+                    == right.local_root_authorization_fingerprint_revision
+                    && left.local_root_authorization_fingerprint
+                        == right.local_root_authorization_fingerprint
+            })
+    }
+
+    pub(super) fn for_event(
+        &self,
+        evidence_kind: RepositoryEvidenceKind,
+        observed_at_unix_ms: i64,
+    ) -> Self {
+        let mut certificate = self.clone();
+        certificate.binding.evidence = vec![RepositoryEvidence {
+            kind: evidence_kind,
+            confidence: RepositoryEvidenceConfidence::High,
+        }];
+        if let Some(authorization) = certificate.binding.local_root_authorization.as_mut() {
+            authorization.observed_at_unix_ms = observed_at_unix_ms;
+        }
+        certificate
+    }
+
     pub(super) fn try_reuse(
         &self,
         path: &Path,
@@ -572,15 +617,7 @@ impl CertifiedCandidate {
         if closing != current || closing_mutable_evidence_state != mutable_evidence_state {
             return Err(ProbeFailure::ConcurrentDrift);
         }
-        let mut reused = self.clone();
-        reused.binding.evidence = vec![RepositoryEvidence {
-            kind: evidence_kind,
-            confidence: RepositoryEvidenceConfidence::High,
-        }];
-        if let Some(authorization) = reused.binding.local_root_authorization.as_mut() {
-            authorization.observed_at_unix_ms = observed_at_unix_ms;
-        }
-        Ok(Some(reused))
+        Ok(Some(self.for_event(evidence_kind, observed_at_unix_ms)))
     }
 }
 
