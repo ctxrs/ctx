@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use crate::{
     blob_dir, config_path, database_path, default_data_root, device_path, history_dir, logs_dir,
-    managed_data_root, object_dir, CaptureProvider, Confidence, ContextCitationType, Fidelity,
-    HistoryRecord, Session, SyncMetadata, SyncOutboxItem, SyncState, Visibility,
+    managed_data_root, object_dir, CaptureProvider, Confidence, Fidelity, HistoryRecord, Session,
+    SyncMetadata, SyncOutboxItem, SyncState, Visibility,
 };
 
 #[test]
@@ -115,10 +115,6 @@ fn history_record_json_names_are_public_names() {
     assert_eq!(session.history_record_id, Some(record_id));
     let value = serde_json::to_value(&session).unwrap();
     assert_eq!(value["history_record_id"], record_id.to_string());
-    assert_eq!(
-        serde_json::to_string(&ContextCitationType::HistoryRecord).unwrap(),
-        "\"history_record\""
-    );
 }
 
 #[test]

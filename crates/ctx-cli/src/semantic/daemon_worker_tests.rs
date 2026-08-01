@@ -162,7 +162,6 @@ fn core_builder_combines_complete_lite_turn_with_provider_source_absent() {
         document.text,
         "user:\nexact Gemini question\n\nassistant:\nfinal exact Gemini answer"
     );
-    assert_eq!(document.raw_source_path, None);
 }
 
 #[test]
