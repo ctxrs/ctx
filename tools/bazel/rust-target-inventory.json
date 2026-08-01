@@ -41,7 +41,7 @@
         "test:setup_sources_import": "//crates/ctx-cli:setup_sources_import_tests",
         "test:skill": "//crates/ctx-cli:skill_tests",
         "test:slash_command_e2e": "//crates/ctx-cli:slash_command_e2e_tests",
-        "test:source_backed_content": "//crates/ctx-cli:source_backed_content_tests",
+        "test:self_contained_core_content": "//crates/ctx-cli:self_contained_core_content_tests",
         "test:status_store_cutover": "//crates/ctx-cli:status_store_cutover_tests",
         "test:stats": "//crates/ctx-cli:stats_tests",
         "test:upgrade": "//crates/ctx-cli:upgrade_tests",
