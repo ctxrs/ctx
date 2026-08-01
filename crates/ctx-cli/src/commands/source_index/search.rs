@@ -58,8 +58,8 @@ pub(super) const SEARCH_CORE_BODY_PREFIX_CHARS: usize = 2_049;
 const MAX_UTF8_CHAR_BYTES: usize = 4;
 pub(super) const SEARCH_CORE_MAX_RETAINED_BODY_BYTES: usize =
     MAX_SEARCH_LIMIT * SEARCH_CORE_BODY_PREFIX_CHARS * MAX_UTF8_CHAR_BYTES;
-const SEARCH_CORE_MAX_AGGREGATE_ENCODED_BYTES: usize = 64 * 1024 * 1024;
-const SEARCH_CORE_MAX_AGGREGATE_CONTENT_BYTES: usize = 64 * 1024 * 1024;
+const SEARCH_CORE_MAX_AGGREGATE_ENCODED_BYTES: usize = MAX_ENCODED_CORE_RECORD_BYTES;
+const SEARCH_CORE_MAX_AGGREGATE_CONTENT_BYTES: usize = MAX_CORE_CONTENT_BYTES;
 pub(super) const MISSING_INDEX_ERROR: &str =
     "the Core index does not exist; retry with daemon refresh enabled";
 const QUEUED_WITHOUT_GENERATION_ERROR: &str =
@@ -498,80 +498,39 @@ pub(super) fn core_records_for_search_hits_with_budget(
         return Err(anyhow!("Core search hydration budgets must be positive"));
     }
 
-    let mut records = HashMap::with_capacity(hits.len());
-    let mut admitted_encoded_core_bytes = 0_usize;
-    let mut admitted_content_bytes = 0_usize;
-    let mut retained_body_bytes = 0_usize;
-    for hit in hits {
-        let event_id = hit.event.event_id.as_uuid();
-        let remaining_encoded_core_bytes = budget
-            .maximum_encoded_core_bytes
-            .saturating_sub(admitted_encoded_core_bytes);
-        let remaining_content_bytes = budget
-            .maximum_content_bytes
-            .saturating_sub(admitted_content_bytes);
-        if remaining_encoded_core_bytes == 0 || remaining_content_bytes == 0 {
-            return Err(search_core_hydration_budget_error(
-                event_id,
+    let event_ids = hits
+        .iter()
+        .map(|hit| hit.event.event_id.as_uuid())
+        .collect::<Vec<_>>();
+    let page_budget = CoreEventPageBudget::new(
+        budget.maximum_encoded_core_bytes,
+        budget.maximum_content_bytes,
+    );
+    // Resolve all selected addresses with one bounded Tantivy query. The
+    // aggregate encoded/content ceilings bound complete records retained by
+    // this batch; each record is then reduced to its presentation prefix.
+    // This keeps top-200 memory bounded without issuing one index query per
+    // result.
+    let batch = index
+        .core_events_by_ids_with_strict_budget(&event_ids, event_ids.len(), page_budget)?
+        .ok_or_else(|| {
+            search_core_hydration_budget_error(
+                event_ids.first().copied().unwrap_or_else(Uuid::nil),
                 SearchCoreHydrationBudgetStage::Decode,
-                admitted_encoded_core_bytes,
-                admitted_content_bytes,
-                retained_body_bytes,
+                0,
+                0,
+                0,
                 budget,
-            ));
-        }
-
-        // Decode exactly one selected record at a time. The strict lookup
-        // declines an oversized singleton, so a pathological result cannot be
-        // admitted merely to make progress. The complete record is reduced to
-        // its bounded presentation projection before the next decode begins.
-        let page_budget = CoreEventPageBudget::new(
-            remaining_encoded_core_bytes.min(MAX_ENCODED_CORE_RECORD_BYTES),
-            remaining_content_bytes.min(MAX_CORE_CONTENT_BYTES),
-        );
-        let batch = index
-            .core_events_by_ids_with_strict_budget(&[event_id], 1, page_budget)?
-            .ok_or_else(|| {
-                search_core_hydration_budget_error(
-                    event_id,
-                    SearchCoreHydrationBudgetStage::Decode,
-                    admitted_encoded_core_bytes,
-                    admitted_content_bytes,
-                    retained_body_bytes,
-                    budget,
-                )
-            })?;
-        admitted_encoded_core_bytes = admitted_encoded_core_bytes
-            .checked_add(batch.encoded_core_bytes)
-            .ok_or_else(|| {
-                search_core_hydration_budget_error(
-                    event_id,
-                    SearchCoreHydrationBudgetStage::Decode,
-                    admitted_encoded_core_bytes,
-                    admitted_content_bytes,
-                    retained_body_bytes,
-                    budget,
-                )
-            })?;
-        admitted_content_bytes = admitted_content_bytes
-            .checked_add(batch.content_bytes)
-            .ok_or_else(|| {
-                search_core_hydration_budget_error(
-                    event_id,
-                    SearchCoreHydrationBudgetStage::Decode,
-                    admitted_encoded_core_bytes,
-                    admitted_content_bytes,
-                    retained_body_bytes,
-                    budget,
-                )
-            })?;
-        let mut items = batch.items.into_iter();
-        let record = items.next().ok_or_else(|| {
-            anyhow!("pinned Core lookup omitted selected search event {event_id}")
+            )
         })?;
-        if items.next().is_some() || record.event_id.as_uuid() != event_id {
+    let admitted_encoded_core_bytes = batch.encoded_core_bytes;
+    let admitted_content_bytes = batch.content_bytes;
+    let mut records = HashMap::with_capacity(hits.len());
+    let mut retained_body_bytes = 0_usize;
+    for (event_id, record) in event_ids.into_iter().zip(batch.items) {
+        if record.event_id.as_uuid() != event_id {
             return Err(anyhow!(
-                "pinned Core lookup returned an invalid singleton for search event {event_id}"
+                "pinned Core lookup returned an invalid record for search event {event_id}"
             ));
         }
         let (record, body_bytes) = search_core_presentation_projection(record)?;
