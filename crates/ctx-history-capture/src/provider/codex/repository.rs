@@ -1,13 +1,13 @@
-use std::{collections::HashMap, path::Path, sync::OnceLock};
+use std::path::Path;
 
 use ctx_history_core::RepositoryFileObservationKind;
-use regex::Regex;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::events::codex_tool_name;
 use crate::repository_attribution::UnscopedFileObservation;
 
+#[path = "repository/outcomes.rs"]
 mod outcomes;
 
 pub(crate) use outcomes::{repository_result_evidence, CodexRepositoryResultEvidence};
@@ -17,6 +17,9 @@ const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 const MAX_WORKDIR_BYTES: usize = 16 * 1024;
 const MAX_CALL_ID_BYTES: usize = 1024;
 const MAX_CONTINUATION_CELL_ID_BYTES: usize = 1024;
+const MAX_STATIC_NESTED_TOOL_CALLS: usize = 24;
+const MAX_STATIC_LITERAL_DEPTH: usize = 32;
+const MAX_STATIC_LITERAL_ITEMS: usize = 256;
 const CODEX_CONTINUATION_CALL_ID_DOMAIN: &[u8] = b"ctx/codex-nativepath/continuation-call-id/v1\0";
 const CODEX_COMMAND_DOMAIN: &[u8] = b"ctx/codex-nativepath/exact-command/v1\0";
 
@@ -121,170 +124,437 @@ fn nested_exec_tool_evidence(payload: &Value) -> Option<Vec<CodexRepositoryToolE
     if source.len() > MAX_STRUCTURED_ARGUMENT_BYTES {
         return None;
     }
-    let literals = json_string_regex()
-        .find_iter(source)
-        .filter_map(|matched| serde_json::from_str::<String>(matched.as_str()).ok())
-        .collect::<Vec<_>>();
-    let commands = named_literal_regex("cmd")
-        .captures_iter(source)
-        .filter_map(|captures| captures.get(1))
-        .filter_map(|matched| serde_json::from_str::<String>(matched.as_str()).ok())
-        .collect::<Vec<_>>();
-    let mut tuple_commands = HashMap::new();
-    for captures in tuple_regex().captures_iter(source) {
-        let Some(workdir) = captures
-            .get(2)
-            .and_then(|matched| serde_json::from_str::<String>(matched.as_str()).ok())
-        else {
-            continue;
-        };
-        let Some(command) = captures
-            .get(3)
-            .and_then(|matched| serde_json::from_str::<String>(matched.as_str()).ok())
-        else {
-            continue;
-        };
-        if bounded_absolute_path(&workdir) {
-            tuple_commands.insert(workdir, command);
-        }
-    }
-    let mut workdirs = named_literal_regex("(?:workdir|dir)")
-        .captures_iter(source)
-        .filter_map(|captures| captures.get(1))
-        .filter_map(|matched| serde_json::from_str::<String>(matched.as_str()).ok())
-        .filter(|value| bounded_absolute_path(value))
-        .collect::<Vec<_>>();
-    // Codex's parallel orchestration commonly places an absolute workdir in a
-    // static tuple and later passes it through a shorthand `workdir` property.
-    // Decode only complete JSON string literals that are themselves absolute;
-    // command text is never searched for embedded paths.
-    workdirs.extend(
-        literals
-            .iter()
-            .filter(|value| bounded_absolute_path(value))
-            .cloned(),
-    );
-    deduplicate(&mut workdirs);
-
+    let calls = StaticJsParser::new(source).parse_program()?;
     let mut evidence = Vec::new();
-    if source.contains("tools.exec_command") {
-        for (index, workdir) in workdirs.iter().enumerate() {
-            let (command, resolution) = if let Some(command) = tuple_commands.get(workdir) {
-                (Some(command.clone()), "static_tuple_literal")
-            } else if commands.len() == 1 {
-                (commands.first().cloned(), "shared_static_literal")
-            } else if commands.len() == workdirs.len() {
-                (commands.get(index).cloned(), "positional_static_literal")
-            } else {
-                (None, "unresolved_static_variable")
-            };
-            let command =
-                command.and_then(|command| bounded_literal(&command, MAX_COMMAND_BYTES, |_| true));
-            let command_sha256 = command
-                .as_deref()
-                .map(|command| digest_hex(CODEX_COMMAND_DOMAIN, command.as_bytes()));
-            evidence.push(CodexRepositoryToolEvidence {
-                tool_name: "exec_command".to_owned(),
-                command,
-                declared_workdir: Some(workdir.clone()),
-                continuation_cell_id: None,
-                file_observations: Vec::new(),
-                structured_content: json!({
-                    "provider_native_tool": {
-                        "provider": "codex",
-                        "name": "exec_command",
-                        "outer_name": "exec",
-                        "call_id": call_id,
-                        "nested_activity_index": index,
-                        "argument_schema": "codex_nested_exec_command_static_v1",
-                        "declared_workdir": workdir,
-                        "command_resolution": resolution,
-                        "command_sha256": command_sha256,
-                        "raw_arguments_retained": false,
+    for (index, call) in calls.into_iter().enumerate() {
+        match call {
+            StaticNestedToolCall::ExecCommand(arguments) => {
+                let command =
+                    bounded_literal(arguments.get("cmd")?.as_str()?, MAX_COMMAND_BYTES, |_| true)?;
+                let declared_workdir = match arguments.get("workdir") {
+                    Some(value) => {
+                        let value = bounded_literal(value.as_str()?, MAX_WORKDIR_BYTES, |_| true)?;
+                        Some(bounded_absolute_path(&value).then_some(value)?)
                     }
-                }),
-            });
-        }
-    }
-
-    let mut patch_paths = Vec::new();
-    if source.contains("tools.apply_patch") {
-        for literal in &literals {
-            for line in literal.lines() {
-                let line = line.trim();
-                let observation = [
-                    ("*** Add File:", RepositoryFileObservationKind::Created),
-                    ("*** Update File:", RepositoryFileObservationKind::Modified),
-                    ("*** Delete File:", RepositoryFileObservationKind::Deleted),
-                ]
-                .into_iter()
-                .find_map(|(header, kind)| {
-                    line.strip_prefix(header)
-                        .map(str::trim)
-                        .filter(|path| bounded_path(path))
-                        .map(|path| (path.to_owned(), kind))
+                    None => None,
+                };
+                let command_sha256 = digest_hex(CODEX_COMMAND_DOMAIN, command.as_bytes());
+                evidence.push(CodexRepositoryToolEvidence {
+                    tool_name: "exec_command".to_owned(),
+                    command: Some(command),
+                    declared_workdir,
+                    continuation_cell_id: None,
+                    file_observations: Vec::new(),
+                    structured_content: json!({
+                        "provider_native_tool": {
+                            "provider": "codex",
+                            "name": "exec_command",
+                            "outer_name": "exec",
+                            "call_id": call_id,
+                            "nested_activity_index": index,
+                            "argument_schema": "codex_nested_exec_command_literal_v2",
+                            "command_sha256": command_sha256,
+                            "raw_arguments_retained": false,
+                        }
+                    }),
                 });
-                if let Some(observation) = observation {
-                    patch_paths.push(observation);
+            }
+            StaticNestedToolCall::ApplyPatch(patch) => {
+                let mut patch_paths = patch
+                    .lines()
+                    .filter_map(|line| {
+                        let line = line.trim();
+                        [
+                            ("*** Add File:", RepositoryFileObservationKind::Created),
+                            ("*** Update File:", RepositoryFileObservationKind::Modified),
+                            ("*** Delete File:", RepositoryFileObservationKind::Deleted),
+                        ]
+                        .into_iter()
+                        .find_map(|(header, kind)| {
+                            line.strip_prefix(header)
+                                .map(str::trim)
+                                .filter(|path| bounded_path(path))
+                                .map(|path| (path.to_owned(), kind))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let mut seen = std::collections::HashSet::new();
+                patch_paths.retain(|(path, _)| seen.insert(path.clone()));
+                if patch_paths.is_empty() {
+                    continue;
                 }
+                evidence.push(CodexRepositoryToolEvidence {
+                    tool_name: "apply_patch".to_owned(),
+                    command: None,
+                    declared_workdir: None,
+                    continuation_cell_id: None,
+                    file_observations: patch_paths
+                        .iter()
+                        .cloned()
+                        .map(|(path, kind)| UnscopedFileObservation {
+                            path,
+                            prior_path: None,
+                            kind,
+                        })
+                        .collect(),
+                    structured_content: json!({
+                        "provider_native_tool": {
+                            "provider": "codex",
+                            "name": "apply_patch",
+                            "outer_name": "exec",
+                            "call_id": call_id,
+                            "nested_activity_index": index,
+                            "argument_schema": "codex_nested_apply_patch_literal_v2",
+                            "static_patch_paths": patch_paths.len(),
+                            "raw_arguments_retained": false,
+                        }
+                    }),
+                });
             }
         }
-    }
-    let mut seen_patch_paths = std::collections::HashSet::new();
-    patch_paths.retain(|(path, _)| seen_patch_paths.insert(path.clone()));
-    if !patch_paths.is_empty() {
-        evidence.push(CodexRepositoryToolEvidence {
-            tool_name: "apply_patch".to_owned(),
-            command: None,
-            declared_workdir: None,
-            continuation_cell_id: None,
-            file_observations: patch_paths
-                .iter()
-                .cloned()
-                .map(|(path, kind)| UnscopedFileObservation {
-                    path,
-                    prior_path: None,
-                    kind,
-                })
-                .collect(),
-            structured_content: json!({
-                "provider_native_tool": {
-                    "provider": "codex",
-                    "name": "apply_patch",
-                    "outer_name": "exec",
-                    "call_id": call_id,
-                    "argument_schema": "codex_nested_apply_patch_static_headers_v1",
-                    "static_patch_paths": patch_paths.len(),
-                    "raw_arguments_retained": false,
-                }
-            }),
-        });
     }
     Some(evidence)
 }
 
-fn json_string_regex() -> &'static Regex {
-    static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r#"\"(?:\\.|[^\"\\])*\""#).expect("static regex"))
+enum StaticNestedToolCall {
+    ExecCommand(Map<String, Value>),
+    ApplyPatch(String),
 }
 
-fn named_literal_regex(name: &'static str) -> &'static Regex {
-    static CMD: OnceLock<Regex> = OnceLock::new();
-    static WORKDIR: OnceLock<Regex> = OnceLock::new();
-    let slot = if name == "cmd" { &CMD } else { &WORKDIR };
-    slot.get_or_init(|| {
-        Regex::new(&format!(r#"(?s)\b{name}\s*:\s*(\"(?:\\.|[^\"\\])*\")"#)).expect("static regex")
-    })
+struct StaticJsParser<'a> {
+    source: &'a [u8],
+    cursor: usize,
 }
 
-fn tuple_regex() -> &'static Regex {
-    static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| {
-        Regex::new(
-            r#"(?s)\[\s*(\"(?:\\.|[^\"\\])*\")\s*,\s*(\"(?:\\.|[^\"\\])*\")\s*,\s*(\"(?:\\.|[^\"\\])*\")\s*\]"#,
-        )
-        .expect("static regex")
-    })
+impl<'a> StaticJsParser<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            source: source.as_bytes(),
+            cursor: 0,
+        }
+    }
+
+    fn parse_program(mut self) -> Option<Vec<StaticNestedToolCall>> {
+        let mut calls = Vec::new();
+        let mut terminal_output_statements = 0_usize;
+        loop {
+            self.skip_program_trivia()?;
+            if self.cursor == self.source.len() {
+                break;
+            }
+            if terminal_output_statements == 0 {
+                if let Some(call) = self.parse_tool_statement() {
+                    calls.push(call);
+                    if calls.len() > MAX_STATIC_NESTED_TOOL_CALLS {
+                        return None;
+                    }
+                    continue;
+                }
+            }
+            if self.parse_terminal_output_statement() {
+                terminal_output_statements += 1;
+                if terminal_output_statements > MAX_STATIC_NESTED_TOOL_CALLS {
+                    return None;
+                }
+                continue;
+            }
+            return None;
+        }
+        Some(calls)
+    }
+
+    fn parse_terminal_output_statement(&mut self) -> bool {
+        let checkpoint = self.cursor;
+        if !self.consume_keyword("text") {
+            return false;
+        }
+        self.skip_whitespace();
+        if !self.consume_byte(b'(') {
+            self.cursor = checkpoint;
+            return false;
+        }
+        self.skip_whitespace();
+        if self.parse_identifier().is_none() {
+            self.cursor = checkpoint;
+            return false;
+        }
+        loop {
+            if !self.consume_byte(b'.') {
+                break;
+            }
+            if self.parse_identifier().is_none() {
+                self.cursor = checkpoint;
+                return false;
+            }
+        }
+        self.skip_whitespace();
+        if !self.consume_byte(b')') {
+            self.cursor = checkpoint;
+            return false;
+        }
+        if !self.consume_statement_terminator() {
+            self.cursor = checkpoint;
+            return false;
+        }
+        true
+    }
+
+    fn consume_statement_terminator(&mut self) -> bool {
+        self.skip_whitespace();
+        if self.consume_byte(b';') {
+            return true;
+        }
+        let saved = self.cursor;
+        if self.skip_program_trivia().is_some() && self.cursor == self.source.len() {
+            self.cursor = saved;
+            true
+        } else {
+            self.cursor = saved;
+            false
+        }
+    }
+
+    fn parse_tool_statement(&mut self) -> Option<StaticNestedToolCall> {
+        let checkpoint = self.cursor;
+        if self.consume_keyword("const") {
+            self.skip_whitespace();
+            self.parse_identifier()?;
+            self.skip_whitespace();
+            if !self.consume_byte(b'=') {
+                self.cursor = checkpoint;
+                return None;
+            }
+            self.skip_whitespace();
+        }
+        if !self.consume_keyword("await") {
+            self.cursor = checkpoint;
+            return None;
+        }
+        self.skip_whitespace();
+        if !self.consume_bytes(b"tools.") {
+            self.cursor = checkpoint;
+            return None;
+        }
+        let method = self.parse_identifier()?;
+        self.skip_whitespace();
+        if !self.consume_byte(b'(') {
+            self.cursor = checkpoint;
+            return None;
+        }
+        self.skip_whitespace();
+        let value = self.parse_static_value(0)?;
+        self.skip_whitespace();
+        if !self.consume_byte(b')') {
+            self.cursor = checkpoint;
+            return None;
+        }
+        if !self.consume_statement_terminator() {
+            self.cursor = checkpoint;
+            return None;
+        }
+        match (method.as_str(), value) {
+            ("exec_command", Value::Object(arguments)) => {
+                Some(StaticNestedToolCall::ExecCommand(arguments))
+            }
+            ("apply_patch", Value::String(patch)) => Some(StaticNestedToolCall::ApplyPatch(patch)),
+            _ => {
+                self.cursor = checkpoint;
+                None
+            }
+        }
+    }
+
+    fn parse_static_value(&mut self, depth: usize) -> Option<Value> {
+        if depth > MAX_STATIC_LITERAL_DEPTH {
+            return None;
+        }
+        self.skip_whitespace();
+        match self.source.get(self.cursor).copied()? {
+            b'"' => self.parse_json_string().map(Value::String),
+            b'{' => self.parse_static_object(depth + 1).map(Value::Object),
+            b'[' => self.parse_static_array(depth + 1).map(Value::Array),
+            b't' if self.consume_keyword("true") => Some(Value::Bool(true)),
+            b'f' if self.consume_keyword("false") => Some(Value::Bool(false)),
+            b'n' if self.consume_keyword("null") => Some(Value::Null),
+            b'-' | b'0'..=b'9' => self.parse_number(),
+            _ => None,
+        }
+    }
+
+    fn parse_static_object(&mut self, depth: usize) -> Option<Map<String, Value>> {
+        self.consume_byte(b'{').then_some(())?;
+        let mut object = Map::new();
+        loop {
+            self.skip_whitespace();
+            if self.consume_byte(b'}') {
+                return Some(object);
+            }
+            if object.len() >= MAX_STATIC_LITERAL_ITEMS {
+                return None;
+            }
+            let key = if self.source.get(self.cursor) == Some(&b'"') {
+                self.parse_json_string()?
+            } else {
+                self.parse_identifier()?
+            };
+            self.skip_whitespace();
+            self.consume_byte(b':').then_some(())?;
+            let value = self.parse_static_value(depth)?;
+            if object.insert(key, value).is_some() {
+                return None;
+            }
+            self.skip_whitespace();
+            if self.consume_byte(b'}') {
+                return Some(object);
+            }
+            self.consume_byte(b',').then_some(())?;
+        }
+    }
+
+    fn parse_static_array(&mut self, depth: usize) -> Option<Vec<Value>> {
+        self.consume_byte(b'[').then_some(())?;
+        let mut values = Vec::new();
+        loop {
+            self.skip_whitespace();
+            if self.consume_byte(b']') {
+                return Some(values);
+            }
+            if values.len() >= MAX_STATIC_LITERAL_ITEMS {
+                return None;
+            }
+            values.push(self.parse_static_value(depth)?);
+            self.skip_whitespace();
+            if self.consume_byte(b']') {
+                return Some(values);
+            }
+            self.consume_byte(b',').then_some(())?;
+        }
+    }
+
+    fn parse_json_string(&mut self) -> Option<String> {
+        let start = self.cursor;
+        self.consume_byte(b'"').then_some(())?;
+        let mut escaped = false;
+        while let Some(byte) = self.source.get(self.cursor).copied() {
+            self.cursor += 1;
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                return serde_json::from_slice(self.source.get(start..self.cursor)?).ok();
+            } else if byte.is_ascii_control() {
+                return None;
+            }
+        }
+        None
+    }
+
+    fn parse_number(&mut self) -> Option<Value> {
+        let start = self.cursor;
+        while self.source.get(self.cursor).is_some_and(|byte| {
+            byte.is_ascii_digit() || matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E')
+        }) {
+            self.cursor += 1;
+        }
+        serde_json::from_slice(self.source.get(start..self.cursor)?).ok()
+    }
+
+    fn parse_identifier(&mut self) -> Option<String> {
+        let start = self.cursor;
+        let first = self.source.get(self.cursor).copied()?;
+        if !first.is_ascii_alphabetic() && !matches!(first, b'_' | b'$') {
+            return None;
+        }
+        self.cursor += 1;
+        while self
+            .source
+            .get(self.cursor)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+        {
+            self.cursor += 1;
+        }
+        std::str::from_utf8(self.source.get(start..self.cursor)?)
+            .ok()
+            .map(str::to_owned)
+    }
+
+    fn consume_keyword(&mut self, keyword: &str) -> bool {
+        let start = self.cursor;
+        if !self.consume_bytes(keyword.as_bytes()) {
+            return false;
+        }
+        if self
+            .source
+            .get(self.cursor)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+        {
+            self.cursor = start;
+            return false;
+        }
+        true
+    }
+
+    fn consume_bytes(&mut self, expected: &[u8]) -> bool {
+        if self
+            .source
+            .get(self.cursor..self.cursor.saturating_add(expected.len()))
+            == Some(expected)
+        {
+            self.cursor += expected.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn consume_byte(&mut self, expected: u8) -> bool {
+        if self.source.get(self.cursor) == Some(&expected) {
+            self.cursor += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self
+            .source
+            .get(self.cursor)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            self.cursor += 1;
+        }
+    }
+
+    fn skip_program_trivia(&mut self) -> Option<()> {
+        loop {
+            self.skip_whitespace();
+            if self.source.get(self.cursor..self.cursor.saturating_add(2)) == Some(b"//") {
+                self.cursor += 2;
+                while self
+                    .source
+                    .get(self.cursor)
+                    .is_some_and(|byte| *byte != b'\n')
+                {
+                    self.cursor += 1;
+                }
+                continue;
+            }
+            if self.source.get(self.cursor..self.cursor.saturating_add(2)) == Some(b"/*") {
+                self.cursor += 2;
+                while self.source.get(self.cursor..self.cursor.saturating_add(2)) != Some(b"*/") {
+                    self.cursor += 1;
+                    if self.cursor >= self.source.len() {
+                        return None;
+                    }
+                }
+                self.cursor += 2;
+                continue;
+            }
+            return Some(());
+        }
+    }
 }
 
 fn bounded_absolute_path(value: &str) -> bool {
@@ -297,11 +567,6 @@ fn bounded_path(value: &str) -> bool {
         && value.len() <= MAX_WORKDIR_BYTES
         && !value.contains('\0')
         && !value.contains(['\r', '\n'])
-}
-
-fn deduplicate(values: &mut Vec<String>) {
-    let mut seen = std::collections::HashSet::new();
-    values.retain(|value| seen.insert(value.clone()));
 }
 
 fn decode_top_level_argument_object(value: &Value) -> Option<Map<String, Value>> {
@@ -451,18 +716,16 @@ mod tests {
     }
 
     #[test]
-    fn statically_decodes_nested_exec_workdirs_commands_and_patch_headers() {
+    fn exact_top_level_literal_calls_decode_commands_and_patch_headers() {
         let payload = json!({
             "type": "custom_tool_call",
             "name": "exec",
             "call_id": "outer-1",
             "input": r#"
-                const tasks = [
-                  ["one", "/repo/one", "git status"],
-                  ["two", "/repo/two", "git log -1"]
-                ].map(async ([name, workdir, cmd]) =>
-                  tools.exec_command({cmd, workdir}));
-                await tools.apply_patch({prompt: "*** Begin Patch\n*** Add File: /repo/one/src/new.rs\n*** Update File: /repo/one/src/lib.rs\n*** Delete File: /repo/one/src/old.rs\n*** End Patch"});
+                const first = await tools.exec_command({cmd:"git status",workdir:"/repo/one",yield_time_ms:10000});
+                const second = await tools.exec_command({cmd:"git log -1",workdir:"/repo/two"});
+                const patched = await tools.apply_patch("*** Begin Patch\n*** Add File: /repo/one/src/new.rs\n*** Update File: /repo/one/src/lib.rs\n*** Delete File: /repo/one/src/old.rs\n*** End Patch");
+                text(first.output);
             "#
         });
         let evidence = repository_tool_evidence(&payload);
@@ -498,6 +761,31 @@ mod tests {
             evidence[2].file_observations[2].kind,
             RepositoryFileObservationKind::Deleted
         );
+    }
+
+    #[test]
+    fn inert_or_dynamic_javascript_never_emits_executed_tool_evidence() {
+        for source in [
+            r#"const example = "tools.exec_command({cmd:\"git commit -m inert\",workdir:\"/repo\"})"; text(example);"#,
+            r#"// tools.exec_command({cmd:"git commit -m comment",workdir:"/repo"})
+                text("*** Add File: /repo/inert.rs");"#,
+            r#"if (false) { await tools.exec_command({cmd:"git commit -m dead",workdir:"/repo"}); }"#,
+            r#"const args = {cmd:"git commit -m dynamic",workdir:"/repo"};
+                const result = await tools.exec_command(args);"#,
+            r#"const result = await tools.exec_command({cmd:"git status",workdir:"/repo"});
+                observeDynamically(result);"#,
+            r#"text(prior.output);
+                const result = await tools.exec_command({cmd:"git status",workdir:"/repo"});"#,
+            r#"const patch = "*** Begin Patch\n*** Add File: /repo/inert.rs\n*** End Patch"; text(patch);"#,
+        ] {
+            let payload = json!({
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "outer-inert",
+                "input": source,
+            });
+            assert!(repository_tool_evidence(&payload).is_empty(), "{source}");
+        }
     }
 
     #[test]

@@ -234,6 +234,7 @@ fn repository_contract_rejects_unscoped_and_mismatched_observations() {
 #[test]
 fn missing_candidate_reuses_only_the_exact_prior_certificate_and_revokes_local_access() {
     let mut prior = record();
+    prior.repository_candidate_evidence.declared_tool_workdir = Some("/old/repo".to_owned());
     prior.repository_bindings.push(binding());
     prior
         .repository_file_observations
@@ -244,6 +245,7 @@ fn missing_candidate_reuses_only_the_exact_prior_certificate_and_revokes_local_a
             prior_relative_path: None,
         });
     let mut current = record();
+    current.repository_candidate_evidence.declared_tool_workdir = Some("/old/repo".to_owned());
     current.repository_abstentions.push(RepositoryAbstention {
         evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
         reason: RepositoryAbstentionReason::CandidateMissingBeforeCertification,
@@ -282,6 +284,48 @@ fn missing_candidate_reuses_only_the_exact_prior_certificate_and_revokes_local_a
         association_policy_revision: 1,
     }];
     assert!(!wrong_source.reuse_prior_repository_certificate(&prior));
+}
+
+#[test]
+fn prior_repository_certificate_is_bound_to_exact_generation_inputs() {
+    let mut prior = record();
+    prior.repository_candidate_evidence.declared_tool_workdir = Some("/old/repo".to_owned());
+    prior.repository_bindings.push(binding());
+
+    let missing = || {
+        let mut current = record();
+        current.repository_candidate_evidence.declared_tool_workdir = Some("/old/repo".to_owned());
+        current.repository_abstentions.push(RepositoryAbstention {
+            evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
+            reason: RepositoryAbstentionReason::CandidateMissingBeforeCertification,
+            detail: Some("candidate_missing_before_certification".to_owned()),
+            association_policy_revision: 1,
+        });
+        current
+    };
+
+    let mut moved_after_certification = missing();
+    assert!(moved_after_certification.reuse_prior_repository_certificate(&prior));
+
+    let mut changed_parser = missing();
+    changed_parser.parser_revision.push_str("-changed");
+    assert!(!changed_parser.reuse_prior_repository_certificate(&prior));
+
+    let mut changed_content = missing();
+    changed_content.content.normalized_body = Some("changed command".to_owned());
+    assert!(!changed_content.reuse_prior_repository_certificate(&prior));
+
+    let mut changed_command_digest = missing();
+    changed_command_digest.content.structured_content = Some(serde_json::json!({
+        "provider_native_tool": {"command_sha256": "changed"}
+    }));
+    assert!(!changed_command_digest.reuse_prior_repository_certificate(&prior));
+
+    let mut changed_candidate = missing();
+    changed_candidate
+        .repository_candidate_evidence
+        .declared_tool_workdir = Some("/different/repo".to_owned());
+    assert!(!changed_candidate.reuse_prior_repository_certificate(&prior));
 }
 
 #[test]
@@ -429,6 +473,10 @@ fn repository_spike_abstention_codes_have_stable_wire_names() {
         (
             RepositoryAbstentionReason::GitProbeFailed,
             "git_probe_failed",
+        ),
+        (
+            RepositoryAbstentionReason::ProbeBudgetExceeded,
+            "probe_budget_exceeded",
         ),
         (
             RepositoryAbstentionReason::ProviderOutputUnjoined,
@@ -605,7 +653,15 @@ fn replacement_lineage_and_pull_request_shapes_are_explicit() {
 fn every_repository_revision_changes_the_core_contract_fingerprint() {
     let current = CoreContractRevisions::current();
     let expected = core_record_contract_fingerprint_for(current);
+    assert_eq!(
+        expected,
+        "e425637155689c4046f57bf4efed5269b260c1b691e5f456f158aa8efdbea739"
+    );
     for changed in [
+        CoreContractRevisions {
+            repository_contract: current.repository_contract + 1,
+            ..current
+        },
         CoreContractRevisions {
             repository_observation: current.repository_observation + 1,
             ..current

@@ -448,7 +448,7 @@ pub(super) fn analyze(command: Option<&str>, base: Option<&Path>) -> CommandAnal
 
         let (git, wrapper_error) = unwrap_wrappers(&segment);
         let Some(git) = git else {
-            preserve_derived_candidate(&mut analysis, &mut command_candidates);
+            analysis.blocks_session_fallback = true;
             let (reason, detail) = opaque_segment_abstention(&segment, wrapper_error);
             push_analysis_abstention(&mut analysis, reason, detail);
             cut_off = true;
@@ -483,12 +483,7 @@ pub(super) fn analyze(command: Option<&str>, base: Option<&Path>) -> CommandAnal
                 }
             }
             Err((reason, detail)) => {
-                analysis.blocks_session_fallback |= matches!(
-                    reason,
-                    RepositoryAbstentionReason::DynamicPath
-                        | RepositoryAbstentionReason::ConflictingIdentity
-                );
-                preserve_derived_candidate(&mut analysis, &mut command_candidates);
+                analysis.blocks_session_fallback = true;
                 push_analysis_abstention(&mut analysis, reason, detail);
                 cut_off = true;
                 break;
@@ -497,8 +492,7 @@ pub(super) fn analyze(command: Option<&str>, base: Option<&Path>) -> CommandAnal
     }
     if !cut_off {
         if let Some((reason, detail)) = tokenization.terminal_abstention {
-            analysis.blocks_session_fallback |= analysis.derived_effective_cwd.is_some();
-            preserve_derived_candidate(&mut analysis, &mut command_candidates);
+            analysis.blocks_session_fallback = true;
             push_analysis_abstention(&mut analysis, reason, detail);
         }
     }
@@ -516,6 +510,7 @@ fn abstain(reason: RepositoryAbstentionReason, detail: &'static str) -> CommandA
             reason,
             detail,
         }],
+        blocks_session_fallback: true,
         ..CommandAnalysis::default()
     }
 }
@@ -530,22 +525,6 @@ fn push_analysis_abstention(
         reason,
         detail,
     });
-}
-
-fn preserve_derived_candidate(
-    analysis: &mut CommandAnalysis,
-    candidates: &mut Vec<CommandRepositoryPath>,
-) {
-    if let Some(path) = analysis.derived_effective_cwd.clone() {
-        push_command_candidate(
-            analysis,
-            candidates,
-            CommandRepositoryPath {
-                path,
-                evidence_kind: RepositoryEvidenceKind::DerivedEffectiveCwd,
-            },
-        );
-    }
 }
 
 fn push_command_candidate(

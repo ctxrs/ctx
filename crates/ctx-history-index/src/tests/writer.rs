@@ -119,6 +119,77 @@ fn replacement_reuses_missing_prior_repository_certificate_and_deletion_removes_
 }
 
 #[test]
+fn replacement_does_not_reuse_repository_certificate_after_event_semantics_change() {
+    use ctx_history_core::{
+        CoreRecordAnnotation, RepositoryAbstention, RepositoryAbstentionReason, RepositoryBinding,
+        RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
+    };
+
+    let temp = tempdir().unwrap();
+    let source = source("repository-changed-session.jsonl");
+    let initial_document = document(&source, 1, "git commit -m original");
+    let event_id = initial_document.event_id;
+    let binding = RepositoryBinding {
+        binding_id: "binding-1".to_owned(),
+        logical_repository_id: "local:repo-1".to_owned(),
+        checkout_id: None,
+        worktree_id: None,
+        aliases: Vec::new(),
+        git_object_format: None,
+        local_root_authorization: None,
+        evidence: vec![RepositoryEvidence {
+            kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
+            confidence: RepositoryEvidenceConfidence::High,
+        }],
+        association_policy_revision: 1,
+    };
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(with_annotation(
+            initial_document,
+            CoreRecordAnnotation {
+                repository_bindings: vec![binding],
+                ..CoreRecordAnnotation::default()
+            },
+        ))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    initial.commit(|_| true).unwrap();
+
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    replacement.begin_source(source.clone()).unwrap();
+    replacement
+        .add_core_record(with_annotation(
+            document(&source, 1, "git commit -m changed"),
+            CoreRecordAnnotation {
+                repository_abstentions: vec![RepositoryAbstention {
+                    evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
+                    reason: RepositoryAbstentionReason::CandidateMissingBeforeCertification,
+                    detail: None,
+                    association_policy_revision: 1,
+                }],
+                ..CoreRecordAnnotation::default()
+            },
+        ))
+        .unwrap();
+    replacement
+        .certify_source(certificate(&source, 2, 1))
+        .unwrap();
+    replacement.commit(|_| true).unwrap();
+
+    let rebuilt = VerifiedIndex::open(temp.path())
+        .unwrap()
+        .core_record_by_id(event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert!(rebuilt.repository_bindings.is_empty());
+    assert!(rebuilt.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::CandidateMissingBeforeCertification
+    }));
+}
+
+#[test]
 fn unchanged_commit_returns_the_verified_base_without_republication() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");

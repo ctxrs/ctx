@@ -12,13 +12,14 @@ use crate::{SourceKey, StableEntityId, StableEntityKind, TypedKey};
 pub const CORE_RECORD_VERSION: u32 = 1;
 pub const CORE_NORMALIZATION_REVISION: u32 = 1;
 pub const CORE_CONTENT_POLICY_REVISION: u32 = 1;
-pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 2;
+pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 3;
 pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 1;
 pub const CORE_BOUNDED_SHELL_SUBSET_REVISION: u32 = 1;
 pub const CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION: u32 = 1;
 pub const CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION: u32 = 1;
 pub const CORE_REPOSITORY_LOCATOR_FINGERPRINT_DOMAIN: &[u8] =
     b"ctx.core.repository-local-root-fingerprint.v1\0";
+const CORE_REPOSITORY_REUSE_INPUT_DOMAIN: &[u8] = b"ctx.core.repository-reuse-input.v1\0";
 pub const CORE_MISSING_ACTIVITY_TIME_UNIX_MS: i64 = i64::MIN;
 
 /// Maximum complete policy-selected content admitted to one Core record.
@@ -207,6 +208,61 @@ pub struct CoreRecordAnnotation {
     pub repository_vcs_observations: Vec<RepositoryVcsObservation>,
 }
 
+#[derive(Serialize)]
+struct RepositoryReuseInput<'a> {
+    record_version: u32,
+    event_id: StableEntityId,
+    session_id: StableEntityId,
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
+    source: &'a SourceKey,
+    provider_session_id: &'a Option<String>,
+    native_event_id: &'a Option<TypedKey>,
+    event_sequence: u64,
+    occurred_at_unix_ms: Option<i64>,
+    event_type: &'a str,
+    role: &'a Option<String>,
+    agent_type: &'a str,
+    is_primary: bool,
+    workspace: &'a Option<String>,
+    branch: &'a Option<String>,
+    cwd: &'a Option<String>,
+    parser_revision: &'a str,
+    normalization_revision: u32,
+    content: &'a CoreContent,
+    metadata: &'a BTreeMap<String, serde_json::Value>,
+    repository_candidate_evidence: &'a RepositoryCandidateEvidence,
+}
+
+impl<'a> From<&'a CoreRecord> for RepositoryReuseInput<'a> {
+    fn from(record: &'a CoreRecord) -> Self {
+        Self {
+            record_version: record.record_version,
+            event_id: record.event_id,
+            session_id: record.session_id,
+            parent_session_id: record.parent_session_id,
+            root_session_id: record.root_session_id,
+            source: &record.source,
+            provider_session_id: &record.provider_session_id,
+            native_event_id: &record.native_event_id,
+            event_sequence: record.event_sequence,
+            occurred_at_unix_ms: record.occurred_at_unix_ms,
+            event_type: &record.event_type,
+            role: &record.role,
+            agent_type: &record.agent_type,
+            is_primary: record.is_primary,
+            workspace: &record.workspace,
+            branch: &record.branch,
+            cwd: &record.cwd,
+            parser_revision: &record.parser_revision,
+            normalization_revision: record.normalization_revision,
+            content: &record.content,
+            metadata: &record.metadata,
+            repository_candidate_evidence: &record.repository_candidate_evidence,
+        }
+    }
+}
+
 impl CoreRecord {
     /// Constructs the common policy-selected Core shape while keeping the
     /// provider parser revision explicit.
@@ -349,7 +405,18 @@ impl CoreRecord {
         let same_event = self.event_id == prior.event_id
             && self.session_id == prior.session_id
             && self.source.exact_descriptor_eq(&prior.source);
-        if !missing_before_certification || !same_event || prior.repository_bindings.is_empty() {
+        let same_reuse_input = self
+            .repository_reuse_input_fingerprint()
+            .is_some_and(|current| {
+                prior
+                    .repository_reuse_input_fingerprint()
+                    .is_some_and(|previous| current == previous)
+            });
+        if !missing_before_certification
+            || !same_event
+            || !same_reuse_input
+            || prior.repository_bindings.is_empty()
+        {
             return false;
         }
 
@@ -388,6 +455,17 @@ impl CoreRecord {
             association_policy_revision,
         });
         true
+    }
+
+    fn repository_reuse_input_fingerprint(&self) -> Option<[u8; 32]> {
+        let encoded = serde_json::to_vec(&RepositoryReuseInput::from(self)).ok()?;
+        let encoded_len = u64::try_from(encoded.len()).ok()?;
+        let mut digest = Sha256::new();
+        digest.update(CORE_REPOSITORY_REUSE_INPUT_DOMAIN);
+        digest.update(CORE_REPOSITORY_CONTRACT_REVISION.to_be_bytes());
+        digest.update(encoded_len.to_be_bytes());
+        digest.update(encoded);
+        Some(digest.finalize().into())
     }
 
     fn validate_repositories(&self) -> CoreRecordResult<()> {
@@ -859,6 +937,7 @@ pub enum RepositoryAbstentionReason {
     AmbiguousCandidates,
     AmbiguousRemote,
     GitProbeFailed,
+    ProbeBudgetExceeded,
     ProviderOutputUnjoined,
     LinkageCapacityExceeded,
     OutcomeResultInadmissible,

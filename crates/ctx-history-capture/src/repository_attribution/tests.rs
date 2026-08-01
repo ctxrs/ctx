@@ -7,7 +7,9 @@ use std::{
 
 use ctx_history_core::{
     GitObjectFormat, GitObjectId, RepositoryAbstentionReason, RepositoryAlias, RepositoryAliasKind,
-    RepositoryEvidenceKind, RepositoryFileObservationKind, RepositoryVcsObservationKind,
+    RepositoryEvidenceKind, RepositoryFileObservationKind, RepositoryOutcomeKind,
+    RepositoryOutcomeLinkage, RepositoryOutcomeObservation, RepositoryVcsObservationKind,
+    CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
 };
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
@@ -264,7 +266,7 @@ fn exact_wrappers_are_accepted_and_unknown_shapes_abstain() {
 }
 
 #[test]
-fn literal_cd_survives_opaque_suffix_and_stops_before_later_inference() {
+fn literal_cd_is_preserved_as_candidate_evidence_but_not_opaque_operation_authority() {
     let temp = TempDir::new().unwrap();
     let control = temp.path().join("control");
     fs::create_dir(&control).unwrap();
@@ -283,11 +285,7 @@ fn literal_cd_survives_opaque_suffix_and_stops_before_later_inference() {
         command: Some("cd ../first && cargo test".to_owned()),
         ..AttributionInput::default()
     });
-    assert_eq!(cargo.repository_bindings.len(), 1);
-    assert_eq!(
-        cargo.repository_bindings[0].logical_repository_id,
-        "forge:github.com/acme/first"
-    );
+    assert!(cargo.repository_bindings.is_empty());
     assert!(has_reason(
         &cargo,
         RepositoryAbstentionReason::UnknownWrapper
@@ -308,15 +306,7 @@ fn literal_cd_survives_opaque_suffix_and_stops_before_later_inference() {
             )),
             ..AttributionInput::default()
         });
-        assert_eq!(annotation.repository_bindings.len(), 1, "{suffix}");
-        assert_eq!(
-            annotation.repository_bindings[0].logical_repository_id,
-            "forge:github.com/acme/first"
-        );
-        assert!(annotation.repository_bindings[0]
-            .evidence
-            .iter()
-            .any(|evidence| evidence.kind == RepositoryEvidenceKind::DerivedEffectiveCwd));
+        assert!(annotation.repository_bindings.is_empty(), "{suffix}");
         assert!(has_reason(&annotation, reason), "{suffix}");
         assert_eq!(
             annotation
@@ -341,11 +331,14 @@ fn class_f_does_not_destroy_independent_workdir_or_file_evidence() {
         command: Some("project_alias".to_owned()),
         ..AttributionInput::default()
     });
-    assert_eq!(workdir.repository_bindings.len(), 1);
-    assert!(workdir.repository_bindings[0]
-        .evidence
-        .iter()
-        .any(|evidence| evidence.kind == RepositoryEvidenceKind::DeclaredToolWorkdir));
+    assert!(workdir.repository_bindings.is_empty());
+    assert_eq!(
+        workdir
+            .repository_candidate_evidence
+            .declared_tool_workdir
+            .as_deref(),
+        Some(repo.to_string_lossy().as_ref())
+    );
     assert!(has_reason(
         &workdir,
         RepositoryAbstentionReason::UnknownWrapper
@@ -370,6 +363,107 @@ fn class_f_does_not_destroy_independent_workdir_or_file_evidence() {
     assert!(has_reason(
         &file,
         RepositoryAbstentionReason::UnknownWrapper
+    ));
+}
+
+fn exact_commit_outcome() -> RepositoryOutcomeObservation {
+    RepositoryOutcomeObservation {
+        kind: RepositoryOutcomeKind::Commit,
+        produced_object_ids: vec![GitObjectId {
+            format: GitObjectFormat::Sha1,
+            hex: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+        }],
+        replacement_lineage: Vec::new(),
+        pull_request: None,
+        observed_at_unix_ms: 1,
+        linkage: RepositoryOutcomeLinkage {
+            provider: "fixture".to_owned(),
+            origin_call_id: "origin".to_owned(),
+            result_call_id: "result".to_owned(),
+            origin_event_sequence: 1,
+            continuation_call_id_sha256: Vec::new(),
+            result_record_sha256: [7; 32],
+        },
+        outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    }
+}
+
+#[test]
+fn opaque_command_routes_block_base_certification_and_outcome_association() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "repo", None);
+    for (command, reason) in [
+        (
+            "safe-wrap git commit -m exact",
+            RepositoryAbstentionReason::UnknownWrapper,
+        ),
+        (
+            "bash -lc 'git commit -m exact'",
+            RepositoryAbstentionReason::ProfileDependent,
+        ),
+        (
+            "git -C $REPO commit -m exact",
+            RepositoryAbstentionReason::DynamicPath,
+        ),
+        (
+            "git ci -m exact",
+            RepositoryAbstentionReason::UnknownWrapper,
+        ),
+    ] {
+        let mut attributor = RepositoryAttributor::default();
+        let path = repo.to_string_lossy().into_owned();
+        let annotation = attributor.attribute(AttributionInput {
+            declared_tool_workdir: Some(path.clone()),
+            command: Some(command.to_owned()),
+            outcome_operation_repository_path: Some(path.clone()),
+            outcome_output_repository_path: Some(path.clone()),
+            outcome_observations: vec![exact_commit_outcome()],
+            ..AttributionInput::default()
+        });
+        assert!(annotation.repository_bindings.is_empty(), "{command}");
+        assert!(
+            annotation.repository_vcs_observations.is_empty(),
+            "{command}"
+        );
+        assert!(has_reason(&annotation, reason), "{command}");
+        assert!(has_reason(
+            &annotation,
+            RepositoryAbstentionReason::OutcomeRepositoryUnbound
+        ));
+        assert_eq!(
+            annotation
+                .repository_candidate_evidence
+                .declared_tool_workdir
+                .as_deref(),
+            Some(path.as_str())
+        );
+        assert_eq!(attributor.git_subprocess_count(), 0, "{command}");
+    }
+}
+
+#[test]
+fn failed_explicit_outcome_route_never_uses_sole_provider_logical_binding() {
+    let temp = TempDir::new().unwrap();
+    let missing = temp.path().join("missing");
+    let path = missing.to_string_lossy().into_owned();
+    let annotation = attribute(AttributionInput {
+        provider_native_repository_aliases: vec![forge("acme", "provider-only")],
+        command: Some(format!(
+            "git -C {path} commit -m exact && git -C {path} rev-parse HEAD"
+        )),
+        outcome_operation_repository_path: Some(path.clone()),
+        outcome_output_repository_path: Some(path),
+        outcome_observations: vec![exact_commit_outcome()],
+        ..AttributionInput::default()
+    });
+    assert_eq!(annotation.repository_bindings.len(), 1);
+    assert!(annotation.repository_bindings[0]
+        .local_root_authorization
+        .is_none());
+    assert!(annotation.repository_vcs_observations.is_empty());
+    assert!(has_reason(
+        &annotation,
+        RepositoryAbstentionReason::OutcomeRepositoryUnbound
     ));
 }
 
@@ -624,6 +718,40 @@ fn candidate_products_abstain_before_any_git_probe() {
         &commands,
         RepositoryAbstentionReason::CandidateMissingBeforeCertification
     ));
+}
+
+#[test]
+fn one_event_is_bounded_to_two_full_certificates_and_eight_git_subprocesses() {
+    let temp = TempDir::new().unwrap();
+    let repositories = [
+        repository(temp.path(), "first-budget", None),
+        repository(temp.path(), "second-budget", None),
+        repository(temp.path(), "third-budget", None),
+    ];
+    let command = repositories
+        .iter()
+        .map(|path| format!("git -C {} status", path.display()))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let mut attributor = RepositoryAttributor::default();
+    let annotation = attributor.attribute(AttributionInput {
+        command: Some(command),
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_bindings.len(), 2);
+    assert!(has_reason(
+        &annotation,
+        RepositoryAbstentionReason::ProbeBudgetExceeded
+    ));
+    assert_eq!(
+        attributor.full_certification_probe_count(),
+        super::git::MAX_FULL_CERTIFICATIONS_PER_EVENT
+    );
+    assert_eq!(
+        attributor.git_subprocess_count(),
+        super::git::MAX_GIT_SUBPROCESSES_PER_EVENT
+    );
 }
 
 #[cfg(unix)]
