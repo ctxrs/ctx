@@ -1,8 +1,9 @@
+#[cfg(unix)]
+use std::time::Duration;
 use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    time::Duration,
 };
 
 use ctx_history_core::{
@@ -15,9 +16,11 @@ use ctx_history_core::{
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+#[cfg(unix)]
+use super::git::ProbeFailure;
 use super::{
     attribute,
-    git::{CandidateKind, GitCertifier, ProbeFailure},
+    git::{CandidateKind, GitCertifier},
     AttributionInput, RepositoryAttributor, UnscopedFileObservation, UnscopedVcsObservation,
 };
 
