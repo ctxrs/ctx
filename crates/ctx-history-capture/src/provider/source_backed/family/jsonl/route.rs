@@ -36,7 +36,6 @@ use crate::{
     CaptureError, Result,
 };
 
-const FAMILY_PARSER_REVISION: &str = "borrowed-jsonl-family-v1";
 const FAMILY_POLICY_REVISION: &str = "borrowed-jsonl-certified-append-v1";
 const FAMILY_FRONTIER_KIND: &str = "borrowed-jsonl-family-checkpoint-v1";
 const FAMILY_SOURCE_REVISION_KIND: &str = "borrowed-jsonl-file-observation-v1";
