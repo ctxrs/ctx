@@ -3,9 +3,8 @@ use ctx_history_core::{EventRole, EventType, Fidelity, ProviderArtifactDescripto
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::common::time::parse_optional_rfc3339_field;
 use crate::provider::normalization::capped_text;
-use crate::{Result, CODEX_SESSION_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS};
+use crate::PROVIDER_MAX_TEXT_CHARS;
 
 mod retention;
 mod tool;
@@ -44,13 +43,6 @@ pub(crate) struct CodexNativeEvent {
     pub(crate) metadata: Value,
 }
 
-pub(crate) fn codex_session_line_timestamp(
-    value: &Value,
-    fallback: DateTime<Utc>,
-) -> Result<DateTime<Utc>> {
-    Ok(parse_optional_rfc3339_field(value, "timestamp")?.unwrap_or(fallback))
-}
-
 pub(crate) fn codex_message_body(payload: &Value) -> Option<(EventRole, Value)> {
     let role_text = payload
         .get("role")
@@ -69,32 +61,6 @@ pub(crate) fn codex_message_body(payload: &Value) -> Option<(EventRole, Value)> 
             "phase": payload.get("phase").and_then(Value::as_str),
             "text": text,
             "truncated": truncated,
-        }),
-    ))
-}
-
-/// Rebuilds the exact normalized message payload used by complete-content
-/// verification.
-pub(crate) fn codex_message_event(
-    payload: &Value,
-    line_number: usize,
-    occurred_at: DateTime<Utc>,
-) -> Option<CodexNativeEvent> {
-    let (role, body) = codex_message_body(payload)?;
-    let role_text = body.get("message_role").and_then(Value::as_str)?.to_owned();
-    Some(codex_provider_event(
-        line_number,
-        occurred_at,
-        EventType::Message,
-        Some(role),
-        body,
-        json!({
-            "source": "codex_session",
-            "source_format": CODEX_SESSION_SOURCE_FORMAT,
-            "import_scope": "fast_transcript_index",
-            "line": line_number,
-            "item_type": "message",
-            "message_role": role_text,
         }),
     ))
 }

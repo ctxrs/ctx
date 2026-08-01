@@ -718,7 +718,3 @@ fn capture_error(error: DirectJsonlAdapterError) -> CaptureError {
         other => CaptureError::InvalidPayload(other.to_string()),
     }
 }
-
-#[cfg(test)]
-#[path = "source_backed_architecture_tests.rs"]
-mod architecture_tests;

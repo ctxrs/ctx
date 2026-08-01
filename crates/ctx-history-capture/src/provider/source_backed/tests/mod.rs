@@ -6,10 +6,7 @@ mod registry;
 use std::{
     fs,
     path::PathBuf,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
 };
 
 use ctx_history_core::{

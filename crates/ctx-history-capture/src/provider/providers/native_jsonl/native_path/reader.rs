@@ -50,22 +50,6 @@ pub(crate) struct DirectJsonlProjector {
     pub(super) session: Option<DirectJsonlSession>,
 }
 
-#[cfg(test)]
-std::thread_local! {
-    static DIRECT_JSONL_PROVIDER_PROJECTIONS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(super) fn reset_provider_projection_count() {
-    DIRECT_JSONL_PROVIDER_PROJECTIONS.set(0);
-}
-
-#[cfg(test)]
-pub(super) fn provider_projection_count() -> usize {
-    DIRECT_JSONL_PROVIDER_PROJECTIONS.get()
-}
-
 impl DirectJsonlProjector {
     pub(crate) fn new(
         provider: CaptureProvider,
@@ -92,9 +76,6 @@ impl DirectJsonlProjector {
     }
 
     pub(crate) fn project_record(&mut self, record: JsonlRecordRef<'_>) -> Result<ProjectedLine> {
-        #[cfg(test)]
-        DIRECT_JSONL_PROVIDER_PROJECTIONS
-            .set(DIRECT_JSONL_PROVIDER_PROJECTIONS.get().saturating_add(1));
         self.project_record_inner(record)
     }
 

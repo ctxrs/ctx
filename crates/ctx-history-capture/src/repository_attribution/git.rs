@@ -152,6 +152,7 @@ impl GitCertifier {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn certify_at(
         &self,
         path: &Path,
@@ -232,6 +233,7 @@ impl GitCertifier {
         self.full_certification_probes.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     pub(super) fn git_subprocess_count(&self) -> usize {
         self.git_subprocesses.load(Ordering::Relaxed)
     }

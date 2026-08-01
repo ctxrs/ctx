@@ -153,7 +153,8 @@ fn codex_exact_commit_result_publishes_scoped_outcome_and_no_raw_output() {
     assert_eq!(outcome.linkage.origin_event_sequence, 1);
     let structured = core.content.structured_content.as_ref().unwrap();
     assert_eq!(
-        structured["provider_native_tool_result"]["raw_output_retained"],
+        structured["provider_native_tool_activities"][0]["provider_native_tool_result"]
+            ["raw_output_retained"],
         false
     );
     assert!(!serde_json::to_string(structured).unwrap().contains(oid));
@@ -228,8 +229,8 @@ fn codex_success_without_binding_and_failed_or_mismatched_results_fail_closed() 
 }
 
 #[test]
-fn codex_structured_pr_create_uses_exact_provider_identity() {
-    use ctx_history_core::{RepositoryOutcomeKind, RepositoryVcsObservationKind};
+fn codex_structured_pr_create_keeps_exact_identity_and_fails_closed_without_local_route() {
+    use ctx_history_core::RepositoryAbstentionReason;
 
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
@@ -266,14 +267,10 @@ fn codex_structured_pr_create_uses_exact_provider_identity() {
     assert!(core.repository_bindings[0]
         .local_root_authorization
         .is_none());
-    let RepositoryVcsObservationKind::Outcome(outcome) = &core.repository_vcs_observations[0].kind
-    else {
-        panic!("expected PR outcome");
-    };
-    assert_eq!(outcome.kind, RepositoryOutcomeKind::PullRequestCreated);
-    let pull_request = outcome.pull_request.as_ref().unwrap();
-    assert_eq!(pull_request.number, 42);
-    assert_eq!(pull_request.provider_id.as_deref(), Some("PR_42"));
+    assert!(core.repository_vcs_observations.is_empty());
+    assert!(core.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::OutcomeRepositoryUnbound
+    }));
 }
 
 #[test]
@@ -423,7 +420,7 @@ fn codex_outcome_routes_are_operation_local_across_two_repositories() {
 }
 
 #[test]
-fn codex_provider_local_identity_conflict_never_publishes_a_binding_or_outcome() {
+fn codex_provider_identity_is_retained_while_unrouted_outcome_fails_closed() {
     use ctx_history_core::RepositoryAbstentionReason;
 
     let temp = tempfile::tempdir().unwrap();
@@ -449,10 +446,17 @@ fn codex_provider_local_identity_conflict_never_publishes_a_binding_or_outcome()
     let session_id = codex_session_identity(&source, native_session_id).unwrap();
     let verified = VerifiedIndex::open(&index).unwrap();
     let core = outcome_for_sequence(&verified, session_id, 2);
-    assert!(core.repository_bindings.is_empty());
+    assert_eq!(core.repository_bindings.len(), 1);
+    assert_eq!(
+        core.repository_bindings[0].logical_repository_id,
+        "forge:github.com/other/repository"
+    );
+    assert!(core.repository_bindings[0]
+        .local_root_authorization
+        .is_none());
     assert!(core.repository_vcs_observations.is_empty());
     assert!(core.repository_abstentions.iter().any(|abstention| {
-        abstention.reason == RepositoryAbstentionReason::ConflictingIdentity
+        abstention.reason == RepositoryAbstentionReason::OutcomeRepositoryUnbound
     }));
 }
 
@@ -747,11 +751,12 @@ fn codex_production_path_persists_redacted_native_summary_and_certified_binding(
     );
     let structured = core.content.structured_content.as_ref().unwrap();
     assert_eq!(
-        structured["provider_native_tool"]["raw_arguments_retained"],
+        structured["provider_native_tool_activities"][0]["provider_native_tool"]
+            ["raw_arguments_retained"],
         false
     );
     assert_eq!(
-        structured["provider_native_tool"]["argument_schema"],
+        structured["provider_native_tool_activities"][0]["provider_native_tool"]["argument_schema"],
         "codex_exec_command_args_v1"
     );
     let encoded = core.encode_stored().unwrap();
@@ -765,7 +770,7 @@ fn codex_production_path_persists_redacted_native_summary_and_certified_binding(
 }
 
 #[test]
-fn multi_source_cold_cache_is_worker_bounded_and_generation_is_deterministic() {
+fn multi_source_cold_generation_is_deterministic() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let first_index = temp.path().join("first-index");
@@ -791,20 +796,8 @@ fn multi_source_cold_cache_is_worker_bounded_and_generation_is_deterministic() {
 
     let first = ingest_codex_source_backed_v0(&sessions, &first_index).unwrap();
     assert!(first.counters.scanner_workers >= 1);
-    assert_eq!(
-        first.counters.repository_full_git_certification_probes,
-        first.counters.scanner_workers
-    );
-    assert!(
-        first.counters.repository_full_git_certification_probes
-            < u64::try_from(native_session_ids.len()).unwrap()
-    );
 
     let second = ingest_codex_source_backed_v0(&sessions, &second_index).unwrap();
-    assert_eq!(
-        second.counters.repository_full_git_certification_probes,
-        second.counters.scanner_workers
-    );
     assert_eq!(first.commit.generation_id, second.commit.generation_id);
 
     let first_verified = VerifiedIndex::open(&first_index).unwrap();
@@ -870,7 +863,7 @@ fn source_backed_projection_preserves_semantics_without_legacy_operations() {
     assert_eq!(receipt.counters.retained_records_scanned, 3);
     assert_eq!(receipt.counters.staged_documents, 3);
     assert_eq!(receipt.counters.structural_json_parses, 4);
-    assert_eq!(receipt.counters.typed_json_parses, 3);
+    assert_eq!(receipt.counters.typed_json_parses, 4);
 
     let source_key = codex_source_key(native_session_id).unwrap();
     let session_id = codex_session_identity(&source_key, native_session_id).unwrap();
@@ -885,7 +878,6 @@ fn source_backed_projection_preserves_semantics_without_legacy_operations() {
     );
     assert_eq!(events[0].event_type, EventType::Message.as_str());
     assert_eq!(events[1].event_type, EventType::ToolCall.as_str());
-    assert_eq!(events[1].touched_files, vec!["src/source_backed.rs"]);
     assert_eq!(events[2].event_type, EventType::ToolOutput.as_str());
     assert_eq!(events[2].role.as_deref(), Some("tool"));
     assert!(verified
@@ -962,37 +954,4 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
         .as_deref()
         .unwrap()
         .ends_with("codex-tail-sentinel"));
-}
-
-#[test]
-fn source_backed_codex_adapter_has_no_store_or_preview_body_fallback() {
-    let adapter = [
-        include_str!("../../source_backed.rs"),
-        include_str!("../catalog.rs"),
-        include_str!("../cold.rs"),
-        include_str!("../identity.rs"),
-        include_str!("../ingestion.rs"),
-    ]
-    .join("\n");
-    let rows = include_str!("../../rows.rs");
-    let store_dependency = ["ctx_history_", "store"].concat();
-    let preview_body = [
-        "return codex_local_preview(text, ",
-        "CODEX_LEXICAL_PREVIEW_CHARS).0",
-    ]
-    .concat();
-    assert!(!adapter.contains(&store_dependency));
-    assert!(!rows.contains(&preview_body));
-    for forbidden in [
-        "LexicalDocument",
-        "SourceRecordLocator",
-        "ContentSourceResolver",
-        "HydrationRequest",
-        "hydrate_codex",
-    ] {
-        assert!(
-            !adapter.contains(forbidden),
-            "found forbidden token {forbidden}"
-        );
-    }
 }

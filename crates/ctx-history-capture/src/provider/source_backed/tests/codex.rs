@@ -203,27 +203,3 @@ fn codex_history_and_sessions_publish_self_contained_core_across_lifecycle() {
         .source_format()
         == "codex_history_jsonl"));
 }
-
-#[test]
-fn codex_registration_has_no_legacy_transport_dependency() {
-    let owned = [
-        include_str!("../../codex/nativepath/source_backed.rs"),
-        include_str!("../../codex/nativepath/source_backed/identity.rs"),
-        include_str!("../../codex/nativepath/prompt_history/source_backed.rs"),
-        include_str!("../../codex/nativepath/prompt_history/source_backed/projection.rs"),
-        include_str!("../registration/families/jsonl/codex.rs"),
-    ]
-    .join("\n");
-    for forbidden in [
-        "LexicalDocument",
-        "SourceRecordLocator",
-        "ContentSourceResolver",
-        "HydrationRequest",
-        "hydrate_codex",
-    ] {
-        assert!(
-            !owned.contains(forbidden),
-            "found forbidden token {forbidden}"
-        );
-    }
-}

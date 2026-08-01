@@ -81,22 +81,6 @@ impl CodexSessionTreeOwnership {
     }
 }
 
-#[cfg(test)]
-type CodexSessionTreeCounterObserver =
-    Arc<dyn Fn(CodexSourceBackedCountersV0) + Send + Sync + 'static>;
-#[cfg(test)]
-type CodexSessionTreeAfterScan = Arc<dyn Fn() + Send + Sync + 'static>;
-
-#[derive(Clone)]
-struct CodexSessionTreeScanControl {
-    indexer_threads: usize,
-    scanner_workers: Option<usize>,
-    #[cfg(test)]
-    counter_observer: Option<CodexSessionTreeCounterObserver>,
-    #[cfg(test)]
-    after_scan: Option<CodexSessionTreeAfterScan>,
-}
-
 pub(super) fn register_codex_session_tree_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
@@ -113,70 +97,19 @@ pub(in crate::provider::source_backed) fn register_codex_session_tree_routes(
     // The route sink does not expose its writer options yet. The production
     // path reserves the runtime-derived default indexer budget until a shared
     // scheduler supplies explicit scanner capacity through this seam.
-    register_codex_session_tree_route_with_scan_control(
+    register_codex_session_tree_route_with_indexer_threads(
         registry,
         sources,
         selection,
-        CodexSessionTreeScanControl {
-            indexer_threads: WriterOptions::default().indexer_threads,
-            scanner_workers: None,
-            #[cfg(test)]
-            counter_observer: None,
-            #[cfg(test)]
-            after_scan: None,
-        },
+        WriterOptions::default().indexer_threads,
     )
 }
 
-#[cfg(test)]
-pub(in crate::provider::source_backed) fn register_codex_session_tree_route_for_test(
-    registry: &mut SourceBackedProviderRegistry,
-    source: ProviderSource,
-    selection: SourceBackedRouteSelection,
-    scanner_workers: usize,
-    observed_counters: Arc<Mutex<Vec<CodexSourceBackedCountersV0>>>,
-    after_scan: Option<CodexSessionTreeAfterScan>,
-) -> SourceBackedCoordinatorResult<()> {
-    register_codex_session_tree_routes_for_test(
-        registry,
-        vec![source],
-        selection,
-        scanner_workers,
-        observed_counters,
-        after_scan,
-    )
-}
-
-#[cfg(test)]
-pub(in crate::provider::source_backed) fn register_codex_session_tree_routes_for_test(
-    registry: &mut SourceBackedProviderRegistry,
-    sources: Vec<ProviderSource>,
-    selection: SourceBackedRouteSelection,
-    scanner_workers: usize,
-    observed_counters: Arc<Mutex<Vec<CodexSourceBackedCountersV0>>>,
-    after_scan: Option<CodexSessionTreeAfterScan>,
-) -> SourceBackedCoordinatorResult<()> {
-    let observer: CodexSessionTreeCounterObserver = Arc::new(move |counters| {
-        observed_counters.lock().unwrap().push(counters);
-    });
-    register_codex_session_tree_route_with_scan_control(
-        registry,
-        sources,
-        selection,
-        CodexSessionTreeScanControl {
-            indexer_threads: 1,
-            scanner_workers: Some(scanner_workers),
-            counter_observer: Some(observer),
-            after_scan,
-        },
-    )
-}
-
-fn register_codex_session_tree_route_with_scan_control(
+fn register_codex_session_tree_route_with_indexer_threads(
     registry: &mut SourceBackedProviderRegistry,
     mut sources: Vec<ProviderSource>,
     selection: SourceBackedRouteSelection,
-    scan_control: CodexSessionTreeScanControl,
+    indexer_threads: usize,
 ) -> SourceBackedCoordinatorResult<()> {
     if sources.is_empty() {
         return Err(invalid_route(
@@ -288,8 +221,8 @@ fn register_codex_session_tree_route_with_scan_control(
                 &mut revalidation,
                 &mut timings,
                 &mut counters,
-                scan_control.indexer_threads,
-                scan_control.scanner_workers,
+                indexer_threads,
+                None,
             )
             .map_err(route_error)?;
             for base in base_sources.values() {
@@ -318,14 +251,6 @@ fn register_codex_session_tree_route_with_scan_control(
                 inventory: opening.certificate,
                 sources: revalidation,
             });
-            #[cfg(test)]
-            if let Some(observer) = &scan_control.counter_observer {
-                observer(counters);
-            }
-            #[cfg(test)]
-            if let Some(after_scan) = &scan_control.after_scan {
-                after_scan();
-            }
             Ok(())
         },
         move |candidate| {
