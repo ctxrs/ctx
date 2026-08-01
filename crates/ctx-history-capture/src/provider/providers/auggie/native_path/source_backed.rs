@@ -7,12 +7,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(test)]
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
-
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CoreRecord, CoreRecordError,
     EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
@@ -80,68 +74,11 @@ pub(crate) type AuggieSourceBackedResult<T> = Result<T, AuggieSourceBackedError>
 #[derive(Debug, Clone)]
 pub(crate) struct AuggieSourceBackedRoot {
     path: PathBuf,
-    #[cfg(test)]
-    open_tracker: Option<Arc<AuggieLeafOpenTracker>>,
 }
 
 impl AuggieSourceBackedRoot {
     pub(crate) fn explicit(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            #[cfg(test)]
-            open_tracker: None,
-        }
-    }
-
-    #[cfg(test)]
-    fn with_open_tracker(mut self, open_tracker: Arc<AuggieLeafOpenTracker>) -> Self {
-        self.open_tracker = Some(open_tracker);
-        self
-    }
-}
-
-#[cfg(test)]
-#[derive(Debug, Default)]
-struct AuggieLeafOpenTracker {
-    active: AtomicUsize,
-    peak: AtomicUsize,
-    total: AtomicUsize,
-}
-
-#[cfg(test)]
-impl AuggieLeafOpenTracker {
-    fn begin(self: &Arc<Self>) -> AuggieLeafOpenGuard {
-        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-        self.total.fetch_add(1, Ordering::SeqCst);
-        self.peak.fetch_max(active, Ordering::SeqCst);
-        AuggieLeafOpenGuard {
-            tracker: Arc::clone(self),
-        }
-    }
-
-    fn active(&self) -> usize {
-        self.active.load(Ordering::SeqCst)
-    }
-
-    fn peak(&self) -> usize {
-        self.peak.load(Ordering::SeqCst)
-    }
-
-    fn total(&self) -> usize {
-        self.total.load(Ordering::SeqCst)
-    }
-}
-
-#[cfg(test)]
-struct AuggieLeafOpenGuard {
-    tracker: Arc<AuggieLeafOpenTracker>,
-}
-
-#[cfg(test)]
-impl Drop for AuggieLeafOpenGuard {
-    fn drop(&mut self) {
-        let previous = self.tracker.active.fetch_sub(1, Ordering::SeqCst);
-        debug_assert!(previous > 0);
+        Self { path: path.into() }
     }
 }
 
@@ -158,27 +95,6 @@ pub(crate) struct AuggieSourceBackedInventory {
 }
 
 impl AuggieSourceBackedInventory {
-    #[cfg(test)]
-    pub(crate) fn is_complete(&self) -> bool {
-        self.status == AuggieSourceBackedInventoryStatus::Complete
-    }
-
-    #[cfg(test)]
-    fn paths(&self) -> Vec<PathBuf> {
-        self.tree
-            .as_ref()
-            .map(|tree| match &tree.authority {
-                AuggieTreeAuthority::File { selected, .. } => {
-                    vec![selected.canonical_path.clone()]
-                }
-                AuggieTreeAuthority::Directory { routes, .. } => routes
-                    .iter()
-                    .map(|route| route.canonical_path.clone())
-                    .collect(),
-            })
-            .unwrap_or_default()
-    }
-
     fn into_complete_tree(self) -> Option<AuggieDocumentTree> {
         if self.status == AuggieSourceBackedInventoryStatus::Complete {
             self.tree
@@ -252,15 +168,11 @@ enum AuggieTreeAuthority {
     File {
         root: ProviderSourceRoot,
         selected: AuggieDocumentLeaf,
-        #[cfg(test)]
-        open_tracker: Option<Arc<AuggieLeafOpenTracker>>,
     },
     Directory {
         directory: ProviderSourceDirectory,
         selection: AuggieTreeSelection,
         routes: Vec<AuggieDocumentLeaf>,
-        #[cfg(test)]
-        open_tracker: Option<Arc<AuggieLeafOpenTracker>>,
     },
 }
 
@@ -286,32 +198,9 @@ impl AuggieTreeAuthority {
         }
         Ok(stamp)
     }
-
-    #[cfg(test)]
-    fn track_open(&self) -> Option<AuggieLeafOpenGuard> {
-        match self {
-            Self::File { open_tracker, .. } | Self::Directory { open_tracker, .. } => {
-                open_tracker.as_ref().map(AuggieLeafOpenTracker::begin)
-            }
-        }
-    }
 }
 
 type AuggieDocumentTree = CompleteDocumentTree<AuggieDocumentLeaf, AuggieTreeAuthority>;
-
-/// Enumerates direct `*.json` children and closes each leaf after observation.
-#[cfg(test)]
-pub(crate) fn discover_auggie_source_backed(
-    root: &AuggieSourceBackedRoot,
-) -> AuggieSourceBackedResult<AuggieSourceBackedInventory> {
-    let inventory = discover_auggie_source_backed_unfenced(root)?;
-    if let Some(tree) = inventory.tree.as_ref() {
-        if revalidate_auggie_tree(tree)? != tree.tree_fingerprint {
-            return Err(CaptureError::SourceChangedDuringCapture.into());
-        }
-    }
-    Ok(inventory)
-}
 
 fn discover_auggie_source_backed_unfenced(
     root: &AuggieSourceBackedRoot,
@@ -330,7 +219,7 @@ fn discover_auggie_source_backed_unfenced(
     let tree = match opened {
         OpenedProviderSourcePath::File(opened) => {
             drop(opened);
-            complete_auggie_file_tree(root, selected)?
+            complete_auggie_file_tree(selected)?
         }
         OpenedProviderSourcePath::Directory(directory) => {
             let (directory, selection) =
@@ -351,7 +240,7 @@ fn discover_auggie_source_backed_unfenced(
                     }
                     Err(error) => return Err(error.into()),
                 };
-            complete_auggie_directory_tree(root, directory, selection)?
+            complete_auggie_directory_tree(directory, selection)?
         }
     };
     Ok(AuggieSourceBackedInventory {
@@ -360,10 +249,7 @@ fn discover_auggie_source_backed_unfenced(
     })
 }
 
-fn complete_auggie_file_tree(
-    _source_root: &AuggieSourceBackedRoot,
-    path: PathBuf,
-) -> AuggieSourceBackedResult<AuggieDocumentTree> {
+fn complete_auggie_file_tree(path: PathBuf) -> AuggieSourceBackedResult<AuggieDocumentTree> {
     if !is_json_path(&path) {
         return Err(invalid_source_path(
             &path,
@@ -379,17 +265,10 @@ fn complete_auggie_file_tree(
         .ok_or_else(|| invalid_source_path(&path, "Auggie source file has no authority parent"))?;
     let root = ProviderSourceRoot::open(parent)?;
     let relative_path = PathBuf::from(file_name);
-    #[cfg(test)]
-    let open_guard = _source_root
-        .open_tracker
-        .as_ref()
-        .map(AuggieLeafOpenTracker::begin);
     let opened = root.open_file(&relative_path)?;
     let stamp = AuggieFileStamp::from_opened(path.clone(), opened)?;
     let selected = AuggieDocumentLeaf::from_opened(path.clone(), relative_path, &stamp);
     drop(stamp);
-    #[cfg(test)]
-    drop(open_guard);
     let leaves = vec![observed_auggie_leaf(selected.clone())];
     let tree_fingerprint = auggie_tree_fingerprint(
         AuggieTreeSelection::ExplicitFile,
@@ -399,17 +278,11 @@ fn complete_auggie_file_tree(
     Ok(CompleteDocumentTree::new(
         tree_fingerprint,
         leaves,
-        AuggieTreeAuthority::File {
-            root,
-            selected,
-            #[cfg(test)]
-            open_tracker: _source_root.open_tracker.clone(),
-        },
+        AuggieTreeAuthority::File { root, selected },
     ))
 }
 
 fn complete_auggie_directory_tree(
-    _source_root: &AuggieSourceBackedRoot,
     directory: ProviderSourceDirectory,
     selection: AuggieTreeSelection,
 ) -> AuggieSourceBackedResult<AuggieDocumentTree> {
@@ -421,11 +294,6 @@ fn complete_auggie_directory_tree(
     let mut leaves = Vec::new();
     for name in entries {
         let path = selected_path.join(&name);
-        #[cfg(test)]
-        let open_guard = _source_root
-            .open_tracker
-            .as_ref()
-            .map(AuggieLeafOpenTracker::begin);
         match directory.open_child(&name)? {
             OpenedProviderSourcePath::File(opened) if is_json_path(&path) => {
                 let stamp = AuggieFileStamp::from_opened(path.clone(), opened)?;
@@ -437,8 +305,6 @@ fn complete_auggie_directory_tree(
             }
             OpenedProviderSourcePath::File(_) | OpenedProviderSourcePath::Directory(_) => {}
         }
-        #[cfg(test)]
-        drop(open_guard);
         if routes.len() > AUGGIE_MAX_DISCOVERED_FILES {
             return Err(invalid_source_path(
                 &selected_path,
@@ -456,8 +322,6 @@ fn complete_auggie_directory_tree(
             directory,
             selection,
             routes,
-            #[cfg(test)]
-            open_tracker: _source_root.open_tracker.clone(),
         },
     ))
 }
@@ -501,15 +365,11 @@ fn auggie_tree_fingerprint(
 fn revalidate_auggie_tree(tree: &AuggieDocumentTree) -> AuggieSourceBackedResult<[u8; 32]> {
     let (selection, authority_fingerprint) = match &tree.authority {
         AuggieTreeAuthority::File { root, selected, .. } => {
-            #[cfg(test)]
-            let open_guard = tree.authority.track_open();
             let stamp = tree.authority.open_leaf(selected)?;
             if !stamp.revalidate()? || !selected.matches(&stamp) {
                 return Err(CaptureError::SourceChangedDuringCapture.into());
             }
             drop(stamp);
-            #[cfg(test)]
-            drop(open_guard);
             root.revalidate()?;
             (
                 AuggieTreeSelection::ExplicitFile,
@@ -523,15 +383,11 @@ fn revalidate_auggie_tree(tree: &AuggieDocumentTree) -> AuggieSourceBackedResult
             ..
         } => {
             for route in routes {
-                #[cfg(test)]
-                let open_guard = tree.authority.track_open();
                 let stamp = tree.authority.open_leaf(route)?;
                 if !stamp.revalidate()? || !route.matches(&stamp) {
                     return Err(CaptureError::SourceChangedDuringCapture.into());
                 }
                 drop(stamp);
-                #[cfg(test)]
-                drop(open_guard);
             }
             directory.revalidate()?;
             directory.authority_root().revalidate()?;
@@ -552,24 +408,11 @@ fn revalidate_auggie_tree(tree: &AuggieDocumentTree) -> AuggieSourceBackedResult
 struct AuggieDocumentTreeAdapter {
     root: AuggieSourceBackedRoot,
     context: ProviderAdapterContext,
-    #[cfg(test)]
-    parse_count: Option<Arc<AtomicUsize>>,
 }
 
 impl AuggieDocumentTreeAdapter {
     fn new(root: AuggieSourceBackedRoot, context: ProviderAdapterContext) -> Self {
-        Self {
-            root,
-            context,
-            #[cfg(test)]
-            parse_count: None,
-        }
-    }
-
-    #[cfg(test)]
-    fn with_parse_count(mut self, parse_count: Arc<AtomicUsize>) -> Self {
-        self.parse_count = Some(parse_count);
-        self
+        Self { root, context }
     }
 }
 
@@ -605,12 +448,7 @@ impl ReplacementDocumentTree for AuggieDocumentTreeAdapter {
         leaf: &Self::Leaf,
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
-        scan_changed_auggie_document(authority, leaf, &self.context, sink, || {
-            #[cfg(test)]
-            if let Some(parse_count) = self.parse_count.as_ref() {
-                parse_count.fetch_add(1, Ordering::Relaxed);
-            }
-        })
+        scan_changed_auggie_document(authority, leaf, &self.context, sink)
     }
 
     fn revalidate_complete(&self, tree: &AuggieDocumentTree) -> SourceBackedRouteResult<[u8; 32]> {
@@ -623,12 +461,8 @@ fn scan_changed_auggie_document(
     leaf: &AuggieDocumentLeaf,
     context: &ProviderAdapterContext,
     sink: &mut ChangedDocumentSink<'_, '_>,
-    observe_parse: impl FnOnce(),
 ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
-    #[cfg(test)]
-    let open_guard = authority.track_open();
     let stamp = authority.open_leaf(leaf).map_err(route_error)?;
-    observe_parse();
     let parsed = parse_opened_auggie_source(stamp, context).map_err(route_error)?;
     let ParsedAuggieSource {
         stamp,
@@ -645,8 +479,6 @@ fn scan_changed_auggie_document(
     let observation = auggie_source_observation(&source, &stamp).map_err(route_error)?;
     let certified_bytes = stamp.len;
     drop(stamp);
-    #[cfg(test)]
-    drop(open_guard);
     sink.begin_source(source.clone())?;
     let mut event_ids = HashSet::with_capacity(events.len());
     let mut indexed_documents = 0_u64;

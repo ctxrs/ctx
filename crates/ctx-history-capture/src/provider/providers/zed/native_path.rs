@@ -178,19 +178,6 @@ struct ZedAdmittedSqliteComponent {
     file: OpenedProviderSourceFile,
 }
 
-pub(super) fn into_capture_error(error: ZedNativePathError) -> CaptureError {
-    match error {
-        ZedNativePathError::Capture(error) => error,
-        ZedNativePathError::Io(error) => CaptureError::Io(error),
-        ZedNativePathError::Sqlite(error) => CaptureError::Sqlite(error),
-        ZedNativePathError::SqliteSourceAccess(error) => CaptureError::SystemIo {
-            operation: "accessing a root-authorized Zed SQLite source",
-            source: io::Error::other(error),
-        },
-        ZedNativePathError::UnsupportedSchema(reason) => CaptureError::UnsupportedSchema(reason),
-    }
-}
-
 impl ZedAdmittedSqliteFamily {
     fn open(data_root: &Path, path: &Path) -> ZedNativeResult<Self> {
         let parent = path

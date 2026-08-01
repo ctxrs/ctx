@@ -186,12 +186,8 @@ impl RovoDevTreeAuthority {
             .as_deref()
             .map(provider_thread_session_identity)
             .transpose()?;
-        let root_session_id = resolve_root_session(
-            &mut lineage,
-            &self.sources,
-            &self.counters,
-            &header.provider_session_id,
-        )?;
+        let root_session_id =
+            resolve_root_session(&mut lineage, &self.sources, &header.provider_session_id)?;
         Ok(RovoDevBoundDocument {
             source_key: header.source_key,
             provider_session_id: header.provider_session_id,
@@ -241,9 +237,7 @@ fn document_header(
 
 fn probe_document_header(
     source: &RovoDevOpenedSource,
-    counters: &RovoDevWorkCounters,
 ) -> RovoDevSourceBackedResult<RovoDevDocumentHeader> {
-    counters.record_ancestor_header_probe();
     let files = source.open_files()?;
     let fallback = || document_header(source.source.provider_session_id.clone(), None);
     if source.opening.context_length() > MAX_PROVIDER_JSONL_LINE_BYTES as u64 {
@@ -341,7 +335,6 @@ fn register_document_header(
 fn ensure_document_header(
     lineage: &mut RovoDevLineageCache,
     sources: &[RovoDevOpenedSource],
-    counters: &RovoDevWorkCounters,
     source_index: usize,
 ) -> RovoDevSourceBackedResult<RovoDevDocumentHeader> {
     if let Some(header) = lineage.headers.get(source_index).and_then(Option::as_ref) {
@@ -350,7 +343,7 @@ fn ensure_document_header(
     let source = sources
         .get(source_index)
         .ok_or(RovoDevSourceBackedError::CountMismatch)?;
-    let header = probe_document_header(source, counters)?;
+    let header = probe_document_header(source)?;
     register_document_header(lineage, source_index, header.clone())?;
     Ok(header)
 }
@@ -358,7 +351,6 @@ fn ensure_document_header(
 fn find_document_header(
     lineage: &mut RovoDevLineageCache,
     sources: &[RovoDevOpenedSource],
-    counters: &RovoDevWorkCounters,
     provider_session_id: &str,
 ) -> RovoDevSourceBackedResult<Option<RovoDevDocumentHeader>> {
     let source = rovodev_source_key(provider_session_id)?;
@@ -383,7 +375,7 @@ fn find_document_header(
         .unwrap_or_default();
     for index in directory_candidates {
         if lineage.headers.get(index).is_some_and(Option::is_none) {
-            let header = ensure_document_header(lineage, sources, counters, index)?;
+            let header = ensure_document_header(lineage, sources, index)?;
             if header.provider_session_id == provider_session_id {
                 return Ok(Some(header));
             }
@@ -392,7 +384,7 @@ fn find_document_header(
     while lineage.next_unprobed < sources.len() {
         let index = lineage.next_unprobed;
         lineage.next_unprobed = lineage.next_unprobed.saturating_add(1);
-        let header = ensure_document_header(lineage, sources, counters, index)?;
+        let header = ensure_document_header(lineage, sources, index)?;
         if header.provider_session_id == provider_session_id {
             return Ok(Some(header));
         }
@@ -403,7 +395,6 @@ fn find_document_header(
 fn resolve_root_session(
     lineage: &mut RovoDevLineageCache,
     sources: &[RovoDevOpenedSource],
-    counters: &RovoDevWorkCounters,
     provider_session_id: &str,
 ) -> RovoDevSourceBackedResult<StableEntityId> {
     if let Some(root) = lineage.roots.get(provider_session_id).copied() {
@@ -413,7 +404,6 @@ fn resolve_root_session(
     let mut visited = HashSet::new();
     let mut cursor = provider_session_id.to_owned();
     let root = loop {
-        counters.record_lineage_visit();
         if let Some(root) = lineage.roots.get(&cursor).copied() {
             break root;
         }
@@ -421,7 +411,7 @@ fn resolve_root_session(
             return Err(RovoDevSourceBackedError::LineageCycle(cursor));
         }
         path.push(cursor.clone());
-        let Some(header) = find_document_header(lineage, sources, counters, &cursor)? else {
+        let Some(header) = find_document_header(lineage, sources, &cursor)? else {
             break provider_thread_session_identity(&cursor)?;
         };
         let Some(parent) = header.parent_provider_session_id else {
@@ -652,7 +642,7 @@ fn open_leaf(
     if source.proof()? != leaf.proof {
         return Err(CaptureError::SourceChangedDuringCapture.into());
     }
-    RovoDevSnapshot::read(source, context, &authority.counters)
+    RovoDevSnapshot::read(source, context)
 }
 
 fn checked_add(left: u64, right: u64) -> RovoDevSourceBackedResult<u64> {

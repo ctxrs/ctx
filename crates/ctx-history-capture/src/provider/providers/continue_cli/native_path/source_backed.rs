@@ -2,12 +2,6 @@
 
 use std::path::PathBuf;
 
-#[cfg(test)]
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
-
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
     EventIdentityInput, EventType, NativeItemKey, NativeSessionKey, ProjectionContractError,
@@ -90,21 +84,11 @@ pub(crate) type ContinueSourceBackedOutcome = SourceBackedCoordinatorResult<()>;
 /// Provider state for one canonical replacement-document route.
 pub(crate) struct ContinueSourceBackedReader {
     root: PathBuf,
-    #[cfg(test)]
-    parse_count: Option<Arc<AtomicUsize>>,
-    #[cfg(test)]
-    after_scan: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl ContinueSourceBackedReader {
     fn explicit(root: PathBuf) -> Self {
-        Self {
-            root,
-            #[cfg(test)]
-            parse_count: None,
-            #[cfg(test)]
-            after_scan: None,
-        }
+        Self { root }
     }
 
     pub(crate) fn register(
@@ -114,18 +98,6 @@ impl ContinueSourceBackedReader {
     ) -> ContinueSourceBackedOutcome {
         let adapter = Self::explicit(source.path.clone());
         register_replacement_document_tree_route(registry, source, selection, adapter)
-    }
-
-    #[cfg(test)]
-    fn with_parse_count(mut self, parse_count: Arc<AtomicUsize>) -> Self {
-        self.parse_count = Some(parse_count);
-        self
-    }
-
-    #[cfg(test)]
-    fn with_after_scan(mut self, after_scan: Arc<dyn Fn() + Send + Sync>) -> Self {
-        self.after_scan = Some(after_scan);
-        self
     }
 }
 
@@ -174,16 +146,7 @@ impl ReplacementDocumentTree for ContinueSourceBackedReader {
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
         let snapshot = authority.open_source(leaf).map_err(route_error)?;
-        #[cfg(test)]
-        if let Some(parse_count) = self.parse_count.as_ref() {
-            parse_count.fetch_add(1, Ordering::Relaxed);
-        }
-        let terminal = scan_continue_document(snapshot, authority, sink)?;
-        #[cfg(test)]
-        if let Some(after_scan) = self.after_scan.as_ref() {
-            after_scan();
-        }
-        Ok(terminal)
+        scan_continue_document(snapshot, authority, sink)
     }
 
     fn revalidate_complete(

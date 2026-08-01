@@ -24,64 +24,6 @@ const CATALOG_MAX_PATH_BYTES: usize = 4 * 1024;
 const LEAF_DOMAIN: &[u8] = b"ctx.codebuddy.document-leaf.v1\0";
 const TREE_DOMAIN: &[u8] = b"ctx.codebuddy.document-tree.v1\0";
 
-#[cfg(test)]
-std::thread_local! {
-    static BODY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static DISCOVERY_OPERATIONS: std::cell::Cell<[usize; 3]> =
-        const { std::cell::Cell::new([0; 3]) };
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct DiscoveryOperationCounts {
-    pub(super) route_inspections: usize,
-    pub(super) indexed_path_lookups: usize,
-    pub(super) indexed_parent_lookups: usize,
-}
-
-#[cfg(test)]
-pub(super) fn reset_body_reads() {
-    BODY_READS.with(|reads| reads.set(0));
-}
-
-#[cfg(test)]
-pub(super) fn body_reads() -> usize {
-    BODY_READS.with(std::cell::Cell::get)
-}
-
-pub(super) fn note_body_read() {
-    #[cfg(test)]
-    BODY_READS.with(|reads| reads.set(reads.get().saturating_add(1)));
-}
-
-#[cfg(test)]
-pub(super) fn reset_discovery_operations() {
-    DISCOVERY_OPERATIONS.with(|operations| operations.set([0; 3]));
-}
-
-#[cfg(test)]
-pub(super) fn discovery_operations() -> DiscoveryOperationCounts {
-    let [route_inspections, indexed_path_lookups, indexed_parent_lookups] =
-        DISCOVERY_OPERATIONS.with(std::cell::Cell::get);
-    DiscoveryOperationCounts {
-        route_inspections,
-        indexed_path_lookups,
-        indexed_parent_lookups,
-    }
-}
-
-#[inline(always)]
-fn note_discovery_operation(operation: usize) {
-    #[cfg(test)]
-    DISCOVERY_OPERATIONS.with(|operations| {
-        let mut current = operations.get();
-        current[operation] = current[operation].saturating_add(1);
-        operations.set(current);
-    });
-    #[cfg(not(test))]
-    let _ = operation;
-}
-
 #[derive(Debug)]
 pub(super) struct CodeBuddyDocumentLeaf {
     pub(super) source: SourceKey,
@@ -128,44 +70,6 @@ pub(super) struct CodeBuddyTreeAuthority {
     selection: CatalogSelection,
     routes: Vec<CatalogRoute>,
     index: DiscoveryIndex,
-}
-
-impl CodeBuddyTreeAuthority {
-    #[cfg(test)]
-    pub(super) fn retained_handles(&self) -> usize {
-        1
-    }
-
-    #[cfg(test)]
-    pub(super) fn route_count(&self) -> usize {
-        self.routes.len()
-    }
-
-    #[cfg(test)]
-    pub(super) fn indexed_extension_fingerprints_match_full_scan(
-        &self,
-        leaves: &[ObservedDocumentLeaf<CodeBuddyDocumentLeaf>],
-    ) -> bool {
-        leaves.iter().all(|leaf| {
-            let DocumentLeafKind::Extension { session_index, .. } = &leaf.provider_leaf.kind else {
-                return true;
-            };
-            let session = session_index
-                .relative_path
-                .parent()
-                .unwrap_or_else(|| Path::new(""));
-            let project_index = session
-                .parent()
-                .unwrap_or_else(|| Path::new(""))
-                .join("index.json");
-            inspection::full_scan_extension_fingerprint(
-                &leaf.provider_leaf.source,
-                session,
-                &project_index,
-                &self.routes,
-            ) == leaf.fingerprint
-        })
-    }
 }
 
 pub(super) type CodeBuddyDocumentTree =
@@ -389,7 +293,6 @@ pub(super) fn read_observed_file(
     expected: &CodeBuddyObservedFile,
     maximum_bytes: usize,
 ) -> Result<Vec<u8>> {
-    note_body_read();
     open_observed_file(root, expected)?.read_all_bounded(maximum_bytes)
 }
 

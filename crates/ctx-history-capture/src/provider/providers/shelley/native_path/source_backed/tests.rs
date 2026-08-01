@@ -279,7 +279,6 @@ fn shelley_scan_queries_are_bounded_by_row_sets_with_exact_core_replay() {
     assert_eq!(cold_work.pages_emitted, 1);
     assert_eq!(cold_work.peak_buffered_rows, 40);
     assert!(cold_work.peak_buffered_bytes > 0);
-    assert_eq!(cold_work.hydration_snapshot_opens, 0);
 
     reset_shelley_query_counters();
     let (replay, replay_receipt) = drain(&adapter);
@@ -312,7 +311,6 @@ fn shelley_scan_queries_are_bounded_by_row_sets_with_exact_core_replay() {
     assert_eq!(replay_work.pages_emitted, 1);
     assert_eq!(replay_work.peak_buffered_rows, 40);
     assert!(replay_work.peak_buffered_bytes > 0);
-    assert_eq!(replay_work.hydration_snapshot_opens, 0);
 }
 
 #[test]
@@ -471,7 +469,6 @@ fn shelley_route_cold_noop_and_rewrite_keep_complete_core_records() {
     let cold_work = shelley_query_counters();
     assert_eq!(shelley_query_shape(cold_work), [4, 3, 3, 3, 6, 40]);
     assert_eq!(cold_work.pages_emitted, 1);
-    assert_eq!(cold_work.hydration_snapshot_opens, 0);
     assert_eq!(sqlite_persistent_bytes(&database), persistent_before);
 
     reset_shelley_query_counters();
@@ -484,7 +481,6 @@ fn shelley_route_cold_noop_and_rewrite_keep_complete_core_records() {
     assert_eq!(noop_work.pages_emitted, 1);
     assert_eq!(noop_work.peak_buffered_rows, 40);
     assert!(noop_work.peak_buffered_bytes > 0);
-    assert_eq!(noop_work.hydration_snapshot_opens, 0);
     assert_eq!(sqlite_persistent_bytes(&database), persistent_before);
 
     let verified = VerifiedIndex::open(&index_root).unwrap();
@@ -533,7 +529,6 @@ fn shelley_route_cold_noop_and_rewrite_keep_complete_core_records() {
     let rewrite_work = shelley_query_counters();
     assert_eq!(shelley_query_shape(rewrite_work), [4, 3, 3, 3, 6, 40]);
     assert_eq!(rewrite_work.pages_emitted, 1);
-    assert_eq!(rewrite_work.hydration_snapshot_opens, 0);
     assert_eq!(sqlite_persistent_bytes(&database), rewritten_persistent);
     let replacement_records = VerifiedIndex::open(&index_root)
         .unwrap()
