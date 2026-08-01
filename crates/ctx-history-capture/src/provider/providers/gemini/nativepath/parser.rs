@@ -19,9 +19,8 @@ use sha2::{Digest, Sha256};
 use std::cell::Cell;
 
 use crate::{
-    CaptureError, OutputAssociations, OutputNativeCoordinate, OutputObservationKind, OutputOutcome,
-    OutputOutcomeMetadata, OutputSourceLocator, ProOutputObservation, Result,
-    MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
+    CaptureError, OutputOutcome, OutputOutcomeMetadata, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
+    PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 #[cfg(test)]
@@ -33,9 +32,9 @@ use super::dto::{
 };
 use super::dto::{
     GeminiEventBody, GeminiEventIdentity, GeminiFileObservation, GeminiNativeOrder,
-    GeminiNativePathProfile, GeminiRetainedEvent, GeminiScanError, GeminiScanResult, GeminiSession,
-    GeminiSourceLocator, GeminiSourceRecordEvidence, GeminiToolCall, GeminiTouchOverflow,
-    GeminiTranscriptLayout, GeminiTranscriptSource,
+    GeminiRetainedEvent, GeminiScanError, GeminiScanResult, GeminiSession,
+    GeminiSourceRecordEvidence, GeminiToolCall, GeminiTouchOverflow, GeminiTranscriptLayout,
+    GeminiTranscriptSource,
 };
 
 mod identity;
@@ -63,7 +62,6 @@ const BODY_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-retained-body-v1\0";
 const RESULT_STRING_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-result-string-v1\0";
 const RESULT_UNSUPPORTED_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-result-unsupported-v1\0";
 const RESULT_FALLBACK_ID_DOMAIN: &[u8] = b"ctx-gemini-nativepath-result-fallback-id-v1\0";
-const OUTPUT_UNIT_KEY_DOMAIN: &[u8] = b"ctx-gemini-nativepath-output-unit-key-v1\0";
 const PREFIX_HASH_DOMAIN: &[u8] = b"ctx-gemini-nativepath-complete-prefix-v1\0";
 #[cfg(test)]
 const CORE_PAGE_IDENTITY_DOMAIN: &[u8] = b"ctx-gemini-nativepath-core-page-v2\0";
@@ -72,7 +70,6 @@ const PREFIX_HASH_BUFFER_BYTES: usize = 64 * 1024;
 #[cfg(test)]
 const PAGE_ENVELOPE_FIXED_BYTES: usize = 4 * 1024;
 const EVENT_ENVELOPE_FIXED_BYTES: usize = 1024;
-const OUTPUT_ENVELOPE_FIXED_BYTES: usize = 1024;
 #[cfg(test)]
 const REJECTION_ENVELOPE_FIXED_BYTES: usize = 512;
 #[cfg(test)]
@@ -89,7 +86,6 @@ thread_local! {
     static TEST_RECORD_READS: Cell<u64> = const { Cell::new(0) };
     static TEST_PREFIX_BYTES_HASHED: Cell<u64> = const { Cell::new(0) };
     static TEST_RESULT_SELECTIVE_PASSES: Cell<u64> = const { Cell::new(0) };
-    static TEST_RESULT_FULL_DECODINGS: Cell<u64> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -97,16 +93,11 @@ pub(super) fn reset_gemini_parse_counters() {
     TEST_RECORD_READS.set(0);
     TEST_PREFIX_BYTES_HASHED.set(0);
     TEST_RESULT_SELECTIVE_PASSES.set(0);
-    TEST_RESULT_FULL_DECODINGS.set(0);
 }
 
 #[cfg(test)]
-pub(super) fn gemini_parse_counters() -> (u64, u64, u64) {
-    (
-        TEST_RECORD_READS.get(),
-        TEST_RESULT_SELECTIVE_PASSES.get(),
-        TEST_RESULT_FULL_DECODINGS.get(),
-    )
+pub(super) fn gemini_parse_counters() -> (u64, u64) {
+    (TEST_RECORD_READS.get(), TEST_RESULT_SELECTIVE_PASSES.get())
 }
 
 #[cfg(test)]
@@ -227,16 +218,7 @@ impl GeminiBorrowedRecordParser {
         };
         let events = match class {
             GeminiRecordClass::Result => {
-                let decoded = match decode_result_record(
-                    payload,
-                    GeminiNativePathProfile::CoreOnly,
-                    &self.source,
-                    &self.session,
-                    raw_ordinal,
-                    source_record,
-                    byte_start,
-                    byte_end_exclusive,
-                ) {
+                let decoded = match decode_result_record(payload, raw_ordinal, source_record) {
                     Ok(decoded) => decoded,
                     Err(_) => return Ok(Vec::new()),
                 };

@@ -6,7 +6,7 @@
 //! without retaining publication state.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -48,7 +48,7 @@ const FORGECODE_LOGICAL_EVENT_KIND: &str = "forgecode-message";
 const FORGECODE_NATIVE_EVENT_POSITION_KIND: &str = "forgecode-message-index-v1";
 const FORGECODE_RECORD_DIGEST_DOMAIN: &[u8] = b"ctx.forgecode.source-backed-scan-v0\0";
 const FORGECODE_SOURCE_BACKED_PARSER_REVISION: &str =
-    "forgecode-nativepath-source-backed-v0:parser=1;policy=6";
+    "forgecode-nativepath-source-backed-v0:parser=1;policy=7";
 
 #[derive(Debug, Error)]
 pub(crate) enum ForgeCodeSourceBackedErrorV0 {
@@ -154,7 +154,8 @@ fn project_source_backed_page(
         )
         .into());
     }
-    let ignored_records = ignored_output_records(&page)?;
+    let ignored_records = u64::try_from(page.ignored_output_records)
+        .map_err(|_| ForgeCodeSourceBackedErrorV0::CountOverflow)?;
     let direct_touches = direct_touches(&page);
     let row = page.row.as_ref();
     let mut documents = Vec::with_capacity(page.events.len());
@@ -315,26 +316,6 @@ fn direct_touches(page: &ForgeCodePage) -> BTreeMap<u64, Vec<String>> {
     touches
 }
 
-fn ignored_output_records(page: &ForgeCodePage) -> ForgeCodeSourceBackedResultV0<u64> {
-    let retained = page
-        .events
-        .iter()
-        .filter_map(|event| event.provider_event_index.checked_sub(1))
-        .filter_map(|index| u32::try_from(index).ok())
-        .collect::<BTreeSet<_>>();
-    page.outputs.iter().try_fold(0_u64, |count, output| {
-        let retained_in_core = output
-            .coordinate
-            .source_record_subrecord_index
-            .is_some_and(|index| retained.contains(&index));
-        if retained_in_core {
-            Ok(count)
-        } else {
-            checked_add(count, 1)
-        }
-    })
-}
-
 fn forgecode_session_id(
     source: &SourceKey,
     conversation_id: &str,
@@ -457,7 +438,6 @@ impl ReplacementDocumentTree for ForgeCodeSourceSelectionV0 {
             authority.native.clone(),
             ForgeCodeFrontier::initial(),
             context,
-            true,
         )
         .map_err(route_error)?;
         let mut content_digest = Sha256::new();

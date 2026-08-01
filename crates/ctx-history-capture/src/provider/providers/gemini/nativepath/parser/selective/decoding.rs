@@ -3,25 +3,12 @@ use super::*;
 #[allow(clippy::too_many_arguments)]
 pub(in super::super) fn decode_result_record(
     payload: &[u8],
-    profile: GeminiNativePathProfile,
-    source: &GeminiTranscriptSource,
-    session: &GeminiSession,
     raw_ordinal: u64,
     source_record: GeminiSourceRecordEvidence,
-    byte_start: u64,
-    byte_end_exclusive: u64,
 ) -> std::result::Result<DecodedGeminiResult, String> {
     #[cfg(test)]
     TEST_RESULT_SELECTIVE_PASSES.set(TEST_RESULT_SELECTIVE_PASSES.get().saturating_add(1));
-    let capture_full_content = profile == GeminiNativePathProfile::CoreAndTransientOutputs;
-    #[cfg(test)]
-    if capture_full_content {
-        TEST_RESULT_FULL_DECODINGS.set(TEST_RESULT_FULL_DECODINGS.get().saturating_add(1));
-    }
-    // This is the record's sole decoding pass. CoreOnly computes only the
-    // bounded transient material needed to recognize the exact released
-    // positional hash; the same visitor captures full Pro content.
-    let result = parse_result_record_selectively(payload, capture_full_content)?;
+    let result = parse_result_record_selectively(payload)?;
     let occurred_at_unix_ms = result.occurred_at_unix_ms;
     let native_record_id = result.native_record_id;
     let mut probed = result.outputs;
@@ -32,8 +19,6 @@ pub(in super::super) fn decode_result_record(
     }
     let mut decoded = DecodedGeminiResult {
         events: Vec::new(),
-        outputs: Vec::new(),
-        output_reservations: Vec::new(),
         decoded_body_bytes: 0,
         failure_diagnostics: 0,
         failure_previews: 0,
@@ -52,8 +37,7 @@ pub(in super::super) fn decode_result_record(
             .and_then(|call_id| result_call_counts.get(call_id))
             .is_some_and(|count| *count != 1);
     }
-    for (index, mut probed) in probed.into_iter().enumerate() {
-        let content = probed.content.take();
+    for (index, probed) in probed.into_iter().enumerate() {
         let retained_failure = !probed.redacted
             && matches!(
                 probed.outcome.outcome,
@@ -63,39 +47,23 @@ pub(in super::super) fn decode_result_record(
             || probed.declared_workdir.is_some()
             || !probed.file_paths.is_empty()
             || probed.ambiguous_native_fields;
-        decoded.decoded_body_bytes = decoded.decoded_body_bytes.saturating_add(
-            if profile == GeminiNativePathProfile::CoreAndTransientOutputs {
-                content.as_ref().map_or(0, |content| content.len() as u64)
-            } else if retained_failure {
-                probed
-                    .released_diagnostic_preview
-                    .as_ref()
-                    .map_or(0, |preview| preview.len() as u64)
-            } else {
-                0
-            },
-        );
+        decoded.decoded_body_bytes =
+            decoded
+                .decoded_body_bytes
+                .saturating_add(if retained_failure {
+                    probed
+                        .released_diagnostic_preview
+                        .as_ref()
+                        .map_or(0, |preview| preview.len() as u64)
+                } else {
+                    0
+                });
         let sub_ordinal = u32::try_from(index)
             .map_err(|_| "Gemini result subrecord ordinal overflowed".to_owned())?;
         let event_identity = result_event_identity(native_record_id.as_deref(), &probed);
         let GeminiEventIdentity::NativeRecordId(identity_key) = &event_identity;
         if !retained_identities.insert(identity_key.clone()) {
             continue;
-        }
-        if !probed.redacted && probed.has_output_content {
-            decoded.output_reservations.push((
-                sub_ordinal,
-                conservative_transient_output_reservation(
-                    probed.content_bytes,
-                    probed.call_id.as_deref(),
-                    &event_identity,
-                    source,
-                    session,
-                    byte_start,
-                    byte_end_exclusive,
-                    native_record_id.as_deref(),
-                )?,
-            ));
         }
         if !probed.redacted && (retained_failure || retained_repository_evidence) {
             let event = decode_output_diagnostic(
@@ -115,26 +83,6 @@ pub(in super::super) fn decode_result_record(
                 }
             }
             decoded.events.push((event.event, event_bytes));
-        }
-        if profile == GeminiNativePathProfile::CoreAndTransientOutputs
-            && !probed.redacted
-            && probed.has_output_content
-        {
-            push_transient_output(
-                &mut decoded.outputs,
-                content.unwrap_or_default(),
-                probed.outcome,
-                probed.call_id,
-                sub_ordinal,
-                event_identity,
-                source,
-                session,
-                raw_ordinal,
-                byte_start,
-                byte_end_exclusive,
-                occurred_at_unix_ms,
-                native_record_id.as_deref(),
-            )?;
         }
     }
     Ok(decoded)
@@ -235,192 +183,6 @@ enum ReleasedGeminiEventBody {
         duration_ms: Option<u64>,
         output_preview: Option<String>,
     },
-}
-
-#[allow(clippy::too_many_arguments)]
-fn conservative_transient_output_reservation(
-    output_content_bytes: usize,
-    call_id: Option<&str>,
-    event_identity: &GeminiEventIdentity,
-    source: &GeminiTranscriptSource,
-    session: &GeminiSession,
-    byte_start: u64,
-    byte_end_exclusive: u64,
-    native_record_id: Option<&str>,
-) -> std::result::Result<usize, String> {
-    let source_locator = GeminiSourceLocator {
-        path: source.path.clone(),
-        byte_start,
-        byte_end_exclusive,
-    };
-    let locator_payload = serde_json::to_vec(&source_locator)
-        .map_err(|error| format!("failed to encode Gemini output source locator: {error}"))?;
-    let unit_key = output_unit_key(session, event_identity);
-    let root_session_id = session
-        .parent_native_session_id
-        .as_deref()
-        .unwrap_or(&session.native_session_id);
-    let mut total = OUTPUT_ENVELOPE_FIXED_BYTES;
-    for value in [
-        Some(unit_key.as_str()),
-        native_record_id,
-        Some(session.native_session_id.as_str()),
-        Some(root_session_id),
-        session.parent_native_session_id.as_deref(),
-        Some(session.native_session_id.as_str()),
-        call_id,
-        Some("gemini/nativepath/jsonl-result"),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        total = total
-            .checked_add(estimated_json_string_wire_bytes(value).ok_or_else(|| {
-                "Gemini transient output reservation byte count overflowed".to_owned()
-            })?)
-            .ok_or_else(|| {
-                "Gemini transient output reservation byte count overflowed".to_owned()
-            })?;
-    }
-    total = total
-        .checked_add(
-            estimated_base64_wire_bytes(locator_payload.len()).ok_or_else(|| {
-                "Gemini transient output reservation byte count overflowed".to_owned()
-            })?,
-        )
-        .ok_or_else(|| "Gemini transient output reservation byte count overflowed".to_owned())?;
-    total
-        .checked_add(
-            estimated_base64_wire_bytes(output_content_bytes).ok_or_else(|| {
-                "Gemini transient output reservation byte count overflowed".to_owned()
-            })?,
-        )
-        .ok_or_else(|| "Gemini transient output reservation byte count overflowed".to_owned())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_transient_output(
-    outputs: &mut Vec<(ProOutputObservation, usize)>,
-    content: String,
-    outcome: OutputOutcomeMetadata,
-    call_id: Option<String>,
-    sub_ordinal: u32,
-    event_identity: GeminiEventIdentity,
-    source: &GeminiTranscriptSource,
-    session: &GeminiSession,
-    raw_ordinal: u64,
-    byte_start: u64,
-    byte_end_exclusive: u64,
-    occurred_at_unix_ms: Option<i64>,
-    native_record_id: Option<&str>,
-) -> std::result::Result<(), String> {
-    if outputs.len() >= MAX_GEMINI_NATIVE_PAGE_RECORDS {
-        return Err(format!(
-            "Gemini result record exceeds the {MAX_GEMINI_NATIVE_PAGE_RECORDS} output limit"
-        ));
-    }
-    let source_locator = GeminiSourceLocator {
-        path: source.path.clone(),
-        byte_start,
-        byte_end_exclusive,
-    };
-    let locator_payload = serde_json::to_vec(&source_locator)
-        .map_err(|error| format!("failed to encode Gemini output source locator: {error}"))?;
-    let root_session_id = session
-        .parent_native_session_id
-        .clone()
-        .unwrap_or_else(|| session.native_session_id.clone());
-    let observation = ProOutputObservation {
-        kind: OutputObservationKind::Tool,
-        coordinate: OutputNativeCoordinate {
-            unit_key: output_unit_key(session, &event_identity),
-            native_sequence: raw_ordinal,
-            native_record_id: native_record_id.map(str::to_owned),
-            source_record_ordinal: Some(raw_ordinal),
-            source_record_subrecord_index: Some(sub_ordinal),
-            byte_start: Some(byte_start),
-            byte_end_exclusive: Some(byte_end_exclusive),
-        },
-        occurred_at_unix_ms,
-        associations: OutputAssociations {
-            direct_session_id: session.native_session_id.clone(),
-            root_session_id,
-            parent_session_id: session.parent_native_session_id.clone(),
-            provider_session_id: Some(session.native_session_id.clone()),
-            agent_id: None,
-            repository: None,
-        },
-        call_id,
-        command: None,
-        outcome,
-        locator: OutputSourceLocator {
-            version: 1,
-            kind: "gemini/nativepath/jsonl-result".to_owned(),
-            payload: locator_payload,
-        },
-        content: content.into_bytes(),
-    };
-    let serialized_bytes = transient_output_bytes(&observation)?;
-    outputs.push((observation, serialized_bytes));
-    Ok(())
-}
-
-fn transient_output_bytes(
-    observation: &ProOutputObservation,
-) -> std::result::Result<usize, String> {
-    let mut total = OUTPUT_ENVELOPE_FIXED_BYTES;
-    for value in [
-        Some(observation.coordinate.unit_key.as_str()),
-        observation.coordinate.native_record_id.as_deref(),
-        Some(observation.associations.direct_session_id.as_str()),
-        Some(observation.associations.root_session_id.as_str()),
-        observation.associations.parent_session_id.as_deref(),
-        observation.associations.provider_session_id.as_deref(),
-        observation.associations.agent_id.as_deref(),
-        observation.call_id.as_deref(),
-        Some(observation.locator.kind.as_str()),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        total = total
-            .checked_add(estimated_json_string_wire_bytes(value).ok_or_else(|| {
-                "Gemini transient output serialized byte count overflowed".to_owned()
-            })?)
-            .ok_or_else(|| "Gemini transient output serialized byte count overflowed".to_owned())?;
-    }
-    if let Some(command) = &observation.command {
-        for value in [
-            Some(command.tool_name.as_str()),
-            Some(command.command.as_str()),
-            command.working_directory.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            total = total
-                .checked_add(estimated_json_string_wire_bytes(value).ok_or_else(|| {
-                    "Gemini transient output serialized byte count overflowed".to_owned()
-                })?)
-                .ok_or_else(|| {
-                    "Gemini transient output serialized byte count overflowed".to_owned()
-                })?;
-        }
-    }
-    total = total
-        .checked_add(
-            estimated_base64_wire_bytes(observation.locator.payload.len()).ok_or_else(|| {
-                "Gemini transient output serialized byte count overflowed".to_owned()
-            })?,
-        )
-        .ok_or_else(|| "Gemini transient output serialized byte count overflowed".to_owned())?;
-    total
-        .checked_add(
-            estimated_base64_wire_bytes(observation.content.len()).ok_or_else(|| {
-                "Gemini transient output serialized byte count overflowed".to_owned()
-            })?,
-        )
-        .ok_or_else(|| "Gemini transient output serialized byte count overflowed".to_owned())
 }
 
 #[derive(Debug, Deserialize)]

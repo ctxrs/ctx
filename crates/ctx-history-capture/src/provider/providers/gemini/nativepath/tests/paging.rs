@@ -184,7 +184,6 @@ fn gemini_nativepath_core_retains_failure_and_timeout_diagnostics() {
     }
     assert_eq!(outcome.metrics.result_body_hashes_created, 2);
     assert_eq!(outcome.metrics.result_previews_created, 2);
-    assert_eq!(outcome.metrics.result_handoffs_created, 0);
 }
 
 #[test]
@@ -226,5 +225,5 @@ fn gemini_nativepath_core_bounds_large_failure_diagnostic_parsing() {
     assert!(
         outcome.metrics.result_body_bytes_decoded_or_allocated <= PROVIDER_MAX_PREVIEW_CHARS as u64
     );
-    assert_eq!(gemini_parse_counters(), (2, 1, 0));
+    assert_eq!(gemini_parse_counters(), (2, 1));
 }

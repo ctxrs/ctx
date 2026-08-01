@@ -493,7 +493,7 @@ impl<'a> GeminiNativePageReader<'a> {
                     .metrics
                     .native_result_record_bytes_observed
                     .saturating_add(record.bytes_observed);
-                let Some(session) = self.state.session.as_ref() else {
+                if self.state.session.is_none() {
                     return Err(GeminiScanError::UncommittedRecord {
                         raw_ordinal: self.raw_ordinal,
                         byte_start,
@@ -501,17 +501,8 @@ impl<'a> GeminiNativePageReader<'a> {
                         reason: "Gemini result appeared before an importable session header"
                             .to_owned(),
                     });
-                };
-                let decoded = match decode_result_record(
-                    payload,
-                    GeminiNativePathProfile::CoreOnly,
-                    self.source,
-                    session,
-                    self.raw_ordinal,
-                    source_record,
-                    byte_start,
-                    byte_end_exclusive,
-                ) {
+                }
+                let decoded = match decode_result_record(payload, self.raw_ordinal, source_record) {
                     Ok(decoded) => decoded,
                     Err(reason) => {
                         return Ok(Some(self.reject_completed_record(
