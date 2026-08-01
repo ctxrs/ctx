@@ -480,7 +480,7 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
 }
 
 #[test]
-fn automatic_refresh_replaces_a_pre_settings_generation() {
+fn automatic_refresh_replaces_a_zstd_settings_generation() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let index_root = source_backed_index_root(&data_root);
@@ -527,11 +527,9 @@ fn automatic_refresh_replaces_a_pre_settings_generation() {
     let old_generation_path = index_root.join("index-generations").join(old_directory);
     let meta_path = old_generation_path.join("meta.json");
     let mut meta: Value = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
-    assert!(meta
-        .as_object_mut()
-        .unwrap()
-        .remove("index_settings")
-        .is_some());
+    meta["index_settings"]["docstore_compression"] =
+        Value::String("zstd(compression_level=1)".to_owned());
+    meta["index_settings"]["docstore_blocksize"] = Value::from(64 * 1024);
     std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
     assert!(matches!(
         VerifiedIndex::open(&index_root),
