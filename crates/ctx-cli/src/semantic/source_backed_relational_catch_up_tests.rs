@@ -142,6 +142,14 @@ fn query(data_root: &Path, sql: &str) -> Vec<Vec<RawSqlValue>> {
         .rows
 }
 
+fn sequence_value(value: u64) -> RawSqlValue {
+    RawSqlValue::Text {
+        value: format!("{value:020}"),
+        bytes: 20,
+        truncated: false,
+    }
+}
+
 fn relational_bytes(data_root: &Path) -> Vec<u8> {
     let path = sql_compatibility_path(data_root);
     let mut bytes = fs::read(&path).unwrap();
@@ -279,7 +287,7 @@ fn replace_existing_projection_publishes_only_the_new_generation() {
     assert_eq!(metadata.build_generation, 2);
     assert_eq!(
         query(temp.path(), "SELECT event_seq FROM ctx_events"),
-        vec![vec![RawSqlValue::Integer(2)]]
+        vec![vec![sequence_value(2)]]
     );
     assert!(!candidate_projection_path(&destination).exists());
     assert_no_sqlite_sidecars(&destination);
@@ -497,7 +505,7 @@ fn initial_noop_replacement_and_deletion_need_no_provider_file_and_store_no_body
     );
     assert_eq!(
         query(temp.path(), "SELECT event_seq FROM ctx_events"),
-        vec![vec![RawSqlValue::Integer(1)]]
+        vec![vec![sequence_value(1)]]
     );
     let bytes = relational_bytes(temp.path());
     assert!(!bytes
@@ -531,7 +539,7 @@ fn initial_noop_replacement_and_deletion_need_no_provider_file_and_store_no_body
     );
     assert_eq!(
         query(temp.path(), "SELECT event_seq FROM ctx_events"),
-        vec![vec![RawSqlValue::Integer(2)]]
+        vec![vec![sequence_value(2)]]
     );
 
     let deleted_generation = delete_generation(temp.path(), &source);
