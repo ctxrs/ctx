@@ -28,7 +28,7 @@ mod tests {
 
     #[test]
     fn result_value_rendering_is_unbounded_and_does_not_search_objects() {
-        let long = "x".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 17);
+        let long = "x".repeat(16_017);
         assert_eq!(
             provider_normalized_result_value(&json!([long.clone(), 7, false])),
             format!("{long}\n7\nfalse")

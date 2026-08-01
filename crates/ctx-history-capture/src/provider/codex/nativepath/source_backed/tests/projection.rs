@@ -107,7 +107,7 @@ fn outcome_for_sequence(
 }
 
 #[test]
-fn codex_exact_commit_result_publishes_scoped_outcome_and_no_raw_output() {
+fn codex_exact_commit_result_publishes_scoped_outcome_and_complete_raw_output() {
     use ctx_history_core::{RepositoryOutcomeKind, RepositoryVcsObservationKind};
 
     let temp = tempfile::tempdir().unwrap();
@@ -152,12 +152,24 @@ fn codex_exact_commit_result_publishes_scoped_outcome_and_no_raw_output() {
     assert_eq!(outcome.linkage.result_call_id, "commit-call");
     assert_eq!(outcome.linkage.origin_event_sequence, 1);
     let structured = core.content.structured_content.as_ref().unwrap();
+    assert!(
+        structured["provider_content"]["provider_native_tool_result"]["result"]
+            .as_str()
+            .unwrap()
+            .contains(oid)
+    );
+    assert!(core
+        .content
+        .normalized_body
+        .as_deref()
+        .unwrap()
+        .contains(oid));
     assert_eq!(
         structured["provider_native_tool_activities"][0]["provider_native_tool_result"]
             ["raw_output_retained"],
         false
     );
-    assert!(!serde_json::to_string(structured).unwrap().contains(oid));
+    assert!(serde_json::to_string(structured).unwrap().contains(oid));
 }
 
 #[test]
@@ -221,11 +233,14 @@ fn codex_success_without_binding_and_failed_or_mismatched_results_fail_closed() 
     assert!(prose.repository_abstentions.iter().any(|abstention| {
         abstention.reason == RepositoryAbstentionReason::OutcomeResultInadmissible
     }));
-    assert!(verified
-        .events_for_session(session_id.as_uuid())
+    let mismatched = outcome_for_sequence(&verified, session_id, 8);
+    assert!(mismatched.repository_vcs_observations.is_empty());
+    assert!(mismatched
+        .content
+        .normalized_body
+        .as_deref()
         .unwrap()
-        .iter()
-        .all(|event| event.event_sequence != 8));
+        .contains(oid));
 }
 
 #[test]
@@ -420,7 +435,7 @@ fn codex_outcome_routes_are_operation_local_across_two_repositories() {
 }
 
 #[test]
-fn codex_provider_identity_is_retained_while_unrouted_outcome_fails_closed() {
+fn codex_provider_identity_stays_complete_while_conflicting_route_abstains() {
     use ctx_history_core::RepositoryAbstentionReason;
 
     let temp = tempfile::tempdir().unwrap();
@@ -446,17 +461,22 @@ fn codex_provider_identity_is_retained_while_unrouted_outcome_fails_closed() {
     let session_id = codex_session_identity(&source, native_session_id).unwrap();
     let verified = VerifiedIndex::open(&index).unwrap();
     let core = outcome_for_sequence(&verified, session_id, 2);
-    assert_eq!(core.repository_bindings.len(), 1);
     assert_eq!(
-        core.repository_bindings[0].logical_repository_id,
-        "forge:github.com/other/repository"
+        core.content.normalized_body.as_deref(),
+        Some("https://github.com/other/repository/pull/9")
     );
-    assert!(core.repository_bindings[0]
-        .local_root_authorization
-        .is_none());
+    assert_eq!(
+        core.content.structured_content.as_ref().unwrap()["provider_content"]
+            ["provider_native_tool_result"]["result"],
+        "https://github.com/other/repository/pull/9"
+    );
+    assert!(core.repository_bindings.is_empty());
     assert!(core.repository_vcs_observations.is_empty());
     assert!(core.repository_abstentions.iter().any(|abstention| {
         abstention.reason == RepositoryAbstentionReason::OutcomeRepositoryUnbound
+    }));
+    assert!(core.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::ConflictingIdentity
     }));
 }
 
@@ -531,7 +551,7 @@ fn codex_duplicate_and_reordered_linkage_abstains_without_positive_outcomes() {
 }
 
 #[test]
-fn codex_pending_cache_evicts_by_raw_ordinal_without_rejoining_old_results() {
+fn codex_pending_cache_evicts_by_raw_ordinal_without_rejoining_old_result_identity() {
     use ctx_history_core::RepositoryVcsObservationKind;
 
     let temp = tempfile::tempdir().unwrap();
@@ -556,11 +576,9 @@ fn codex_pending_cache_evicts_by_raw_ordinal_without_rejoining_old_results() {
     let source = codex_source_key(native_session_id).unwrap();
     let session_id = codex_session_identity(&source, native_session_id).unwrap();
     let verified = VerifiedIndex::open(&index).unwrap();
-    assert!(verified
-        .events_for_session(session_id.as_uuid())
-        .unwrap()
-        .iter()
-        .all(|event| event.event_sequence != 26));
+    let oldest = outcome_for_sequence(&verified, session_id, 26);
+    assert!(oldest.repository_vcs_observations.is_empty());
+    assert_eq!(oldest.content.normalized_body.as_deref(), Some(oid));
     let newest = outcome_for_sequence(&verified, session_id, 27);
     let RepositoryVcsObservationKind::Outcome(outcome) =
         &newest.repository_vcs_observations[0].kind
@@ -641,7 +659,7 @@ fn codex_continuation_overflow_survives_checkpoint_and_typed_abstains() {
 }
 
 #[test]
-fn codex_production_path_persists_redacted_native_summary_and_certified_binding() {
+fn codex_production_path_persists_complete_native_input_and_certified_binding() {
     use std::process::Command;
 
     let temp = tempfile::tempdir().unwrap();
@@ -751,6 +769,10 @@ fn codex_production_path_persists_redacted_native_summary_and_certified_binding(
     );
     let structured = core.content.structured_content.as_ref().unwrap();
     assert_eq!(
+        structured["provider_content"]["provider_native_tool_call"]["arguments"]["cmd"],
+        arguments["cmd"]
+    );
+    assert_eq!(
         structured["provider_native_tool_activities"][0]["provider_native_tool"]
             ["raw_arguments_retained"],
         false
@@ -760,10 +782,10 @@ fn codex_production_path_persists_redacted_native_summary_and_certified_binding(
         "codex_exec_command_args_v1"
     );
     let encoded = core.encode_stored().unwrap();
-    assert!(!encoded
+    assert!(encoded
         .windows(secret.len())
         .any(|window| window == secret.as_bytes()));
-    assert!(!encoded
+    assert!(encoded
         .windows(arguments.to_string().len())
         .any(|window| window == arguments.to_string().as_bytes()));
     assert!(core.repository_vcs_observations.is_empty());
@@ -901,10 +923,7 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
     let sessions = temp.path().join("sessions");
     fs::create_dir_all(&sessions).unwrap();
     let native_session_id = "019fa000-0000-7000-8000-000000000022";
-    let full_text = format!(
-        "codex-full-{}-codex-tail-sentinel",
-        "m".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 512)
-    );
+    let full_text = format!("codex-full-{}-codex-tail-sentinel", "m".repeat(16_512));
     write_session(
         &sessions,
         native_session_id,
@@ -962,4 +981,87 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
         .as_deref()
         .unwrap()
         .ends_with("codex-tail-sentinel"));
+}
+
+#[test]
+fn indexed_core_keeps_over_16k_message_tool_arguments_and_successful_result() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000023";
+    let message_tail = "message_tail_complete_contract";
+    let argument_tail = "tool_argument_tail_complete_contract";
+    let result_tail = "tool_result_tail_complete_contract";
+    let full_message = format!("{} {message_tail}", "message body ".repeat(1_400));
+    let full_argument = format!("{} {argument_tail}", "tool argument ".repeat(1_400));
+    let full_result = format!("{} {result_tail}", "successful result ".repeat(1_200));
+    assert!(full_message.len() > 16_000);
+    assert!(full_argument.len() > 16_000);
+    assert!(full_result.len() > 16_000);
+    let tool_call = serde_json::json!({
+        "timestamp": "2026-07-28T12:00:02Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "custom_complete_tool",
+            "call_id": "complete-call",
+            "arguments": serde_json::json!({"prompt": full_argument}).to_string(),
+        }
+    })
+    .to_string();
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            message("assistant", &full_message),
+            tool_call,
+            successful_result("complete-call", Value::String(full_result.clone())),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let events = verified.events_for_session(session_id.as_uuid()).unwrap();
+    assert_eq!(events.len(), 3);
+    for (query, event) in [message_tail, argument_tail, result_tail]
+        .into_iter()
+        .zip(events.iter())
+    {
+        assert!(verified
+            .search_event_candidates(query, 10)
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate.event.event_id == event.event_id));
+    }
+
+    let message_core = outcome_for_sequence(&verified, session_id, 1);
+    assert_eq!(
+        message_core.content.normalized_body.as_deref(),
+        Some(full_message.as_str())
+    );
+    let call_core = outcome_for_sequence(&verified, session_id, 2);
+    assert!(call_core
+        .content
+        .normalized_body
+        .as_deref()
+        .unwrap()
+        .contains(argument_tail));
+    assert_eq!(
+        call_core.content.structured_content.as_ref().unwrap()["provider_native_tool_call"]
+            ["arguments"]["prompt"],
+        full_argument
+    );
+    let result_core = outcome_for_sequence(&verified, session_id, 3);
+    assert_eq!(
+        result_core.content.normalized_body.as_deref(),
+        Some(full_result.as_str())
+    );
+    assert_eq!(
+        result_core.content.structured_content.as_ref().unwrap()["provider_native_tool_result"]
+            ["result"],
+        full_result
+    );
 }

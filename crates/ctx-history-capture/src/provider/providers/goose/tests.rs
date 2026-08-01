@@ -4,7 +4,7 @@ use super::normalization::{goose_normalized_result_content, goose_output_project
 
 #[test]
 fn goose_result_content_is_unbounded_ordered_and_does_not_search_wrappers() {
-    let long = "x".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 37);
+    let long = "x".repeat(16_037);
     let content = json!([
         {"type": "text", "output": "not a result"},
         {"type": "toolResponse", "toolResult": long.clone(), "result": "lower priority"},

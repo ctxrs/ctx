@@ -32,12 +32,12 @@ use super::{
 };
 use crate::{
     common::io::{open_provider_source_file, OpenedProviderSourceFile},
-    provider::codex::events::CodexToolCallContext,
+    provider::codex::events::{codex_result_value, CodexToolCallContext},
     provider::file_touches::{
         event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
         MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
     },
-    CaptureError, OutputOutcome, Result,
+    CaptureError, Result,
 };
 #[cfg(test)]
 pub(crate) use checkpoint::install_after_codex_prefix_hash_hook;

@@ -11,7 +11,7 @@ use super::layout::{
     KimiWireLayout, KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES, KIMI_WIRE_LAYOUT_MAX_INDEX_ENTRIES,
 };
 
-const SUCCESS_BODY: &str = "KIMI_SUCCESS_BODY_MUST_NEVER_ENTER_CORE";
+const SUCCESS_BODY: &str = "KIMI_SUCCESS_BODY_RETAINED_IN_CORE";
 const FAILURE_BODY: &str = "KIMI_FAILURE_DIAGNOSTIC";
 
 fn kimi_wire_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {

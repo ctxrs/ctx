@@ -869,7 +869,8 @@ fn oversized_edge_id_fails_typed_bounds_before_catalog_retention() {
 fn core_body_prefers_full_payload_over_native_preview() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("preview.jsonl");
-    let full = format!("custom-full-{}-custom-preview-tail", "p".repeat(8_192));
+    let full = format!("custom-full-{}-custom-preview-tail", "p".repeat(16_512));
+    assert!(full.len() > 16_000);
     let mut record = event(0, "event-full", "root", &full);
     record["preview"] = Value::String("native preview only".to_owned());
     write_records(

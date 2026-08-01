@@ -9,7 +9,6 @@ use std::{
 };
 
 use chrono::Duration;
-use ctx_history_core::EventType;
 use rusqlite::Connection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -39,8 +38,7 @@ use crate::{
 
 use super::super::event::{
     forgecode_event, forgecode_event_type, forgecode_for_each_metric_file_touch_with_limit,
-    forgecode_message_parts, forgecode_timestamp, forgecode_tool_result_is_error,
-    ForgeCodeFileTouch, ForgeCodeNativeEvent,
+    forgecode_message_parts, forgecode_timestamp, ForgeCodeFileTouch, ForgeCodeNativeEvent,
 };
 use super::super::record_evidence::ForgeCodeRecordEvidence;
 
@@ -445,7 +443,6 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodePage {
     pub(in crate::provider::providers::forgecode) terminal: bool,
     pub(in crate::provider::providers::forgecode) row: Option<ForgeCodeConversationRow>,
     pub(in crate::provider::providers::forgecode) events: Vec<ForgeCodeRetainedEvent>,
-    pub(in crate::provider::providers::forgecode) ignored_output_records: usize,
     pub(in crate::provider::providers::forgecode) touches: Vec<ForgeCodeFileTouch>,
     pub(in crate::provider::providers::forgecode) rejections: Vec<ProviderImportFailure>,
     pub(in crate::provider::providers::forgecode) retained_bytes: usize,

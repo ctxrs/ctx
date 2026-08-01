@@ -165,7 +165,7 @@ fn row_reader_scans_sessions_then_messages_and_rejects_before_hydration() {
 
 #[test]
 fn result_content_uses_only_the_tool_content_column_without_a_size_cap() {
-    let long = "x".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 19);
+    let long = "x".repeat(16_019);
     assert_eq!(
         hermes_normalized_result_content("tool", &Value::String(long.clone())),
         Some(long)

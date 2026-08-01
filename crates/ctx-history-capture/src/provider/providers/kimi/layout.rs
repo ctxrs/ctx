@@ -14,11 +14,12 @@ use serde_json::{json, Value};
 use crate::common::io::{ensure_regular_provider_transcript_file, read_text_file_limited};
 use crate::common::io::{read_provider_jsonl_line_or_skip_oversized, ProviderJsonlLineRead};
 use crate::provider::normalization::provider_local_preview;
-use crate::{CaptureError, Result, PROVIDER_MAX_TEXT_CHARS};
+use crate::{CaptureError, Result};
 
 pub(super) const KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const KIMI_WIRE_LAYOUT_MAX_INDEX_ENTRIES: usize = 65_536;
 const KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES_U64: u64 = 16 * 1024 * 1024;
+const KIMI_LAYOUT_METADATA_TEXT_MAX_CHARS: usize = 16_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct KimiSessionIndexEntry {
@@ -445,5 +446,5 @@ fn kimi_index_bytes_error(observed_bytes: u64) -> CaptureError {
 }
 
 fn capped_kimi_text(value: &str) -> String {
-    provider_local_preview(value, PROVIDER_MAX_TEXT_CHARS).0
+    provider_local_preview(value, KIMI_LAYOUT_METADATA_TEXT_MAX_CHARS).0
 }

@@ -4,14 +4,14 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::provider::normalization::{
-    provider_capped_json, provider_json_text, provider_nonnegative_i64_to_u64,
-    provider_policy_body, provider_policy_event_text, provider_required_timestamp_seconds,
+    provider_json_text, provider_nonnegative_i64_to_u64, provider_policy_body,
+    provider_policy_event_text, provider_required_timestamp_seconds,
     provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
     provider_value_text,
 };
 use crate::{
     record_evidence::RecordDigest, OutputOutcome, OutputOutcomeMetadata, Result,
-    HERMES_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
+    HERMES_SQLITE_SOURCE_FORMAT,
 };
 
 mod layout;
@@ -123,7 +123,7 @@ pub(in crate::provider::providers::hermes) fn hermes_native_event(
             "result_evidence": result_evidence,
             "result_outcome": result_outcome,
             "source_format": HERMES_SQLITE_SOURCE_FORMAT,
-            "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
+            "body": retained_body,
         }),
         metadata: json!({
             "source": "hermes_state_db",

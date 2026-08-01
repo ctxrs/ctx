@@ -154,8 +154,7 @@ fn project_source_backed_page(
         )
         .into());
     }
-    let ignored_records = u64::try_from(page.ignored_output_records)
-        .map_err(|_| ForgeCodeSourceBackedErrorV0::CountOverflow)?;
+    let ignored_records = 0;
     let direct_touches = direct_touches(&page);
     let row = page.row.as_ref();
     let mut documents = Vec::with_capacity(page.events.len());
@@ -256,6 +255,7 @@ fn core_record(
         .get(&retained.provider_event_index)
         .filter(|touches| !touches.is_empty())
         .map(|touches| serde_json::json!(touches));
+    let structured_content = retained.event.payload.get("body").cloned();
     let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
@@ -274,6 +274,7 @@ fn core_record(
     record.role = retained.event.role.map(|role| role.as_str().to_owned());
     record.branch = forgecode_branch(row);
     record.workspace = Some(row.workspace_id.to_string());
+    record.content.structured_content = structured_content;
     if let Some(native_file_touches) = native_file_touches {
         record.metadata.insert(
             "provider_native_file_touches".to_owned(),

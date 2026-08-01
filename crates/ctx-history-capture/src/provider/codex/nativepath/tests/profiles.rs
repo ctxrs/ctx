@@ -50,7 +50,7 @@ fn raw_ordinals_include_headers_outputs_malformed_and_ignored_records() {
             .iter()
             .map(|row| row.raw_ordinal)
             .collect::<Vec<_>>(),
-        vec![1, 4, 6]
+        vec![1, 2, 4, 6]
     );
     assert_eq!(scan.next_raw_ordinal, 7);
     assert_eq!(scan.counters.complete_records, 7);
@@ -63,6 +63,7 @@ fn raw_ordinals_include_headers_outputs_malformed_and_ignored_records() {
             .map(|row| row.session_cwd.as_deref())
             .collect::<Vec<_>>(),
         vec![
+            Some("/workspace"),
             Some("/workspace"),
             Some("/workspace"),
             Some("/workspace/turn")
@@ -175,7 +176,7 @@ fn source_backed_row_preserves_full_lexical_text_and_native_identity() {
 }
 
 #[test]
-fn output_heavy_scan_never_hydrates_non_display_result_bodies() {
+fn output_heavy_scan_retains_complete_result_bodies() {
     let secret = "RESULT_ONLY_MARKER_".repeat(32_768);
     let contents = [
         session_meta("output-owner"),
@@ -188,14 +189,15 @@ fn output_heavy_scan_never_hydrates_non_display_result_bodies() {
     let (_temp, path) = write_source(&contents);
     let (scan, sink) = scan_collect(discover_one(&path, "output-owner"), None);
 
-    assert_eq!(sink.rows.len(), 3);
+    assert_eq!(sink.rows.len(), 4);
     assert_eq!(scan.counters.native_result_records, 1);
     assert!(scan.counters.native_result_record_bytes > secret.len() as u64);
     assert_eq!(scan.counters.structural_json_parses, 5);
     assert_eq!(scan.counters.structural_output_probes, 1);
-    assert_eq!(scan.counters.typed_json_parses, 4);
+    assert_eq!(scan.counters.typed_json_parses, 5);
     assert_eq!(scan.counters.retained_json_parses, 3);
-    assert!(!format!("{:?}", sink.rows).contains("RESULT_ONLY_MARKER_"));
+    assert_eq!(sink.rows[2].lexical_body, secret);
+    assert!(format!("{:?}", sink.rows).contains("RESULT_ONLY_MARKER_"));
 }
 
 #[test]
@@ -229,8 +231,8 @@ fn source_backed_projection_prefilters_with_exact_scan_accounting() {
         scan.counters.native_result_record_bytes,
         ineligible_result.len() as u64
     );
-    assert_eq!(scan.counters.prefiltered_records, 2);
-    assert_eq!(scan.counters.structural_json_parses, 2);
+    assert_eq!(scan.counters.prefiltered_records, 1);
+    assert_eq!(scan.counters.structural_json_parses, 3);
     assert_eq!(scan.counters.typed_json_parses, 2);
 
     let row = &sink.rows[0];
@@ -333,7 +335,7 @@ fn pending_call_checkpoint_keeps_fresh_and_append_source_backed_outputs_identica
             .iter()
             .map(|row| row.raw_ordinal)
             .collect::<Vec<_>>(),
-        vec![6, 7]
+        vec![5, 6, 7, 8]
     );
     assert_eq!(
         append_scan.counters.rejected_complete_records,

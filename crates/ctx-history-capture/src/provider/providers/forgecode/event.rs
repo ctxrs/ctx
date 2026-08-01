@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 
 use crate::provider::file_touches::normalized_key;
 use crate::provider::normalization::{
-    provider_capped_json, provider_capped_json_value, provider_line_from_index,
-    provider_normalized_result_value, provider_policy_body, provider_result_identifier_evidence,
+    provider_capped_json_value, provider_line_from_index, provider_normalized_result_value,
+    provider_policy_body, provider_policy_event_text, provider_result_identifier_evidence,
     provider_result_outcome_evidence, provider_role, provider_timestamp_value, provider_value_text,
 };
 use crate::provider::providers::goose::goose_timestamp;
@@ -60,17 +60,6 @@ pub(super) fn forgecode_event_type(parts: ForgeCodeMessageParts<'_>) -> EventTyp
         "image" => EventType::Artifact,
         _ => EventType::Notice,
     }
-}
-
-pub(super) fn forgecode_tool_result_is_error(parts: ForgeCodeMessageParts<'_>) -> Option<bool> {
-    (parts.variant == "tool")
-        .then(|| {
-            parts
-                .body
-                .pointer("/output/is_error")
-                .and_then(Value::as_bool)
-        })
-        .flatten()
 }
 
 pub(super) fn forgecode_event_role(parts: ForgeCodeMessageParts<'_>) -> Option<EventRole> {
@@ -128,6 +117,7 @@ pub(super) fn forgecode_event(
         "usage": parts.usage,
     });
     let retained_body = provider_policy_body(event_type, &body);
+    let retained_text = provider_policy_event_text(event_type, &text, &body);
     ForgeCodeNativeEvent {
         provider_event_index,
         provider_event_hash: compute_payload_hash(entry).ok(),
@@ -136,18 +126,12 @@ pub(super) fn forgecode_event(
         role: forgecode_event_role(parts),
         occurred_at,
         payload: json!({
-            "text": text,
-            "text_retention": {
-                "mode": "none",
-                "limit_chars": Value::Null,
-                "truncated": false,
-                "omission_policy": "none",
-                "omission_applied": false,
-            },
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
             "result_evidence": provider_result_identifier_evidence(event_type, &text, &body),
             "result_outcome": provider_result_outcome_evidence(event_type, &body),
             "source_format": FORGECODE_SQLITE_SOURCE_FORMAT,
-            "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
+            "body": retained_body,
         }),
         metadata: json!({
             "source": "forgecode_conversations",

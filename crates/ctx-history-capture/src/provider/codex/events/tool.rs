@@ -121,6 +121,10 @@ fn codex_output_indicates_success(value: &Value) -> bool {
 }
 
 pub(crate) fn codex_result_content(payload: &Value) -> Option<Cow<'_, str>> {
+    codex_result_value(payload).map(codex_output_text)
+}
+
+pub(crate) fn codex_result_value(payload: &Value) -> Option<&Value> {
     let item_type = payload.get("type").and_then(Value::as_str)?;
     if !matches!(
         item_type,
@@ -136,7 +140,6 @@ pub(crate) fn codex_result_content(payload: &Value) -> Option<Cow<'_, str>> {
         .get("output")
         .or_else(|| payload.get("tools"))
         .or_else(|| payload.get("result"))
-        .map(codex_output_text)
 }
 
 pub(crate) fn codex_output_text(value: &Value) -> Cow<'_, str> {

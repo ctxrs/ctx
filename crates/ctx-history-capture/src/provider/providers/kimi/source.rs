@@ -11,9 +11,11 @@ use crate::common::time::parse_rfc3339_utc;
 use crate::provider::normalization::{
     provider_capped_json, provider_local_preview, provider_timestamp_seconds_to_datetime,
 };
-use crate::{fnv1a64, Result, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS};
+use crate::{fnv1a64, Result, PROVIDER_MAX_PREVIEW_CHARS};
 
 use super::layout::KimiWireLayout;
+
+const KIMI_SESSION_METADATA_TEXT_MAX_CHARS: usize = 16_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct KimiWireSessionState {
@@ -84,7 +86,7 @@ impl KimiWireObservation {
                     .or_else(|| state.get("cwd"))
                     .and_then(Value::as_str)
                     .filter(|cwd| !cwd.trim().is_empty())
-                    .map(|cwd| capped_kimi_text(cwd, PROVIDER_MAX_TEXT_CHARS))
+                    .map(|cwd| capped_kimi_text(cwd, KIMI_SESSION_METADATA_TEXT_MAX_CHARS))
             });
         let state_metadata = provider_capped_json(&state, PROVIDER_MAX_PREVIEW_CHARS);
         let agent_state_metadata = provider_capped_json(&agent_state, PROVIDER_MAX_PREVIEW_CHARS);
@@ -93,11 +95,11 @@ impl KimiWireObservation {
             .get("title")
             .or_else(|| state.get("customTitle"))
             .and_then(Value::as_str)
-            .map(|title| capped_kimi_text(title, PROVIDER_MAX_TEXT_CHARS));
+            .map(|title| capped_kimi_text(title, KIMI_SESSION_METADATA_TEXT_MAX_CHARS));
         let last_prompt = state
             .get("lastPrompt")
             .and_then(Value::as_str)
-            .map(|prompt| capped_kimi_text(prompt, PROVIDER_MAX_TEXT_CHARS));
+            .map(|prompt| capped_kimi_text(prompt, KIMI_SESSION_METADATA_TEXT_MAX_CHARS));
         let started_at = kimi_state_timestamp(&state, &["createdAt", "created_at"]);
         let ended_at = kimi_state_timestamp(&state, &["updatedAt", "updated_at"]);
         let auxiliary_revision = fnv1a64(
