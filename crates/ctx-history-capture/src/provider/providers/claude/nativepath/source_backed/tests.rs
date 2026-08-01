@@ -413,6 +413,55 @@ fn over_8_mib_tool_result_is_admitted_complete_without_structured_body_duplicati
 }
 
 #[test]
+fn claude_large_tool_arguments_keep_both_complete_core_representations() {
+    let tail = "claude_large_tool_argument_tail_complete";
+    let full_argument = format!("{}{tail}", "x".repeat(8 * 1024 * 1024));
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "assistant",
+        "uuid": "large-tool-call-record",
+        "sessionId": "test-session",
+        "timestamp": "2026-08-01T12:00:00Z",
+        "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "large-tool-call",
+                "name": "custom_complete_tool",
+                "input": {"prompt": &full_argument}
+            }]
+        }
+    }))
+    .unwrap();
+    assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    let [record] = emitted.as_slice() else {
+        panic!("expected exactly one Claude tool-call record");
+    };
+    let normalized = record.content.normalized_body.as_deref().unwrap();
+    let structured = record.content.structured_content.as_ref().unwrap();
+    assert!(normalized.contains(tail));
+    assert_eq!(
+        structured["input"]["prompt"].as_str(),
+        Some(full_argument.as_str())
+    );
+    assert!(
+        normalized.len() + serde_json::to_vec(structured).unwrap().len()
+            > ctx_history_core::MAX_CORE_CONTENT_BYTES
+    );
+    record.validate_contract().unwrap();
+    record.encode_stored().unwrap();
+}
+
+#[test]
 fn source_storage_project_path_never_becomes_core_workspace() {
     let source_storage = "/home/private-user/.claude/projects/-home-private-user-secret-project";
     let logical_workspace = "/workspace/provider-native-project";
