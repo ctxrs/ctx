@@ -5,6 +5,7 @@
 
 use std::{
     collections::BTreeMap,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -165,12 +166,27 @@ pub struct ShowEventOptions {
 #[derive(Debug, Clone)]
 pub struct ShowSessionOptions {
     pub mode: String,
+    /// Maximum selected transcript events in one resumable MCP page.
+    ///
+    /// `None` preserves the SDK's unbounded streaming CLI adapter. Supplying a
+    /// limit opts this call into the existing MCP `show_session` paging
+    /// contract, which accepts values from 1 through 4,096.
+    pub limit: Option<usize>,
+    /// Opaque `next_cursor` from a preceding MCP `show_session` page.
+    ///
+    /// Supplying a cursor opts this call into MCP paging with its default
+    /// 200-event limit when `limit` is `None`. Cursors are nonempty ASCII
+    /// strings of at most 4,096 bytes, bound to the exact session and active
+    /// Core generation.
+    pub cursor: Option<String>,
 }
 
 impl Default for ShowSessionOptions {
     fn default() -> Self {
         Self {
             mode: "lite".to_owned(),
+            limit: None,
+            cursor: None,
         }
     }
 }
@@ -313,6 +329,11 @@ impl AgentHistoryClient {
         id: impl AsRef<str>,
         options: ShowSessionOptions,
     ) -> Result<AgentHistoryEnvelope, AgentHistoryError> {
+        if options.limit.is_some() || options.cursor.is_some() {
+            let config = self.local_backend_config()?;
+            let raw = run_ctx_mcp_show_session(config, id.as_ref(), &options)?;
+            return normalize(AgentHistoryOperation::ShowSession, self.backend_info(), raw);
+        }
         self.local_json_owned(
             AgentHistoryOperation::ShowSession,
             vec![
@@ -325,6 +346,27 @@ impl AgentHistoryClient {
                 "json".to_owned(),
             ],
         )
+    }
+
+    fn local_backend_config(&self) -> Result<&LocalBackendConfig, AgentHistoryError> {
+        match &self.backend {
+            AgentHistoryBackend::Local(config) => Ok(config),
+            AgentHistoryBackend::Hosted(config) => {
+                let mut details = JsonObject::new();
+                details.insert("backend".to_owned(), json!("hosted"));
+                Err(AgentHistoryError {
+                    body: AgentHistoryErrorBody {
+                        details: Some(details),
+                        ..AgentHistoryErrorBody::new(
+                            AgentHistoryErrorCode::NotSupported,
+                            "hosted ctx agent history backend is not available in this in-repo SDK",
+                            false,
+                        )
+                    },
+                }
+                .with_cause(config.base_url.clone()))
+            }
+        }
     }
 
     fn import_or_sync(
@@ -371,24 +413,7 @@ impl AgentHistoryClient {
         operation: AgentHistoryOperation,
         args: Vec<String>,
     ) -> Result<AgentHistoryEnvelope, AgentHistoryError> {
-        let config = match &self.backend {
-            AgentHistoryBackend::Local(config) => config,
-            AgentHistoryBackend::Hosted(config) => {
-                let mut details = JsonObject::new();
-                details.insert("backend".to_owned(), json!("hosted"));
-                return Err(AgentHistoryError {
-                    body: AgentHistoryErrorBody {
-                        details: Some(details),
-                        ..AgentHistoryErrorBody::new(
-                            AgentHistoryErrorCode::NotSupported,
-                            "hosted ctx agent history backend is not available in this in-repo SDK",
-                            false,
-                        )
-                    },
-                }
-                .with_cause(config.base_url.clone()));
-            }
-        };
+        let config = self.local_backend_config()?;
 
         let raw = run_ctx_json(config, &args)?;
         normalize(operation, self.backend_info(), raw)
@@ -466,6 +491,238 @@ fn run_ctx_json(config: &LocalBackendConfig, args: &[String]) -> Result<Value, A
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn run_ctx_mcp_show_session(
+    config: &LocalBackendConfig,
+    id: &str,
+    options: &ShowSessionOptions,
+) -> Result<Value, AgentHistoryError> {
+    let mut arguments = serde_json::Map::from_iter([
+        ("ctx_session_id".to_owned(), json!(id)),
+        ("mode".to_owned(), json!(options.mode)),
+    ]);
+    if let Some(limit) = options.limit {
+        arguments.insert("limit".to_owned(), json!(limit));
+    }
+    if let Some(cursor) = &options.cursor {
+        arguments.insert("cursor".to_owned(), json!(cursor));
+    }
+    let requests = [
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "ctx-sdk", "version": env!("CARGO_PKG_VERSION") }
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "show_session",
+                "arguments": Value::Object(arguments)
+            }
+        }),
+    ];
+
+    let mut command = Command::new(&config.ctx_binary);
+    command
+        .args(["mcp", "serve"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.envs(&config.env);
+    if let Some(data_root) = &config.data_root {
+        command.env("CTX_DATA_ROOT", data_root);
+    }
+    command.env("CTX_ANALYTICS_ENABLED", "false");
+    let mut child = command.spawn().map_err(|err| {
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::BackendUnavailable,
+            "failed to start ctx MCP server",
+            true,
+        )
+        .with_cause(err.to_string())
+    })?;
+
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::AdapterError,
+            "ctx MCP stdin was unavailable",
+            true,
+        )
+    })?;
+    for request in requests {
+        serde_json::to_writer(&mut stdin, &request).map_err(|err| {
+            AgentHistoryError::new(
+                AgentHistoryErrorCode::AdapterError,
+                "failed to encode ctx MCP request",
+                false,
+            )
+            .with_cause(err.to_string())
+        })?;
+        stdin.write_all(b"\n").map_err(|err| {
+            AgentHistoryError::new(
+                AgentHistoryErrorCode::AdapterError,
+                "failed to write ctx MCP request",
+                true,
+            )
+            .with_cause(err.to_string())
+        })?;
+    }
+    drop(stdin);
+
+    let stdout = child.stdout.take().ok_or_else(|| {
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::AdapterError,
+            "ctx MCP stdout was unavailable",
+            true,
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::AdapterError,
+            "ctx MCP stderr was unavailable",
+            true,
+        )
+    })?;
+    let stdout_reader = thread::spawn(move || read_pipe(stdout));
+    let stderr_reader = thread::spawn(move || read_pipe(stderr));
+
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|err| {
+            AgentHistoryError::new(
+                AgentHistoryErrorCode::AdapterError,
+                "failed to wait for ctx MCP server",
+                true,
+            )
+            .with_cause(err.to_string())
+        })? {
+            break status;
+        }
+        if started.elapsed() > config.timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(AgentHistoryError::new(
+                AgentHistoryErrorCode::Timeout,
+                "ctx MCP request timed out",
+                true,
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let stdout = join_pipe(stdout_reader, "stdout")?;
+    let stderr = join_pipe(stderr_reader, "stderr")?;
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
+        return Err(AgentHistoryError::new(
+            classify_stderr(&stderr),
+            stderr.trim().to_owned(),
+            false,
+        ));
+    }
+
+    let mut tool_response = None;
+    for line in stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let response: Value = serde_json::from_slice(line).map_err(|err| {
+            AgentHistoryError::new(
+                AgentHistoryErrorCode::DecodeError,
+                "failed to decode ctx MCP response",
+                false,
+            )
+            .with_cause(err.to_string())
+        })?;
+        if response.get("id") == Some(&json!(2)) {
+            tool_response = Some(response);
+        }
+    }
+    let response = tool_response.ok_or_else(|| {
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::DecodeError,
+            "ctx MCP response omitted show_session result",
+            false,
+        )
+    })?;
+    if let Some(error) = response.get("error") {
+        return Err(AgentHistoryError::new(
+            AgentHistoryErrorCode::AdapterError,
+            "ctx MCP show_session request failed",
+            false,
+        )
+        .with_cause(error.to_string()));
+    }
+    let result = response.get("result").ok_or_else(|| {
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::DecodeError,
+            "ctx MCP response omitted result",
+            false,
+        )
+    })?;
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        let structured = result
+            .get("structuredContent")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let message = structured
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("ctx MCP show_session tool failed");
+        let code = match structured.get("error_code").and_then(Value::as_str) {
+            Some("invalid_request" | "invalid_cursor" | "cursor_mismatch" | "cursor_stale") => {
+                AgentHistoryErrorCode::InvalidRequest
+            }
+            Some("not_found") => AgentHistoryErrorCode::NotFound,
+            _ => AgentHistoryErrorCode::AdapterError,
+        };
+        return Err(AgentHistoryError::new(code, message, false).with_cause(structured.to_string()));
+    }
+    result.get("structuredContent").cloned().ok_or_else(|| {
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::DecodeError,
+            "ctx MCP response omitted structuredContent",
+            false,
+        )
+    })
+}
+
+fn read_pipe(mut pipe: impl Read) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn join_pipe(
+    reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    name: &str,
+) -> Result<Vec<u8>, AgentHistoryError> {
+    reader
+        .join()
+        .map_err(|_| {
+            AgentHistoryError::new(
+                AgentHistoryErrorCode::AdapterError,
+                format!("ctx MCP {name} reader panicked"),
+                true,
+            )
+        })?
+        .map_err(|err| {
+            AgentHistoryError::new(
+                AgentHistoryErrorCode::AdapterError,
+                format!("failed to read ctx MCP {name}"),
+                true,
+            )
+            .with_cause(err.to_string())
+        })
 }
 
 fn classify_stderr(stderr: &str) -> AgentHistoryErrorCode {
@@ -597,7 +854,8 @@ fn normalize_session(raw: &Value) -> Result<SessionResult, AgentHistoryError> {
         "session": raw.get("session").cloned(),
         "events": raw.get("events").cloned().unwrap_or_else(|| json!([])),
         "mode": raw.get("mode").cloned(),
-        "format": raw.get("format").cloned()
+        "format": raw.get("format").cloned(),
+        "pagination": raw.get("pagination").cloned()
     });
     decode_payload(camelize_object_keys(&value), "session")
 }

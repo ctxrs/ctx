@@ -9,7 +9,8 @@ use ctx_history_core::{
     CoreRecordAnnotation, GitObjectId, RepositoryAbstention, RepositoryAbstentionReason,
     RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryCandidateKind,
     RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
-    RepositoryFileObservationKind, RepositoryOutcomeObservation, RepositoryVcsObservationKind,
+    RepositoryFileObservation, RepositoryFileObservationKind, RepositoryOutcomeKind,
+    RepositoryOutcomeObservation, RepositoryVcsObservation, RepositoryVcsObservationKind,
     CORE_BOUNDED_SHELL_SUBSET_REVISION, CORE_MISSING_ACTIVITY_TIME_UNIX_MS,
     CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
@@ -20,20 +21,24 @@ use sha2::{Digest, Sha256};
 
 use git::{
     negative_route_geometry_state, CandidateKind, CertifiedCandidate, EventProbeBudget,
-    GitCertifier, ProbeFailure,
+    GitCertifier, ProbeFailure, ResolvedCommitProducer,
 };
-pub(crate) use outcome::{linked_outcome_evidence, LinkedOutcomeEvidence, LinkedOutcomeInput};
+pub(crate) use outcome::{
+    linked_outcome_evidence, LinkedOutcomeEvidence, LinkedOutcomeInput, UnscopedOutcomeObservation,
+};
 use scoping::{path_string, scope_files, scope_outcomes, scope_vcs};
 use shell::{analyze, command_too_large};
 pub(crate) use shell::{
     bounded_outcome_evidence_relevant, bounded_outcome_plan, lexical_absolute,
-    BoundedOutcomeOperation, BoundedOutcomePlan, BoundedOutcomePlanDisposition, MAX_COMMAND_BYTES,
+    BoundedCommitProducer, BoundedOutcomeOperation, BoundedOutcomePlan,
+    BoundedOutcomePlanDisposition, MAX_COMMAND_BYTES,
 };
 
 const MAX_PROVIDER_NATIVE_IDENTITIES: usize = 16;
 const MAX_REPOSITORY_CANDIDATES: usize = 32;
 const MAX_POSITIVE_CERTIFICATION_CACHE_ENTRIES: usize = 32;
 const MAX_NEGATIVE_CERTIFICATION_CACHE_ENTRIES: usize = 64;
+const MAX_EVENT_TIME_CERTIFICATION_ENTRIES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UnscopedFileObservation {
@@ -65,7 +70,7 @@ pub(crate) struct AttributionInput {
     pub(crate) vcs_observations: Vec<UnscopedVcsObservation>,
     pub(crate) outcome_operation_repository_path: Option<String>,
     pub(crate) outcome_output_repository_path: Option<String>,
-    pub(crate) outcome_observations: Vec<RepositoryOutcomeObservation>,
+    pub(crate) outcome_observations: Vec<UnscopedOutcomeObservation>,
     pub(crate) outcome_abstentions: Vec<(RepositoryAbstentionReason, &'static str)>,
 }
 
@@ -81,6 +86,7 @@ pub(crate) struct RepositoryAttributor {
     certifier: GitCertifier,
     positive_cache: Vec<CachedPositiveCertificate>,
     negative_cache: Vec<CachedNegativeCertificate>,
+    event_time_cache: Vec<CachedEventTimeCertificate>,
     cache_clock: u64,
 }
 
@@ -109,6 +115,16 @@ struct CachedNegativeCertificate {
     kind: CandidateKind,
     route_geometry_state: [u8; 32],
     failure: ProbeFailure,
+    last_used: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedEventTimeCertificate {
+    path: PathBuf,
+    kind: CandidateKind,
+    observed_at_unix_ms: i64,
+    certificate: CertifiedCandidate,
+    certified_move_at_unix_ms: Option<i64>,
     last_used: u64,
 }
 
@@ -143,11 +159,20 @@ impl RepositoryAttributor {
                 observed_at_unix_ms,
             ) {
                 Ok(Some(reused)) => {
+                    self.record_live_event_time_certificate(candidate, &reused, now)?;
                     self.positive_cache[index].last_used = now;
                     return Ok(reused);
                 }
                 Ok(None) => {
                     self.positive_cache.remove(index);
+                }
+                Err(ProbeFailure::Missing) => {
+                    if let Some(reused) =
+                        self.try_reuse_moved_event_time_certificate(candidate, now)?
+                    {
+                        return Ok(reused);
+                    }
+                    return Err(ProbeFailure::Missing);
                 }
                 Err(failure) => return Err(failure),
             }
@@ -160,7 +185,15 @@ impl RepositoryAttributor {
                     && cached.route_geometry_state == state
             }) {
                 self.negative_cache[index].last_used = now;
-                return Err(self.negative_cache[index].failure.clone());
+                let failure = self.negative_cache[index].failure.clone();
+                if failure == ProbeFailure::Missing {
+                    if let Some(reused) =
+                        self.try_reuse_moved_event_time_certificate(candidate, now)?
+                    {
+                        return Ok(reused);
+                    }
+                }
+                return Err(failure);
             }
             self.negative_cache
                 .retain(|cached| cached.path != candidate.path || cached.kind != candidate.kind);
@@ -173,6 +206,19 @@ impl RepositoryAttributor {
             observed_at_unix_ms,
             budget,
         );
+        let result = match result {
+            Ok(certificate) => {
+                self.record_live_event_time_certificate(candidate, &certificate, now)?;
+                Ok(certificate)
+            }
+            Err(ProbeFailure::Missing) => {
+                match self.try_reuse_moved_event_time_certificate(candidate, now)? {
+                    Some(reused) => Ok(reused),
+                    None => Err(ProbeFailure::Missing),
+                }
+            }
+            Err(failure) => Err(failure),
+        };
         match &result {
             Ok(certificate) => {
                 self.negative_cache.retain(|cached| {
@@ -203,6 +249,121 @@ impl RepositoryAttributor {
             Err(_) => {}
         }
         result
+    }
+
+    fn record_live_event_time_certificate(
+        &mut self,
+        candidate: &Candidate,
+        certificate: &CertifiedCandidate,
+        now: u64,
+    ) -> Result<(), ProbeFailure> {
+        let observed_at_unix_ms = certificate.observed_at_unix_ms();
+        if observed_at_unix_ms == CORE_MISSING_ACTIVITY_TIME_UNIX_MS {
+            return Ok(());
+        }
+
+        if self.event_time_cache.iter().any(|cached| {
+            cached.path == candidate.path
+                && cached.kind == candidate.kind
+                && cached.observed_at_unix_ms == observed_at_unix_ms
+                && !cached.certificate.same_binding_identity(certificate)
+        }) {
+            return Err(ProbeFailure::ConflictingEventTimeIdentity);
+        }
+
+        for cached in &mut self.event_time_cache {
+            if cached.certificate.repository_root == certificate.repository_root
+                || cached.observed_at_unix_ms >= observed_at_unix_ms
+                || !cached.certificate.same_binding_identity(certificate)
+                || !cached
+                    .certificate
+                    .same_local_root_authorization_identity(certificate)
+            {
+                continue;
+            }
+            if matches!(
+                git::validate_candidate_route(
+                    &cached.certificate.repository_root,
+                    CandidateKind::Directory,
+                ),
+                Err(ProbeFailure::Missing)
+            ) {
+                cached.certified_move_at_unix_ms = Some(
+                    cached
+                        .certified_move_at_unix_ms
+                        .map_or(observed_at_unix_ms, |existing| {
+                            existing.min(observed_at_unix_ms)
+                        }),
+                );
+            }
+        }
+
+        if let Some(cached) = self.event_time_cache.iter_mut().find(|cached| {
+            cached.path == candidate.path
+                && cached.kind == candidate.kind
+                && cached.observed_at_unix_ms == observed_at_unix_ms
+                && cached.certificate.same_binding_identity(certificate)
+        }) {
+            cached.certificate = certificate.clone();
+            cached.last_used = now;
+            return Ok(());
+        }
+        self.event_time_cache.push(CachedEventTimeCertificate {
+            path: candidate.path.clone(),
+            kind: candidate.kind,
+            observed_at_unix_ms,
+            certificate: certificate.clone(),
+            certified_move_at_unix_ms: None,
+            last_used: now,
+        });
+        evict_oldest_event_time(&mut self.event_time_cache);
+        Ok(())
+    }
+
+    fn try_reuse_moved_event_time_certificate(
+        &mut self,
+        candidate: &Candidate,
+        now: u64,
+    ) -> Result<Option<CertifiedCandidate>, ProbeFailure> {
+        let observed_at_unix_ms = candidate.observed_at_unix_ms;
+        if observed_at_unix_ms == CORE_MISSING_ACTIVITY_TIME_UNIX_MS {
+            return Ok(None);
+        }
+        let matching = self
+            .event_time_cache
+            .iter()
+            .enumerate()
+            .filter(|(_, cached)| {
+                cached.path == candidate.path
+                    && cached.kind == candidate.kind
+                    && cached.observed_at_unix_ms == observed_at_unix_ms
+                    && cached
+                        .certified_move_at_unix_ms
+                        .is_some_and(|moved_at| moved_at > observed_at_unix_ms)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let Some((&first, rest)) = matching.split_first() else {
+            return Ok(None);
+        };
+        if rest.iter().any(|index| {
+            !self.event_time_cache[*index]
+                .certificate
+                .same_binding_identity(&self.event_time_cache[first].certificate)
+        }) {
+            return Err(ProbeFailure::ConflictingEventTimeIdentity);
+        }
+        let mut reused = self.event_time_cache[first]
+            .certificate
+            .for_event(candidate.evidence_kind, observed_at_unix_ms);
+        // The historical certificate proves stable repository identity at the
+        // event's timestamp. It does not re-authorize a route that is missing
+        // now, so never project its former local-root authorization.
+        reused.binding.local_root_authorization = None;
+        for index in matching {
+            self.event_time_cache[index].last_used = now;
+        }
+        Ok(Some(reused))
     }
 
     pub(crate) fn full_certification_probe_count(&self) -> usize {
@@ -258,11 +419,26 @@ fn evict_oldest_negative(cache: &mut Vec<CachedNegativeCertificate>) {
     }
 }
 
+fn evict_oldest_event_time(cache: &mut Vec<CachedEventTimeCertificate>) {
+    if cache.len() <= MAX_EVENT_TIME_CERTIFICATION_ENTRIES {
+        return;
+    }
+    if let Some(index) = cache
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, cached)| (cached.last_used, cached.path.as_os_str()))
+        .map(|(index, _)| index)
+    {
+        cache.remove(index);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Candidate {
     path: PathBuf,
     kind: CandidateKind,
     evidence_kind: RepositoryEvidenceKind,
+    observed_at_unix_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -289,12 +465,15 @@ impl ProviderIdentityResolution {
         !matches!(self, Self::Absent)
     }
 
-    fn binds_all_outcomes(&self, outcomes: &[RepositoryOutcomeObservation]) -> bool {
+    fn binds_all_outcomes(&self, outcomes: &[UnscopedOutcomeObservation]) -> bool {
         let Self::Binding(binding) = self else {
             return false;
         };
         !outcomes.is_empty()
             && outcomes.iter().all(|outcome| {
+                let UnscopedOutcomeObservation::Exact(outcome) = outcome else {
+                    return false;
+                };
                 outcome.pull_request.as_ref().is_some_and(|pull_request| {
                     binding.aliases.contains(&pull_request.forge_repository)
                 })
@@ -470,6 +649,7 @@ fn attribute_with_attributor(
                     path: candidate.path.clone(),
                     kind: CandidateKind::Directory,
                     evidence_kind: candidate.evidence_kind,
+                    observed_at_unix_ms: activity_at_unix_ms,
                 }),
         );
     }
@@ -478,6 +658,7 @@ fn attribute_with_attributor(
             path: workdir.clone(),
             kind: CandidateKind::Directory,
             evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
+            observed_at_unix_ms: activity_at_unix_ms,
         });
     }
     if !command_analysis.blocks_session_fallback {
@@ -486,6 +667,7 @@ fn attribute_with_attributor(
                 path: path.clone(),
                 kind: CandidateKind::Directory,
                 evidence_kind: RepositoryEvidenceKind::ProviderNativeResult,
+                observed_at_unix_ms: activity_at_unix_ms,
             });
         }
     }
@@ -540,6 +722,7 @@ fn attribute_with_attributor(
             path: path.clone(),
             kind: CandidateKind::File,
             evidence_kind: RepositoryEvidenceKind::FileActivity,
+            observed_at_unix_ms: activity_at_unix_ms,
         });
         file_inputs.push(ScopedFileInput {
             path,
@@ -584,6 +767,7 @@ fn attribute_with_attributor(
                 path: path.clone(),
                 kind: CandidateKind::Directory,
                 evidence_kind: RepositoryEvidenceKind::VcsActivity,
+                observed_at_unix_ms: activity_at_unix_ms,
             });
         }
         vcs_inputs.push(ScopedVcsInput { path, observation });
@@ -621,6 +805,7 @@ fn attribute_with_attributor(
                 path: cwd.clone(),
                 kind: CandidateKind::Directory,
                 evidence_kind: RepositoryEvidenceKind::SessionCwd,
+                observed_at_unix_ms: activity_at_unix_ms,
             });
         }
     }
@@ -645,6 +830,14 @@ fn attribute_with_attributor(
             .iter()
             .map(|certificate| certificate.binding.clone()),
     );
+    let outcome_observations = resolve_deferred_commit_observations(
+        &mut annotation,
+        &certified,
+        outcome_observations,
+        outcome_operation_path.as_deref(),
+        &attributor.certifier,
+        &mut probe_budget,
+    );
     scope_files(&mut annotation, &certified, file_inputs);
     scope_vcs(&mut annotation, &certified, vcs_inputs);
     scope_outcomes(
@@ -663,6 +856,144 @@ fn attribute_with_attributor(
         );
     }
     annotation
+}
+
+fn resolve_deferred_commit_observations(
+    annotation: &mut CoreRecordAnnotation,
+    certified: &[CertifiedCandidate],
+    observations: Vec<UnscopedOutcomeObservation>,
+    operation_path: Option<&std::path::Path>,
+    certifier: &GitCertifier,
+    budget: &mut EventProbeBudget,
+) -> Vec<RepositoryOutcomeObservation> {
+    let mut exact = Vec::new();
+    for observation in observations {
+        let deferred = match observation {
+            UnscopedOutcomeObservation::Exact(outcome) => {
+                exact.push(outcome);
+                continue;
+            }
+            UnscopedOutcomeObservation::DeferredCommit(deferred) => deferred,
+        };
+        let Some(operation_path) = operation_path else {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::ProviderNativeResult,
+                RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+                "deferred_commit_has_no_operation_route",
+            );
+            continue;
+        };
+        let Some(certificate) = certified
+            .iter()
+            .filter(|certificate| operation_path.starts_with(&certificate.repository_root))
+            .max_by_key(|certificate| certificate.repository_root.components().count())
+        else {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::ProviderNativeResult,
+                RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+                "deferred_commit_route_has_no_certified_binding",
+            );
+            continue;
+        };
+        let producer = match (deferred.producer, deferred.rewrites_history) {
+            (_, true) => ResolvedCommitProducer::Rewrite,
+            (BoundedCommitProducer::Commit, false) => ResolvedCommitProducer::Commit,
+            (BoundedCommitProducer::Merge, false) => ResolvedCommitProducer::Merge,
+            (BoundedCommitProducer::Rebase, false) => {
+                push_abstention(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    RepositoryAbstentionReason::OutcomeResultInadmissible,
+                    "deferred_rebase_result_is_not_supported",
+                );
+                continue;
+            }
+        };
+        let resolved = match certifier.resolve_commit(
+            certificate,
+            &deferred.oid_prefix,
+            &deferred.subject,
+            producer,
+            budget,
+        ) {
+            Ok(resolved) => resolved,
+            Err(ProbeFailure::BudgetExceeded) => {
+                push_probe_failure(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    ProbeFailure::BudgetExceeded,
+                    false,
+                );
+                continue;
+            }
+            Err(ProbeFailure::ConcurrentDrift | ProbeFailure::Missing) => {
+                push_abstention(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    RepositoryAbstentionReason::ConcurrentDrift,
+                    "deferred_commit_repository_changed_during_resolution",
+                );
+                continue;
+            }
+            Err(ProbeFailure::PlatformUnsupported) => {
+                push_probe_failure(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    ProbeFailure::PlatformUnsupported,
+                    false,
+                );
+                continue;
+            }
+            Err(_) => {
+                push_abstention(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    RepositoryAbstentionReason::OutcomeResultInadmissible,
+                    "deferred_commit_did_not_resolve_exactly",
+                );
+                continue;
+            }
+        };
+
+        let binding_id = certificate.binding.binding_id.clone();
+        annotation
+            .repository_vcs_observations
+            .push(RepositoryVcsObservation {
+                repository_binding_id: binding_id.clone(),
+                kind: RepositoryVcsObservationKind::Commit,
+                object_id: Some(resolved.object_id.clone()),
+                parent_object_ids: resolved.parent_object_ids.clone(),
+                reference: None,
+                relative_path: None,
+            });
+        annotation
+            .repository_file_observations
+            .extend(
+                resolved
+                    .files
+                    .into_iter()
+                    .map(|file| RepositoryFileObservation {
+                        repository_binding_id: binding_id.clone(),
+                        relative_path: file.path,
+                        kind: file.kind,
+                        prior_relative_path: file.prior_path,
+                    }),
+            );
+        if !deferred.rewrites_history {
+            exact.push(RepositoryOutcomeObservation {
+                kind: RepositoryOutcomeKind::Commit,
+                produced_object_ids: vec![resolved.object_id],
+                replacement_lineage: Vec::new(),
+                pull_request: None,
+                observed_at_unix_ms: deferred.observed_at_unix_ms,
+                linkage: deferred.linkage,
+                outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+            });
+        }
+    }
+    exact
 }
 
 fn bounded_absolute(
@@ -738,6 +1069,10 @@ fn push_probe_failure(
         ProbeFailure::ConcurrentDrift => (
             RepositoryAbstentionReason::ConcurrentDrift,
             "repository_changed_during_probe",
+        ),
+        ProbeFailure::ConflictingEventTimeIdentity => (
+            RepositoryAbstentionReason::ConflictingIdentity,
+            "event_time_certificate_conflicts_with_current_route",
         ),
         ProbeFailure::PlatformUnsupported => (
             RepositoryAbstentionReason::PlatformUnsupported,

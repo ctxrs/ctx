@@ -432,19 +432,46 @@ the final command result from stdout when `--format json` is present.
 
 ```bash
 ctx show session <ctx-session-id> --format json
+ctx show session <ctx-session-id> --format jsonl
 ctx show event <ctx-event-id> --format json
 ```
 
-Writes nothing and returns:
+Show reads only the active verified Core generation. Session presentation walks
+bounded internal Core pages and writes each selected event as it is rendered;
+it does not retain the complete session. The CLI has no public session cursor
+or page limit. Without `--max-events`, `ctx show session` streams every event
+selected by the requested mode in deterministic order, so large transcripts
+are complete rather than silently capped.
+
+Session JSON is one `session_transcript` object containing:
 
 - `schema_version`;
-- `target`, either `session` or `event`;
-- `payload_type`, either `session_transcript` or `event_window`;
-- `mode` for session transcripts;
-- `format`;
+- `target: "session"`;
+- `payload_type: "session_transcript"`;
+- `ctx_session_id`, `provider`, and `provider_session_id` when known;
+- `mode` and `format`;
 - `session` for session output;
-- `event` for event output;
 - `events[]`.
+
+`--max-events <N>` is an explicit terminal truncation control, not pagination.
+When it stops selection, JSON adds
+`truncated: {"events": true, "max_events": N}` and does not return a
+continuation cursor. Without that option, session JSON has no `pagination`,
+`has_more`, or `next_cursor` fields.
+
+Session JSONL emits zero or more event records followed by exactly one terminal
+completion record. An event record has
+`payload_type: "session_transcript_event"`, the session identity and mode, and
+one rendered `event`. The terminal record has
+`payload_type: "session_transcript_completion"`, the same session identity and
+mode, `events_returned`, `complete`, and, only after explicit `--max-events`
+truncation, `truncated: {"events": true, "max_events": N}`. A complete empty
+session therefore emits only a completion record with `events_returned: 0` and
+`complete: true`. JSONL completion metadata is terminal stream metadata; it is
+not an MCP pagination envelope.
+
+Event JSON remains one `event_window` object with `target: "event"`, `format`,
+`event`, and `events[]`.
 
 `session` includes the ctx-owned `item_id`, `record_type`, `provider`, and
 `provider_session_id` when known. For Codex, `provider_session_id` is the resume
@@ -455,9 +482,15 @@ or `structured_content` when policy permits. Each rendered event also includes
 `content.complete`, `content.policy_status`, and an optional
 `content.policy_reason`.
 
-Show reads the active verified Core generation. It does not reopen provider
-transcript files at query time and does not return provider source paths,
-existence checks, or source cursors.
+Show does not reopen provider transcript files at query time and does not return
+provider source paths, existence checks, or source cursors. With `--out`, a
+session transcript is staged and atomically installed only after the complete
+stream succeeds; a failed stream does not replace an existing destination.
+
+The in-repo Rust SDK preserves this split. `ShowSessionOptions::default()` has
+no `limit` or `cursor` and uses the complete CLI stream. Supplying either option
+uses the existing local MCP `show_session` page contract; its returned
+`pagination` object is preserved in the SDK session result's additive fields.
 
 If the active generation changes while `show` or `search` is opening its
 verified reader, JSON mode exits nonzero and writes one error object to stderr
@@ -475,8 +508,9 @@ ctx show session <ctx-session-id> --mode full --format json --out transcript.jso
 With `--out`, writes the requested transcript artifact to that path and prints
 nothing on success. Without `--out`, stdout is the requested transcript
 artifact. JSON and JSONL artifact rows use the same ctx-owned ID fields as
-`show`; JSONL rows include `payload_type: "session_transcript_event"` and wrap
-the transcript row in `event`.
+`show`; JSONL uses the event-plus-terminal-completion stream described above.
+Artifacts inherit the same complete-by-default behavior and explicit,
+non-resumable `--max-events` truncation contract.
 
 ## Search
 

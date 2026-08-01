@@ -123,47 +123,14 @@ impl OpenCodeNativeSchema {
             false
         };
 
-        // Conversation-bearing current families win first. Metadata-only projection rows must
-        // not hide durable message+part history, while an explicitly present empty current table
-        // retains its established migration authority. A message+part route is authoritative
-        // only when its join is populated; otherwise populated legacy messages remain visible.
-        let (family, event_has_type) = if let Some((
-            family,
-            has_type,
-            CurrentTableRows::ConversationBearing,
-        )) = session_message
-        {
-            (family, has_type)
-        } else if let Some((family, has_type, CurrentTableRows::ConversationBearing)) =
-            session_entry
-        {
-            (family, has_type)
-        } else if let Some((family, has_type, CurrentTableRows::Empty)) = session_message {
-            (family, has_type)
-        } else if message_part_join {
-            (
-                OpenCodeNativeSchemaFamily::MessagePart,
-                part.map(|(has_type, _)| has_type).unwrap_or(false),
-            )
-        } else if let Some((has_type, true)) = message {
-            (OpenCodeNativeSchemaFamily::LegacyMessage, has_type)
-        } else if let Some((family, has_type, CurrentTableRows::MetadataOnly)) = session_message {
-            (family, has_type)
-        } else if let Some((family, has_type, _)) = session_entry {
-            (family, has_type)
-        } else if message.is_some() && part.is_some() {
-            (
-                OpenCodeNativeSchemaFamily::MessagePart,
-                part.map(|(has_type, _)| has_type).unwrap_or(false),
-            )
-        } else if let Some((has_type, _)) = message {
-            (OpenCodeNativeSchemaFamily::LegacyMessage, has_type)
-        } else {
-            return Err(CaptureError::InvalidPayload(format!(
-                "{} NativePath found no explicitly supported message schema family",
-                dialect.display_name
-            )));
-        };
+        let (family, event_has_type) = select_schema_family(
+            dialect,
+            session_message,
+            session_entry,
+            message,
+            part,
+            message_part_join,
+        )?;
 
         validate_native_ordering_rows(conn, family)?;
         let user_version = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -177,6 +144,68 @@ impl OpenCodeNativeSchema {
             session_columns: session.keys().cloned().collect(),
             event_has_type,
         })
+    }
+}
+
+fn select_schema_family(
+    dialect: &OpenCodeSqliteDialect,
+    session_message: Option<(OpenCodeNativeSchemaFamily, bool, CurrentTableRows)>,
+    session_entry: Option<(OpenCodeNativeSchemaFamily, bool, CurrentTableRows)>,
+    message: Option<(bool, bool)>,
+    part: Option<(bool, bool)>,
+    message_part_join: bool,
+) -> Result<(OpenCodeNativeSchemaFamily, bool)> {
+    let mut populated = Vec::new();
+    if let Some((family, has_type, CurrentTableRows::ConversationBearing)) = session_message {
+        populated.push((family, has_type));
+    }
+    if let Some((family, has_type, CurrentTableRows::ConversationBearing)) = session_entry {
+        populated.push((family, has_type));
+    }
+    if message_part_join {
+        populated.push((
+            OpenCodeNativeSchemaFamily::MessagePart,
+            part.is_some_and(|(has_type, _)| has_type),
+        ));
+    } else if let Some((has_type, true)) = message {
+        populated.push((OpenCodeNativeSchemaFamily::LegacyMessage, has_type));
+    }
+
+    match populated.as_slice() {
+        [selected] => return Ok(*selected),
+        [] => {}
+        _ => {
+            let families = populated
+                .iter()
+                .map(|(family, _)| family.label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(CaptureError::InvalidPayload(format!(
+                "{} NativePath found ambiguous populated message schema families: {families}",
+                dialect.display_name
+            )));
+        }
+    }
+
+    // An entirely empty database still has one stable schema identity. Table
+    // presence is used only after proving that every supported representation
+    // is empty, so an empty migration table can never hide populated history.
+    if let Some((family, has_type, _)) = session_message {
+        Ok((family, has_type))
+    } else if let Some((family, has_type, _)) = session_entry {
+        Ok((family, has_type))
+    } else if message.is_some() && part.is_some() {
+        Ok((
+            OpenCodeNativeSchemaFamily::MessagePart,
+            part.is_some_and(|(has_type, _)| has_type),
+        ))
+    } else if let Some((has_type, _)) = message {
+        Ok((OpenCodeNativeSchemaFamily::LegacyMessage, has_type))
+    } else {
+        Err(CaptureError::InvalidPayload(format!(
+            "{} NativePath found no explicitly supported message schema family",
+            dialect.display_name
+        )))
     }
 }
 
@@ -712,9 +741,9 @@ mod tests {
     }
 
     #[test]
-    fn explicitly_empty_current_table_remains_authoritative() {
+    fn populated_message_part_wins_over_empty_current_table() {
         let conn = mixed_schema(CurrentTable::SessionMessage);
         let schema = OpenCodeNativeSchema::probe(&conn, &OPENCODE_SQLITE_DIALECT).unwrap();
-        assert_eq!(schema.family, OpenCodeNativeSchemaFamily::SessionMessageSeq);
+        assert_eq!(schema.family, OpenCodeNativeSchemaFamily::MessagePart);
     }
 }

@@ -329,3 +329,232 @@ fn moved_linked_worktree_recertifies_new_root_without_stale_old_authorization() 
         RepositoryAbstentionReason::CandidateMissingBeforeCertification
     ));
 }
+
+#[cfg(unix)]
+#[test]
+fn moved_local_root_reuses_only_exact_prior_event_time_certificates() {
+    let temp = TempDir::new().unwrap();
+    let neutral = temp.path().join("neutral");
+    fs::create_dir(&neutral).unwrap();
+    let old = repository(temp.path(), "local-old", None);
+    let tracked = old.join("tracked.txt");
+    let mut attributor = RepositoryAttributor::default();
+
+    let old_call = attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(100),
+        session_cwd: Some(neutral.to_string_lossy().into_owned()),
+        declared_tool_workdir: Some(old.to_string_lossy().into_owned()),
+        command: Some("git status --short".to_owned()),
+        ..AttributionInput::default()
+    });
+    let old_file = attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(110),
+        session_cwd: Some(neutral.to_string_lossy().into_owned()),
+        declared_tool_workdir: Some(old.to_string_lossy().into_owned()),
+        file_observations: vec![UnscopedFileObservation {
+            path: tracked.to_string_lossy().into_owned(),
+            prior_path: None,
+            kind: RepositoryFileObservationKind::Modified,
+        }],
+        ..AttributionInput::default()
+    });
+    assert_eq!(old_call.repository_bindings.len(), 1);
+    assert_eq!(old_file.repository_file_observations.len(), 1);
+    assert_eq!(attributor.full_certification_probe_count(), 1);
+
+    let moved = temp.path().join("local-moved");
+    fs::rename(&old, &moved).unwrap();
+    let new_call = attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(200),
+        session_cwd: Some(neutral.to_string_lossy().into_owned()),
+        declared_tool_workdir: Some(moved.to_string_lossy().into_owned()),
+        command: Some("git status --short".to_owned()),
+        ..AttributionInput::default()
+    });
+    assert_eq!(new_call.repository_bindings.len(), 1);
+    assert_eq!(attributor.full_certification_probe_count(), 2);
+    for identity in [
+        &old_call.repository_bindings[0],
+        &old_file.repository_bindings[0],
+    ] {
+        assert_eq!(
+            identity.logical_repository_id,
+            new_call.repository_bindings[0].logical_repository_id
+        );
+        assert_eq!(
+            identity.checkout_id,
+            new_call.repository_bindings[0].checkout_id
+        );
+        assert_eq!(
+            identity.worktree_id,
+            new_call.repository_bindings[0].worktree_id
+        );
+    }
+    assert!(new_call.repository_bindings[0]
+        .logical_repository_id
+        .starts_with("local:"));
+    assert_eq!(
+        new_call.repository_bindings[0]
+            .local_root_authorization
+            .as_ref()
+            .unwrap()
+            .local_root,
+        moved.to_string_lossy()
+    );
+
+    let replayed_call = attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(100),
+        session_cwd: Some(neutral.to_string_lossy().into_owned()),
+        declared_tool_workdir: Some(old.to_string_lossy().into_owned()),
+        command: Some("git status --short".to_owned()),
+        ..AttributionInput::default()
+    });
+    assert_eq!(replayed_call.repository_bindings.len(), 1);
+    assert_eq!(
+        replayed_call.repository_bindings[0].binding_id,
+        old_call.repository_bindings[0].binding_id
+    );
+    assert!(replayed_call.repository_bindings[0]
+        .local_root_authorization
+        .is_none());
+    assert_eq!(attributor.full_certification_probe_count(), 2);
+
+    let replayed_file = attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(110),
+        session_cwd: Some(neutral.to_string_lossy().into_owned()),
+        declared_tool_workdir: Some(old.to_string_lossy().into_owned()),
+        file_observations: vec![UnscopedFileObservation {
+            path: tracked.to_string_lossy().into_owned(),
+            prior_path: None,
+            kind: RepositoryFileObservationKind::Modified,
+        }],
+        ..AttributionInput::default()
+    });
+    assert_eq!(replayed_file.repository_bindings.len(), 1);
+    assert_eq!(replayed_file.repository_file_observations.len(), 1);
+    assert_eq!(
+        replayed_file.repository_file_observations[0].repository_binding_id,
+        old_call.repository_bindings[0].binding_id
+    );
+
+    for input in [
+        AttributionInput {
+            activity_at_unix_ms: Some(150),
+            declared_tool_workdir: Some(old.to_string_lossy().into_owned()),
+            ..AttributionInput::default()
+        },
+        AttributionInput {
+            activity_at_unix_ms: Some(300),
+            declared_tool_workdir: Some(old.to_string_lossy().into_owned()),
+            ..AttributionInput::default()
+        },
+        AttributionInput {
+            declared_tool_workdir: Some(old.to_string_lossy().into_owned()),
+            ..AttributionInput::default()
+        },
+    ] {
+        let untrusted = attributor.attribute(input);
+        assert!(untrusted.repository_bindings.is_empty());
+        assert!(has_reason(
+            &untrusted,
+            RepositoryAbstentionReason::CandidateMissingBeforeCertification
+        ));
+    }
+
+    let never_seen_file = attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(110),
+        file_observations: vec![UnscopedFileObservation {
+            path: old.join("never-seen.txt").to_string_lossy().into_owned(),
+            prior_path: None,
+            kind: RepositoryFileObservationKind::Modified,
+        }],
+        ..AttributionInput::default()
+    });
+    assert!(never_seen_file.repository_bindings.is_empty());
+    assert!(never_seen_file.repository_file_observations.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn event_time_history_fails_closed_for_identity_conflict_and_live_replacement() {
+    let temp = TempDir::new().unwrap();
+    let old = repository(temp.path(), "old", None);
+    let moved = temp.path().join("moved");
+    let mut attributor = RepositoryAttributor::default();
+    let original = attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(100),
+        declared_tool_workdir: Some(old.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    fs::rename(&old, &moved).unwrap();
+    let relocated = attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(200),
+        declared_tool_workdir: Some(moved.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    assert_eq!(
+        original.repository_bindings[0].binding_id,
+        relocated.repository_bindings[0].binding_id
+    );
+
+    let replacement = repository(temp.path(), "old", None);
+    let historical_conflict = attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(100),
+        declared_tool_workdir: Some(old.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    assert!(historical_conflict.repository_bindings.is_empty());
+    assert!(has_reason(
+        &historical_conflict,
+        RepositoryAbstentionReason::ConflictingIdentity
+    ));
+
+    let current_replacement = attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(300),
+        declared_tool_workdir: Some(replacement.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    assert_eq!(current_replacement.repository_bindings.len(), 1);
+    assert_ne!(
+        current_replacement.repository_bindings[0].binding_id,
+        original.repository_bindings[0].binding_id
+    );
+
+    let conflict_old = repository(temp.path(), "conflict-old", None);
+    let conflict_moved = temp.path().join("conflict-moved");
+    let mut conflicting_attributor = RepositoryAttributor::default();
+    let local = conflicting_attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(400),
+        declared_tool_workdir: Some(conflict_old.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    fs::rename(&conflict_old, &conflict_moved).unwrap();
+    run_git(
+        &conflict_moved,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/conflicting-identity.git",
+        ],
+    );
+    let forge = conflicting_attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(500),
+        declared_tool_workdir: Some(conflict_moved.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    assert_ne!(
+        local.repository_bindings[0].logical_repository_id,
+        forge.repository_bindings[0].logical_repository_id
+    );
+    let unbound_old_phase = conflicting_attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(400),
+        declared_tool_workdir: Some(conflict_old.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    assert!(unbound_old_phase.repository_bindings.is_empty());
+    assert!(has_reason(
+        &unbound_old_phase,
+        RepositoryAbstentionReason::CandidateMissingBeforeCertification
+    ));
+}

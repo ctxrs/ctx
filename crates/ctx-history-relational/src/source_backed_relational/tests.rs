@@ -12,9 +12,11 @@ use ctx_history_core::{
     NativeItemKey, NativeSessionKey, RepositoryAlias, RepositoryAliasKind, RepositoryBinding,
     RepositoryCandidateEvidence, RepositoryEvidence, RepositoryEvidenceConfidence,
     RepositoryEvidenceKind, RepositoryFileObservation, RepositoryFileObservationKind,
+    RepositoryOutcomeKind, RepositoryOutcomeLinkage, RepositoryOutcomeObservation,
     RepositoryVcsObservation, RepositoryVcsObservationKind, SessionIdentityInput, SourceAnchor,
     SourceKey, StableEntityId, TypedKey, CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION,
     CORE_RECORD_VERSION, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
 };
 use tempfile::TempDir;
 
@@ -878,6 +880,53 @@ fn repository_file_and_vcs_rows_cannot_cross_repository_bindings() {
             "SELECT logical_repository_id, object_id FROM ctx_vcs_observations"
         ),
         vec![vec![text_value("beta"), text_value(&"a".repeat(40))]]
+    );
+}
+
+#[test]
+fn repository_outcome_variant_materializes_as_a_typed_vcs_kind() {
+    let (_temp, mut projection) = projection();
+    let source = source("repository-outcome");
+    let metadata = source_metadata(&source, 1, 1);
+    let generation = generation(5, vec![metadata.clone()]);
+    let mut event = repository_record(&source, 1);
+    event.repository_vcs_observations = vec![RepositoryVcsObservation {
+        repository_binding_id: "repo-shared".to_owned(),
+        kind: RepositoryVcsObservationKind::Outcome(Box::new(RepositoryOutcomeObservation {
+            kind: RepositoryOutcomeKind::Commit,
+            produced_object_ids: vec![GitObjectId {
+                format: GitObjectFormat::Sha1,
+                hex: "a".repeat(40),
+            }],
+            replacement_lineage: Vec::new(),
+            pull_request: None,
+            observed_at_unix_ms: 1_700_000_000_000,
+            linkage: RepositoryOutcomeLinkage {
+                provider: "codex".to_owned(),
+                origin_call_id: "call-origin".to_owned(),
+                result_call_id: "call-result".to_owned(),
+                origin_event_sequence: 7,
+                continuation_call_id_sha256: Vec::new(),
+                result_record_sha256: [4; 32],
+            },
+            outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+        })),
+        object_id: None,
+        parent_object_ids: Vec::new(),
+        reference: None,
+        relative_path: None,
+    }];
+
+    projection
+        .rebuild(&generation, records(metadata, vec![event]))
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &projection,
+            "SELECT observation_kind FROM ctx_vcs_observations"
+        ),
+        vec![vec![text_value("outcome")]]
     );
 }
 

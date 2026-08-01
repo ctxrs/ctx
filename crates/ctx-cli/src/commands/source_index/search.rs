@@ -417,7 +417,11 @@ pub(super) fn search_existing_generation(
     let collection =
         collect_search_hits_with_backend(request, &index, data_root, semantic_weight, &filters)?;
     let query_duration = query_started.elapsed();
-    let core_records = core_records_for_search_hits(&index, &collection.result_window.hits)?;
+    let core_records = core_records_for_search_hits(
+        &index,
+        &collection.result_window.hits,
+        &NormalizedSearchQuery::from_request(request),
+    )?;
     let value = search_json(
         request,
         data_root,
