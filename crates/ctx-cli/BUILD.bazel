@@ -615,6 +615,10 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "search_show_locate_sql_tests",
     src = "tests/search_show_locate_sql.rs",
+    extra_crates = [
+        "anstream",
+        "unicode-width",
+    ],
     extra_srcs = [
         "tests/support/search_show_locate_sql/import_paths.rs",
         "tests/support/search_show_locate_sql/pi_flow.rs",

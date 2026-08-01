@@ -122,7 +122,8 @@ fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
             break serde_json::from_slice::<Value>(&output.stdout).unwrap();
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if (stderr.contains("source-backed SQL projection")
+        if (stderr.contains("Core SQL projection")
+            || stderr.contains("source-backed SQL projection")
             || stderr.contains("source-backed relational projection")
             || stderr.contains("no such table: source_backed_relational_state"))
             && Instant::now() < deadline
@@ -809,15 +810,11 @@ fn fresh_home_search_mvp_flow() {
 
     let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
     assert_eq!(doctor["schema_version"], 1);
-    assert_eq!(doctor["ok"], false);
+    assert_eq!(doctor["ok"], true);
     assert_eq!(doctor["daemon"]["enabled"], true);
     assert_eq!(doctor["source_epoch"]["lexical"]["status"], "ready");
     assert_eq!(doctor["pro"]["error_code"], "pro_not_installed");
-    assert!(doctor["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding == "resolver is unavailable (unknown)"));
+    assert!(doctor["findings"].as_array().unwrap().is_empty());
 }
 
 #[test]
