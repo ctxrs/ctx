@@ -736,12 +736,6 @@ impl NanoClawProjectSnapshot {
             .sum()
     }
 
-    pub(super) fn selected_component_count(&self) -> u64 {
-        u64::try_from(self.inventory.session_databases.len())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(2)
-    }
-
     pub(super) fn logical_authority_fingerprint(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"ctx-nanoclaw-compound-logical-authority-v1\0");
