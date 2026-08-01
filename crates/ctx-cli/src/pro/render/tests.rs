@@ -416,6 +416,8 @@ fn ambiguous_commit_never_implies_an_asserted_producer_golden() {
 fn narrow_commit_uses_label_children_without_truncating_ids_golden() {
     let commit = resource("commit:abcdef", ResourceKind::Commit, "abcdef");
     let session_id = "session:018f0f65-8b1f-7f30-9dc4-a81c7e36a1b2";
+    let evidence = event_evidence(1);
+    let event_id = evidence.citation.event_id.to_string();
     let mut produced = commit_match(
         &commit,
         CommitFactType::Produced,
@@ -439,7 +441,7 @@ fn narrow_commit_uses_label_children_without_truncating_ids_golden() {
         },
         git_snapshot: None,
         matches: vec![produced],
-        evidence: vec![event_evidence(1)],
+        evidence: vec![evidence],
         next: None,
     };
     result.validate().unwrap();
@@ -449,7 +451,7 @@ fn narrow_commit_uses_label_children_without_truncating_ids_golden() {
         include_str!("../../../testdata/pro/blame_commit_narrow.golden.txt")
     );
     assert!(rendered.contains(session_id));
-    assert!(rendered.contains("00000000-0000-0000-0000-000000000001"));
+    assert!(rendered.contains(&event_id));
 }
 
 #[test]
@@ -557,6 +559,14 @@ fn labels_wider_than_the_configured_column_stack_or_align_by_actual_width() {
 #[test]
 fn core_evidence_keeps_generation_event_source_and_sequence() {
     let commit = resource("commit:abcdef", ResourceKind::Commit, "abcdef");
+    let evidence = event_evidence(1);
+    let expected_citation = format!(
+        "ctx show event {} · Core {} · source {} · sequence {}",
+        evidence.citation.event_id,
+        &evidence.citation.core_generation_id[..12],
+        evidence.citation.source.identity(),
+        evidence.citation.event_sequence,
+    );
     let result = BlameResult {
         target: ResolvedBlameTarget::Commit {
             commit: commit.clone(),
@@ -572,14 +582,12 @@ fn core_evidence_keeps_generation_event_source_and_sequence() {
             FactState::Asserted,
             1,
         )],
-        evidence: vec![event_evidence(1)],
+        evidence: vec![evidence],
         next: None,
     };
     result.validate().unwrap();
     let rendered = render_plain(&result, 120);
-    assert!(rendered.contains("ctx show event"));
-    assert!(rendered.contains("Core aaaaaaaaaaaa"));
-    assert!(rendered.contains("sequence 1"));
+    assert!(rendered.contains(&expected_citation), "{rendered}");
 }
 
 #[test]

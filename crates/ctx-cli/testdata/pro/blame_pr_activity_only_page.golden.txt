@@ -18,4 +18,5 @@ More results
     ctx blame pr 42 --repository ctxrs/ctx --cursor commit-page
 
 Evidence
-  [1]  ctx show event 00000000-0000-0000-0000-000000000001
+  [1]
+    ctx show event 8cd765ac-68a3-8a2c-ae04-669a08be6370 · Core aaaaaaaaaaaa · source 0f989cc2-fb1b-8eaf-8403-078d7622424b · sequence 1

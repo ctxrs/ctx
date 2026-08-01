@@ -870,7 +870,7 @@ mod tests {
         assert!(result["structuredContent"]["error"]
             .as_str()
             .unwrap()
-            .contains("source-backed SQL projection is missing"));
+            .contains("Core SQL projection is missing"));
         assert!(
             std::fs::read_dir(temp.path()).unwrap().next().is_none(),
             "MCP SQL must leave a pristine data root empty"

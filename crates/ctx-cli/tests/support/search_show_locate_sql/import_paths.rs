@@ -254,7 +254,7 @@ fn import_rejects_unreadable_directory_with_path_context() {
 }
 
 #[test]
-fn codex_cli_fails_closed_when_raw_source_is_deleted() {
+fn codex_cli_search_and_show_survive_deleted_raw_source() {
     let temp = tempdir();
     let source = PathBuf::from(provider_history_fixture("codex-sessions"));
     let copied = temp.path().join("copied-codex-sessions");
@@ -273,15 +273,52 @@ fn codex_cli_fails_closed_when_raw_source_is_deleted() {
 
     fs::remove_dir_all(&copied).unwrap();
 
-    let stderr = ctx(&temp)
-        .args(["search", "onboarding", "--refresh", "off", "--format=json"])
-        .assert()
-        .failure()
-        .get_output()
-        .stderr
-        .clone();
-    let error: Value = serde_json::from_slice(&stderr).unwrap();
-    assert_eq!(error["error_code"], "source_unreadable");
-    assert_eq!(error["failure_kind"], "temporarily_unavailable");
-    assert_eq!(error["retryable"], true);
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "onboarding",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&search, "codex", "onboarding", 1, "message");
+
+    let result = &search["results"][0];
+    let event_id = result["ctx_event_id"].as_str().unwrap();
+    let session_id = result["ctx_session_id"].as_str().unwrap();
+    let shown_event =
+        json_output(ctx(&temp).args(["show", "event", event_id, "--window", "1", "--format=json"]));
+    assert_eq!(
+        shown_event["payload_type"], "event_window",
+        "{shown_event:#}"
+    );
+    assert_eq!(shown_event["ctx_event_id"], event_id, "{shown_event:#}");
+    assert_eq!(shown_event["ctx_session_id"], session_id, "{shown_event:#}");
+    assert_eq!(shown_event["event"]["provider"], "codex", "{shown_event:#}");
+    assert!(
+        shown_event["event"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("onboarding")),
+        "{shown_event:#}"
+    );
+
+    let shown_session =
+        json_output(ctx(&temp).args(["show", "session", session_id, "--format=json"]));
+    assert_eq!(
+        shown_session["payload_type"], "session_transcript",
+        "{shown_session:#}"
+    );
+    assert_eq!(
+        shown_session["ctx_session_id"], session_id,
+        "{shown_session:#}"
+    );
+    assert!(
+        shown_session["events"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| event["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("onboarding")))),
+        "{shown_session:#}"
+    );
 }
