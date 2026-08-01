@@ -1,6 +1,6 @@
-use std::{fs, path::Path};
 #[cfg(unix)]
 use std::process::Command;
+use std::{fs, path::Path};
 
 use ctx_history_core::{CaptureProvider, EventRole, EventType, TypedKey};
 #[cfg(unix)]
