@@ -423,7 +423,6 @@ impl StatusMarker {
 #[derive(Debug, Default, Clone)]
 struct GeminiBoundedContent {
     preview: Option<String>,
-    decoded_bytes: usize,
     sha256: [u8; 32],
 }
 
@@ -434,7 +433,6 @@ enum GeminiSelectedContent {
     String(GeminiBoundedContent),
     Null,
     Unsupported {
-        encoded_bytes: usize,
         sha256: [u8; 32],
     },
 }
@@ -457,9 +455,6 @@ struct ProbedGeminiOutput {
     outcome: OutputOutcomeMetadata,
     redacted: bool,
     released_diagnostic_preview: Option<String>,
-    content: Option<String>,
-    content_bytes: usize,
-    has_output_content: bool,
     fallback_identity_sha256: [u8; 32],
 }
 
@@ -471,8 +466,6 @@ struct ProbedGeminiResult {
 
 pub(super) struct DecodedGeminiResult {
     pub(super) events: Vec<(GeminiRetainedEvent, usize)>,
-    pub(super) outputs: Vec<(ProOutputObservation, usize)>,
-    pub(super) output_reservations: Vec<(u32, usize)>,
     pub(super) decoded_body_bytes: u64,
     pub(super) failure_diagnostics: usize,
     pub(super) failure_previews: usize,
@@ -486,12 +479,10 @@ const MAX_GEMINI_REPOSITORY_PATHS: usize = 256;
 struct GeminiRawJson<'a> {
     bytes: &'a [u8],
     offset: usize,
-    capture_full_content: bool,
 }
 
 struct GeminiRawString {
     retained: String,
-    decoded_bytes: usize,
     truncated: bool,
     non_whitespace: bool,
     sha256: [u8; 32],
@@ -501,7 +492,6 @@ impl GeminiRawString {
     fn bounded_content(self) -> GeminiBoundedContent {
         GeminiBoundedContent {
             preview: Some(self.retained),
-            decoded_bytes: self.decoded_bytes,
             sha256: self.sha256,
         }
     }
@@ -512,12 +502,8 @@ impl GeminiRawString {
 }
 
 impl<'a> GeminiRawJson<'a> {
-    fn new(bytes: &'a [u8], capture_full_content: bool) -> Self {
-        Self {
-            bytes,
-            offset: 0,
-            capture_full_content,
-        }
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
     }
 
     fn finish(mut self) -> std::result::Result<(), String> {
@@ -574,7 +560,6 @@ impl<'a> GeminiRawJson<'a> {
         let mut retained = String::new();
         let mut retained_chars = 0_usize;
         let mut decoded_chars = 0_usize;
-        let mut decoded_bytes = 0_usize;
         let mut non_whitespace = false;
         let mut hasher = Sha256::new();
         hasher.update(RESULT_STRING_HASH_DOMAIN);
@@ -587,7 +572,6 @@ impl<'a> GeminiRawJson<'a> {
                     self.offset = self.offset.saturating_add(1);
                     return Ok(GeminiRawString {
                         retained,
-                        decoded_bytes,
                         truncated: retained_chars < decoded_chars,
                         non_whitespace,
                         sha256: hasher.finalize().into(),
@@ -616,9 +600,6 @@ impl<'a> GeminiRawJson<'a> {
                             ));
                         }
                     };
-                    decoded_bytes = decoded_bytes
-                        .checked_add(character.len_utf8())
-                        .ok_or_else(|| "Gemini result string length overflowed".to_owned())?;
                     let mut encoded = [0_u8; 4];
                     hasher.update(character.encode_utf8(&mut encoded).as_bytes());
                     decoded_chars = decoded_chars.saturating_add(1);
@@ -642,9 +623,6 @@ impl<'a> GeminiRawJson<'a> {
                         self.offset = self.offset.saturating_add(1);
                     }
                     let run = &self.bytes[start..self.offset];
-                    decoded_bytes = decoded_bytes
-                        .checked_add(run.len())
-                        .ok_or_else(|| "Gemini result string length overflowed".to_owned())?;
                     hasher.update(run);
                     decoded_chars = decoded_chars.saturating_add(run.len());
                     non_whitespace |= run.iter().any(|byte| !byte.is_ascii_whitespace());
@@ -679,9 +657,6 @@ impl<'a> GeminiRawJson<'a> {
                         .and_then(|value| value.chars().next())
                         .ok_or_else(|| "Gemini result JSON string is not UTF-8".to_owned())?;
                     self.offset = end;
-                    decoded_bytes = decoded_bytes
-                        .checked_add(character.len_utf8())
-                        .ok_or_else(|| "Gemini result string length overflowed".to_owned())?;
                     hasher.update(encoded);
                     decoded_chars = decoded_chars.saturating_add(1);
                     non_whitespace |= !character.is_whitespace();

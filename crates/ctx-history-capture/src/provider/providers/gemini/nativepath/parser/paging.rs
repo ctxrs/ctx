@@ -44,14 +44,6 @@ pub(super) fn estimated_json_string_wire_bytes(value: &str) -> Option<usize> {
     })
 }
 
-pub(super) fn estimated_base64_wire_bytes(decoded_bytes: usize) -> Option<usize> {
-    decoded_bytes
-        .checked_add(2)?
-        .checked_div(3)?
-        .checked_mul(4)?
-        .checked_add(2)
-}
-
 #[cfg(test)]
 pub(super) fn rejection_wire_bytes(rejection: &GeminiRejection) -> Option<usize> {
     REJECTION_ENVELOPE_FIXED_BYTES.checked_add(estimated_json_string_wire_bytes(&rejection.reason)?)

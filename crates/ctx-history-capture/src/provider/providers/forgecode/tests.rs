@@ -11,9 +11,10 @@ use super::nativepath::source::{
 };
 
 const SUCCESS_SENTINEL: &str = "forgecode-success-body-must-stay-out-of-core";
+const FAILURE_SENTINEL: &str = "forgecode-failure-evidence-must-stay-in-core";
 
 #[test]
-fn scanner_pages_messages_and_separates_success_output() {
+fn scanner_pages_messages_and_counts_ignored_success_output() {
     let directory = crate::test_support_paths::tempdir().unwrap();
     let source_path = directory.path().join(".forge.db");
     let mut messages = (0..18)
@@ -29,16 +30,12 @@ fn scanner_pages_messages_and_separates_success_output() {
         })
         .collect::<Vec<_>>();
     messages.push(success_output(SUCCESS_SENTINEL));
+    messages.push(failure_output(FAILURE_SENTINEL));
     write_source(&source_path, "conversation-pages", Value::Array(messages));
 
     let source = live_source(&source_path);
-    let mut scanner = ForgeCodeScanner::new(
-        source,
-        ForgeCodeFrontier::initial(),
-        context(&source_path),
-        true,
-    )
-    .unwrap();
+    let mut scanner =
+        ForgeCodeScanner::new(source, ForgeCodeFrontier::initial(), context(&source_path)).unwrap();
     let mut pages = Vec::new();
     while let Some(page) = scanner.next_page().unwrap() {
         pages.push(page);
@@ -46,9 +43,15 @@ fn scanner_pages_messages_and_separates_success_output() {
 
     assert_eq!(pages.len(), 2);
     assert_eq!(pages[0].events.len(), 16);
-    assert_eq!(pages[1].events.len(), 2);
-    assert_eq!(pages[1].outputs.len(), 1);
-    assert_eq!(pages[1].outputs[0].content, SUCCESS_SENTINEL.as_bytes());
+    assert_eq!(pages[1].events.len(), 3);
+    assert_eq!(pages[1].ignored_output_records, 1);
+    let failure = pages[1]
+        .events
+        .iter()
+        .find(|event| event.event.event_type == ctx_history_core::EventType::ToolOutput)
+        .unwrap();
+    assert_eq!(failure.event.payload["result_outcome"], "failure");
+    assert!(failure.event.payload.to_string().contains(FAILURE_SENTINEL));
     assert!(pages
         .iter()
         .flat_map(|page| &page.events)
@@ -90,7 +93,6 @@ fn malformed_row_is_bounded_and_does_not_hide_healthy_sibling() {
         live_source(&source_path),
         ForgeCodeFrontier::initial(),
         context(&source_path),
-        false,
     )
     .unwrap();
     let first = scanner.next_page().unwrap().unwrap();
@@ -165,13 +167,21 @@ fn insert_row(
 }
 
 fn success_output(text: &str) -> Value {
+    tool_output(text, false)
+}
+
+fn failure_output(text: &str) -> Value {
+    tool_output(text, true)
+}
+
+fn tool_output(text: &str, is_error: bool) -> Value {
     json!({
         "message": {
             "tool": {
                 "name": "shell",
-                "call_id": "call-success",
+                "call_id": if is_error { "call-failure" } else { "call-success" },
                 "output": {
-                    "is_error": false,
+                    "is_error": is_error,
                     "values": [{"text": text}]
                 }
             }

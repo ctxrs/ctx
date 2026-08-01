@@ -11,12 +11,7 @@ impl GeminiRawJson<'_> {
         match self.peek() {
             Some(b'"') => Ok(GeminiRawOutput {
                 content: GeminiSelectedContent::String(
-                    self.string(if self.capture_full_content {
-                        usize::MAX
-                    } else {
-                        PROVIDER_MAX_PREVIEW_CHARS
-                    })?
-                    .bounded_content(),
+                    self.string(PROVIDER_MAX_PREVIEW_CHARS)?.bounded_content(),
                 ),
                 ..GeminiRawOutput::default()
             }),
@@ -37,7 +32,6 @@ impl GeminiRawJson<'_> {
                 hasher.update(encoded);
                 Ok(GeminiRawOutput {
                     content: GeminiSelectedContent::Unsupported {
-                        encoded_bytes: encoded.len(),
                         sha256: hasher.finalize().into(),
                     },
                     ..GeminiRawOutput::default()
@@ -201,11 +195,7 @@ impl GeminiRawJson<'_> {
         self.whitespace();
         match self.peek() {
             Some(b'"') => self
-                .string(if self.capture_full_content {
-                    usize::MAX
-                } else {
-                    PROVIDER_MAX_PREVIEW_CHARS
-                })
+                .string(PROVIDER_MAX_PREVIEW_CHARS)
                 .map(GeminiRawString::bounded_content)
                 .map(GeminiSelectedContent::String),
             Some(b'n') => {
@@ -220,7 +210,6 @@ impl GeminiRawJson<'_> {
                 hasher.update(RESULT_UNSUPPORTED_HASH_DOMAIN);
                 hasher.update(encoded);
                 Ok(GeminiSelectedContent::Unsupported {
-                    encoded_bytes: encoded.len(),
                     sha256: hasher.finalize().into(),
                 })
             }
@@ -411,9 +400,8 @@ struct GeminiRawResultCall {
 
 pub(super) fn parse_result_record_selectively(
     payload: &[u8],
-    capture_full_content: bool,
 ) -> std::result::Result<ProbedGeminiResult, String> {
-    let mut parser = GeminiRawJson::new(payload, capture_full_content);
+    let mut parser = GeminiRawJson::new(payload);
     parser.whitespace();
     parser.take(b'{')?;
     parser.whitespace();
@@ -490,24 +478,18 @@ pub(super) fn parse_result_record_selectively(
     parser.finish()?;
 
     let mut outputs = Vec::new();
-    let mut invalid_selected_shape = false;
     let mut output_count = 0_usize;
     let record_redacted = outcome.is_redacted();
     if let Some(result) = top_result {
         output_count = output_count.saturating_add(1);
-        if let Some(output) = finish_probed_output(
+        outputs.push(finish_probed_output(
             None,
             None,
             GeminiRepositoryArgs::default(),
             false,
             &outcome,
             result,
-            capture_full_content,
-        ) {
-            outputs.push(output);
-        } else {
-            invalid_selected_shape = true;
-        }
+        ));
     }
     for call in calls {
         let Some(result) = call.result else {
@@ -519,24 +501,14 @@ pub(super) fn parse_result_record_selectively(
             ));
         }
         output_count = output_count.saturating_add(1);
-        if let Some(output) = finish_probed_output(
+        outputs.push(finish_probed_output(
             nonempty(call.id),
             nonempty(call.name),
             call.args,
             record_redacted,
             &call.outcome,
             result,
-            capture_full_content,
-        ) {
-            outputs.push(output);
-        } else {
-            invalid_selected_shape = true;
-        }
-    }
-    // The shared legacy extractor abstains from the complete result record
-    // when any selected alias has an unsupported shape.
-    if invalid_selected_shape {
-        outputs.clear();
+        ));
     }
 
     Ok(ProbedGeminiResult {
@@ -556,30 +528,17 @@ pub(super) fn finish_probed_output(
     record_redacted: bool,
     outer_outcome: &GeminiOutputOutcomeDto,
     result: GeminiRawOutput,
-    capture_full_content: bool,
-) -> Option<ProbedGeminiOutput> {
-    let (retained, content_bytes, has_output_content, content_kind, content_sha256) =
-        match result.content {
-            GeminiSelectedContent::String(content) => (
-                content.preview,
-                content.decoded_bytes,
-                true,
-                b"string".as_slice(),
-                Some(content.sha256),
-            ),
-            GeminiSelectedContent::Absent => (None, 0, false, b"absent".as_slice(), None),
-            GeminiSelectedContent::Null => (None, 0, false, b"null".as_slice(), None),
-            GeminiSelectedContent::Unsupported {
-                encoded_bytes,
-                sha256,
-            } => (
-                None,
-                encoded_bytes,
-                true,
-                b"unsupported".as_slice(),
-                Some(sha256),
-            ),
-        };
+) -> ProbedGeminiOutput {
+    let (retained, content_kind, content_sha256) = match result.content {
+        GeminiSelectedContent::String(content) => {
+            (content.preview, b"string".as_slice(), Some(content.sha256))
+        }
+        GeminiSelectedContent::Absent => (None, b"absent".as_slice(), None),
+        GeminiSelectedContent::Null => (None, b"null".as_slice(), None),
+        GeminiSelectedContent::Unsupported { sha256 } => {
+            (None, b"unsupported".as_slice(), Some(sha256))
+        }
+    };
     let outcome = outer_outcome.combined_metadata(&result.outcome);
     let fallback_identity_sha256 = result_fallback_identity_sha256(
         call_id.as_deref(),
@@ -594,7 +553,7 @@ pub(super) fn finish_probed_output(
             .take(PROVIDER_MAX_PREVIEW_CHARS)
             .collect::<String>()
     });
-    Some(ProbedGeminiOutput {
+    ProbedGeminiOutput {
         call_id,
         tool_name,
         command: repository_args.command,
@@ -604,11 +563,8 @@ pub(super) fn finish_probed_output(
         outcome,
         redacted: record_redacted || outer_outcome.redacted_with(&result.outcome),
         released_diagnostic_preview,
-        content: capture_full_content.then_some(retained).flatten(),
-        content_bytes,
-        has_output_content,
         fallback_identity_sha256,
-    })
+    }
 }
 
 pub(super) fn result_fallback_identity_sha256(
@@ -655,19 +611,6 @@ pub(super) fn result_event_identity(
         format!("gemini-result-v1:fallback-sha256:{fallback}")
     };
     GeminiEventIdentity::NativeRecordId(identity)
-}
-
-pub(super) fn output_unit_key(session: &GeminiSession, identity: &GeminiEventIdentity) -> String {
-    let GeminiEventIdentity::NativeRecordId(identity) = identity;
-    let mut hasher = Sha256::new();
-    hasher.update(OUTPUT_UNIT_KEY_DOMAIN);
-    hash_page_text(&mut hasher, &session.native_session_id);
-    hash_page_text(&mut hasher, identity);
-    format!(
-        "gemini/nativepath/{}/{}",
-        session.native_session_id,
-        hex_sha256(hasher.finalize().into())
-    )
 }
 
 pub(super) fn hex_sha256(digest: [u8; 32]) -> String {

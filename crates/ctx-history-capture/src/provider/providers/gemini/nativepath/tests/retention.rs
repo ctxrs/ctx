@@ -43,7 +43,6 @@ fn gemini_nativepath_result_only_failure_retains_only_a_sparse_core_diagnostic()
     assert_eq!(outcome.metrics.result_body_hashes_created, 1);
     assert_eq!(outcome.metrics.result_previews_created, 1);
     assert_eq!(outcome.metrics.result_file_touches_created, 0);
-    assert_eq!(outcome.metrics.result_handoffs_created, 0);
 }
 
 #[test]

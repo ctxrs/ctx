@@ -151,23 +151,6 @@ pub(crate) struct GeminiRetainedEvent {
     pub(crate) safe_file_touches: Vec<String>,
 }
 
-/// Internal result-decoding mode retained by the sparse diagnostic parser.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GeminiNativePathProfile {
-    CoreOnly,
-    CoreAndTransientOutputs,
-}
-
-/// The source coordinate encoded into a generic transient output locator.
-/// It is intentionally small and deterministic so a Pro page can be retried
-/// independently of Core without reparsing a different source identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct GeminiSourceLocator {
-    pub(crate) path: PathBuf,
-    pub(crate) byte_start: u64,
-    pub(crate) byte_end_exclusive: u64,
-}
-
 /// The certified scanner position immediately before or after a page. It only
 /// covers records actually contained by that page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,7 +233,6 @@ pub(crate) struct GeminiParserMetrics {
     pub(crate) result_previews_created: u64,
     pub(crate) result_file_touches_created: u64,
     pub(crate) result_fts_documents_created: u64,
-    pub(crate) result_handoffs_created: u64,
     pub(crate) retained_messages: u64,
     pub(crate) retained_tool_calls: u64,
     pub(crate) retained_notices: u64,

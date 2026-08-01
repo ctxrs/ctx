@@ -100,7 +100,6 @@ fn gemini_nativepath_retains_core_rows_without_header_or_result_material() {
     assert_eq!(outcome.metrics.result_previews_created, 0);
     assert_eq!(outcome.metrics.result_file_touches_created, 0);
     assert_eq!(outcome.metrics.result_fts_documents_created, 0);
-    assert_eq!(outcome.metrics.result_handoffs_created, 0);
     assert_eq!(outcome.checkpoint.retained_event_count, 4);
     assert_eq!(outcome.signals.source_change, GeminiSourceChange::Fresh);
     assert_eq!(

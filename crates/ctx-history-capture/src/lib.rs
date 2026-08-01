@@ -74,11 +74,7 @@ pub(crate) mod native_source;
 mod pro_output;
 pub(crate) mod record_evidence;
 pub(crate) mod repository_attribution;
-pub use pro_output::{
-    OutputAssociations, OutputCommandContext, OutputNativeCoordinate, OutputObservationKind,
-    OutputOutcome, OutputOutcomeMetadata, OutputRepositoryContext, OutputSourceLocator,
-    ProOutputObservation,
-};
+pub use pro_output::{OutputObservationKind, OutputOutcome, OutputOutcomeMetadata};
 
 mod error;
 pub use error::{CaptureError, ProviderJsonlInventoryLimit, ProviderSourceFailureKind, Result};

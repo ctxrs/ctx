@@ -73,12 +73,6 @@ pub(super) fn forgecode_tool_result_is_error(parts: ForgeCodeMessageParts<'_>) -
         .flatten()
 }
 
-pub(super) fn forgecode_tool_result_call_id(parts: ForgeCodeMessageParts<'_>) -> Option<String> {
-    (parts.variant == "tool")
-        .then(|| parts.body.get("call_id").and_then(forgecode_scalar_text))
-        .flatten()
-}
-
 pub(super) fn forgecode_event_role(parts: ForgeCodeMessageParts<'_>) -> Option<EventRole> {
     match parts.variant {
         "text" => forgecode_role_text(parts).map(|role| provider_role(Some(&role))),
