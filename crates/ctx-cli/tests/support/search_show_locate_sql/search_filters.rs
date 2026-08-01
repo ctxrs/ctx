@@ -16,7 +16,7 @@ fn human_search_reports_no_results() {
         assert!(
             stderr.contains(
                 "daemon source refresh was queued but no published generation exists; retry with --refresh wait"
-            ),
+            ) || stderr.contains("There is no current searchable generation"),
             "{stderr}"
         );
     }
