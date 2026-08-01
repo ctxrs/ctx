@@ -257,6 +257,53 @@ fn every_tool_call_block_projects_with_a_stable_selector() {
 }
 
 #[test]
+fn openclaw_large_tool_arguments_keep_both_complete_core_representations() {
+    let tail = "openclaw_large_tool_argument_tail_complete";
+    let full_argument = format!("{}{tail}", "x".repeat(8 * 1024 * 1024));
+    let value = serde_json::json!({
+        "type": "message",
+        "id": "large-tool-call-record",
+        "timestamp": "2026-07-31T12:00:00Z",
+        "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "toolCall",
+                "id": "large-call-1",
+                "name": "custom_complete_tool",
+                "arguments": {"prompt": &full_argument}
+            }]
+        }
+    });
+    let bytes = serde_json::to_vec(&value).unwrap();
+    assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+    let (_temp, mut projector) = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    let [record] = emitted.as_slice() else {
+        panic!("expected exactly one OpenClaw tool-call record");
+    };
+    let normalized = record.content.normalized_body.as_deref().unwrap();
+    let structured = record.content.structured_content.as_ref().unwrap();
+    assert!(normalized.contains(tail));
+    assert_eq!(
+        structured["arguments"]["prompt"].as_str(),
+        Some(full_argument.as_str())
+    );
+    assert!(
+        normalized.len() + serde_json::to_vec(structured).unwrap().len()
+            > ctx_history_core::MAX_CORE_CONTENT_BYTES
+    );
+    record.validate_contract().unwrap();
+    record.encode_stored().unwrap();
+}
+
+#[test]
 fn running_result_is_emitted_before_continuation_state_is_checkpointed() {
     let call = serde_json::to_vec(&serde_json::json!({
         "type": "message",

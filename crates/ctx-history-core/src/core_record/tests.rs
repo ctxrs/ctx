@@ -168,6 +168,51 @@ fn core_record_has_no_locator_or_canonical_preview_field() {
 }
 
 #[test]
+fn duplicate_complete_representations_share_one_content_budget_through_the_ceiling() {
+    let duplicate = "x".repeat(MAX_CORE_CONTENT_BYTES - 2);
+    let mut record = record();
+    record.content.normalized_body = Some(duplicate.clone());
+    record.content.structured_content = Some(serde_json::Value::String(duplicate));
+
+    assert_eq!(
+        serde_json::to_vec(record.content.structured_content.as_ref().unwrap())
+            .unwrap()
+            .len(),
+        MAX_CORE_CONTENT_BYTES
+    );
+    record.validate_contract().unwrap();
+    record.encode_stored().unwrap();
+}
+
+#[test]
+fn either_complete_representation_over_the_content_ceiling_is_rejected() {
+    let mut oversized_body = record();
+    oversized_body.content.structured_content = None;
+    oversized_body.content.normalized_body = Some("x".repeat(MAX_CORE_CONTENT_BYTES + 1));
+    assert!(matches!(
+        oversized_body.validate_contract(),
+        Err(CoreRecordError::FieldTooLarge {
+            field: "normalized_body",
+            actual,
+            maximum: MAX_CORE_CONTENT_BYTES,
+        }) if actual == MAX_CORE_CONTENT_BYTES + 1
+    ));
+
+    let mut oversized_structured = record();
+    oversized_structured.content.structured_content = Some(serde_json::Value::String(
+        "x".repeat(MAX_CORE_CONTENT_BYTES),
+    ));
+    assert!(matches!(
+        oversized_structured.validate_contract(),
+        Err(CoreRecordError::FieldTooLarge {
+            field: "structured_content",
+            actual,
+            maximum: MAX_CORE_CONTENT_BYTES,
+        }) if actual == MAX_CORE_CONTENT_BYTES + 2
+    ));
+}
+
+#[test]
 fn repository_contract_scopes_relative_observations_to_known_bindings() {
     let mut record = record();
     record.repository_bindings.push(binding());
@@ -784,8 +829,23 @@ fn pull_request_outcome_must_match_its_referenced_repository_binding() {
         Err(CoreRecordError::InvalidRepositoryOutcome)
     ));
 
+    let RepositoryVcsObservationKind::Outcome(outcome) =
+        &mut record.repository_vcs_observations[0].kind
+    else {
+        unreachable!();
+    };
+    outcome.pull_request.as_mut().unwrap().forge_repository.name = "ctx".to_owned();
     record.repository_bindings[0].aliases.clear();
+    record.repository_bindings[0].logical_repository_id = "repo-1".to_owned();
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryOutcome)
+    ));
+
     record.repository_bindings[0].logical_repository_id = "forge:github.com/ctxrs/ctx".to_owned();
+    record.validate_contract().unwrap();
+
+    record.repository_bindings[0].logical_repository_id = "forge:github.com/ctxrs/other".to_owned();
     assert!(matches!(
         record.validate_contract(),
         Err(CoreRecordError::InvalidRepositoryOutcome)
@@ -798,7 +858,7 @@ fn every_repository_revision_changes_the_core_contract_fingerprint() {
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
-        "41ef12d599e6ebb8769b23e0e47e47a40e6939dd835b82aa2cc145038ac2d417"
+        "68991e8e9894e3ea16a752af306adb66fceda6667eb802637a9e14ed776c5cae"
     );
     for changed in [
         CoreContractRevisions {

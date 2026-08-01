@@ -316,7 +316,7 @@ fn incompatible_zstd_generation_rebuilds_from_sources_without_cloning_the_slot()
     let candidate = Index::open_in_dir(&candidates[0]).unwrap();
     assert!(candidate.load_metas().unwrap().segments.is_empty());
     assert_eq!(candidate.settings().docstore_compression, Compressor::Lz4);
-    assert_eq!(candidate.settings().docstore_blocksize, 16 * 1024);
+    assert_eq!(candidate.settings().docstore_blocksize, 32 * 1024);
     drop(candidate);
 
     let source = source();

@@ -25,8 +25,8 @@ use validation::{
 
 pub const CORE_RECORD_VERSION: u32 = 1;
 pub const CORE_NORMALIZATION_REVISION: u32 = 1;
-pub const CORE_CONTENT_POLICY_REVISION: u32 = 1;
-pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 5;
+pub const CORE_CONTENT_POLICY_REVISION: u32 = 2;
+pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 6;
 pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 2;
 pub const CORE_BOUNDED_SHELL_SUBSET_REVISION: u32 = 1;
 pub const CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION: u32 = 3;
@@ -37,14 +37,14 @@ pub const CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN: &[u8] =
 const CORE_REPOSITORY_REUSE_INPUT_DOMAIN: &[u8] = b"ctx.core.repository-reuse-input.v1\0";
 pub const CORE_MISSING_ACTIVITY_TIME_UNIX_MS: i64 = i64::MIN;
 
-/// Maximum complete policy-selected content admitted to one Core record.
+/// Maximum decoded size of either complete representation of policy-selected
+/// content admitted to one Core record.
 pub const MAX_CORE_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 /// JSON escaping can expand content beyond its decoded size. This is a decode
 /// and storage bound, not a preview or truncation policy.
 pub const MAX_ENCODED_CORE_RECORD_BYTES: usize = 64 * 1024 * 1024;
 
 const MAX_TEXT_METADATA_BYTES: usize = 64 * 1024;
-const MAX_STRUCTURED_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_REPOSITORY_ITEMS: usize = 256;
 const MAX_REPOSITORY_OBSERVATIONS: usize = 4_096;
@@ -171,7 +171,11 @@ pub enum CoreRecordError {
 pub struct CoreContent {
     pub policy_revision: u32,
     pub policy_status: CoreContentPolicyStatus,
+    /// Complete normalized text representation of the selected event.
     pub normalized_body: Option<String>,
+    /// Optional complete structured representation of the same selected event.
+    /// Providers may intentionally repeat arguments present in
+    /// `normalized_body`; admission charges the larger representation once.
     pub structured_content: Option<serde_json::Value>,
 }
 
@@ -590,16 +594,13 @@ impl CoreContent {
         validate_size(
             "structured_content",
             structured_bytes,
-            MAX_STRUCTURED_CONTENT_BYTES,
+            MAX_CORE_CONTENT_BYTES,
         )?;
-        let selected_content_bytes =
-            body_bytes
-                .checked_add(structured_bytes)
-                .ok_or(CoreRecordError::FieldTooLarge {
-                    field: "selected_content",
-                    actual: usize::MAX,
-                    maximum: MAX_CORE_CONTENT_BYTES,
-                })?;
+        // These fields are alternate complete representations of one selected
+        // event, not independent payloads. Charging the larger decoded form
+        // keeps the per-record ceiling while avoiding double-counting content
+        // that providers intentionally retain in both forms.
+        let selected_content_bytes = body_bytes.max(structured_bytes);
         validate_size(
             "selected_content",
             selected_content_bytes,
