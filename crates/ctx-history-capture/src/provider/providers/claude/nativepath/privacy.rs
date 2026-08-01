@@ -4,6 +4,8 @@ use ctx_history_core::MAX_CORE_CONTENT_BYTES;
 
 use crate::{OutputOutcome, OutputOutcomeMetadata};
 
+use super::rows::CLAUDE_MAX_RECORD_ROWS;
+
 mod outcome;
 
 use outcome::{combine_outcome_evidence, scan_direct_output_range, scan_outcome_range};
@@ -11,8 +13,6 @@ use outcome::{combine_outcome_evidence, scan_direct_output_range, scan_outcome_r
 const MAX_ESCAPED_LABEL_BYTES: usize = 256;
 const MAX_SCAN_DEPTH: usize = 128;
 const MAX_METADATA_BYTES: usize = 4 * 1024;
-const MAX_STRUCTURAL_CONTENT_ITEMS: usize = 64;
-const MAX_PREFLIGHT_OUTPUT_DESCRIPTORS: usize = MAX_STRUCTURAL_CONTENT_ITEMS + 1;
 const MAX_RESULT_OUTCOME_NODES: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -27,8 +27,7 @@ pub(super) struct RawResultClassification {
 pub(super) struct RawRecordPreflight {
     pub(super) result: RawResultClassification,
     pub(super) outcome: OutputOutcomeMetadata,
-    output_descriptors: [RawOutputDescriptor; MAX_PREFLIGHT_OUTPUT_DESCRIPTORS],
-    output_descriptor_count: usize,
+    output_descriptors: Vec<RawOutputDescriptor>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -51,7 +50,7 @@ struct RawValueRange {
 
 impl RawRecordPreflight {
     pub(super) fn output_descriptors(&self) -> &[RawOutputDescriptor] {
-        &self.output_descriptors[..self.output_descriptor_count]
+        &self.output_descriptors
     }
 }
 
@@ -114,7 +113,6 @@ pub(super) fn preflight_record(bytes: &[u8]) -> Result<RawRecordPreflight, serde
         result: scanner.result,
         outcome,
         output_descriptors: scanner.output_descriptors,
-        output_descriptor_count: scanner.output_descriptor_count,
     })
 }
 
@@ -215,8 +213,7 @@ struct ResultScanner<'a> {
     message_content: Option<Range<usize>>,
     record_tool_use_result: Option<Range<usize>>,
     message_tool_use_result: Option<Range<usize>>,
-    output_descriptors: [RawOutputDescriptor; MAX_PREFLIGHT_OUTPUT_DESCRIPTORS],
-    output_descriptor_count: usize,
+    output_descriptors: Vec<RawOutputDescriptor>,
 }
 
 impl<'a> ResultScanner<'a> {
@@ -232,8 +229,7 @@ impl<'a> ResultScanner<'a> {
             message_content: None,
             record_tool_use_result: None,
             message_tool_use_result: None,
-            output_descriptors: [RawOutputDescriptor::default(); MAX_PREFLIGHT_OUTPUT_DESCRIPTORS],
-            output_descriptor_count: 0,
+            output_descriptors: Vec::new(),
         }
     }
 
@@ -255,8 +251,7 @@ impl<'a> ResultScanner<'a> {
         let mut seen_critical = 0_u16;
         let mut block_primary_output = false;
         let mut block_call_id = None;
-        let mut block_result_values = [RawValueRange::default(); MAX_PREFLIGHT_OUTPUT_DESCRIPTORS];
-        let mut block_result_value_count = 0_usize;
+        let mut block_result_values = Vec::new();
         loop {
             let key = self.string_range()?;
             self.whitespace();
@@ -343,12 +338,14 @@ impl<'a> ResultScanner<'a> {
                 (ObjectKind::Block, Field::ResultLike)
                     if raw_label_is_result(&self.bytes[key.clone()]) =>
                 {
-                    if let Some(target) = block_result_values.get_mut(block_result_value_count) {
-                        *target = RawValueRange {
+                    if block_result_values.len() >= CLAUDE_MAX_RECORD_ROWS {
+                        self.limit_violation =
+                            Some("Claude result exceeds the representable row limit");
+                    } else {
+                        block_result_values.push(RawValueRange {
                             start: value_range.start,
                             end: value_range.end,
-                        };
-                        block_result_value_count += 1;
+                        });
                     }
                 }
                 _ => {}
@@ -376,11 +373,7 @@ impl<'a> ResultScanner<'a> {
                             }),
                         );
                     }
-                    for value in block_result_values
-                        .iter()
-                        .copied()
-                        .take(block_result_value_count)
-                    {
+                    for value in block_result_values.iter().copied() {
                         self.push_output_descriptor(None, Some(value));
                     }
                 }
@@ -418,13 +411,12 @@ impl<'a> ResultScanner<'a> {
         call_id: Option<RawStringRange>,
         value: Option<RawValueRange>,
     ) {
-        if let Some(target) = self
-            .output_descriptors
-            .get_mut(self.output_descriptor_count)
-        {
-            *target = RawOutputDescriptor { call_id, value };
-            self.output_descriptor_count += 1;
+        if self.output_descriptors.len() >= CLAUDE_MAX_RECORD_ROWS {
+            self.limit_violation = Some("Claude result exceeds the representable row limit");
+            return;
         }
+        self.output_descriptors
+            .push(RawOutputDescriptor { call_id, value });
     }
 
     fn metadata_value(&mut self, depth: usize, max_bytes: usize) -> Result<(), ()> {
@@ -489,13 +481,7 @@ impl<'a> ResultScanner<'a> {
                 if self.consume(b']') {
                     return Ok(());
                 }
-                let mut items = 0_usize;
                 loop {
-                    items = items.saturating_add(1);
-                    if items > MAX_STRUCTURAL_CONTENT_ITEMS {
-                        self.limit_violation =
-                            Some("Claude content exceeds the 64-item structural limit");
-                    }
                     self.content(depth + 1)?;
                     self.whitespace();
                     if self.consume(b']') {

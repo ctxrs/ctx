@@ -6,7 +6,10 @@ use serde_json::Value;
 
 use super::source::ClaudeSessionKey;
 
-pub(crate) const CLAUDE_MAX_RECORD_ROWS: usize = 64;
+// Native event ordering reserves 16 bits for subrecords within one physical
+// record, so every index from 0 through u16::MAX is representable without
+// colliding with the following physical record.
+pub(crate) const CLAUDE_MAX_RECORD_ROWS: usize = 1 << 16;
 pub(crate) const CLAUDE_MAX_FILE_TOUCHES_PER_RECORD: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

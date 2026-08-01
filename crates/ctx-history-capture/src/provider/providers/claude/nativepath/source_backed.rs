@@ -51,7 +51,7 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-claude-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "claude-session";
 const LOGICAL_EVENT_KIND: &str = "claude-event";
 const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v6";
-const PARSER_REVISION: &str = "claude-shared-jsonl-v4-result-content";
+const PARSER_REVISION: &str = "claude-shared-jsonl-v5-complete-content-blocks";
 const MAX_PENDING_CALLS: usize = 4096;
 const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;
 
@@ -202,6 +202,7 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
             attributor: RepositoryAttributor::default(),
             pending_calls,
             linkage_capacity_exceeded,
+            rejected_records: 0,
             fallback_identities: FallbackEventIdentityState::new(base_event_lookup),
         }))
     }
@@ -224,6 +225,7 @@ struct ClaudeProjector {
     attributor: RepositoryAttributor,
     pending_calls: HashMap<String, PendingCallState>,
     linkage_capacity_exceeded: bool,
+    rejected_records: u64,
     fallback_identities: FallbackEventIdentityState,
 }
 
@@ -271,6 +273,13 @@ impl FallbackEventIdentityState {
 }
 
 impl ClaudeProjector {
+    fn reject_record(&mut self) -> Result<()> {
+        self.rejected_records = self.rejected_records.checked_add(1).ok_or_else(|| {
+            CaptureError::InvalidPayload("Claude rejected-record count overflowed".to_owned())
+        })?;
+        Ok(())
+    }
+
     fn remember_pending_call(&mut self, call_id: &str, state: PendingCallState) {
         if let Some(existing) = self.pending_calls.get_mut(call_id) {
             *existing = PendingCallState::Ambiguous;
@@ -306,17 +315,19 @@ impl JsonlFamilyProjector for ClaudeProjector {
             line_number,
             record_sha256: Sha256::digest(record.bytes()).into(),
         };
-        let Ok(parsed) = parse_native_record(record.bytes(), ordinal, &locator) else {
-            return Ok(());
+        let parsed = match parse_native_record(record.bytes(), ordinal, &locator) {
+            Ok(parsed) => parsed,
+            Err(_) => return self.reject_record(),
         };
         if parsed
             .session_id
             .as_deref()
             .filter(|session| !session.trim().is_empty())
             .is_some_and(|session| session != self.binding.key.root_session_id)
+            || parsed.rows.is_empty()
             || parsed.rows.len() > CLAUDE_MAX_RECORD_ROWS
         {
-            return Ok(());
+            return self.reject_record();
         }
         self.session.observe(
             parsed.timestamp.as_deref(),
@@ -435,6 +446,10 @@ impl JsonlFamilyProjector for ClaudeProjector {
 
     fn provider_checkpoint(&self) -> Result<Option<TypedKey>> {
         encode_projector_checkpoint(self).map(Some)
+    }
+
+    fn rejected_records(&self) -> u64 {
+        self.rejected_records
     }
 }
 
