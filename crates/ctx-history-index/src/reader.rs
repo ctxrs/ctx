@@ -42,7 +42,8 @@ impl VerifiedIndex {
         Ok(Some(generation_id))
     }
 
-    /// Opens a generation and performs the exhaustive publication audit.
+    /// Opens a generation, verifies every physical checksum, and audits every
+    /// stored Core record plus its source and identity aggregates.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         Self::open_inner(root.as_ref(), true)
     }
@@ -57,7 +58,7 @@ impl VerifiedIndex {
         Self::open_inner(root.as_ref(), false)
     }
 
-    fn open_inner(root: &Path, exhaustive: bool) -> Result<Self> {
+    fn open_inner(root: &Path, audit_stored_core: bool) -> Result<Self> {
         if !root.is_dir() {
             return Err(IndexError::MissingActiveGenerationPointer);
         }
@@ -82,7 +83,7 @@ impl VerifiedIndex {
         if searcher_generation(&searcher) != meta_generation(&metas) {
             return Err(IndexError::ConcurrentGenerationChange);
         }
-        if exhaustive {
+        if audit_stored_core {
             if !searcher.index().validate_checksum()?.is_empty() {
                 return Err(IndexError::ChecksumMismatch);
             }

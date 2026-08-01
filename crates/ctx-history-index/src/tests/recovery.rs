@@ -629,15 +629,20 @@ fn assert_active_meta_incompatibility_is_rebuilt(
 }
 
 #[test]
-fn pre_settings_generation_is_rebuilt_without_clone_or_pointer_churn() {
+fn zstd_settings_generation_is_rebuilt_without_clone_or_pointer_churn() {
     assert_active_meta_incompatibility_is_rebuilt(
-        "pre-settings.jsonl",
+        "zstd-settings.jsonl",
         |meta| {
-            assert!(meta
-                .as_object_mut()
-                .unwrap()
-                .remove("index_settings")
-                .is_some());
+            meta["index_settings"] = serde_json::to_value(tantivy::IndexSettings {
+                docstore_compression: tantivy::store::Compressor::Zstd(
+                    tantivy::store::ZstdCompressor {
+                        compression_level: Some(1),
+                    },
+                ),
+                docstore_compress_dedicated_thread: true,
+                docstore_blocksize: 64 * 1024,
+            })
+            .unwrap();
         },
         |error| {
             assert!(matches!(

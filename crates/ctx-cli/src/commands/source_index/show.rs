@@ -158,7 +158,7 @@ pub(crate) fn run_show(
                 SessionJsonOptions {
                     mode: args.mode,
                     format: args.format,
-                    max_events: None,
+                    max_events: args.max_events,
                     output_limit_bytes: CLI_PRESENTATION_MAX_OUTPUT_BYTES,
                 },
             )?;
@@ -484,7 +484,7 @@ pub(super) fn render_event_value(event: &CoreEventRecord) -> Value {
     let content = &event.core_record.content;
     let (policy_status, policy_reason, complete) = match &content.policy_status {
         CoreContentPolicyStatus::Selected => ("selected", None, true),
-        CoreContentPolicyStatus::Redacted { reason } => ("redacted", Some(reason.as_str()), true),
+        CoreContentPolicyStatus::Redacted { reason } => ("redacted", Some(reason.as_str()), false),
         CoreContentPolicyStatus::Omitted { reason } => ("omitted", Some(reason.as_str()), false),
     };
     compact_json(json!({

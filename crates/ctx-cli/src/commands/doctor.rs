@@ -31,7 +31,6 @@ pub(crate) fn run_doctor(
         ("history_epoch", true),
         ("lexical", true),
         ("catalog", true),
-        ("resolver", true),
         ("relational", true),
         ("semantic", config.semantic_search_enabled()),
         (
@@ -155,10 +154,9 @@ fn render_doctor_human(
     document.push_blank();
     document.append(section("Issues", evidence_list(context, &evidence)));
     document.push_blank();
-    let refresh_failed = findings.iter().any(|finding| {
-        finding.contains("(source_refresh_failed)")
-            || finding.starts_with("resolver is unavailable ")
-    });
+    let refresh_failed = findings
+        .iter()
+        .any(|finding| finding.contains("(source_refresh_failed)"));
     document.append(hint(
         context,
         Hint {
@@ -204,7 +202,6 @@ fn humanize_doctor_finding(finding: &str) -> HumanDoctorFinding {
         "history_epoch" => "History",
         "lexical" => "Search index",
         "catalog" => "History source catalog",
-        "resolver" => "History refresh service",
         "relational" => "Session view",
         "semantic" => "Semantic search",
         "pro_projection" => "ctx Pro index",
@@ -222,9 +219,7 @@ fn humanize_doctor_finding(finding: &str) -> HumanDoctorFinding {
     };
     let detail = match reason {
         "catalog_publication_pending" => "Required local data is still being prepared.",
-        "daemon_unavailable" | "resolver_unavailable" => {
-            "The background history refresh service is not available."
-        }
+        "daemon_unavailable" => "The background history refresh service is not available.",
         "source_refresh_failed" | "lexical_generation_unavailable" => {
             "Required local data is not available."
         }
@@ -284,7 +279,6 @@ mod ui_tests {
             "history_epoch is unavailable (source_refresh_failed)",
             "lexical is unavailable (source_refresh_failed)",
             "catalog is pending (catalog_publication_pending)",
-            "resolver is unavailable (daemon_unavailable)",
             "relational is unavailable (lexical_generation_unavailable)",
         ]
         .map(str::to_owned);
@@ -294,12 +288,11 @@ mod ui_tests {
             let document = render_doctor_human(&context, "apply", &findings);
             let rendered = document.render_plain();
             let flattened = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
-            assert!(rendered.starts_with("! ctx found 5 issues\n"));
+            assert!(rendered.starts_with("! ctx found 4 issues\n"));
             for expected in [
                 "History is unavailable",
                 "Search index is unavailable",
                 "History source catalog is still preparing",
-                "History refresh service is unavailable",
                 "Session view is unavailable",
                 "Check the history refresh service.",
                 "ctx daemon status",
@@ -313,7 +306,6 @@ mod ui_tests {
                 "history_epoch",
                 "source_refresh_failed",
                 "catalog_publication_pending",
-                "daemon_unavailable",
                 "lexical_generation_unavailable",
             ] {
                 assert!(

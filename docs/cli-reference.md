@@ -50,11 +50,9 @@ ctx daemon enable
 
 - `setup` creates the data root, discovers known provider history locations,
   inventories current sources, builds and atomically publishes the
-  self-contained Core generation, catches up the relational projection, and
-  prints next steps. It never opens or migrates pre-v0.26 history. After a
-  Tantivy Core generation is verified and active, setup deletes old
-  history artifacts; a failed build leaves cleanup for the next successful
-  fix-forward setup.
+  self-contained Core generation, schedules derived catch-up, and prints next
+  steps. It never opens, migrates, or deletes pre-v0.26 history. Old Store
+  files are ignored and may be removed explicitly by their owner.
   Setup does not write `config.toml` for implicit defaults or execute
   history-source plugin commands. When `[daemon].enabled` is true, setup may
   opportunistically start the ctx-owned background daemon after foreground
@@ -628,6 +626,7 @@ request and is not reported remotely.
 ctx show session <ctx-session-id>
 ctx show session <ctx-session-id> --mode full --format text
 ctx show session <ctx-session-id> --mode log --format jsonl
+ctx show session <ctx-session-id> --max-events 4096 --format json
 ctx show session <ctx-session-id> --format markdown --out transcript.md
 ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
 ctx show event <ctx-event-id> --window 3 --format text
@@ -640,7 +639,9 @@ assistant messages. `--mode full` keeps all user/assistant/system message
 events, and `--mode log` renders all imported events including tool and command
 activity. `--format` accepts `text`, `markdown`, `json`, or `jsonl`. Without
 `--out`, `show session` writes to stdout. With `--out`, it writes the rendered
-transcript artifact to that path and prints nothing on success.
+transcript artifact to that path and prints nothing on success. Sessions over
+the bounded presentation limit require `--max-events`; the value is capped at
+4096 and the response reports truncation.
 
 `show event` renders one ctx-owned event hit. `--before` and `--after` include
 neighboring events in the same session; `--window N` is shorthand for

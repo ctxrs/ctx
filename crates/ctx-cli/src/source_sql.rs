@@ -61,8 +61,8 @@ impl SqlCompatibility {
     /// without its relational consumer fails closed instead of falling back to
     /// stale canonical rows. A completely fresh root initializes only the
     /// disposable relational schema. `work.sqlite` is never inspected: 1.0
-    /// source-backed history is a new data epoch, and verified activation
-    /// retires obsolete Store leaves instead of preserving a fallback.
+    /// source-backed history is a new data epoch. Obsolete Store leaves are
+    /// inert owner-managed files, never a fallback or an implicit delete target.
     pub fn open_for_data_root(data_root: impl AsRef<Path>) -> SqlCompatibilityResult<Self> {
         let data_root = data_root.as_ref();
         let projection_path = sql_compatibility_path(data_root);

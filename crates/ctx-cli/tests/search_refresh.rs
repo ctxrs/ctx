@@ -171,7 +171,12 @@ fn spawn_copied_test_binary(command: &mut StdCommand) -> io::Result<Child> {
 
 fn assert_published_generation(search: &Value, expected_mode: &str) -> String {
     assert_eq!(search["freshness"]["mode"], expected_mode, "{search:#}");
-    assert_eq!(search["freshness"]["status"], "completed", "{search:#}");
+    let expected_status = if expected_mode == "off" {
+        "existing_generation"
+    } else {
+        "completed"
+    };
+    assert_eq!(search["freshness"]["status"], expected_status, "{search:#}");
     assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     search["retrieval"]["generation_id"]
         .as_str()
@@ -201,11 +206,6 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
             && status["lexical"]["request_state"] == "published"
             && status["refresh"]["status"] == "ready"
             && status["refresh"]["published_generation"] == expected_generation
-            && status["resolver"]["status"] == "ready"
-            && status["daemon"]["jobs"]["source_backed_refresh"]["status"] == "completed"
-            && status["daemon"]["jobs"]["source_backed_refresh"]["request_state"] == "published"
-            && status["daemon"]["jobs"]["source_backed_refresh"]["published_generation"]
-                == expected_generation
     });
     assert_eq!(status["history_epoch"]["status"], "ready", "{status:#}");
     assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
@@ -228,12 +228,6 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
         "{status:#}"
     );
     assert_eq!(status["refresh"]["generation_matches"], true, "{status:#}");
-    assert_eq!(status["resolver"]["status"], "ready", "{status:#}");
-    assert_eq!(
-        status["resolver"]["generation_id"], expected_generation,
-        "{status:#}"
-    );
-    assert_eq!(status["resolver"]["generation_matches"], true, "{status:#}");
     assert_eq!(
         status["indexed_events"], status["lexical"]["indexed_documents"],
         "{status:#}"
@@ -401,8 +395,15 @@ fn assert_source_backed_search_show_oracle(
             "{shown_event:#}"
         );
 
-        let shown_session =
-            json_output(ctx(temp).args(["show", "session", session_id, "--format", "json"]));
+        let shown_session = json_output(ctx(temp).args([
+            "show",
+            "session",
+            session_id,
+            "--max-events",
+            "4096",
+            "--format",
+            "json",
+        ]));
         assert_eq!(
             shown_session["payload_type"], "session_transcript",
             "{shown_session:#}"
@@ -457,6 +458,17 @@ fn generation_manifest_paths(temp: &TempDir) -> Vec<PathBuf> {
     };
     let mut paths = entries
         .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .and_then(|name| name.strip_suffix(".json"))
+                .is_some_and(|stem| {
+                    stem.len() == 64
+                        && stem
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+        })
         .collect::<Vec<_>>();
     paths.sort();
     paths
@@ -550,7 +562,7 @@ fn assert_daemon_publication(
 ) -> Value {
     let expected_source_count = expected_providers.len() as u64;
     let status = assert_source_generation_ready(temp, expected_generation);
-    let job = &status["daemon"]["jobs"]["source_backed_refresh"];
+    let job = &status["daemon"]["jobs"]["core_refresh"];
     assert_eq!(job["owner"], "daemon", "{status:#}");
     assert_eq!(
         status["daemon"]["mode"], "source-refresh-only",
@@ -643,18 +655,18 @@ fn assert_daemon_refresh_failure(
     expected_route_count: u64,
     retained_generation: Option<&str>,
 ) -> Value {
-    let status = wait_for_status(temp, "terminal source refresh failure", |status| {
+    let status = wait_for_status(temp, "terminal Core refresh failure", |status| {
         status["refresh"]["status"] == "unavailable"
-            && status["daemon"]["jobs"]["source_backed_refresh"]["status"] == "failed"
-            && status["daemon"]["jobs"]["source_backed_refresh"]["request_state"] == "failed"
+            && status["daemon"]["jobs"]["core_refresh"]["status"] == "failed"
+            && status["daemon"]["jobs"]["core_refresh"]["request_state"] == "failed"
     });
     assert_eq!(status["refresh"]["status"], "unavailable", "{status:#}");
     assert_eq!(
-        status["refresh"]["reason"], "source_refresh_failed",
+        status["refresh"]["reason"], "core_refresh_failed",
         "{status:#}"
     );
     assert_eq!(status["refresh"]["request_state"], "failed", "{status:#}");
-    let job = &status["daemon"]["jobs"]["source_backed_refresh"];
+    let job = &status["daemon"]["jobs"]["core_refresh"];
     assert_eq!(job["owner"], "daemon", "{status:#}");
     assert!(
         matches!(

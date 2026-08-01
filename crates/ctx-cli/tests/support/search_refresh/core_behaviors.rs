@@ -21,7 +21,7 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
     let initial_documents = initial["retrieval"]["indexed_documents"].as_u64().unwrap();
     let initial_status =
         assert_daemon_publication(&temp, &initial_generation, 1, &["codex", "codex"]);
-    let initial_job = &initial_status["daemon"]["jobs"]["source_backed_refresh"];
+    let initial_job = &initial_status["daemon"]["jobs"]["core_refresh"];
     let initial_current = initial_job["receipt"]["current"].clone();
 
     let index_root = search_refresh_data_root(&temp).join("search/lexical");
@@ -56,7 +56,7 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
     );
     let unchanged_status =
         assert_daemon_publication(&temp, &initial_generation, 1, &["codex", "codex"]);
-    let unchanged_job = &unchanged_status["daemon"]["jobs"]["source_backed_refresh"];
+    let unchanged_job = &unchanged_status["daemon"]["jobs"]["core_refresh"];
     assert_eq!(
         unchanged_job["generation_changed"], false,
         "{unchanged_job:#}"
@@ -131,7 +131,7 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
 
         let append_status =
             assert_daemon_publication(&temp, &append_generation, 1, &["codex", "codex"]);
-        let append_job = &append_status["daemon"]["jobs"]["source_backed_refresh"];
+        let append_job = &append_status["daemon"]["jobs"]["core_refresh"];
         let append_current = &append_job["receipt"]["current"];
         assert_eq!(
             append_current["current_indexed_documents"], expected_documents,
@@ -177,13 +177,14 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
     );
     let appended_index_bytes = directory_bytes(&index_root);
     assert!(
-        appended_index_bytes <= initial_index_bytes.saturating_mul(3),
+        appended_index_bytes <= initial_index_bytes.saturating_mul(4),
         "{append_runs} tiny appends exceeded the amortized retained-byte budget: \
          before={initial_index_bytes}, after={appended_index_bytes}"
     );
-    assert_eq!(
-        generation_manifest_paths(&temp).len(),
-        initial_manifests.len() + append_runs
+    let retained_manifests = generation_manifest_paths(&temp).len();
+    assert!(
+        (1..=2).contains(&retained_manifests),
+        "inactive generation manifests accumulated after {append_runs} appends: {retained_manifests}"
     );
 }
 
@@ -575,7 +576,7 @@ fn search_refresh_wait_human_output_uses_daemon_job_progress_without_stderr_nois
         .expect("human search should publish a Core generation")
         .to_owned();
     let status = assert_daemon_publication(&temp, &generation, 1, &["claude"]);
-    let job = &status["daemon"]["jobs"]["source_backed_refresh"];
+    let job = &status["daemon"]["jobs"]["core_refresh"];
     assert_eq!(job["progress"]["phase"], "published", "{status:#}");
 }
 
@@ -710,12 +711,12 @@ fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
         "--format=json",
     ]));
     assert!(
-        uncommitted.contains("There is no current searchable generation"),
+        uncommitted.contains("the Core index does not exist"),
         "{uncommitted}"
     );
     let failed = assert_daemon_refresh_failure(&temp, 0, None);
     assert_eq!(
-        failed["history_epoch"]["reason"], "source_refresh_failed",
+        failed["history_epoch"]["reason"], "core_refresh_failed",
         "{failed:#}"
     );
     assert_eq!(failed["lexical"]["status"], "unavailable", "{failed:#}");

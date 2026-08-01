@@ -14,9 +14,9 @@ mod tests {
         SourceBackedRouteSelection,
     };
     use ctx_history_core::{
-        derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
-        NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
-        SourceKey, SourceObservation, TypedKey,
+        derive_event_id, derive_session_id, CertifiedSource, CoreContentPolicyStatus, CoreRecord,
+        EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
+        SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
     };
     use ctx_history_index::{
         EventSearchFilters, GenerationWriter, IndexError, SessionRecord, WriterOptions,
@@ -305,6 +305,7 @@ mod tests {
             provider: None,
             provider_session: provider_session.map(str::to_owned),
             mode: TranscriptMode::Lite,
+            max_events: None,
             format: OutputFormat::Json,
             out: None,
         }
@@ -654,6 +655,38 @@ mod tests {
         assert_eq!(event_value["event"]["provider_session_id"], TEST_SESSION_ID);
         assert!(event_value["event"].get("source").is_none());
         assert!(event_value["event"].get("cursor").is_none());
+
+    }
+
+    #[test]
+    fn show_content_completeness_follows_policy_status() {
+        let event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 44, 1);
+        let selected = fixture_core_event(&event, "selected body");
+        let mut redacted = fixture_core_event(&event, "redacted body");
+        redacted.core_record.content.policy_status = CoreContentPolicyStatus::Redacted {
+            reason: "sensitive".to_owned(),
+        };
+        redacted.core_record.validate_contract().unwrap();
+        let mut omitted = fixture_core_event(&event, "omitted body");
+        omitted.core_record.content.policy_status = CoreContentPolicyStatus::Omitted {
+            reason: "unsupported".to_owned(),
+        };
+        omitted.core_record.content.normalized_body = None;
+        omitted.core_record.content.structured_content = None;
+        omitted.core_record.validate_contract().unwrap();
+
+        let selected = render_event_value(&selected);
+        let redacted = render_event_value(&redacted);
+        let omitted = render_event_value(&omitted);
+
+        assert_eq!(selected["content"]["complete"], true);
+        assert_eq!(selected["content"]["policy_status"], "selected");
+        assert_eq!(redacted["content"]["complete"], false);
+        assert_eq!(redacted["content"]["policy_status"], "redacted");
+        assert_eq!(redacted["content"]["policy_reason"], "sensitive");
+        assert_eq!(omitted["content"]["complete"], false);
+        assert_eq!(omitted["content"]["policy_status"], "omitted");
+        assert_eq!(omitted["content"]["policy_reason"], "unsupported");
     }
 
     #[test]
