@@ -37,7 +37,7 @@ mod tests {
 
     use super::*;
     use super::{
-        render::{render_show_document, search_json},
+        render::{render_show_document, search_json, SearchCorePresentation},
         search::{
             core_records_for_search_hits_with_budget, NormalizedSearchQuery, SearchCollection,
             SearchCoreHydrationBudget, SearchCoreHydrationBudgetExceeded,
@@ -493,7 +493,13 @@ mod tests {
             &index,
             &collection,
             &EventSearchFilters::default(),
-            &HashMap::from([(event_id, core_event)]),
+            &HashMap::from([(
+                event_id,
+                SearchCorePresentation {
+                    record: core_event,
+                    snippet_truncated: false,
+                },
+            )]),
             "existing_generation",
             1,
             std::time::Duration::ZERO,
@@ -603,7 +609,22 @@ mod tests {
             &index,
             &collection,
             &EventSearchFilters::default(),
-            &HashMap::from([(first_id, first_core), (second_id, second_core)]),
+            &HashMap::from([
+                (
+                    first_id,
+                    SearchCorePresentation {
+                        record: first_core,
+                        snippet_truncated: false,
+                    },
+                ),
+                (
+                    second_id,
+                    SearchCorePresentation {
+                        record: second_core,
+                        snippet_truncated: false,
+                    },
+                ),
+            ]),
             "existing_generation",
             1,
             std::time::Duration::ZERO,
@@ -939,11 +960,11 @@ mod tests {
     }
 
     #[test]
-    fn limit_200_search_retains_only_bounded_core_snippet_projections() {
+    fn limit_200_search_retains_compact_query_centered_core_projections() {
         let temp = tempdir().unwrap();
         let body = format!(
             "{} {TEST_QUERY}",
-            "🦀".repeat(SEARCH_CORE_BODY_PREFIX_CHARS)
+            "🦀".repeat(4_100)
         );
         let body_bytes = body.len();
         let events = (1..=crate::MAX_SEARCH_LIMIT)
@@ -974,10 +995,12 @@ mod tests {
         .unwrap();
         assert_eq!(collection.result_window.hits.len(), crate::MAX_SEARCH_LIMIT);
         assert!(!collection.result_window.more_available);
+        let normalized_query = NormalizedSearchQuery::from_request(&source_request);
 
         let core_records = core_records_for_search_hits_with_budget(
             &index,
             &collection.result_window.hits,
+            &normalized_query,
             SEARCH_CORE_HYDRATION_BUDGET,
         )
         .unwrap();
@@ -985,6 +1008,7 @@ mod tests {
             .values()
             .map(|record| {
                 record
+                    .record
                     .core_record
                     .content
                     .normalized_body
@@ -992,16 +1016,28 @@ mod tests {
                     .map_or(0, String::len)
             })
             .sum::<usize>();
-        assert_eq!(
-            retained_body_bytes, SEARCH_CORE_MAX_RETAINED_BODY_BYTES,
-            "200 maximum-width UTF-8 lookahead prefixes should exactly reach the retained-body budget"
-        );
+        assert!(retained_body_bytes <= SEARCH_CORE_MAX_RETAINED_BODY_BYTES);
         assert!(core_records.values().all(|record| {
-            record.core_record.content.structured_content.is_none()
-                && record.core_record.metadata.is_empty()
-                && record.core_record.repository_bindings.is_empty()
-                && record.core_record.repository_file_observations.is_empty()
-                && record.core_record.repository_vcs_observations.is_empty()
+            let projected = record.record.core_record.content.normalized_body.as_deref();
+            record.snippet_truncated
+                && projected.is_some_and(|projected| {
+                    projected.chars().count() == SEARCH_CORE_BODY_PREFIX_CHARS
+                        && projected.contains(TEST_QUERY)
+                        && projected.len() < body_bytes
+                })
+                && record.record.core_record.content.structured_content.is_none()
+                && record.record.core_record.metadata.is_empty()
+                && record.record.core_record.repository_bindings.is_empty()
+                && record
+                    .record
+                    .core_record
+                    .repository_file_observations
+                    .is_empty()
+                && record
+                    .record
+                    .core_record
+                    .repository_vcs_observations
+                    .is_empty()
         }));
 
         let value = search_json(
@@ -1019,8 +1055,11 @@ mod tests {
         let results = value["results"].as_array().unwrap();
         assert_eq!(results.len(), crate::MAX_SEARCH_LIMIT);
         assert!(results.iter().all(|result| {
-            result["snippet"].as_str().unwrap().chars().count() == 2_048
+            result["snippet"].as_str().unwrap().chars().count()
+                == SEARCH_CORE_BODY_PREFIX_CHARS
+                && result["snippet"].as_str().unwrap().contains(TEST_QUERY)
                 && result["snippet_truncated"] == true
+                && result["snippet_max_chars"] == SEARCH_CORE_BODY_PREFIX_CHARS
         }));
         assert_eq!(value["result_window"]["returned"], crate::MAX_SEARCH_LIMIT);
         assert_eq!(value["result_window"]["more_available"], false);
@@ -1028,6 +1067,7 @@ mod tests {
         let decode_error = core_records_for_search_hits_with_budget(
             &index,
             &collection.result_window.hits,
+            &normalized_query,
             SearchCoreHydrationBudget {
                 maximum_encoded_core_bytes: SEARCH_CORE_HYDRATION_BUDGET.maximum_encoded_core_bytes,
                 maximum_content_bytes: body_bytes.checked_mul(crate::MAX_SEARCH_LIMIT).unwrap() - 1,
@@ -1048,8 +1088,9 @@ mod tests {
         let retention_error = core_records_for_search_hits_with_budget(
             &index,
             &collection.result_window.hits,
+            &normalized_query,
             SearchCoreHydrationBudget {
-                maximum_retained_body_bytes: SEARCH_CORE_MAX_RETAINED_BODY_BYTES - 1,
+                maximum_retained_body_bytes: retained_body_bytes - 1,
                 ..SEARCH_CORE_HYDRATION_BUDGET
             },
         )
@@ -1058,10 +1099,7 @@ mod tests {
             .downcast_ref::<SearchCoreHydrationBudgetExceeded>()
             .expect("aggregate retention failure must stay typed");
         assert_eq!(typed.stage, SearchCoreHydrationBudgetStage::Retention);
-        assert_eq!(
-            typed.retained_body_bytes,
-            SEARCH_CORE_MAX_RETAINED_BODY_BYTES
-        );
+        assert_eq!(typed.retained_body_bytes, retained_body_bytes);
     }
 
     #[test]

@@ -7,14 +7,17 @@ use uuid::Uuid;
 
 use crate::MAX_SEARCH_LIMIT;
 
-use super::SearchHit;
+use super::{NormalizedSearchQuery, SearchHit};
+use crate::commands::source_index::render::{
+    search_snippet_fragment, SearchCorePresentation, SEARCH_SNIPPET_MAX_CHARS,
+};
 
-// Search renders 2,048 characters and needs one more character to preserve a
-// truthful truncation bit. Four bytes is the maximum UTF-8 width of one char.
-pub(in crate::commands::source_index) const SEARCH_CORE_BODY_PREFIX_CHARS: usize = 2_049;
+#[cfg(test)]
+pub(in crate::commands::source_index) const SEARCH_CORE_BODY_PREFIX_CHARS: usize =
+    SEARCH_SNIPPET_MAX_CHARS;
 const MAX_UTF8_CHAR_BYTES: usize = 4;
 pub(in crate::commands::source_index) const SEARCH_CORE_MAX_RETAINED_BODY_BYTES: usize =
-    MAX_SEARCH_LIMIT * SEARCH_CORE_BODY_PREFIX_CHARS * MAX_UTF8_CHAR_BYTES;
+    MAX_SEARCH_LIMIT * SEARCH_SNIPPET_MAX_CHARS * MAX_UTF8_CHAR_BYTES;
 const SEARCH_CORE_MAX_AGGREGATE_ENCODED_BYTES: usize = MAX_ENCODED_CORE_RECORD_BYTES;
 const SEARCH_CORE_MAX_AGGREGATE_CONTENT_BYTES: usize = MAX_CORE_CONTENT_BYTES;
 
@@ -72,15 +75,17 @@ impl std::error::Error for SearchCoreHydrationBudgetExceeded {}
 pub(super) fn core_records_for_search_hits(
     index: &VerifiedIndex,
     hits: &[SearchHit],
-) -> Result<HashMap<Uuid, CoreEventRecord>> {
-    core_records_for_search_hits_with_budget(index, hits, SEARCH_CORE_HYDRATION_BUDGET)
+    query: &NormalizedSearchQuery,
+) -> Result<HashMap<Uuid, SearchCorePresentation>> {
+    core_records_for_search_hits_with_budget(index, hits, query, SEARCH_CORE_HYDRATION_BUDGET)
 }
 
 pub(in crate::commands::source_index) fn core_records_for_search_hits_with_budget(
     index: &VerifiedIndex,
     hits: &[SearchHit],
+    query: &NormalizedSearchQuery,
     budget: SearchCoreHydrationBudget,
-) -> Result<HashMap<Uuid, CoreEventRecord>> {
+) -> Result<HashMap<Uuid, SearchCorePresentation>> {
     if budget.maximum_encoded_core_bytes == 0
         || budget.maximum_content_bytes == 0
         || budget.maximum_retained_body_bytes == 0
@@ -97,10 +102,9 @@ pub(in crate::commands::source_index) fn core_records_for_search_hits_with_budge
         budget.maximum_content_bytes,
     );
     // Resolve all selected addresses with one bounded Tantivy query. The
-    // aggregate encoded/content ceilings bound complete records retained by
-    // this batch; each record is then reduced to its presentation prefix.
-    // This keeps top-200 memory bounded without issuing one index query per
-    // result.
+    // aggregate encoded/content ceilings bound complete decoded records for
+    // this batch. Each record is reduced to its compact query-centered
+    // presentation before it enters the returned map.
     let batch = index
         .core_events_by_ids_with_strict_budget(&event_ids, event_ids.len(), page_budget)?
         .ok_or_else(|| {
@@ -117,13 +121,14 @@ pub(in crate::commands::source_index) fn core_records_for_search_hits_with_budge
     let admitted_content_bytes = batch.content_bytes;
     let mut records = HashMap::with_capacity(hits.len());
     let mut retained_body_bytes = 0_usize;
+    let query_texts = query.texts();
     for (event_id, record) in event_ids.into_iter().zip(batch.items) {
         if record.event_id.as_uuid() != event_id {
             return Err(anyhow!(
                 "pinned Core lookup returned an invalid record for search event {event_id}"
             ));
         }
-        let (record, body_bytes) = search_core_presentation_projection(record)?;
+        let (record, body_bytes) = search_core_presentation_projection(record, &query_texts)?;
         let next_retained_body_bytes =
             retained_body_bytes.checked_add(body_bytes).ok_or_else(|| {
                 search_core_hydration_budget_error(
@@ -155,7 +160,8 @@ pub(in crate::commands::source_index) fn core_records_for_search_hits_with_budge
 
 fn search_core_presentation_projection(
     record: CoreEventRecord,
-) -> Result<(CoreEventRecord, usize)> {
+    query_texts: &[&str],
+) -> Result<(SearchCorePresentation, usize)> {
     let CoreEventRecord {
         event,
         mut core_record,
@@ -171,17 +177,9 @@ fn search_core_presentation_projection(
                 event.event_id
             )
         })?;
-    let body_prefix = body
-        .chars()
-        .take(SEARCH_CORE_BODY_PREFIX_CHARS)
-        .collect::<String>();
-    let retained_body_bytes = body_prefix.len();
+    let (fragment, snippet_truncated) = search_snippet_fragment(&body, query_texts);
+    let retained_body_bytes = fragment.len();
 
-    // The renderer currently accepts CoreEventRecord. Construct a valid,
-    // ephemeral Core-owned presentation record so the complete body,
-    // structured content, annotations, and repository observations are
-    // dropped before the next result is decoded. This projection is never
-    // exposed as complete Core data.
     let core_record = CoreRecord::new_selected(
         core_record.event_id,
         core_record.session_id,
@@ -191,10 +189,16 @@ fn search_core_presentation_projection(
         core_record.event_type,
         core_record.agent_type,
         core_record.is_primary,
-        "search-presentation-v1",
-        body_prefix,
+        "search-presentation-v2",
+        fragment,
     )?;
-    Ok((CoreEventRecord { event, core_record }, retained_body_bytes))
+    Ok((
+        SearchCorePresentation {
+            record: CoreEventRecord { event, core_record },
+            snippet_truncated,
+        },
+        retained_body_bytes,
+    ))
 }
 
 fn search_core_hydration_budget_error(
