@@ -505,7 +505,6 @@ ctx_cli_integration_test(
     name = "pro_qualification_tests",
     src = "tests/pro_qualification.rs",
     binary = ":ctx_pro_qualification",
-    extra_crates = ["sha2"],
     tags = ["qualification", "release-gate", "security"],
     test_support = [
         "base",
