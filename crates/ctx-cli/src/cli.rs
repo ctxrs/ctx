@@ -40,7 +40,7 @@ pub(crate) const MAX_EVENT_WINDOW: usize = 50;
     styles = crate::ui::CLAP_STYLES
 )]
 pub(crate) struct Cli {
-    #[arg(long, env = "CTX_DATA_ROOT", global = true)]
+    #[arg(long, env = "CTX_DATA_ROOT", hide_env_values = true, global = true)]
     pub(crate) data_root: Option<PathBuf>,
     #[arg(
         long,
@@ -634,6 +634,91 @@ fn parse_daemon_idle_exit_seconds(value: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+    use std::{env, ffi::OsString, sync::Mutex};
+
+    const CONFIGURED_DATA_ROOT: &str =
+        "/configured/ctx-data-root-marker/secret-segment-one/secret-segment-two";
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct DataRootEnvGuard {
+        previous: Option<OsString>,
+    }
+
+    impl DataRootEnvGuard {
+        fn set() -> Self {
+            let previous = env::var_os("CTX_DATA_ROOT");
+            env::set_var("CTX_DATA_ROOT", CONFIGURED_DATA_ROOT);
+            Self { previous }
+        }
+    }
+
+    impl Drop for DataRootEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => env::set_var("CTX_DATA_ROOT", previous),
+                None => env::remove_var("CTX_DATA_ROOT"),
+            }
+        }
+    }
+
+    fn assert_data_root_help_contract(help: &str, command: &str, width: usize) {
+        assert!(
+            help.contains("CTX_DATA_ROOT"),
+            "{command} help at width {width} omitted CTX_DATA_ROOT:\n{help}"
+        );
+
+        let unwrapped = help.split_whitespace().collect::<String>();
+        assert!(
+            !unwrapped.contains(CONFIGURED_DATA_ROOT),
+            "{command} help at width {width} leaked the configured data root:\n{help}"
+        );
+        for fragment in [
+            "ctx-data-root-marker",
+            "secret-segment-one",
+            "secret-segment-two",
+        ] {
+            assert!(
+                !help.contains(fragment),
+                "{command} help at width {width} leaked configured path fragment {fragment}:\n{help}"
+            );
+        }
+    }
+
+    #[test]
+    fn root_help_hides_the_configured_data_root_at_narrow_and_wide_widths() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = DataRootEnvGuard::set();
+
+        for width in [32, 80] {
+            let help = Cli::command()
+                .term_width(width)
+                .render_long_help()
+                .to_string();
+            assert_data_root_help_contract(&help, "root", width);
+        }
+    }
+
+    #[test]
+    fn leaf_help_hides_the_configured_data_root_at_narrow_and_wide_widths() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = DataRootEnvGuard::set();
+
+        for width in [32, 80] {
+            let mut command = Cli::command().term_width(width);
+            command.build();
+            let help = command
+                .find_subcommand_mut("search")
+                .expect("search must remain a public leaf command")
+                .render_long_help()
+                .to_string();
+            assert_data_root_help_contract(&help, "search", width);
+        }
+    }
 
     #[test]
     fn daemon_run_rejects_once_and_keeps_finite_idle_controls() {
