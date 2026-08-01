@@ -42,11 +42,9 @@ impl SourceBackedSemanticDocumentBuilder for CoreBuilder {
         }
         Ok(Some(SemanticEventDocument {
             event_id: record.event_id.as_uuid(),
-            history_record_id: None,
             session_id: Some(record.session_id.as_uuid()),
             seq: record.event_sequence,
             occurred_at_ms: record.occurred_at_unix_ms.unwrap_or_default(),
-            anchor_occurred_at_ms: record.occurred_at_unix_ms.unwrap_or_default(),
             event_type: EventType::Message,
             role: Some(EventRole::User),
             rank_bucket: "core_event".to_owned(),

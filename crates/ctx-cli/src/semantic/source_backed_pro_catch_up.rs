@@ -376,10 +376,9 @@ pub(super) fn status_generation(data_root: &Path) -> Option<String> {
 
 /// Waits for the daemon-owned Pro projection of one exact Core generation.
 ///
-/// This is deliberately a status-only seam. The CLI must never rebuild a
-/// resolver registry, reread provider sources, or open the legacy Store in
-/// order to make Pro ready; those operations remain owned by the daemon tick
-/// that retained the generation-bound source authority.
+/// This is deliberately a status-only seam. The CLI must not reread provider
+/// sources or materialize Pro itself; that work remains owned by the daemon
+/// tick that retained the generation-bound Core authority.
 pub(crate) fn wait_for_completed_generation(
     data_root: &Path,
     core_generation_id: &str,
