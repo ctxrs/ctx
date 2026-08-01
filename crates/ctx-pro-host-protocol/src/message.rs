@@ -4,13 +4,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    ApplyCoreSourceDeltaPageRequest, AuthorizationRequest, AuthorizationResult,
-    BeginCoreMaterializationRequest, BlameRequest, BlameResult, ConfirmGraphKeyDeletionRequest,
-    CoreMaterializationBegan, CoreMaterializationFinished, CoreMaterializationReceipt,
-    CoreRecordPageMaterialized, CoreSourceDeltaPageApplied, ErrorClass,
+    ApplyCoreEventDeltaPageRequest, ApplyCoreSourceDeltaPageRequest, AuthorizationRequest,
+    AuthorizationResult, BeginCoreMaterializationRequest, BlameRequest, BlameResult,
+    ConfirmGraphKeyDeletionRequest, CoreEventDeltaPageApplied, CoreEventStatePage,
+    CoreEventStatePageRequest, CoreMaterializationBegan, CoreMaterializationFinished,
+    CoreMaterializationReceipt, CoreSourceDeltaPageApplied, ErrorClass,
     FinishCoreMaterializationRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
-    MaterializeCoreRecordPageRequest, PrepareGraphKeyDeletionRequest, ProtocolError,
-    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+    PrepareGraphKeyDeletionRequest, ProtocolError, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -95,7 +95,8 @@ pub enum HostMessage {
     Status(StatusRequest),
     BeginCoreMaterialization(BeginCoreMaterializationRequest),
     ApplyCoreSourceDeltaPage(ApplyCoreSourceDeltaPageRequest),
-    MaterializeCoreRecordPage(MaterializeCoreRecordPageRequest),
+    CoreEventStatePage(CoreEventStatePageRequest),
+    ApplyCoreEventDeltaPage(ApplyCoreEventDeltaPageRequest),
     FinishCoreMaterialization(FinishCoreMaterializationRequest),
     Blame(BlameRequest),
 }
@@ -115,7 +116,8 @@ pub enum HelperMessage {
     Status(StatusResult),
     CoreMaterializationBegan(CoreMaterializationBegan),
     CoreSourceDeltaPageApplied(CoreSourceDeltaPageApplied),
-    CoreRecordPageMaterialized(CoreRecordPageMaterialized),
+    CoreEventStatePage(CoreEventStatePage),
+    CoreEventDeltaPageApplied(CoreEventDeltaPageApplied),
     CoreMaterializationFinished(CoreMaterializationFinished),
     Blame(BlameResult),
     Error(ProtocolError),
@@ -291,6 +293,34 @@ impl RepositoryCoverage {
                 ));
             }
         }
+        if self.logical_binding_events > self.repository_candidate_events {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "repository coverage logical binding events exceed candidate coverage",
+            ));
+        }
+        for (label, count) in [
+            (
+                "certified live-root access events",
+                self.certified_live_root_access_events,
+            ),
+            ("file evidence events", self.file_evidence_events),
+            (
+                "exact commit evidence events",
+                self.exact_commit_evidence_events,
+            ),
+            (
+                "exact pull-request evidence events",
+                self.exact_pull_request_evidence_events,
+            ),
+        ] {
+            if count > self.logical_binding_events {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    format!("repository coverage {label} exceeds logical binding coverage"),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -379,6 +409,26 @@ impl StatusResult {
                 "terminal materialized coverage requires a current Core projection",
             ));
         }
+        if let Some(receipt) = &self.core_receipt {
+            let valid_terminal_mapping = match self.coverage {
+                MaterializedCoverage::Empty => {
+                    receipt.event_count == 0 && self.repository_coverage.is_empty()
+                }
+                MaterializedCoverage::Abstained => {
+                    receipt.event_count > 0 && self.repository_coverage.logical_binding_events == 0
+                }
+                MaterializedCoverage::Complete => {
+                    receipt.event_count > 0 && self.repository_coverage.logical_binding_events > 0
+                }
+                MaterializedCoverage::NotMaterialized | MaterializedCoverage::Partial => true,
+            };
+            if !valid_terminal_mapping {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    "materialized coverage does not match the completed Core receipt and repository coverage",
+                ));
+            }
+        }
         if !self
             .available_operations
             .is_subset(&self.supported_operations)
@@ -403,6 +453,7 @@ impl StatusResult {
                     self.access.local_repository == ProAccessState::Available
                         && self.repository_coverage.certified_live_root_access_events > 0
                         && self.repository_coverage.file_evidence_events > 0
+                        && self.repository_coverage.exact_commit_evidence_events > 0
                 }
                 ProOperation::CommitBlame => {
                     self.repository_coverage.exact_commit_evidence_events > 0
@@ -416,7 +467,7 @@ impl StatusResult {
                     ErrorClass::Sequence,
                     match operation {
                         ProOperation::FileBlame => {
-                            "file blame requires local-repository access, certified live-root access, and file evidence"
+                            "file blame requires local-repository access, certified live-root access, file evidence, and exact commit evidence"
                         }
                         ProOperation::CommitBlame => {
                             "commit blame requires exact commit evidence"

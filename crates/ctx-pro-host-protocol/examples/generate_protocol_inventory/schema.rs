@@ -50,10 +50,12 @@ pub(super) fn inventory() -> Value {
         "bounds": {
             "core_source_states": MAX_CORE_SOURCE_STATES,
             "core_source_delta_page_items": MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
-            "core_record_page_items": MAX_CORE_RECORD_PAGE_ITEMS,
-            "core_record_page_content_bytes": MAX_CORE_RECORD_PAGE_CONTENT_BYTES,
+            "core_event_state_page_items": MAX_CORE_EVENT_STATE_PAGE_ITEMS,
+            "core_event_delta_page_items": MAX_CORE_EVENT_DELTA_PAGE_ITEMS,
+            "core_event_delta_page_content_bytes": MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
             "core_source_delta_page_wire_bytes": MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES,
-            "core_record_page_wire_bytes": MAX_CORE_RECORD_PAGE_WIRE_BYTES,
+            "core_event_state_page_wire_bytes": MAX_CORE_EVENT_STATE_PAGE_WIRE_BYTES,
+            "core_event_delta_page_wire_bytes": MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES,
             "core_control_wire_bytes": MAX_CORE_CONTROL_WIRE_BYTES,
             "core_materializer_revision_bytes": MAX_CORE_MATERIALIZER_REVISION_BYTES,
             "blame_results": MAX_BLAME_RESULTS,
@@ -67,12 +69,14 @@ pub(super) fn inventory() -> Value {
             "hello", "authorize", "prepare_graph_key_deletion",
             "confirm_graph_key_deletion", "status",
             "begin_core_materialization", "apply_core_source_delta_page",
-            "materialize_core_record_page", "finish_core_materialization", "blame"
+            "core_event_state_page", "apply_core_event_delta_page",
+            "finish_core_materialization", "blame"
         ],
         "helper_message_kinds": [
             "hello", "authorized", "graph_key_deletion_prepared", "graph_key_deleted",
             "status", "core_materialization_began", "core_source_delta_page_applied",
-            "core_record_page_materialized", "core_materialization_finished", "blame", "error"
+            "core_event_state_page", "core_event_delta_page_applied",
+            "core_materialization_finished", "blame", "error"
         ],
         "capabilities": wire_names(&capabilities, Capability::wire_name),
         "enums": {
@@ -85,6 +89,7 @@ pub(super) fn inventory() -> Value {
             "pro_access_state": ["available", "locked", "unavailable"],
             "pro_operation": ["file_blame", "commit_blame", "pull_request_blame"],
             "core_source_delta_kind": ["present", "removed"],
+            "core_event_delta_kind": ["added", "replaced", "tombstoned"],
             "query_snapshot_expectation_kind": ["core"],
             "resource_kind": ResourceKind::ALL.map(ResourceKind::wire_name)
         },
@@ -130,21 +135,33 @@ pub(super) fn inventory() -> Value {
             "ApplyCoreSourceDeltaPageRequest": fields(&["page"], &[]),
             "CoreSourceDeltaPageApplied": fields(&[
                 "materialization_id", "core_generation_id", "page_index", "changed_sources",
-                "removed_sources", "materialize_sources", "replayed"
+                "removed_sources", "reconcile_sources", "replayed"
             ], &[]),
-            "CoreRecordPage": fields(&[
-                "materialization_id", "core_generation_id", "source", "source_index",
-                "page_index", "terminal", "records"
+            "CoreSourceReconciliation": fields(&["source_index", "delta"], &[]),
+            "CoreEventState": fields(
+                &["event_id", "core_record_sha256", "requires_replacement"], &[]),
+            "CoreEventStatePageRequest": fields(&[
+                "materialization_id", "core_generation_id", "reconciliation", "page_index",
+                "after_event_id", "maximum_items"
             ], &[]),
-            "MaterializeCoreRecordPageRequest": fields(&["page"], &[]),
-            "CoreRecordPageMaterialized": fields(&[
-                "materialization_id", "core_generation_id", "source",
-                "source_revision_sha256", "source_index", "page_index", "accepted_records",
-                "terminal", "replayed"
+            "CoreEventStatePage": fields(&[
+                "materialization_id", "core_generation_id", "reconciliation", "page_index",
+                "after_event_id", "states", "terminal", "replayed"
+            ], &[]),
+            "CoreEventReplacement": fields(&["prior_core_record_sha256", "record"], &[]),
+            "CoreEventTombstone": fields(&["event_id", "prior_core_record_sha256"], &[]),
+            "CoreEventDeltaPage": fields(&[
+                "materialization_id", "core_generation_id", "reconciliation", "page_index",
+                "terminal", "deltas"
+            ], &[]),
+            "ApplyCoreEventDeltaPageRequest": fields(&["page"], &[]),
+            "CoreEventDeltaPageApplied": fields(&[
+                "materialization_id", "core_generation_id", "source_index", "page_index",
+                "additions", "replacements", "tombstones", "terminal", "replayed"
             ], &[]),
             "FinishCoreMaterializationRequest": fields(&[
                 "materialization_id", "head", "expected_prior_receipt", "source_delta_pages",
-                "changed_sources", "removed_sources", "record_pages", "materialized_records"
+                "changed_sources", "removed_sources", "event_delta_pages", "event_mutations"
             ], &[]),
             "CoreMaterializationFinished": fields(&["receipt", "replayed"], &[]),
             "QuerySnapshotExpectation.core": fields(&["kind", "receipt"], &[]),
@@ -166,16 +183,18 @@ pub(super) fn inventory() -> Value {
             "contract_version": CORE_MATERIALIZATION_CONTRACT_VERSION,
             "sequence": [
                 "begin_core_materialization", "apply_core_source_delta_page",
-                "materialize_core_record_page", "finish_core_materialization"
+                "core_event_state_page", "apply_core_event_delta_page",
+                "finish_core_materialization"
             ],
             "authority": "one_generation_pinned_core_snapshot_delta_feed",
-            "initial": "the_helper_requests_every_present_source_because_it_has_no_prior_revision",
-            "incremental": "producer_sends_every_current_source_as_present_and_delta_ack_materialize_sources_is_the_exact_ordered_actually_changed_subset_that_receives_record_pages",
-            "removal": "removed_sources_are_applied_only_from_the_same_ordered_delta_pages",
-            "records": "complete_core_records_are_read_only_from_the_pinned_core_source_event_page_api",
+            "initial": "the_helper_reconciles_every_present_source_because_it_has_no_prior_event_state",
+            "incremental": "source_delta_ack_reconcile_sources_is_the_exact_ordered_changed_or_removed_subset_and_event_state_pages_drive_bounded_added_replaced_and_tombstoned_event_delta_pages",
+            "removal": "source_removal_is_resumable_as_bounded_event_tombstone_pages_and_deletes_source_control_state only_on_its_terminal_page",
+            "replacement": "prior_event_removal_and_replacement_record_insertion_are_atomic_in_one_bounded_event_delta_page",
+            "records": "complete_core_records_are_read_only_from_the_pinned_core_source_event_page_api_and_only_added_or_replaced_events_cross_the_protocol",
             "repository_data": "repository_bindings_abstentions_file_and_vcs_observations_exist_only_inside_core_records",
-            "publication": "explicit_terminal_counts_and_at_most_one_prior_receipt_cas",
-            "replay": "exact_completed_generation_may_skip_all_delta_and_record_pages",
+            "publication": "explicit_terminal_counts_at_most_one_prior_receipt_cas_and_a_small_final_control_transaction",
+            "replay": "exact_completed_generation_may_skip_all_delta_and_event pages",
             "integrity": "strict_page_sequence_content_generation_and_transactional_staging_without_hash_chains"
         },
         "status_contract": {
@@ -189,11 +208,17 @@ pub(super) fn inventory() -> Value {
                 "certified_live_root_access_events", "file_evidence_events",
                 "exact_commit_evidence_events", "exact_pull_request_evidence_events"
             ],
-            "coverage_bound": "each_repository_coverage_event_count_is_at_most_the_receipt_event_count_and_is_zero_without_a_receipt",
+            "coverage_bound": "repository_candidate_events_is_at_most_receipt_event_count_and every_specialized_axis_is_a_subset_of_logical_binding_events_which_is_a_subset_of_repository_candidate_events",
+            "terminal_coverage": {
+                "empty": "receipt_event_count_is_zero_and_all_repository_coverage_axes_are_zero",
+                "abstained": "receipt_event_count_is_positive_and_logical_binding_events_is_zero",
+                "complete": "receipt_event_count_is_positive_and_logical_binding_events_is_positive"
+            },
             "operation_prerequisites": {
                 "global": ["current_complete_projection", "entitlement", "graph_key"],
                 "file_blame": [
-                    "local_repository", "certified_live_root_access_events", "file_evidence_events"
+                    "local_repository", "certified_live_root_access_events", "file_evidence_events",
+                    "exact_commit_evidence_events"
                 ],
                 "commit_blame": ["exact_commit_evidence_events"],
                 "pull_request_blame": ["exact_pull_request_evidence_events"]

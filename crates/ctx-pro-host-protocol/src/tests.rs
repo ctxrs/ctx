@@ -59,10 +59,12 @@ fn repository_coverage(event_count: u64) -> RepositoryCoverage {
 #[test]
 fn status_axes_preserve_terminal_empty_without_advertising_blame() {
     let generation = "a".repeat(64);
+    let mut empty_receipt = receipt('a');
+    empty_receipt.event_count = 0;
     let quiet = StatusResult {
         currentness: CoreProjectionCurrentness::Current,
         requested_core_generation_id: Some(generation.clone()),
-        core_receipt: Some(receipt('a')),
+        core_receipt: Some(empty_receipt),
         coverage: MaterializedCoverage::Empty,
         repository_coverage: RepositoryCoverage::default(),
         access: access(ProAccessState::Available),
@@ -76,10 +78,12 @@ fn status_axes_preserve_terminal_empty_without_advertising_blame() {
     assert_eq!(invalid.validate().unwrap_err().class, ErrorClass::Sequence);
 
     let mut abstained = quiet.clone();
+    abstained.core_receipt = Some(receipt('a'));
     abstained.coverage = MaterializedCoverage::Abstained;
     abstained.validate().unwrap();
 
     let ready = StatusResult {
+        core_receipt: Some(receipt('a')),
         coverage: MaterializedCoverage::Complete,
         repository_coverage: repository_coverage(2),
         available_operations: operations(),
@@ -145,6 +149,9 @@ fn available_operations_are_a_supported_ready_subset() {
     status.repository_coverage.file_evidence_events = 0;
     assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
     status.repository_coverage.file_evidence_events = 1;
+    status.repository_coverage.exact_commit_evidence_events = 0;
+    assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+    status.repository_coverage.exact_commit_evidence_events = 1;
     status.validate().unwrap();
 
     status.available_operations = BTreeSet::from([ProOperation::PullRequestBlame]);
@@ -218,6 +225,73 @@ fn repository_coverage_is_zero_without_and_bounded_by_a_receipt() {
 
     status.repository_coverage = repository_coverage(2);
     status.validate().unwrap();
+}
+
+#[test]
+fn impossible_terminal_status_and_coverage_lattice_vectors_fail_closed() {
+    let base = StatusResult {
+        currentness: CoreProjectionCurrentness::Current,
+        requested_core_generation_id: Some("a".repeat(64)),
+        core_receipt: Some(receipt('a')),
+        coverage: MaterializedCoverage::Complete,
+        repository_coverage: repository_coverage(2),
+        access: access(ProAccessState::Available),
+        supported_operations: operations(),
+        available_operations: BTreeSet::new(),
+    };
+
+    let impossible_coverages = [
+        RepositoryCoverage {
+            repository_candidate_events: 1,
+            logical_binding_events: 2,
+            ..RepositoryCoverage::default()
+        },
+        RepositoryCoverage {
+            repository_candidate_events: 2,
+            logical_binding_events: 1,
+            certified_live_root_access_events: 2,
+            ..RepositoryCoverage::default()
+        },
+        RepositoryCoverage {
+            repository_candidate_events: 2,
+            logical_binding_events: 1,
+            file_evidence_events: 2,
+            ..RepositoryCoverage::default()
+        },
+        RepositoryCoverage {
+            repository_candidate_events: 2,
+            logical_binding_events: 1,
+            exact_commit_evidence_events: 2,
+            ..RepositoryCoverage::default()
+        },
+        RepositoryCoverage {
+            repository_candidate_events: 2,
+            logical_binding_events: 1,
+            exact_pull_request_evidence_events: 2,
+            ..RepositoryCoverage::default()
+        },
+    ];
+    for repository_coverage in impossible_coverages {
+        let status = StatusResult {
+            repository_coverage,
+            ..base.clone()
+        };
+        assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+    }
+
+    for coverage in [MaterializedCoverage::Empty, MaterializedCoverage::Abstained] {
+        let status = StatusResult {
+            coverage,
+            ..base.clone()
+        };
+        assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+    }
+    let status = StatusResult {
+        coverage: MaterializedCoverage::Complete,
+        repository_coverage: RepositoryCoverage::default(),
+        ..base
+    };
+    assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
 }
 
 #[test]

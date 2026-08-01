@@ -68,18 +68,21 @@ pub use query::{
 };
 mod core_materialization;
 pub use core_materialization::{
-    core_materialization_id, core_source_snapshot_sha256, ApplyCoreSourceDeltaPageRequest,
-    BeginCoreMaterializationRequest, CoreGenerationHead, CoreMaterializationBegan,
+    core_materialization_id, core_record_sha256, core_source_snapshot_sha256,
+    ApplyCoreEventDeltaPageRequest, ApplyCoreSourceDeltaPageRequest,
+    BeginCoreMaterializationRequest, CoreEventDelta, CoreEventDeltaPage, CoreEventDeltaPageApplied,
+    CoreEventReplacement, CoreEventState, CoreEventStatePage, CoreEventStatePageRequest,
+    CoreEventTombstone, CoreGenerationHead, CoreMaterializationBegan,
     CoreMaterializationBeginAcknowledgementIdentity, CoreMaterializationFinished,
-    CoreMaterializationReceipt, CoreMaterializationReceiptIdentity, CoreRecordPage,
-    CoreRecordPageAcknowledgementIdentity, CoreRecordPageMaterialized, CoreSourceDelta,
+    CoreMaterializationReceipt, CoreMaterializationReceiptIdentity, CoreSourceDelta,
     CoreSourceDeltaPage, CoreSourceDeltaPageAcknowledgementIdentity, CoreSourceDeltaPageApplied,
-    CoreSourceRemoval, CoreSourceState, FinishCoreMaterializationRequest,
-    MaterializeCoreRecordPageRequest, CORE_MATERIALIZATION_CONTRACT_VERSION,
-    MAX_CORE_CONTROL_WIRE_BYTES, MAX_CORE_MATERIALIZER_REVISION_BYTES,
-    MAX_CORE_RECORD_PAGE_CONTENT_BYTES, MAX_CORE_RECORD_PAGE_ITEMS,
-    MAX_CORE_RECORD_PAGE_WIRE_BYTES, MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
-    MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES, MAX_CORE_SOURCE_STATES,
+    CoreSourceReconciliation, CoreSourceRemoval, CoreSourceState, FinishCoreMaterializationRequest,
+    CORE_MATERIALIZATION_CONTRACT_VERSION, MAX_CORE_CONTROL_WIRE_BYTES,
+    MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES, MAX_CORE_EVENT_DELTA_PAGE_ITEMS,
+    MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES, MAX_CORE_EVENT_STATE_PAGE_ITEMS,
+    MAX_CORE_EVENT_STATE_PAGE_WIRE_BYTES, MAX_CORE_MATERIALIZER_REVISION_BYTES,
+    MAX_CORE_SOURCE_DELTA_PAGE_ITEMS, MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES,
+    MAX_CORE_SOURCE_STATES,
 };
 mod fake;
 pub use fake::{FakeBlameFailure, FakeHelper};
