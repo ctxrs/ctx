@@ -1385,7 +1385,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
             &temp,
             "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'command_output'"
         ),
-        0
+        2
     );
     assert_eq!(
         source_backed_count(
@@ -1397,7 +1397,8 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
     );
     assert_eq!(
         source_backed_count(&temp, "SELECT COUNT(*) FROM ctx_files_touched"),
-        1
+        0,
+        "unscoped fixture paths must not cross the Core repository boundary"
     );
     assert_eq!(
         source_backed_count(
