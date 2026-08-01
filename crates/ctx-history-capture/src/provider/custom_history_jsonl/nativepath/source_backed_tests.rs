@@ -480,6 +480,17 @@ fn projected_records_are_complete_and_locator_free() {
     assert!(records
         .iter()
         .all(|record| record.native_event_id.is_some()));
+    let Some(TypedKey::Composite(identity)) = records[0].native_event_id.as_ref() else {
+        panic!("custom Core event identity must retain source selector parts");
+    };
+    assert_eq!(
+        &identity[..2],
+        &[
+            TypedKey::utf8("demo-agent").unwrap(),
+            TypedKey::utf8("source-a").unwrap(),
+        ]
+    );
+    assert_eq!(identity[2], TypedKey::utf8("event_id:event-a").unwrap());
     let encoded = serde_json::to_string(&records).unwrap();
     assert!(!encoded.contains("source_path"));
     assert!(!encoded.contains("locator"));

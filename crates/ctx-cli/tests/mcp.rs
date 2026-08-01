@@ -307,7 +307,6 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
             "mode=full",
             "daemon_lock:",
             "daemon_endpoint:",
-            "daemon_jobs: source_backed_refresh=",
         ],
     );
     assert!(data_root.join("daemon/daemon.lock").is_file());
@@ -627,7 +626,7 @@ fn mcp_sql_fresh_root_reports_missing_projection_without_initializing_storage() 
     assert!(
         error["structuredContent"]["error"]
             .as_str()
-            .is_some_and(|message| message.contains("source-backed SQL projection is missing")),
+            .is_some_and(|message| message.contains("Core SQL projection is missing")),
         "{error:#}"
     );
     assert!(
