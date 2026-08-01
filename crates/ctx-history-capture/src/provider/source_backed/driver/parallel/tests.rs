@@ -591,7 +591,7 @@ fn oversized_valid_core_record_is_rejected_typed_by_the_generation_writer() {
 
     let error = run_single(source, move |job, emitter| {
         emitter.begin(ParallelLeafScanBegin::replace(job.source().clone()))?;
-        emitter.emit_core_record(record)?;
+        emitter.emit_core_record(record.clone())?;
         Ok(())
     })
     .unwrap_err();
