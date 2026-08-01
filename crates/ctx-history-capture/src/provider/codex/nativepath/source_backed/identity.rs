@@ -1,5 +1,168 @@
 use super::*;
 
+const CODEX_NATIVE_EVENT_NAMESPACE: &str = "codex.event.v1";
+const CODEX_PROVIDER_EVENT_KEY_VERSION: &str = "provider-native-v1";
+const CODEX_FALLBACK_EVENT_KEY_VERSION: &str = "fallback-v1";
+const CODEX_PROVIDER_EVENT_OCCURRENCE_DOMAIN: &[u8] =
+    b"ctx/codex-nativepath/provider-event-occurrence/v1\0";
+const CODEX_FALLBACK_EVENT_DIGEST_DOMAIN: &[u8] = b"ctx/codex-nativepath/fallback-event/v1\0";
+
+#[derive(Default)]
+pub(super) struct CodexEventIdentityStateV0 {
+    base_lookup: Option<BaseEventIdentityLookup>,
+    occurrences: HashMap<[u8; 32], u64>,
+}
+
+impl CodexEventIdentityStateV0 {
+    pub(super) fn for_append(base_lookup: BaseEventIdentityLookup) -> Self {
+        Self {
+            base_lookup: Some(base_lookup),
+            occurrences: HashMap::new(),
+        }
+    }
+
+    fn next_identity(
+        &mut self,
+        source: &SourceKey,
+        session_id: StableEntityId,
+        row: &CodexSourceBackedRowV0,
+    ) -> CodexSourceBackedResultV0<(StableEntityId, TypedKey)> {
+        let (occurrence_key, parts) = match row.provider_event_identity.as_ref() {
+            Some(provider_identity) => provider_event_key(row, provider_identity)?,
+            None => fallback_event_key(row)?,
+        };
+        let occurrence = match self.occurrences.get(&occurrence_key).copied() {
+            Some(occurrence) => occurrence,
+            None => self.first_unused_base_occurrence(source, session_id, &parts)?,
+        };
+        self.occurrences.insert(
+            occurrence_key,
+            occurrence
+                .checked_add(1)
+                .ok_or(CodexSourceBackedErrorV0::CountOverflow)?,
+        );
+        event_identity_for_occurrence(source, session_id, &parts, occurrence)
+    }
+
+    fn first_unused_base_occurrence(
+        &self,
+        source: &SourceKey,
+        session_id: StableEntityId,
+        parts: &[TypedKey],
+    ) -> CodexSourceBackedResultV0<u64> {
+        let Some(base_lookup) = self.base_lookup.as_ref() else {
+            return Ok(0);
+        };
+        if !base_occurrence_exists(base_lookup, source, session_id, parts, 0)? {
+            return Ok(0);
+        }
+
+        // Revision-v6 generations assign each logical key a contiguous range
+        // from zero. Exact event-ID probes therefore recover its high-water
+        // mark without reading any record from the validated source prefix.
+        let mut present = 0_u64;
+        let mut missing = 1_u64;
+        while base_occurrence_exists(base_lookup, source, session_id, parts, missing)? {
+            present = missing;
+            missing = match missing.checked_mul(2) {
+                Some(next) => next,
+                None if missing != u64::MAX => u64::MAX,
+                None => return Err(CodexSourceBackedErrorV0::CountOverflow),
+            };
+        }
+        while present.saturating_add(1) < missing {
+            let candidate = present + (missing - present) / 2;
+            if base_occurrence_exists(base_lookup, source, session_id, parts, candidate)? {
+                present = candidate;
+            } else {
+                missing = candidate;
+            }
+        }
+        Ok(missing)
+    }
+}
+
+fn base_occurrence_exists(
+    base_lookup: &BaseEventIdentityLookup,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    parts: &[TypedKey],
+    occurrence: u64,
+) -> CodexSourceBackedResultV0<bool> {
+    let (event_id, _) = event_identity_for_occurrence(source, session_id, parts, occurrence)?;
+    Ok(base_lookup.contains(event_id.as_uuid())?)
+}
+
+fn event_identity_for_occurrence(
+    source: &SourceKey,
+    session_id: StableEntityId,
+    parts: &[TypedKey],
+    occurrence: u64,
+) -> CodexSourceBackedResultV0<(StableEntityId, TypedKey)> {
+    let mut native_parts = parts.to_vec();
+    native_parts.push(TypedKey::U64(occurrence));
+    let native_event_id = TypedKey::composite(native_parts.clone())?;
+    let native_item_key = NativeItemKey::composite(CODEX_NATIVE_EVENT_NAMESPACE, native_parts)?;
+    let event_id = codex_event_identity(source, session_id, &native_item_key)?;
+    Ok((event_id, native_event_id))
+}
+
+fn provider_event_key(
+    row: &CodexSourceBackedRowV0,
+    provider_identity: &CodexProviderEventIdentityV0,
+) -> CodexSourceBackedResultV0<([u8; 32], Vec<TypedKey>)> {
+    let role = row.role.map(|role| role.as_str());
+    let mut hasher = Sha256::new();
+    hasher.update(CODEX_PROVIDER_EVENT_OCCURRENCE_DOMAIN);
+    hash_identity_text(&mut hasher, provider_identity.kind.as_str());
+    hash_identity_text(&mut hasher, &provider_identity.value);
+    hash_identity_text(&mut hasher, row.event_type.as_str());
+    hash_identity_optional_text(&mut hasher, role);
+    let occurrence_key = hasher.finalize().into();
+    let parts = vec![
+        TypedKey::utf8(CODEX_PROVIDER_EVENT_KEY_VERSION)?,
+        TypedKey::utf8(provider_identity.kind.as_str())?,
+        TypedKey::utf8(&provider_identity.value)?,
+        TypedKey::utf8(row.event_type.as_str())?,
+        role.map(TypedKey::utf8)
+            .transpose()?
+            .unwrap_or(TypedKey::Null),
+    ];
+    Ok((occurrence_key, parts))
+}
+
+fn fallback_event_key(
+    row: &CodexSourceBackedRowV0,
+) -> CodexSourceBackedResultV0<([u8; 32], Vec<TypedKey>)> {
+    let mut hasher = Sha256::new();
+    hasher.update(CODEX_FALLBACK_EVENT_DIGEST_DOMAIN);
+    hasher.update(row.occurred_at.timestamp().to_le_bytes());
+    hasher.update(row.occurred_at.timestamp_subsec_nanos().to_le_bytes());
+    hash_identity_text(&mut hasher, row.event_type.as_str());
+    hash_identity_optional_text(&mut hasher, row.role.map(|role| role.as_str()));
+    hash_identity_text(&mut hasher, &row.lexical_body);
+    let digest: [u8; 32] = hasher.finalize().into();
+    Ok((
+        digest,
+        vec![
+            TypedKey::utf8(CODEX_FALLBACK_EVENT_KEY_VERSION)?,
+            TypedKey::bytes(digest.to_vec())?,
+        ],
+    ))
+}
+
+fn hash_identity_optional_text(hasher: &mut Sha256, value: Option<&str>) {
+    hasher.update([u8::from(value.is_some())]);
+    if let Some(value) = value {
+        hash_identity_text(hasher, value);
+    }
+}
+
+fn hash_identity_text(hasher: &mut Sha256, value: &str) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
 pub(super) fn codex_source_key(native_session_id: &str) -> CodexSourceBackedResultV0<SourceKey> {
     let anchor = SourceAnchor::provider_native(
         CODEX_SOURCE_ANCHOR_NAMESPACE,
@@ -31,20 +194,14 @@ pub(super) fn codex_session_identity(
 
 pub(super) fn codex_event_identity(
     source: &SourceKey,
-    native_session_id: &str,
-    raw_ordinal: u64,
+    session_id: StableEntityId,
+    native_item_key: &NativeItemKey,
 ) -> CodexSourceBackedResultV0<StableEntityId> {
-    let session_id = codex_session_identity(source, native_session_id)?;
-    let native_item_key = NativeItemKey::certified_position(
-        CODEX_NATIVE_EVENT_POSITION_KIND,
-        TypedKey::U64(raw_ordinal),
-        PositionStability::AppendStable,
-    )?;
     Ok(derive_event_id(EventIdentityInput {
         source,
         session_id,
         logical_item_kind: CODEX_LOGICAL_EVENT_KIND,
-        native_item_key: &native_item_key,
+        native_item_key,
         subrecord_selector: None,
     })?)
 }
@@ -54,6 +211,7 @@ pub(super) fn codex_core_record(
     session_id: StableEntityId,
     owner: &CodexSessionRow,
     row: CodexSourceBackedRowV0,
+    event_identity_state: &mut CodexEventIdentityStateV0,
     attributor: &mut crate::repository_attribution::RepositoryAttributor,
 ) -> CodexSourceBackedResultV0<CoreRecord> {
     let native_session_id = owner.native_session_id.as_str();
@@ -69,8 +227,11 @@ pub(super) fn codex_core_record(
         .transpose()?
         .unwrap_or(session_id);
     let is_primary = parent_session_id.is_none();
+    let (event_id, native_event_id) =
+        event_identity_state.next_identity(source, session_id, &row)?;
     let CodexSourceBackedRowV0 {
         raw_ordinal,
+        provider_event_identity: _,
         occurred_at,
         event_type,
         role,
@@ -81,7 +242,6 @@ pub(super) fn codex_core_record(
         repository_result,
         repository_files,
     } = row;
-    let event_id = codex_event_identity(source, native_session_id, raw_ordinal)?;
     if lexical_body.is_empty() {
         return Err(CodexSourceBackedErrorV0::MissingLexicalBody);
     }
@@ -180,7 +340,7 @@ pub(super) fn codex_core_record(
     )?;
     record.parent_session_id = parent_session_id;
     record.provider_session_id = Some(native_session_id.to_owned());
-    record.native_event_id = Some(TypedKey::U64(raw_ordinal));
+    record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());
     record.role = role.map(|role| role.as_str().to_owned());
     record.workspace.clone_from(&session_cwd);

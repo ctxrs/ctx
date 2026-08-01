@@ -14,15 +14,15 @@ use std::{
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
     CertifiedSourceDeletion, CertifiedSourceInventory, CoreRecord, CoreRecordAnnotation,
-    CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, PositionStability,
-    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
-    SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation, StableEntityId,
-    TypedKey,
+    CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
+    SourceInventoryObservation, SourceKey, SourceObservation, StableEntityId, TypedKey,
 };
 #[cfg(test)]
 use ctx_history_index::VerifiedIndex;
 use ctx_history_index::{
-    CommitReceipt, GenerationWriter, IndexError, RevalidationTarget, WriterOptions,
+    BaseEventIdentityLookup, CommitReceipt, GenerationWriter, IndexError, RevalidationTarget,
+    WriterOptions,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -30,7 +30,7 @@ use thiserror::Error;
 use super::{
     discover_codex_catalog_sources,
     reader::{CodexParseDisposition, CodexScanCounters},
-    rows::CodexSourceBackedRowV0,
+    rows::{CodexProviderEventIdentityV0, CodexSourceBackedRowV0},
     source::{CodexCatalogSource, CodexFileObservation, CodexSourceIdentity},
     CodexAppendProof, CodexCheckpointGeneration, CodexNativeCheckpoint, CodexNativeOwnedPage,
     CodexNativeScanner, CodexSessionRow, CodexSourceScan,
@@ -52,13 +52,12 @@ use crate::{
 
 const CODEX_SOURCE_ANCHOR_NAMESPACE: &str = "codex.session";
 const CODEX_NATIVE_SESSION_NAMESPACE: &str = "codex.session";
-const CODEX_NATIVE_EVENT_POSITION_KIND: &str = "codex.jsonl.raw-ordinal";
 const CODEX_LOGICAL_SESSION_KIND: &str = "codex-session";
 const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
 const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v7";
-const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v5";
+const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v6";
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v1";
 const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v1";
@@ -313,7 +312,7 @@ use cold::{cold_scanner_worker_count_for_parallelism, take_cold_scanner_activity
 pub(crate) use identity::source_observation;
 use identity::{
     certify_scan, codex_core_record, codex_session_identity, codex_source_key, decode_append_proof,
-    validate_owner,
+    validate_owner, CodexEventIdentityStateV0,
 };
 #[cfg(test)]
 use ingestion::ingest_codex_source_backed_inner_v0;

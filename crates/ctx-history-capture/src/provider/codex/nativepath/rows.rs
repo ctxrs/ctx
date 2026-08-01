@@ -57,6 +57,7 @@ pub(crate) struct CodexEventRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodexSourceBackedRowV0 {
     pub(crate) raw_ordinal: u64,
+    pub(crate) provider_event_identity: Option<CodexProviderEventIdentityV0>,
     pub(crate) occurred_at: DateTime<Utc>,
     pub(crate) event_type: EventType,
     pub(crate) role: Option<EventRole>,
@@ -134,6 +135,11 @@ impl CodexSourceBackedRowV0 {
             .checked_add(self.touched_paths.len())?
             .checked_add(self.repository_files.len())?;
         size_of::<Self>()
+            .checked_add(
+                self.provider_event_identity
+                    .as_ref()
+                    .map_or(0, |identity| identity.value.capacity()),
+            )?
             .checked_add(self.lexical_body.capacity())?
             .checked_add(self.session_cwd.as_ref().map_or(0, String::capacity))?
             .checked_add(path_slots)?
@@ -143,6 +149,27 @@ impl CodexSourceBackedRowV0 {
             .checked_add(repository_file_bytes)?
             .checked_add(allocation_count.checked_mul(OWNED_ALLOCATION_OVERHEAD_BYTES)?)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexProviderEventIdentityKindV0 {
+    Id,
+    CallId,
+}
+
+impl CodexProviderEventIdentityKindV0 {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::CallId => "call_id",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodexProviderEventIdentityV0 {
+    pub(crate) kind: CodexProviderEventIdentityKindV0,
+    pub(crate) value: String,
 }
 
 pub(super) struct CodexSourceBackedBuiltRowV0 {
@@ -238,6 +265,7 @@ pub(super) fn build_source_backed_event_row(
     Ok(Ok(CodexSourceBackedBuiltRowV0 {
         row: CodexSourceBackedRowV0 {
             raw_ordinal,
+            provider_event_identity: provider_event_identity(&retained.payload),
             occurred_at: retained.occurred_at,
             event_type: semantic.event_type,
             role: semantic.role,
@@ -255,6 +283,7 @@ pub(super) fn build_source_backed_event_row(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_source_backed_sparse_output_row(
     raw_ordinal: u64,
+    provider_event_identity: Option<CodexProviderEventIdentityV0>,
     occurred_at: DateTime<Utc>,
     result_kind: CodexResultKind,
     context: Option<&CodexToolCallContext>,
@@ -289,6 +318,7 @@ pub(super) fn build_source_backed_sparse_output_row(
     };
     Ok(Some(CodexSourceBackedRowV0 {
         raw_ordinal,
+        provider_event_identity,
         occurred_at,
         event_type,
         role: Some(EventRole::Tool),
@@ -299,6 +329,26 @@ pub(super) fn build_source_backed_sparse_output_row(
         repository_result,
         repository_files: Vec::new(),
     }))
+}
+
+pub(super) fn provider_event_identity(payload: &Value) -> Option<CodexProviderEventIdentityV0> {
+    const MAX_PROVIDER_EVENT_ID_BYTES: usize = 64 * 1024;
+
+    [
+        (CodexProviderEventIdentityKindV0::Id, "id"),
+        (CodexProviderEventIdentityKindV0::CallId, "call_id"),
+    ]
+    .into_iter()
+    .find_map(|(kind, field)| {
+        payload
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= MAX_PROVIDER_EVENT_ID_BYTES)
+            .map(|value| CodexProviderEventIdentityV0 {
+                kind,
+                value: value.to_owned(),
+            })
+    })
 }
 
 pub(super) fn repository_file_kind(kind: Option<FileChangeKind>) -> RepositoryFileObservationKind {

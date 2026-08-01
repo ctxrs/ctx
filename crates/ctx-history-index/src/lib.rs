@@ -79,8 +79,11 @@ use ctx_history_core::{StableEntityId, IDENTITY_VERSION};
 #[cfg(test)]
 use tantivy::TantivyDocument;
 use tantivy::{
+    collector::Count,
     directory::{Directory, DirectoryLock, Lock, INDEX_WRITER_LOCK},
     indexer::LogMergePolicy,
+    query::TermQuery,
+    schema::{Field, IndexRecordOption},
     Index, IndexMeta, IndexSettings, IndexWriter, ReloadPolicy, Searcher, Term,
 };
 use uuid::Uuid;
@@ -160,7 +163,43 @@ pub struct GenerationWriter {
     before_writer_handoff: Option<Box<dyn FnOnce() + Send>>,
 }
 
+/// Exact point lookup over the immutable generation captured when a writer opened.
+///
+/// Provider append adapters use this to resolve a small suffix against existing
+/// deterministic identities without enumerating or decoding the validated prefix.
+#[derive(Clone)]
+pub struct BaseEventIdentityLookup {
+    searcher: Option<Searcher>,
+    event_id_field: Field,
+}
+
+impl BaseEventIdentityLookup {
+    /// Returns whether the immutable base generation contains `event_id`.
+    pub fn contains(&self, event_id: Uuid) -> Result<bool> {
+        let Some(searcher) = self.searcher.as_ref() else {
+            return Ok(false);
+        };
+        let query = TermQuery::new(
+            Term::from_field_text(self.event_id_field, &event_id.to_string()),
+            IndexRecordOption::Basic,
+        );
+        match searcher.search(&query, &Count)? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(IndexError::DuplicateEventIdentity(event_id.to_string())),
+        }
+    }
+}
+
 impl GenerationWriter {
+    /// Captures an exact event-identity lookup pinned to this writer's base generation.
+    pub fn base_event_identity_lookup(&self) -> BaseEventIdentityLookup {
+        BaseEventIdentityLookup {
+            searcher: self.base_searcher.clone(),
+            event_id_field: self.fields.event_id,
+        }
+    }
+
     pub fn open(root: impl AsRef<Path>, options: WriterOptions) -> Result<Self> {
         let indexer_threads = options.indexer_threads.clamp(1, 8);
         let minimum = INDEX_MEMORY_MIN_PER_THREAD.saturating_mul(indexer_threads);
