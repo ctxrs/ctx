@@ -1,4 +1,10 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use ctx_history_core::{
     core_record_contract_fingerprint, derive_event_id, derive_session_id, CoreContent,
@@ -8,9 +14,11 @@ use ctx_history_core::{
     RepositoryEvidenceKind, RepositoryFileObservation, RepositoryFileObservationKind,
     RepositoryVcsObservation, RepositoryVcsObservationKind, SessionIdentityInput, SourceAnchor,
     SourceKey, StableEntityId, TypedKey, CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION,
-    CORE_RECORD_VERSION,
+    CORE_RECORD_VERSION, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
 };
 use tempfile::TempDir;
+
+use rusqlite::{ffi, Connection};
 
 use super::*;
 
@@ -77,7 +85,7 @@ fn repository_binding(binding_id: &str, logical_id: &str) -> RepositoryBinding {
             kind: RepositoryEvidenceKind::FileActivity,
             confidence: RepositoryEvidenceConfidence::High,
         }],
-        association_policy_revision: 1,
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     }
 }
 
@@ -116,6 +124,32 @@ fn record(source: &SourceKey, sequence: u64) -> CoreRecord {
         repository_file_observations: Vec::new(),
         repository_vcs_observations: Vec::new(),
     }
+}
+
+fn repository_record(source: &SourceKey, sequence: u64) -> CoreRecord {
+    let mut event = record(source, sequence);
+    event.repository_bindings = vec![repository_binding("repo-shared", "ctx")];
+    event.repository_file_observations = vec![RepositoryFileObservation {
+        repository_binding_id: "repo-shared".to_owned(),
+        relative_path: format!("src/event-{sequence}.rs"),
+        kind: RepositoryFileObservationKind::Modified,
+        prior_relative_path: None,
+    }];
+    event.repository_vcs_observations = vec![RepositoryVcsObservation {
+        repository_binding_id: "repo-shared".to_owned(),
+        kind: RepositoryVcsObservationKind::Commit,
+        object_id: Some(GitObjectId {
+            format: GitObjectFormat::Sha1,
+            hex: format!("{sequence:040x}"),
+        }),
+        parent_object_ids: vec![GitObjectId {
+            format: GitObjectFormat::Sha1,
+            hex: "b".repeat(40),
+        }],
+        reference: Some("refs/heads/main".to_owned()),
+        relative_path: None,
+    }];
+    event
 }
 
 fn source_metadata(source: &SourceKey, revision: u8, events: u64) -> RelationalSourceMetadata {
@@ -196,6 +230,111 @@ fn view_columns(projection: &SourceBackedRelationalProjection, view: &str) -> Ve
         _ => None,
     })
     .collect()
+}
+
+fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
+    let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+    statement
+        .query_map([], |row| row.get(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+#[derive(Debug)]
+struct ProjectionWork {
+    vm_steps: u64,
+    page_cache_misses: u64,
+}
+
+fn measured_projection_work(
+    projection: &mut SourceBackedRelationalProjection,
+    operation: impl FnOnce(&mut SourceBackedRelationalProjection),
+) -> ProjectionWork {
+    projection
+        .conn
+        .execute_batch("PRAGMA cache_size = -64; PRAGMA shrink_memory;")
+        .unwrap();
+    sqlite_cache_misses(&projection.conn, true);
+    let progress_calls = Arc::new(AtomicU64::new(0));
+    let measured_calls = Arc::clone(&progress_calls);
+    projection.conn.progress_handler(
+        1,
+        Some(move || {
+            measured_calls.fetch_add(1, Ordering::Relaxed);
+            false
+        }),
+    );
+
+    operation(projection);
+
+    projection.conn.progress_handler(0, None::<fn() -> bool>);
+    ProjectionWork {
+        vm_steps: progress_calls.load(Ordering::Relaxed),
+        page_cache_misses: sqlite_cache_misses(&projection.conn, false),
+    }
+}
+
+fn sqlite_cache_misses(conn: &Connection, reset: bool) -> u64 {
+    let mut current = 0;
+    let mut highwater = 0;
+    // SAFETY: sqlite3_db_status only reads and optionally resets a counter on
+    // this live connection; both output pointers remain valid for the call.
+    let result = unsafe {
+        ffi::sqlite3_db_status(
+            conn.handle(),
+            ffi::SQLITE_DBSTATUS_CACHE_MISS,
+            &mut current,
+            &mut highwater,
+            i32::from(reset),
+        )
+    };
+    assert_eq!(result, ffi::SQLITE_OK);
+    u64::try_from(current).unwrap()
+}
+
+fn incremental_work_with_unchanged_events(
+    unchanged_event_count: u64,
+) -> (ProjectionWork, ProjectionWork) {
+    let (_temp, mut projection) = projection();
+    let unchanged = source(&format!("unchanged-{unchanged_event_count}"));
+    let changing = source(&format!("changing-{unchanged_event_count}"));
+    let unchanged_metadata = source_metadata(&unchanged, 1, unchanged_event_count);
+    let changing_metadata = source_metadata(&changing, 1, 1);
+    let initial = generation(
+        30,
+        vec![unchanged_metadata.clone(), changing_metadata.clone()],
+    );
+    let mut initial_records = records(
+        unchanged_metadata.clone(),
+        (1..=unchanged_event_count)
+            .map(|sequence| record(&unchanged, sequence))
+            .collect(),
+    );
+    initial_records.extend(records(changing_metadata, vec![record(&changing, 1)]));
+    projection.rebuild(&initial, initial_records).unwrap();
+
+    let changing_v2 = source_metadata(&changing, 2, 2);
+    let appended = generation(31, vec![unchanged_metadata.clone(), changing_v2.clone()]);
+    let append = measured_projection_work(&mut projection, |projection| {
+        let receipt = projection
+            .catch_up(
+                &appended,
+                records(
+                    changing_v2,
+                    vec![record(&changing, 1), record(&changing, 2)],
+                ),
+            )
+            .unwrap();
+        assert_eq!(receipt.event_count, unchanged_event_count + 2);
+    });
+
+    let deletion = generation(32, vec![unchanged_metadata]);
+    let delete = measured_projection_work(&mut projection, |projection| {
+        let receipt = projection.catch_up(&deletion, Vec::new()).unwrap();
+        assert_eq!(receipt.event_count, unchanged_event_count);
+    });
+    (append, delete)
 }
 
 #[test]
@@ -325,6 +464,158 @@ fn full_initial_projection_uses_only_intentional_core_metadata() {
             "observed_at_ms",
         ]
     );
+}
+
+#[test]
+fn every_public_view_keeps_the_exact_v7_column_contract() {
+    let (_temp, projection) = projection();
+    let contracts: [(&str, &[&str]); 8] = [
+        (
+            "ctx_sessions",
+            &[
+                "ctx_session_id",
+                "parent_ctx_session_id",
+                "root_ctx_session_id",
+                "source_id",
+                "provider",
+                "source_format",
+                "provider_session_id",
+                "agent_type",
+                "is_primary",
+                "branch",
+                "workspace",
+                "cwd",
+                "started_at_ms",
+                "ended_at_ms",
+                "health",
+            ],
+        ),
+        (
+            "ctx_events",
+            &[
+                "ctx_event_id",
+                "ctx_session_id",
+                "source_id",
+                "provider",
+                "source_format",
+                "provider_session_id",
+                "native_event_id_json",
+                "event_seq",
+                "event_type",
+                "role",
+                "occurred_at_ms",
+                "parser_revision",
+                "normalization_revision",
+                "content_policy_revision",
+                "content_policy_status",
+                "branch",
+                "workspace",
+                "cwd",
+            ],
+        ),
+        (
+            "ctx_files_touched",
+            &[
+                "ctx_file_touch_id",
+                "ctx_event_id",
+                "ctx_session_id",
+                "source_id",
+                "provider",
+                "source_format",
+                "repository_binding_id",
+                "logical_repository_id",
+                "path",
+                "old_path",
+                "observation_kind",
+                "observed_at_ms",
+            ],
+        ),
+        (
+            "ctx_sources",
+            &[
+                "source_id",
+                "provider",
+                "source_format",
+                "schema_variant",
+                "provider_identity_version",
+                "parser_revision",
+                "indexed_event_count",
+                "health",
+            ],
+        ),
+        (
+            "ctx_repositories",
+            &[
+                "ctx_event_id",
+                "ctx_session_id",
+                "repository_binding_id",
+                "logical_repository_id",
+                "checkout_id",
+                "worktree_id",
+                "git_object_format",
+                "association_policy_revision",
+            ],
+        ),
+        (
+            "ctx_vcs_observations",
+            &[
+                "ctx_event_id",
+                "ctx_session_id",
+                "repository_binding_id",
+                "logical_repository_id",
+                "observation_kind",
+                "object_format",
+                "object_id",
+                "reference_name",
+                "relative_path",
+                "observed_at_ms",
+            ],
+        ),
+        (
+            "ctx_repository_abstentions",
+            &[
+                "ctx_event_id",
+                "ctx_session_id",
+                "evidence_kind",
+                "reason",
+                "association_policy_revision",
+            ],
+        ),
+        (
+            "ctx_projection_metadata",
+            &[
+                "schema_version",
+                "contract_version",
+                "materializer_revision",
+                "build_generation",
+                "core_generation_id",
+                "target_core_generation_id",
+                "status",
+                "source_count",
+                "session_count",
+                "event_count",
+                "repository_binding_count",
+                "file_touch_count",
+                "vcs_observation_count",
+                "last_error",
+                "core_manifest_version",
+                "core_record_version",
+                "core_record_contract_fingerprint",
+                "core_lexical_schema_version",
+                "core_policy_schema_hash",
+            ],
+        ),
+    ];
+    for (view, expected) in contracts {
+        assert_eq!(
+            view_columns(&projection, view),
+            expected
+                .iter()
+                .map(|column| (*column).to_owned())
+                .collect::<Vec<_>>(),
+            "public view contract changed for {view}"
+        );
+    }
 }
 
 #[test]
@@ -594,6 +885,240 @@ fn repository_file_and_vcs_rows_cannot_cross_repository_bindings() {
         ),
         vec![vec![text_value("beta"), text_value(&"a".repeat(40))]]
     );
+}
+
+#[test]
+fn repeated_repository_descriptors_are_shared_without_changing_public_cardinality() {
+    let (_temp, mut projection) = projection();
+    let source = source("shared-repository-descriptor");
+    let metadata = source_metadata(&source, 1, 64);
+    let generation = generation(50, vec![metadata.clone()]);
+    let receipt = projection
+        .rebuild(
+            &generation,
+            records(
+                metadata,
+                (1..=64)
+                    .map(|sequence| repository_record(&source, sequence))
+                    .collect(),
+            ),
+        )
+        .unwrap();
+
+    assert_eq!(
+        (
+            receipt.repository_binding_count,
+            receipt.file_touch_count,
+            receipt.vcs_observation_count,
+        ),
+        (64, 64, 64)
+    );
+    assert_eq!(
+        query_rows(
+            &projection,
+            "SELECT
+                (SELECT COUNT(*) FROM core_repository_bindings),
+                (SELECT COUNT(*) FROM core_event_repositories),
+                (SELECT COUNT(*) FROM core_repository_aliases),
+                (SELECT COUNT(*) FROM core_repository_evidence),
+                (SELECT COUNT(*) FROM ctx_repositories)"
+        ),
+        vec![vec![
+            RawSqlValue::Integer(1),
+            RawSqlValue::Integer(64),
+            RawSqlValue::Integer(1),
+            RawSqlValue::Integer(1),
+            RawSqlValue::Integer(64),
+        ]]
+    );
+}
+
+#[test]
+fn integer_key_foreign_keys_cascade_every_event_owned_row() {
+    let (_temp, mut projection) = projection();
+    let source = source("cascade");
+    let metadata = source_metadata(&source, 1, 1);
+    let generation = generation(51, vec![metadata.clone()]);
+    projection
+        .rebuild(
+            &generation,
+            records(metadata, vec![repository_record(&source, 1)]),
+        )
+        .unwrap();
+
+    projection
+        .conn
+        .execute(
+            "DELETE FROM core_sources WHERE source_id = ?1",
+            [source.identity().as_uuid().to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &projection,
+            "SELECT
+                (SELECT COUNT(*) FROM core_sessions),
+                (SELECT COUNT(*) FROM core_events),
+                (SELECT COUNT(*) FROM core_event_repositories),
+                (SELECT COUNT(*) FROM core_file_observations),
+                (SELECT COUNT(*) FROM core_vcs_observations),
+                (SELECT COUNT(*) FROM core_vcs_parent_objects),
+                (SELECT COUNT(*) FROM pragma_foreign_key_check)"
+        ),
+        vec![vec![
+            RawSqlValue::Integer(0),
+            RawSqlValue::Integer(0),
+            RawSqlValue::Integer(0),
+            RawSqlValue::Integer(0),
+            RawSqlValue::Integer(0),
+            RawSqlValue::Integer(0),
+            RawSqlValue::Integer(0),
+        ]]
+    );
+    materialization::prune_orphan_repository_bindings(&projection.conn).unwrap();
+    assert_eq!(
+        query_rows(&projection, "SELECT COUNT(*) FROM core_repository_bindings")[0][0],
+        RawSqlValue::Integer(0)
+    );
+}
+
+#[test]
+fn full_digest_validation_rejects_a_uuid_collision() {
+    let (_temp, mut projection) = projection();
+    let source = source("collision");
+    let metadata = source_metadata(&source, 1, 1);
+    let generation = generation(52, vec![metadata.clone()]);
+    let event = record(&source, 1);
+    projection
+        .rebuild(&generation, records(metadata, vec![event.clone()]))
+        .unwrap();
+
+    let mut colliding_digest = event.event_id.digest();
+    colliding_digest[31] ^= 0xff;
+    let error = projection
+        .conn
+        .execute(
+            "INSERT INTO core_events (
+                 ctx_event_id, event_digest, session_key, event_seq, event_type,
+                 normalization_revision, content_policy_revision, content_policy_status
+             ) SELECT ?1, ?2, session_key, '00000000000000000002', 'message',
+                      normalization_revision, content_policy_revision, content_policy_status
+               FROM core_events WHERE ctx_event_id = ?1",
+            rusqlite::params![
+                event.event_id.as_uuid().to_string(),
+                colliding_digest.as_slice(),
+            ],
+        )
+        .unwrap_err();
+    assert!(matches!(error, rusqlite::Error::SqliteFailure(_, _)));
+    let stored_digest: Vec<u8> = projection
+        .conn
+        .query_row(
+            "SELECT event_digest FROM core_events WHERE ctx_event_id = ?1",
+            [event.event_id.as_uuid().to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_digest, event.event_id.digest());
+}
+
+#[test]
+fn compact_internal_tables_drop_derivable_columns_and_use_required_indexes() {
+    let (_temp, projection) = projection();
+    for removed in [
+        "source_id",
+        "ctx_session_id",
+        "session_identity",
+        "parser_revision",
+    ] {
+        assert!(
+            !view_columns(&projection, "core_events").contains(&removed.to_owned()),
+            "core_events retained derivable column {removed}"
+        );
+    }
+    for removed in ["ctx_event_id", "source_id", "ctx_session_id", "binding_id"] {
+        assert!(
+            !view_columns(&projection, "core_file_observations").contains(&removed.to_owned()),
+            "core_file_observations retained derivable column {removed}"
+        );
+    }
+    let without_rowid: i64 = projection
+        .conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM sqlite_schema
+             WHERE type = 'table'
+               AND name IN (
+                   'core_event_repositories', 'core_repository_aliases',
+                   'core_repository_evidence', 'core_repository_abstentions',
+                   'core_file_observations', 'core_vcs_observations',
+                   'core_vcs_parent_objects'
+               )
+               AND sql LIKE '%WITHOUT ROWID%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(without_rowid, 7);
+
+    let source_count_plan = query_plan(
+        &projection.conn,
+        "SELECT COUNT(*)
+         FROM core_sessions AS session INDEXED BY core_sessions_source
+         JOIN core_events AS event INDEXED BY core_events_session_seq
+           ON event.session_key = session.session_key
+         WHERE session.source_key = 1",
+    )
+    .join("\n");
+    assert!(source_count_plan.contains("core_sessions_source"));
+    assert!(source_count_plan.contains("core_events_session_seq"));
+
+    let reverse_plan = query_plan(
+        &projection.conn,
+        "SELECT child.session_key
+         FROM core_sessions AS child INDEXED BY core_sessions_parent
+         WHERE child.parent_ctx_session_id = '00000000-0000-8000-8000-000000000000'",
+    )
+    .join("\n");
+    assert!(reverse_plan.contains("core_sessions_parent"));
+
+    let binding_plan = query_plan(
+        &projection.conn,
+        "SELECT event_key FROM core_event_repositories
+         WHERE repository_binding_key = 1",
+    )
+    .join("\n");
+    assert!(binding_plan.contains("core_event_repositories_binding"));
+}
+
+#[test]
+fn incremental_validation_work_is_independent_of_unchanged_event_volume() {
+    let (small_append, small_delete) = incremental_work_with_unchanged_events(8);
+    let (large_append, large_delete) = incremental_work_with_unchanged_events(2_048);
+
+    eprintln!(
+        "v8 incremental work: small_append={small_append:?} large_append={large_append:?} \
+         small_delete={small_delete:?} large_delete={large_delete:?}"
+    );
+    assert!(
+        large_append.vm_steps <= small_append.vm_steps + 750,
+        "append validation scaled with unchanged events: {small_append:?} -> {large_append:?}"
+    );
+    assert!(
+        large_delete.vm_steps <= small_delete.vm_steps + 750,
+        "delete validation scaled with unchanged events: {small_delete:?} -> {large_delete:?}"
+    );
+    for (operation, work) in [
+        ("small append", small_append),
+        ("large append", large_append),
+        ("small delete", small_delete),
+        ("large delete", large_delete),
+    ] {
+        assert!(
+            work.page_cache_misses <= 512,
+            "{operation} exceeded the source-scoped page budget: {work:?}"
+        );
+    }
 }
 
 #[test]

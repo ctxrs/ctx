@@ -2,7 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     manifest::ValidatedGeneration,
-    materialization::{materialize_records, validate_projected_generation},
+    materialization::{
+        materialize_records, prune_orphan_repository_bindings, source_projection_snapshot,
+        stored_projection_counts, validate_incremental_projected_generation,
+        validate_projected_generation, ProjectionCounts, SourceProjectionSnapshot,
+    },
     sqlite_u64, CommittedCoreGeneration, RelationalProjectionError, RelationalProjectionPlan,
     RelationalProjectionReceipt, RelationalProjectionRecord, RelationalProjectionStatus, Result,
     SourceBackedRelationalProjection, RELATIONAL_MATERIALIZER_REVISION,
@@ -16,6 +20,16 @@ const MAX_FAILURE_DETAIL_CHARS: usize = 2_048;
 enum BuildMode {
     Rebuild,
     CatchUp,
+}
+
+enum ValidationScope {
+    Full,
+    Incremental {
+        prior_counts: ProjectionCounts,
+        changed_source_ids: BTreeSet<String>,
+        affected_source_ids: BTreeSet<String>,
+        old: SourceProjectionSnapshot,
+    },
 }
 
 impl SourceBackedRelationalProjection {
@@ -158,10 +172,10 @@ where
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let prior = stored_source_revisions(&tx)?;
     let generation_ids = validated.sources.keys().cloned().collect::<BTreeSet<_>>();
-    let expected = match mode {
+    let (expected, validation_scope) = match mode {
         BuildMode::Rebuild => {
             tx.execute("DELETE FROM core_sources", [])?;
-            generation_ids.clone()
+            (generation_ids.clone(), ValidationScope::Full)
         }
         BuildMode::CatchUp => {
             let changed = validated
@@ -177,15 +191,45 @@ where
                 .filter(|source_id| !generation_ids.contains(*source_id))
                 .cloned()
                 .collect::<BTreeSet<_>>();
-            for source_id in changed.union(&removed) {
+            let affected_source_ids = changed.union(&removed).cloned().collect::<BTreeSet<_>>();
+            let prior_counts = stored_projection_counts(&tx)?;
+            let old = source_projection_snapshot(&tx, &affected_source_ids)?;
+            for source_id in &affected_source_ids {
                 tx.execute("DELETE FROM core_sources WHERE source_id = ?1", [source_id])?;
             }
-            changed
+            (
+                changed.clone(),
+                ValidationScope::Incremental {
+                    prior_counts,
+                    changed_source_ids: changed,
+                    affected_source_ids,
+                    old,
+                },
+            )
         }
     };
 
     materialize_records(&tx, expected, validated, records)?;
-    let counts = validate_projected_generation(&tx, validated)?;
+    prune_orphan_repository_bindings(&tx)?;
+    let counts = match validation_scope {
+        ValidationScope::Full => validate_projected_generation(&tx, validated)?,
+        ValidationScope::Incremental {
+            prior_counts,
+            changed_source_ids,
+            affected_source_ids,
+            old,
+        } => {
+            let new = source_projection_snapshot(&tx, &affected_source_ids)?;
+            validate_incremental_projected_generation(
+                &tx,
+                validated,
+                prior_counts,
+                &old,
+                &new,
+                &changed_source_ids,
+            )?
+        }
+    };
     let prior_build: i64 = tx.query_row(
         "SELECT build_generation FROM core_relational_state WHERE singleton = 1",
         [],

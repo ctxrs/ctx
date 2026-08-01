@@ -32,8 +32,9 @@ CREATE TABLE IF NOT EXISTS core_relational_state (
 );
 
 CREATE TABLE IF NOT EXISTS core_sources (
-    source_id TEXT PRIMARY KEY,
-    source_identity BLOB NOT NULL UNIQUE,
+    source_key INTEGER PRIMARY KEY,
+    source_id TEXT NOT NULL UNIQUE,
+    source_digest BLOB NOT NULL UNIQUE CHECK (length(source_digest) = 32),
     provider TEXT NOT NULL,
     source_format TEXT NOT NULL,
     schema_variant TEXT NOT NULL,
@@ -45,13 +46,16 @@ CREATE TABLE IF NOT EXISTS core_sources (
 );
 
 CREATE TABLE IF NOT EXISTS core_sessions (
-    ctx_session_id TEXT PRIMARY KEY,
-    session_identity BLOB NOT NULL UNIQUE,
-    source_id TEXT NOT NULL REFERENCES core_sources(source_id) ON DELETE CASCADE,
+    session_key INTEGER PRIMARY KEY,
+    ctx_session_id TEXT NOT NULL UNIQUE,
+    session_digest BLOB NOT NULL UNIQUE CHECK (length(session_digest) = 32),
+    source_key INTEGER NOT NULL REFERENCES core_sources(source_key) ON DELETE CASCADE,
     parent_ctx_session_id TEXT,
-    parent_session_identity BLOB,
+    parent_session_digest BLOB CHECK (
+        parent_session_digest IS NULL OR length(parent_session_digest) = 32
+    ),
     root_ctx_session_id TEXT NOT NULL,
-    root_session_identity BLOB NOT NULL,
+    root_session_digest BLOB NOT NULL CHECK (length(root_session_digest) = 32),
     provider_session_id TEXT,
     agent_type TEXT NOT NULL,
     is_primary INTEGER NOT NULL,
@@ -62,141 +66,136 @@ CREATE TABLE IF NOT EXISTS core_sessions (
         CHECK (length(first_event_seq) = 20 AND first_event_seq NOT GLOB '*[^0-9]*'),
     started_at_ms INTEGER,
     ended_at_ms INTEGER,
-    health TEXT NOT NULL
+    health TEXT NOT NULL,
+    CHECK (
+        (parent_ctx_session_id IS NULL AND parent_session_digest IS NULL)
+        OR (parent_ctx_session_id IS NOT NULL AND parent_session_digest IS NOT NULL)
+    )
 );
 
-CREATE INDEX IF NOT EXISTS core_sessions_source ON core_sessions(source_id);
-CREATE INDEX IF NOT EXISTS core_sessions_parent ON core_sessions(parent_ctx_session_id);
-CREATE INDEX IF NOT EXISTS core_sessions_root ON core_sessions(root_ctx_session_id);
+CREATE INDEX IF NOT EXISTS core_sessions_source ON core_sessions(source_key);
+CREATE INDEX IF NOT EXISTS core_sessions_parent
+ON core_sessions(parent_ctx_session_id, parent_session_digest);
+CREATE INDEX IF NOT EXISTS core_sessions_root
+ON core_sessions(root_ctx_session_id, root_session_digest);
 
 CREATE TABLE IF NOT EXISTS core_events (
-    ctx_event_id TEXT PRIMARY KEY,
-    event_identity BLOB NOT NULL UNIQUE,
-    source_id TEXT NOT NULL REFERENCES core_sources(source_id) ON DELETE CASCADE,
-    ctx_session_id TEXT NOT NULL REFERENCES core_sessions(ctx_session_id) ON DELETE CASCADE,
-    session_identity BLOB NOT NULL,
+    event_key INTEGER PRIMARY KEY,
+    ctx_event_id TEXT NOT NULL UNIQUE,
+    event_digest BLOB NOT NULL UNIQUE CHECK (length(event_digest) = 32),
+    session_key INTEGER NOT NULL REFERENCES core_sessions(session_key) ON DELETE CASCADE,
     native_event_id_json TEXT,
     event_seq TEXT NOT NULL
         CHECK (length(event_seq) = 20 AND event_seq NOT GLOB '*[^0-9]*'),
     event_type TEXT NOT NULL,
     role TEXT,
     occurred_at_ms INTEGER,
-    parser_revision TEXT NOT NULL,
     normalization_revision INTEGER NOT NULL,
     content_policy_revision INTEGER NOT NULL,
     content_policy_status TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS core_events_session_seq
-ON core_events(ctx_session_id, event_seq, ctx_event_id);
-CREATE INDEX IF NOT EXISTS core_events_source ON core_events(source_id);
+ON core_events(session_key, event_seq, ctx_event_id);
 
-CREATE TABLE IF NOT EXISTS core_event_repositories (
-    ctx_event_id TEXT NOT NULL REFERENCES core_events(ctx_event_id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS core_repository_bindings (
+    repository_binding_key INTEGER PRIMARY KEY,
+    descriptor_key TEXT NOT NULL UNIQUE,
     binding_id TEXT NOT NULL,
-    source_id TEXT NOT NULL REFERENCES core_sources(source_id) ON DELETE CASCADE,
-    ctx_session_id TEXT NOT NULL REFERENCES core_sessions(ctx_session_id) ON DELETE CASCADE,
     logical_repository_id TEXT NOT NULL,
     checkout_id TEXT,
     worktree_id TEXT,
     git_object_format TEXT,
-    association_policy_revision INTEGER NOT NULL,
-    PRIMARY KEY (ctx_event_id, binding_id)
+    association_policy_revision INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS core_event_repositories_logical
-ON core_event_repositories(logical_repository_id, binding_id);
-CREATE INDEX IF NOT EXISTS core_event_repositories_source
-ON core_event_repositories(source_id);
+CREATE INDEX IF NOT EXISTS core_repository_bindings_logical
+ON core_repository_bindings(logical_repository_id, repository_binding_key);
+
+CREATE TABLE IF NOT EXISTS core_event_repositories (
+    event_key INTEGER NOT NULL REFERENCES core_events(event_key) ON DELETE CASCADE,
+    repository_binding_key INTEGER NOT NULL
+        REFERENCES core_repository_bindings(repository_binding_key) ON DELETE RESTRICT,
+    PRIMARY KEY (event_key, repository_binding_key)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS core_event_repositories_binding
+ON core_event_repositories(repository_binding_key, event_key);
 
 CREATE TABLE IF NOT EXISTS core_repository_aliases (
-    ctx_event_id TEXT NOT NULL,
-    binding_id TEXT NOT NULL,
+    repository_binding_key INTEGER NOT NULL
+        REFERENCES core_repository_bindings(repository_binding_key) ON DELETE CASCADE,
     ordinal INTEGER NOT NULL,
     kind TEXT NOT NULL,
     host TEXT NOT NULL,
     namespace TEXT NOT NULL,
     name TEXT NOT NULL,
     remote_name TEXT,
-    PRIMARY KEY (ctx_event_id, binding_id, ordinal),
-    FOREIGN KEY (ctx_event_id, binding_id)
-        REFERENCES core_event_repositories(ctx_event_id, binding_id) ON DELETE CASCADE
-);
+    PRIMARY KEY (repository_binding_key, ordinal)
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS core_repository_evidence (
-    ctx_event_id TEXT NOT NULL,
-    binding_id TEXT NOT NULL,
+    repository_binding_key INTEGER NOT NULL
+        REFERENCES core_repository_bindings(repository_binding_key) ON DELETE CASCADE,
     ordinal INTEGER NOT NULL,
     kind TEXT NOT NULL,
     confidence TEXT NOT NULL,
-    PRIMARY KEY (ctx_event_id, binding_id, ordinal),
-    FOREIGN KEY (ctx_event_id, binding_id)
-        REFERENCES core_event_repositories(ctx_event_id, binding_id) ON DELETE CASCADE
-);
+    PRIMARY KEY (repository_binding_key, ordinal)
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS core_repository_abstentions (
-    ctx_event_id TEXT NOT NULL REFERENCES core_events(ctx_event_id) ON DELETE CASCADE,
+    event_key INTEGER NOT NULL REFERENCES core_events(event_key) ON DELETE CASCADE,
     ordinal INTEGER NOT NULL,
-    source_id TEXT NOT NULL REFERENCES core_sources(source_id) ON DELETE CASCADE,
-    ctx_session_id TEXT NOT NULL REFERENCES core_sessions(ctx_session_id) ON DELETE CASCADE,
     evidence_kind TEXT NOT NULL,
     reason TEXT NOT NULL,
     association_policy_revision INTEGER NOT NULL,
-    PRIMARY KEY (ctx_event_id, ordinal)
-);
+    PRIMARY KEY (event_key, ordinal)
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS core_file_observations (
-    ctx_event_id TEXT NOT NULL,
-    binding_id TEXT NOT NULL,
+    event_key INTEGER NOT NULL,
+    repository_binding_key INTEGER NOT NULL,
     ordinal INTEGER NOT NULL,
-    source_id TEXT NOT NULL REFERENCES core_sources(source_id) ON DELETE CASCADE,
-    ctx_session_id TEXT NOT NULL REFERENCES core_sessions(ctx_session_id) ON DELETE CASCADE,
     relative_path TEXT NOT NULL,
     prior_relative_path TEXT,
     observation_kind TEXT NOT NULL,
     observed_at_ms INTEGER,
-    PRIMARY KEY (ctx_event_id, ordinal),
-    FOREIGN KEY (ctx_event_id, binding_id)
-        REFERENCES core_event_repositories(ctx_event_id, binding_id) ON DELETE CASCADE
-);
+    PRIMARY KEY (event_key, ordinal),
+    FOREIGN KEY (event_key, repository_binding_key)
+        REFERENCES core_event_repositories(event_key, repository_binding_key) ON DELETE CASCADE
+) WITHOUT ROWID;
 
 CREATE INDEX IF NOT EXISTS core_file_observations_repository_path
-ON core_file_observations(binding_id, relative_path);
-CREATE INDEX IF NOT EXISTS core_file_observations_source
-ON core_file_observations(source_id);
+ON core_file_observations(repository_binding_key, relative_path);
 
 CREATE TABLE IF NOT EXISTS core_vcs_observations (
-    ctx_event_id TEXT NOT NULL,
-    binding_id TEXT NOT NULL,
+    event_key INTEGER NOT NULL,
+    repository_binding_key INTEGER NOT NULL,
     ordinal INTEGER NOT NULL,
-    source_id TEXT NOT NULL REFERENCES core_sources(source_id) ON DELETE CASCADE,
-    ctx_session_id TEXT NOT NULL REFERENCES core_sessions(ctx_session_id) ON DELETE CASCADE,
     observation_kind TEXT NOT NULL,
     object_format TEXT,
     object_id TEXT,
     reference_name TEXT,
     relative_path TEXT,
     observed_at_ms INTEGER,
-    PRIMARY KEY (ctx_event_id, ordinal),
-    FOREIGN KEY (ctx_event_id, binding_id)
-        REFERENCES core_event_repositories(ctx_event_id, binding_id) ON DELETE CASCADE
-);
+    PRIMARY KEY (event_key, ordinal),
+    FOREIGN KEY (event_key, repository_binding_key)
+        REFERENCES core_event_repositories(event_key, repository_binding_key) ON DELETE CASCADE
+) WITHOUT ROWID;
 
 CREATE INDEX IF NOT EXISTS core_vcs_observations_repository
-ON core_vcs_observations(binding_id, observation_kind);
-CREATE INDEX IF NOT EXISTS core_vcs_observations_source
-ON core_vcs_observations(source_id);
+ON core_vcs_observations(repository_binding_key, observation_kind);
 
 CREATE TABLE IF NOT EXISTS core_vcs_parent_objects (
-    ctx_event_id TEXT NOT NULL,
+    event_key INTEGER NOT NULL,
     observation_ordinal INTEGER NOT NULL,
     parent_ordinal INTEGER NOT NULL,
     object_format TEXT NOT NULL,
     object_id TEXT NOT NULL,
-    PRIMARY KEY (ctx_event_id, observation_ordinal, parent_ordinal),
-    FOREIGN KEY (ctx_event_id, observation_ordinal)
-        REFERENCES core_vcs_observations(ctx_event_id, ordinal) ON DELETE CASCADE
-);
+    PRIMARY KEY (event_key, observation_ordinal, parent_ordinal),
+    FOREIGN KEY (event_key, observation_ordinal)
+        REFERENCES core_vcs_observations(event_key, ordinal) ON DELETE CASCADE
+) WITHOUT ROWID;
 
 DROP VIEW IF EXISTS ctx_sessions;
 CREATE VIEW ctx_sessions AS
@@ -217,14 +216,14 @@ SELECT
     s.ended_at_ms,
     s.health
 FROM core_sessions s
-JOIN core_sources src ON src.source_id = s.source_id;
+JOIN core_sources src ON src.source_key = s.source_key;
 
 DROP VIEW IF EXISTS ctx_events;
 CREATE VIEW ctx_events AS
 SELECT
     e.ctx_event_id,
-    e.ctx_session_id,
-    e.source_id,
+    s.ctx_session_id,
+    src.source_id,
     src.provider,
     src.source_format,
     s.provider_session_id,
@@ -233,7 +232,7 @@ SELECT
     e.event_type,
     e.role,
     e.occurred_at_ms,
-    e.parser_revision,
+    src.parser_revision,
     e.normalization_revision,
     e.content_policy_revision,
     e.content_policy_status,
@@ -241,28 +240,30 @@ SELECT
     s.workspace,
     s.cwd
 FROM core_events e
-JOIN core_sessions s ON s.ctx_session_id = e.ctx_session_id
-JOIN core_sources src ON src.source_id = e.source_id;
+JOIN core_sessions s ON s.session_key = e.session_key
+JOIN core_sources src ON src.source_key = s.source_key;
 
 DROP VIEW IF EXISTS ctx_files_touched;
 CREATE VIEW ctx_files_touched AS
 SELECT
-    f.ctx_event_id || ':' || f.ordinal AS ctx_file_touch_id,
-    f.ctx_event_id,
-    f.ctx_session_id,
-    f.source_id,
+    e.ctx_event_id || ':' || f.ordinal AS ctx_file_touch_id,
+    e.ctx_event_id,
+    s.ctx_session_id,
+    src.source_id,
     src.provider,
     src.source_format,
-    f.binding_id AS repository_binding_id,
+    r.binding_id AS repository_binding_id,
     r.logical_repository_id,
     f.relative_path AS path,
     f.prior_relative_path AS old_path,
     f.observation_kind,
     f.observed_at_ms
 FROM core_file_observations f
-JOIN core_event_repositories r
-  ON r.ctx_event_id = f.ctx_event_id AND r.binding_id = f.binding_id
-JOIN core_sources src ON src.source_id = f.source_id;
+JOIN core_events e ON e.event_key = f.event_key
+JOIN core_sessions s ON s.session_key = e.session_key
+JOIN core_sources src ON src.source_key = s.source_key
+JOIN core_repository_bindings r
+  ON r.repository_binding_key = f.repository_binding_key;
 
 DROP VIEW IF EXISTS ctx_sources;
 CREATE VIEW ctx_sources AS
@@ -280,22 +281,26 @@ FROM core_sources src;
 DROP VIEW IF EXISTS ctx_repositories;
 CREATE VIEW ctx_repositories AS
 SELECT
-    r.ctx_event_id,
-    r.ctx_session_id,
+    e.ctx_event_id,
+    s.ctx_session_id,
     r.binding_id AS repository_binding_id,
     r.logical_repository_id,
     r.checkout_id,
     r.worktree_id,
     r.git_object_format,
     r.association_policy_revision
-FROM core_event_repositories r;
+FROM core_event_repositories er
+JOIN core_events e ON e.event_key = er.event_key
+JOIN core_sessions s ON s.session_key = e.session_key
+JOIN core_repository_bindings r
+  ON r.repository_binding_key = er.repository_binding_key;
 
 DROP VIEW IF EXISTS ctx_vcs_observations;
 CREATE VIEW ctx_vcs_observations AS
 SELECT
-    v.ctx_event_id,
-    v.ctx_session_id,
-    v.binding_id AS repository_binding_id,
+    e.ctx_event_id,
+    s.ctx_session_id,
+    r.binding_id AS repository_binding_id,
     r.logical_repository_id,
     v.observation_kind,
     v.object_format,
@@ -304,18 +309,22 @@ SELECT
     v.relative_path,
     v.observed_at_ms
 FROM core_vcs_observations v
-JOIN core_event_repositories r
-  ON r.ctx_event_id = v.ctx_event_id AND r.binding_id = v.binding_id;
+JOIN core_events e ON e.event_key = v.event_key
+JOIN core_sessions s ON s.session_key = e.session_key
+JOIN core_repository_bindings r
+  ON r.repository_binding_key = v.repository_binding_key;
 
 DROP VIEW IF EXISTS ctx_repository_abstentions;
 CREATE VIEW ctx_repository_abstentions AS
 SELECT
-    ctx_event_id,
-    ctx_session_id,
-    evidence_kind,
-    reason,
-    association_policy_revision
-FROM core_repository_abstentions;
+    e.ctx_event_id,
+    s.ctx_session_id,
+    a.evidence_kind,
+    a.reason,
+    a.association_policy_revision
+FROM core_repository_abstentions a
+JOIN core_events e ON e.event_key = a.event_key
+JOIN core_sessions s ON s.session_key = e.session_key;
 
 DROP VIEW IF EXISTS ctx_projection_metadata;
 CREATE VIEW ctx_projection_metadata AS
