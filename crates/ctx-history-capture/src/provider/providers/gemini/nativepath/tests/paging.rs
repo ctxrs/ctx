@@ -131,6 +131,52 @@ fn gemini_single_exact_result_may_roll_past_the_page_target() {
 }
 
 #[test]
+fn gemini_large_exact_result_is_stored_once_with_bounded_structured_linkage() {
+    const RESULT_BYTES: usize = 9 * 1024 * 1024;
+
+    let exact = format!(
+        "{}GEMINI_COMPLETE_RESULT_SINGLE_COPY_CANARY",
+        "x".repeat(RESULT_BYTES)
+    );
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let path = write_transcript(
+        &root,
+        &[
+            header("large-core-result", "main"),
+            json!({
+                "id": "large-core-result-record",
+                "type": "gemini",
+                "toolCalls": [{
+                    "id": "large-core-call",
+                    "name": "read_file",
+                    "result": {"content": exact}
+                }]
+            }),
+        ],
+    );
+    let source = rediscover(&root, &path);
+    let (_, rows) = scan_collect(&source, None);
+    let records = project_gemini_test_events(&source, rows).unwrap();
+
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    let normalized = record.content.normalized_body.as_deref().unwrap();
+    assert_eq!(normalized, exact);
+    let structured = record.content.structured_content.as_ref().unwrap();
+    assert_eq!(
+        structured.pointer("/details/complete_result/location"),
+        Some(&json!("normalized_body"))
+    );
+    let encoded_structured = serde_json::to_vec(structured).unwrap();
+    assert!(encoded_structured.len() < 64 * 1024);
+    assert!(!String::from_utf8(encoded_structured)
+        .unwrap()
+        .contains("GEMINI_COMPLETE_RESULT_SINGLE_COPY_CANARY"));
+    record.validate_contract().unwrap();
+}
+
+#[test]
 fn gemini_nativepath_safe_pages_rewind_before_an_uncommitted_overflow_record() {
     const CONTENT_BYTES: usize = 2_100_000;
 

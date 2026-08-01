@@ -373,35 +373,8 @@ fn merge_repository_annotation(
 ) {
     let target_evidence = &mut target.repository_candidate_evidence;
     let additional_evidence = additional.repository_candidate_evidence;
-    target_evidence.session_cwd = target_evidence
-        .session_cwd
-        .take()
-        .or(additional_evidence.session_cwd);
-    for (target_value, additional_value) in [
-        (
-            &mut target_evidence.declared_tool_workdir,
-            additional_evidence.declared_tool_workdir,
-        ),
-        (
-            &mut target_evidence.derived_effective_cwd,
-            additional_evidence.derived_effective_cwd,
-        ),
-        (
-            &mut target_evidence.command_specific_repository_path,
-            additional_evidence.command_specific_repository_path,
-        ),
-        (
-            &mut target_evidence.outcome_operation_repository_path,
-            additional_evidence.outcome_operation_repository_path,
-        ),
-        (
-            &mut target_evidence.outcome_output_repository_path,
-            additional_evidence.outcome_output_repository_path,
-        ),
-    ] {
-        if additional_value.is_some() {
-            *target_value = additional_value;
-        }
+    for candidate in additional_evidence.candidates {
+        target_evidence.insert(candidate.kind, candidate.path);
     }
     for mut binding in additional.repository_bindings.drain(..) {
         if let Some(existing) = target

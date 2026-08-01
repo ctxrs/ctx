@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 5;
+pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 6;
 pub const LEXICAL_SCHEMA_REVISION: u32 = 10;
 pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
 pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 3;
@@ -51,6 +51,7 @@ pub struct LexicalGenerationPolicy {
     pub core_repository_contract_revision: u32,
     pub core_repository_observation_revision: u32,
     pub core_bounded_shell_subset_revision: u32,
+    pub core_repository_association_policy_revision: u32,
     pub core_repository_outcome_capture_revision: u32,
     pub core_repository_local_root_authorization_fingerprint_revision: u32,
     pub included_event_classes: [SourceEventClass; 11],
@@ -148,6 +149,8 @@ pub fn current_source_generation_policy() -> SourceGenerationPolicy {
                 ctx_history_core::CORE_REPOSITORY_OBSERVATION_REVISION,
             core_bounded_shell_subset_revision:
                 ctx_history_core::CORE_BOUNDED_SHELL_SUBSET_REVISION,
+            core_repository_association_policy_revision:
+                ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
             core_repository_outcome_capture_revision:
                 ctx_history_core::CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
             core_repository_local_root_authorization_fingerprint_revision:
@@ -216,9 +219,13 @@ mod tests {
             .as_object()
             .unwrap()
             .contains_key("core_repository_local_root_authorization_fingerprint_revision"));
+        assert!(serde_json::to_value(&first).unwrap()["lexical"]
+            .as_object()
+            .unwrap()
+            .contains_key("core_repository_association_policy_revision"));
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "46da5ba5a0c714f6461d66b134c16156f2a19af9cc19ca924b108a1c46a1e626"
+            "cf52bad983143269bc156c117fe2a1277ee0a329baf4f37abe6dcff9e557dc23"
         );
     }
 
@@ -226,7 +233,7 @@ mod tests {
     fn generation_affecting_field_changes_policy_hash() {
         let current = current_source_generation_policy();
         let mut changed = current.clone();
-        changed.semantic.chunk_target_chars += 1;
+        changed.lexical.core_repository_association_policy_revision += 1;
 
         assert_ne!(
             current.canonical_sha256().unwrap(),

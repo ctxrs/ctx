@@ -760,14 +760,16 @@ fn codex_production_path_persists_complete_native_input_and_certified_binding() 
         .unwrap()
         .unwrap();
     assert_eq!(
-        core.repository_candidate_evidence.session_cwd.as_deref(),
-        Some(control.to_string_lossy().as_ref())
+        core.repository_candidate_evidence
+            .paths(ctx_history_core::RepositoryCandidateKind::SessionCwd)
+            .collect::<Vec<_>>(),
+        vec![control.to_string_lossy().as_ref()]
     );
     assert_eq!(
         core.repository_candidate_evidence
-            .declared_tool_workdir
-            .as_deref(),
-        Some(repository.to_string_lossy().as_ref())
+            .paths(ctx_history_core::RepositoryCandidateKind::DeclaredToolWorkdir)
+            .collect::<Vec<_>>(),
+        vec![repository.to_string_lossy().as_ref()]
     );
     assert_eq!(core.repository_bindings.len(), 1);
     assert_eq!(

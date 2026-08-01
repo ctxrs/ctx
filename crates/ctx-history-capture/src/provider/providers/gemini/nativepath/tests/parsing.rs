@@ -600,9 +600,9 @@ fn gemini_exact_native_result_args_id_and_content_are_retained() {
     assert_eq!(
         result
             .repository_candidate_evidence
-            .declared_tool_workdir
-            .as_deref(),
-        Some(repo.to_string_lossy().as_ref())
+            .paths(ctx_history_core::RepositoryCandidateKind::DeclaredToolWorkdir)
+            .collect::<Vec<_>>(),
+        vec![repo.to_string_lossy().as_ref()]
     );
     assert!(result
         .repository_file_observations
@@ -793,7 +793,8 @@ fn gemini_first_turn_native_shape_keeps_real_history_cross_provider_parity_unpro
     assert!(records[0].repository_bindings.is_empty());
     assert!(records[0]
         .repository_candidate_evidence
-        .session_cwd
+        .paths(ctx_history_core::RepositoryCandidateKind::SessionCwd)
+        .next()
         .is_none());
     assert!(record_has_reason(
         &records[0],
@@ -837,7 +838,8 @@ fn gemini_multiple_native_directories_abstain_instead_of_selecting_one() {
     assert!(records[0].repository_bindings.is_empty());
     assert!(records[0]
         .repository_candidate_evidence
-        .session_cwd
+        .paths(ctx_history_core::RepositoryCandidateKind::SessionCwd)
+        .next()
         .is_none());
     assert!(record_has_reason(
         &records[0],

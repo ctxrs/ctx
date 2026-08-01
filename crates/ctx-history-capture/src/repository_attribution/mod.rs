@@ -7,10 +7,11 @@ use std::{collections::BTreeMap, fmt::Write, path::PathBuf};
 
 use ctx_history_core::{
     CoreRecordAnnotation, GitObjectId, RepositoryAbstention, RepositoryAbstentionReason,
-    RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryEvidence,
-    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservationKind,
-    RepositoryOutcomeObservation, RepositoryVcsObservationKind, CORE_BOUNDED_SHELL_SUBSET_REVISION,
-    CORE_MISSING_ACTIVITY_TIME_UNIX_MS,
+    RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryCandidateKind,
+    RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
+    RepositoryFileObservationKind, RepositoryOutcomeObservation, RepositoryVcsObservationKind,
+    CORE_BOUNDED_SHELL_SUBSET_REVISION, CORE_MISSING_ACTIVITY_TIME_UNIX_MS,
+    CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
 };
@@ -29,7 +30,6 @@ pub(crate) use shell::{
     BoundedOutcomeOperation, BoundedOutcomePlan, BoundedOutcomePlanDisposition,
 };
 
-pub(crate) const ASSOCIATION_POLICY_REVISION: u32 = 3;
 const MAX_PROVIDER_NATIVE_IDENTITIES: usize = 16;
 const MAX_REPOSITORY_CANDIDATES: usize = 32;
 const MAX_POSITIVE_CERTIFICATION_CACHE_ENTRIES: usize = 32;
@@ -295,7 +295,7 @@ fn attribute_with_attributor(
         metadata: BTreeMap::from([(
             "repository_association".to_owned(),
             json!({
-                "association_policy_revision": ASSOCIATION_POLICY_REVISION,
+                "association_policy_revision": CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
                 "repository_observation_revision": CORE_REPOSITORY_OBSERVATION_REVISION,
                 "bounded_shell_subset_revision": CORE_BOUNDED_SHELL_SUBSET_REVISION,
                 "outcome_capture_revision": CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
@@ -326,10 +326,17 @@ fn attribute_with_attributor(
         RepositoryEvidenceKind::DeclaredToolWorkdir,
         &mut annotation.repository_abstentions,
     );
-    annotation.repository_candidate_evidence.session_cwd = session_cwd.as_deref().map(path_string);
-    annotation
-        .repository_candidate_evidence
-        .declared_tool_workdir = declared_workdir.as_deref().map(path_string);
+    if let Some(path) = &session_cwd {
+        annotation
+            .repository_candidate_evidence
+            .insert(RepositoryCandidateKind::SessionCwd, path_string(path));
+    }
+    if let Some(path) = &declared_workdir {
+        annotation.repository_candidate_evidence.insert(
+            RepositoryCandidateKind::DeclaredToolWorkdir,
+            path_string(path),
+        );
+    }
     let outcome_operation_path = bounded_absolute(
         outcome_operation_repository_path.as_deref(),
         RepositoryEvidenceKind::ProviderNativeResult,
@@ -340,12 +347,18 @@ fn attribute_with_attributor(
         RepositoryEvidenceKind::ProviderNativeResult,
         &mut annotation.repository_abstentions,
     );
-    annotation
-        .repository_candidate_evidence
-        .outcome_operation_repository_path = outcome_operation_path.as_deref().map(path_string);
-    annotation
-        .repository_candidate_evidence
-        .outcome_output_repository_path = outcome_output_path.as_deref().map(path_string);
+    if let Some(path) = &outcome_operation_path {
+        annotation.repository_candidate_evidence.insert(
+            RepositoryCandidateKind::OutcomeOperationRepositoryPath,
+            path_string(path),
+        );
+    }
+    if let Some(path) = &outcome_output_path {
+        annotation.repository_candidate_evidence.insert(
+            RepositoryCandidateKind::OutcomeOutputRepositoryPath,
+            path_string(path),
+        );
+    }
 
     let base = declared_workdir.as_deref().or(session_cwd.as_deref());
     let command_analysis = analyze(input.command.as_deref(), base);
@@ -359,24 +372,29 @@ fn attribute_with_attributor(
                     evidence_kind: abstention.evidence_kind,
                     reason: abstention.reason,
                     detail: Some(abstention.detail.to_owned()),
-                    association_policy_revision: ASSOCIATION_POLICY_REVISION,
+                    association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
                 }),
         );
-    annotation
-        .repository_candidate_evidence
-        .derived_effective_cwd = command_analysis
-        .derived_effective_cwd
-        .as_deref()
-        .map(path_string);
-    annotation
-        .repository_candidate_evidence
-        .command_specific_repository_path = command_analysis
-        .repository_paths
-        .iter()
-        .find(|candidate| {
-            candidate.evidence_kind == RepositoryEvidenceKind::CommandSpecificRepositoryPath
-        })
-        .map(|candidate| path_string(&candidate.path));
+    if let Some(path) = &command_analysis.derived_effective_cwd {
+        annotation.repository_candidate_evidence.insert(
+            RepositoryCandidateKind::DerivedEffectiveCwd,
+            path_string(path),
+        );
+    }
+    for candidate in &command_analysis.repository_paths {
+        let kind = match candidate.evidence_kind {
+            RepositoryEvidenceKind::DerivedEffectiveCwd => {
+                RepositoryCandidateKind::DerivedEffectiveCwd
+            }
+            RepositoryEvidenceKind::CommandSpecificRepositoryPath => {
+                RepositoryCandidateKind::CommandSpecificRepositoryPath
+            }
+            _ => continue,
+        };
+        annotation
+            .repository_candidate_evidence
+            .insert(kind, path_string(&candidate.path));
+    }
 
     if command_analysis.blocks_session_fallback && !outcome_observations.is_empty() {
         push_abstention(
@@ -403,23 +421,6 @@ fn attribute_with_attributor(
         .saturating_add(input.vcs_observations.len())
         .saturating_add(usize::from(input.declared_tool_workdir.is_some()))
         .saturating_add(usize::from(outcome_operation_path.is_some()));
-    if requested_candidate_count > MAX_REPOSITORY_CANDIDATES {
-        push_abstention(
-            &mut annotation,
-            RepositoryEvidenceKind::ProviderNativeResult,
-            RepositoryAbstentionReason::CandidateLimitExceeded,
-            "repository_candidate_product_limit_exceeded",
-        );
-        if !outcome_observations.is_empty() {
-            push_abstention(
-                &mut annotation,
-                RepositoryEvidenceKind::ProviderNativeResult,
-                RepositoryAbstentionReason::OutcomeRepositoryUnbound,
-                "repository_outcome_blocked_by_candidate_limit",
-            );
-        }
-        return annotation;
-    }
 
     let mut candidates = Vec::new();
     let more_specific_command =
@@ -489,6 +490,16 @@ fn attribute_with_attributor(
             }
             (_, None) => None,
         };
+        annotation.repository_candidate_evidence.insert(
+            RepositoryCandidateKind::FileActivityPath,
+            path_string(&path),
+        );
+        if let Some(prior_path) = &prior_path {
+            annotation.repository_candidate_evidence.insert(
+                RepositoryCandidateKind::FileActivityPath,
+                path_string(prior_path),
+            );
+        }
         candidates.push(Candidate {
             path: path.clone(),
             kind: CandidateKind::File,
@@ -530,6 +541,9 @@ fn attribute_with_attributor(
             }
         };
         if let Some(path) = &path {
+            annotation
+                .repository_candidate_evidence
+                .insert(RepositoryCandidateKind::VcsActivityPath, path_string(path));
             candidates.push(Candidate {
                 path: path.clone(),
                 kind: CandidateKind::Directory,
@@ -537,6 +551,24 @@ fn attribute_with_attributor(
             });
         }
         vcs_inputs.push(ScopedVcsInput { path, observation });
+    }
+
+    if requested_candidate_count > MAX_REPOSITORY_CANDIDATES {
+        push_abstention(
+            &mut annotation,
+            RepositoryEvidenceKind::ProviderNativeResult,
+            RepositoryAbstentionReason::CandidateLimitExceeded,
+            "repository_candidate_product_limit_exceeded",
+        );
+        if !outcome_observations.is_empty() {
+            push_abstention(
+                &mut annotation,
+                RepositoryEvidenceKind::ProviderNativeResult,
+                RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+                "repository_outcome_blocked_by_candidate_limit",
+            );
+        }
+        return annotation;
     }
 
     let attempted_specific = input.declared_tool_workdir.is_some()
@@ -608,7 +640,7 @@ fn bounded_absolute(
                 evidence_kind: kind,
                 reason: RepositoryAbstentionReason::UnsafePath,
                 detail: Some("structured_path_is_not_bounded_absolute_literal".to_owned()),
-                association_policy_revision: ASSOCIATION_POLICY_REVISION,
+                association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
             });
             None
         }
@@ -820,7 +852,7 @@ fn logical_only_binding(
             kind: RepositoryEvidenceKind::ProviderNativeProject,
             confidence: RepositoryEvidenceConfidence::Explicit,
         }],
-        association_policy_revision: ASSOCIATION_POLICY_REVISION,
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     }
 }
 
@@ -849,7 +881,7 @@ fn push_abstention(
         evidence_kind,
         reason,
         detail: Some(detail.to_owned()),
-        association_policy_revision: ASSOCIATION_POLICY_REVISION,
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     };
     if !annotation.repository_abstentions.contains(&abstention) {
         annotation.repository_abstentions.push(abstention);
