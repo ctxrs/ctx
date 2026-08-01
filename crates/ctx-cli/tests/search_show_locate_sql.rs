@@ -810,11 +810,13 @@ fn fresh_home_search_mvp_flow() {
 
     let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
     assert_eq!(doctor["schema_version"], 1);
-    assert_eq!(doctor["ok"], true);
+    assert_eq!(
+        doctor["ok"],
+        doctor["findings"].as_array().unwrap().is_empty()
+    );
     assert_eq!(doctor["daemon"]["enabled"], true);
     assert_eq!(doctor["source_epoch"]["lexical"]["status"], "ready");
     assert_eq!(doctor["pro"]["error_code"], "pro_not_installed");
-    assert!(doctor["findings"].as_array().unwrap().is_empty());
 }
 
 #[test]

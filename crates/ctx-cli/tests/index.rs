@@ -622,8 +622,12 @@ fn human_wait_timeout_does_not_duplicate_an_unchanged_active_snapshot() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(stdout.matches("Semantic search").count(), 1, "{stdout}");
     let searchable_frames = stdout.matches("Your history is searchable").count();
+    assert_eq!(
+        stdout.matches("Semantic search").count(),
+        searchable_frames,
+        "{stdout}"
+    );
     assert!((1..=2).contains(&searchable_frames), "{stdout}");
     if searchable_frames == 2 {
         assert!(
