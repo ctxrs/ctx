@@ -32,17 +32,16 @@ pub(crate) use source::{
 };
 #[cfg(test)]
 pub(crate) use source::{CodexCatalogSource, CodexSourceIdentity};
+#[cfg(test)]
+pub(crate) use source_backed::CodexCatalogWorkV0;
 pub(crate) use source_backed::{
     discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_v0,
     ingest_codex_sources_serial_v0, ingest_codex_sources_v0, managed_codex_session_source,
     observe_codex_explicit_session_source_backed_v0,
     source_observation as codex_source_observation,
     writer_base_sources as codex_writer_base_sources, CodexExplicitSessionSourceBackedInputV0,
-    CodexSessionTreeInventoryV0,
-    CodexSourceBackedCountersV0, CodexSourceBackedErrorV0, CodexSourceBackedPhaseTimingsV0,
-    CodexSourceBackedResultV0, CodexTerminalSourceEvidenceV0,
+    CodexSessionTreeInventoryV0, CodexSourceBackedCountersV0, CodexSourceBackedErrorV0,
+    CodexSourceBackedPhaseTimingsV0, CodexSourceBackedResultV0, CodexTerminalSourceEvidenceV0,
 };
-#[cfg(test)]
-pub(crate) use source_backed::CodexCatalogWorkV0;
 #[cfg(test)]
 mod tests;
