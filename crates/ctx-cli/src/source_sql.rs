@@ -71,7 +71,7 @@ impl SqlCompatibility {
             return Self::open_existing_projection(projection_path, generation_path);
         }
 
-        if generation_path.join("meta.json").try_exists()? {
+        if active_core_generation_id(&generation_path)?.is_some() {
             return Err(
                 RelationalProjectionError::MissingSourceBackedSqlProjection {
                     projection_path,
@@ -90,7 +90,7 @@ impl SqlCompatibility {
         generation_path: PathBuf,
     ) -> SqlCompatibilityResult<Self> {
         let compatibility = Self::open(projection_path)?;
-        if generation_path.join("meta.json").try_exists()? {
+        if active_core_generation_id(&generation_path)?.is_some() {
             let index = VerifiedIndex::open_pinned(&generation_path).map_err(|error| {
                 RelationalProjectionError::InvalidCoreGeneration(error.to_string())
             })?;
@@ -122,6 +122,11 @@ impl SqlCompatibility {
     pub fn query(&self, sql: &str, options: RawSqlOptions) -> SqlCompatibilityResult<RawSqlResult> {
         self.projection.raw_sql_query(sql, options)
     }
+}
+
+fn active_core_generation_id(path: &Path) -> SqlCompatibilityResult<Option<String>> {
+    VerifiedIndex::active_generation_id(path)
+        .map_err(|error| RelationalProjectionError::InvalidCoreGeneration(error.to_string()))
 }
 
 /// Default filename for the source-backed SQL compatibility consumer.
@@ -201,7 +206,11 @@ mod existing_only_tests {
         drop(writer);
         let generation_path = temp.path().join("search").join("lexical");
         std::fs::create_dir_all(&generation_path).unwrap();
-        std::fs::write(generation_path.join("meta.json"), b"invalid generation").unwrap();
+        std::fs::write(
+            generation_path.join("active-generation.json"),
+            b"invalid generation",
+        )
+        .unwrap();
 
         let error = SqlCompatibility::open_existing_for_data_root(temp.path())
             .err()

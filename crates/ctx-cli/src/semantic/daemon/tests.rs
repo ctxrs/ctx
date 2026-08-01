@@ -440,7 +440,7 @@ fn one_scheduler_cycle_publishes_core_without_entering_a_blocked_sidecar() -> Re
         .path()
         .join("search")
         .join("lexical")
-        .join("meta.json")
+        .join("active-generation.json")
         .is_file());
     Ok(())
 }

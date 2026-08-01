@@ -50,7 +50,7 @@ const CANDIDATE_OVERSAMPLE: usize = 8;
 const SOURCE_FUSION_CANDIDATES: usize = 1_600;
 const MAX_USAGE_CONTEXT_EVENTS_PER_SESSION: usize = 256;
 pub(super) const MISSING_INDEX_ERROR: &str =
-    "the source-backed index does not exist; retry with daemon refresh enabled";
+    "the Core index does not exist; retry with daemon refresh enabled";
 const QUEUED_WITHOUT_GENERATION_ERROR: &str =
     "daemon source refresh was queued but no published generation exists; retry with --refresh wait";
 
@@ -219,8 +219,13 @@ fn search_index_is_not_ready(data_root: &Path, error: &anyhow::Error) -> bool {
             MISSING_INDEX_ERROR | QUEUED_WITHOUT_GENERATION_ERROR
         )
     });
+    let root = index_root(data_root);
+    let active_generation_missing = VerifiedIndex::active_generation_id(&root)
+        .ok()
+        .flatten()
+        .is_none();
     missing_generation
-        || (!index_root(data_root).join("meta.json").is_file()
+        || (active_generation_missing
             && error
                 .downcast_ref::<SourceBackedRefreshDaemonUnavailable>()
                 .is_some())

@@ -24,6 +24,9 @@ impl VerifiedIndex {
     /// Returns the generation named by the validated active pointer and commit
     /// payload without constructing a query reader or auditing documents.
     pub fn active_generation_id(root: impl AsRef<Path>) -> Result<Option<String>> {
+        if !root.as_ref().is_dir() {
+            return Ok(None);
+        }
         let control_directory =
             DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
         let root = control_directory.root_path().to_path_buf();
@@ -55,6 +58,9 @@ impl VerifiedIndex {
     }
 
     fn open_inner(root: &Path, exhaustive: bool) -> Result<Self> {
+        if !root.is_dir() {
+            return Err(IndexError::MissingActiveGenerationPointer);
+        }
         let control_directory =
             DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
         let root = control_directory.root_path().to_path_buf();

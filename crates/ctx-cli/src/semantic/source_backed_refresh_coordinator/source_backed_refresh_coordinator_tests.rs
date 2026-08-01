@@ -632,8 +632,9 @@ fn concurrent_refresh_request_uses_active_generation_without_reopening_inflight_
     assert_eq!(request["request_state"], "queued");
 
     let index_root = source_backed_index_root(temp.path());
-    std::fs::create_dir_all(&index_root).unwrap();
-    std::fs::write(index_root.join("meta.json"), b"in-flight metadata").unwrap();
+    let inactive = index_root.join("index-generations/in-flight");
+    std::fs::create_dir_all(&inactive).unwrap();
+    std::fs::write(inactive.join("meta.json"), b"in-flight metadata").unwrap();
 
     let coalesced = coordinator
         .handle_ipc_request(
