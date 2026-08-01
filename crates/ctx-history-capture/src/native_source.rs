@@ -22,10 +22,6 @@ impl NativeLocator {
         Ok(locator)
     }
 
-    pub(crate) fn kind(&self) -> &str {
-        &self.kind
-    }
-
     pub(crate) fn value(&self) -> &[u8] {
         &self.value
     }

@@ -4,7 +4,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{CaptureProvider, ContentRef, EventType};
+use ctx_history_core::{CaptureProvider, EventType};
 use serde_json::{json, Value};
 
 use crate::provider::file_touches::visit_all_file_touch_drafts;
@@ -15,12 +15,11 @@ use super::super::{
     dialect::{native_jsonl_record_starts_session, validate_direct_native_jsonl_provider},
     normalization,
     normalization::{
-        antigravity_session_id_from_path, native_jsonl_entry_type, native_jsonl_event_id,
-        native_jsonl_event_text, native_jsonl_event_type, native_jsonl_header_cwd,
-        native_jsonl_header_session_id, native_jsonl_header_start_time, native_jsonl_model,
-        native_jsonl_path_session, native_jsonl_role,
-        native_jsonl_session_metadata_from_normalized_header, native_jsonl_session_status,
-        native_jsonl_timestamp, native_jsonl_tokens,
+        antigravity_session_id_from_path, native_jsonl_entry_type, native_jsonl_event_text,
+        native_jsonl_event_type, native_jsonl_header_cwd, native_jsonl_header_session_id,
+        native_jsonl_header_start_time, native_jsonl_model, native_jsonl_path_session,
+        native_jsonl_role, native_jsonl_session_metadata_from_normalized_header,
+        native_jsonl_session_status, native_jsonl_timestamp, native_jsonl_tokens,
     },
     result_content,
     result_content::{
@@ -40,7 +39,6 @@ pub(super) const DIRECT_JSONL_MAX_FILE_TOUCHES_PER_RECORD: usize = 63;
 
 #[path = "reader_projection.rs"]
 mod projection;
-pub(crate) use projection::direct_jsonl_complete_message_provider_event_hash;
 pub(super) use projection::ProjectedLine;
 
 pub(crate) struct DirectJsonlProjector {

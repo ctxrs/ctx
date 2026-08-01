@@ -70,10 +70,9 @@ pub(crate) const MUX_SOURCE_FORMAT: &str = "mux_session_jsonl";
 pub(crate) const PROVIDER_MAX_TEXT_CHARS: usize = 16_000;
 pub(crate) const PROVIDER_MAX_PREVIEW_CHARS: usize = 4_000;
 
-pub mod complete_content;
-
 pub(crate) mod native_source;
 mod pro_output;
+pub(crate) mod record_evidence;
 pub(crate) mod repository_attribution;
 pub use pro_output::{
     OutputAssociations, OutputCommandContext, OutputNativeCoordinate, OutputObservationKind,

@@ -70,7 +70,7 @@ pub(crate) fn goose_normalized_result_content(content: &Value) -> Option<String>
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
-pub(crate) fn goose_complete_content_text(content: &Value) -> Option<String> {
+pub(crate) fn goose_message_text(content: &Value) -> Option<String> {
     let mut parts = Vec::new();
     goose_collect_complete_text(content, &mut parts);
     (!parts.is_empty()).then(|| parts.join("\n"))
@@ -412,8 +412,8 @@ pub(super) fn normalize_goose_native_message(
         GooseRetainedContentClass::Message => GooseNativeEventKind::Message,
         GooseRetainedContentClass::ToolCall => GooseNativeEventKind::ToolCall,
     };
-    let searchable_text = goose_complete_content_text(&content)
-        .unwrap_or_else(|| format!("Goose {} message", message.role));
+    let searchable_text =
+        goose_message_text(&content).unwrap_or_else(|| format!("Goose {} message", message.role));
     let file_touches = if kind == GooseNativeEventKind::ToolCall {
         goose_native_file_touches(&content)?
     } else {

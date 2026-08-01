@@ -291,7 +291,6 @@ impl ReplacementDocumentTree for GooseSourceBackedAdapterV0 {
         let terminal = scan_goose_logical_snapshot(
             snapshot.connection().map_err(route_error)?,
             &self.source,
-            self.selection.selected(),
             sink,
         )
         .map_err(route_error)?;
@@ -530,7 +529,6 @@ struct GooseSessionProjection {
 fn scan_goose_logical_snapshot(
     connection: &Connection,
     source: &SourceKey,
-    selected: &GooseSourceRouteV0,
     sink: &mut ChangedDocumentSink<'_, '_>,
 ) -> GooseSourceBackedResultV0<DocumentSourceTerminal> {
     #[cfg(test)]

@@ -27,16 +27,6 @@ impl NanoClawMessageSource {
         }
     }
 
-    fn from_tag(tag: u8) -> Result<Self> {
-        match tag {
-            1 => Ok(Self::Inbound),
-            2 => Ok(Self::Outbound),
-            _ => Err(CaptureError::InvalidPayload(
-                "NanoClaw locator has an unknown message source".to_owned(),
-            )),
-        }
-    }
-
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Inbound => "inbound",
@@ -57,13 +47,6 @@ impl NanoClawMessageSource {
             Self::Outbound => "outbound.db",
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NanoClawMessageLocator {
-    pub(crate) session_rowid: i64,
-    pub(crate) source: NanoClawMessageSource,
-    pub(crate) message_rowid: i64,
 }
 
 /// Provider-owned safe boundary. It identifies the next logical row after a
@@ -98,7 +81,7 @@ pub(super) fn nanoclaw_message_locator(
 ) -> Result<NativeLocator> {
     if session_rowid <= 0 || message_rowid <= 0 {
         return Err(CaptureError::InvalidPayload(
-            "NanoClaw complete-content locator rowids must be positive".to_owned(),
+            "NanoClaw native message coordinate rowids must be positive".to_owned(),
         ));
     }
     let mut value = Vec::with_capacity(17);
@@ -109,42 +92,8 @@ pub(super) fn nanoclaw_message_locator(
         .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
 }
 
-pub(crate) fn decode_nanoclaw_message_locator(
-    locator: &NativeLocator,
-) -> Result<NanoClawMessageLocator> {
-    if locator.kind() != NANOCLAW_MESSAGE_LOCATOR_KIND || locator.value().len() != 17 {
-        return Err(CaptureError::InvalidPayload(
-            "NanoClaw complete-content locator has an invalid shape".to_owned(),
-        ));
-    }
-    let session_rowid = nanoclaw_unordered_i64(nanoclaw_decode_u64(&locator.value()[..8])?);
-    let source = NanoClawMessageSource::from_tag(locator.value()[8])?;
-    let message_rowid = nanoclaw_unordered_i64(nanoclaw_decode_u64(&locator.value()[9..17])?);
-    if session_rowid <= 0 || message_rowid <= 0 {
-        return Err(CaptureError::InvalidPayload(
-            "NanoClaw complete-content locator rowids must be positive".to_owned(),
-        ));
-    }
-    Ok(NanoClawMessageLocator {
-        session_rowid,
-        source,
-        message_rowid,
-    })
-}
-
-fn nanoclaw_decode_u64(bytes: &[u8]) -> Result<u64> {
-    let bytes: [u8; 8] = bytes.try_into().map_err(|_| {
-        CaptureError::InvalidPayload("NanoClaw cursor integer has an invalid width".to_owned())
-    })?;
-    Ok(u64::from_be_bytes(bytes))
-}
-
 pub(super) fn nanoclaw_ordered_i64(value: i64) -> u64 {
     (value as u64) ^ (1_u64 << 63)
-}
-
-fn nanoclaw_unordered_i64(value: u64) -> i64 {
-    (value ^ (1_u64 << 63)) as i64
 }
 
 pub(super) fn nanoclaw_next_ordinal(ordinal: u64) -> Result<u64> {

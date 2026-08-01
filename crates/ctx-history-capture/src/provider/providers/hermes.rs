@@ -3,8 +3,6 @@ use ctx_history_core::{EventRole, EventType};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::complete_content::CompleteContentBodyDigest;
-use crate::native_source::NativeSqliteValue;
 use crate::provider::normalization::{
     provider_capped_json, provider_json_text, provider_nonnegative_i64_to_u64,
     provider_policy_body, provider_policy_event_text, provider_required_timestamp_seconds,
@@ -12,94 +10,23 @@ use crate::provider::normalization::{
     provider_value_text,
 };
 use crate::{
-    CaptureError, OutputOutcome, OutputOutcomeMetadata, Result, HERMES_SQLITE_SOURCE_FORMAT,
-    PROVIDER_MAX_PREVIEW_CHARS,
+    record_evidence::RecordDigest, OutputOutcome, OutputOutcomeMetadata, Result,
+    HERMES_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 mod layout;
 pub(crate) mod source_backed;
 mod sqlite;
 
-use self::layout::{decode_hermes_message, HermesMessageRow, HermesSchema, HermesSqliteValue};
+use self::layout::{HermesMessageRow, HermesSqliteValue};
 
 pub(super) const HERMES_CAPTURE_REVISION: u32 = 2;
 pub(super) const HERMES_POLICY_REVISION: u32 = 6;
 
-pub(crate) fn load_hermes_message_values_schema(conn: &rusqlite::Connection) -> Result<()> {
-    HermesSchema::detect(conn).map(|_| ())
-}
-
-pub(crate) fn load_hermes_message_values(
-    conn: &rusqlite::Connection,
-    rowid: i64,
-) -> Result<Vec<NativeSqliteValue>> {
-    let schema = HermesSchema::detect(conn)?;
-    let visibility = schema.message_visibility();
-    let predicate = if visibility.is_empty() {
-        String::new()
-    } else {
-        format!(" and {visibility}")
-    };
-    let sql = format!(
-        "select {} from messages m where m.rowid = ?1{predicate}",
-        schema.messages().projection()
-    );
-    conn.query_row(&sql, [rowid], |row| {
-        schema
-            .messages()
-            .capture_values(row, 0)
-            .map(|values| values.into_iter().map(native_source_value).collect())
-    })
-    .map_err(Into::into)
-}
-
-pub(crate) fn hermes_complete_message_with_normalized_hash(
-    conn: &rusqlite::Connection,
-    values: &[NativeSqliteValue],
-) -> Result<(String, String, String, String)> {
-    let schema = HermesSchema::detect(conn)?;
-    let values = values
-        .iter()
-        .map(hermes_sqlite_value)
-        .collect::<Result<Vec<_>>>()?;
-    let row = decode_hermes_message(&schema, &values)?;
-    let content = hermes_decode_content(row.content.as_deref());
-    let text = provider_value_text(&content).unwrap_or_else(|| {
-        row.tool_name
-            .as_ref()
-            .map(|name| format!("tool: {name}"))
-            .unwrap_or_else(|| format!("Hermes {}", row.role))
-    });
-    let normalized_hash = hermes_message_revision(&row)?;
-    let provider_hash = format!("message:{}", row.id);
-    Ok((row.session_id, provider_hash, normalized_hash, text))
-}
-
-fn native_source_value(value: HermesSqliteValue) -> NativeSqliteValue {
-    match value {
-        HermesSqliteValue::Null => NativeSqliteValue::Null,
-        HermesSqliteValue::Integer(value) => NativeSqliteValue::Integer(value),
-        HermesSqliteValue::RealBits(value) => NativeSqliteValue::RealBits(value),
-        HermesSqliteValue::Text(value) => NativeSqliteValue::Text(value),
-    }
-}
-
-fn hermes_sqlite_value(value: &NativeSqliteValue) -> Result<HermesSqliteValue> {
-    match value {
-        NativeSqliteValue::Null => Ok(HermesSqliteValue::Null),
-        NativeSqliteValue::Integer(value) => Ok(HermesSqliteValue::Integer(*value)),
-        NativeSqliteValue::RealBits(value) => Ok(HermesSqliteValue::RealBits(*value)),
-        NativeSqliteValue::Text(value) => Ok(HermesSqliteValue::Text(value.clone())),
-        NativeSqliteValue::Blob(_) => Err(CaptureError::InvalidPayload(
-            "Hermes logical rows do not accept SQLite blobs".to_owned(),
-        )),
-    }
-}
-
 #[derive(Clone, Debug)]
 struct HermesPreparedCoreMessage {
     native: HermesNativeEvent,
-    record_digest: CompleteContentBodyDigest,
+    record_digest: RecordDigest,
 }
 
 impl HermesPreparedCoreMessage {
@@ -225,39 +152,7 @@ pub(in crate::provider::providers::hermes) fn hermes_native_event(
     })
 }
 
-fn hermes_record_digest(values: &[NativeSqliteValue]) -> CompleteContentBodyDigest {
-    const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
-    let mut digest = Sha256::new();
-    digest.update(DOMAIN);
-    digest.update((values.len() as u64).to_be_bytes());
-    for value in values {
-        match value {
-            NativeSqliteValue::Null => digest.update([0]),
-            NativeSqliteValue::Integer(value) => {
-                digest.update([1]);
-                digest.update(value.to_be_bytes());
-            }
-            NativeSqliteValue::RealBits(value) => {
-                digest.update([2]);
-                digest.update(value.to_be_bytes());
-            }
-            NativeSqliteValue::Text(value) => {
-                digest.update([3]);
-                digest.update((value.len() as u64).to_be_bytes());
-                digest.update(value.as_bytes());
-            }
-            NativeSqliteValue::Blob(value) => {
-                digest.update([4]);
-                digest.update((value.len() as u64).to_be_bytes());
-                digest.update(value);
-            }
-        }
-    }
-    CompleteContentBodyDigest::parse(format!("{:x}", digest.finalize()))
-        .expect("SHA-256 formatter must return a valid digest")
-}
-
-fn hermes_layout_record_digest(values: &[HermesSqliteValue]) -> CompleteContentBodyDigest {
+fn hermes_layout_record_digest(values: &[HermesSqliteValue]) -> RecordDigest {
     const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
     let mut digest = Sha256::new();
     digest.update(DOMAIN);
@@ -280,7 +175,7 @@ fn hermes_layout_record_digest(values: &[HermesSqliteValue]) -> CompleteContentB
             }
         }
     }
-    CompleteContentBodyDigest::parse(format!("{:x}", digest.finalize()))
+    RecordDigest::parse(format!("{:x}", digest.finalize()))
         .expect("SHA-256 formatter must return a valid digest")
 }
 

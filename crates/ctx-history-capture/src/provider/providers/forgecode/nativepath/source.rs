@@ -38,13 +38,13 @@ use crate::{
     ProviderImportFailure, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
-use super::super::complete_content::ForgeCodeCompleteContentDigest;
 use super::super::event::{
     forgecode_event, forgecode_event_type, forgecode_for_each_metric_file_touch_with_limit,
-    forgecode_message_parts, forgecode_message_text, forgecode_normalized_result_content,
-    forgecode_timestamp, forgecode_tool_result_call_id, forgecode_tool_result_is_error,
-    ForgeCodeFileTouch, ForgeCodeNativeEvent,
+    forgecode_message_parts, forgecode_normalized_result_content, forgecode_timestamp,
+    forgecode_tool_result_call_id, forgecode_tool_result_is_error, ForgeCodeFileTouch,
+    ForgeCodeNativeEvent,
 };
+use super::super::record_evidence::ForgeCodeRecordEvidence;
 
 pub(super) const FORGECODE_NATIVE_PARSER_REVISION: u32 = 1;
 pub(super) const FORGECODE_NATIVE_POLICY_REVISION: u32 = 6;
@@ -399,7 +399,7 @@ fn forgecode_logical_fingerprint(
 }
 
 fn forgecode_decoded_row_digest(row: &ForgeCodeDecodedRow) -> Result<[u8; 32]> {
-    Ok(ForgeCodeCompleteContentDigest::new(
+    Ok(ForgeCodeRecordEvidence::new(
         row.rowid,
         &row.conversation_id,
         row.title.as_deref(),

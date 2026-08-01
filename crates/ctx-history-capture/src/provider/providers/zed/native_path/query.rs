@@ -6,12 +6,12 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     common::time::parse_rfc3339_utc,
-    complete_content::sqlite::sqlite_logical_record_digest,
     native_source::NativeSqliteValue,
     provider::sqlite::{
         ensure_sqlite_table_columns, optional_column_expr, sqlite_table_columns,
         sqlite_table_exists, SqliteLengthPreflightGuard,
     },
+    record_evidence::{sqlite_logical_record_digest, RecordDigest},
     MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
@@ -611,9 +611,7 @@ pub(crate) fn scan_zed_native_snapshot(
     })
 }
 
-fn zed_logical_record_digest(
-    row: &ZedLoadedRow,
-) -> crate::complete_content::CompleteContentBodyDigest {
+fn zed_logical_record_digest(row: &ZedLoadedRow) -> RecordDigest {
     sqlite_logical_record_digest(&[
         NativeSqliteValue::Text(row.id.clone()),
         optional_native_text(row.parent_id.clone()),

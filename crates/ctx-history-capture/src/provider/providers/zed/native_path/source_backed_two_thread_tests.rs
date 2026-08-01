@@ -17,10 +17,10 @@ use crate::provider::source_backed::{
     SourceBackedProviderRegistry, SourceBackedRouteSelection,
 };
 use crate::{
-    complete_content::CompleteContentBodyDigest,
-    discover_provider_sources_for_provider_with_context, DiscoveryContext, DiscoveryIssueKind,
-    DiscoveryPlatform, DiscoveryPlatformDirs, ProviderCatalogSupport, ProviderImportSupport,
-    ProviderSource, ProviderSourceKind, ProviderSourceStatus, ZED_THREADS_SQLITE_SOURCE_FORMAT,
+    discover_provider_sources_for_provider_with_context, record_evidence::RecordDigest,
+    DiscoveryContext, DiscoveryIssueKind, DiscoveryPlatform, DiscoveryPlatformDirs,
+    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceStatus, ZED_THREADS_SQLITE_SOURCE_FORMAT,
 };
 
 #[test]
@@ -301,7 +301,7 @@ fn zed_core_record_retains_full_tail_beyond_sixteen_kibibytes() {
             body: full_body.clone(),
             safe_file_touches: Vec::new(),
         },
-        CompleteContentBodyDigest::from_text(&full_body),
+        RecordDigest::from_text(&full_body),
     )
     .unwrap();
     let record = zed_core_record(&source, &context, event).unwrap();

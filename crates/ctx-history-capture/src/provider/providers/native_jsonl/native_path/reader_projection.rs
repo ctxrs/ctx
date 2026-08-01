@@ -147,16 +147,6 @@ impl DirectJsonlProjector {
             None,
             touches,
         )?;
-        attach_direct_message_locator(
-            &mut event,
-            self.provider,
-            &self.source_format,
-            &value,
-            bytes,
-            byte_start,
-            byte_end_exclusive,
-            line_number,
-        )?;
         event.source_record = DirectJsonlSourceRecord {
             byte_start,
             byte_end_exclusive,
@@ -376,77 +366,6 @@ fn direct_jsonl_model(provider: CaptureProvider, value: &Value) -> Option<Value>
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn attach_direct_message_locator(
-    event: &mut DirectJsonlEvent,
-    provider: CaptureProvider,
-    source_format: &str,
-    value: &Value,
-    record_bytes: &[u8],
-    byte_start: u64,
-    byte_end_exclusive: u64,
-    line_number: usize,
-) -> Result<()> {
-    use crate::complete_content::jsonl::JSONL_COMPLETE_CONTENT_LOCATOR_KIND;
-    use crate::complete_content::{
-        attach_verified_content_locator, verified_content_address_supported,
-        verified_content_profile, CompleteContentBodyDigest, CompleteContentSourceFamily,
-        VerifiedContentLocatorV1, VerifiedContentRole, COMPLETE_CONTENT_MAX_BODY_BYTES,
-    };
-
-    if event.event_type != EventType::Message
-        || !verified_content_address_supported(
-            provider,
-            source_format,
-            CompleteContentSourceFamily::Jsonl,
-            VerifiedContentRole::MessageBody,
-            JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
-        )
-    {
-        return Ok(());
-    }
-    let entry_type = native_jsonl_entry_type(provider, value);
-    let text = direct_jsonl_event_text(provider, value, EventType::Message, &entry_type);
-    if text.chars().count() <= crate::PROVIDER_MAX_TEXT_CHARS
-        || text.len() > COMPLETE_CONTENT_MAX_BODY_BYTES
-        || byte_start >= byte_end_exclusive
-    {
-        return Ok(());
-    }
-    let Some(content_ref) = ContentRef::from_bytes(text.as_bytes()) else {
-        return Ok(());
-    };
-    let Some(profile) = verified_content_profile(
-        provider,
-        source_format,
-        CompleteContentSourceFamily::Jsonl,
-        VerifiedContentRole::MessageBody,
-    ) else {
-        return Err(CaptureError::SystemInvariant(
-            "supported direct JSONL route has no complete-content profile",
-        ));
-    };
-    let mut range = [0_u8; 16];
-    range[..8].copy_from_slice(&byte_start.to_be_bytes());
-    range[8..].copy_from_slice(&byte_end_exclusive.to_be_bytes());
-    let Some(locator) = VerifiedContentLocatorV1::new(
-        VerifiedContentRole::MessageBody,
-        profile,
-        content_ref,
-        CompleteContentSourceFamily::Jsonl,
-        JSONL_COMPLETE_CONTENT_LOCATOR_KIND,
-        &range,
-        native_jsonl_event_id(provider, value, line_number),
-        CompleteContentBodyDigest::from_bytes(record_bytes),
-    ) else {
-        return Ok(());
-    };
-    attach_verified_content_locator(&mut event.metadata, locator).ok_or(
-        CaptureError::SystemInvariant("direct JSONL verified-content locator is malformed"),
-    )?;
-    Ok(())
-}
-
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ProjectedLine {
     pub(crate) events: Vec<DirectJsonlEvent>,
@@ -610,37 +529,6 @@ fn direct_jsonl_touches(
         Ok(()) => DirectJsonlTouchProjection::Accepted(touches),
         Err(DirectJsonlTouchVisitError::LimitExceeded) => DirectJsonlTouchProjection::LimitExceeded,
     }
-}
-
-pub(crate) fn direct_jsonl_complete_message_provider_event_hash(
-    provider: CaptureProvider,
-    source_format: &str,
-    value: &Value,
-    raw_ordinal: u64,
-    line_number: usize,
-) -> Option<String> {
-    let event_type = direct_jsonl_event_type(provider, value);
-    if event_type != EventType::Message {
-        return None;
-    }
-    let DirectJsonlTouchProjection::Accepted(touches) =
-        direct_jsonl_touches(value, event_type, false)
-    else {
-        return None;
-    };
-    direct_event(
-        provider,
-        source_format,
-        value,
-        raw_ordinal,
-        0,
-        line_number,
-        DateTime::<Utc>::UNIX_EPOCH,
-        None,
-        touches,
-    )
-    .ok()
-    .map(|event| event.provider_event_hash)
 }
 
 fn file_touch_limit_rejection(

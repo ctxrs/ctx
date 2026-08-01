@@ -1,6 +1,5 @@
 mod digest;
 
-pub(super) use digest::normalized_retained_event_hash;
 use digest::{
     bound_rejection_text, checked_add, conservative_text_bytes, event_estimated_bytes, hash_bytes,
     page_identity, session_estimated_bytes,
@@ -11,17 +10,15 @@ use ctx_history_core::{EventRole, EventType};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{complete_content::CompleteContentBodyDigest, CaptureError, OutputOutcome, Result};
+use crate::{record_evidence::RecordDigest, CaptureError, OutputOutcome, Result};
 
 pub(in super::super) const WARP_NATIVE_PAGE_MAX_ROWS: usize = 64;
 pub(in super::super) const WARP_NATIVE_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
-const WARP_NATIVE_BODY_MAX_CHARS: usize = 16_000;
 const WARP_NATIVE_REJECTION_KEY_MAX_CHARS: usize = 512;
 const WARP_NATIVE_REJECTION_REASON_MAX_CHARS: usize = 1_024;
 const WARP_NATIVE_REJECTION_RESERVE_BYTES: usize = 40 * 1024;
 pub(super) const WARP_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-warp-source-integrity-v4\0";
 const WARP_DIGEST_CHAIN_DOMAIN: &[u8] = b"ctx-warp-native-digest-chain-v1\0";
-const WARP_EVENT_HASH_DOMAIN: &[u8] = b"ctx-warp-retained-event-v2\0";
 const WARP_PAGE_IDENTITY_DOMAIN: &[u8] = b"ctx-warp-native-safe-page-v2\0";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -79,7 +76,7 @@ pub(in super::super) struct WarpNativeEvent {
     pub(in super::super) call_id: Option<String>,
     pub(in super::super) occurred_at: Option<DateTime<Utc>>,
     pub(in super::super) lexical_body: String,
-    pub(in super::super) source_record_digest: CompleteContentBodyDigest,
+    pub(in super::super) source_record_digest: RecordDigest,
 }
 
 pub(in super::super) struct WarpNativeEventDraft {
@@ -98,7 +95,7 @@ pub(in super::super) struct WarpNativeEventDraft {
     pub(in super::super) call_id: Option<String>,
     pub(in super::super) occurred_at: Option<DateTime<Utc>>,
     pub(in super::super) body: String,
-    pub(in super::super) source_record_digest: CompleteContentBodyDigest,
+    pub(in super::super) source_record_digest: RecordDigest,
 }
 
 impl WarpNativeEvent {

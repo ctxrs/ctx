@@ -77,22 +77,6 @@ pub(super) fn qoder_event_text(value: &Value, event_type: EventType) -> String {
         .unwrap_or_default()
 }
 
-pub(crate) fn qoder_complete_content_message_record(
-    value: &Value,
-    line_number: usize,
-) -> Option<(String, String)> {
-    let event_type = qoder_event_type(value);
-    if event_type != EventType::Message {
-        return None;
-    }
-    Some((
-        qoder_event_text(value, event_type),
-        qoder_event_identity(value)
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("line-{line_number}")),
-    ))
-}
-
 pub(super) fn qoder_model(value: &Value) -> Option<Value> {
     value
         .get("model")
@@ -529,7 +513,6 @@ mod tests {
 
         assert_eq!(qoder_event_type(&value), EventType::ToolOutput);
         assert_eq!(qoder_role(&value), EventRole::Tool);
-        assert!(qoder_complete_content_message_record(&value, 1).is_none());
         let results = enumerate_qoder_results(&value).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, Some("top-level secret"));

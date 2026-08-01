@@ -56,8 +56,6 @@ enum DirectJsonlAdapterError {
     NativeSessionChanged,
     #[error("direct JSONL record expansion does not reconcile")]
     CountMismatch,
-    #[error("direct JSONL event has no exact source-record evidence")]
-    MissingRecordEvidence,
 }
 
 type DirectJsonlAdapterResult<T> = std::result::Result<T, DirectJsonlAdapterError>;

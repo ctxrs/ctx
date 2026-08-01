@@ -932,23 +932,6 @@ struct NanoClawCompoundRevisionEvidence<'a> {
     certified_bytes: u64,
 }
 
-pub(super) fn nanoclaw_project_root(path: &Path) -> Result<PathBuf> {
-    if path.is_dir() && path.join("data").join("v2.db").is_file() {
-        return Ok(path.to_path_buf());
-    }
-    if path.file_name().and_then(|name| name.to_str()) == Some("v2.db") {
-        if let Some(data_dir) = path.parent() {
-            if let Some(root) = data_dir.parent() {
-                return Ok(root.to_path_buf());
-            }
-        }
-    }
-    Err(CaptureError::InvalidProviderTranscriptPath {
-        path: path.to_path_buf(),
-        reason: "NanoClaw import path must be a project root or data/v2.db",
-    })
-}
-
 fn nanoclaw_requested_project_root(path: &Path) -> Result<PathBuf> {
     let root = if path.file_name().and_then(|name| name.to_str()) == Some("v2.db") {
         path.parent()
