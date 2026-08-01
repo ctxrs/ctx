@@ -23,11 +23,19 @@ impl Drop for SourceRefreshDaemon {
 }
 
 pub(super) fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    start_source_refresh_daemon(temp, "full")
+}
+
+pub(super) fn start_core_only_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
+    start_source_refresh_daemon(temp, "source-refresh-only")
+}
+
+fn start_source_refresh_daemon(temp: &TempDir, mode: &str) -> SourceRefreshDaemon {
     let data_root = data_root(temp);
     fs::create_dir_all(&data_root).unwrap();
     fs::write(
         data_root.join("config.toml"),
-        "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
+        format!("[daemon]\nenabled = true\nmode = \"{mode}\"\n\n[search]\nsemantic = false\n"),
     )
     .unwrap();
     let binary = copied_ctx_binary(temp);
@@ -53,7 +61,7 @@ pub(super) fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshD
             "--loop-interval-seconds",
             "600",
         ])
-        .env("CTX_DAEMON_MODE", "full")
+        .env("CTX_DAEMON_MODE", mode)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     let child = command
@@ -73,7 +81,7 @@ pub(super) fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshD
                 .unwrap()
                 .read_to_string(&mut stderr)
                 .unwrap();
-            panic!("source-refresh daemon exited before becoming ready ({exit}): {stderr}");
+            panic!("{mode} source-refresh daemon exited before becoming ready ({exit}): {stderr}");
         }
         let status = ctx(temp)
             .args(["daemon", "status", "--format=json"])
@@ -89,7 +97,7 @@ pub(super) fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshD
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for source-refresh daemon readiness: {status:#?}"
+            "timed out waiting for {mode} source-refresh daemon readiness: {status:#?}"
         );
         std::thread::sleep(Duration::from_millis(25));
     }

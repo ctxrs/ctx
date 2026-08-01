@@ -3,8 +3,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
-    thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use anyhow::{Context, Result};
@@ -27,7 +26,7 @@ use crate::source_sql::sql_compatibility_path;
 
 use super::{
     paths_status::{
-        daemon_jobs_path, daemon_report, open_or_create_pid_lock_file, read_daemon_job_status,
+        daemon_jobs_path, open_or_create_pid_lock_file, read_daemon_job_status,
         write_daemon_job_status,
     },
     source_backed_refresh_coordinator::{
@@ -38,8 +37,6 @@ use super::{
 
 const SOURCE_BACKED_RELATIONAL_STATUS_FILE: &str = "relational-catch-up.json";
 const SOURCE_BACKED_RELATIONAL_LOCK_FILE: &str = "relational-catch-up.lock";
-const SOURCE_BACKED_RELATIONAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const SOURCE_BACKED_RELATIONAL_WAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 mod record_stream;
 mod status;
@@ -227,79 +224,6 @@ pub(super) fn generation_needs_catch_up(data_root: &Path, core_generation_id: &s
 
 pub(super) fn status_generation(data_root: &Path) -> Option<String> {
     read_status(data_root).map(|status| status.core_generation_id)
-}
-
-pub(crate) fn wait_for_completed_generation(
-    data_root: &Path,
-    core_generation_id: &str,
-    fail_if_daemon_unavailable: bool,
-) -> Result<()> {
-    wait_for_completed_generation_with(
-        data_root,
-        core_generation_id,
-        fail_if_daemon_unavailable,
-        SOURCE_BACKED_RELATIONAL_WAIT_TIMEOUT,
-        || thread::sleep(SOURCE_BACKED_RELATIONAL_POLL_INTERVAL),
-    )
-}
-
-pub(crate) fn converge_required_generation(
-    data_root: &Path,
-    core_generation_id: &str,
-) -> Result<()> {
-    if generation_needs_catch_up(data_root, core_generation_id) {
-        run_after_core_publication(data_root, core_generation_id)?;
-    }
-    wait_for_completed_generation(data_root, core_generation_id, false)
-}
-
-fn wait_for_completed_generation_with(
-    data_root: &Path,
-    core_generation_id: &str,
-    fail_if_daemon_unavailable: bool,
-    timeout: Duration,
-    mut wait: impl FnMut(),
-) -> Result<()> {
-    let started = Instant::now();
-    loop {
-        if let Some(status) = read_status(data_root) {
-            if status.is_completed_for(core_generation_id)
-                && ready_projection_metadata(data_root, core_generation_id).is_some()
-            {
-                return Ok(());
-            }
-            if status.core_generation_id == core_generation_id
-                && status.status == status::SourceBackedRelationalCatchUpState::Error
-            {
-                let code = status
-                    .error_code
-                    .as_deref()
-                    .unwrap_or("source_relational_projection_unavailable");
-                let detail = status
-                    .last_error
-                    .as_deref()
-                    .unwrap_or("daemon Core relational catch-up failed");
-                anyhow::bail!("{code}: {detail}");
-            }
-        }
-        if fail_if_daemon_unavailable {
-            let daemon = daemon_report(data_root);
-            let owns_relational_catch_up = daemon.get("running").and_then(Value::as_bool)
-                == Some(true)
-                && daemon.get("mode").and_then(Value::as_str) == Some("full");
-            if !owns_relational_catch_up {
-                anyhow::bail!(
-                    "the ctx daemon is unavailable for required relational catch-up; no foreground writer was started"
-                );
-            }
-        }
-        if started.elapsed() >= timeout {
-            anyhow::bail!(
-                "source_relational_projection_unavailable: timed out waiting for daemon relational generation {core_generation_id}"
-            );
-        }
-        wait();
-    }
 }
 
 pub(super) fn read_status_json(data_root: &Path) -> Option<Value> {

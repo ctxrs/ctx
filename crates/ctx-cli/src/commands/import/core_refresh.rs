@@ -5,9 +5,8 @@ use anyhow::{bail, Context, Result};
 use crate::{
     config::AppConfig,
     semantic::{
-        autostart_daemon_and_wait, converge_source_backed_relational_generation,
-        coordinate_core_refresh_without_autostart, coordinate_source_backed_refresh,
-        SourceBackedRefreshMode, SourceBackedRefreshObservation,
+        autostart_daemon_and_wait, coordinate_core_refresh_without_autostart,
+        coordinate_source_backed_refresh, SourceBackedRefreshMode, SourceBackedRefreshObservation,
     },
     DaemonTriggerCommandArg,
 };
@@ -21,9 +20,9 @@ pub(super) enum ImportCoreRefreshRequest<'a> {
 
 /// Applies import-specific policy around the one Core refresh control path.
 ///
-/// Import may start the daemon and waits for the required relational frontier,
-/// but discovery, acquisition, classification, Core construction, and atomic
-/// publication all remain owned by the shared refresh engine.
+/// Import may start the daemon and waits only for authoritative Core publication.
+/// Relational, Pro, and semantic projections follow independently under daemon
+/// scheduling.
 pub(super) fn wait_for_import_core_refresh(
     data_root: &Path,
     config: &AppConfig,
@@ -58,25 +57,25 @@ pub(super) fn wait_for_import_core_refresh(
             refresh.pin.generation_id()
         );
     }
-    converge_source_backed_relational_generation(data_root, refresh.pin.generation_id())
-        .context("converge the required relational projection after Core publication")?;
     Ok(refresh)
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn import_control_contains_no_ingestion_or_provider_read_implementation() {
+    fn import_control_contains_no_ingestion_provider_read_or_sidecar_implementation() {
         let source = include_str!("core_refresh.rs");
         for forbidden in [
             ["ctx_history_", "capture"].concat(),
             ["SourceBackedRefresh", "Executor"].concat(),
             ["VerifiedIndex", "::open"].concat(),
             ["Store", "::open"].concat(),
+            ["converge_source_backed_", "relational_generation"].concat(),
+            ["run_relational_", "after_core_publication"].concat(),
         ] {
             assert!(
                 !source.contains(&forbidden),
-                "import Core control contains forbidden implementation `{forbidden}`"
+                "import Core control contains forbidden foreground implementation `{forbidden}`"
             );
         }
     }
