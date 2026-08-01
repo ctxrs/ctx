@@ -377,13 +377,36 @@ fn sql_reads_generation_only_projection_and_supports_formats_and_input_sources()
 
     let json =
         json_output(ctx(&temp).args(["sql", "SELECT 1 AS one, 'two' AS two", "--format=json"]));
-    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["schema_version"], 2);
     assert_eq!(json["payload_type"], "sql_result");
     assert_eq!(json["read_only"], true);
     assert_eq!(json["share_safe"], false);
     assert_eq!(json["columns"], json!(["one", "two"]));
     assert_eq!(json["rows"], json!([[1, "two"]]));
     assert_eq!(json["returned_rows"], 1);
+    assert_eq!(
+        json["snapshot"],
+        json!({
+            "observed_core_generation_id": generation_id.clone(),
+            "projection_status": "ready",
+            "relational_build_generation": 1,
+            "relational_core_generation_id": generation_id.clone(),
+            "stale": false,
+        })
+    );
+
+    let narrow_join = json_output(ctx(&temp).args([
+        "sql",
+        "SELECT e.ctx_event_id, s.root_ctx_session_id FROM ctx_events AS e LEFT JOIN ctx_sessions AS s ON s.ctx_session_id = e.ctx_session_id LIMIT 1",
+        "--max-columns",
+        "2",
+        "--format=json",
+    ]));
+    assert_eq!(
+        narrow_join["columns"],
+        json!(["ctx_event_id", "root_ctx_session_id"])
+    );
+    assert_eq!(narrow_join["rows"], json!([]));
 
     let metadata = json_output(ctx(&temp).args([
         "sql",
@@ -764,9 +787,13 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&first, "codex", "codex_session_jsonl_tree");
+    let first_generation = first["sources"][0]["published_generation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert_eq!(first["resume"], false);
     assert_eq!(first["resume_mode"], "normal_scan");
-    wait_for_test_daemon_source_refresh(&temp);
+    wait_for_test_lexical_projection(&temp, &first_generation);
     assert_eq!(
         source_backed_count(
             &temp,
@@ -977,6 +1004,10 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl_tree");
+    let imported_generation = imported["sources"][0]["published_generation"]
+        .as_str()
+        .unwrap();
+    wait_for_test_lexical_projection(&temp, imported_generation);
 
     let query = "setup flow";
     let search = json_output(ctx(&temp).args([

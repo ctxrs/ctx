@@ -9,9 +9,10 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Number, Value};
 
 use ctx_history_relational::{
-    RawSqlOptions, RawSqlResult, RawSqlValue, RelationalProjectionError, RAW_SQL_DEFAULT_MAX_ROWS,
-    RAW_SQL_DEFAULT_MAX_VALUE_BYTES, RAW_SQL_MAX_ROWS_CAP, RAW_SQL_MAX_SQL_BYTES_CAP,
-    RAW_SQL_MAX_TIMEOUT, RAW_SQL_MAX_VALUE_BYTES_CAP,
+    RawSqlOptions, RawSqlResult, RawSqlSnapshot, RawSqlValue, RelationalProjectionError,
+    RelationalProjectionStatus, RAW_SQL_DEFAULT_MAX_ROWS, RAW_SQL_DEFAULT_MAX_VALUE_BYTES,
+    RAW_SQL_MAX_ROWS_CAP, RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT,
+    RAW_SQL_MAX_VALUE_BYTES_CAP,
 };
 
 use crate::analytics::{count_bucket, duration_bucket, SqlTelemetry};
@@ -79,11 +80,16 @@ pub(crate) fn run_sql(
         Err(RelationalProjectionError::Sql(rusqlite::Error::MultipleStatement))
             if args.output_format() == SqlFormat::Table =>
         {
+            drop(compatibility);
             ui.write_stderr(&render_sql_multiple_statements(ui.stderr_context()))?;
             return Err(crate::dispatch::rendered_cli_error());
         }
         result => result?,
     };
+    // Rows and snapshot metadata are fully materialized now. Release the
+    // SQLite read transaction before potentially slow stdout rendering so a
+    // blocked pipe cannot retain WAL pages or delay relational maintenance.
+    drop(compatibility);
     telemetry.returned_rows = Some(count_bucket(result.returned_rows as u64));
     telemetry.returned_columns = Some(count_bucket(result.columns.len() as u64));
     telemetry.rows_truncated = Some(result.truncated.rows);
@@ -377,10 +383,11 @@ pub(crate) fn print_sql_truncation_notice(result: &RawSqlResult) {
 
 pub(crate) fn raw_sql_result_json(result: &RawSqlResult) -> Value {
     compact_json(json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "payload_type": "sql_result",
         "read_only": true,
         "share_safe": false,
+        "snapshot": result.snapshot.as_ref().map(raw_sql_snapshot_json),
         "columns": result.columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>(),
         "rows": result
             .rows
@@ -401,6 +408,24 @@ pub(crate) fn raw_sql_result_json(result: &RawSqlResult) -> Value {
         },
         "elapsed_ms": result.elapsed.as_millis(),
     }))
+}
+
+fn raw_sql_snapshot_json(snapshot: &RawSqlSnapshot) -> Value {
+    compact_json(json!({
+        "relational_core_generation_id": snapshot.relational_core_generation_id.clone(),
+        "relational_build_generation": snapshot.relational_build_generation,
+        "observed_core_generation_id": snapshot.observed_core_generation_id.clone(),
+        "projection_status": relational_projection_status_name(snapshot.projection_status),
+        "stale": snapshot.stale,
+    }))
+}
+
+fn relational_projection_status_name(status: RelationalProjectionStatus) -> &'static str {
+    match status {
+        RelationalProjectionStatus::Empty => "empty",
+        RelationalProjectionStatus::Ready => "ready",
+        RelationalProjectionStatus::Behind => "behind",
+    }
 }
 
 pub(crate) fn raw_sql_value_json(value: &RawSqlValue) -> Value {
@@ -502,7 +527,10 @@ pub(crate) fn csv_escape(value: &str) -> String {
 mod ui_tests {
     use std::{io::Write as _, time::Duration};
 
-    use ctx_history_relational::{RawSqlColumn, RawSqlLimits, RawSqlTruncation, RawSqlValue};
+    use ctx_history_relational::{
+        RawSqlColumn, RawSqlLimits, RawSqlSnapshot, RawSqlTruncation, RawSqlValue,
+        RelationalProjectionStatus,
+    };
     use unicode_width::UnicodeWidthStr as _;
 
     use super::*;
@@ -514,6 +542,7 @@ mod ui_tests {
 
     fn result(rows: Vec<Vec<RawSqlValue>>) -> RawSqlResult {
         RawSqlResult {
+            snapshot: None,
             columns: vec![
                 RawSqlColumn {
                     name: "provider".to_owned(),
@@ -589,6 +618,26 @@ mod ui_tests {
         assert!(rendered.contains("Position"));
         assert!(rendered.contains("Column"));
         assert!(rendered.find("provider").unwrap() < rendered.find("summary").unwrap());
+    }
+
+    #[test]
+    fn empty_snapshot_omits_unavailable_generation_ids() {
+        let snapshot = raw_sql_snapshot_json(&RawSqlSnapshot {
+            relational_core_generation_id: None,
+            relational_build_generation: 0,
+            observed_core_generation_id: None,
+            projection_status: RelationalProjectionStatus::Empty,
+            stale: false,
+        });
+
+        assert_eq!(
+            snapshot,
+            json!({
+                "relational_build_generation": 0,
+                "projection_status": "empty",
+                "stale": false,
+            })
+        );
     }
 
     #[test]

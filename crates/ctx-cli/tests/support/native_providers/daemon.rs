@@ -140,6 +140,14 @@ pub(super) fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
         .unwrap_or_else(|| panic!("expected integer SQL scalar in {packet:#}"))
 }
 
+pub(super) fn wait_for_imported_projections(temp: &TempDir, packet: &Value) {
+    let generation = packet["sources"][0]["published_generation"]
+        .as_str()
+        .unwrap_or_else(|| panic!("import packet omitted published generation: {packet:#}"));
+    wait_for_test_lexical_projection(temp, generation);
+    wait_for_test_relational_projection(temp, generation);
+}
+
 pub(super) fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
     assert_eq!(search["schema_version"], 1, "{search:#}");
     assert_eq!(search["query"], query, "{search:#}");

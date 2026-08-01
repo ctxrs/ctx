@@ -53,6 +53,89 @@ fn normalized(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn forced_active_generation_race() -> anyhow::Error {
+    anyhow::Error::new(IndexError::ConcurrentGenerationChange)
+        .context("open verified Core index test fixture")
+}
+
+#[test]
+fn show_and_search_generation_races_use_the_stable_retryable_json_envelope() {
+    let temp = tempdir().unwrap();
+    for command in ["show", "search"] {
+        let (mut ui, captured) = test_ui(80);
+        let error = if command == "show" {
+            render_show_error::<()>(Err(forced_active_generation_race()), true, &mut ui)
+                .unwrap_err()
+        } else {
+            render_search_error::<()>(
+                Err(forced_active_generation_race()),
+                false,
+                temp.path(),
+                &mut ui,
+            )
+            .unwrap_err()
+        };
+        assert_eq!(error.to_string(), "CLI error was already rendered");
+
+        let rendered = captured.text();
+        let structured: serde_json::Value = serde_json::from_str(rendered.trim()).unwrap();
+        assert_eq!(
+            structured["error"],
+            "generation_changed/active_generation_race"
+        );
+        assert_eq!(structured["error_code"], "generation_changed");
+        assert_eq!(structured["failure_kind"], "active_generation_race");
+        assert_eq!(
+            structured["detail"],
+            "the active searchable generation changed while the command was opening it"
+        );
+        assert_eq!(structured["retryable"], true);
+        assert_eq!(rendered.lines().count(), 1, "{command}: {rendered}");
+        assert!(!rendered.contains("Error:"), "{command}: {rendered}");
+        assert!(
+            !rendered.contains("verified reader was opening"),
+            "{command}: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn show_and_search_generation_races_are_actionable_for_humans() {
+    let temp = tempdir().unwrap();
+    for width in [32, 48, 80, 100] {
+        for command in ["show", "search"] {
+            let (mut ui, captured) = test_ui(width);
+            let error = if command == "show" {
+                render_show_error::<()>(Err(forced_active_generation_race()), false, &mut ui)
+                    .unwrap_err()
+            } else {
+                render_search_error::<()>(
+                    Err(forced_active_generation_race()),
+                    true,
+                    temp.path(),
+                    &mut ui,
+                )
+                .unwrap_err()
+            };
+            assert_eq!(error.to_string(), "CLI error was already rendered");
+
+            let rendered = captured.text();
+            assert!(rendered.starts_with("✗ History changed"), "{rendered}");
+            assert!(
+                normalized(&rendered).contains("new searchable generation"),
+                "{rendered}"
+            );
+            assert!(
+                normalized(&rendered).contains(&format!("Retry the same {command} command.")),
+                "{rendered}"
+            );
+            assert!(!rendered.contains("Error:"), "{rendered}");
+            assert!(!rendered.contains("verified reader"), "{rendered}");
+            assert!(!rendered.contains('\u{1b}'), "{rendered}");
+        }
+    }
+}
+
 #[test]
 fn missing_lookup_machine_errors_keep_exact_bytes_and_no_human_output() {
     let temp = tempdir().unwrap();

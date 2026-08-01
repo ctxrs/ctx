@@ -8,6 +8,7 @@ mod contracts;
 mod durable_directory;
 mod identity;
 mod index_document;
+mod merge_policy;
 pub mod policy;
 mod publication;
 mod query;
@@ -90,7 +91,6 @@ use tantivy::TantivyDocument;
 use tantivy::{
     collector::Count,
     directory::{error::LockError, Directory, DirectoryLock, Lock},
-    indexer::LogMergePolicy,
     query::TermQuery,
     schema::{Field, IndexRecordOption},
     Index, IndexWriter, ReloadPolicy, Searcher, Term,
@@ -99,6 +99,7 @@ use uuid::Uuid;
 
 use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
 use index_document::{core_content_bytes, IndexDocument, IndexSourceFields, SourceToken};
+use merge_policy::LexicalMergePolicy;
 use staging::{finish_identical_staging, PendingSource as StagedPendingSource, PendingSourceMode};
 use writer_support::{
     acquire_generation_writer_lock_with_retry, clear_active_generation_rebuild_marker,

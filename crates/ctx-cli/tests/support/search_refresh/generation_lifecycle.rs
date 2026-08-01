@@ -341,61 +341,57 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     }));
     let (deferred_manifest, _) = generation_manifest(&temp, &deferred_generation);
     assert!(deferred_manifest.removals.is_empty());
-    assert_eq!(
-        deferred_manifest
+    let mut prior_generation = deferred_generation;
+    let mut prior_missing = deferred_manifest
+        .source_catalog()
+        .missing_source(truncate_source.observation().source())
+        .expect("first unavailable lifecycle observation")
+        .consecutive_missing()
+        .get();
+    assert!((1..3).contains(&prior_missing), "{deferred_manifest:#?}");
+
+    // The native watcher may certify one absence before the explicit refresh
+    // request. Count authoritative inventories, rather than assuming one
+    // command maps to one observation.
+    let mut deletion_attempts = 0;
+    let deleted = loop {
+        deletion_attempts += 1;
+        assert!(
+            deletion_attempts <= 3,
+            "source was not deleted after three further complete inventories"
+        );
+        let next = json_output(ctx(&temp).args([
+            "search",
+            truncate_query,
+            "--provider",
+            "codex",
+            "--refresh",
+            "wait",
+            "--format=json",
+        ]));
+        let next_generation = assert_published_generation(&next, "wait");
+        assert_ne!(next_generation, prior_generation);
+        let (next_manifest, _) = generation_manifest(&temp, &next_generation);
+        if !next_manifest.removals.is_empty() {
+            break next;
+        }
+
+        assert_eq!(next["retrieval"]["indexed_documents"], 2, "{next:#}");
+        let next_missing = next_manifest
             .source_catalog()
             .missing_source(truncate_source.observation().source())
-            .expect("first unavailable lifecycle observation")
+            .expect("deferred unavailable lifecycle observation")
             .consecutive_missing()
-            .get(),
-        1
-    );
-
-    let deferred_again = json_output(ctx(&temp).args([
-        "search",
-        truncate_query,
-        "--provider",
-        "codex",
-        "--refresh",
-        "wait",
-        "--format=json",
-    ]));
-    let second_deferred_generation = assert_published_generation(&deferred_again, "wait");
-    assert_ne!(second_deferred_generation, deferred_generation);
-    assert_eq!(
-        deferred_again["retrieval"]["indexed_documents"], 2,
-        "{deferred_again:#}"
-    );
-    assert!(deferred_again["results"].as_array().is_some_and(|results| {
-        results.iter().any(|result| {
-            result["snippet"]
-                .as_str()
-                .is_some_and(|snippet| snippet.contains(truncate_query))
-        })
-    }));
-    let (second_deferred_manifest, _) = generation_manifest(&temp, &second_deferred_generation);
-    assert!(second_deferred_manifest.removals.is_empty());
-    assert_eq!(
-        second_deferred_manifest
-            .source_catalog()
-            .missing_source(truncate_source.observation().source())
-            .expect("second unavailable lifecycle observation")
-            .consecutive_missing()
-            .get(),
-        2
-    );
-
-    let deleted = json_output(ctx(&temp).args([
-        "search",
-        truncate_query,
-        "--provider",
-        "codex",
-        "--refresh",
-        "wait",
-        "--format=json",
-    ]));
+            .get();
+        assert!(
+            next_missing > prior_missing && next_missing < 3,
+            "{next_manifest:#?}"
+        );
+        prior_missing = next_missing;
+        prior_generation = next_generation;
+    };
     let deletion_generation = assert_published_generation(&deleted, "wait");
-    assert_ne!(deletion_generation, second_deferred_generation);
+    assert_ne!(deletion_generation, prior_generation);
     assert_eq!(deleted["retrieval"]["indexed_documents"], 1, "{deleted:#}");
     assert!(
         deleted["results"].as_array().unwrap().iter().all(|result| {

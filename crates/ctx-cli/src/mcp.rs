@@ -659,6 +659,10 @@ fn tool_sql(arguments: &Value, data_root: &Path) -> Result<Value> {
             timeout: Duration::from_millis(timeout_ms),
         },
     )?;
+    // The result is fully materialized. Release the pinned SQLite read
+    // transaction before JSON serialization or a potentially blocked MCP
+    // transport write.
+    drop(compatibility);
     Ok(raw_sql_result_json(&result))
 }
 

@@ -4,17 +4,19 @@
 //! Command/MCP integration should open this reader at the relational
 //! projection path, not at the legacy canonical Store path. The writer is
 //! advanced only after a certified Core commit through
-//! `SourceBackedRelationalProjection::catch_up`. Query admission fails closed
-//! while an active Core generation's projection is absent, behind, or bound to
-//! a different generation. Without active Core, only the canonical empty
-//! projection is admissible; Core search success remains independent.
+//! `SourceBackedRelationalProjection::catch_up`. Each query pins one SQLite
+//! read transaction and may use the latest coherent relational generation
+//! while Core is ahead or catch-up has failed. The result reports both
+//! frontiers and staleness. Without
+//! active Core, only the canonical empty projection is admissible; Core search
+//! success remains independent.
 
 use std::path::{Path, PathBuf};
 
 use ctx_history_index::VerifiedIndex;
 use ctx_history_relational::{
-    RawSqlOptions, RawSqlResult, RelationalProjectionError, RelationalProjectionMetadata,
-    RelationalProjectionStatus, SourceBackedRelationalProjection,
+    RawSqlOptions, RawSqlResult, RawSqlSnapshot, RelationalProjectionError,
+    RelationalProjectionMetadata, RelationalProjectionStatus, SourceBackedRelationalProjection,
 };
 
 pub type SqlCompatibilityResult<T> = std::result::Result<T, RelationalProjectionError>;
@@ -25,13 +27,20 @@ const LEXICAL_DIRECTORY: &str = "lexical";
 /// A read-only handle to current stable `ctx_*` views and projection metadata.
 pub struct SqlCompatibility {
     projection: SourceBackedRelationalProjection,
+    snapshot: RawSqlSnapshot,
 }
 
 impl SqlCompatibility {
     pub fn open(path: impl AsRef<Path>) -> SqlCompatibilityResult<Self> {
-        Ok(Self {
-            projection: SourceBackedRelationalProjection::open_read_only(path)?,
-        })
+        let projection = SourceBackedRelationalProjection::open_read_only(path)?;
+        projection.begin_read_snapshot()?;
+        let metadata = projection.metadata()?;
+        let observed_core_generation_id = metadata.active_core_generation_id.clone();
+        Ok(Self::from_pinned_projection(
+            projection,
+            metadata,
+            observed_core_generation_id,
+        ))
     }
 
     /// Opens the existing SQL authority for one ctx data root.
@@ -85,33 +94,66 @@ impl SqlCompatibility {
 
         let writer = SourceBackedRelationalProjection::open(&projection_path)?;
         drop(writer);
-        Self::open(projection_path)
+        // Re-enter the existing-projection admission path so Core is observed
+        // after the empty relational snapshot is pinned. Core may have been
+        // published between the absence check above and projection creation.
+        Self::open_existing_projection(projection_path, generation_path)
     }
 
     fn open_existing_projection(
         projection_path: PathBuf,
         generation_path: PathBuf,
     ) -> SqlCompatibilityResult<Self> {
-        let compatibility = Self::open(projection_path)?;
-        let metadata = compatibility.metadata()?;
-        if active_core_generation_id(&generation_path)?.is_none() {
+        let projection = SourceBackedRelationalProjection::open_read_only(projection_path)?;
+        projection.begin_read_snapshot()?;
+        let metadata = projection.metadata()?;
+        // Observe Core only after the SQLite transaction has pinned rows and
+        // relational metadata. This prevents a newly published Core pointer
+        // from being reported as current for an older, not-yet-pinned read.
+        let observed_core_generation_id = active_core_generation_id(&generation_path)?;
+        Self::admit_pinned_projection(projection, metadata, observed_core_generation_id)
+    }
+
+    #[cfg(test)]
+    fn open_existing_projection_for_observed(
+        projection_path: PathBuf,
+        observed_core_generation_id: Option<String>,
+    ) -> SqlCompatibilityResult<Self> {
+        let projection = SourceBackedRelationalProjection::open_read_only(projection_path)?;
+        projection.begin_read_snapshot()?;
+        let metadata = projection.metadata()?;
+        Self::admit_pinned_projection(projection, metadata, observed_core_generation_id)
+    }
+
+    fn admit_pinned_projection(
+        projection: SourceBackedRelationalProjection,
+        metadata: RelationalProjectionMetadata,
+        observed_core_generation_id: Option<String>,
+    ) -> SqlCompatibilityResult<Self> {
+        if observed_core_generation_id.is_none() {
             if !is_genuinely_empty_projection(&metadata) {
                 return Err(RelationalProjectionError::IncompatibleState(
                     "Core generation is absent but the relational projection is not empty"
                         .to_owned(),
                 ));
             }
-            return Ok(compatibility);
+            return Ok(Self::from_pinned_projection(
+                projection,
+                metadata,
+                observed_core_generation_id,
+            ));
         }
 
-        let index = VerifiedIndex::open_pinned(&generation_path)
-            .map_err(|error| RelationalProjectionError::InvalidCoreGeneration(error.to_string()))?;
-        if metadata.status != RelationalProjectionStatus::Ready
-            || metadata.active_core_generation_id.as_deref() != Some(index.generation_id())
+        if !matches!(
+            metadata.status,
+            RelationalProjectionStatus::Ready | RelationalProjectionStatus::Behind
+        ) || metadata.active_core_generation_id.is_none()
         {
             return Err(
                 RelationalProjectionError::SourceBackedSqlGenerationMismatch {
-                    expected_generation: index.generation_id().to_owned(),
+                    expected_generation: observed_core_generation_id
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_owned()),
                     active_generation: metadata.active_core_generation_id,
                     status: match metadata.status {
                         RelationalProjectionStatus::Empty => "empty",
@@ -122,7 +164,38 @@ impl SqlCompatibility {
                 },
             );
         }
-        Ok(compatibility)
+        Ok(Self::from_pinned_projection(
+            projection,
+            metadata,
+            observed_core_generation_id,
+        ))
+    }
+
+    fn from_pinned_projection(
+        projection: SourceBackedRelationalProjection,
+        metadata: RelationalProjectionMetadata,
+        observed_core_generation_id: Option<String>,
+    ) -> Self {
+        let stale = match metadata.status {
+            RelationalProjectionStatus::Behind => true,
+            RelationalProjectionStatus::Ready => {
+                metadata.active_core_generation_id != observed_core_generation_id
+            }
+            RelationalProjectionStatus::Empty => {
+                metadata.active_core_generation_id.is_some()
+                    || observed_core_generation_id.is_some()
+            }
+        };
+        Self {
+            projection,
+            snapshot: RawSqlSnapshot {
+                relational_core_generation_id: metadata.active_core_generation_id,
+                relational_build_generation: metadata.build_generation,
+                observed_core_generation_id,
+                projection_status: metadata.status,
+                stale,
+            },
+        }
     }
 
     pub fn metadata(&self) -> SqlCompatibilityResult<RelationalProjectionMetadata> {
@@ -130,7 +203,9 @@ impl SqlCompatibility {
     }
 
     pub fn query(&self, sql: &str, options: RawSqlOptions) -> SqlCompatibilityResult<RawSqlResult> {
-        self.projection.raw_sql_query(sql, options)
+        let mut result = self.projection.raw_sql_query(sql, options)?;
+        result.snapshot = Some(self.snapshot.clone());
+        Ok(result)
     }
 }
 

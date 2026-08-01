@@ -86,6 +86,9 @@ fn source_format_and_parser_classification_do_not_rotate_lineage_identity() {
     assert_eq!(before.identity(), after.identity());
     assert_eq!(before, after);
     assert!(!before.exact_descriptor_eq(&after));
+    assert!(before.is_same_lineage_descriptor_replacement(&after));
+    assert!(!before.is_same_lineage_descriptor_replacement(&before));
+    assert!(!before.is_same_lineage_descriptor_replacement(&source(8)));
     assert_eq!(
         before.validate_exact_descriptor(&after).unwrap_err(),
         ProjectionContractError::SourceDescriptorChanged

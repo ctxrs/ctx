@@ -40,8 +40,8 @@ mod tests {
         },
         show::{
             canonical_show_output_bytes, core_events_by_ids_with_presentation_limits, event_window,
-            event_window_value, render_event_value, render_event_values, session_json,
-            session_json_with_event_cap, session_transcript_value,
+            event_window_value, render_event_value, render_event_values, render_show_error,
+            session_json, session_json_with_event_cap, session_transcript_value,
             take_core_presentation_fetch_ids, validate_show_target,
             EncodedCorePresentationLimitError, SessionJsonOptions,
         },

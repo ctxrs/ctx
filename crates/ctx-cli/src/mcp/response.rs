@@ -38,6 +38,19 @@ pub(super) fn tool_result(structured: Value) -> Value {
 }
 
 pub(super) fn tool_error_result(err: Error) -> Value {
+    if crate::commands::source_index::is_active_generation_race(&err) {
+        let structured = crate::commands::source_index::active_generation_race_error_json();
+        return json!({
+            "isError": true,
+            "content": [
+                {
+                    "type": "text",
+                    "text": "History changed while ctx was opening the searchable generation. Retry the same request.",
+                }
+            ],
+            "structuredContent": structured,
+        });
+    }
     if let Some(error) =
         err.downcast_ref::<crate::presentation_limit::PresentationOutputLimitError>()
     {
@@ -154,12 +167,35 @@ pub(super) fn json_rpc_error(code: i64, message: &str, data: Option<Value>) -> V
 
 #[cfg(test)]
 mod tests {
+    use ctx_history_index::IndexError;
     use serde_json::json;
     use uuid::Uuid;
 
     use super::{
         error_response, invalid_request_response, invalid_tool_request, tool_error_result,
     };
+
+    #[test]
+    fn generation_change_is_a_retryable_typed_tool_error() {
+        let error = anyhow::Error::new(IndexError::ConcurrentGenerationChange)
+            .context("opening the searchable generation");
+        let result = tool_error_result(error);
+
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["structuredContent"]["error"],
+            "generation_changed/active_generation_race"
+        );
+        assert_eq!(
+            result["structuredContent"]["error_code"],
+            "generation_changed"
+        );
+        assert_eq!(
+            result["structuredContent"]["failure_kind"],
+            "active_generation_race"
+        );
+        assert_eq!(result["structuredContent"]["retryable"], true);
+    }
 
     #[test]
     fn error_response_preserves_required_null_id_while_pruning_optional_data() {

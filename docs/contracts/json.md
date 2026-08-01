@@ -5,8 +5,8 @@ arguments, typed result identifiers, and local paths. Treat it as private until
 a user reviews it.
 
 Command result JSON uses `schema_version: 1` except for
-`ctx setup --format json`, `ctx stats --format json`, and
-`ctx import --format json`.
+`ctx setup --format json`, `ctx stats --format json`,
+`ctx import --format json`, and `ctx sql --format json`.
 The Pro status object embedded by `ctx status --format json` and exposed through MCP
 uses its own version 2 contract, described below. Progress-event JSON is stderr
 progress output and does not include `schema_version`.
@@ -459,6 +459,13 @@ Show reads the active verified Core generation. It does not reopen provider
 transcript files at query time and does not return provider source paths,
 existence checks, or source cursors.
 
+If the active generation changes while `show` or `search` is opening its
+verified reader, JSON mode exits nonzero and writes one error object to stderr
+with `error: "generation_changed/active_generation_race"`,
+`error_code: "generation_changed"`,
+`failure_kind: "active_generation_race"`, and `retryable: true`. Clients may
+retry the same command; this race is not returned as a successful result.
+
 ## Transcript Artifacts
 
 ```bash
@@ -649,6 +656,11 @@ projection and returns:
 - `payload_type: "sql_result"`;
 - `read_only: true`;
 - `share_safe: false`;
+- `snapshot.relational_core_generation_id`;
+- `snapshot.relational_build_generation`;
+- `snapshot.observed_core_generation_id`;
+- `snapshot.projection_status` (`empty`, `ready`, or `behind`);
+- `snapshot.stale`;
 - `columns[]`, ordered selected column names;
 - `rows[]`, ordered arrays matching `columns[]`;
 - `returned_rows`;
@@ -667,8 +679,18 @@ the configured value cap. Truncated text values are encoded as objects with
 encoded as objects with `type: "blob"`, `bytes`, `preview_hex`, and
 `truncated`.
 
-`share_safe` is required and is always `false` for schema-version-1 SQL
-results. `read_only: true` describes database mutation only. The relational
+Schema-version-2 SQL results add the required `snapshot` object. The last
+coherent relational projection remains readable when its generation is older
+than the observed active Core generation; that case reports `stale: true`.
+`projection_status: "behind"` means catch-up failed after that coherent
+generation was published, not that partially updated rows are visible. The
+canonical empty projection with no active Core generation reports
+`stale: false`; generation-ID fields are omitted when no generation exists.
+Each result binds rows and relational generation metadata to one SQLite read
+transaction; separate invocations may observe different coherent generations.
+
+`share_safe` is required and is always `false` for SQL results. `read_only:
+true` describes database mutation only. The relational
 projection and its stable/internal views are metadata-only: they do not
 contain event bodies, previews, command/result payloads, or transcript text,
 and SQL does not fetch those bodies. Selected metadata can still contain

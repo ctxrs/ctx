@@ -32,8 +32,8 @@ use crate::{
 use super::{
     render::{enforce_json_output_limit, render_show_document, timestamp_json, write_show_value},
     shared::{
-        open_index, resolve_core_event, resolve_lookup_for_output, resolve_session,
-        validate_ctx_id, validate_session_selector,
+        open_index, render_active_generation_race, resolve_core_event, resolve_lookup_for_output,
+        resolve_session, validate_ctx_id, validate_session_selector, ActiveGenerationRaceCommand,
     },
 };
 
@@ -91,6 +91,24 @@ pub(super) fn take_core_presentation_fetch_ids() -> Vec<Uuid> {
 }
 
 pub(crate) fn run_show(
+    args: ShowArgs,
+    data_root: PathBuf,
+    telemetry: &mut ShowTelemetry,
+    local_usage: &mut CliUsage,
+    ui: &mut Ui,
+) -> Result<()> {
+    let json_output = matches!(
+        &args.target,
+        ShowTarget::Event(args) if args.format == OutputFormat::Json
+    ) || matches!(
+        &args.target,
+        ShowTarget::Session(args) if args.format == OutputFormat::Json
+    );
+    let result = run_show_inner(args, data_root, telemetry, local_usage, ui);
+    render_show_error(result, json_output, ui)
+}
+
+fn run_show_inner(
     args: ShowArgs,
     data_root: PathBuf,
     telemetry: &mut ShowTelemetry,
@@ -189,6 +207,10 @@ pub(crate) fn run_show(
             Ok(())
         }
     }
+}
+
+pub(super) fn render_show_error<T>(result: Result<T>, json_output: bool, ui: &mut Ui) -> Result<T> {
+    render_active_generation_race(result, json_output, ActiveGenerationRaceCommand::Show, ui)
 }
 
 fn write_show_document(value: &Value, event_id: Uuid, ui: &mut Ui) -> Result<usize> {

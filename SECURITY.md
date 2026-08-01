@@ -27,6 +27,42 @@ No session text, prompts, or transcripts leave this machine by default.
 When local-only security mode is enabled, these commands also do not use
 network access.
 
+## macOS Release Signing Identity
+
+Official macOS release binaries beginning with ctx 0.25.0 are signed and
+notarized under this identity:
+
+- Developer ID authority:
+  `Developer ID Application: Profound Health Institute LLC (SJSNARH4TG)`
+- Apple Team ID: `SJSNARH4TG`
+
+On macOS, verify an installed official release binary's integrity and Apple
+trust, then inspect its signing identity with:
+
+```bash
+codesign --verify --strict --verbose=4 "$(command -v ctx)"
+spctl --assess --verbose=4 --type install "$(command -v ctx)"
+codesign -d --verbose=4 "$(command -v ctx)" 2>&1 | grep -E '^(Authority|TeamIdentifier)='
+```
+
+The relevant output is:
+
+```text
+Authority=Developer ID Application: Profound Health Institute LLC (SJSNARH4TG)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+TeamIdentifier=SJSNARH4TG
+```
+
+Profound Health Institute LLC is the legacy legal name still attached to ctx
+engineering, inc.'s Apple Developer account. Both names identify the same
+publisher; Team ID `SJSNARH4TG` is the stable identifier to compare. Until
+Apple reflects the current legal name, macOS may show “Profound Health
+Institute LLC” in Login Items or background-activity notices. Source builds and
+package-manager builds are not necessarily the official signed release bytes;
+run the commands against a downloaded official macOS release binary when
+checking one of those installation paths.
+
 ## Reporting Vulnerabilities
 
 Do not publish private prompts, command output, customer data, credentials, raw

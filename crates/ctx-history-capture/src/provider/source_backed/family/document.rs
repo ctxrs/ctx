@@ -47,6 +47,7 @@ impl DocumentLeafFingerprint {
 pub(crate) struct ObservedDocumentLeaf<L> {
     pub(crate) fingerprint: DocumentLeafFingerprint,
     replay_from_frontier: bool,
+    bound_replay_source: Option<SourceKey>,
     pub(crate) provider_leaf: L,
 }
 
@@ -68,6 +69,7 @@ impl<L> ObservedDocumentLeaf<L> {
         Self {
             fingerprint: physical_fingerprint,
             replay_from_frontier,
+            bound_replay_source: None,
             provider_leaf,
         }
     }
@@ -116,11 +118,16 @@ impl CurrentDocumentSources {
         }
     }
     fn contains_canonical(&mut self, source: &SourceKey) -> bool {
+        self.canonical_source(source).is_some()
+    }
+    fn canonical_source(&mut self, source: &SourceKey) -> Option<&SourceKey> {
         #[cfg(test)]
         {
             self.operations.canonical_lookups += 1;
         }
-        self.canonical.contains_key(&source.identity().digest())
+        self.canonical
+            .get(&source.identity().digest())
+            .and_then(|index| self.ordered.get(*index))
     }
     fn insert(&mut self, source: SourceKey) -> bool {
         #[cfg(test)]
@@ -264,6 +271,27 @@ pub(crate) trait ReplacementDocumentTree: Send + Sync + 'static {
             "document adapter opted into independent leaves without deriving an exact source",
         ))
     }
+    /// Derives the current exact descriptor before durable replay admission.
+    ///
+    /// `None` means the descriptor is not independently derivable: replay
+    /// retains the existing parser-revision plus physical-fingerprint
+    /// contract. `Some` additionally binds replay to the exact current source
+    /// descriptor and forces a scan when that descriptor changed. The
+    /// independent policy already promises cheap exact-source derivation, so
+    /// it adds that binding without an additional adapter method.
+    fn durable_replay_source(
+        &self,
+        authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+    ) -> SourceBackedRouteResult<Option<SourceKey>> {
+        match self.leaf_execution_policy() {
+            DocumentLeafExecutionPolicy::Serial => Ok(None),
+            DocumentLeafExecutionPolicy::Independent
+            | DocumentLeafExecutionPolicy::IndependentCapped(_) => {
+                self.independent_leaf_source(authority, leaf).map(Some)
+            }
+        }
+    }
     fn discover_complete(
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>>;
@@ -400,8 +428,9 @@ where
     A: ReplacementDocumentTree,
 {
     let base_sources = source_backed_base_sources(sink, |source| adapter.owns_source(source));
-    let tree = adapter.discover_complete_with_base(&base_sources)?;
+    let mut tree = adapter.discover_complete_with_base(&base_sources)?;
     validate_unique_leaf_fingerprints(&tree.leaves)?;
+    bind_durable_replay_sources(adapter, &mut tree)?;
     let mut replayable = HashMap::new();
     for base in &base_sources {
         if base.parser_revision() != adapter.parser_revision() {
@@ -453,6 +482,24 @@ where
         if current_sources.contains_exact(base.observation().source()) {
             continue;
         }
+        if let Some(replacement) = current_sources.canonical_source(base.observation().source()) {
+            if base
+                .observation()
+                .source()
+                .is_same_lineage_descriptor_replacement(replacement)
+                && inventory.contains(replacement)
+            {
+                // `begin_source` has already staged the replacement under the
+                // canonical source token. The writer atomically removes A's
+                // documents and publishes B after exact-source and complete-
+                // inventory terminal revalidation. This is not a deletion:
+                // the authoritative inventory still contains the lineage.
+                continue;
+            }
+            return Err(document_changed(
+                "complete document tree produced an ambiguous source descriptor transition",
+            ));
+        }
         let deletion = CertifiedSourceDeletion::from_inventory(
             base.observation().source().clone(),
             &inventory,
@@ -463,6 +510,43 @@ where
     }
 
     Ok(ExpectedDocumentRoute::new(tree, certificates, inventory))
+}
+
+fn bind_durable_replay_sources<A>(
+    adapter: &A,
+    tree: &mut CompleteDocumentTree<A::Leaf, A::TreeAuthority>,
+) -> SourceBackedRouteResult<()>
+where
+    A: ReplacementDocumentTree,
+{
+    for observed in &mut tree.leaves {
+        if !observed.replay_from_frontier {
+            continue;
+        }
+        let source = adapter.durable_replay_source(&tree.authority, &observed.provider_leaf)?;
+        if source
+            .as_ref()
+            .is_some_and(|source| !adapter.owns_source(source))
+        {
+            return Err(document_changed(
+                "document adapter derived a replay source outside its route ownership",
+            ));
+        }
+        observed.bound_replay_source = source;
+    }
+    Ok(())
+}
+
+fn exact_replay_for_observed(
+    observed: &ObservedDocumentLeaf<impl Sized>,
+    replayable: &mut HashMap<DocumentLeafFingerprint, CertifiedSource>,
+) -> Option<CertifiedSource> {
+    let base = replayable.remove(&observed.fingerprint)?;
+    match observed.bound_replay_source.as_ref() {
+        Some(current) => base.observation().source().exact_descriptor_eq(current),
+        None => true,
+    }
+    .then_some(base)
 }
 
 fn scan_document_leaves_serial<A>(
@@ -477,10 +561,7 @@ where
     let mut current_sources = CurrentDocumentSources::with_capacity(tree.leaves.len());
     let mut certificates = Vec::with_capacity(tree.leaves.len());
     for observed in &tree.leaves {
-        let replay = observed
-            .replay_from_frontier
-            .then(|| replayable.remove(&observed.fingerprint))
-            .flatten();
+        let replay = exact_replay_for_observed(observed, &mut replayable);
         let certificate = if let Some(base) = replay {
             stage_exact_document_replay(sink, &base)?;
             base
@@ -498,6 +579,15 @@ where
                 ));
             }
             let source = changed.source()?.clone();
+            if observed
+                .bound_replay_source
+                .as_ref()
+                .is_some_and(|expected| !expected.exact_descriptor_eq(&source))
+            {
+                return Err(document_changed(
+                    "document leaf scan derived a different exact replay source",
+                ));
+            }
             if current_sources.contains_canonical(&source) {
                 return Err(document_changed(
                     "complete document tree produced a duplicate logical source",
@@ -552,10 +642,7 @@ where
         .collect::<HashMap<_, _>>();
     let mut jobs = Vec::with_capacity(tree.leaves.len());
     for observed in &tree.leaves {
-        let replay = observed
-            .replay_from_frontier
-            .then(|| replayable.remove(&observed.fingerprint))
-            .flatten();
+        let replay = exact_replay_for_observed(observed, &mut replayable);
         let (source, leaf) = if let Some(base) = replay {
             (
                 base.observation().source().clone(),
@@ -564,8 +651,12 @@ where
                 },
             )
         } else {
-            let source =
-                adapter.independent_leaf_source(&tree.authority, &observed.provider_leaf)?;
+            let source = match observed.bound_replay_source.as_ref() {
+                Some(source) => source.clone(),
+                None => {
+                    adapter.independent_leaf_source(&tree.authority, &observed.provider_leaf)?
+                }
+            };
             let logical_base = (!observed.replay_from_frontier)
                 .then(|| base_by_source.get(&source.identity().digest()).cloned())
                 .flatten()
@@ -846,6 +937,28 @@ where
     adapter
         .revalidate_complete(&expected.tree)
         .is_ok_and(|terminal| terminal == expected.tree.tree_fingerprint)
+        && revalidate_durable_replay_sources(adapter, &expected.tree)
+}
+
+fn revalidate_durable_replay_sources<A>(
+    adapter: &A,
+    tree: &CompleteDocumentTree<A::Leaf, A::TreeAuthority>,
+) -> bool
+where
+    A: ReplacementDocumentTree,
+{
+    tree.leaves.iter().all(|observed| {
+        if !observed.replay_from_frontier {
+            return true;
+        }
+        adapter
+            .durable_replay_source(&tree.authority, &observed.provider_leaf)
+            .is_ok_and(|current| match (&observed.bound_replay_source, current) {
+                (Some(expected), Some(current)) => expected.exact_descriptor_eq(&current),
+                (None, None) => true,
+                _ => false,
+            })
+    })
 }
 
 fn document_changed(detail: impl Into<String>) -> SourceBackedRouteError {
