@@ -2,8 +2,10 @@ use std::sync::atomic::Ordering;
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSourceInventory, CoreRecord, CoreRecordAnnotation,
-    EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceObservation, TypedKey,
+    EventIdentityInput, NativeItemKey, NativeSessionKey, RepositoryBinding, RepositoryEvidence,
+    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
+    RepositoryFileObservationKind, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceFrontier, SourceInventoryObservation, SourceObservation, TypedKey,
 };
 use tantivy::{
     collector::DocSetCollector, indexer::NoMergePolicy, query::AllQuery,

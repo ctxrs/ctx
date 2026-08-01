@@ -425,7 +425,7 @@ fn query_metadata_event_record(encoded: &[u8]) -> Result<EventRecord> {
 fn stored_core_event_record_from_document(
     document: &TantivyDocument,
     fields: Fields,
-    event: EventRecord,
+    mut event: EventRecord,
 ) -> Result<(CoreEventRecord, usize)> {
     note_stored_core_event_record_materialization();
     let encoded_core_record = required_bytes(document, fields.core_record, "core_record")?;
@@ -450,6 +450,15 @@ fn stored_core_event_record_from_document(
     {
         return Err(IndexError::InvalidStoredDocumentField("core_record"));
     }
+
+    let mut touched_files = BTreeSet::new();
+    for observation in &core_record.repository_file_observations {
+        touched_files.insert(observation.relative_path.clone());
+        if let Some(prior_relative_path) = &observation.prior_relative_path {
+            touched_files.insert(prior_relative_path.clone());
+        }
+    }
+    event.touched_files = touched_files.into_iter().collect();
 
     Ok((CoreEventRecord { event, core_record }, stored_core_bytes))
 }

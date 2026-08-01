@@ -103,6 +103,82 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
 }
 
 #[test]
+fn decoded_core_event_reports_searchable_touched_files_deterministically() {
+    let temp = tempdir().unwrap();
+    let source = source("repository-files.jsonl");
+    let mut expected = document(&source, 1, "repository file activity");
+    expected.repository_bindings.push(RepositoryBinding {
+        binding_id: "binding-1".to_owned(),
+        logical_repository_id: "repo-1".to_owned(),
+        checkout_id: None,
+        worktree_id: None,
+        aliases: Vec::new(),
+        git_object_format: None,
+        local_root_authorization: None,
+        evidence: vec![RepositoryEvidence {
+            kind: RepositoryEvidenceKind::FileActivity,
+            confidence: RepositoryEvidenceConfidence::Explicit,
+        }],
+        association_policy_revision: 1,
+    });
+    expected.repository_file_observations = vec![
+        RepositoryFileObservation {
+            repository_binding_id: "binding-1".to_owned(),
+            relative_path: "src/lib.rs".to_owned(),
+            kind: RepositoryFileObservationKind::Modified,
+            prior_relative_path: None,
+        },
+        RepositoryFileObservation {
+            repository_binding_id: "binding-1".to_owned(),
+            relative_path: "src/lib.rs".to_owned(),
+            kind: RepositoryFileObservationKind::Read,
+            prior_relative_path: None,
+        },
+        RepositoryFileObservation {
+            repository_binding_id: "binding-1".to_owned(),
+            relative_path: "src/new.rs".to_owned(),
+            kind: RepositoryFileObservationKind::Renamed,
+            prior_relative_path: Some("src/old.rs".to_owned()),
+        },
+    ];
+    expected.validate_contract().unwrap();
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(expected.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let decoded = index
+        .core_event_by_id(expected.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        decoded.touched_files,
+        vec![
+            "src/lib.rs".to_owned(),
+            "src/new.rs".to_owned(),
+            "src/old.rs".to_owned(),
+        ]
+    );
+    for file in ["SRC/LIB.RS", "src/new.rs", "src/old.rs"] {
+        let matches = index
+            .search_event_candidates_with_filters(
+                "repository:file:activity",
+                &EventSearchFilters {
+                    file: Some(file.to_owned()),
+                    ..EventSearchFilters::default()
+                },
+                10,
+            )
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].event.event_id, expected.event_id);
+    }
+}
+
+#[test]
 fn core_valid_escape_heavy_query_metadata_indexes_without_a_narrower_json_bound() {
     const ESCAPED_FIELD_BYTES: usize = 17 * 1024;
     const NATIVE_ID_BYTES: usize = 60 * 1024;
