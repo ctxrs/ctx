@@ -17,11 +17,11 @@ SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 TANTIVY_FEATURES = (
     "columnar-zstd-compression",
     "fs4",
-    "lz4-compression",
-    "lz4_flex",
     "memmap2",
     "mmap",
     "tempfile",
+    "zstd",
+    "zstd-compression",
 )
 WORKSPACE_PACKAGES = (
     ("ctx", "crates/ctx-cli"),
@@ -31,7 +31,6 @@ WORKSPACE_PACKAGES = (
 )
 EXTERNAL_PACKAGES = (
     ("fs4", "0.1.0"),
-    ("lz4_flex", "0.11.0"),
     ("memmap2", "0.9.0"),
     ("tantivy", "0.26.1"),
     ("tempfile", "3.0.0"),
@@ -95,7 +94,7 @@ license = "MIT"
 repository = "https://github.com/ctxrs/ctx"
 
 [workspace.dependencies]
-tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression", "columnar-zstd-compression"] }
+tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "zstd-compression", "columnar-zstd-compression"] }
 """,
             encoding="utf-8",
         )
@@ -234,14 +233,12 @@ repository = "https://example.invalid/{name}"
             ),
             self.package("ctx-history-relational", "0.26.0"),
             self.package("fs4", "0.1.0", external=True),
-            self.package("lz4_flex", "0.11.0", external=True),
             self.package("memmap2", "0.9.0", external=True),
             self.package(
                 "tantivy",
                 "0.26.1",
                 (
                     "fs4 0.1.0",
-                    "lz4_flex 0.11.0",
                     "memmap2 0.9.0",
                     "tempfile 3.0.0",
                     "zstd 0.13.0",
@@ -405,7 +402,7 @@ repository = "https://example.invalid/{name}"
                 for item in component.get("properties", [])
             )
         ]
-        self.assertEqual(len(cargo_components), 10)
+        self.assertEqual(len(cargo_components), 9)
         self.assertTrue(
             all(component.get("licenses") for component in cargo_components)
         )
@@ -442,7 +439,7 @@ repository = "https://example.invalid/{name}"
             for package in candidate["tantivy"]["dependency_closure"]
         }
         self.assertTrue(
-            {"tantivy", "fs4", "lz4_flex", "memmap2", "tempfile", "zstd"}
+            {"tantivy", "fs4", "memmap2", "tempfile", "zstd"}
             <= closure_names
         )
         self.assertIn("tantivy 0.26.1", self.notices.read_text(encoding="utf-8"))
