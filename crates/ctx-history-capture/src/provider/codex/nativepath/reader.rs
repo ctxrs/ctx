@@ -24,9 +24,9 @@ use super::{
     },
     rows::{
         build_source_backed_event_row, build_source_backed_sparse_output_row,
-        source_backed_display_text, source_backed_output_eligibility, CodexEventRow,
-        CodexRetainedNonMaterialized, CodexSessionRow, CodexSourceBackedDocumentEligibility,
-        CodexSourceBackedRowV0,
+        provider_event_identity, source_backed_display_text, source_backed_output_eligibility,
+        CodexEventRow, CodexRetainedNonMaterialized, CodexSessionRow,
+        CodexSourceBackedDocumentEligibility, CodexSourceBackedRowV0,
     },
     source::{CodexAppendProof, CodexCatalogSource, CodexFileObservation},
 };

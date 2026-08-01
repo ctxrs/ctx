@@ -97,6 +97,20 @@ fn tool_call_with_patch(call_id: &str) -> String {
         .to_string()
 }
 
+fn identity_exec_call(call_id: &str, command: &str) -> String {
+    serde_json::json!({
+        "timestamp": "2026-07-28T12:00:02Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": call_id,
+            "arguments": {"cmd": command}
+        }
+    })
+    .to_string()
+}
+
 fn failed_tool_output(call_id: &str) -> String {
     serde_json::json!({
         "timestamp": "2026-07-28T12:00:03Z",

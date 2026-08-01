@@ -212,8 +212,10 @@ fn ingest_codex_sources_with_options_v0(
         indexer_threads,
         cold_options.scanner_workers,
     )?;
+    let base_event_lookup = writer.base_event_identity_lookup();
     ingest_codex_cold_parallel_v0(
         changed_sources,
+        base_event_lookup,
         writer,
         revalidation,
         timings,
@@ -232,6 +234,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
     counters: &mut CodexSourceBackedCountersV0,
 ) -> CodexSourceBackedResultV0<()> {
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
+    let base_event_lookup = writer.base_event_identity_lookup();
     for (source, source_key, native_session_id) in sources {
         let base = base_sources.get(&source_key).cloned();
         if base
@@ -297,6 +300,10 @@ pub(crate) fn ingest_codex_sources_serial_v0(
         counters.peak_active_scanners = counters.peak_active_scanners.max(1);
         timings.scanner_worker_busy += scanner_started.elapsed();
         let session_id = codex_session_identity(&source_key, &native_session_id)?;
+        let mut event_identity_state = match append_base {
+            Some(_) => CodexEventIdentityStateV0::for_append(base_event_lookup.clone()),
+            None => CodexEventIdentityStateV0::default(),
+        };
         let mut staged_for_source = 0_u64;
         loop {
             let scanner_started = Instant::now();
@@ -324,6 +331,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
                     session_id,
                     owner,
                     row,
+                    &mut event_identity_state,
                     &mut repository_attributor,
                 )?;
                 timings.scanner_worker_busy += conversion_started.elapsed();

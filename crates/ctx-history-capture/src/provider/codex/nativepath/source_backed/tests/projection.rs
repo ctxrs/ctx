@@ -922,13 +922,21 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
         CodexNativeScanner::new_source_backed_v0(catalog_source.clone(), None).unwrap();
     let mut records = Vec::new();
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
+    let mut event_identity_state = CodexEventIdentityStateV0::default();
     while let Some(page) = scanner.next_page().unwrap() {
         let CodexNativeOwnedPage::Core(page) = page;
         let owner = page.owner.unwrap();
         for row in page.source_backed_rows {
             records.push(
-                codex_core_record(&source, session_id, &owner, row, &mut repository_attributor)
-                    .unwrap(),
+                codex_core_record(
+                    &source,
+                    session_id,
+                    &owner,
+                    row,
+                    &mut event_identity_state,
+                    &mut repository_attributor,
+                )
+                .unwrap(),
             );
         }
     }

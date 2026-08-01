@@ -322,6 +322,9 @@ impl CodexNativeScanner {
         };
         let core_row = build_source_backed_sparse_output_row(
             self.raw_ordinal,
+            decoded
+                .as_ref()
+                .and_then(|decoded| provider_event_identity(&decoded.payload)),
             occurred_at,
             result_kind,
             context.as_ref(),

@@ -120,7 +120,6 @@ struct ColdSourcePlanV0 {
     base: Option<CertifiedSource>,
 }
 
-#[derive(Debug)]
 struct ColdSourceJobV0 {
     source_index: usize,
     source: CodexCatalogSource,
@@ -128,6 +127,7 @@ struct ColdSourceJobV0 {
     native_session_id: String,
     session_id: StableEntityId,
     proof: Option<CodexAppendProof>,
+    base_event_lookup: BaseEventIdentityLookup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +232,7 @@ pub(super) fn cold_scanner_worker_count_for_parallelism(
 
 pub(super) fn ingest_codex_cold_parallel_v0(
     sources: Vec<ChangedSourceV0>,
+    base_event_lookup: BaseEventIdentityLookup,
     writer: &mut GenerationWriter,
     revalidation: &mut HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
     timings: &mut CodexSourceBackedPhaseTimingsV0,
@@ -267,6 +268,7 @@ pub(super) fn ingest_codex_cold_parallel_v0(
             native_session_id,
             session_id,
             proof,
+            base_event_lookup: base_event_lookup.clone(),
         });
     }
 
@@ -445,6 +447,12 @@ fn run_cold_scan_lane_v0(
         }
         let mut page_index = 0_u64;
         let mut staged_documents = 0_u64;
+        let mut event_identity_state = match mode {
+            ChangedSourceModeV0::FullGeneration => CodexEventIdentityStateV0::default(),
+            ChangedSourceModeV0::AppendDelta => {
+                CodexEventIdentityStateV0::for_append(job.base_event_lookup.clone())
+            }
+        };
         loop {
             if cancellation.load(AtomicOrdering::Acquire) {
                 return Ok(());
@@ -473,6 +481,7 @@ fn run_cold_scan_lane_v0(
                         job.session_id,
                         owner,
                         row,
+                        &mut event_identity_state,
                         &mut repository_attributor,
                     )?);
                     staged_documents = staged_documents
@@ -674,7 +683,7 @@ fn consume_cold_lanes_v0(
                             "document identity does not match its assigned source",
                         ));
                     }
-                    if record.native_event_id != Some(TypedKey::U64(record.event_sequence))
+                    if record.native_event_id.is_none()
                         || lane_state
                             .last_event_sequence
                             .is_some_and(|last| record.event_sequence <= last)
