@@ -17,7 +17,6 @@ use super::{
     source::session_columns,
 };
 
-const CRUSH_NATIVE_MAX_ROW_BYTES: u64 = 6 * 1024 * 1024;
 const CRUSH_NATIVE_MAX_EVENT_TOUCHES: usize = 3_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

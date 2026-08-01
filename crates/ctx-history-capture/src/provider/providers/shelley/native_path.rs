@@ -17,8 +17,6 @@ pub(crate) mod source_backed;
 const SHELLEY_PREFIX_DOMAIN: &[u8] = b"ctx-shelley-nativepath-prefix-v1\0";
 const SHELLEY_PAGE_MAX_UNITS: usize = 64;
 const SHELLEY_PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
-const SHELLEY_ROW_MAX_BYTES: usize = 3 * 1024 * 1024;
-const SHELLEY_PAGE_FIXED_OVERHEAD: usize = 64 * 1024;
 
 #[derive(Debug)]
 enum ShelleyUnit<T> {

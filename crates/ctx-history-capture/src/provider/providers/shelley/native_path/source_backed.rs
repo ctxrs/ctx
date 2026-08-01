@@ -36,7 +36,8 @@ use super::{
         normalization::{shelley_output_classification, shelley_timestamp},
         relationships::{
             shelley_event_role, shelley_event_type, shelley_logical_record_digest,
-            shelley_message_body, shelley_message_complete_text, shelley_verified_record_values,
+            shelley_message_body, shelley_message_complete_result, shelley_message_complete_text,
+            shelley_verified_record_values,
         },
         source::{
             shelley_conversation_columns, shelley_conversation_select_expressions,
@@ -52,7 +53,7 @@ use super::{
 const SHELLEY_SOURCE_ANCHOR_NAMESPACE: &str = "shelley.exact-cwd-slot";
 const SHELLEY_SOURCE_ANCHOR_KEY: &str = "shelley.db";
 const SHELLEY_SOURCE_SCHEMA_VARIANT: &str = "shelley-exact-cwd-sqlite-v1";
-pub(crate) const SHELLEY_SOURCE_PARSER_REVISION: &str = "shelley-source-backed-v1";
+pub(crate) const SHELLEY_SOURCE_PARSER_REVISION: &str = "shelley-source-backed-v2";
 const SHELLEY_LOGICAL_SESSION_KIND: &str = "shelley-conversation";
 const SHELLEY_NATIVE_SESSION_NAMESPACE: &str = "shelley.conversation";
 const SHELLEY_LOGICAL_EVENT_KIND: &str = "shelley-message";
@@ -79,6 +80,8 @@ pub(crate) enum ShelleySourceBackedError {
     MissingLexicalBody,
     #[error("Shelley source-backed conversation lineage is invalid: {0}")]
     InvalidLineage(String),
+    #[error("Shelley source-backed result shape is invalid: {0}")]
+    InvalidResultShape(String),
 }
 
 pub(crate) type ShelleySourceBackedResult<T> = Result<T, ShelleySourceBackedError>;
@@ -352,7 +355,8 @@ impl ShelleySourceBackedScan {
                         Err(
                             error @ (ShelleySourceBackedError::Projection(_)
                             | ShelleySourceBackedError::MissingLexicalBody
-                            | ShelleySourceBackedError::InvalidLineage(_)),
+                            | ShelleySourceBackedError::InvalidLineage(_)
+                            | ShelleySourceBackedError::InvalidResultShape(_)),
                         ) => {
                             self.hash_record(
                                 rowid,
@@ -695,20 +699,21 @@ fn build_record(
 ) -> ShelleySourceBackedResult<Option<CoreRecord>> {
     let native_body = shelley_message_body(&value.message);
     let event_type = shelley_event_type(&value.message, &native_body);
-    if shelley_output_classification(&value.message)
-        .as_ref()
-        .is_some_and(|classification| {
-            !matches!(
-                classification.outcome,
-                OutputOutcome::Failure | OutputOutcome::Timeout
-            )
-        })
-    {
-        return Ok(None);
-    }
+    let output = shelley_output_classification(&value.message);
     let role = shelley_event_role(&value.message.entry_type);
     let (event_id, native_event_id) = shelley_event_identity(source, &value.message)?;
-    let body = shelley_message_complete_text(&value.message)
+    let result = output
+        .as_ref()
+        .map(|_| {
+            shelley_message_complete_result(&value.message)
+                .map_err(ShelleySourceBackedError::InvalidResultShape)?
+                .ok_or(ShelleySourceBackedError::MissingLexicalBody)
+        })
+        .transpose()?;
+    let body = result
+        .as_ref()
+        .map(|result| result.text.clone())
+        .or_else(|| shelley_message_complete_text(&value.message))
         .unwrap_or_else(|| format!("Shelley {} message", value.message.entry_type));
     if body.trim().is_empty() {
         return Err(ShelleySourceBackedError::MissingLexicalBody);
@@ -741,6 +746,20 @@ fn build_record(
     record.role = role.map(|role| role.as_str().to_owned());
     record.workspace = cwd.clone();
     record.cwd = cwd;
+    if let (Some(classification), Some(result)) = (output, result) {
+        record.content.structured_content = Some(serde_json::json!({
+            "provider_native_tool_result": {
+                "call_ids": result.call_ids,
+                "tool_names": result.tool_names,
+                "outcome": match classification.outcome {
+                    OutputOutcome::Success => "success",
+                    OutputOutcome::Failure => "failure",
+                    OutputOutcome::Timeout => "timeout",
+                    OutputOutcome::Unknown => "unknown",
+                },
+            },
+        }));
+    }
     record.validate_contract().map_err(|error| {
         ShelleySourceBackedError::Capture(CaptureError::InvalidPayload(error.to_string()))
     })?;

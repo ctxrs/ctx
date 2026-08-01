@@ -24,7 +24,8 @@ use thiserror::Error;
 
 use super::super::{
     message::{
-        core_eligible, deepagents_event_type, deepagents_messages_from_blob, DeepAgentsMessage,
+        core_eligible, deepagents_event_type, deepagents_messages_from_blob,
+        deepagents_output_outcome, DeepAgentsMessage,
     },
     record_evidence::deepagents_write_record_digest,
     source::{
@@ -48,7 +49,7 @@ use crate::{
 const DEEPAGENTS_SOURCE_ANCHOR_NAMESPACE: &str = "deepagents.sessions";
 const DEEPAGENTS_SOURCE_ANCHOR_KEY: &str = "selected-sessions-db";
 const DEEPAGENTS_SOURCE_SCHEMA_VARIANT: &str = "deepagents-sqlite-write-messages-v0";
-const DEEPAGENTS_SOURCE_PARSER_REVISION: &str = "deepagents-source-backed-v0";
+const DEEPAGENTS_SOURCE_PARSER_REVISION: &str = "deepagents-source-backed-v1";
 const DEEPAGENTS_NATIVE_SESSION_NAMESPACE: &str = "deepagents.thread";
 const DEEPAGENTS_NATIVE_MESSAGE_NAMESPACE: &str = "deepagents.message";
 const DEEPAGENTS_NATIVE_WRITE_NAMESPACE: &str = "deepagents.write";
@@ -578,7 +579,7 @@ fn deepagents_core_record(
         TypedKey::I64(key.idx),
     ];
     let fallback_item_key = NativeItemKey::composite(DEEPAGENTS_NATIVE_WRITE_NAMESPACE, write_key)?;
-    let native_item_key = match message.message_id.as_deref() {
+    let native_item_key = match bounded_linkage(message.message_id.as_deref()) {
         Some(message_id) => NativeItemKey::native_id(
             DEEPAGENTS_NATIVE_MESSAGE_NAMESPACE,
             TypedKey::utf8(message_id)?,
@@ -630,22 +631,53 @@ fn deepagents_core_record(
     record.role = Some(message.role.as_str().to_owned());
     record.branch = branch.map(str::to_owned);
     record.cwd = cwd.map(str::to_owned);
-    record.content.structured_content = Some(serde_json::json!({
-        "provider_native_message": {
-            "message_type": message.message_type,
-            "message_class": message.message_class,
-            "message_id": message.message_id,
-            "tool_call_id": message.tool_call_id,
-            "status": message.status,
-            "exit_code": message.exit_code,
-            "duration_ms": message.duration_ms,
-            "timed_out": message.timed_out,
-            "is_error": message.is_error,
-            "success": message.success,
-        }
-    }));
+    record.content.structured_content = if message.role == ctx_history_core::EventRole::Tool {
+        let outcome = deepagents_output_outcome(message);
+        let call_id = bounded_linkage(message.tool_call_id.as_deref());
+        Some(serde_json::json!({
+            "provider_native_result": {
+                "call_id": call_id,
+                "linkage_exact": call_id.is_some(),
+                "result_outcome": output_outcome_label(outcome.outcome),
+                "status": bounded_status(message.status.as_deref()),
+                "exit_code": outcome.exit_code,
+                "duration_ms": outcome.duration_ms,
+            }
+        }))
+    } else {
+        Some(serde_json::json!({
+            "provider_native_message": {
+                "message_type": bounded_status(Some(&message.message_type)),
+                "message_class": bounded_status(message.message_class.as_deref()),
+                "message_id": bounded_linkage(message.message_id.as_deref()),
+            }
+        }))
+    };
     record.validate_contract()?;
     Ok(record)
+}
+
+fn bounded_linkage(value: Option<&str>) -> Option<&str> {
+    const MAX_LINKAGE_BYTES: usize = 16 * 1024;
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= MAX_LINKAGE_BYTES)
+}
+
+fn bounded_status(value: Option<&str>) -> Option<&str> {
+    const MAX_STATUS_BYTES: usize = 4 * 1024;
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= MAX_STATUS_BYTES)
+}
+
+fn output_outcome_label(outcome: crate::OutputOutcome) -> &'static str {
+    match outcome {
+        crate::OutputOutcome::Success => "success",
+        crate::OutputOutcome::Failure => "failure",
+        crate::OutputOutcome::Timeout => "timeout",
+        crate::OutputOutcome::Unknown => "unknown",
+    }
 }
 
 fn digest_bytes(digest: &crate::record_evidence::RecordDigest) -> Option<[u8; 32]> {

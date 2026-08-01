@@ -49,7 +49,7 @@ const OPENHANDS_SOURCE_SCHEMA_VARIANT: &str = "openhands-v1-conversation-tree-v1
 const OPENHANDS_SOURCE_REVISION_KIND: &str = "openhands-v1-conversation-leaves-v2";
 const OPENHANDS_INVENTORY_AUTHORITY_NAMESPACE: &str = "openhands.v1-selected-tree";
 const OPENHANDS_INVENTORY_REVISION_KIND: &str = "openhands-v1-event-file-inventory-v2";
-const OPENHANDS_PARSER_REVISION: &str = "openhands-source-backed-v2";
+const OPENHANDS_PARSER_REVISION: &str = "openhands-source-backed-v3";
 const OPENHANDS_CONVERSATION_CONTENT_DOMAIN: &[u8] = b"ctx.openhands.conversation-content.v1\0";
 const OPENHANDS_DISCOVERY_MAX_DEPTH: usize = 16;
 const OPENHANDS_DISCOVERY_MAX_ENTRIES: usize = 16_384;
@@ -543,6 +543,14 @@ pub(crate) fn project_leaf_job(
             record.native_event_id = Some(TypedKey::utf8(decoded.event_id())?);
             record.occurred_at_unix_ms = Some(decoded.timestamp().timestamp_millis());
             record.role = Some(decoded.role().as_str().to_owned());
+            if matches!(
+                decoded.event_type(),
+                ctx_history_core::EventType::ToolOutput
+                    | ctx_history_core::EventType::CommandOutput
+                    | ctx_history_core::EventType::FileTouched
+            ) {
+                record.content.structured_content = Some(openhands_output_linkage(&decoded)?);
+            }
             record.validate_contract().map_err(core_contract)?;
             Ok::<CoreRecord, OpenHandsSourceBackedErrorV2>(record)
         })
@@ -558,30 +566,82 @@ pub(crate) fn project_leaf_job(
 }
 
 fn lexical_body(decoded: &OpenHandsDecodedEvent) -> Option<String> {
-    let event_type = decoded.event_type();
     let text = if matches!(
-        event_type,
+        decoded.event_type(),
         ctx_history_core::EventType::ToolOutput
             | ctx_history_core::EventType::CommandOutput
             | ctx_history_core::EventType::FileTouched
     ) {
-        let outcome = openhands_output_outcome(decoded);
-        if !matches!(outcome, OutputOutcome::Failure | OutputOutcome::Timeout) {
-            return None;
-        }
-        if decoded.text().trim().is_empty() {
-            if outcome == OutputOutcome::Timeout {
-                "OpenHands command timed out".to_owned()
-            } else {
-                "OpenHands command failed".to_owned()
-            }
-        } else {
-            decoded.text().to_owned()
-        }
+        decoded.text().to_owned()
     } else {
         decoded.text().to_owned()
     };
     (!text.trim().is_empty()).then_some(text)
+}
+
+fn openhands_output_linkage(
+    decoded: &OpenHandsDecodedEvent,
+) -> OpenHandsSourceBackedResultV2<serde_json::Value> {
+    let value = decoded.value();
+    let observation = value
+        .get("observation")
+        .and_then(serde_json::Value::as_object);
+    let unique_text = |fields: &[&str]| -> OpenHandsSourceBackedResultV2<Option<String>> {
+        let mut selected = None;
+        for field in fields {
+            let candidate = value
+                .get(*field)
+                .or_else(|| observation.and_then(|object| object.get(*field)))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty());
+            let Some(candidate) = candidate else {
+                continue;
+            };
+            if candidate.len() > 16 * 1024 {
+                return Err(OpenHandsSourceBackedErrorV2::DecodeFailed(format!(
+                    "OpenHands {field} exceeds the bounded linkage limit"
+                )));
+            }
+            if selected
+                .as_deref()
+                .is_some_and(|existing| existing != candidate)
+            {
+                return Err(OpenHandsSourceBackedErrorV2::DecodeFailed(format!(
+                    "OpenHands result exposes conflicting {field} linkage"
+                )));
+            }
+            selected = Some(candidate.to_owned());
+        }
+        Ok(selected)
+    };
+    let outcome = match openhands_output_outcome(decoded) {
+        OutputOutcome::Success => "success",
+        OutputOutcome::Failure => "failure",
+        OutputOutcome::Timeout => "timeout",
+        OutputOutcome::Unknown => "unknown",
+    };
+    let observation_kind = observation
+        .and_then(|object| object.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned);
+    if observation_kind
+        .as_ref()
+        .is_some_and(|value| value.len() > 16 * 1024)
+    {
+        return Err(OpenHandsSourceBackedErrorV2::DecodeFailed(
+            "OpenHands observation kind exceeds the bounded linkage limit".to_owned(),
+        ));
+    }
+    let tool_name = unique_text(&["tool_name", "name"])?.or(observation_kind);
+    Ok(serde_json::json!({
+        "provider_native_tool_result": {
+            "call_id": unique_text(&["tool_call_id", "call_id"] )?,
+            "action_id": unique_text(&["action_id"] )?,
+            "tool_name": tool_name,
+            "outcome": outcome,
+        }
+    }))
 }
 
 fn openhands_output_outcome(decoded: &OpenHandsDecodedEvent) -> OutputOutcome {

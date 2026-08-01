@@ -36,9 +36,9 @@ use crate::{
             visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
         },
         normalization::{
-            provider_block_text, provider_message_id, provider_output_event_is_failure,
-            provider_result_outcome_evidence, provider_role_from_message, provider_string_field,
-            provider_timestamp_from_fields,
+            provider_block_text, provider_explicit_result_value_text, provider_message_id,
+            provider_output_event_is_failure, provider_result_outcome_evidence,
+            provider_role_from_message, provider_string_field, provider_timestamp_from_fields,
         },
         source_backed::{
             family::document::{
@@ -63,11 +63,10 @@ const LOGICAL_SESSION_KIND: &str = "rovodev-session";
 const LOGICAL_EVENT_KIND: &str = "rovodev-event";
 const SOURCE_SCHEMA_VARIANT: &str = "rovodev-session-json-tree-v1";
 const SOURCE_REVISION_KIND: &str = "rovodev-session-tree-revision-v1";
-const PARSER_REVISION: &str = "rovodev-source-backed-v1";
+const PARSER_REVISION: &str = "rovodev-source-backed-v2";
 const RELATIVE_CONTEXT_FILE: &str = "session_context.json";
 const MESSAGE_OBJECT_KIND: &str = "message_history";
 const FILE_HASH_BUFFER_BYTES: usize = 64 * 1024;
-const SOURCE_BACKED_MAX_RECORD_BYTES: usize = 6 * 1024 * 1024;
 const SOURCE_BACKED_MAX_JSON_DEPTH: usize = 128;
 const SOURCE_BACKED_MAX_COLLECTION_ELEMENTS: usize = 65_536;
 const SOURCE_BACKED_MAX_FAILURE_BYTES: usize = 4 * 1024;

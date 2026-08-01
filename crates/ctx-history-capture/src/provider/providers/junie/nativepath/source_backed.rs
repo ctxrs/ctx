@@ -37,7 +37,7 @@ const NATIVE_EVENT_POSITION_KIND: &str = "junie.normalized-event-index";
 const LOGICAL_SESSION_KIND: &str = "junie-session";
 const LOGICAL_EVENT_KIND: &str = "junie-event";
 const SOURCE_SCHEMA_VARIANT: &str = "junie-session-events-v2";
-const PARSER_REVISION: &str = "junie-source-backed-v3";
+const PARSER_REVISION: &str = "junie-source-backed-v4";
 const METADATA_TEXT_MAX_CHARS: usize = 2_048;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,7 +277,7 @@ fn core_record(
         })
     } else {
         Some(serde_json::json!({
-            "details": row.body,
+            "provider_native_event": row.body,
             "file_path": row.file_change.map(|change| change.path),
         }))
     };

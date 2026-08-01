@@ -1,6 +1,17 @@
 use serde_json::Value;
 
-use crate::provider::normalization::provider_value_text;
+use crate::provider::normalization::{provider_normalized_result_value, provider_value_text};
+
+/// Returns complete content from Firebender's native tool-result field.
+///
+/// Tool results use the direct message `content` field. Other output-shaped
+/// descendants are deliberately ignored so malformed wrappers cannot be
+/// promoted into selected Core content.
+pub(crate) fn firebender_result_content(message: &Value) -> Option<String> {
+    let content = message.get("content")?;
+    let body = provider_normalized_result_value(content);
+    (!body.trim().is_empty()).then_some(body)
+}
 
 pub(crate) fn firebender_message_text(message: &Value) -> Option<String> {
     let mut parts = Vec::new();

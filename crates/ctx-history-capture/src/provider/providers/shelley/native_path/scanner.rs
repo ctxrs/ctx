@@ -152,28 +152,12 @@ fn project_message_candidates(
 
     let message_rowids = candidates
         .iter()
-        .filter(|candidate| candidate.retained_bytes <= SHELLEY_ROW_MAX_BYTES)
         .map(|candidate| candidate.rowid)
         .collect::<Vec<_>>();
     let mut message_values =
         query_row_values_set(conn, "messages", "m", message_select, &message_rowids, true)?;
     let mut prepared = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        if candidate.retained_bytes > SHELLEY_ROW_MAX_BYTES {
-            let reason = format!(
-                "Shelley message row {} exceeds the source-backed row byte limit",
-                candidate.rowid
-            );
-            prepared.push(PreparedMessage::Complete((
-                ShelleyUnit::Rejected {
-                    rowid: candidate.rowid,
-                    retained_bytes: SHELLEY_PAGE_FIXED_OVERHEAD.min(SHELLEY_ROW_MAX_BYTES),
-                    reason: reason.clone(),
-                },
-                rejected_row_digest(b'm', candidate.rowid, candidate.retained_bytes, &reason),
-            )));
-            continue;
-        }
         let values = message_values
             .remove(&candidate.rowid)
             .ok_or(CaptureError::SourceChangedDuringCapture)?;
@@ -209,9 +193,7 @@ fn project_message_candidates(
     let conversation_rowids = conversation_candidates
         .values()
         .filter_map(|candidates| match candidates.as_slice() {
-            [candidate] if candidate.retained_bytes <= SHELLEY_ROW_MAX_BYTES => {
-                Some(candidate.rowid)
-            }
+            [candidate] => Some(candidate.rowid),
             _ => None,
         })
         .collect::<BTreeSet<_>>()
@@ -269,29 +251,6 @@ fn project_message_candidates(
             )));
             continue;
         };
-        if parent_candidate.retained_bytes > SHELLEY_ROW_MAX_BYTES {
-            let reason = format!(
-                "Shelley message {} parent conversation exceeds the source-backed row byte limit",
-                message.message_id
-            );
-            let parent_digest = rejected_row_digest(
-                b'p',
-                parent_candidate.rowid,
-                parent_candidate.retained_bytes,
-                &reason,
-            );
-            let row_digest =
-                values_row_digest(b'm', candidate.rowid, &values, Some(&parent_digest));
-            units.push(PreparedUnit::Complete((
-                ShelleyUnit::Rejected {
-                    rowid: candidate.rowid,
-                    retained_bytes: candidate.retained_bytes.saturating_add(256),
-                    reason,
-                },
-                row_digest,
-            )));
-            continue;
-        }
         let parent_values = conversation_values
             .get(&parent_candidate.rowid)
             .ok_or(CaptureError::SourceChangedDuringCapture)?;

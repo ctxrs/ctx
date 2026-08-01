@@ -28,7 +28,7 @@ use super::{
         CrushCandidate,
     },
     read_native_schema, CrushLoadedRow, CrushNativeFrontier, CrushNativeSchema,
-    CRUSH_NATIVE_MAX_EVENT_TOUCHES, CRUSH_NATIVE_MAX_ROW_BYTES,
+    CRUSH_NATIVE_MAX_EVENT_TOUCHES,
 };
 use crate::{
     common::io::ProviderSourceRoot,
@@ -47,10 +47,7 @@ use crate::{
 
 use super::super::{
     capture::message_record_digest_bytes,
-    projection::{
-        crush_normalized_result_content, project_message, CrushMessageProjection,
-        CrushRecordProjection, CrushSessionRow,
-    },
+    projection::{project_message, CrushMessageProjection, CrushRecordProjection, CrushSessionRow},
     CRUSH_CAPTURE_REVISION, CRUSH_POLICY_REVISION,
 };
 
@@ -65,7 +62,7 @@ pub(crate) const CRUSH_DISCOVERY_REVISION: &str = "crush-project-inventory-sourc
 pub(crate) const CRUSH_SOURCE_SCHEMA_VARIANT: &str = "crush-project-sqlite-v0";
 const CRUSH_SOURCE_REVISION_KIND: &str = "crush-sqlite-snapshot-v1";
 pub(crate) const CRUSH_FRONTIER_KIND: &str = "crush-sqlite-exact-snapshot-v0";
-pub(crate) const CRUSH_PARSER_REVISION: &str = "crush-sqlite-source-backed-v0";
+pub(crate) const CRUSH_PARSER_REVISION: &str = "crush-sqlite-source-backed-v1";
 const CRUSH_NATIVE_SESSION_NAMESPACE: &str = "crush.session";
 const CRUSH_NATIVE_MESSAGE_NAMESPACE: &str = "crush.message";
 const CRUSH_LOGICAL_SESSION_KIND: &str = "crush-session";
@@ -486,22 +483,12 @@ fn scan_source_in_snapshot(
             batch_bytes = batch_bytes.saturating_add(candidate.observed_bytes);
         }
         let candidates = &observed[..batch_len];
-        let admissible = candidates
-            .iter()
-            .copied()
-            .filter(|candidate| candidate.observed_bytes <= CRUSH_NATIVE_MAX_ROW_BYTES)
-            .collect::<Vec<_>>();
-        let mut loaded = load_message_batch(source.connection()?, &source.schema, &admissible)?;
+        let mut loaded = load_message_batch(source.connection()?, &source.schema, candidates)?;
 
         for candidate in candidates {
             frontier.after_rowid = Some(candidate.rowid);
             counts.complete_records = checked_add(counts.complete_records, 1)?;
             counts.certified_bytes = checked_add(counts.certified_bytes, candidate.observed_bytes)?;
-            if candidate.observed_bytes > CRUSH_NATIVE_MAX_ROW_BYTES {
-                counts.rejected_records = checked_add(counts.rejected_records, 1)?;
-                hash_rejected_candidate(&mut digest, candidate, b"oversized");
-                continue;
-            }
             let row = loaded
                 .remove(&candidate.rowid)
                 .ok_or(CaptureError::SourceChangedDuringCapture)?;
@@ -594,32 +581,46 @@ fn core_record(
     record.native_event_id = Some(TypedKey::utf8(row.id.clone())?);
     record.occurred_at_unix_ms = event.occurred_at_unix_ms;
     record.role = event.role.map(|role| role.as_str().to_owned());
-    record.content.structured_content = Some(json!({
-        "native_message": {
-            "rowid": row.rowid,
-            "id": row.id,
-            "session_id": row.session_id,
-            "role": row.role,
-            "parts": projection.raw_parts,
-            "created_at_unix_ms": row.created_at,
-            "updated_at_unix_ms": row.updated_at,
-            "provider": row.provider,
-            "model": row.model,
-            "is_summary_message": row.is_summary_message,
-        },
-        "native_session": {
-            "id": session.id,
-            "parent_session_id": session.parent_session_id,
-            "title": session.title,
-            "created_at_unix_ms": session.created_at,
-            "updated_at_unix_ms": session.updated_at,
-            "prompt_tokens": session.prompt_tokens,
-            "completion_tokens": session.completion_tokens,
-            "cost": session.cost,
-            "summary_message_id": session.summary_message_id,
-        },
-        "file_touches": touched_files,
-    }));
+    record.content.structured_content = if let Some(output) = projection.output.as_ref() {
+        Some(json!({
+            "provider_native_result": {
+                "call_id": output.call_id,
+                "tool_name": output.tool_name,
+                "linkage_exact": output.linkage_exact,
+                "result_outcome": output_outcome_label(output.outcome.outcome),
+                "exit_code": output.outcome.exit_code,
+                "duration_ms": output.outcome.duration_ms,
+            },
+            "file_touches": touched_files,
+        }))
+    } else {
+        Some(json!({
+            "native_message": {
+                "rowid": row.rowid,
+                "id": row.id,
+                "session_id": row.session_id,
+                "role": row.role,
+                "parts": projection.raw_parts,
+                "created_at_unix_ms": row.created_at,
+                "updated_at_unix_ms": row.updated_at,
+                "provider": row.provider,
+                "model": row.model,
+                "is_summary_message": row.is_summary_message,
+            },
+            "native_session": {
+                "id": session.id,
+                "parent_session_id": session.parent_session_id,
+                "title": session.title,
+                "created_at_unix_ms": session.created_at,
+                "updated_at_unix_ms": session.updated_at,
+                "prompt_tokens": session.prompt_tokens,
+                "completion_tokens": session.completion_tokens,
+                "cost": session.cost,
+                "summary_message_id": session.summary_message_id,
+            },
+            "file_touches": touched_files,
+        }))
+    };
     record.validate_contract()?;
     Ok(record)
 }
@@ -628,15 +629,19 @@ fn policy_selected_body(
     row: &super::super::projection::CrushMessageRow,
     projection: &CrushMessageProjection,
 ) -> String {
-    if projection.output.is_some() {
-        if let Some(body) = crush_normalized_result_content(&projection.raw_parts) {
-            return body;
-        }
-    }
     projection
         .complete_text
         .clone()
         .unwrap_or_else(|| row.parts.clone())
+}
+
+fn output_outcome_label(outcome: crate::OutputOutcome) -> &'static str {
+    match outcome {
+        crate::OutputOutcome::Success => "success",
+        crate::OutputOutcome::Failure => "failure",
+        crate::OutputOutcome::Timeout => "timeout",
+        crate::OutputOutcome::Unknown => "unknown",
+    }
 }
 
 fn touched_paths(projection: &CrushMessageProjection) -> CrushSourceBackedResultV0<Vec<String>> {

@@ -5,7 +5,9 @@ use super::message::{
     core_eligible, deepagents_decode_msgpack, deepagents_event_type,
     deepagents_messages_from_msgpack_value, DeepAgentsMessage,
 };
+use super::source::deepagents_write_candidate_page;
 use crate::CaptureError;
+use rusqlite::Connection;
 
 fn message(role: &str, text: &str, status: Option<&str>) -> MsgpackValue {
     let mut fields = vec![
@@ -19,7 +21,7 @@ fn message(role: &str, text: &str, status: Option<&str>) -> MsgpackValue {
         ),
         (
             MsgpackValue::String("id".into()),
-            MsgpackValue::String(format!("{role}-{text}").into()),
+            MsgpackValue::String(format!("{role}-id").into()),
         ),
     ];
     if let Some(status) = status {
@@ -68,7 +70,7 @@ fn source_backed_eligibility_keeps_provider_event_classification() {
     assert_eq!(deepagents_event_type(&user), EventType::Message);
 
     let successful_tool = decoded_message(message("tool", "success output", Some("success")));
-    assert!(!core_eligible(&successful_tool));
+    assert!(core_eligible(&successful_tool));
     assert_eq!(
         deepagents_event_type(&successful_tool),
         EventType::ToolOutput
@@ -84,4 +86,63 @@ fn source_backed_eligibility_keeps_provider_event_classification() {
         deepagents_event_type(&timed_out_tool),
         EventType::ToolOutput
     );
+}
+
+#[test]
+fn duplicate_projected_msgpack_keys_are_rejected() {
+    let duplicate_content = MsgpackValue::Map(vec![
+        (
+            MsgpackValue::String("type".into()),
+            MsgpackValue::String("tool".into()),
+        ),
+        (
+            MsgpackValue::String("content".into()),
+            MsgpackValue::String("first".into()),
+        ),
+        (
+            MsgpackValue::String("content".into()),
+            MsgpackValue::String("second".into()),
+        ),
+    ]);
+    let decoded = deepagents_messages_from_msgpack_value(&duplicate_content);
+    assert!(decoded.messages.is_empty());
+    assert_eq!(decoded.rejected_entries, 1);
+}
+
+#[test]
+fn write_candidate_larger_than_native_page_target_is_hydrated() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "create table writes (
+                thread_id text not null,
+                checkpoint_ns text not null,
+                checkpoint_id text not null,
+                task_id text not null,
+                idx integer not null,
+                channel text not null,
+                type text,
+                value blob not null
+            );",
+        )
+        .unwrap();
+    let body = format!(
+        "deepagents-large-head-{}-deepagents-large-tail",
+        "x".repeat(8 * 1024 * 1024)
+    );
+    let payload = encoded(&message("tool", &body, Some("success")));
+    assert!(payload.len() > 8 * 1024 * 1024);
+    connection
+        .execute(
+            "insert into writes (
+                thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value
+             ) values ('thread', '', 'checkpoint', 'task', 0, 'messages', 'msgpack', ?1)",
+            [&payload],
+        )
+        .unwrap();
+    let candidates = deepagents_write_candidate_page(&connection, None, 8).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].key.is_some());
+    assert!(candidates[0].rejection_reason.is_none());
+    assert_eq!(candidates[0].value.as_deref(), Some(payload.as_slice()));
 }

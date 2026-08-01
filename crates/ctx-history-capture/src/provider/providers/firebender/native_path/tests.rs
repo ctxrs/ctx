@@ -1,5 +1,4 @@
-use ctx_history_core::SourceAnchor;
-use ctx_pro_host_protocol::{CoreRecordPage, CoreSourceState, MaterializeCoreRecordPageRequest};
+use ctx_history_core::{EventType, SourceAnchor};
 use serde_json::json;
 
 use super::{
@@ -34,7 +33,7 @@ fn direct_core_projection_is_complete_and_self_contained() {
 }
 
 #[test]
-fn serialized_core_and_pro_records_do_not_disclose_firebender_database_path() {
+fn serialized_current_core_record_does_not_disclose_firebender_database_path() {
     let physical_path = "/private/home/alice/secret-project/.idea/firebender/chat_history.db";
     let (_, source) = firebender_database_path_and_source(physical_path.as_ref()).unwrap();
     assert_eq!(
@@ -64,30 +63,78 @@ fn serialized_core_and_pro_records_do_not_disclose_firebender_database_path() {
         .unwrap();
     let core_wire = serde_json::to_string(&record).unwrap();
 
-    let page = CoreRecordPage::new(
-        "00".repeat(32),
-        "11".repeat(32),
-        CoreSourceState {
-            source,
-            source_revision_sha256: "22".repeat(32),
-            event_count: 1,
-        },
-        0,
-        0,
-        true,
-        vec![record],
-    )
-    .unwrap();
-    let pro_wire = serde_json::to_string(&MaterializeCoreRecordPageRequest { page }).unwrap();
+    let stored_wire = String::from_utf8(record.encode_stored().unwrap()).unwrap();
     let reversible_path_hex = physical_path
         .as_bytes()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
 
-    for serialized in [&core_wire, &pro_wire] {
+    for serialized in [&core_wire, &stored_wire] {
         assert!(!serialized.contains(physical_path));
         assert!(!serialized.contains(&reversible_path_hex));
         assert!(!serialized.contains("provider-path-v1"));
     }
+}
+
+#[test]
+fn tool_results_keep_complete_success_failure_and_unknown_content_once() {
+    let (_, source) = firebender_database_path_and_source(
+        "/tmp/firebender-result-completeness/chat_history.db".as_ref(),
+    )
+    .unwrap();
+    let row = FirebenderRow {
+        rowid: 7,
+        id: "session-results".to_owned(),
+        name: "results".to_owned(),
+        created_at: 1_700_000_000_000,
+        updated_at: 1_700_000_000_001,
+        messages_json: "[]".to_owned(),
+        metadata_json: "{}".to_owned(),
+        messages: Vec::new(),
+    };
+    let session_id = firebender_session_id(&source, &row.id).unwrap();
+    for (index, (status, body, outcome)) in [
+        (Some("completed"), "complete success body", "success"),
+        (Some("failed"), "complete failure body", "failure"),
+        (None, "complete unknown body", "unknown"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let message = json!({
+            "id": format!("result-{index}"),
+            "role": "tool",
+            "tool_call_id": format!("call-{index}"),
+            "name": "shell",
+            "content": body,
+            "status": status,
+        });
+        let record = firebender_core_record(&source, session_id, None, &row, index, &message)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.event_type, EventType::ToolOutput.as_str());
+        assert_eq!(record.content.meaningful_text(), body);
+        let linkage = record
+            .content
+            .structured_content
+            .as_ref()
+            .unwrap()
+            .get("provider_native_result")
+            .unwrap();
+        assert_eq!(linkage["result_outcome"], outcome);
+        assert_eq!(linkage["call_id"], format!("call-{index}"));
+        assert!(!linkage.to_string().contains(body));
+    }
+
+    let status_only = json!({
+        "id": "status-only",
+        "role": "tool",
+        "status": "failed",
+    });
+    assert!(
+        firebender_core_record(&source, session_id, None, &row, 4, &status_only)
+            .unwrap()
+            .is_none()
+    );
 }

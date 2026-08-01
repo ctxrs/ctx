@@ -44,6 +44,7 @@ pub(super) struct WarpDecodedOutput {
     pub(super) call_id: Option<String>,
     pub(super) tool_name: &'static str,
     pub(super) outcome: OutputOutcome,
+    pub(super) body: String,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -137,7 +138,7 @@ fn decode_warp_native_message(
     let message_id = message_id
         .map(warp_text_owned)
         .transpose()?
-        .filter(|value| !value.is_empty());
+        .and_then(bounded_linkage_owned);
     let Some((arm, payload)) = selected_arm else {
         return Ok(WarpDecodedMessage {
             message_ordinal,
@@ -162,15 +163,8 @@ fn decode_warp_native_message(
         arm,
         WarpMessageArm::ToolResult | WarpMessageArm::DebugOutput
     ) {
-        let decoded_payload = decode_excluded_output(arm, payload, counters)?;
-        let needs_metadata = matches!(
-            &decoded_payload,
-            WarpDecodedMessagePayload::Output(output)
-                if matches!(
-                    output.outcome,
-                    OutputOutcome::Failure | OutputOutcome::Timeout
-                )
-        );
+        let decoded_payload = decode_output(arm, payload, counters)?;
+        let needs_metadata = matches!(&decoded_payload, WarpDecodedMessagePayload::Output(_));
         let (request_id, occurred_at) = if needs_metadata {
             decode_output_metadata(request_id, timestamp, counters)
         } else {
@@ -189,7 +183,7 @@ fn decode_warp_native_message(
     let request_id = request_id
         .map(warp_text_owned)
         .transpose()?
-        .filter(|value| !value.is_empty());
+        .and_then(bounded_linkage_owned);
     let occurred_at = timestamp.map(decode_timestamp).transpose()?.flatten();
     let (event_type, role, kind, body, tool_call) = match arm {
         WarpMessageArm::UserQuery => (
@@ -274,7 +268,7 @@ fn decode_output_metadata(
     let request_id = request_id
         .map(warp_text_owned)
         .transpose()
-        .map(|value| value.filter(|value| !value.is_empty()));
+        .map(|value| value.and_then(bounded_linkage_owned));
     let occurred_at = timestamp
         .map(decode_timestamp)
         .transpose()
@@ -291,7 +285,7 @@ fn decode_output_metadata(
     (request_id.unwrap_or(None), occurred_at.unwrap_or(None))
 }
 
-fn decode_excluded_output(
+fn decode_output(
     arm: WarpMessageArm,
     payload: &[u8],
     counters: &mut WarpDecodeCounters,
@@ -340,23 +334,33 @@ fn decode_excluded_output(
             counters.native_results_unknown = counters.native_results_unknown.saturating_add(1);
         }
     }
-    let needs_call_id = matches!(
-        classification.outcome,
-        OutputOutcome::Failure | OutputOutcome::Timeout
-    );
-    let call_id = if needs_call_id {
-        classification
-            .call_id
-            .map(warp_text_owned)
-            .transpose()
-            .map(|value| value.filter(|value| !value.is_empty()))
-    } else {
-        Ok(None)
+    let body = match classification.body {
+        WarpClassifiedBody::Bytes(Some(body)) => match warp_text_owned(body) {
+            Ok(body) if !body.trim().is_empty() => body,
+            Ok(_) | Err(_) => {
+                counters.malformed_output_records =
+                    counters.malformed_output_records.saturating_add(1);
+                return Ok(WarpDecodedMessagePayload::Excluded);
+            }
+        },
+        WarpClassifiedBody::Bytes(None) | WarpClassifiedBody::Malformed => {
+            counters.malformed_output_records = counters.malformed_output_records.saturating_add(1);
+            return Ok(WarpDecodedMessagePayload::Excluded);
+        }
     };
+    let call_id = classification
+        .call_id
+        .map(warp_text_owned)
+        .transpose()
+        .map(|value| value.and_then(bounded_linkage_owned));
+    if call_id.is_err() {
+        counters.malformed_output_records = counters.malformed_output_records.saturating_add(1);
+    }
     Ok(WarpDecodedMessagePayload::Output(WarpDecodedOutput {
         call_id: call_id.unwrap_or(None),
         tool_name: classification.tool_name,
         outcome: classification.outcome,
+        body,
     }))
 }
 
@@ -442,10 +446,13 @@ fn classify_run_shell_result(data: &[u8]) -> Result<(OutputOutcome, WarpClassifi
             WarpClassifiedBody::Bytes(deprecated_output),
         ));
     };
-    let body = if matches!(field, 4 | 5) {
-        classified_nested_text(payload, 1)
-    } else {
-        WarpClassifiedBody::Bytes(None)
+    let body = match field {
+        4 | 5 => classified_nested_text(payload, 1),
+        6 => match classified_nested_text(payload, 1) {
+            WarpClassifiedBody::Bytes(None) => WarpClassifiedBody::Bytes(deprecated_output),
+            body => body,
+        },
+        _ => WarpClassifiedBody::Bytes(None),
     };
     let outcome = match field {
         5 => OutputOutcome::Success,
@@ -592,4 +599,113 @@ fn last_length_delimited_field(data: &[u8]) -> Result<Option<(u32, &[u8])>> {
 
 fn warp_text_owned(data: &[u8]) -> Result<String> {
     super::super::wire::warp_wire_text(data).map(str::to_owned)
+}
+
+fn bounded_linkage_owned(value: String) -> Option<String> {
+    const MAX_LINKAGE_BYTES: usize = 16 * 1024;
+    let value = value.trim();
+    (!value.is_empty() && value.len() <= MAX_LINKAGE_BYTES).then(|| value.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn textual_success_failure_and_unknown_results_are_complete() {
+        for (tool_result, expected_outcome, expected_body) in [
+            (
+                shell_result(Some((5, nested_text("shell success"))), None),
+                OutputOutcome::Success,
+                "shell success",
+            ),
+            (
+                shell_result(Some((6, nested_text("shell failure"))), None),
+                OutputOutcome::Failure,
+                "shell failure",
+            ),
+            (
+                shell_result(None, Some(b"shell unknown")),
+                OutputOutcome::Unknown,
+                "shell unknown",
+            ),
+        ] {
+            let decoded = decode_warp_native_task(&task_with_tool_result(tool_result)).unwrap();
+            let WarpDecodedMessagePayload::Output(output) = &decoded.messages[0].payload else {
+                panic!("textual Warp result was not retained");
+            };
+            assert_eq!(output.outcome, expected_outcome);
+            assert_eq!(output.body, expected_body);
+            assert_eq!(output.call_id.as_deref(), Some("call-1"));
+        }
+    }
+
+    #[test]
+    fn binary_and_status_only_results_remain_unsupported() {
+        let binary = shell_result(None, Some(&[0xff, 0xfe]));
+        let status_only = shell_result(Some((6, Vec::new())), None);
+        for tool_result in [binary, status_only] {
+            let decoded = decode_warp_native_task(&task_with_tool_result(tool_result)).unwrap();
+            assert!(matches!(
+                decoded.messages[0].payload,
+                WarpDecodedMessagePayload::Excluded
+            ));
+        }
+    }
+
+    #[test]
+    fn textual_result_larger_than_page_target_is_not_truncated() {
+        let body = format!(
+            "warp-large-head-{}-warp-large-tail",
+            "x".repeat(8 * 1024 * 1024)
+        );
+        let tool_result = shell_result(Some((5, nested_text(&body))), None);
+        let decoded = decode_warp_native_task(&task_with_tool_result(tool_result)).unwrap();
+        let WarpDecodedMessagePayload::Output(output) = &decoded.messages[0].payload else {
+            panic!("large textual Warp result was not retained");
+        };
+        assert_eq!(output.body, body);
+    }
+
+    fn task_with_tool_result(tool_result: Vec<u8>) -> Vec<u8> {
+        let mut message = Vec::new();
+        push_length_delimited(&mut message, 5, &tool_result);
+        let mut task = Vec::new();
+        push_length_delimited(&mut task, 5, &message);
+        task
+    }
+
+    fn shell_result(terminal: Option<(u32, Vec<u8>)>, deprecated: Option<&[u8]>) -> Vec<u8> {
+        let mut shell = Vec::new();
+        if let Some(deprecated) = deprecated {
+            push_length_delimited(&mut shell, 1, deprecated);
+        }
+        if let Some((field, payload)) = terminal {
+            push_length_delimited(&mut shell, field, &payload);
+        }
+        let mut result = Vec::new();
+        push_length_delimited(&mut result, 1, b"call-1");
+        push_length_delimited(&mut result, 2, &shell);
+        result
+    }
+
+    fn nested_text(text: &str) -> Vec<u8> {
+        let mut nested = Vec::new();
+        push_length_delimited(&mut nested, 1, text.as_bytes());
+        nested
+    }
+
+    fn push_length_delimited(target: &mut Vec<u8>, field: u32, payload: &[u8]) {
+        push_varint(target, u64::from(field) << 3 | 2);
+        push_varint(target, u64::try_from(payload.len()).unwrap());
+        target.extend_from_slice(payload);
+    }
+
+    fn push_varint(target: &mut Vec<u8>, mut value: u64) {
+        while value >= 0x80 {
+            target.push((value as u8 & 0x7f) | 0x80);
+            value >>= 7;
+        }
+        target.push(value as u8);
+    }
 }

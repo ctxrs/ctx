@@ -13,7 +13,7 @@ use crate::{
 use super::super::{
     assistant::{
         junie_buffer_result_text, junie_merge_buffered_agent_event, junie_step_output_projection,
-        JunieAssistantBuffer, JunieOutputOutcome, JunieStepAgg,
+        JunieAssistantBuffer, JunieOutputOutcome, JunieStepAgg, JunieStepOutputProjection,
     },
     session_tree::JunieIndexMeta,
     MAX_JUNIE_TRANSIENT_TURN_BYTES,
@@ -263,18 +263,7 @@ fn flush_assistant(
             rows.push(step_event(*event_index, occurred_at, step));
             increment_event_index(event_index)?;
             if let Some(projected) = junie_step_output_projection(step) {
-                if matches!(
-                    projected.outcome,
-                    JunieOutputOutcome::Failure | JunieOutputOutcome::Timeout
-                ) {
-                    rows.push(output_failure_event(
-                        *event_index,
-                        occurred_at,
-                        step,
-                        projected.details,
-                        projected.outcome,
-                    ));
-                }
+                rows.push(output_event(*event_index, occurred_at, step, projected));
                 increment_event_index(event_index)?;
             }
             continue;
@@ -366,20 +355,17 @@ fn step_event(event_index: u64, occurred_at: DateTime<Utc>, step: &JunieStepAgg)
     }
 }
 
-fn output_failure_event(
+fn output_event(
     event_index: u64,
     occurred_at: DateTime<Utc>,
     step: &JunieStepAgg,
-    details: &str,
-    outcome: JunieOutputOutcome,
+    projected: JunieStepOutputProjection<'_>,
 ) -> EventDraft {
-    let timed_out = outcome == JunieOutputOutcome::Timeout;
-    let tool_name = if step.command.is_some() {
-        "Bash"
-    } else if step.files.is_some() {
-        "view"
-    } else {
-        "tool"
+    let outcome = match projected.outcome {
+        JunieOutputOutcome::Success => "success",
+        JunieOutputOutcome::Failure => "failure",
+        JunieOutputOutcome::Timeout => "timeout",
+        JunieOutputOutcome::Unknown => "unknown",
     };
     EventDraft {
         event_index,
@@ -390,22 +376,25 @@ fn output_failure_event(
         },
         role: Some(EventRole::Tool),
         occurred_at,
-        text: details.to_owned(),
+        text: projected.details.to_owned(),
         body: json!({
-            "tool_name": tool_name,
-            "details": details,
-            "output_preview": provider_local_preview(details, PROVIDER_MAX_PREVIEW_CHARS).0,
-            "status": step.status,
-            "call_id": format!("step:{}", step.order),
-            "provider_step_id": step.provider_step_id,
-            "command": step.command,
-            "exit_code": step.exit_code,
-            "duration_ms": step.duration_ms,
-            "timed_out": timed_out,
-            "result_outcome": "failure",
+            "provider_native_tool_result": {
+                "tool_name": projected.tool_name,
+                "status": bounded_linkage(step.status.as_deref()),
+                "call_id": projected.call_id,
+                "provider_step_id": bounded_linkage(Some(&step.provider_step_id)),
+                "exit_code": projected.exit_code,
+                "duration_ms": projected.duration_ms,
+                "timed_out": projected.outcome == JunieOutputOutcome::Timeout,
+                "outcome": outcome,
+            },
         }),
         file_change: None,
     }
+}
+
+fn bounded_linkage(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| value.len() <= 4 * 1024)
 }
 
 fn file_change_event(
@@ -454,4 +443,99 @@ fn file_content_text(value: Option<&Value>) -> Option<String> {
         .and_then(Value::as_str)
         .or_else(|| value.as_str())
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+
+    fn project_agent_event(projection: &mut JunieProjection, ordinal: u64, agent_event: Value) {
+        let bytes = serde_json::to_vec(&json!({
+            "kind": "SessionA2uxEvent",
+            "timestampMs": 1_786_000_000_000_i64 + ordinal as i64,
+            "event": { "agentEvent": agent_event },
+        }))
+        .unwrap();
+        assert!(projection
+            .project(JsonlRecordRef::for_test(&bytes, ordinal))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn retains_complete_success_failure_unknown_and_abstains_on_malformed_output() {
+        let meta = JunieIndexMeta {
+            session_id: "session-result-test".to_owned(),
+            ..JunieIndexMeta::default()
+        };
+        let mut projection = JunieProjection::new(&meta, true, DateTime::<Utc>::UNIX_EPOCH);
+        let complete_success = format!("{}junie-oversized-tail", "j".repeat(9 * 1024 * 1024));
+        for (ordinal, event) in [
+            json!({
+                "kind": "TerminalBlockUpdatedEvent",
+                "stepId": "success-step",
+                "command": "large-command",
+                "details": complete_success,
+                "status": "success",
+                "exitCode": 0,
+            }),
+            json!({
+                "kind": "ToolBlockUpdatedEvent",
+                "stepId": "failure-step",
+                "details": "failure body",
+                "status": "failed",
+            }),
+            json!({
+                "kind": "ToolBlockUpdatedEvent",
+                "stepId": "unknown-step",
+                "details": "unknown body",
+            }),
+            json!({
+                "kind": "ToolBlockUpdatedEvent",
+                "stepId": "malformed-step",
+                "details": { "unexpected": "object" },
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            project_agent_event(&mut projection, ordinal as u64, event);
+        }
+
+        let rows = projection.finish().unwrap();
+        let outputs = rows
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.event_type,
+                    EventType::ToolOutput | EventType::CommandOutput
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[0].text, complete_success);
+        assert!(outputs[0].text.ends_with("junie-oversized-tail"));
+        assert_eq!(outputs[1].text, "failure body");
+        assert_eq!(outputs[2].text, "unknown body");
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|row| {
+                    row.body
+                        .pointer("/provider_native_tool_result/outcome")
+                        .and_then(Value::as_str)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>(),
+            ["success", "failure", "unknown"]
+        );
+        assert_eq!(
+            outputs[0]
+                .body
+                .pointer("/provider_native_tool_result/call_id")
+                .and_then(Value::as_str),
+            Some("step:0")
+        );
+        assert!(!outputs[0].body.to_string().contains("junie-oversized-tail"));
+    }
 }

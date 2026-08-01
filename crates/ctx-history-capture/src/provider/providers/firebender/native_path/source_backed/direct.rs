@@ -43,7 +43,7 @@ const DIRECT_PAGE_DOCUMENTS: usize = 64;
 const CONTENT_DIGEST_DOMAIN: &[u8] = b"ctx-firebender-logical-content-v2\0";
 const LOGICAL_FINGERPRINT_DOMAIN: &[u8] = b"ctx-firebender-logical-fingerprint-v1\0";
 const OVERSIZE_DIGEST_DOMAIN: &[u8] = b"ctx-firebender-oversize-row-v1\0";
-pub(super) const DIRECT_PARSER_REVISION: &str = "firebender-source-backed-v2";
+pub(super) const DIRECT_PARSER_REVISION: &str = "firebender-source-backed-v3";
 
 #[derive(Debug)]
 pub(crate) struct FirebenderDirectScan {
@@ -462,7 +462,6 @@ struct RowCandidate {
     created_at: i64,
     retained_bytes: u64,
     lengths: [u64; 4],
-    load_values: bool,
 }
 
 fn next_rows(
@@ -516,7 +515,6 @@ fn next_rows(
                     created_at: row.get(2)?,
                     retained_bytes,
                     lengths,
-                    load_values: retained_bytes <= FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES as u64,
                 })
             },
         )
@@ -529,20 +527,17 @@ fn next_rows(
     let mut selected = Vec::new();
     let mut loaded_bytes = 0_u64;
     for candidate in candidates {
-        if candidate.load_values {
-            let next = loaded_bytes
-                .checked_add(candidate.retained_bytes)
-                .ok_or(FirebenderSourceBackedError::CountOverflow)?;
-            if !selected.is_empty() && next > FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES as u64 {
-                break;
-            }
-            loaded_bytes = next;
+        let next = loaded_bytes
+            .checked_add(candidate.retained_bytes)
+            .ok_or(FirebenderSourceBackedError::CountOverflow)?;
+        if !selected.is_empty() && next > FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES as u64 {
+            break;
         }
+        loaded_bytes = next;
         selected.push(candidate);
     }
     let safe_rowids = selected
         .iter()
-        .filter(|candidate| candidate.load_values)
         .map(|candidate| candidate.rowid)
         .collect::<Vec<_>>();
     let mut values = BTreeMap::new();
@@ -586,16 +581,6 @@ fn next_rows(
     selected
         .into_iter()
         .map(|candidate| {
-            if !candidate.load_values {
-                return Ok(DecodedRow {
-                    rowid: candidate.rowid,
-                    updated_at: candidate.updated_at,
-                    row: None,
-                    rejection: Some("Firebender row exceeds the bounded scan limit".to_owned()),
-                    retained_bytes: FIREBENDER_PAGE_OVERHEAD_BYTES as u64,
-                    lengths: candidate.lengths,
-                });
-            }
             let (id, name, messages_json, metadata_json) =
                 values.remove(&candidate.rowid).ok_or_else(|| {
                     FirebenderSourceBackedError::Capture(CaptureError::SourceChangedDuringCapture)
@@ -665,4 +650,67 @@ fn source_changed(detail: impl Into<String>) -> SourceBackedRouteError {
 
 fn internal_error(detail: impl Into<String>) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indivisible_tool_result_larger_than_page_target_is_retained() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "create table chat_sessions (
+                    id text not null,
+                    name text not null,
+                    created_at integer not null,
+                    updated_at integer not null,
+                    messages_json text not null,
+                    metadata_json text not null
+                );",
+            )
+            .unwrap();
+        let body = format!(
+            "firebender-large-head-{}-firebender-large-tail",
+            "x".repeat(8 * 1024 * 1024)
+        );
+        let messages = serde_json::json!([{
+            "id": "large-result",
+            "role": "tool",
+            "tool_call_id": "large-call",
+            "content": body,
+            "status": "success"
+        }])
+        .to_string();
+        connection
+            .execute(
+                "insert into chat_sessions
+                 (id, name, created_at, updated_at, messages_json, metadata_json)
+                 values ('large-session', 'large', 1, 2, ?1, '{}')",
+                [&messages],
+            )
+            .unwrap();
+
+        let source = firebender_source_key().unwrap();
+        let mut emitted = Vec::new();
+        let scan = scan_rows(
+            &connection,
+            Path::new("/tmp/chat_history.db"),
+            source,
+            false,
+            &mut |page| {
+                emitted.extend(page);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(scan.counts.rejected_records, 0);
+        assert_eq!(emitted.len(), 1);
+        let retained = emitted[0].content.meaningful_text();
+        assert!(retained.starts_with("firebender-large-head-"));
+        assert!(retained.ends_with("-firebender-large-tail"));
+        assert!(retained.len() > FIREBENDER_SOURCE_BACKED_PAGE_MAX_BYTES);
+    }
 }

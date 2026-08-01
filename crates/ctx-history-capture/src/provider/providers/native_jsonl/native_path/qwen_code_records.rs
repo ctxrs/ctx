@@ -76,8 +76,12 @@ pub(crate) fn enumerate_qwen_code_results(
         return Ok(Vec::new());
     }
     if reject_redacted(value).is_err() {
-        let count = result_block_count(value.pointer("/message/content"))?.max(1);
-        return (0..count)
+        let mut indices = result_block_indices(value.pointer("/message/content"))?;
+        if indices.is_empty() {
+            indices.push(0);
+        }
+        return indices
+            .into_iter()
             .map(|index| {
                 Ok(NativeJsonlResultSubrecord {
                     subrecord_index: u32::try_from(index)
@@ -91,6 +95,9 @@ pub(crate) fn enumerate_qwen_code_results(
             .collect();
     }
     let blocks = enumerate_content_block_results(value.pointer("/message/content"), value)?;
+    if !blocks.is_empty() && value.get("toolCallResult").is_some() {
+        return Err(NativeJsonlResultExtractionError::InvalidShape);
+    }
     if !blocks.is_empty() {
         return Ok(blocks);
     }
@@ -124,8 +131,8 @@ fn enumerate_content_block_results<'a>(
         .as_array()
         .ok_or(NativeJsonlResultExtractionError::InvalidShape)?
         .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
         .enumerate()
+        .filter(|(_, block)| block.get("type").and_then(Value::as_str) == Some("tool_result"))
         .map(|(index, block)| {
             let (content, redacted) =
                 match extract_result_ref(Some(block), &["content", "output", "text"]) {
@@ -151,47 +158,28 @@ fn enumerate_content_block_results<'a>(
         .collect()
 }
 
-fn result_block_count(
+fn result_block_indices(
     content: Option<&Value>,
-) -> std::result::Result<usize, NativeJsonlResultExtractionError> {
+) -> std::result::Result<Vec<usize>, NativeJsonlResultExtractionError> {
     let Some(content) = content else {
-        return Ok(0);
+        return Ok(Vec::new());
     };
     Ok(content
         .as_array()
         .ok_or(NativeJsonlResultExtractionError::InvalidShape)?
         .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
-        .count())
+        .enumerate()
+        .filter_map(|(index, block)| {
+            (block.get("type").and_then(Value::as_str) == Some("tool_result")).then_some(index)
+        })
+        .collect())
 }
 
 fn extract_result_ref<'a>(
     value: Option<&'a Value>,
     object_fields: &[&str],
-) -> std::result::Result<Option<&'a str>, NativeJsonlResultExtractionError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    reject_redacted(value)?;
-    match value {
-        Value::String(text) => Ok(Some(text)),
-        Value::Null => Ok(None),
-        Value::Object(object) => {
-            for field in object_fields {
-                if let Some(selected) = object.get(*field) {
-                    return match selected {
-                        Value::String(text) => Ok(Some(text)),
-                        Value::Null => Ok(None),
-                        _ => Err(NativeJsonlResultExtractionError::InvalidShape),
-                    };
-                }
-            }
-            Ok(None)
-        }
-        Value::Array(_) | Value::Bool(_) | Value::Number(_) => {
-            Err(NativeJsonlResultExtractionError::InvalidShape)
-        }
-    }
+) -> std::result::Result<Option<std::borrow::Cow<'a, str>>, NativeJsonlResultExtractionError> {
+    extract_direct_result_content(value, object_fields, true)
 }
 
 fn native_result_identity(value: &Value) -> Option<&str> {

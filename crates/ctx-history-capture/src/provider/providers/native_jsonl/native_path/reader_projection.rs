@@ -125,17 +125,7 @@ impl DirectJsonlProjector {
             );
         }
 
-        let touches = match direct_jsonl_touches(&value, event_type, false) {
-            DirectJsonlTouchProjection::Accepted(touches) => touches,
-            DirectJsonlTouchProjection::LimitExceeded => {
-                return Ok(ProjectedLine::rejection(file_touch_limit_rejection(
-                    &self.path,
-                    ordinal,
-                    byte_start,
-                    byte_end_exclusive,
-                )));
-            }
-        };
+        let touches = direct_jsonl_touches(&value, event_type, false);
         let mut event = direct_event(
             self.provider,
             &self.source_format,
@@ -204,62 +194,57 @@ impl DirectJsonlProjector {
             }
         };
         let mut projected = ProjectedLine::default();
-        let retained_failures = subrecords
-            .iter()
-            .filter(|subrecord| {
-                matches!(
+        let has_retained_failure = subrecords.iter().any(|subrecord| {
+            subrecord
+                .content
+                .as_deref()
+                .is_some_and(|content| !content.trim().is_empty())
+                && matches!(
                     subrecord.outcome.outcome,
                     OutputOutcome::Failure | OutputOutcome::Timeout
                 )
-            })
-            .count();
-        let retained_failure_touches = if retained_failures == 0 {
-            Vec::new()
+        });
+        let retained_failure_touches = if has_retained_failure {
+            direct_jsonl_touches(value, EventType::ToolOutput, true)
         } else {
-            match direct_jsonl_touches(value, EventType::ToolOutput, true) {
-                DirectJsonlTouchProjection::Accepted(touches)
-                    if touches.len().saturating_mul(retained_failures)
-                        <= DIRECT_JSONL_MAX_FILE_TOUCHES_PER_RECORD =>
-                {
-                    touches
-                }
-                DirectJsonlTouchProjection::Accepted(_)
-                | DirectJsonlTouchProjection::LimitExceeded => {
-                    return Ok(ProjectedLine::rejection(file_touch_limit_rejection(
-                        &self.path,
-                        ordinal,
-                        byte_start,
-                        byte_end_exclusive,
-                    )));
-                }
-            }
+            Vec::new()
         };
         for subrecord in subrecords {
+            let Some(content) = subrecord
+                .content
+                .as_deref()
+                .filter(|content| !content.trim().is_empty())
+            else {
+                continue;
+            };
             let sub_ordinal = subrecord.subrecord_index;
-            if matches!(
+            let touches = if matches!(
                 subrecord.outcome.outcome,
                 OutputOutcome::Failure | OutputOutcome::Timeout
             ) {
-                let mut event = direct_event(
-                    self.provider,
-                    &self.source_format,
-                    value,
-                    ordinal,
-                    sub_ordinal,
-                    line_number,
-                    occurred_at,
-                    Some(&subrecord),
-                    retained_failure_touches.clone(),
-                )?;
-                event.source_record = DirectJsonlSourceRecord {
-                    byte_start,
-                    byte_end_exclusive,
-                    record_digest,
-                };
-                projected.events.push(event);
-            }
+                retained_failure_touches.clone()
+            } else {
+                Vec::new()
+            };
+            debug_assert_eq!(subrecord.content.as_deref(), Some(content));
+            let mut event = direct_event(
+                self.provider,
+                &self.source_format,
+                value,
+                ordinal,
+                sub_ordinal,
+                line_number,
+                occurred_at,
+                Some(&subrecord),
+                touches,
+            )?;
+            event.source_record = DirectJsonlSourceRecord {
+                byte_start,
+                byte_end_exclusive,
+                record_digest,
+            };
+            projected.events.push(event);
         }
-        projected.recompute_serialized_bytes();
         Ok(projected)
     }
 }
@@ -341,14 +326,7 @@ fn direct_jsonl_lexical_text(
     result: Option<&super::result_content::NativeJsonlResultSubrecord<'_>>,
 ) -> String {
     if let Some(result) = result {
-        let tool_name = result.tool_name.unwrap_or(event_type.as_str());
-        let outcome = match result.outcome.outcome {
-            OutputOutcome::Failure => "failure",
-            OutputOutcome::Timeout => "timeout",
-            OutputOutcome::Success => "success",
-            OutputOutcome::Unknown => "event",
-        };
-        return format!("{tool_name} {outcome}");
+        return result.content.as_deref().unwrap_or_default().to_owned();
     }
     if text.trim().is_empty() {
         event_type.as_str().to_owned()
@@ -370,35 +348,21 @@ fn direct_jsonl_model(provider: CaptureProvider, value: &Value) -> Option<Value>
 pub(crate) struct ProjectedLine {
     pub(crate) events: Vec<DirectJsonlEvent>,
     pub(crate) rejections: Vec<DirectJsonlRejection>,
-    pub(crate) serialized_bytes: usize,
 }
 
 impl ProjectedLine {
     fn event(event: DirectJsonlEvent) -> Self {
-        let mut line = Self {
-            events: vec![event],
-            ..Self::default()
-        };
-        line.recompute_serialized_bytes();
-        line
-    }
-
-    fn rejection(rejection: DirectJsonlRejection) -> Self {
-        let serialized_bytes = rejection_wire_bytes(&rejection);
         Self {
-            rejections: vec![rejection],
-            serialized_bytes,
+            events: vec![event],
             ..Self::default()
         }
     }
 
-    fn recompute_serialized_bytes(&mut self) {
-        self.serialized_bytes = self
-            .events
-            .iter()
-            .map(event_wire_bytes)
-            .chain(self.rejections.iter().map(rejection_wire_bytes))
-            .fold(0_usize, usize::saturating_add);
+    fn rejection(rejection: DirectJsonlRejection) -> Self {
+        Self {
+            rejections: vec![rejection],
+            ..Self::default()
+        }
     }
 }
 
@@ -423,6 +387,20 @@ fn direct_event(
         direct_jsonl_event_text(provider, value, event_type, &entry_type)
     };
     let lexical_text = direct_jsonl_lexical_text(event_type, &text, result);
+    if result.is_some() && lexical_text.trim().is_empty() {
+        return Err(CaptureError::InvalidPayload(
+            "direct JSONL result record has no meaningful selected content".to_owned(),
+        ));
+    }
+    let tool_result = result.map(|result| {
+        json!({
+            "call_id": result.call_id,
+            "tool_name": result.tool_name,
+            "outcome": direct_jsonl_outcome(result.outcome.outcome),
+            "exit_code": result.outcome.exit_code,
+            "duration_ms": result.outcome.duration_ms,
+        })
+    });
 
     let positional_event_index = direct_jsonl_event_sequence(raw_ordinal, sub_ordinal)?;
     let native_record_id = direct_jsonl_native_event_identity(provider, value);
@@ -433,6 +411,7 @@ fn direct_event(
         "native_record_id": native_record_id,
         "sub_ordinal": sub_ordinal,
         "lexical_text": lexical_text,
+        "tool_result": tool_result.clone(),
         "touches": touches,
     }))?;
     Ok(DirectJsonlEvent {
@@ -455,10 +434,20 @@ fn direct_event(
             "tokens": native_jsonl_tokens(provider, value),
             "source_record_ordinal": raw_ordinal,
             "source_record_subrecord_index": sub_ordinal,
+            "tool_result": tool_result,
         }),
         touches,
         source_record: DirectJsonlSourceRecord::default(),
     })
+}
+
+fn direct_jsonl_outcome(outcome: OutputOutcome) -> &'static str {
+    match outcome {
+        OutputOutcome::Success => "success",
+        OutputOutcome::Failure => "failure",
+        OutputOutcome::Timeout => "timeout",
+        OutputOutcome::Unknown => "unknown",
+    }
 }
 
 fn direct_jsonl_event_sequence(raw_ordinal: u64, sub_ordinal: u32) -> Result<u64> {
@@ -488,66 +477,33 @@ fn direct_jsonl_event_sequence(raw_ordinal: u64, sub_ordinal: u32) -> Result<u64
         ))
 }
 
-enum DirectJsonlTouchProjection {
-    Accepted(Vec<DirectJsonlTouch>),
-    LimitExceeded,
-}
-
-enum DirectJsonlTouchVisitError {
-    LimitExceeded,
-}
-
 fn direct_jsonl_touches(
     value: &Value,
     event_type: EventType,
     retained_failure: bool,
-) -> DirectJsonlTouchProjection {
+) -> Vec<DirectJsonlTouch> {
     if event_type == EventType::ToolOutput && !retained_failure {
-        return DirectJsonlTouchProjection::Accepted(Vec::new());
+        return Vec::new();
     }
     let mut touches = Vec::new();
     let mut seen = BTreeSet::new();
-    let outcome = visit_all_file_touch_drafts(value, |draft| {
+    visit_all_file_touch_drafts(value, |draft| {
         let key = (
             draft.path.clone(),
             draft.old_path.clone(),
             draft.change_kind.map(|kind| kind.as_str().to_owned()),
         );
         if seen.insert(key) {
-            if touches.len() == DIRECT_JSONL_MAX_FILE_TOUCHES_PER_RECORD {
-                return Err(DirectJsonlTouchVisitError::LimitExceeded);
-            }
             touches.push(DirectJsonlTouch {
                 path: draft.path,
                 old_path: draft.old_path,
                 change_kind: draft.change_kind,
             });
         }
-        Ok(())
-    });
-    match outcome {
-        Ok(()) => DirectJsonlTouchProjection::Accepted(touches),
-        Err(DirectJsonlTouchVisitError::LimitExceeded) => DirectJsonlTouchProjection::LimitExceeded,
-    }
-}
-
-fn file_touch_limit_rejection(
-    path: &Path,
-    ordinal: u64,
-    byte_start: u64,
-    byte_end_exclusive: u64,
-) -> DirectJsonlRejection {
-    DirectJsonlRejection {
-        raw_ordinal: ordinal,
-        byte_start,
-        byte_end_exclusive,
-        reason: format!(
-            "{}:{} exceeds the {} unique file-touch transaction bound",
-            path.display(),
-            ordinal.saturating_add(1),
-            DIRECT_JSONL_MAX_FILE_TOUCHES_PER_RECORD
-        ),
-    }
+        Ok::<_, std::convert::Infallible>(())
+    })
+    .expect("direct JSONL file-touch collection is infallible");
+    touches
 }
 
 fn direct_jsonl_native_event_identity(provider: CaptureProvider, value: &Value) -> Option<String> {

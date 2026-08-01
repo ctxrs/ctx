@@ -29,16 +29,11 @@ pub(super) fn deepagents_event_type(message: &DeepAgentsMessage) -> EventType {
 }
 
 pub(super) fn core_eligible(message: &DeepAgentsMessage) -> bool {
-    if message.role != EventRole::Tool {
-        return true;
-    }
-    matches!(
-        deepagents_output_outcome(message).outcome,
-        OutputOutcome::Failure | OutputOutcome::Timeout
-    )
+    let _ = message;
+    true
 }
 
-fn deepagents_output_outcome(message: &DeepAgentsMessage) -> OutputOutcomeMetadata {
+pub(super) fn deepagents_output_outcome(message: &DeepAgentsMessage) -> OutputOutcomeMetadata {
     let status = message
         .status
         .as_deref()
@@ -185,6 +180,9 @@ fn deepagents_message_from_fields(
     fields: &[(MsgpackValue, MsgpackValue)],
     class_name: Option<String>,
 ) -> DeepAgentsMessageOutcome {
+    if deepagents_has_duplicate_projected_keys(fields) {
+        return DeepAgentsMessageOutcome::Rejected;
+    }
     let message_type = msgpack_map_string(fields, "type")
         .or_else(|| msgpack_map_string(fields, "role"))
         .or_else(|| class_name.clone())
@@ -258,19 +256,60 @@ pub(super) fn deepagents_content_text(value: &MsgpackValue) -> Option<String> {
         return Some(text);
     }
     if let MsgpackValue::Array(items) = value {
-        let parts = items
-            .iter()
-            .filter_map(|item| match item {
-                MsgpackValue::Map(fields) => msgpack_map_string(fields, "text"),
-                _ => msgpack_string(item),
-            })
-            .collect::<Vec<_>>();
+        let mut parts = Vec::with_capacity(items.len());
+        for item in items {
+            let text = match item {
+                MsgpackValue::Map(fields) if !deepagents_has_duplicate_key(fields, "text") => {
+                    msgpack_map_string(fields, "text")?
+                }
+                MsgpackValue::Map(_) => return None,
+                _ => msgpack_string(item)?,
+            };
+            parts.push(text);
+        }
         let joined = parts.join(" ").trim().to_owned();
         if !joined.is_empty() {
             return Some(joined);
         }
     }
     None
+}
+
+fn deepagents_has_duplicate_projected_keys(fields: &[(MsgpackValue, MsgpackValue)]) -> bool {
+    const PROJECTED_KEYS: &[&str] = &[
+        "type",
+        "role",
+        "content",
+        "id",
+        "tool_call_id",
+        "toolCallId",
+        "status",
+        "state",
+        "outcome",
+        "exit_code",
+        "exitCode",
+        "duration_ms",
+        "durationMs",
+        "timed_out",
+        "timedOut",
+        "timeout",
+        "is_error",
+        "isError",
+        "success",
+        "ok",
+    ];
+    PROJECTED_KEYS
+        .iter()
+        .any(|key| deepagents_has_duplicate_key(fields, key))
+}
+
+fn deepagents_has_duplicate_key(fields: &[(MsgpackValue, MsgpackValue)], key: &str) -> bool {
+    fields
+        .iter()
+        .filter(|(field_key, _)| msgpack_string(field_key).as_deref() == Some(key))
+        .take(2)
+        .count()
+        > 1
 }
 
 pub(super) fn msgpack_map_get<'a>(

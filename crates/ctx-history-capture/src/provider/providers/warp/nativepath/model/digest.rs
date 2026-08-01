@@ -139,7 +139,6 @@ fn hash_rejection(hasher: &mut Sha256, rejection: &WarpNativeRejection) -> Resul
         WarpNativeRejectionKind::MalformedProtobuf => 3,
         WarpNativeRejectionKind::MissingConversation => 4,
         WarpNativeRejectionKind::OversizedTask => 5,
-        WarpNativeRejectionKind::OversizedNormalizedUnit => 6,
         WarpNativeRejectionKind::DuplicateMessageIdentity => 7,
     }]);
     hash_text(hasher, &rejection.native_key)?;

@@ -15,6 +15,8 @@ use rusqlite::{limits::Limit, Connection};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[cfg(test)]
+use super::nativepath::{WarpNativeEventIdentity, WarpNativeOrder};
 use super::{
     nativepath::{
         scan_warp_source_backed_connection, WarpNativeEvent, WarpNativeMessageIdentity,
@@ -45,7 +47,7 @@ const WARP_NATIVE_ITEM_NAMESPACE: &str = "warp.task-message";
 const WARP_LOGICAL_SESSION_KIND: &str = "warp-conversation";
 const WARP_LOGICAL_ITEM_KIND: &str = "warp-task-message";
 const WARP_SOURCE_SCHEMA_VARIANT: &str = "warp-agent-task-protobuf-v1";
-const WARP_SOURCE_BACKED_PARSER_REVISION: &str = "warp-source-backed-logical-v1";
+const WARP_SOURCE_BACKED_PARSER_REVISION: &str = "warp-source-backed-logical-v2";
 const WARP_SCHEMA_EVIDENCE: &[u8] = b"agent_conversations+agent_tasks+unique-task-id-v1";
 const WARP_MISSING_TREE_DOMAIN: &[u8] = b"ctx.warp.missing-logical-tree.v1\0";
 const WARP_LOGICAL_LEAF_DOMAIN: &[u8] = b"ctx.warp.logical-leaf.v1\0";
@@ -668,6 +670,7 @@ fn core_record(
             "kind": event.kind,
             "request_id": event.request_id,
             "call_id": event.call_id,
+            "linkage_exact": event.call_id.is_some(),
             "result_outcome": result_outcome,
         })
     });
@@ -694,9 +697,12 @@ fn core_record(
     record.occurred_at_unix_ms = event.occurred_at.map(|value| value.timestamp_millis());
     record.role = event.role.map(|role| role.as_str().to_owned());
     if let Some(native_tool) = native_tool {
-        record.content.structured_content = Some(serde_json::json!({
-            "provider_native_tool": native_tool,
-        }));
+        let key = if event.result_outcome.is_some() {
+            "provider_native_result"
+        } else {
+            "provider_native_tool"
+        };
+        record.content.structured_content = Some(serde_json::json!({(key): native_tool}));
     }
     record.validate_contract()?;
     Ok(record)
@@ -850,4 +856,76 @@ fn sqlite_access_error(error: crate::provider_sources::SqliteSourceAccessError) 
 
 fn source_backed_capture_error(error: WarpSourceBackedErrorV0) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+    use crate::{record_evidence::RecordDigest, OutputOutcome};
+    use ctx_history_core::{EventRole, EventType};
+
+    #[test]
+    fn core_projection_keeps_success_failure_unknown_and_large_result_bodies_once() {
+        let selection = WarpSourceSelectionV0::new("/tmp", "/tmp/warp.db", "surface").unwrap();
+        let source = warp_source_key(&selection).unwrap();
+        let lineage = WarpSessionLineage {
+            parent_conversation_id: None,
+            root_conversation_id: "conversation".to_owned(),
+        };
+        for (index, (outcome, expected)) in [
+            (OutputOutcome::Success, "success"),
+            (OutputOutcome::Failure, "failure"),
+            (OutputOutcome::Unknown, "unknown"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let body = if index == 0 {
+                format!(
+                    "warp-core-head-{}-warp-core-tail",
+                    "x".repeat(8 * 1024 * 1024)
+                )
+            } else {
+                format!("{expected} complete Warp result")
+            };
+            let record = core_record(
+                &source,
+                &lineage,
+                WarpNativeEvent {
+                    identity: super::WarpNativeEventIdentity {
+                        conversation_id: "conversation".to_owned(),
+                        task_id: format!("task-{index}"),
+                        message: WarpNativeMessageIdentity::MessageOrdinal(0),
+                    },
+                    native_order: super::WarpNativeOrder {
+                        provider_event_index: u64::try_from(index).unwrap(),
+                        legacy_provider_event_index: Some(u64::try_from(index).unwrap()),
+                        task_rowid: i64::try_from(index + 1).unwrap(),
+                        task_key: format!("task-{index}"),
+                        message_ordinal: 0,
+                    },
+                    event_type: EventType::ToolOutput,
+                    role: Some(EventRole::Tool),
+                    kind: "run_shell_command",
+                    request_id: Some(format!("request-{index}")),
+                    result_outcome: Some(outcome),
+                    call_id: Some(format!("call-{index}")),
+                    occurred_at: None,
+                    lexical_body: body.clone(),
+                    source_record_digest: RecordDigest::from_text("warp source row"),
+                },
+            )
+            .unwrap();
+            assert_eq!(record.content.meaningful_text(), body);
+            let structured = record.content.structured_content.as_ref().unwrap();
+            assert_eq!(
+                structured
+                    .pointer("/provider_native_result/result_outcome")
+                    .and_then(serde_json::Value::as_str),
+                Some(expected)
+            );
+            assert!(!structured.to_string().contains("complete Warp result"));
+            assert!(!structured.to_string().contains("warp-core-head-"));
+        }
+    }
 }

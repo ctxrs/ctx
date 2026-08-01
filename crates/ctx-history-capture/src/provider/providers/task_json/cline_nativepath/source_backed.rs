@@ -25,6 +25,7 @@ use crate::{
         SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
     },
     provider_sources::ProviderSource,
+    OutputOutcome,
 };
 
 use super::{
@@ -46,7 +47,7 @@ use support::*;
 const SOURCE_ANCHOR_NAMESPACE: &str = "task-directory-id";
 const SOURCE_SCHEMA_VARIANT: &str = "task-directory-v1";
 const SOURCE_REVISION_KIND: &str = "task-directory-compound-v1";
-const PARSER_REVISION: &str = "task-json-source-backed-v2";
+const PARSER_REVISION: &str = "task-json-source-backed-v3";
 const LOGICAL_SESSION_KIND: &str = "task-json-thread";
 const LOGICAL_EVENT_KIND: &str = "task-json-event";
 const NATIVE_SESSION_NAMESPACE: &str = "task-json-task-id";
@@ -54,7 +55,7 @@ const NATIVE_ITEM_NAMESPACE: &str = "task-json-native-item";
 const NATIVE_ITEM_POSITION_KIND: &str = "task-json-component-ordinal";
 const SUBRECORD_POSITION_KIND: &str = "task-json-subrecord";
 const MAX_SOURCE_BACKED_PAGE_DOCUMENTS: usize = 64;
-const MAX_SOURCE_BACKED_PAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SOURCE_BACKED_PAGE_BYTES: usize = ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES;
 
 #[derive(Debug, Error)]
 pub(crate) enum TaskJsonSourceBackedError {
@@ -630,6 +631,30 @@ fn project_event(
             "provider_native_file_touches".to_owned(),
             native_file_touches,
         );
+    }
+    if let Some(call) = event.tool_call.as_ref() {
+        record.content.structured_content = Some(serde_json::json!({
+            "provider_native_tool_call": {
+                "call_id": call.call_id.as_deref(),
+                "name": call.name.as_deref(),
+            }
+        }));
+    } else if let Some(output) = event.sparse_output.as_ref() {
+        let outcome = match output.outcome {
+            OutputOutcome::Success => "success",
+            OutputOutcome::Failure => "failure",
+            OutputOutcome::Timeout => "timeout",
+            OutputOutcome::Unknown => "unknown",
+        };
+        record.content.structured_content = Some(serde_json::json!({
+            "provider_native_tool_result": {
+                "call_id": output.call_id.as_deref(),
+                "outcome": outcome,
+                "exit_code": output.exit_code,
+                "duration_ms": output.duration_ms,
+                "output_bytes": output.output_bytes,
+            }
+        }));
     }
     record.validate_contract()?;
     Ok(record)

@@ -15,7 +15,7 @@ use crate::provider::sqlite::{
     ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists,
     SqliteLengthPreflightGuard,
 };
-use crate::{CaptureError, ProviderAdapterContext, Result};
+use crate::{CaptureError, ProviderAdapterContext, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
 const DEEPAGENTS_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 32 * 16;
 
@@ -301,9 +301,7 @@ pub(super) fn deepagents_checkpoint_contexts(
 }
 
 pub(super) fn deepagents_oversize_limit() -> Result<u64> {
-    let bounded = crate::provider::native_ingestion::NATIVE_INGESTION_PAGE_MAX_BYTES
-        .saturating_sub(256 * 1024);
-    u64::try_from(bounded)
+    u64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| CaptureError::SystemInvariant("Deep Agents byte limit exceeds u64"))
 }
 

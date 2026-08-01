@@ -46,6 +46,7 @@ fn body(record: &CoreRecord) -> &str {
 #[test]
 fn cold_projection_preserves_complete_bodies_outcomes_and_core_semantics() {
     const TAIL: &str = "openhandspostsixteenkilobytesentinel";
+    const LARGE_TAIL: &str = "openhands-post-eight-mib-tail";
 
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("profile");
@@ -60,11 +61,12 @@ fn cold_projection_preserves_complete_bodies_outcomes_and_core_semantics() {
         "0001-message.json",
         message("event-message", &full_body),
     );
+    let large_success = format!("{}{}", "s".repeat(9 * 1024 * 1024), LARGE_TAIL);
     write_event(
         &root,
         "conversation-cold",
         "0002-success.json",
-        output("event-success", "private successful output", Some(0), false),
+        output("event-success", &large_success, Some(0), false),
     );
     write_event(
         &root,
@@ -76,21 +78,27 @@ fn cold_projection_preserves_complete_bodies_outcomes_and_core_semantics() {
         &root,
         "conversation-cold",
         "0004-timeout.json",
-        output("event-timeout", "", None, true),
+        output("event-timeout", "timeout output", None, true),
+    );
+    write_event(
+        &root,
+        "conversation-cold",
+        "0005-unknown.json",
+        output("event-unknown", "unknown output", None, false),
     );
 
     let (projection, io) = count_event_file_io(|| project(&root).unwrap());
     let projection = &projection[0];
     assert_eq!(io.inventory_opens, 1);
     assert_eq!(io.inventory_walks, 1);
-    assert_eq!(io.body_reads, 4);
-    assert_eq!(io.leaf_lookups, 4);
+    assert_eq!(io.body_reads, 5);
+    assert_eq!(io.leaf_lookups, 5);
     assert_eq!(io.peak_transient_leaf_handles, 1);
     assert_eq!(io.active_transient_leaf_handles, 0);
-    assert_eq!(projection.source.counts().complete_records, 4);
-    assert_eq!(projection.source.counts().retained_records, 3);
-    assert_eq!(projection.source.counts().ignored_records, 1);
-    assert_eq!(projection.source.counts().indexed_documents, 3);
+    assert_eq!(projection.source.counts().complete_records, 5);
+    assert_eq!(projection.source.counts().retained_records, 5);
+    assert_eq!(projection.source.counts().ignored_records, 0);
+    assert_eq!(projection.source.counts().indexed_documents, 5);
     assert_eq!(body(&projection.records[0]), full_body);
     let structured: Value = serde_json::from_str(body(&projection.records[0])).unwrap();
     assert_eq!(
@@ -99,12 +107,20 @@ fn cold_projection_preserves_complete_bodies_outcomes_and_core_semantics() {
             .and_then(Value::as_str),
         Some(TAIL)
     );
-    assert_eq!(body(&projection.records[1]), "failure output");
-    assert_eq!(body(&projection.records[2]), "OpenHands command timed out");
-    assert!(projection
-        .records
-        .iter()
-        .all(|record| !body(record).contains("private successful output")));
+    assert_eq!(body(&projection.records[1]), large_success);
+    assert!(body(&projection.records[1]).ends_with(LARGE_TAIL));
+    assert_eq!(body(&projection.records[2]), "failure output");
+    assert_eq!(body(&projection.records[3]), "timeout output");
+    assert_eq!(body(&projection.records[4]), "unknown output");
+    assert_eq!(
+        projection.records[1]
+            .content
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/provider_native_tool_result/call_id"))
+            .and_then(Value::as_str),
+        Some("call-event-success")
+    );
 
     let first = &projection.records[0];
     assert_eq!(first.parent_session_id, None);
@@ -120,19 +136,19 @@ fn cold_projection_preserves_complete_bodies_outcomes_and_core_semantics() {
     assert_eq!(first.agent_type, "primary");
     assert!(first.is_primary);
     assert_eq!(first.event_sequence, 0);
-    assert_eq!(projection.records[1].event_sequence, 2);
-    assert_eq!(projection.records[2].event_sequence, 3);
+    assert_eq!(projection.records[1].event_sequence, 1);
+    assert_eq!(projection.records[2].event_sequence, 2);
     assert_eq!(first.occurred_at_unix_ms, Some(1_785_240_000_000));
     assert_eq!(first.event_type, "message");
     assert_eq!(first.role.as_deref(), Some("assistant"));
     assert_eq!(
         projection.source.parser_revision(),
-        "openhands-source-backed-v2"
+        "openhands-source-backed-v3"
     );
 }
 
 #[test]
-fn file_result_policy_hides_success_and_retains_meaningful_failure() {
+fn file_result_policy_retains_success_and_meaningful_failure() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("profile");
     write_event(
@@ -172,12 +188,16 @@ fn file_result_policy_hides_success_and_retains_meaningful_failure() {
 
     let projection = project(&root).unwrap().remove(0);
     assert_eq!(projection.source.counts().complete_records, 2);
-    assert_eq!(projection.source.counts().ignored_records, 1);
-    assert_eq!(projection.source.counts().retained_records, 1);
-    assert_eq!(projection.records.len(), 1);
+    assert_eq!(projection.source.counts().ignored_records, 0);
+    assert_eq!(projection.source.counts().retained_records, 2);
+    assert_eq!(projection.records.len(), 2);
     assert_eq!(projection.records[0].event_type, "file_touched");
     assert_eq!(
         body(&projection.records[0]),
+        "successful editor output must not be searchable"
+    );
+    assert_eq!(
+        body(&projection.records[1]),
         "meaningful editor failure remains searchable"
     );
 }
@@ -504,6 +524,7 @@ fn output(id: &str, body: &str, exit_code: Option<i64>, timeout: bool) -> Value 
         "timestamp": "2026-07-28T12:00:01Z",
         "kind": "ObservationEvent",
         "source": "environment",
+        "tool_call_id": format!("call-{id}"),
         "observation": {
             "kind": "ExecuteBashObservation",
             "content": body,

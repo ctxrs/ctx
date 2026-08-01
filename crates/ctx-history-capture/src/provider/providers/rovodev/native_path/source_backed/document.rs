@@ -430,8 +430,17 @@ struct ProjectedMessage {
     event_type: EventType,
     role: Option<EventRole>,
     occurred_at: chrono::DateTime<chrono::Utc>,
+    body: String,
+    output: Option<ProjectedOutput>,
     touched_files: Vec<String>,
     touch_limit_exceeded: bool,
+}
+
+#[derive(Debug)]
+struct ProjectedOutput {
+    outcome: OutputOutcome,
+    call_id: Option<String>,
+    tool_name: Option<String>,
 }
 
 fn project_message(
@@ -450,14 +459,25 @@ fn project_message(
         .or_else(|| message.get("type"))
         .and_then(serde_json::Value::as_str);
     let mut event_type = rovodev_event_type(message, role_text);
+    let mut output = None;
+    let body;
     if event_type == EventType::ToolOutput {
         let outcome = output_outcome(message);
-        if !matches!(outcome, OutputOutcome::Failure | OutputOutcome::Timeout) {
+        let Some(selected_body) = explicit_output_body(message)? else {
             return Ok(None);
-        }
+        };
+        body = selected_body;
         if output_kind(message) == OutputObservationKind::Command {
             event_type = EventType::CommandOutput;
         }
+        let (call_id, tool_name) = output_linkage(message)?;
+        output = Some(ProjectedOutput {
+            outcome,
+            call_id,
+            tool_name,
+        });
+    } else {
+        body = lexical_body(message, event_type);
     }
     let occurred_at = message_timestamp(message).unwrap_or(document.started_at);
     let role = Some(provider_role_from_message(message, role_text));
@@ -477,9 +497,116 @@ fn project_message(
         event_type,
         role,
         occurred_at,
+        body,
+        output,
         touched_files,
         touch_limit_exceeded: outcome.limit_exceeded(),
     }))
+}
+
+fn explicit_output_body(value: &serde_json::Value) -> std::result::Result<Option<String>, String> {
+    let mut result_parts = Vec::new();
+    if let Some(parts) = value.get("parts").and_then(serde_json::Value::as_array) {
+        for part in parts {
+            let kind = part
+                .get("kind")
+                .or_else(|| part.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .map(|value| value.trim().to_ascii_lowercase());
+            if kind.as_deref().is_some_and(|kind| {
+                matches!(
+                    kind,
+                    "tool_result" | "tool-result" | "tool_use_result" | "function_result"
+                )
+            }) {
+                result_parts.push(part);
+            }
+        }
+    }
+    let selected = if result_parts.is_empty() {
+        vec![value]
+    } else {
+        result_parts
+    };
+    let mut bodies = Vec::new();
+    for result in selected {
+        let candidates = ["content", "result", "output", "text"]
+            .into_iter()
+            .filter_map(|field| result.get(field))
+            .filter(|value| !value.is_null())
+            .collect::<Vec<_>>();
+        let candidate = match candidates.as_slice() {
+            [] => continue,
+            [candidate] => *candidate,
+            _ => {
+                return Err(bounded_failure(
+                    "Rovo Dev tool result exposes more than one candidate body field",
+                ));
+            }
+        };
+        if let Some(body) =
+            provider_explicit_result_value_text(candidate).filter(|body| !body.trim().is_empty())
+        {
+            bodies.push(body);
+        }
+    }
+    Ok((!bodies.is_empty()).then(|| bodies.join("\n")))
+}
+
+fn output_linkage(
+    value: &serde_json::Value,
+) -> std::result::Result<(Option<String>, Option<String>), String> {
+    fn unique(
+        values: impl Iterator<Item = String>,
+        label: &str,
+    ) -> std::result::Result<Option<String>, String> {
+        let mut selected = None;
+        for value in values.filter(|value| !value.trim().is_empty()) {
+            if value.len() > 4 * 1024 {
+                return Err(bounded_failure(format!(
+                    "Rovo Dev {label} exceeds the linkage bound"
+                )));
+            }
+            if selected.as_ref().is_some_and(|selected| selected != &value) {
+                return Err(bounded_failure(format!(
+                    "Rovo Dev tool result has ambiguous {label}"
+                )));
+            }
+            selected = Some(value);
+        }
+        Ok(selected)
+    }
+
+    let mut result_objects = vec![value];
+    if let Some(parts) = value.get("parts").and_then(serde_json::Value::as_array) {
+        result_objects.extend(parts.iter());
+    }
+    let call_id = unique(
+        result_objects.iter().filter_map(|value| {
+            [
+                "tool_use_id",
+                "toolUseId",
+                "tool_call_id",
+                "toolCallId",
+                "call_id",
+                "callId",
+            ]
+            .into_iter()
+            .find_map(|field| value.get(field).and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+        }),
+        "call id",
+    )?;
+    let tool_name = unique(
+        result_objects.iter().filter_map(|value| {
+            ["tool_name", "toolName", "name", "tool"]
+                .into_iter()
+                .find_map(|field| value.get(field).and_then(serde_json::Value::as_str))
+                .map(str::to_owned)
+        }),
+        "tool name",
+    )?;
+    Ok((call_id, tool_name))
 }
 
 fn output_kind(value: &serde_json::Value) -> OutputObservationKind {
@@ -575,16 +702,6 @@ pub(super) fn scan_rovodev_document(
         Ok(document) => {
             counts.rejected_records = document.initial_failure_count;
             for (index, raw_message) in document.messages.iter().enumerate() {
-                let serialized_bytes = serde_json::to_vec(raw_message)
-                    .map_err(|error| {
-                        rovodev_route_error(RovoDevSourceBackedError::Capture(error.into()))
-                    })?
-                    .len();
-                if serialized_bytes > SOURCE_BACKED_MAX_RECORD_BYTES {
-                    counts.rejected_records =
-                        checked_add(counts.rejected_records, 1).map_err(rovodev_route_error)?;
-                    continue;
-                }
                 match project_message(raw_message, index, document) {
                     Err(_) => {
                         counts.rejected_records =
@@ -674,7 +791,7 @@ fn core_record(
         TypedKey::U64(message_index),
         TypedKey::utf8(&native_record_id)?,
     ])?;
-    let body = lexical_body(raw_message, event.event_type);
+    let body = event.body.clone();
     let branch = provider_string_field(
         &document.metadata,
         &[
@@ -687,16 +804,27 @@ fn core_record(
     )
     .or_else(|| document.context_branch.clone());
     let native_file_touches =
-        (!event.touched_files.is_empty()).then(|| serde_json::json!(event.touched_files));
+        (!event.touched_files.is_empty()).then(|| serde_json::json!(&event.touched_files));
     let native_tool = matches!(
         event.event_type,
         EventType::ToolCall | EventType::ToolOutput | EventType::CommandOutput
     )
     .then(|| {
+        let projected_output = event.output.as_ref();
         serde_json::json!({
-            "name": recursive_string_field(raw_message, &["tool_name", "toolName", "name", "tool"]),
-            "call_id": recursive_string_field(raw_message, &["tool_call_id", "toolCallId", "call_id", "callId"]),
-            "arguments": raw_message.get("arguments").or_else(|| raw_message.get("input")),
+            "name": projected_output.and_then(|output| output.tool_name.as_deref())
+                .map(str::to_owned)
+                .or_else(|| projected_output.is_none().then(|| recursive_string_field(raw_message, &["tool_name", "toolName", "name", "tool"])).flatten()),
+            "call_id": projected_output.and_then(|output| output.call_id.as_deref())
+                .map(str::to_owned)
+                .or_else(|| projected_output.is_none().then(|| recursive_string_field(raw_message, &["tool_call_id", "toolCallId", "call_id", "callId"])).flatten()),
+            "arguments": projected_output.is_none().then(|| raw_message.get("arguments").or_else(|| raw_message.get("input"))).flatten(),
+            "result_outcome": projected_output.map(|output| match output.outcome {
+                OutputOutcome::Success => "success",
+                OutputOutcome::Failure => "failure",
+                OutputOutcome::Timeout => "timeout",
+                OutputOutcome::Unknown => "unknown",
+            }),
         })
     });
     let is_primary = document.parent_provider_session_id.is_none();
@@ -776,5 +904,67 @@ fn lexical_body(raw_message: &serde_json::Value, event_type: EventType) -> Strin
         event_type.as_str().to_owned()
     } else {
         text
+    }
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+
+    fn document() -> PreparedDocument {
+        PreparedDocument {
+            metadata: serde_json::Value::Null,
+            context_branch: None,
+            messages: Vec::new(),
+            provider_session_id: "session".to_owned(),
+            parent_provider_session_id: None,
+            started_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            cwd: None,
+            initial_failure_count: 0,
+        }
+    }
+
+    #[test]
+    fn typed_tool_results_keep_success_failure_unknown_and_large_bodies() {
+        for (status, expected) in [
+            (Some("success"), OutputOutcome::Success),
+            (Some("failure"), OutputOutcome::Failure),
+            (None, OutputOutcome::Unknown),
+        ] {
+            let mut part = serde_json::json!({
+                "kind": "tool_result",
+                "tool_use_id": "call-1",
+                "content": format!("complete-{expected:?}"),
+            });
+            if let Some(status) = status {
+                part["status"] = serde_json::json!(status);
+            }
+            let message = serde_json::json!({"role": "tool", "parts": [part]});
+            let projected = project_message(&message, 0, &document()).unwrap().unwrap();
+            assert_eq!(projected.body, format!("complete-{expected:?}"));
+            let output = projected.output.unwrap();
+            assert_eq!(output.outcome, expected);
+            assert_eq!(output.call_id.as_deref(), Some("call-1"));
+        }
+
+        let large = format!("{}tail", "x".repeat(9 * 1024 * 1024));
+        let message = serde_json::json!({
+            "role": "tool",
+            "parts": [{"kind": "tool_result", "content": large}],
+        });
+        assert!(serde_json::to_vec(&message).unwrap().len() > 8 * 1024 * 1024);
+        let projected = project_message(&message, 0, &document()).unwrap().unwrap();
+        assert_eq!(projected.body.len(), 9 * 1024 * 1024 + 4);
+        assert!(projected.body.ends_with("tail"));
+
+        let ambiguous = serde_json::json!({
+            "role": "tool",
+            "parts": [{
+                "kind": "tool_result",
+                "content": "one",
+                "output": "two",
+            }],
+        });
+        assert!(project_message(&ambiguous, 0, &document()).is_err());
     }
 }
