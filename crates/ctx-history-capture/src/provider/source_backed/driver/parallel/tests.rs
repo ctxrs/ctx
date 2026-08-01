@@ -71,6 +71,7 @@ impl SinkHarness {
             complete_inventories: &mut self.complete_inventories,
             route_index: 0,
             leaf_worker_budget: self.leaf_worker_budget,
+            automatic_missing_observed_at_unix_ms: None,
         };
         sink.run_parallel_leaf_scans(jobs, worker_count, scan)
     }
@@ -535,6 +536,7 @@ fn worker_budget_reserves_indexers_runtime_and_caps_scanners() {
         complete_inventories: &mut harness.complete_inventories,
         route_index: 0,
         leaf_worker_budget: harness.leaf_worker_budget,
+        automatic_missing_observed_at_unix_ms: None,
     };
     assert_eq!(sink.recommended_leaf_workers(0), 0);
     assert_eq!(sink.recommended_leaf_workers(2), 2);

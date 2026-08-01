@@ -3,6 +3,16 @@ use super::super::*;
 pub type SourceBackedCoordinatorResult<T> = Result<T, SourceBackedCoordinatorError>;
 pub type SourceBackedRouteResult<T> = Result<T, SourceBackedRouteError>;
 
+/// Three independently committed complete inventories bound transient
+/// automatic-source absence while preserving prompt eventual deletion.
+pub const AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBackedDeletionDisposition {
+    Deferred,
+    Deleted,
+}
+
 /// Runtime metadata for one selected source route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceBackedRouteMetadata {
@@ -73,6 +83,7 @@ pub struct SourceBackedGenerationSink<'writer> {
     pub(in super::super) complete_inventories: &'writer mut Vec<CompleteInventoryOwner>,
     pub(in super::super) route_index: usize,
     pub(in super::super) leaf_worker_budget: usize,
+    pub(in super::super) automatic_missing_observed_at_unix_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -157,13 +168,26 @@ impl SourceBackedGenerationSink<'_> {
         &mut self,
         deletion: CertifiedSourceDeletion,
         inventory: CertifiedSourceInventory,
-    ) -> SourceBackedCoordinatorResult<()> {
+    ) -> SourceBackedCoordinatorResult<SourceBackedDeletionDisposition> {
         if !deletion.verifies(&inventory) {
             return Err(SourceBackedCoordinatorError::InvalidDeletionWitness);
         }
         self.claim(deletion.source())?;
+        if let Some(observed_at_unix_ms) = self.automatic_missing_observed_at_unix_ms {
+            let deleted = self.writer.observe_automatic_source_missing(
+                deletion,
+                inventory,
+                observed_at_unix_ms,
+                AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES,
+            )?;
+            return Ok(if deleted {
+                SourceBackedDeletionDisposition::Deleted
+            } else {
+                SourceBackedDeletionDisposition::Deferred
+            });
+        }
         self.writer.delete_source(deletion, inventory)?;
-        Ok(())
+        Ok(SourceBackedDeletionDisposition::Deleted)
     }
 
     pub fn replace_source(

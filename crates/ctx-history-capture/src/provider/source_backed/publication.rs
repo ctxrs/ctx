@@ -147,6 +147,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
     let leaf_worker_budget = source_backed_leaf_worker_budget(writer_options.indexer_threads);
     let scan_started = Instant::now();
     let mut writer = GenerationWriter::open(index_root.as_ref(), writer_options)?;
+    let automatic_missing_observed_at_unix_ms = source_missing_observation_time();
     let mut owners = HashMap::new();
     let mut complete_inventory_owners = Vec::new();
     let mut completed_routes = 0;
@@ -171,6 +172,9 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             complete_inventories: &mut complete_inventory_owners,
             route_index,
             leaf_worker_budget,
+            automatic_missing_observed_at_unix_ms: (route.metadata.selection
+                == Some(SourceBackedRouteSelection::Automatic))
+            .then_some(automatic_missing_observed_at_unix_ms),
         };
         (driver.scan)(&mut sink).map_err(|source| SourceBackedCoordinatorError::RouteScan {
             provider: route.metadata.source.provider,
@@ -280,6 +284,13 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         certified_source_count,
         certified_source_bytes,
     })
+}
+
+fn source_missing_observation_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
 }
 
 fn recertify_retained_deletions(

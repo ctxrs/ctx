@@ -230,16 +230,19 @@ fn register_codex_session_tree_route_with_indexer_threads(
                 if managed_codex_session_source(base_source)
                     && !opening.certificate.contains(base_source)
                 {
-                    sink.delete_source(
-                        CertifiedSourceDeletion::from_inventory(
-                            base_source.clone(),
-                            &opening.certificate,
+                    let disposition = sink
+                        .delete_source(
+                            CertifiedSourceDeletion::from_inventory(
+                                base_source.clone(),
+                                &opening.certificate,
+                            )
+                            .map_err(route_error)?,
+                            opening.certificate.clone(),
                         )
-                        .map_err(route_error)?,
-                        opening.certificate.clone(),
-                    )
-                    .map_err(route_coordinator_error)?;
-                    counters.deleted_sources = counters.deleted_sources.saturating_add(1);
+                        .map_err(route_coordinator_error)?;
+                    if disposition == SourceBackedDeletionDisposition::Deleted {
+                        counters.deleted_sources = counters.deleted_sources.saturating_add(1);
+                    }
                 }
             }
             *capture_terminal_evidence.lock().map_err(|_| {

@@ -8,6 +8,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    identity::is_generation_id,
     policy::{
         current_source_generation_policy_hash, LEXICAL_SCHEMA_REVISION, LEXICAL_TOKENIZER_REVISION,
     },
@@ -95,8 +96,14 @@ pub enum IndexError {
     NonCanonicalManifestSources,
     #[error("generation manifest removals are not strictly sorted and unique")]
     NonCanonicalManifestRemovals,
+    #[error("generation source catalog missing states are not strictly sorted and unique")]
+    NonCanonicalSourceCatalogMissingStates,
     #[error("generation manifest retains and removes source {0}")]
     ManifestSourceRemovalOverlap(String),
+    #[error("generation source catalog has invalid missing state for source {0}")]
+    InvalidSourceCatalogMissingState(String),
+    #[error("generation source catalog marks unretained source {0} as missing")]
+    SourceCatalogMissingSourceNotRetained(String),
     #[error("certified removal for source {0} does not match its complete inventory")]
     InvalidGenerationRemoval(String),
     #[error(
@@ -115,6 +122,12 @@ pub enum IndexError {
     IndexMemoryTooSmall { actual: usize, minimum: usize },
     #[error("source replacement has already started for {0}")]
     DuplicateSource(String),
+    #[error("source {0} was observed missing more than once in one refresh")]
+    DuplicateSourceMissingObservation(String),
+    #[error("source {0} cannot enter deletion grace because it is not retained")]
+    SourceMissingObservationNotRetained(String),
+    #[error("automatic source deletion grace must require at least two complete inventories")]
+    InvalidSourceDeletionGraceThreshold,
     #[error("source replacement has not started for {0}")]
     SourceNotStarted(String),
     #[error("source {0} has no certified append frontier in the committed generation")]
@@ -301,6 +314,219 @@ pub struct GenerationRemoval {
     inventory: CertifiedSourceInventory,
 }
 
+/// Non-zero number of consecutive complete inventories that omitted a source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ConsecutiveSourceMissingCount(u32);
+
+impl ConsecutiveSourceMissingCount {
+    fn first() -> Self {
+        Self(1)
+    }
+
+    fn incremented(self) -> Result<Self> {
+        self.0
+            .checked_add(1)
+            .map(Self)
+            .ok_or(IndexError::CountOverflow)
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+
+    fn validate(self) -> Result<()> {
+        if self.0 == 0 {
+            return Err(IndexError::InvalidSourceCatalogMissingState(
+                "zero-count".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One committed refresh point at which a complete inventory omitted a source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceMissingObservationPoint {
+    generation_id: String,
+    observed_at_unix_ms: u64,
+}
+
+impl SourceMissingObservationPoint {
+    pub(crate) fn new(generation_id: String, observed_at_unix_ms: u64) -> Result<Self> {
+        let point = Self {
+            generation_id,
+            observed_at_unix_ms,
+        };
+        point.validate_contract()?;
+        Ok(point)
+    }
+
+    pub fn generation_id(&self) -> &str {
+        &self.generation_id
+    }
+
+    pub fn observed_at_unix_ms(&self) -> u64 {
+        self.observed_at_unix_ms
+    }
+
+    fn validate_contract(&self) -> Result<()> {
+        if !is_generation_id(&self.generation_id) {
+            return Err(IndexError::InvalidGenerationId);
+        }
+        Ok(())
+    }
+}
+
+/// Durable cross-refresh state for one retained source absent from a complete inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCatalogMissingState {
+    latest_deletion_candidate: CertifiedSourceDeletion,
+    consecutive_missing: ConsecutiveSourceMissingCount,
+    first_observation: SourceMissingObservationPoint,
+    last_observation: SourceMissingObservationPoint,
+}
+
+impl SourceCatalogMissingState {
+    pub(crate) fn first(
+        latest_deletion_candidate: CertifiedSourceDeletion,
+        observation: SourceMissingObservationPoint,
+    ) -> Self {
+        Self {
+            latest_deletion_candidate,
+            consecutive_missing: ConsecutiveSourceMissingCount::first(),
+            first_observation: observation.clone(),
+            last_observation: observation,
+        }
+    }
+
+    pub(crate) fn advance(
+        &self,
+        latest_deletion_candidate: CertifiedSourceDeletion,
+        observation: SourceMissingObservationPoint,
+    ) -> Result<Self> {
+        if !self
+            .source()
+            .exact_descriptor_eq(latest_deletion_candidate.source())
+            || !same_inventory_authority(
+                self.latest_deletion_candidate.inventory(),
+                latest_deletion_candidate.inventory(),
+            )
+        {
+            return Ok(Self::first(latest_deletion_candidate, observation));
+        }
+        Ok(Self {
+            latest_deletion_candidate,
+            consecutive_missing: self.consecutive_missing.incremented()?,
+            first_observation: self.first_observation.clone(),
+            last_observation: observation,
+        })
+    }
+
+    pub fn source(&self) -> &SourceKey {
+        self.latest_deletion_candidate.source()
+    }
+
+    pub fn latest_deletion_candidate(&self) -> &CertifiedSourceDeletion {
+        &self.latest_deletion_candidate
+    }
+
+    pub fn consecutive_missing(&self) -> ConsecutiveSourceMissingCount {
+        self.consecutive_missing
+    }
+
+    pub fn first_observation(&self) -> &SourceMissingObservationPoint {
+        &self.first_observation
+    }
+
+    pub fn last_observation(&self) -> &SourceMissingObservationPoint {
+        &self.last_observation
+    }
+
+    fn validate_contract(&self) -> Result<()> {
+        let source_id = self.source().identity().to_string();
+        self.latest_deletion_candidate
+            .validate_contract()
+            .map_err(|_| IndexError::InvalidSourceCatalogMissingState(source_id.clone()))?;
+        self.consecutive_missing
+            .validate()
+            .map_err(|_| IndexError::InvalidSourceCatalogMissingState(source_id.clone()))?;
+        self.first_observation
+            .validate_contract()
+            .map_err(|_| IndexError::InvalidSourceCatalogMissingState(source_id.clone()))?;
+        self.last_observation
+            .validate_contract()
+            .map_err(|_| IndexError::InvalidSourceCatalogMissingState(source_id.clone()))?;
+        if self.consecutive_missing.get() == 1 && self.first_observation != self.last_observation {
+            return Err(IndexError::InvalidSourceCatalogMissingState(source_id));
+        }
+        Ok(())
+    }
+}
+
+fn same_inventory_authority(
+    left: &ctx_history_core::SourceInventoryObservation,
+    right: &ctx_history_core::SourceInventoryObservation,
+) -> bool {
+    left.provider() == right.provider()
+        && left.authority_namespace() == right.authority_namespace()
+        && left.authority_key() == right.authority_key()
+}
+
+/// Generation-bound ctx source catalog state that is not provider content.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCatalogCheckpoint {
+    missing_sources: Vec<SourceCatalogMissingState>,
+}
+
+impl SourceCatalogCheckpoint {
+    pub(crate) fn from_missing_sources(
+        mut missing_sources: Vec<SourceCatalogMissingState>,
+    ) -> Result<Self> {
+        missing_sources.sort_by(|left, right| {
+            source_sort_key(left.source()).cmp(&source_sort_key(right.source()))
+        });
+        let checkpoint = Self { missing_sources };
+        checkpoint.validate_contract()?;
+        Ok(checkpoint)
+    }
+
+    pub fn missing_sources(&self) -> &[SourceCatalogMissingState] {
+        &self.missing_sources
+    }
+
+    pub fn missing_source(&self, source: &SourceKey) -> Option<&SourceCatalogMissingState> {
+        self.missing_sources
+            .binary_search_by(|candidate| {
+                source_sort_key(candidate.source()).cmp(&source_sort_key(source))
+            })
+            .ok()
+            .and_then(|index| self.missing_sources.get(index))
+            .filter(|candidate| candidate.source().exact_descriptor_eq(source))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.missing_sources.is_empty()
+    }
+
+    fn validate_contract(&self) -> Result<()> {
+        if self
+            .missing_sources
+            .windows(2)
+            .any(|pair| source_sort_key(pair[0].source()) >= source_sort_key(pair[1].source()))
+        {
+            return Err(IndexError::NonCanonicalSourceCatalogMissingStates);
+        }
+        for state in &self.missing_sources {
+            state.validate_contract()?;
+        }
+        Ok(())
+    }
+}
+
 impl GenerationRemoval {
     pub fn new(
         deletion: CertifiedSourceDeletion,
@@ -352,6 +578,7 @@ pub struct GenerationManifest {
     pub sources: Vec<CertifiedSource>,
     pub core_record_aggregates: Vec<SourceCoreRecordAggregate>,
     pub removals: Vec<GenerationRemoval>,
+    source_catalog: SourceCatalogCheckpoint,
 }
 
 /// Incrementally composable commitment to one source's exact stored Core
@@ -426,13 +653,19 @@ impl GenerationManifest {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        Self::from_parts_with_record_aggregates(sources, aggregates, removals)
+        Self::from_catalog_parts_with_record_aggregates(
+            sources,
+            aggregates,
+            removals,
+            SourceCatalogCheckpoint::default(),
+        )
     }
 
-    pub(crate) fn from_parts_with_record_aggregates(
+    pub(crate) fn from_catalog_parts_with_record_aggregates(
         mut sources: Vec<CertifiedSource>,
         mut core_record_aggregates: Vec<SourceCoreRecordAggregate>,
         mut removals: Vec<GenerationRemoval>,
+        source_catalog: SourceCatalogCheckpoint,
     ) -> Result<Self> {
         sources.sort_by(|left, right| {
             source_sort_key(left.observation().source())
@@ -480,6 +713,7 @@ impl GenerationManifest {
             sources,
             core_record_aggregates,
             removals,
+            source_catalog,
         };
         manifest.validate_contract()?;
         Ok(manifest)
@@ -487,6 +721,10 @@ impl GenerationManifest {
 
     pub fn generation_id(&self) -> Result<String> {
         Ok(sha256_hex(&serde_json::to_vec(self)?))
+    }
+
+    pub fn source_catalog(&self) -> &SourceCatalogCheckpoint {
+        &self.source_catalog
     }
 
     pub(crate) fn validate_contract(&self) -> Result<()> {
@@ -512,6 +750,7 @@ impl GenerationManifest {
                 "non-canonical aggregate ordering".to_owned(),
             ));
         }
+        self.source_catalog.validate_contract()?;
         let mut source_index = 0;
         for removal in &self.removals {
             removal.validate_contract()?;
@@ -564,6 +803,26 @@ impl GenerationManifest {
             return Err(IndexError::CoreRecordAggregateMismatch(
                 "manifest aggregate cardinality".to_owned(),
             ));
+        }
+        for missing in self.source_catalog.missing_sources() {
+            let retained = self.sources.binary_search_by(|candidate| {
+                source_sort_key(candidate.observation().source())
+                    .cmp(&source_sort_key(missing.source()))
+            });
+            let is_exactly_retained = retained
+                .ok()
+                .and_then(|index| self.sources.get(index))
+                .is_some_and(|source| {
+                    source
+                        .observation()
+                        .source()
+                        .exact_descriptor_eq(missing.source())
+                });
+            if !is_exactly_retained {
+                return Err(IndexError::SourceCatalogMissingSourceNotRetained(
+                    missing.source().identity().to_string(),
+                ));
+            }
         }
         if self.indexed_documents != expected_documents
             || self.certified_source_bytes != expected_bytes

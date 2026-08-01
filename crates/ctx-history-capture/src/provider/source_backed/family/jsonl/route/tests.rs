@@ -223,6 +223,7 @@ fn capture_parallel_test_generation(
             complete_inventories: &mut complete_inventories,
             route_index: 0,
             leaf_worker_budget: workers,
+            automatic_missing_observed_at_unix_ms: None,
         };
         with_family_scanner_workers(workers, || {
             capture(adapter, root, &resident, &mut sink).unwrap();
@@ -347,6 +348,7 @@ fn production_jsonl_scheduler_projects_multiple_sources_concurrently() {
         complete_inventories: &mut complete_inventories,
         route_index: 0,
         leaf_worker_budget: 4,
+        automatic_missing_observed_at_unix_ms: None,
     };
 
     with_family_scanner_workers(4, || {

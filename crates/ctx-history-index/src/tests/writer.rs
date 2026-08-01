@@ -702,6 +702,171 @@ fn exact_replay_witness_covers_removal_only_and_rejects_stale_inventory() {
 }
 
 #[test]
+fn automatic_missing_checkpoint_survives_reopen_reappearance_and_final_deletion() {
+    const DELETE_AFTER: u32 = 3;
+
+    let temp = tempdir().unwrap();
+    let source = source("automatic-missing.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "last good automatic source"))
+        .unwrap();
+    initial
+        .certify_source(appendable_certificate(&source, 1, 1, 10))
+        .unwrap();
+    let initial = initial.commit(|_| true).unwrap();
+
+    let present_inventory = complete_inventory(&source, 2, vec![source.clone()]);
+    let mut noop = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let replayed = stage_exact_replay(&mut noop, &source);
+    noop.certify_complete_inventory(present_inventory.clone())
+        .unwrap();
+    let noop = noop
+        .commit_with_complete_inventory_revalidation(
+            |target| matches!(target, RevalidationTarget::Source(current) if current == &replayed),
+            |current| current == &present_inventory,
+        )
+        .unwrap();
+    assert_eq!(noop.generation_id, initial.generation_id);
+    assert!(noop.manifest().source_catalog().is_empty());
+
+    let observe_missing = |revision, observed_at_unix_ms| {
+        let inventory = complete_inventory(&source, revision, Vec::new());
+        let deletion = CertifiedSourceDeletion::from_inventory(source.clone(), &inventory).unwrap();
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer
+            .certify_complete_inventory(inventory.clone())
+            .unwrap();
+        let deleted = writer
+            .observe_automatic_source_missing(
+                deletion,
+                inventory.clone(),
+                observed_at_unix_ms,
+                DELETE_AFTER,
+            )
+            .unwrap();
+        let receipt = writer
+            .commit_with_complete_inventory_revalidation(
+                |target| {
+                    matches!(target, RevalidationTarget::Deletion(current) if current.verifies(&inventory))
+                },
+                |current| current == &inventory,
+            )
+            .unwrap();
+        (deleted, receipt)
+    };
+
+    let (deleted, first_missing) = observe_missing(3, 100);
+    assert!(!deleted);
+    assert_eq!(first_missing.indexed_documents, 1);
+    assert!(first_missing.manifest().removals.is_empty());
+    let first_state = first_missing
+        .manifest()
+        .source_catalog()
+        .missing_source(&source)
+        .unwrap();
+    assert_eq!(first_state.consecutive_missing().get(), 1);
+    assert_eq!(
+        first_state.first_observation().generation_id(),
+        initial.generation_id
+    );
+    assert_eq!(first_state.first_observation().observed_at_unix_ms(), 100);
+    assert_eq!(
+        first_state.first_observation(),
+        first_state.last_observation()
+    );
+
+    let (deleted, second_missing) = observe_missing(4, 200);
+    assert!(!deleted);
+    assert_eq!(second_missing.indexed_documents, 1);
+    let second_state = second_missing
+        .manifest()
+        .source_catalog()
+        .missing_source(&source)
+        .unwrap();
+    assert_eq!(second_state.consecutive_missing().get(), 2);
+    assert_eq!(
+        second_state.first_observation(),
+        first_state.first_observation()
+    );
+    assert_eq!(
+        second_state.last_observation().generation_id(),
+        first_missing.generation_id
+    );
+    assert_eq!(second_state.last_observation().observed_at_unix_ms(), 200);
+
+    let reappeared_inventory = complete_inventory(&source, 5, vec![source.clone()]);
+    let mut reappeared = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let replayed = stage_exact_replay(&mut reappeared, &source);
+    reappeared
+        .certify_complete_inventory(reappeared_inventory.clone())
+        .unwrap();
+    let reappeared = reappeared
+        .commit_with_complete_inventory_revalidation(
+            |target| matches!(target, RevalidationTarget::Source(current) if current == &replayed),
+            |current| current == &reappeared_inventory,
+        )
+        .unwrap();
+    assert_eq!(reappeared.indexed_documents, 1);
+    assert!(reappeared.manifest().source_catalog().is_empty());
+    assert!(reappeared.manifest().removals.is_empty());
+
+    let (deleted, missing_after_reset) = observe_missing(6, 300);
+    assert!(!deleted);
+    let reset_state = missing_after_reset
+        .manifest()
+        .source_catalog()
+        .missing_source(&source)
+        .unwrap();
+    assert_eq!(reset_state.consecutive_missing().get(), 1);
+    assert_eq!(
+        reset_state.first_observation().generation_id(),
+        reappeared.generation_id
+    );
+
+    let (deleted, second_after_reset) = observe_missing(7, 400);
+    assert!(!deleted);
+    assert_eq!(
+        second_after_reset
+            .manifest()
+            .source_catalog()
+            .missing_source(&source)
+            .unwrap()
+            .consecutive_missing()
+            .get(),
+        2
+    );
+
+    let (deleted, final_deletion) = observe_missing(8, 500);
+    assert!(deleted);
+    assert_eq!(final_deletion.indexed_documents, 0);
+    assert!(final_deletion.manifest().source_catalog().is_empty());
+    assert_eq!(final_deletion.manifest().removals.len(), 1);
+    assert!(final_deletion.manifest().removals[0]
+        .deletion()
+        .source()
+        .exact_descriptor_eq(&source));
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().document_count(),
+        0
+    );
+
+    let final_inventory = complete_inventory(&source, 8, Vec::new());
+    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    replay
+        .certify_complete_inventory(final_inventory.clone())
+        .unwrap();
+    let replay = replay
+        .commit_with_complete_inventory_revalidation(
+            |_| false,
+            |current| current == &final_inventory,
+        )
+        .unwrap();
+    assert_eq!(replay.generation_id, final_deletion.generation_id);
+}
+
+#[test]
 fn empty_inventory_requires_terminal_witness_and_rejects_discovered_source_race() {
     let temp = tempdir().unwrap();
     let discovered = source("discovered-after-opening.jsonl");
