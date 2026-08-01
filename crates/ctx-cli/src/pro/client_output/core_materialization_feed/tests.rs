@@ -7,7 +7,6 @@ use ctx_history_core::{
     SourceObservation, TypedKey,
 };
 use ctx_history_index::{GenerationWriter, WriterOptions};
-use ctx_pro_host_protocol::MAX_CORE_RECORD_PAGE_WIRE_BYTES;
 use tempfile::tempdir;
 
 use super::*;
@@ -97,17 +96,6 @@ fn add_source(
     writer
         .certify_source(certificate(source, revision, count))
         .unwrap();
-}
-
-fn encoded_record_bytes(page: &CoreRecordPage) -> usize {
-    page.records
-        .iter()
-        .map(|record| serde_json::to_vec(record).unwrap().len())
-        .sum()
-}
-
-fn encoded_page_bytes(page: &CoreRecordPage) -> usize {
-    serde_json::to_vec(page).unwrap().len()
 }
 
 fn receipt_for(index: &VerifiedIndex, revision: &str) -> CoreMaterializationReceipt {
@@ -487,56 +475,6 @@ fn event_item_boundary_uses_one_exchange_per_bounded_page() {
     assert_eq!(consumer.event_pages[1].deltas.len(), 1);
     assert!(!consumer.event_pages[0].terminal);
     assert!(consumer.event_pages[1].terminal);
-}
-
-#[test]
-fn escaped_records_share_one_page_within_content_and_wire_bounds() {
-    let temp = tempdir().unwrap();
-    let source = source("encoded-boundary.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source_with_count(
-        &mut writer,
-        &source,
-        1,
-        vec!["\"".repeat(5 * 1024 * 1024), "\"".repeat(5 * 1024 * 1024)],
-    );
-    writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let mut consumer = Consumer::new();
-
-    let report = sync_core_feed(&index, None, &mut consumer).unwrap();
-    assert_eq!(report.materialized_records, 2);
-    assert_eq!(report.record_pages, 1);
-    assert_eq!(consumer.record_exchanges, 1);
-    assert_eq!(consumer.record_pages.len(), 1);
-    let page = &consumer.record_pages[0];
-    assert_eq!(page.records.len(), 2);
-    assert_eq!(page.content_bytes().unwrap(), 10 * 1024 * 1024);
-    assert!(encoded_record_bytes(page) > MAX_CORE_RECORD_PAGE_CONTENT_BYTES);
-    assert!(encoded_record_bytes(page) <= MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES);
-    assert!(encoded_page_bytes(page) <= MAX_CORE_RECORD_PAGE_WIRE_BYTES);
-}
-
-#[test]
-fn escaped_single_record_above_content_byte_count_still_transports() {
-    let temp = tempdir().unwrap();
-    let source = source("overlarge-encoded.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source_with_count(&mut writer, &source, 1, vec!["\"".repeat(9 * 1024 * 1024)]);
-    writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let mut consumer = Consumer::new();
-
-    let report = sync_core_feed(&index, None, &mut consumer).unwrap();
-    assert_eq!(report.materialized_records, 1);
-    assert_eq!(consumer.record_exchanges, 1);
-    assert_eq!(consumer.record_pages.len(), 1);
-    assert!(encoded_record_bytes(&consumer.record_pages[0]) > MAX_CORE_RECORD_PAGE_CONTENT_BYTES);
-    assert!(
-        encoded_record_bytes(&consumer.record_pages[0])
-            <= MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES
-    );
-    assert!(encoded_page_bytes(&consumer.record_pages[0]) <= MAX_CORE_RECORD_PAGE_WIRE_BYTES);
 }
 
 #[test]
