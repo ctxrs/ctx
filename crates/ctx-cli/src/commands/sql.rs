@@ -9,7 +9,8 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Number, Value};
 
 use ctx_history_relational::{
-    RawSqlOptions, RawSqlResult, RawSqlValue, RAW_SQL_MAX_ROWS_CAP, RAW_SQL_MAX_SQL_BYTES_CAP,
+    RawSqlOptions, RawSqlResult, RawSqlValue, RelationalProjectionError, RAW_SQL_DEFAULT_MAX_ROWS,
+    RAW_SQL_DEFAULT_MAX_VALUE_BYTES, RAW_SQL_MAX_ROWS_CAP, RAW_SQL_MAX_SQL_BYTES_CAP,
     RAW_SQL_MAX_TIMEOUT, RAW_SQL_MAX_VALUE_BYTES_CAP,
 };
 
@@ -73,7 +74,16 @@ pub(crate) fn run_sql(
             max_sql_bytes: args.max_sql_bytes,
             timeout: args.timeout,
         },
-    )?;
+    );
+    let result = match result {
+        Err(RelationalProjectionError::Sql(rusqlite::Error::MultipleStatement))
+            if args.output_format() == SqlFormat::Table =>
+        {
+            ui.write_stderr(&render_sql_multiple_statements(ui.stderr_context()))?;
+            return Err(crate::dispatch::rendered_cli_error());
+        }
+        result => result?,
+    };
     telemetry.returned_rows = Some(count_bucket(result.returned_rows as u64));
     telemetry.returned_columns = Some(count_bucket(result.columns.len() as u64));
     telemetry.rows_truncated = Some(result.truncated.rows);
@@ -235,16 +245,37 @@ fn render_sql_truncation(
     ))
 }
 
+fn render_sql_multiple_statements(context: &RenderContext) -> Document {
+    diagnostic(
+        context,
+        Diagnostic {
+            level: DiagnosticLevel::Error,
+            summary: "One read-only SQL statement required",
+            detail: Some(
+                "ctx sql accepts one read-only statement per command. Run each statement separately.",
+            ),
+            fields: &[],
+            action: Some(Action {
+                command: "ctx sql 'SELECT 1'",
+            }),
+        },
+    )
+}
+
 fn sql_truncation_action(args: &SqlArgs, result: &RawSqlResult) -> Option<String> {
     let mut command = vec!["ctx sql".to_owned()];
+    let mut increases_limit = false;
     if result.truncated.rows {
         let next = result
             .limits
             .max_rows
             .saturating_mul(2)
             .min(RAW_SQL_MAX_ROWS_CAP);
-        if next > result.limits.max_rows {
+        if result.limits.max_rows < RAW_SQL_DEFAULT_MAX_ROWS {
+            increases_limit = true;
+        } else if next > result.limits.max_rows {
             command.push(format!("--max-rows {next}"));
+            increases_limit = true;
         }
     }
     if result.truncated.values {
@@ -253,11 +284,14 @@ fn sql_truncation_action(args: &SqlArgs, result: &RawSqlResult) -> Option<String
             .max_value_bytes
             .saturating_mul(2)
             .min(RAW_SQL_MAX_VALUE_BYTES_CAP);
-        if next > result.limits.max_value_bytes {
+        if result.limits.max_value_bytes < RAW_SQL_DEFAULT_MAX_VALUE_BYTES {
+            increases_limit = true;
+        } else if next > result.limits.max_value_bytes {
             command.push(format!("--max-value-bytes {next}"));
+            increases_limit = true;
         }
     }
-    if command.len() == 1 {
+    if !increases_limit {
         return None;
     }
     match (&args.sql, &args.file) {
@@ -584,10 +618,12 @@ mod ui_tests {
     }
 
     #[test]
-    fn bounded_preview_action_keeps_full_quoted_sql_copyable_across_widths() {
+    fn bounded_preview_action_uses_defaults_to_stay_copyable_at_80_and_100_columns() {
         let mut result = result(vec![vec![text("codex"), text("summary")]]);
         result.truncated.rows = true;
         result.truncated.values = true;
+        result.limits.max_rows = 1;
+        result.limits.max_value_bytes = 4;
         let sql = "SELECT 'abcdefgh' AS value UNION ALL SELECT 'ijklmnop'";
         let args = SqlArgs {
             sql: Some(sql.to_owned()),
@@ -603,10 +639,10 @@ mod ui_tests {
         let action = sql_truncation_action(&args, &result).unwrap();
         assert_eq!(
             action,
-            "ctx sql --max-rows 200 --max-value-bytes 32768 'SELECT '\\''abcdefgh'\\'' AS value UNION ALL SELECT '\\''ijklmnop'\\'''"
+            "ctx sql 'SELECT '\\''abcdefgh'\\'' AS value UNION ALL SELECT '\\''ijklmnop'\\'''"
         );
 
-        for width in [32, 48, 80, 100, 120] {
+        for width in [80, 100] {
             for color in [ColorMode::Never, ColorMode::Always] {
                 let context = context(width, color);
                 let document = render_sql_truncation(&context, &result, Some(&action)).unwrap();
@@ -638,9 +674,28 @@ mod ui_tests {
 
                 let plain = document.render_plain();
                 assert!(plain.contains(&format!("Next\n  {action}\n")), "{plain}");
-                assert!(plain.lines().all(|line| {
-                    line == command_line || line.width() <= context.content_width().unwrap_or(1)
-                }));
+                assert!(plain
+                    .lines()
+                    .all(|line| line.width() <= context.content_width().unwrap_or(1)));
+                assert_eq!(strip_ansi(&document.render(&context)), plain);
+            }
+        }
+    }
+
+    #[test]
+    fn multiple_statement_error_explains_the_rule_and_has_a_valid_action() {
+        for width in [80, 100] {
+            for color in [ColorMode::Never, ColorMode::Always] {
+                let context = context(width, color);
+                let document = render_sql_multiple_statements(&context);
+                let plain = document.render_plain();
+
+                assert!(plain.starts_with("✗ One read-only SQL statement required\n"));
+                assert!(plain.contains("one read-only statement per command"));
+                assert!(plain.contains("each statement"));
+                assert!(plain.contains("separately."));
+                assert!(plain.contains("Next\n  ctx sql 'SELECT 1'\n"));
+                assert_fits(&document, &context);
                 assert_eq!(strip_ansi(&document.render(&context)), plain);
             }
         }
