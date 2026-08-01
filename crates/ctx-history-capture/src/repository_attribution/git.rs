@@ -96,6 +96,9 @@ pub(super) struct CertifiedCandidate {
     pub(super) repository_root: PathBuf,
     git_dir: PathBuf,
     common_dir: PathBuf,
+    // Internal cache fence only: logical identity and wire authorization keep
+    // their existing contracts while pointer/geometry changes force a probe.
+    repository_geometry_state: [u8; 32],
     branch: Option<String>,
     mutable_evidence_state: [u8; 32],
 }
@@ -278,6 +281,10 @@ impl GitCertifier {
             "sha256" => GitObjectFormat::Sha256,
             _ => return Err(ProbeFailure::Failed("unsupported_git_object_format")),
         };
+        let repository_geometry = repository_geometry_state(&root)?;
+        if repository_geometry.git_dir != git_dir || repository_geometry.common_dir != common_dir {
+            return Err(ProbeFailure::ConcurrentDrift);
+        }
 
         let branch = repository_head_branch(&git_dir, object_format)?;
         let remotes_output = self.run_git(
@@ -305,6 +312,7 @@ impl GitCertifier {
             object_format,
             branch,
             aliases,
+            repository_geometry_state: repository_geometry.fingerprint,
             locator_fingerprint,
             mutable_evidence_state,
         })
@@ -401,6 +409,7 @@ struct GitSnapshot {
     object_format: GitObjectFormat,
     branch: Option<String>,
     aliases: Vec<RepositoryAlias>,
+    repository_geometry_state: [u8; 32],
     locator_fingerprint: [u8; 32],
     mutable_evidence_state: [u8; 32],
 }
@@ -475,6 +484,7 @@ impl GitSnapshot {
             repository_root: self.root,
             git_dir: self.git_dir,
             common_dir: self.common_dir,
+            repository_geometry_state: self.repository_geometry_state,
             branch: self.branch,
             mutable_evidence_state: self.mutable_evidence_state,
         })
@@ -505,6 +515,13 @@ impl CertifiedCandidate {
         let object_format = self.binding.git_object_format.ok_or(ProbeFailure::Unsafe(
             "cached_repository_has_no_object_format",
         ))?;
+        let geometry = repository_geometry_state(&self.repository_root)?;
+        if geometry.git_dir != self.git_dir
+            || geometry.common_dir != self.common_dir
+            || geometry.fingerprint != self.repository_geometry_state
+        {
+            return Ok(None);
+        }
         let current = repository_locator_fingerprint(
             &self.repository_root,
             &self.git_dir,
@@ -514,22 +531,31 @@ impl CertifiedCandidate {
         if current != authorization.locator_fingerprint {
             return Ok(None);
         }
-        if repository_mutable_evidence_state(
+        let mutable_evidence_state = repository_mutable_evidence_state(
             &self.git_dir,
             &self.common_dir,
             self.branch.as_deref(),
-        )? != self.mutable_evidence_state
-        {
+        )?;
+        if mutable_evidence_state != self.mutable_evidence_state {
             return Ok(None);
         }
         let closing_probe = validate_candidate_route(path, kind)?;
+        let closing_geometry = repository_geometry_state(&self.repository_root)?;
+        if closing_probe != probe_directory || closing_geometry != geometry {
+            return Err(ProbeFailure::ConcurrentDrift);
+        }
         let closing = repository_locator_fingerprint(
             &self.repository_root,
             &self.git_dir,
             &self.common_dir,
             object_format,
         )?;
-        if closing_probe != probe_directory || closing != current {
+        let closing_mutable_evidence_state = repository_mutable_evidence_state(
+            &self.git_dir,
+            &self.common_dir,
+            self.branch.as_deref(),
+        )?;
+        if closing != current || closing_mutable_evidence_state != mutable_evidence_state {
             return Err(ProbeFailure::ConcurrentDrift);
         }
         let mut reused = self.clone();
@@ -766,6 +792,200 @@ fn route_fingerprint(path: &Path) -> Result<[u8; 32], ProbeFailure> {
         digest.update(path_identity_fingerprint(component)?);
     }
     Ok(digest.finalize().into())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepositoryGeometryState {
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+    fingerprint: [u8; 32],
+}
+
+/// Resolves the root's current Git marker without consulting cached Git paths.
+/// Marker identity/content and linked-worktree indirection are retained only as
+/// a local cache fence; they do not become logical repository identity.
+fn repository_geometry_state(root: &Path) -> Result<RepositoryGeometryState, ProbeFailure> {
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        Err(ProbeFailure::PlatformUnsupported)
+    }
+    #[cfg(unix)]
+    {
+        let marker = root.join(".git");
+        let mut digest = Sha256::new();
+        digest.update(b"ctx.repository.cache-geometry.v1\0");
+        let git_dir =
+            match update_repository_geometry_entry(&mut digest, b"root_git_marker", &marker)? {
+                RepositoryGeometryEntry::Directory => marker.clone(),
+                RepositoryGeometryEntry::File(value) => {
+                    let line =
+                        parse_required_geometry_line(&value, "repository_git_pointer_invalid")?;
+                    let path = line
+                        .strip_prefix("gitdir: ")
+                        .ok_or(ProbeFailure::Unsafe("repository_git_pointer_invalid"))?;
+                    lexical_absolute(path, Some(root))
+                        .ok_or(ProbeFailure::Unsafe("repository_git_pointer_invalid"))?
+                }
+                RepositoryGeometryEntry::Missing => {
+                    return Err(ProbeFailure::Unsafe("repository_git_marker_missing"));
+                }
+            };
+        validate_candidate_route(&git_dir, CandidateKind::Directory)?;
+        update_repository_geometry_path(&mut digest, b"resolved_git_dir", &git_dir);
+
+        let commondir_marker = git_dir.join("commondir");
+        let common_dir = match update_repository_geometry_entry(
+            &mut digest,
+            b"commondir_marker",
+            &commondir_marker,
+        )? {
+            RepositoryGeometryEntry::Missing => git_dir.clone(),
+            RepositoryGeometryEntry::File(value) => {
+                let path =
+                    parse_required_geometry_line(&value, "repository_commondir_pointer_invalid")?;
+                lexical_absolute(path, Some(&git_dir))
+                    .ok_or(ProbeFailure::Unsafe("repository_commondir_pointer_invalid"))?
+            }
+            RepositoryGeometryEntry::Directory => {
+                return Err(ProbeFailure::Unsafe(
+                    "repository_commondir_marker_is_not_file",
+                ));
+            }
+        };
+        validate_candidate_route(&common_dir, CandidateKind::Directory)?;
+        update_repository_geometry_path(&mut digest, b"resolved_common_dir", &common_dir);
+
+        let gitdir_marker = git_dir.join("gitdir");
+        match update_repository_geometry_entry(
+            &mut digest,
+            b"worktree_gitdir_marker",
+            &gitdir_marker,
+        )? {
+            RepositoryGeometryEntry::Missing if common_dir == git_dir => {}
+            RepositoryGeometryEntry::Missing => {
+                return Err(ProbeFailure::Unsafe("repository_worktree_backlink_missing"));
+            }
+            RepositoryGeometryEntry::File(value) => {
+                let path =
+                    parse_required_geometry_line(&value, "repository_worktree_backlink_invalid")?;
+                let backlink = lexical_absolute(path, Some(&git_dir))
+                    .ok_or(ProbeFailure::Unsafe("repository_worktree_backlink_invalid"))?;
+                if backlink != marker {
+                    return Err(ProbeFailure::Unsafe(
+                        "repository_worktree_backlink_mismatch",
+                    ));
+                }
+            }
+            RepositoryGeometryEntry::Directory => {
+                return Err(ProbeFailure::Unsafe(
+                    "repository_worktree_backlink_is_not_file",
+                ));
+            }
+        }
+
+        Ok(RepositoryGeometryState {
+            git_dir,
+            common_dir,
+            fingerprint: digest.finalize().into(),
+        })
+    }
+}
+
+#[cfg(unix)]
+enum RepositoryGeometryEntry {
+    Missing,
+    File(Vec<u8>),
+    Directory,
+}
+
+#[cfg(unix)]
+fn update_repository_geometry_entry(
+    digest: &mut Sha256,
+    label: &[u8],
+    path: &Path,
+) -> Result<RepositoryGeometryEntry, ProbeFailure> {
+    use std::os::unix::fs::MetadataExt;
+
+    digest.update(u64::try_from(label.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(label);
+    let opening = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            digest.update([0]);
+            return Ok(RepositoryGeometryEntry::Missing);
+        }
+        Err(_) => {
+            return Err(ProbeFailure::Failed("repository_geometry_metadata_failed"));
+        }
+    };
+    if opening.file_type().is_symlink() {
+        return Err(ProbeFailure::Unsafe(
+            "repository_geometry_marker_is_symlink",
+        ));
+    }
+    let identity = [opening.dev(), opening.ino(), u64::from(opening.mode())];
+    if opening.is_dir() {
+        digest.update([1]);
+        for part in identity {
+            digest.update(part.to_be_bytes());
+        }
+        return Ok(RepositoryGeometryEntry::Directory);
+    }
+    if !opening.is_file() {
+        return Err(ProbeFailure::Unsafe(
+            "repository_geometry_marker_is_not_file_or_directory",
+        ));
+    }
+    if opening.len() > MAX_GIT_OUTPUT_BYTES as u64 {
+        return Err(ProbeFailure::Failed(
+            "repository_geometry_marker_limit_exceeded",
+        ));
+    }
+    let value = fs::read(path)
+        .map_err(|_| ProbeFailure::Failed("repository_geometry_marker_read_failed"))?;
+    let closing = fs::symlink_metadata(path).map_err(|_| ProbeFailure::ConcurrentDrift)?;
+    if !closing.is_file()
+        || closing.file_type().is_symlink()
+        || opening.dev() != closing.dev()
+        || opening.ino() != closing.ino()
+        || opening.mode() != closing.mode()
+        || opening.len() != closing.len()
+        || opening.mtime() != closing.mtime()
+        || opening.mtime_nsec() != closing.mtime_nsec()
+        || opening.ctime() != closing.ctime()
+        || opening.ctime_nsec() != closing.ctime_nsec()
+    {
+        return Err(ProbeFailure::ConcurrentDrift);
+    }
+    digest.update([2]);
+    for part in identity {
+        digest.update(part.to_be_bytes());
+    }
+    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(&value);
+    Ok(RepositoryGeometryEntry::File(value))
+}
+
+#[cfg(unix)]
+fn update_repository_geometry_path(digest: &mut Sha256, label: &[u8], path: &Path) {
+    digest.update(u64::try_from(label.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(label);
+    let value = path.as_os_str().as_encoded_bytes();
+    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(value);
+}
+
+#[cfg(unix)]
+fn parse_required_geometry_line<'a>(
+    value: &'a [u8],
+    failure: &'static str,
+) -> Result<&'a str, ProbeFailure> {
+    let lines = utf8_lines(value).map_err(|_| ProbeFailure::Unsafe(failure))?;
+    match lines.as_slice() {
+        [line] if !line.is_empty() => Ok(line),
+        _ => Err(ProbeFailure::Unsafe(failure)),
+    }
 }
 
 fn repository_mutable_evidence_state(

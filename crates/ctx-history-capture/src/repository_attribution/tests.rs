@@ -1072,6 +1072,168 @@ fn locator_fingerprint_changes_for_recreated_root_git_dir_and_linked_worktree() 
 
 #[cfg(unix)]
 #[test]
+fn linked_worktree_pointer_rebind_recertifies_local_authorization() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(
+        temp.path(),
+        "repo",
+        Some("https://github.com/acme/repo.git"),
+    );
+    let first = temp.path().join("linked-first");
+    let second = temp.path().join("linked-second");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked-first",
+            first.to_str().unwrap(),
+        ],
+    );
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked-second",
+            second.to_str().unwrap(),
+        ],
+    );
+
+    let mut attributor = RepositoryAttributor::default();
+    let before = attributor.attribute(AttributionInput {
+        declared_tool_workdir: Some(first.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    assert_eq!(attributor.full_certification_probe_count(), 1);
+
+    let replacement_pointer = fs::read(second.join(".git")).unwrap();
+    let replacement_git_dir = PathBuf::from(
+        std::str::from_utf8(&replacement_pointer)
+            .unwrap()
+            .trim()
+            .strip_prefix("gitdir: ")
+            .unwrap(),
+    );
+    fs::write(first.join(".git"), replacement_pointer).unwrap();
+    fs::write(
+        replacement_git_dir.join("gitdir"),
+        format!("{}\n", first.join(".git").display()),
+    )
+    .unwrap();
+
+    let rebound = attributor.attribute(AttributionInput {
+        declared_tool_workdir: Some(first.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    assert_eq!(rebound.repository_bindings.len(), 1);
+    assert_eq!(attributor.full_certification_probe_count(), 2);
+    assert_eq!(
+        before.repository_bindings[0].logical_repository_id,
+        rebound.repository_bindings[0].logical_repository_id
+    );
+    assert_eq!(
+        before.repository_bindings[0].checkout_id,
+        rebound.repository_bindings[0].checkout_id
+    );
+    assert_eq!(
+        before.repository_bindings[0].worktree_id,
+        rebound.repository_bindings[0].worktree_id
+    );
+    assert_ne!(locator_fingerprint(&before), locator_fingerprint(&rebound));
+}
+
+#[cfg(unix)]
+#[test]
+fn moved_linked_worktree_recertifies_new_root_without_stale_old_authorization() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(
+        temp.path(),
+        "repo",
+        Some("https://github.com/acme/repo.git"),
+    );
+    let old = temp.path().join("linked-old");
+    let moved = temp.path().join("linked-moved");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked-move",
+            old.to_str().unwrap(),
+        ],
+    );
+
+    let mut attributor = RepositoryAttributor::default();
+    let before = attributor.attribute(AttributionInput {
+        declared_tool_workdir: Some(old.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    assert_eq!(attributor.full_certification_probe_count(), 1);
+
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "move",
+            old.to_str().unwrap(),
+            moved.to_str().unwrap(),
+        ],
+    );
+    let after = attributor.attribute(AttributionInput {
+        declared_tool_workdir: Some(moved.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    assert_eq!(after.repository_bindings.len(), 1);
+    assert_eq!(attributor.full_certification_probe_count(), 2);
+    assert_eq!(
+        before.repository_bindings[0].logical_repository_id,
+        after.repository_bindings[0].logical_repository_id
+    );
+    assert_eq!(
+        before.repository_bindings[0].checkout_id,
+        after.repository_bindings[0].checkout_id
+    );
+    assert_eq!(
+        before.repository_bindings[0].worktree_id,
+        after.repository_bindings[0].worktree_id
+    );
+    assert_eq!(locator_fingerprint(&before), locator_fingerprint(&after));
+    assert_eq!(
+        after.repository_bindings[0]
+            .local_root_authorization
+            .as_ref()
+            .unwrap()
+            .local_root,
+        moved.to_string_lossy()
+    );
+
+    let reused = attributor.attribute(AttributionInput {
+        declared_tool_workdir: Some(moved.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    assert_eq!(reused.repository_bindings.len(), 1);
+    assert_eq!(attributor.full_certification_probe_count(), 2);
+
+    let stale = attributor.attribute(AttributionInput {
+        declared_tool_workdir: Some(old.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    assert!(stale.repository_bindings.is_empty());
+    assert!(has_reason(
+        &stale,
+        RepositoryAbstentionReason::CandidateMissingBeforeCertification
+    ));
+}
+
+#[cfg(unix)]
+#[test]
 fn certification_cache_is_constant_probe_for_repeated_events_and_invalidates_safely() {
     use std::os::unix::fs::symlink;
 
