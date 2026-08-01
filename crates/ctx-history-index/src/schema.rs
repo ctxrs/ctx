@@ -29,6 +29,7 @@ pub(crate) struct Fields {
     pub(crate) event_type: Field,
     pub(crate) role: Field,
     pub(crate) body_search: Field,
+    pub(crate) repository_produced_object_id: Field,
     pub(crate) workspace_filter: Field,
     pub(crate) touched_file_filter: Field,
     pub(crate) core_content_bytes: Field,
@@ -76,6 +77,7 @@ pub(crate) fn lexical_schema() -> Schema {
         "body_search",
         TextOptions::default().set_indexing_options(body_indexing),
     );
+    builder.add_text_field("repository_produced_object_id", STRING);
     builder.add_text_field("workspace_filter", STRING);
     builder.add_text_field("touched_file_filter", STRING);
     builder.add_u64_field("core_content_bytes", FAST);
@@ -111,6 +113,7 @@ pub(crate) fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         event_type: required_field(schema, "event_type")?,
         role: required_field(schema, "role")?,
         body_search: required_field(schema, "body_search")?,
+        repository_produced_object_id: required_field(schema, "repository_produced_object_id")?,
         workspace_filter: required_field(schema, "workspace_filter")?,
         touched_file_filter: required_field(schema, "touched_file_filter")?,
         core_content_bytes: required_field(schema, "core_content_bytes")?,
@@ -134,6 +137,17 @@ mod tests {
     #[test]
     fn lexical_schema_omits_retired_stored_touched_file() {
         assert!(lexical_schema().get_field("touched_file").is_err());
+    }
+
+    #[test]
+    fn produced_object_id_is_exact_indexed_and_not_stored() {
+        let schema = lexical_schema();
+        let field = schema.get_field("repository_produced_object_id").unwrap();
+        let entry = schema.get_field_entry(field);
+
+        assert!(entry.is_indexed());
+        assert!(!entry.is_stored());
+        assert_eq!(entry.field_type().value_type(), tantivy::schema::Type::Str);
     }
 
     #[test]

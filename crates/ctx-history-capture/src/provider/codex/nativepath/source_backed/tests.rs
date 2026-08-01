@@ -50,6 +50,37 @@ fn write_session(sessions: &Path, native_session_id: &str, events: &[String]) {
     fs::write(session_path(sessions, native_session_id), contents).unwrap();
 }
 
+fn write_forked_session(
+    sessions: &Path,
+    native_session_id: &str,
+    parent_native_session_id: &str,
+    events: &[String],
+) {
+    let mut contents = format!(
+        "{}\n",
+        serde_json::json!({
+            "timestamp": "2026-07-28T12:30:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": native_session_id,
+                "session_id": native_session_id,
+                "forked_from_id": parent_native_session_id,
+                "timestamp": "2026-07-28T12:30:00Z",
+                "cwd": "/tmp/source-backed",
+                "originator": "codex_cli_rs",
+                "cli_version": "0.1.0",
+                "source": "cli",
+                "model_provider": "openai"
+            }
+        })
+    );
+    for event in events {
+        contents.push_str(event);
+        contents.push('\n');
+    }
+    fs::write(session_path(sessions, native_session_id), contents).unwrap();
+}
+
 fn session_meta(native_session_id: &str) -> String {
     serde_json::json!({
         "timestamp": "2026-07-28T12:00:00Z",

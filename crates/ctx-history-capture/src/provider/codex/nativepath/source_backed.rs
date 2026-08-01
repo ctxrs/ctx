@@ -58,7 +58,7 @@ const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
 const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v7";
-const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v6";
+const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v7";
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v1";
 const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v1";
@@ -305,6 +305,9 @@ mod catalog;
 mod cold;
 mod identity;
 mod ingestion;
+mod lineage;
+
+use lineage::{CodexOutcomeLineageAuthorityV0, CodexOutcomeOriginV0};
 
 pub(crate) use catalog::{
     discover_codex_root_inventory_v0, discover_codex_session_tree_inventory_v0,

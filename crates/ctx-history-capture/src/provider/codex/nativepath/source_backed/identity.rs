@@ -213,6 +213,7 @@ pub(super) fn codex_core_record(
     row: CodexSourceBackedRowV0,
     event_identity_state: &mut CodexEventIdentityStateV0,
     attributor: &mut crate::repository_attribution::RepositoryAttributor,
+    outcome_lineage: &CodexOutcomeLineageAuthorityV0,
 ) -> CodexSourceBackedResultV0<CoreRecord> {
     let native_session_id = owner.native_session_id.as_str();
     let parent_session_id = owner
@@ -271,6 +272,45 @@ pub(super) fn codex_core_record(
         outcome_output_repository_path = evidence.outcome_output_repository_path;
         outcome_observations = evidence.outcomes;
         outcome_abstentions = evidence.abstentions;
+    }
+    let mut copied_origin = false;
+    let mut unproven_origin = false;
+    let mut retained_outcomes = Vec::with_capacity(outcome_observations.len());
+    for outcome in outcome_observations {
+        let linkage = match &outcome {
+            crate::repository_attribution::UnscopedOutcomeObservation::Exact(outcome) => {
+                &outcome.linkage
+            }
+            crate::repository_attribution::UnscopedOutcomeObservation::DeferredCommit(outcome) => {
+                &outcome.linkage
+            }
+        };
+        match outcome_lineage.classify(
+            native_session_id,
+            &linkage.origin_call_id,
+            &linkage.result_call_id,
+        )? {
+            CodexOutcomeOriginV0::UniqueToSession => retained_outcomes.push(outcome),
+            CodexOutcomeOriginV0::CopiedFromAncestor => {
+                copied_origin = true;
+            }
+            CodexOutcomeOriginV0::Unproven => {
+                unproven_origin = true;
+            }
+        }
+    }
+    outcome_observations = retained_outcomes;
+    if copied_origin {
+        outcome_abstentions.push((
+            ctx_history_core::RepositoryAbstentionReason::ProviderOutputUnjoined,
+            "copied_provider_history_has_ancestor_execution",
+        ));
+    }
+    if unproven_origin {
+        outcome_abstentions.push((
+            ctx_history_core::RepositoryAbstentionReason::ProviderOutputUnjoined,
+            "provider_execution_origin_lineage_unproven",
+        ));
     }
     let mut annotation = attributor.attribute(crate::repository_attribution::AttributionInput {
         activity_at_unix_ms: Some(occurred_at.timestamp_millis()),

@@ -118,6 +118,110 @@ impl VerifiedIndex {
         Ok(coordinates)
     }
 
+    /// Returns complete Core records in the existing deterministic session
+    /// order without retaining the complete session.
+    pub fn core_session_event_page_with_budget(
+        &self,
+        session_id: Uuid,
+        cursor: Option<&SessionEventCursor>,
+        limit: usize,
+        budget: CoreEventPageBudget,
+    ) -> Result<CoreSessionEventPage> {
+        if !(1..=MAX_SESSION_EVENT_PAGE_ITEMS).contains(&limit) {
+            return Err(IndexError::InvalidSessionEventPageSize {
+                requested: limit,
+                maximum: MAX_SESSION_EVENT_PAGE_ITEMS,
+            });
+        }
+        validate_core_event_page_budget(budget)?;
+        if let Some(cursor) = cursor {
+            self.validate_session_event_cursor_request(session_id, cursor)?;
+        }
+
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let stable_session_id = self
+            .stable_session_id(session_id, fields)?
+            .ok_or(IndexError::SessionEventSessionNotFound(session_id))?;
+        let after = cursor
+            .map(|cursor| self.validate_session_event_cursor(stable_session_id, cursor, fields))
+            .transpose()?;
+        let candidates = self.session_event_addresses_after(
+            stable_session_id,
+            after,
+            limit.saturating_add(1),
+            fields,
+        )?;
+        let candidate_count = candidates.len();
+        let mut items = Vec::with_capacity(limit.min(candidate_count));
+        let mut identities = std::collections::HashSet::with_capacity(items.capacity());
+        let mut encoded_core_bytes = 0_usize;
+        let mut content_bytes = 0_usize;
+        let mut consumed = 0_usize;
+        let mut last_order = None;
+
+        for candidate in candidates {
+            if items.len() == limit {
+                break;
+            }
+            let (record, record_encoded_core_bytes) =
+                stored_core_event_record_with_size(&self.searcher, candidate.address, fields)?;
+            let record_content_bytes = core_content_bytes(&record.core_record.content)?;
+            let actual_order = SessionEventOrderKey::for_core_record(&record.core_record)?;
+            if actual_order != candidate.order || record.session_id != stable_session_id {
+                return Err(IndexError::InvalidStoredDocumentField(
+                    SESSION_EVENT_ORDER_FIELD,
+                ));
+            }
+            if !identities.insert(record.event_id) {
+                return Err(IndexError::DuplicateEventIdentity(
+                    record.event_id.to_string(),
+                ));
+            }
+            if !items.is_empty()
+                && !core_event_page_budget_admits(
+                    budget,
+                    encoded_core_bytes,
+                    content_bytes,
+                    record_encoded_core_bytes,
+                    record_content_bytes,
+                )
+            {
+                break;
+            }
+            encoded_core_bytes = encoded_core_bytes
+                .checked_add(record_encoded_core_bytes)
+                .ok_or(IndexError::CountOverflow)?;
+            content_bytes = content_bytes
+                .checked_add(record_content_bytes)
+                .ok_or(IndexError::CountOverflow)?;
+            last_order = Some(candidate.order);
+            items.push(record);
+            consumed = consumed.checked_add(1).ok_or(IndexError::CountOverflow)?;
+        }
+
+        let terminal = consumed == candidate_count;
+        let next_cursor = if terminal {
+            None
+        } else {
+            last_order.map(|order| {
+                SessionEventCursor::new(
+                    self.generation_id.clone(),
+                    stable_session_id,
+                    session_event_coordinate(order),
+                )
+            })
+        };
+        Ok(CoreSessionEventPage {
+            generation_id: self.generation_id.clone(),
+            session_id: stable_session_id,
+            items,
+            encoded_core_bytes,
+            content_bytes,
+            next_cursor,
+            terminal,
+        })
+    }
+
     /// Returns a deterministic body-free window centered on one exact event.
     /// At most 101 coordinates are retained and only one stable-identity
     /// bootstrap record is decoded regardless of session cardinality.
@@ -359,6 +463,51 @@ impl VerifiedIndex {
         Ok(None)
     }
 
+    fn validate_session_event_cursor_request(
+        &self,
+        requested_session_id: Uuid,
+        cursor: &SessionEventCursor,
+    ) -> Result<()> {
+        if cursor.generation_id != self.generation_id {
+            return Err(IndexError::SessionEventCursorGenerationMismatch {
+                cursor_generation: cursor.generation_id.clone(),
+                pinned_generation: self.generation_id.clone(),
+            });
+        }
+        if cursor.session_id.validate_contract().is_err()
+            || cursor.session_id.entity_kind() != StableEntityKind::Session
+        {
+            return Err(IndexError::InvalidSessionEventCursorSessionIdentity);
+        }
+        if cursor.session_id.as_uuid() != requested_session_id {
+            return Err(IndexError::SessionEventCursorSessionMismatch);
+        }
+        Ok(())
+    }
+
+    fn validate_session_event_cursor(
+        &self,
+        stable_session_id: StableEntityId,
+        cursor: &SessionEventCursor,
+        fields: Fields,
+    ) -> Result<SessionEventOrderKey> {
+        if cursor.session_id != stable_session_id {
+            return Err(IndexError::SessionEventCursorSessionMismatch);
+        }
+        let order = session_event_order_key(stable_session_id, cursor.after.sort_key())?;
+        let query = TermQuery::new(
+            Term::from_field_bytes(fields.session_event_order, order.as_bytes()),
+            IndexRecordOption::Basic,
+        );
+        match self.searcher.search(&query, &Count)? {
+            0 => Err(IndexError::InvalidSessionEventCursorCoordinate),
+            1 => Ok(order),
+            _ => Err(IndexError::DuplicateEventIdentity(
+                cursor.after.event_id.to_string(),
+            )),
+        }
+    }
+
     /// Pulls at most `capacity` live coordinates from one exact session range
     /// in global ascending order. Each segment stream seeks directly to the
     /// requested lower bound and `TermMerger` retains only one frontier per
@@ -485,8 +634,8 @@ impl VerifiedIndex {
                             .replace(DocAddress::new(segment_ord, doc_id))
                             .is_some()
                         {
-                            return Err(IndexError::InvalidStoredDocumentField(
-                                SESSION_EVENT_ORDER_FIELD,
+                            return Err(IndexError::DuplicateEventIdentity(
+                                order.event_id().to_string(),
                             ));
                         }
                     }

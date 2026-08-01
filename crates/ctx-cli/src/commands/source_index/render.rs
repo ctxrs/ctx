@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    ops::Range,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -9,6 +10,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use ctx_history_core::{managed_data_root, utc_now};
 use ctx_history_index::{EventSearchFilters, VerifiedIndex};
 use serde_json::{json, Value};
+use unicode_segmentation::UnicodeSegmentation as _;
 use uuid::Uuid;
 
 use crate::{
@@ -29,7 +31,13 @@ mod show;
 pub(super) use search::{render_search_document, render_search_not_ready_document};
 pub(super) use show::render_show_document;
 
-const SEARCH_SNIPPET_MAX_CHARS: usize = 2_048;
+pub(in crate::commands::source_index) const SEARCH_SNIPPET_MAX_CHARS: usize = 320;
+
+#[derive(Debug)]
+pub(in crate::commands::source_index) struct SearchCorePresentation {
+    pub(in crate::commands::source_index) record: ctx_history_index::CoreEventRecord,
+    pub(in crate::commands::source_index) snippet_truncated: bool,
+}
 
 pub(super) fn pretty_json_stdout_bytes(value: &Value) -> Result<usize> {
     Ok(serde_json::to_string_pretty(value)?.len().saturating_add(1))
@@ -46,7 +54,7 @@ struct SearchJsonInput<'a> {
     index: &'a VerifiedIndex,
     collection: &'a SearchCollection,
     filters: &'a EventSearchFilters,
-    core_records: &'a HashMap<Uuid, ctx_history_index::CoreEventRecord>,
+    core_records: &'a HashMap<Uuid, SearchCorePresentation>,
     metrics: SearchRenderMetrics<'a>,
 }
 
@@ -63,7 +71,7 @@ type SearchJsonCompatibilityFn = fn(
     &VerifiedIndex,
     &SearchCollection,
     &EventSearchFilters,
-    &HashMap<Uuid, ctx_history_index::CoreEventRecord>,
+    &HashMap<Uuid, SearchCorePresentation>,
     &str,
     usize,
     Duration,
@@ -187,14 +195,14 @@ fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
 
 fn search_result_json(
     hit: &SearchHit,
-    core_record: &ctx_history_index::CoreEventRecord,
+    core_record: &SearchCorePresentation,
     result_scope: &str,
     query: &NormalizedSearchQuery,
     rank: usize,
     command_prefix: &str,
 ) -> Result<Value> {
     let (snippet, snippet_truncated) = search_snippet(core_record)?;
-    let event = &core_record.event;
+    let event = &core_record.record.event;
     let event_id = event.event_id.as_uuid();
     let session_id = event.session_id.as_uuid();
     let item_id = if result_scope == "session" {
@@ -261,8 +269,9 @@ fn search_result_json(
     })))
 }
 
-fn search_snippet(record: &ctx_history_index::CoreEventRecord) -> Result<(String, bool)> {
+fn search_snippet(record: &SearchCorePresentation) -> Result<(&str, bool)> {
     let body = record
+        .record
         .core_record
         .content
         .normalized_body
@@ -271,15 +280,135 @@ fn search_snippet(record: &ctx_history_index::CoreEventRecord) -> Result<(String
         .ok_or_else(|| {
             anyhow!(
                 "Core search event {} has no normalized body",
-                record.event_id
+                record.record.event_id
             )
         })?;
-    let mut chars = body.chars();
-    let snippet = chars
-        .by_ref()
-        .take(SEARCH_SNIPPET_MAX_CHARS)
-        .collect::<String>();
-    Ok((snippet, chars.next().is_some()))
+    Ok((body, record.snippet_truncated))
+}
+
+pub(in crate::commands::source_index) fn search_snippet_fragment(
+    body: &str,
+    query_texts: &[&str],
+) -> (String, bool) {
+    let grapheme_boundaries = body
+        .grapheme_indices(true)
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(body.len()))
+        .collect::<Vec<_>>();
+    let grapheme_count = grapheme_boundaries.len().saturating_sub(1);
+    if grapheme_count <= SEARCH_SNIPPET_MAX_CHARS {
+        return (body.to_owned(), false);
+    }
+
+    let start = query_match_range(body, query_texts).map_or(0, |matched| {
+        centered_snippet_start(&grapheme_boundaries, matched)
+    });
+    let end = start.saturating_add(SEARCH_SNIPPET_MAX_CHARS);
+    let snippet = body[grapheme_boundaries[start]..grapheme_boundaries[end]].to_owned();
+    let truncated = start > 0 || end < grapheme_count;
+    (snippet, truncated)
+}
+
+fn centered_snippet_start(grapheme_boundaries: &[usize], matched: Range<usize>) -> usize {
+    let grapheme_count = grapheme_boundaries.len().saturating_sub(1);
+    let latest_start = grapheme_count.saturating_sub(SEARCH_SNIPPET_MAX_CHARS);
+    let match_start = grapheme_boundaries
+        .partition_point(|offset| *offset <= matched.start)
+        .saturating_sub(1)
+        .min(grapheme_count.saturating_sub(1));
+    let match_end = grapheme_boundaries
+        .partition_point(|offset| *offset < matched.end)
+        .min(grapheme_count);
+    let match_graphemes = match_end.saturating_sub(match_start).max(1);
+    let leading_context = SEARCH_SNIPPET_MAX_CHARS
+        .saturating_sub(match_graphemes)
+        .saturating_div(2);
+    match_start
+        .saturating_sub(leading_context)
+        .min(latest_start)
+}
+
+fn query_match_range(body: &str, query_texts: &[&str]) -> Option<Range<usize>> {
+    let (folded_body, boundaries) = lowercase_with_original_boundaries(body);
+    let mut best_full_match = None;
+    for query_text in query_texts {
+        let query_text = query_text.trim();
+        if query_text.is_empty() {
+            continue;
+        }
+        update_preferred_match(
+            &mut best_full_match,
+            folded_match_range(&folded_body, &boundaries, query_text),
+            query_text.chars().count(),
+        );
+    }
+    if let Some((_, matched)) = best_full_match {
+        return Some(matched);
+    }
+
+    let mut best_term_match = None;
+    for query_text in query_texts {
+        let query_text = query_text.trim();
+        for term in query_text.split(|character: char| !character.is_alphanumeric()) {
+            if term.is_empty() {
+                continue;
+            }
+            update_preferred_match(
+                &mut best_term_match,
+                folded_match_range(&folded_body, &boundaries, term),
+                term.chars().count(),
+            );
+        }
+    }
+    best_term_match.map(|(_, matched)| matched)
+}
+
+fn update_preferred_match(
+    preferred: &mut Option<(usize, Range<usize>)>,
+    candidate: Option<Range<usize>>,
+    specificity: usize,
+) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if preferred
+        .as_ref()
+        .is_none_or(|(current_specificity, current)| {
+            specificity > *current_specificity
+                || (specificity == *current_specificity && candidate.start < current.start)
+        })
+    {
+        *preferred = Some((specificity, candidate));
+    }
+}
+
+fn lowercase_with_original_boundaries(value: &str) -> (String, Vec<(usize, usize)>) {
+    let mut folded = String::with_capacity(value.len());
+    let mut boundaries = Vec::with_capacity(value.chars().count().saturating_add(1));
+    for (original_offset, character) in value.char_indices() {
+        boundaries.push((folded.len(), original_offset));
+        folded.extend(character.to_lowercase());
+    }
+    boundaries.push((folded.len(), value.len()));
+    (folded, boundaries)
+}
+
+fn folded_match_range(
+    folded_body: &str,
+    boundaries: &[(usize, usize)],
+    query_text: &str,
+) -> Option<Range<usize>> {
+    let folded_query = query_text.to_lowercase();
+    if folded_query.is_empty() {
+        return None;
+    }
+    let folded_start = folded_body.find(&folded_query)?;
+    let folded_end = folded_start.saturating_add(folded_query.len());
+    let start_boundary = boundaries
+        .partition_point(|(folded_offset, _)| *folded_offset <= folded_start)
+        .saturating_sub(1);
+    let end_boundary = boundaries.partition_point(|(folded_offset, _)| *folded_offset < folded_end);
+    Some(boundaries[start_boundary].1..boundaries[end_boundary].1)
 }
 
 fn follow_up_command_prefix(data_root: &Path) -> String {

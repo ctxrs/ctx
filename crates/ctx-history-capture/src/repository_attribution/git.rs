@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     ffi::{OsStr, OsString},
     fs,
     io::Read,
@@ -15,7 +16,7 @@ use std::{
 use ctx_history_core::{
     GitObjectFormat, GitObjectId, RepositoryAlias, RepositoryAliasKind, RepositoryBinding,
     RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
-    RepositoryLocalRootAuthorization,
+    RepositoryFileObservationKind, RepositoryLocalRootAuthorization,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
 };
 use sha2::{Digest, Sha256};
@@ -24,15 +25,16 @@ use url::Url;
 use super::shell::lexical_absolute;
 mod geometry;
 
-pub(super) use geometry::negative_route_geometry_state;
+pub(super) use geometry::{negative_route_geometry_state, validate_candidate_route};
 use geometry::{
     path_identity_fingerprint, repository_geometry_state,
     repository_local_root_authorization_fingerprint, repository_mutable_evidence_state,
-    route_fingerprint, validate_candidate_route,
+    route_fingerprint,
 };
 
 const MAX_PARENT_COMPONENTS: usize = 64;
 const MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_RESOLVED_COMMIT_FILES: usize = 256;
 const MAX_REMOTES: usize = 64;
 const GIT_TIMEOUT: Duration = Duration::from_secs(2);
 // Two repositories, each checked by two snapshots of two Git subprocesses.
@@ -53,6 +55,7 @@ pub(super) enum ProbeFailure {
     AmbiguousRemote,
     Failed(&'static str),
     ConcurrentDrift,
+    ConflictingEventTimeIdentity,
     PlatformUnsupported,
     BudgetExceeded,
 }
@@ -109,6 +112,27 @@ pub(super) struct CertifiedCandidate {
     repository_geometry_state: [u8; 32],
     branch: Option<String>,
     mutable_evidence_state: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResolvedCommit {
+    pub(super) object_id: GitObjectId,
+    pub(super) parent_object_ids: Vec<GitObjectId>,
+    pub(super) files: Vec<ResolvedCommitFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResolvedCommitFile {
+    pub(super) path: String,
+    pub(super) prior_path: Option<String>,
+    pub(super) kind: RepositoryFileObservationKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ResolvedCommitProducer {
+    Commit,
+    Merge,
+    Rewrite,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +266,113 @@ impl GitCertifier {
 
     pub(super) fn full_certification_probe_count(&self) -> usize {
         self.full_certification_probes.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn resolve_commit(
+        &self,
+        certificate: &CertifiedCandidate,
+        oid_prefix: &str,
+        expected_subject: &str,
+        producer: ResolvedCommitProducer,
+        budget: &mut EventProbeBudget,
+    ) -> Result<ResolvedCommit, ProbeFailure> {
+        if !(7..=64).contains(&oid_prefix.len())
+            || !oid_prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || expected_subject.is_empty()
+            || expected_subject.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(ProbeFailure::Failed("invalid_deferred_commit_hint"));
+        }
+        certificate.ensure_current_geometry()?;
+        let revision = format!("{}^{{commit}}", oid_prefix.to_ascii_lowercase());
+        let metadata = self.run_git(
+            &certificate.repository_root,
+            &["show", "-s", "--format=%H%x00%P%x00%s", &revision],
+            false,
+            budget,
+        )?;
+        let (object_id, parent_object_ids, subject) =
+            parse_resolved_commit_metadata(&metadata, certificate.object_format())?;
+        if subject != expected_subject {
+            return Err(ProbeFailure::Failed("commit_subject_mismatch"));
+        }
+        match producer {
+            ResolvedCommitProducer::Commit if parent_object_ids.len() > 1 => {
+                return Err(ProbeFailure::Failed("commit_has_merge_parent_shape"));
+            }
+            ResolvedCommitProducer::Merge if parent_object_ids.len() < 2 => {
+                return Err(ProbeFailure::Failed("merge_has_nonmerge_parent_shape"));
+            }
+            ResolvedCommitProducer::Rewrite => {}
+            _ => {}
+        }
+
+        let containing_refs = self.run_git(
+            &certificate.repository_root,
+            &[
+                "for-each-ref",
+                "--contains",
+                object_id.hex.as_str(),
+                "--format=%(refname)",
+                "refs/heads",
+                "refs/tags",
+            ],
+            false,
+            budget,
+        )?;
+        let containing_refs = utf8_lines(&containing_refs)?;
+        if containing_refs.is_empty()
+            || containing_refs.len() > MAX_REMOTES
+            || containing_refs
+                .iter()
+                .any(|reference| !canonical_symbolic_branch(reference))
+        {
+            return Err(ProbeFailure::Failed(
+                "commit_is_not_reachable_from_local_ref",
+            ));
+        }
+
+        let object_hex = object_id.hex.as_str();
+        let diff = if let Some(first_parent) = parent_object_ids.first() {
+            self.run_git(
+                &certificate.repository_root,
+                &[
+                    "diff-tree",
+                    "-r",
+                    "--no-commit-id",
+                    "--name-status",
+                    "-z",
+                    "--find-renames=100%",
+                    first_parent.hex.as_str(),
+                    object_hex,
+                ],
+                false,
+                budget,
+            )?
+        } else {
+            self.run_git(
+                &certificate.repository_root,
+                &[
+                    "diff-tree",
+                    "--root",
+                    "-r",
+                    "--no-commit-id",
+                    "--name-status",
+                    "-z",
+                    "--find-renames=100%",
+                    object_hex,
+                ],
+                false,
+                budget,
+            )?
+        };
+        let files = parse_resolved_commit_files(&diff)?;
+        certificate.ensure_current_geometry()?;
+        Ok(ResolvedCommit {
+            object_id,
+            parent_object_ids,
+            files,
+        })
     }
 
     #[cfg(test)]
@@ -510,6 +641,80 @@ impl CertifiedCandidate {
         path.starts_with(&self.repository_root)
     }
 
+    pub(super) fn observed_at_unix_ms(&self) -> i64 {
+        self.binding.local_root_authorization.as_ref().map_or(
+            ctx_history_core::CORE_MISSING_ACTIVITY_TIME_UNIX_MS,
+            |authorization| authorization.observed_at_unix_ms,
+        )
+    }
+
+    fn object_format(&self) -> GitObjectFormat {
+        self.binding
+            .git_object_format
+            .expect("certified Git candidates always carry an object format")
+    }
+
+    fn ensure_current_geometry(&self) -> Result<(), ProbeFailure> {
+        validate_candidate_route(&self.repository_root, CandidateKind::Directory)?;
+        let geometry = repository_geometry_state(&self.repository_root)?;
+        if geometry.git_dir != self.git_dir
+            || geometry.common_dir != self.common_dir
+            || geometry.fingerprint != self.repository_geometry_state
+        {
+            return Err(ProbeFailure::ConcurrentDrift);
+        }
+        let Some(authorization) = self.binding.local_root_authorization.as_ref() else {
+            return Err(ProbeFailure::Missing);
+        };
+        let fingerprint = repository_local_root_authorization_fingerprint(
+            &self.repository_root,
+            &self.git_dir,
+            &self.common_dir,
+            self.object_format(),
+        )?;
+        if fingerprint != authorization.local_root_authorization_fingerprint {
+            return Err(ProbeFailure::ConcurrentDrift);
+        }
+        Ok(())
+    }
+
+    pub(super) fn same_binding_identity(&self, other: &Self) -> bool {
+        self.binding.binding_id == other.binding.binding_id
+            && self.binding.logical_repository_id == other.binding.logical_repository_id
+            && self.binding.checkout_id == other.binding.checkout_id
+            && self.binding.worktree_id == other.binding.worktree_id
+            && self.binding.git_object_format == other.binding.git_object_format
+    }
+
+    pub(super) fn same_local_root_authorization_identity(&self, other: &Self) -> bool {
+        self.binding
+            .local_root_authorization
+            .as_ref()
+            .zip(other.binding.local_root_authorization.as_ref())
+            .is_some_and(|(left, right)| {
+                left.local_root_authorization_fingerprint_revision
+                    == right.local_root_authorization_fingerprint_revision
+                    && left.local_root_authorization_fingerprint
+                        == right.local_root_authorization_fingerprint
+            })
+    }
+
+    pub(super) fn for_event(
+        &self,
+        evidence_kind: RepositoryEvidenceKind,
+        observed_at_unix_ms: i64,
+    ) -> Self {
+        let mut certificate = self.clone();
+        certificate.binding.evidence = vec![RepositoryEvidence {
+            kind: evidence_kind,
+            confidence: RepositoryEvidenceConfidence::High,
+        }];
+        if let Some(authorization) = certificate.binding.local_root_authorization.as_mut() {
+            authorization.observed_at_unix_ms = observed_at_unix_ms;
+        }
+        certificate
+    }
+
     pub(super) fn try_reuse(
         &self,
         path: &Path,
@@ -572,15 +777,7 @@ impl CertifiedCandidate {
         if closing != current || closing_mutable_evidence_state != mutable_evidence_state {
             return Err(ProbeFailure::ConcurrentDrift);
         }
-        let mut reused = self.clone();
-        reused.binding.evidence = vec![RepositoryEvidence {
-            kind: evidence_kind,
-            confidence: RepositoryEvidenceConfidence::High,
-        }];
-        if let Some(authorization) = reused.binding.local_root_authorization.as_mut() {
-            authorization.observed_at_unix_ms = observed_at_unix_ms;
-        }
-        Ok(Some(reused))
+        Ok(Some(self.for_event(evidence_kind, observed_at_unix_ms)))
     }
 }
 
@@ -677,6 +874,114 @@ fn parse_optional_oid(
         .validate_contract()
         .map_err(|_| ProbeFailure::Failed("invalid_git_head"))?;
     Ok(Some(object))
+}
+
+fn parse_resolved_commit_metadata(
+    value: &[u8],
+    format: GitObjectFormat,
+) -> Result<(GitObjectId, Vec<GitObjectId>, String), ProbeFailure> {
+    let value = std::str::from_utf8(value)
+        .map_err(|_| ProbeFailure::Unsafe("git_commit_metadata_is_not_unicode"))?;
+    let value = value.strip_suffix('\n').unwrap_or(value);
+    let fields = value.split('\0').collect::<Vec<_>>();
+    let [object, parents, subject] = fields.as_slice() else {
+        return Err(ProbeFailure::Failed("unexpected_git_commit_metadata"));
+    };
+    if subject.is_empty() || subject.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(ProbeFailure::Unsafe("git_commit_subject_is_not_bounded"));
+    }
+    let object_id = parse_full_object_id(object, format)?;
+    let parent_object_ids = if parents.is_empty() {
+        Vec::new()
+    } else {
+        parents
+            .split(' ')
+            .map(|parent| parse_full_object_id(parent, format))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if parent_object_ids.len() > 64
+        || parent_object_ids.iter().collect::<HashSet<_>>().len() != parent_object_ids.len()
+    {
+        return Err(ProbeFailure::Failed("invalid_git_commit_parents"));
+    }
+    Ok((object_id, parent_object_ids, (*subject).to_owned()))
+}
+
+fn parse_full_object_id(value: &str, format: GitObjectFormat) -> Result<GitObjectId, ProbeFailure> {
+    let object = GitObjectId {
+        format,
+        hex: value.to_ascii_lowercase(),
+    };
+    object
+        .validate_contract()
+        .map_err(|_| ProbeFailure::Failed("invalid_git_object_id"))?;
+    Ok(object)
+}
+
+fn parse_resolved_commit_files(value: &[u8]) -> Result<Vec<ResolvedCommitFile>, ProbeFailure> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    if value.last() != Some(&0) {
+        return Err(ProbeFailure::Failed("unterminated_git_name_status"));
+    }
+    let fields = value[..value.len() - 1]
+        .split(|byte| *byte == 0)
+        .collect::<Vec<_>>();
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+    let mut index = 0;
+    while index < fields.len() {
+        let status = std::str::from_utf8(fields[index])
+            .map_err(|_| ProbeFailure::Unsafe("git_name_status_is_not_unicode"))?;
+        index += 1;
+        let (kind, prior_path) = match status {
+            "A" => (RepositoryFileObservationKind::Created, None),
+            "D" => (RepositoryFileObservationKind::Deleted, None),
+            "M" | "T" => (RepositoryFileObservationKind::Modified, None),
+            "R100" => {
+                let prior = fields
+                    .get(index)
+                    .ok_or(ProbeFailure::Failed("truncated_git_rename_status"))?;
+                index += 1;
+                (
+                    RepositoryFileObservationKind::Renamed,
+                    Some(parse_git_relative_path(prior)?),
+                )
+            }
+            _ => return Err(ProbeFailure::Failed("unsupported_git_name_status")),
+        };
+        let path = fields
+            .get(index)
+            .ok_or(ProbeFailure::Failed("truncated_git_name_status"))?;
+        index += 1;
+        let path = parse_git_relative_path(path)?;
+        if !seen.insert(path.clone()) || files.len() >= MAX_RESOLVED_COMMIT_FILES {
+            return Err(ProbeFailure::Failed("git_commit_file_limit_or_duplicate"));
+        }
+        files.push(ResolvedCommitFile {
+            path,
+            prior_path,
+            kind,
+        });
+    }
+    Ok(files)
+}
+
+fn parse_git_relative_path(value: &[u8]) -> Result<String, ProbeFailure> {
+    let value =
+        std::str::from_utf8(value).map_err(|_| ProbeFailure::Unsafe("git_path_is_not_unicode"))?;
+    let path = Path::new(value);
+    if value.is_empty()
+        || value.bytes().any(|byte| byte.is_ascii_control())
+        || path.is_absolute()
+        || !path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(ProbeFailure::Unsafe("git_path_is_not_bounded_relative"));
+    }
+    Ok(value.replace('\\', "/"))
 }
 
 fn repository_head_branch(

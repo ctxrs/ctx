@@ -128,6 +128,7 @@ struct ColdSourceJobV0 {
     session_id: StableEntityId,
     proof: Option<CodexAppendProof>,
     base_event_lookup: BaseEventIdentityLookup,
+    outcome_lineage: Arc<CodexOutcomeLineageAuthorityV0>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +241,7 @@ pub(super) struct ColdIngestionTargetV0<'target> {
 pub(super) fn ingest_codex_cold_parallel_v0(
     sources: Vec<ChangedSourceV0>,
     base_event_lookup: BaseEventIdentityLookup,
+    outcome_lineage: Arc<CodexOutcomeLineageAuthorityV0>,
     target: ColdIngestionTargetV0<'_>,
     worker_count: usize,
     cold_options: ColdParallelOptionsV0,
@@ -279,6 +281,7 @@ pub(super) fn ingest_codex_cold_parallel_v0(
             session_id,
             proof,
             base_event_lookup: base_event_lookup.clone(),
+            outcome_lineage: Arc::clone(&outcome_lineage),
         });
     }
 
@@ -493,6 +496,7 @@ fn run_cold_scan_lane_v0(
                         row,
                         &mut event_identity_state,
                         &mut repository_attributor,
+                        &job.outcome_lineage,
                     )?);
                     staged_documents = staged_documents
                         .checked_add(1)

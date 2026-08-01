@@ -5,7 +5,8 @@ use serde_json::Value;
 
 use super::{
     invalid_tool_request, optional_string, optional_transcript_mode, optional_usize,
-    TranscriptMode, MAX_EVENT_WINDOW, MCP_MAX_SESSION_EVENTS,
+    TranscriptMode, MAX_EVENT_WINDOW, MCP_DEFAULT_SESSION_PAGE_LIMIT, MCP_MAX_SESSION_CURSOR_BYTES,
+    MCP_MAX_SESSION_PAGE_LIMIT,
 };
 use crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES;
 
@@ -14,13 +15,37 @@ pub(super) fn tool_show_session(arguments: &Value, data_root: &Path) -> Result<V
         .ok_or_else(|| invalid_tool_request("ctx_session_id is required"))?;
     validate_ctx_id(&session_id, "ctx_session_id", "session")?;
     let mode = optional_transcript_mode(arguments, "mode")?.unwrap_or(TranscriptMode::Lite);
+    let limit = optional_usize(arguments, "limit")?.unwrap_or(MCP_DEFAULT_SESSION_PAGE_LIMIT);
+    if !(1..=MCP_MAX_SESSION_PAGE_LIMIT).contains(&limit) {
+        return Err(invalid_tool_request(format!(
+            "limit must be between 1 and {MCP_MAX_SESSION_PAGE_LIMIT}"
+        )));
+    }
+    let cursor = optional_session_cursor(arguments)?;
     crate::commands::source_index::mcp_show_session(
         data_root,
         &session_id,
         mode,
-        MCP_MAX_SESSION_EVENTS,
+        limit,
+        cursor.as_deref(),
         MCP_PRESENTATION_MAX_OUTPUT_BYTES,
     )
+}
+
+fn optional_session_cursor(arguments: &Value) -> Result<Option<String>> {
+    let cursor = optional_string(arguments, "cursor")?;
+    match cursor {
+        Some(value)
+            if value.is_empty()
+                || value.len() > MCP_MAX_SESSION_CURSOR_BYTES
+                || !value.is_ascii() =>
+        {
+            Err(invalid_tool_request(format!(
+                "cursor must contain 1 to {MCP_MAX_SESSION_CURSOR_BYTES} ASCII bytes"
+            )))
+        }
+        value => Ok(value),
+    }
 }
 
 pub(super) fn tool_show_event(arguments: &Value, data_root: &Path) -> Result<Value> {

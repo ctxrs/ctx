@@ -1,26 +1,114 @@
-use std::path::Path;
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
-use ctx_history_core::RepositoryFileObservationKind;
+use ctx_history_core::{RepositoryFileObservationKind, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-use super::events::codex_tool_name;
-use crate::repository_attribution::{UnscopedFileObservation, MAX_COMMAND_BYTES};
+use super::events::{codex_tool_name, CodexToolCallContext};
+use crate::{
+    repository_attribution::{UnscopedFileObservation, MAX_COMMAND_BYTES},
+    OutputOutcomeMetadata,
+};
 
 #[path = "repository/outcomes.rs"]
 mod outcomes;
 
-pub(crate) use outcomes::{repository_result_evidence, CodexRepositoryResultEvidence};
+pub(crate) use outcomes::CodexRepositoryResultEvidence;
 
 const MAX_STRUCTURED_ARGUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WORKDIR_BYTES: usize = 16 * 1024;
 const MAX_CALL_ID_BYTES: usize = 1024;
 const MAX_CONTINUATION_CELL_ID_BYTES: usize = 1024;
 const MAX_STATIC_NESTED_TOOL_CALLS: usize = 24;
+const MAX_STATIC_BINDINGS: usize = 24;
+const MAX_STATIC_PATCH_PATHS: usize = 256;
 const MAX_STATIC_LITERAL_DEPTH: usize = 32;
 const MAX_STATIC_LITERAL_ITEMS: usize = 256;
 const CODEX_CONTINUATION_CALL_ID_DOMAIN: &[u8] = b"ctx/codex-nativepath/continuation-call-id/v1\0";
 const CODEX_COMMAND_DOMAIN: &[u8] = b"ctx/codex-nativepath/exact-command/v1\0";
+
+pub(crate) fn repository_result_evidence(
+    payload: &Value,
+    context: &CodexToolCallContext,
+    result_call_id: &str,
+    result_record_sha256: [u8; 32],
+    observed_at_unix_ms: i64,
+    result_outcome: &OutputOutcomeMetadata,
+) -> Option<CodexRepositoryResultEvidence> {
+    if let Some(evidence) = outcomes::repository_result_evidence(
+        payload,
+        context,
+        result_call_id,
+        result_record_sha256,
+        observed_at_unix_ms,
+        result_outcome,
+    ) {
+        return Some(evidence);
+    }
+    exact_linked_result_context(payload, context, result_call_id, result_record_sha256)
+}
+
+fn exact_linked_result_context(
+    payload: &Value,
+    context: &CodexToolCallContext,
+    result_call_id: &str,
+    result_record_sha256: [u8; 32],
+) -> Option<CodexRepositoryResultEvidence> {
+    repository_result_output(payload)?;
+    let command = context.exact_command.clone()?;
+    let origin_call_id = bounded_literal(
+        context.origin_call_id.as_deref()?,
+        MAX_CALL_ID_BYTES,
+        control_identifier,
+    )?;
+    let result_call_id = bounded_literal(result_call_id, MAX_CALL_ID_BYTES, control_identifier)?;
+    let origin_event_sequence = context.origin_event_sequence?;
+    if context.command_too_large
+        || context.correlation_ambiguous
+        || context.continuation_capacity_exceeded
+        || context.continuation_call_id_sha256.len()
+            > crate::provider::codex::nativepath::MAX_CODEX_TOOL_CONTEXTS
+        || context
+            .continuation_call_id_sha256
+            .iter()
+            .collect::<HashSet<_>>()
+            .len()
+            != context.continuation_call_id_sha256.len()
+        || (context.continuation_cell_id.is_some() && !terminal_continuation_result(payload))
+    {
+        return None;
+    }
+    Some(CodexRepositoryResultEvidence {
+        command: Some(command),
+        command_too_large: false,
+        declared_workdir: context.declared_workdir.clone(),
+        outcome_operation_repository_path: None,
+        outcome_output_repository_path: None,
+        structured_content: json!({
+            "provider_native_tool_result": {
+                "provider": "codex",
+                "origin_call_id": origin_call_id,
+                "result_call_id": result_call_id,
+                "origin_event_sequence": origin_event_sequence,
+                "continuation_call_id_sha256": context.continuation_call_id_sha256
+                    .iter()
+                    .map(hex_digest)
+                    .collect::<Vec<_>>(),
+                "result_record_sha256": hex_digest(&result_record_sha256),
+                "result_context_schema": "codex_exact_linked_result_context_v1",
+                "outcome_capture_revision": CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+                "captured_outcomes": 0,
+                "raw_output_retained": false,
+            }
+        }),
+        provider_native_repository_aliases: Vec::new(),
+        outcomes: Vec::new(),
+        abstentions: Vec::new(),
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodexRepositoryToolEvidence {
@@ -44,12 +132,50 @@ pub(crate) fn repository_tool_evidence(payload: &Value) -> Vec<CodexRepositoryTo
     if item_type == "custom_tool_call" && tool_name == "exec" {
         return nested_exec_tool_evidence(payload).unwrap_or_default();
     }
+    if tool_name == "apply_patch" {
+        return native_patch_tool_evidence(payload, item_type)
+            .into_iter()
+            .collect();
+    }
     if !matches!(tool_name.as_str(), "exec_command" | "wait") {
         return Vec::new();
     }
     native_tool_evidence(payload, tool_name)
         .into_iter()
         .collect()
+}
+
+fn native_patch_tool_evidence(
+    payload: &Value,
+    item_type: &str,
+) -> Option<CodexRepositoryToolEvidence> {
+    if payload
+        .get("name")
+        .zip(payload.get("tool"))
+        .is_some_and(|(name, tool)| name != tool)
+    {
+        return None;
+    }
+    let call_id = bounded_literal(
+        payload.get("call_id")?.as_str()?,
+        MAX_CALL_ID_BYTES,
+        control_identifier,
+    )?;
+    let input = exact_one_of(payload, "arguments", "input")?;
+    let (patch, schema) = match input {
+        Value::String(patch) if item_type == "custom_tool_call" => {
+            (patch.clone(), "codex_apply_patch_input_v1")
+        }
+        Value::Object(_) | Value::String(_) if item_type == "function_call" => {
+            let arguments = decode_top_level_argument_object(input)?;
+            (
+                arguments.get("patch")?.as_str()?.to_owned(),
+                "codex_apply_patch_args_v1",
+            )
+        }
+        _ => return None,
+    };
+    patch_tool_evidence(call_id, None, schema, &patch)?
 }
 
 fn native_tool_evidence(payload: &Value, tool_name: String) -> Option<CodexRepositoryToolEvidence> {
@@ -172,61 +298,150 @@ fn nested_exec_tool_evidence(payload: &Value) -> Option<Vec<CodexRepositoryToolE
                 });
             }
             StaticNestedToolCall::ApplyPatch(patch) => {
-                let mut patch_paths = patch
-                    .lines()
-                    .filter_map(|line| {
-                        let line = line.trim();
-                        [
-                            ("*** Add File:", RepositoryFileObservationKind::Created),
-                            ("*** Update File:", RepositoryFileObservationKind::Modified),
-                            ("*** Delete File:", RepositoryFileObservationKind::Deleted),
-                        ]
-                        .into_iter()
-                        .find_map(|(header, kind)| {
-                            line.strip_prefix(header)
-                                .map(str::trim)
-                                .filter(|path| bounded_path(path))
-                                .map(|path| (path.to_owned(), kind))
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let mut seen = std::collections::HashSet::new();
-                patch_paths.retain(|(path, _)| seen.insert(path.clone()));
-                if patch_paths.is_empty() {
-                    continue;
+                if let Some(patch_evidence) = patch_tool_evidence(
+                    call_id.clone(),
+                    Some(index),
+                    "codex_nested_apply_patch_literal_v3",
+                    &patch,
+                )? {
+                    evidence.push(patch_evidence);
                 }
-                evidence.push(CodexRepositoryToolEvidence {
-                    tool_name: "apply_patch".to_owned(),
-                    command: None,
-                    command_too_large: false,
-                    declared_workdir: None,
-                    continuation_cell_id: None,
-                    file_observations: patch_paths
-                        .iter()
-                        .cloned()
-                        .map(|(path, kind)| UnscopedFileObservation {
-                            path,
-                            prior_path: None,
-                            kind,
-                        })
-                        .collect(),
-                    structured_content: json!({
-                        "provider_native_tool": {
-                            "provider": "codex",
-                            "name": "apply_patch",
-                            "outer_name": "exec",
-                            "call_id": call_id,
-                            "nested_activity_index": index,
-                            "argument_schema": "codex_nested_apply_patch_literal_v2",
-                            "static_patch_paths": patch_paths.len(),
-                            "raw_arguments_retained": false,
-                        }
-                    }),
-                });
             }
         }
     }
     Some(evidence)
+}
+
+fn patch_tool_evidence(
+    call_id: String,
+    nested_activity_index: Option<usize>,
+    schema: &'static str,
+    patch: &str,
+) -> Option<Option<CodexRepositoryToolEvidence>> {
+    if patch.len() > MAX_STRUCTURED_ARGUMENT_BYTES {
+        return None;
+    }
+    let file_observations = static_patch_file_observations(patch)?;
+    if file_observations.is_empty() {
+        return Some(None);
+    }
+    let static_patch_paths = file_observations.len();
+    Some(Some(CodexRepositoryToolEvidence {
+        tool_name: "apply_patch".to_owned(),
+        command: None,
+        command_too_large: false,
+        declared_workdir: None,
+        continuation_cell_id: None,
+        file_observations,
+        structured_content: json!({
+            "provider_native_tool": {
+                "provider": "codex",
+                "name": "apply_patch",
+                "outer_name": nested_activity_index.map(|_| "exec"),
+                "call_id": call_id,
+                "nested_activity_index": nested_activity_index,
+                "argument_schema": schema,
+                "static_patch_paths": static_patch_paths,
+                "raw_arguments_retained": false,
+            }
+        }),
+    }))
+}
+
+fn static_patch_file_observations(patch: &str) -> Option<Vec<UnscopedFileObservation>> {
+    let mut lines = patch.lines();
+    if lines.next()?.trim_end() != "*** Begin Patch" {
+        return None;
+    }
+    let mut observations = Vec::new();
+    let mut pending_update = None;
+    let mut ended = false;
+    for line in lines {
+        if ended {
+            if !line.trim().is_empty() {
+                return None;
+            }
+            continue;
+        }
+        if line.trim_end() == "*** End Patch" {
+            push_pending_patch_update(&mut observations, &mut pending_update)?;
+            ended = true;
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Add File: ") {
+            push_pending_patch_update(&mut observations, &mut pending_update)?;
+            push_patch_observation(
+                &mut observations,
+                path,
+                None,
+                RepositoryFileObservationKind::Created,
+            )?;
+        } else if let Some(path) = line.strip_prefix("*** Update File: ") {
+            push_pending_patch_update(&mut observations, &mut pending_update)?;
+            pending_update = Some(bounded_patch_path(path)?);
+        } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            push_pending_patch_update(&mut observations, &mut pending_update)?;
+            push_patch_observation(
+                &mut observations,
+                path,
+                None,
+                RepositoryFileObservationKind::Deleted,
+            )?;
+        } else if let Some(path) = line.strip_prefix("*** Move to: ") {
+            let prior_path = pending_update.take()?;
+            push_patch_observation(
+                &mut observations,
+                path,
+                Some(prior_path),
+                RepositoryFileObservationKind::Renamed,
+            )?;
+        }
+    }
+    ended.then_some(observations)
+}
+
+fn push_pending_patch_update(
+    observations: &mut Vec<UnscopedFileObservation>,
+    pending_update: &mut Option<String>,
+) -> Option<()> {
+    if let Some(path) = pending_update.take() {
+        push_patch_observation(
+            observations,
+            &path,
+            None,
+            RepositoryFileObservationKind::Modified,
+        )?;
+    }
+    Some(())
+}
+
+fn push_patch_observation(
+    observations: &mut Vec<UnscopedFileObservation>,
+    path: &str,
+    prior_path: Option<String>,
+    kind: RepositoryFileObservationKind,
+) -> Option<()> {
+    let path = bounded_patch_path(path)?;
+    if let Some(existing) = observations
+        .iter()
+        .find(|observation| observation.path == path)
+    {
+        return (existing.prior_path == prior_path && existing.kind == kind).then_some(());
+    }
+    if observations.len() >= MAX_STATIC_PATCH_PATHS {
+        return None;
+    }
+    observations.push(UnscopedFileObservation {
+        path,
+        prior_path,
+        kind,
+    });
+    Some(())
+}
+
+fn bounded_patch_path(path: &str) -> Option<String> {
+    let path = path.trim();
+    bounded_path(path).then(|| path.to_owned())
 }
 
 enum StaticNestedToolCall {
@@ -237,6 +452,7 @@ enum StaticNestedToolCall {
 struct StaticJsParser<'a> {
     source: &'a [u8],
     cursor: usize,
+    static_strings: HashMap<String, String>,
 }
 
 impl<'a> StaticJsParser<'a> {
@@ -244,6 +460,7 @@ impl<'a> StaticJsParser<'a> {
         Self {
             source: source.as_bytes(),
             cursor: 0,
+            static_strings: HashMap::new(),
         }
     }
 
@@ -256,7 +473,22 @@ impl<'a> StaticJsParser<'a> {
                 break;
             }
             if terminal_output_statements == 0 {
+                if let Some((name, value)) = self.parse_static_string_declaration() {
+                    if self.static_strings.len() >= MAX_STATIC_BINDINGS
+                        || self.static_strings.insert(name, value).is_some()
+                    {
+                        return None;
+                    }
+                    continue;
+                }
                 if let Some(call) = self.parse_tool_statement() {
+                    calls.push(call);
+                    if calls.len() > MAX_STATIC_NESTED_TOOL_CALLS {
+                        return None;
+                    }
+                    continue;
+                }
+                if let Some(call) = self.parse_wrapped_tool_statement() {
                     calls.push(call);
                     if calls.len() > MAX_STATIC_NESTED_TOOL_CALLS {
                         return None;
@@ -276,6 +508,27 @@ impl<'a> StaticJsParser<'a> {
         Some(calls)
     }
 
+    fn parse_static_string_declaration(&mut self) -> Option<(String, String)> {
+        let checkpoint = self.cursor;
+        let parsed = self.parse_static_string_declaration_inner();
+        if parsed.is_none() {
+            self.cursor = checkpoint;
+        }
+        parsed
+    }
+
+    fn parse_static_string_declaration_inner(&mut self) -> Option<(String, String)> {
+        self.consume_keyword("const").then_some(())?;
+        self.skip_whitespace();
+        let name = self.parse_identifier()?;
+        self.skip_whitespace();
+        self.consume_byte(b'=').then_some(())?;
+        self.skip_whitespace();
+        let value = self.parse_json_string()?;
+        self.consume_statement_terminator().then_some(())?;
+        Some((name, value))
+    }
+
     fn parse_terminal_output_statement(&mut self) -> bool {
         let checkpoint = self.cursor;
         if !self.consume_keyword("text") {
@@ -287,18 +540,16 @@ impl<'a> StaticJsParser<'a> {
             return false;
         }
         self.skip_whitespace();
-        if self.parse_identifier().is_none() {
+        let argument_ok = if self.source.get(self.cursor) == Some(&b'`') {
+            self.parse_output_template()
+        } else if self.source.get(self.cursor) == Some(&b'"') {
+            self.parse_json_string().is_some()
+        } else {
+            self.parse_member_reference()
+        };
+        if !argument_ok {
             self.cursor = checkpoint;
             return false;
-        }
-        loop {
-            if !self.consume_byte(b'.') {
-                break;
-            }
-            if self.parse_identifier().is_none() {
-                self.cursor = checkpoint;
-                return false;
-            }
         }
         self.skip_whitespace();
         if !self.consume_byte(b')') {
@@ -310,6 +561,58 @@ impl<'a> StaticJsParser<'a> {
             return false;
         }
         true
+    }
+
+    fn parse_output_template(&mut self) -> bool {
+        if !self.consume_byte(b'`') {
+            return false;
+        }
+        while let Some(byte) = self.source.get(self.cursor).copied() {
+            match byte {
+                b'`' => {
+                    self.cursor += 1;
+                    return true;
+                }
+                b'\\' => {
+                    self.cursor += 1;
+                    if self.source.get(self.cursor).is_none() {
+                        return false;
+                    }
+                    self.cursor += 1;
+                }
+                b'$' if self
+                    .source
+                    .get(self.cursor.saturating_add(1))
+                    .is_some_and(|next| *next == b'{') =>
+                {
+                    self.cursor += 2;
+                    self.skip_whitespace();
+                    if !self.parse_member_reference() {
+                        return false;
+                    }
+                    self.skip_whitespace();
+                    if !self.consume_byte(b'}') {
+                        return false;
+                    }
+                }
+                _ => self.cursor += 1,
+            }
+        }
+        false
+    }
+
+    fn parse_member_reference(&mut self) -> bool {
+        if self.parse_identifier().is_none() {
+            return false;
+        }
+        loop {
+            if !self.consume_byte(b'.') {
+                return true;
+            }
+            if self.parse_identifier().is_none() {
+                return false;
+            }
+        }
     }
 
     fn consume_statement_terminator(&mut self) -> bool {
@@ -329,51 +632,74 @@ impl<'a> StaticJsParser<'a> {
 
     fn parse_tool_statement(&mut self) -> Option<StaticNestedToolCall> {
         let checkpoint = self.cursor;
+        let parsed = self.parse_tool_statement_inner();
+        if parsed.is_none() {
+            self.cursor = checkpoint;
+        }
+        parsed
+    }
+
+    fn parse_tool_statement_inner(&mut self) -> Option<StaticNestedToolCall> {
         if self.consume_keyword("const") {
             self.skip_whitespace();
             self.parse_identifier()?;
             self.skip_whitespace();
-            if !self.consume_byte(b'=') {
-                self.cursor = checkpoint;
-                return None;
-            }
+            self.consume_byte(b'=').then_some(())?;
             self.skip_whitespace();
         }
-        if !self.consume_keyword("await") {
+        let call = self.parse_tool_invocation()?;
+        self.consume_statement_terminator().then_some(())?;
+        Some(call)
+    }
+
+    fn parse_wrapped_tool_statement(&mut self) -> Option<StaticNestedToolCall> {
+        let checkpoint = self.cursor;
+        let parsed = self.parse_wrapped_tool_statement_inner();
+        if parsed.is_none() {
             self.cursor = checkpoint;
-            return None;
         }
+        parsed
+    }
+
+    fn parse_wrapped_tool_statement_inner(&mut self) -> Option<StaticNestedToolCall> {
+        self.consume_keyword("text").then_some(())?;
         self.skip_whitespace();
-        if !self.consume_bytes(b"tools.") {
-            self.cursor = checkpoint;
-            return None;
-        }
+        self.consume_byte(b'(').then_some(())?;
+        self.skip_whitespace();
+        let call = self.parse_tool_invocation()?;
+        self.skip_whitespace();
+        self.consume_byte(b')').then_some(())?;
+        self.consume_statement_terminator().then_some(())?;
+        Some(call)
+    }
+
+    fn parse_tool_invocation(&mut self) -> Option<StaticNestedToolCall> {
+        self.consume_keyword("await").then_some(())?;
+        self.skip_whitespace();
+        self.consume_bytes(b"tools.").then_some(())?;
         let method = self.parse_identifier()?;
         self.skip_whitespace();
-        if !self.consume_byte(b'(') {
-            self.cursor = checkpoint;
-            return None;
-        }
+        self.consume_byte(b'(').then_some(())?;
         self.skip_whitespace();
-        let value = self.parse_static_value(0)?;
+        let value = if method == "apply_patch"
+            && self
+                .source
+                .get(self.cursor)
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$'))
+        {
+            let binding = self.parse_identifier()?;
+            Value::String(self.static_strings.get(&binding)?.clone())
+        } else {
+            self.parse_static_value(0)?
+        };
         self.skip_whitespace();
-        if !self.consume_byte(b')') {
-            self.cursor = checkpoint;
-            return None;
-        }
-        if !self.consume_statement_terminator() {
-            self.cursor = checkpoint;
-            return None;
-        }
+        self.consume_byte(b')').then_some(())?;
         match (method.as_str(), value) {
             ("exec_command", Value::Object(arguments)) => {
                 Some(StaticNestedToolCall::ExecCommand(arguments))
             }
             ("apply_patch", Value::String(patch)) => Some(StaticNestedToolCall::ApplyPatch(patch)),
-            _ => {
-                self.cursor = checkpoint;
-                None
-            }
+            _ => None,
         }
     }
 
@@ -668,13 +994,19 @@ fn digest_hex(domain: &[u8], value: &[u8]) -> String {
         .collect()
 }
 
+fn hex_digest(value: &[u8; 32]) -> String {
+    value.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use ctx_history_core::{RepositoryAbstentionReason, RepositoryFileObservationKind};
     use serde_json::json;
 
     use super::repository_tool_evidence;
+    use crate::provider::codex::events::CodexToolCallContext;
     use crate::repository_attribution::{attribute, AttributionInput, CommandEvidenceDisposition};
+    use crate::{OutputOutcome, OutputOutcomeMetadata};
 
     #[test]
     fn accepts_only_one_top_level_native_argument_decode_and_redacts_it() {
@@ -821,6 +1153,138 @@ mod tests {
     }
 
     #[test]
+    fn genuine_terminal_template_preserves_declared_workdir_for_call_and_linked_result() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("/usr/bin/git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .status()
+            .unwrap()
+            .success());
+        let workdir = temp.path().to_string_lossy();
+        let payload = json!({
+            "type": "custom_tool_call",
+            "name": "exec",
+            "call_id": "outer-template",
+            "input": format!(
+                "const r = await tools.exec_command({{\"cmd\":\"git diff --check && git diff && cargo test\",\"workdir\":{workdir:?},\"yield_time_ms\":30000}});\ntext(r.output);\ntext(`exit=${{r.exit_code}}`);\n"
+            ),
+        });
+        let mut evidence = repository_tool_evidence(&payload);
+        assert_eq!(evidence.len(), 1);
+        let evidence = evidence.remove(0);
+        assert_eq!(evidence.tool_name, "exec_command");
+        assert_eq!(evidence.declared_workdir.as_deref(), Some(workdir.as_ref()));
+        assert_eq!(
+            evidence.command.as_deref(),
+            Some("git diff --check && git diff && cargo test")
+        );
+
+        let call_annotation = attribute(AttributionInput {
+            declared_tool_workdir: evidence.declared_workdir.clone(),
+            command: evidence.command.clone(),
+            ..AttributionInput::default()
+        });
+        assert_eq!(call_annotation.repository_bindings.len(), 1);
+
+        let context = CodexToolCallContext {
+            tool_name: evidence.tool_name,
+            exact_command: evidence.command,
+            declared_workdir: evidence.declared_workdir,
+            origin_call_id: Some("outer-template".to_owned()),
+            origin_event_sequence: Some(39),
+            ..CodexToolCallContext::default()
+        };
+        let result = super::repository_result_evidence(
+            &json!({"output": "Script completed\nWall time 0.1 seconds\nOutput:\n"}),
+            &context,
+            "outer-template",
+            [7; 32],
+            10,
+            &OutputOutcomeMetadata {
+                outcome: OutputOutcome::Success,
+                exit_code: Some(0),
+                duration_ms: Some(100),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.declared_workdir.as_deref(), Some(workdir.as_ref()));
+        let result_annotation = attribute(AttributionInput {
+            declared_tool_workdir: result.declared_workdir,
+            command: result.command,
+            outcome_operation_repository_path: result.outcome_operation_repository_path,
+            outcome_output_repository_path: result.outcome_output_repository_path,
+            outcome_observations: result.outcomes,
+            outcome_abstentions: result.abstentions,
+            ..AttributionInput::default()
+        });
+        assert_eq!(result_annotation.repository_bindings.len(), 1);
+        assert_eq!(
+            result_annotation.repository_bindings[0].binding_id,
+            call_annotation.repository_bindings[0].binding_id
+        );
+    }
+
+    #[test]
+    fn genuine_bound_patch_wrapper_emits_exact_file_observations() {
+        let payload = json!({
+            "type": "custom_tool_call",
+            "name": "exec",
+            "call_id": "outer-patch",
+            "input": r#"
+                const patch = "*** Begin Patch\n*** Add File: /repo/src/new.rs\n*** Update File: /repo/src/lib.rs\n*** Move to: /repo/src/moved.rs\n*** Delete File: /repo/src/old.rs\n*** End Patch";
+                text(await tools.apply_patch(patch));
+            "#,
+        });
+        let evidence = repository_tool_evidence(&payload);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].tool_name, "apply_patch");
+        assert_eq!(evidence[0].file_observations.len(), 3);
+        assert_eq!(evidence[0].file_observations[0].path, "/repo/src/new.rs");
+        assert_eq!(
+            evidence[0].file_observations[0].kind,
+            RepositoryFileObservationKind::Created
+        );
+        assert_eq!(evidence[0].file_observations[1].path, "/repo/src/moved.rs");
+        assert_eq!(
+            evidence[0].file_observations[1].prior_path.as_deref(),
+            Some("/repo/src/lib.rs")
+        );
+        assert_eq!(
+            evidence[0].file_observations[1].kind,
+            RepositoryFileObservationKind::Renamed
+        );
+        assert_eq!(evidence[0].file_observations[2].path, "/repo/src/old.rs");
+        assert_eq!(
+            evidence[0].file_observations[2].kind,
+            RepositoryFileObservationKind::Deleted
+        );
+        assert_eq!(
+            evidence[0].structured_content["provider_native_tool"]["argument_schema"],
+            "codex_nested_apply_patch_literal_v3"
+        );
+    }
+
+    #[test]
+    fn direct_native_patch_input_uses_the_same_bounded_parser() {
+        let payload = json!({
+            "type": "custom_tool_call",
+            "name": "apply_patch",
+            "call_id": "direct-patch",
+            "input": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n",
+        });
+        let evidence = repository_tool_evidence(&payload);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].tool_name, "apply_patch");
+        assert_eq!(evidence[0].file_observations.len(), 1);
+        assert_eq!(evidence[0].file_observations[0].path, "src/lib.rs");
+        assert_eq!(
+            evidence[0].file_observations[0].kind,
+            RepositoryFileObservationKind::Modified
+        );
+    }
+
+    #[test]
     fn inert_or_dynamic_javascript_never_emits_executed_tool_evidence() {
         for source in [
             r#"const example = "tools.exec_command({cmd:\"git commit -m inert\",workdir:\"/repo\"})"; text(example);"#,
@@ -834,6 +1298,11 @@ mod tests {
             r#"text(prior.output);
                 const result = await tools.exec_command({cmd:"git status",workdir:"/repo"});"#,
             r#"const patch = "*** Begin Patch\n*** Add File: /repo/inert.rs\n*** End Patch"; text(patch);"#,
+            r#"const patch = choosePatch(); text(await tools.apply_patch(patch));"#,
+            r#"const patch = "*** Begin Patch\n*** Add File: /repo/dynamic.rs\n*** End Patch";
+                text(await tools.apply_patch(transform(patch)));"#,
+            r#"const result = await tools.exec_command({cmd:"git status",workdir:"/repo"});
+                text(`${sideEffect()}`);"#,
         ] {
             let payload = json!({
                 "type": "custom_tool_call",

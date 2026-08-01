@@ -6,8 +6,8 @@ pub(crate) use ctx_history_capture::OutputOutcome;
 mod shell;
 
 pub(crate) use shell::{
-    bounded_outcome_plan, lexical_absolute, BoundedOutcomeOperation, BoundedOutcomePlan,
-    BoundedOutcomePlanDisposition,
+    bounded_outcome_plan, lexical_absolute, BoundedCommitProducer, BoundedOutcomeOperation,
+    BoundedOutcomePlan, BoundedOutcomePlanDisposition,
 };
 
 #[path = "../src/repository_attribution/outcome.rs"]

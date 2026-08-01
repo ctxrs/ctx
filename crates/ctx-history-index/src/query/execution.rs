@@ -310,8 +310,8 @@ fn session_event_address_page(
                         .replace(DocAddress::new(segment_ord, doc_id))
                         .is_some()
                     {
-                        return Err(IndexError::InvalidStoredDocumentField(
-                            SESSION_EVENT_ORDER_FIELD,
+                        return Err(IndexError::DuplicateEventIdentity(
+                            order.event_id().to_string(),
                         ));
                     }
                 }
