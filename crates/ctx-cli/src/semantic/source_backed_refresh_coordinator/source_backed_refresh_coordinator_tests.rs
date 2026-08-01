@@ -172,6 +172,91 @@ fn differing_catalog_authority_queues_a_serial_successor() {
 }
 
 #[test]
+fn active_and_pending_refreshes_are_bounded_with_a_typed_busy_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = CoreRefreshEngine::new();
+    let request = |revision: u64| {
+        let digest_byte = u8::try_from(revision).unwrap();
+        let authority = test_catalog_authority(revision, digest_byte);
+        coordinator
+            .handle_ipc_request(
+                temp.path(),
+                &json!({
+                    "schema_version": 1,
+                    "op": SOURCE_REFRESH_REQUEST_OP,
+                    "mode": "wait",
+                    "explicit_source_catalog": authority.to_json(),
+                }),
+            )
+            .unwrap()
+            .expect("source refresh response")
+    };
+
+    let accepted = (1..=SOURCE_REFRESH_ACTIVE_PENDING_LIMIT)
+        .map(|revision| request(u64::try_from(revision).unwrap()))
+        .collect::<Vec<_>>();
+    assert!(accepted.iter().all(|response| response["ok"] == true));
+    assert_eq!(
+        accepted
+            .iter()
+            .map(request_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        SOURCE_REFRESH_ACTIVE_PENDING_LIMIT
+    );
+
+    let busy = request(99);
+    assert_eq!(busy["ok"], false);
+    assert_eq!(busy["status"], "busy");
+    assert_eq!(busy["error_code"], "source_refresh_queue_full");
+    assert_eq!(busy["reason"], "queue_full");
+    assert_eq!(busy["retryable"], true);
+    assert_eq!(
+        busy["active_pending_requests"],
+        SOURCE_REFRESH_ACTIVE_PENDING_LIMIT
+    );
+    assert_eq!(
+        busy["max_active_pending_requests"],
+        SOURCE_REFRESH_ACTIVE_PENDING_LIMIT
+    );
+    assert!(busy.get("request_id").is_none());
+}
+
+#[test]
+fn terminal_history_is_trimmed_independently_from_inflight_capacity() {
+    let coordinator = CoreRefreshEngine::new();
+    let total = SOURCE_REFRESH_ATTEMPT_HISTORY + 3;
+    let mut request_ids = Vec::with_capacity(total);
+
+    for generation in 0..total {
+        let previous = format!("generation-{generation}");
+        let published = format!("generation-{}", generation.saturating_add(1));
+        let request = coordinator.enqueue(Some(previous));
+        request_ids.push(request_id(&request));
+        let run = coordinator
+            .run_next_with(
+                |_, _| Ok(test_publication(published.clone())),
+                || Ok(Some(published.clone())),
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+            .expect("queued refresh");
+        assert!(!run.failed);
+    }
+
+    assert!(request_ids[..3]
+        .iter()
+        .all(|request_id| coordinator.status(request_id).is_none()));
+    assert!(request_ids[3..]
+        .iter()
+        .all(|request_id| coordinator.status(request_id).is_some()));
+
+    let next = coordinator.enqueue(Some(format!("generation-{total}")));
+    assert_eq!(next["request_state"], "queued");
+    assert!(coordinator.has_pending_request());
+}
+
+#[test]
 fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
     let coordinator = CoreRefreshEngine::new();
     assert_eq!(

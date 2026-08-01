@@ -52,8 +52,9 @@ where
     ) -> Result<SourceBackedRefreshPublication>,
 {
     let discovery = discovery.clone().with_data_root(execution.data_root);
+    let work_budget = source_backed_refresh_work_budget(WriterOptions::default().indexer_threads);
     let discovery_started = StdInstant::now();
-    let report = discover_provider_sources_with_context(&discovery);
+    let report = discover_provider_sources_with_context_and_work_budget(&discovery, work_budget);
     let discovery_duration = discovery_started.elapsed();
     validate_provider_source_roots_outside_data_root(execution.data_root, report.sources.iter())
         .context("validate provider roots before source-refresh state writes")?;

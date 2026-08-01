@@ -257,6 +257,47 @@ fn source_worker_names_and_spawn_count_are_deterministically_bounded() {
 }
 
 #[test]
+fn sink_budget_caps_requested_workers_and_writer_consumes_jobs_in_input_order() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let mut harness = SinkHarness::open(&temp.path().join("index"));
+    harness.leaf_worker_budget = 2;
+    let later_job_reached_emission = Arc::new(AtomicBool::new(false));
+    let later_ready = Arc::clone(&later_job_reached_emission);
+    let observed_workers = Arc::new(Mutex::new(HashSet::new()));
+    let workers = Arc::clone(&observed_workers);
+    let jobs = (0_u8..4)
+        .map(|id| ParallelLeafScanJob::new(test_source(id.saturating_add(20)), id))
+        .collect();
+
+    let results = harness
+        .run(jobs, usize::MAX, move |job, emitter| {
+            workers
+                .lock()
+                .unwrap()
+                .insert(std::thread::current().name().unwrap_or_default().to_owned());
+            if *job.leaf() == 1 {
+                later_ready.store(true, Ordering::Release);
+            } else if *job.leaf() == 0 {
+                while !later_ready.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+            }
+            emitter.complete(ParallelLeafScanComplete::Skipped {
+                result: *job.leaf(),
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(results, [0, 1, 2, 3]);
+    assert_eq!(observed_workers.lock().unwrap().len(), 2);
+    assert_eq!(
+        *observed_workers.lock().unwrap(),
+        HashSet::from([source_worker_thread_name(0), source_worker_thread_name(1),])
+    );
+}
+
+#[test]
 fn append_and_skipped_jobs_use_typed_lifecycles_and_ordered_results() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let index_root = temp.path().join("index");
@@ -491,6 +532,60 @@ fn worker_panic_and_unprompted_cancel_are_typed() {
             job_index: 0
         }
     ));
+}
+
+struct SpawnedWorkerDropProbe(Arc<AtomicBool>);
+
+impl Drop for SpawnedWorkerDropProbe {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[test]
+fn worker_spawn_failure_is_typed_and_joins_already_started_workers() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let index_root = temp.path().join("index");
+    let retained_source = test_source(29);
+    let _ = publish_append_base(&index_root, &retained_source, 29);
+    let retained_generation = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .generation_id()
+        .to_owned();
+    let mut harness = SinkHarness::open(&index_root);
+    let first_worker_dropped_job = Arc::new(AtomicBool::new(false));
+    let jobs = vec![
+        ParallelLeafScanJob::new(
+            test_source(30),
+            SpawnedWorkerDropProbe(Arc::clone(&first_worker_dropped_job)),
+        ),
+        ParallelLeafScanJob::new(
+            test_source(31),
+            SpawnedWorkerDropProbe(Arc::new(AtomicBool::new(false))),
+        ),
+    ];
+    let previous = INJECT_WORKER_SPAWN_FAILURE_AT.with(|injected| injected.replace(Some(1)));
+    let error = harness
+        .run::<_, (), _>(jobs, 2, |_job, emitter| {
+            emitter.complete(ParallelLeafScanComplete::Skipped { result: () })?;
+            Ok(())
+        })
+        .unwrap_err();
+    INJECT_WORKER_SPAWN_FAILURE_AT.with(|injected| injected.set(previous));
+
+    assert!(matches!(
+        error,
+        ParallelLeafScanError::WorkerSpawn {
+            worker_index: 1,
+            ..
+        }
+    ));
+    assert!(first_worker_dropped_job.load(Ordering::Acquire));
+    drop(harness);
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        retained_generation
+    );
 }
 
 struct PanicOnDrop;

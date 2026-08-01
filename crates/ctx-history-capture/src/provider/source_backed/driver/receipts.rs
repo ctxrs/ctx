@@ -65,6 +65,8 @@ pub enum SourceBackedCoordinatorError {
     },
     #[error("source {source_id} was staged by more than one provider route")]
     DuplicateSourceOwner { source_id: String },
+    #[error("base source {source_id} was not claimed by any provider route in this refresh")]
+    UnclaimedBaseSource { source_id: String },
     #[error("no executable source-backed routes were registered")]
     NoExecutableRoutes,
     #[error("source deletion was not certified by its supplied authoritative inventory")]
