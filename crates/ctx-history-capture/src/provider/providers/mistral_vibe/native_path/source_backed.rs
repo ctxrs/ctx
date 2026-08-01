@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use super::*;
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
+    provider::normalization::provider_explicit_result_value_text,
     provider::source_backed::family::jsonl::{
         JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
         JsonlFamilyProjector, JsonlRecordRef,
@@ -32,7 +33,7 @@ const NATIVE_EVENT_NAMESPACE: &str = "mistral-vibe-message";
 const NATIVE_EVENT_POSITION_KIND: &str = "mistral-vibe-messages-jsonl-ordinal";
 const LOGICAL_SESSION_KIND: &str = "mistral-vibe-session";
 const LOGICAL_EVENT_KIND: &str = "mistral-vibe-event";
-const PARSER_REVISION: &str = "mistral-vibe-source-backed-v2";
+const PARSER_REVISION: &str = "mistral-vibe-source-backed-v3";
 const SOURCE_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx.mistral-vibe.source-revision.v1\0";
 
 #[derive(Debug, Clone, Copy)]
@@ -232,21 +233,16 @@ fn core_record(
     };
     let mut event_type = mistral_vibe_event_type(role, &value);
     let output = (event_type == EventType::ToolOutput).then(|| output_classification(&value));
-    if output.as_ref().is_some_and(|output| {
-        !matches!(
-            output.outcome,
-            OutputOutcome::Failure | OutputOutcome::Timeout
-        )
-    }) {
-        return Ok(None);
-    }
     let body = if let Some(output) = &output {
         if output.kind == OutputObservationKind::Command {
             event_type = EventType::CommandOutput;
         }
-        mistral_vibe_lexical_text(&value, role, true)
+        let Some(body) = mistral_vibe_output_text(&value)? else {
+            return Ok(None);
+        };
+        body
     } else {
-        mistral_vibe_lexical_text(&value, role, false)
+        mistral_vibe_event_text(role, &value, mistral_vibe_event_type(role, &value))
     };
     if body.is_empty() {
         return Ok(None);
@@ -282,16 +278,28 @@ fn core_record(
         .unwrap_or(TypedKey::U64(ordinal));
     let role = crate::provider::normalization::provider_role(Some(role));
     let touched_files = collect_touched_paths(&value)?;
-    let tool_name = value
-        .get("name")
-        .or_else(|| value.get("tool_name"))
-        .cloned();
-    let structured_content = (!touched_files.is_empty() || tool_name.is_some()).then(|| {
-        serde_json::json!({
-            "tool_name": tool_name,
-            "file_touches": touched_files,
-        })
+    let linkage = output
+        .as_ref()
+        .map(|output| mistral_vibe_output_linkage(&value, *output))
+        .transpose()?;
+    // Result linkage is selected and bounded by `mistral_vibe_output_linkage`.
+    // Keep the legacy top-level tool metadata only for non-result records so a
+    // result cannot duplicate linkage or admit an unbounded auxiliary field.
+    let tool_name = output.is_none().then(|| {
+        value
+            .get("name")
+            .or_else(|| value.get("tool_name"))
+            .cloned()
     });
+    let tool_name = tool_name.flatten();
+    let structured_content =
+        (!touched_files.is_empty() || tool_name.is_some() || linkage.is_some()).then(|| {
+            serde_json::json!({
+                "tool_name": tool_name,
+                "file_touches": touched_files,
+                "provider_native_tool_result": linkage,
+            })
+        });
     let agent_type = if binding.is_primary {
         AgentType::Primary
     } else {
@@ -472,14 +480,131 @@ fn root_session_identity(
     }
 }
 
-fn mistral_vibe_lexical_text(value: &Value, role: &str, failed_output: bool) -> String {
-    if failed_output {
-        format!(
-            "Mistral Vibe failed {} output",
-            value.get("name").and_then(Value::as_str).unwrap_or("tool")
+fn mistral_vibe_output_text(value: &Value) -> Result<Option<String>> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let candidates = ["content", "output", "result"]
+        .into_iter()
+        .filter_map(|field| object.get(field))
+        .filter(|value| !value.is_null())
+        .collect::<Vec<_>>();
+    let selected = match candidates.as_slice() {
+        [] => return Ok(None),
+        [selected] => *selected,
+        _ => {
+            return Err(CaptureError::InvalidPayload(
+                "Mistral Vibe tool result exposes more than one candidate body field".to_owned(),
+            ));
+        }
+    };
+    Ok(provider_explicit_result_value_text(selected).filter(|text| !text.trim().is_empty()))
+}
+
+fn mistral_vibe_output_linkage(value: &Value, output: OutputClassification) -> Result<Value> {
+    let bounded = |field: &'static str| -> Result<Option<&str>> {
+        let value = value.get(field).and_then(Value::as_str);
+        if value.is_some_and(|value| value.len() > super::super::MISTRAL_VIBE_MAX_ID_BYTES) {
+            return Err(CaptureError::InvalidPayload(format!(
+                "Mistral Vibe {field} exceeds the bounded linkage limit"
+            )));
+        }
+        Ok(value)
+    };
+    let outcome = match output.outcome {
+        OutputOutcome::Success => "success",
+        OutputOutcome::Failure => "failure",
+        OutputOutcome::Timeout => "timeout",
+        OutputOutcome::Unknown => "unknown",
+    };
+    Ok(serde_json::json!({
+        "call_id": bounded("tool_call_id")?,
+        "tool_name": bounded("name")?.or(bounded("tool_name")?),
+        "outcome": outcome,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::source_backed::family::jsonl::JsonlRecordRef;
+
+    fn binding() -> (SourceKey, Binding) {
+        let source = source_key("session").unwrap();
+        let session_id = session_identity(&source, "session").unwrap();
+        (
+            source,
+            Binding {
+                metadata_relative_path: PathBuf::from("meta.json"),
+                provider_session_id: "session".to_owned(),
+                session_id,
+                parent_session_id: None,
+                root_session_id: session_id,
+                started_at_unix_ms: 0,
+                cwd: None,
+                branch: None,
+                revision_digest: [0; 32],
+                is_primary: true,
+            },
         )
-    } else {
-        mistral_vibe_event_text(role, value, mistral_vibe_event_type(role, value))
+    }
+
+    #[test]
+    fn tool_results_keep_all_outcomes_complete_linkage_and_large_content() {
+        let (source, binding) = binding();
+        for (status, expected) in [
+            (Some("success"), "success"),
+            (Some("failure"), "failure"),
+            (None, "unknown"),
+        ] {
+            let mut value = serde_json::json!({
+                "role": "tool",
+                "content": format!("complete-{expected}"),
+                "tool_call_id": "call-1",
+                "name": "write_file",
+            });
+            if let Some(status) = status {
+                value["status"] = Value::String(status.to_owned());
+            }
+            let bytes = serde_json::to_vec(&value).unwrap();
+            let record = core_record(&source, &binding, JsonlRecordRef::for_test(&bytes, 0))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                record.content.meaningful_text(),
+                format!("complete-{expected}")
+            );
+            assert_eq!(
+                record
+                    .content
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value.pointer("/provider_native_tool_result/call_id"))
+                    .and_then(Value::as_str),
+                Some("call-1")
+            );
+        }
+
+        let large = format!("{}tail", "x".repeat(9 * 1024 * 1024));
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "role": "tool",
+            "content": large,
+            "tool_call_id": "large",
+        }))
+        .unwrap();
+        let record = core_record(&source, &binding, JsonlRecordRef::for_test(&bytes, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.content.meaningful_text().len(), 9 * 1024 * 1024 + 4);
+        assert!(record.content.meaningful_text().ends_with("tail"));
+
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "role": "tool",
+            "content": "one",
+            "output": "two",
+        }))
+        .unwrap();
+        assert!(core_record(&source, &binding, JsonlRecordRef::for_test(&bytes, 2)).is_err());
     }
 }
 

@@ -15,7 +15,7 @@ use crate::{
 mod message_text;
 pub(crate) mod native_path;
 
-pub(crate) use message_text::firebender_message_text;
+pub(crate) use message_text::{firebender_message_text, firebender_result_content};
 
 pub(crate) fn firebender_chat_history_db_path(path: &Path) -> Result<PathBuf> {
     match fs::symlink_metadata(path) {

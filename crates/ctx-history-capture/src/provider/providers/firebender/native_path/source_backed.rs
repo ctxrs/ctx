@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use super::super::{
     firebender_event_parts, firebender_message_time, firebender_output_evidence,
-    FirebenderOutputEvidence,
+    firebender_result_content, FirebenderOutputEvidence,
 };
 use super::FirebenderRow;
 use crate::{
@@ -90,15 +90,21 @@ pub(super) fn firebender_core_record(
         message,
         firebender_message_occurred_at(row, message_index, message),
     );
-    let body = if event.event_type == EventType::ToolOutput {
+    let output = if event.event_type == EventType::ToolOutput {
         let evidence = firebender_output_evidence(message);
-        if !evidence.failure && !evidence.timeout {
+        let Some(body) = firebender_result_content(message) else {
             return Ok(None);
-        }
-        sparse_output_body(&evidence)
+        };
+        let Some(linkage) = firebender_result_linkage(message, &evidence) else {
+            return Ok(None);
+        };
+        Some((body, linkage))
     } else {
-        event.text
+        None
     };
+    let body = output
+        .as_ref()
+        .map_or_else(|| event.text.clone(), |(body, _)| body.clone());
     let body = if body.is_empty() {
         format!("Firebender {}", event.event_type.as_str())
     } else {
@@ -132,6 +138,11 @@ pub(super) fn firebender_core_record(
     record.occurred_at_unix_ms = Some(event.occurred_at.timestamp_millis());
     record.role = event.role.map(|role| role.as_str().to_owned());
     record.workspace = workspace.map(str::to_owned);
+    if let Some((_, linkage)) = output {
+        record.content.structured_content = Some(serde_json::json!({
+            "provider_native_result": linkage,
+        }));
+    }
     record.validate_contract()?;
     Ok(Some(record))
 }
@@ -159,7 +170,7 @@ fn message_native_key(
         .or_else(|| message.get("tool_call_id"))
         .or_else(|| message.get("toolCallId"))
         .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty() && value.len() <= MAX_LINKAGE_BYTES)
     {
         return Ok(NativeItemKey::native_id(
             FIREBENDER_NATIVE_EVENT_NAMESPACE,
@@ -183,16 +194,66 @@ fn firebender_message_occurred_at(
     firebender_message_time(message, started_at + chrono::Duration::milliseconds(offset))
 }
 
-fn sparse_output_body(evidence: &FirebenderOutputEvidence) -> String {
-    let outcome = if evidence.timeout {
-        "timed out"
+fn firebender_result_linkage(
+    message: &serde_json::Value,
+    evidence: &FirebenderOutputEvidence,
+) -> Option<serde_json::Value> {
+    let call_id = exact_direct_string(
+        message,
+        &["tool_call_id", "toolCallId", "call_id", "callId"],
+    )?;
+    let tool_name = exact_direct_string(message, &["name", "tool_name", "toolName"])?;
+    let linkage_exact = call_id.is_some_and(|value| value.len() <= MAX_LINKAGE_BYTES);
+    let call_id = call_id
+        .filter(|value| value.len() <= MAX_LINKAGE_BYTES)
+        .map(str::to_owned);
+    let tool_name = tool_name
+        .filter(|value| value.len() <= MAX_LINKAGE_BYTES)
+        .map(str::to_owned);
+    let result_outcome = if evidence.timeout {
+        "timeout"
+    } else if evidence.failure {
+        "failure"
+    } else if evidence.success {
+        "success"
     } else {
-        "failed"
+        "unknown"
     };
-    evidence.exit_code.map_or_else(
-        || format!("Firebender tool output {outcome}"),
-        |code| format!("Firebender tool output {outcome} with exit code {code}"),
-    )
+    Some(serde_json::json!({
+        "call_id": call_id,
+        "tool_name": tool_name,
+        "linkage_exact": linkage_exact,
+        "result_outcome": result_outcome,
+        "exit_code": evidence.exit_code,
+        "duration_ms": evidence.duration_ms,
+    }))
+}
+
+/// `Some(None)` means absent, `Some(Some(_))` means one exact value, and
+/// `None` means the native shape is ambiguous or malformed.
+const MAX_LINKAGE_BYTES: usize = 16 * 1024;
+
+fn exact_direct_string<'a>(
+    message: &'a serde_json::Value,
+    keys: &[&str],
+) -> Option<Option<&'a str>> {
+    let object = message.as_object()?;
+    let mut selected = None;
+    for key in keys {
+        let Some(value) = object.get(*key) else {
+            continue;
+        };
+        let value = value.as_str()?.trim();
+        if value.is_empty() {
+            return None;
+        }
+        match selected.as_deref() {
+            Some(existing) if existing != value => return None,
+            Some(_) => {}
+            None => selected = Some(value),
+        }
+    }
+    Some(selected)
 }
 
 pub(super) fn canonical_row_bytes(row: &FirebenderRow) -> FirebenderSourceBackedResult<u64> {

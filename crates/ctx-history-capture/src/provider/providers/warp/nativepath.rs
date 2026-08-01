@@ -13,6 +13,8 @@ pub(super) use model::{
     WarpNativeCounters, WarpNativeEvent, WarpNativeMessageIdentity, WarpNativePage,
     WarpNativeSession, WarpNativeSink,
 };
+#[cfg(test)]
+pub(super) use model::{WarpNativeEventIdentity, WarpNativeOrder};
 use query::scan_warp_native_pinned_snapshot;
 
 pub(in super::super) struct WarpNativeSourceBackedScan {

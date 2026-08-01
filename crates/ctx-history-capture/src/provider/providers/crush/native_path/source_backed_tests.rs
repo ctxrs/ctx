@@ -463,6 +463,72 @@ fn source_backed_message_round_trips_full_policy_body_and_structured_content() {
 }
 
 #[test]
+fn source_backed_indivisible_result_larger_than_page_target_is_complete_once() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("large-result.db");
+    let body = format!(
+        "crush-large-head-{}-crush-large-tail",
+        "x".repeat(8 * 1024 * 1024)
+    );
+    write_database(&path, "session", "message", "placeholder");
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "update messages set role = 'tool', parts = ?1 where id = 'message'",
+            [json!([{
+                "type": "tool_result",
+                "data": {
+                    "content": body,
+                    "status": "success",
+                    "tool_call_id": "call-large",
+                    "name": "shell"
+                }
+            }])
+            .to_string()],
+        )
+        .unwrap();
+    let inventory = TestInventory::new(inventory(
+        b"large-result-inventory",
+        vec![database("large-result-project", &path)],
+    ));
+    let registry = crush_registry(temp.path(), Arc::new(inventory));
+    let index_root = temp.path().join("large-result-index");
+    refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    let source = crush_source_key(TypedKey::utf8("large-result-project").unwrap()).unwrap();
+    let page = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .core_source_event_page(&source, None, 8)
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    let record = &page.items[0].core_record;
+    assert_eq!(record.event_type, EventType::ToolOutput.as_str());
+    assert!(record
+        .content
+        .meaningful_text()
+        .starts_with("crush-large-head-"));
+    assert!(record
+        .content
+        .meaningful_text()
+        .ends_with("-crush-large-tail"));
+    assert!(record.content.meaningful_text().len() > 8 * 1024 * 1024);
+    let structured = record.content.structured_content.as_ref().unwrap();
+    assert_eq!(
+        structured
+            .pointer("/provider_native_result/result_outcome")
+            .and_then(serde_json::Value::as_str),
+        Some("success")
+    );
+    assert_eq!(
+        structured
+            .pointer("/provider_native_result/call_id")
+            .and_then(serde_json::Value::as_str),
+        Some("call-large")
+    );
+    assert!(!structured.to_string().contains("crush-large-head-"));
+    assert!(!structured.to_string().contains("crush-large-tail"));
+}
+
+#[test]
 fn stock_sqlite_snapshot_scan_sees_committed_content_retained_in_active_wal() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("wal-project.db");

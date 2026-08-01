@@ -18,7 +18,7 @@ use thiserror::Error;
 
 use super::{
     normalization::{
-        goose_timestamp, normalize_goose_native_message, normalize_goose_native_output_diagnostic,
+        goose_timestamp, normalize_goose_native_message, normalize_goose_native_output,
         GooseNativeEvent, GooseNativeEventKind,
     },
     position::goose_message_locator,
@@ -56,7 +56,7 @@ use fingerprint::GooseLogicalFingerprint;
 const GOOSE_SOURCE_ANCHOR_NAMESPACE: &str = "goose.installed-sessions";
 const GOOSE_SOURCE_ANCHOR_KEY: &str = "selected-platform-sessions-db";
 const GOOSE_SOURCE_SCHEMA_VARIANT: &str = "goose-sessions-sqlite-v0";
-const GOOSE_PARSER_REVISION: &str = "goose-logical-sqlite-v4";
+const GOOSE_PARSER_REVISION: &str = "goose-logical-sqlite-v5";
 const GOOSE_NATIVE_SESSION_NAMESPACE: &str = "goose.session";
 const GOOSE_NATIVE_EVENT_NAMESPACE: &str = "goose.message";
 const GOOSE_LOGICAL_SESSION_KIND: &str = "goose-session";
@@ -477,11 +477,11 @@ fn scan_goose_logical_snapshot(
                     }
                 }
                 GooseMessageCellDisposition::OutputFailure
-                | GooseMessageCellDisposition::OutputTimeout => {
-                    Some(normalize_goose_native_output_diagnostic(&scanned)?)
+                | GooseMessageCellDisposition::OutputTimeout
+                | GooseMessageCellDisposition::OutputSuccess
+                | GooseMessageCellDisposition::OutputUnknown => {
+                    normalize_goose_native_output(&scanned)?
                 }
-                GooseMessageCellDisposition::OutputSuccess
-                | GooseMessageCellDisposition::OutputUnknown => None,
                 _ => {
                     rejected_records = checked_add(rejected_records, 1)?;
                     None
@@ -628,6 +628,11 @@ fn goose_core_record(
             "provider_native_file_touches".to_owned(),
             native_file_touches,
         );
+    }
+    if event.kind == GooseNativeEventKind::ToolOutput {
+        record.content.structured_content = Some(serde_json::json!({
+            "provider_native_result": event.content,
+        }));
     }
     record.validate_contract()?;
     Ok(record)

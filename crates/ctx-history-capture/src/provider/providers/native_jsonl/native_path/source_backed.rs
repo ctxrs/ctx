@@ -35,10 +35,6 @@ use crate::{
 
 const DIRECT_JSONL_SOURCE_IDENTITY_VERSION: u32 = 1;
 const DIRECT_JSONL_MAX_DIRECTORY_DEPTH: usize = 128;
-const DIRECT_JSONL_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
-const DIRECT_JSONL_MAX_TOUCHED_FILES: usize = 256;
-const DIRECT_JSONL_MAX_EXPANDED_RECORD_UNITS: usize = 64;
-const DIRECT_JSONL_MAX_EXPANDED_RECORD_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 enum DirectJsonlAdapterError {
@@ -474,7 +470,6 @@ fn bind_opened_leaf(
 struct DirectJsonlFamilyProjector {
     adapter: DirectJsonlFamilyAdapter,
     source: SourceKey,
-    source_path: PathBuf,
     bound_session: DirectJsonlSession,
     session_id: StableEntityId,
     projector: DirectJsonlProjector,
@@ -501,7 +496,6 @@ impl DirectJsonlFamilyProjector {
         Ok(Self {
             adapter,
             source,
-            source_path: leaf.source_path().to_path_buf(),
             bound_session: binding.session,
             session_id,
             projector,
@@ -528,21 +522,6 @@ impl JsonlFamilyProjector for DirectJsonlFamilyProjector {
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         let projected = self.projector.project_record(record)?;
-        let expanded_units = projected
-            .events
-            .iter()
-            .map(|event| 1_usize.saturating_add(event.touches.len()))
-            .sum::<usize>()
-            .saturating_add(projected.rejections.len())
-            .max(1);
-        if expanded_units > DIRECT_JSONL_MAX_EXPANDED_RECORD_UNITS
-            || projected.serialized_bytes > DIRECT_JSONL_MAX_EXPANDED_RECORD_BYTES
-        {
-            return Err(CaptureError::InvalidPayload(format!(
-                "{} expands past a certified direct JSONL record boundary",
-                self.source_path.display()
-            )));
-        }
         if !projected.rejections.is_empty() {
             if !projected.events.is_empty() {
                 return Err(capture_error(DirectJsonlAdapterError::CountMismatch));
@@ -644,26 +623,32 @@ fn project_event(
         Some(root) => adapter.session_identity(root)?.1,
         None => session_id,
     };
-    let body = if event.lexical_text.trim().is_empty() {
+    let has_tool_result = event
+        .metadata
+        .get("tool_result")
+        .is_some_and(|value| !value.is_null());
+    let body = if event.lexical_text.trim().is_empty() && has_tool_result {
+        return Err(CaptureError::InvalidPayload(
+            "direct JSONL selected result has no meaningful native content".to_owned(),
+        )
+        .into());
+    } else if event.lexical_text.trim().is_empty() {
         event.event_type.as_str().to_owned()
     } else {
         event.lexical_text.clone()
     };
-    let touches = event
-        .touches
-        .into_iter()
-        .filter(|touch| touch.path.len() <= DIRECT_JSONL_DOCUMENT_METADATA_BYTES)
-        .take(DIRECT_JSONL_MAX_TOUCHED_FILES)
-        .collect::<Vec<_>>();
+    let touches = event.touches;
     let entry_type = event.metadata.get("entry_type").cloned();
     let status = event.metadata.get("status").cloned();
     let model = event.metadata.get("model").cloned();
     let tokens = event.metadata.get("tokens").cloned();
+    let tool_result = event.metadata.get("tool_result").cloned();
     let structured_content = (!touches.is_empty()
         || entry_type.as_ref().is_some_and(|value| !value.is_null())
         || status.as_ref().is_some_and(|value| !value.is_null())
         || model.as_ref().is_some_and(|value| !value.is_null())
-        || tokens.as_ref().is_some_and(|value| !value.is_null()))
+        || tokens.as_ref().is_some_and(|value| !value.is_null())
+        || tool_result.as_ref().is_some_and(|value| !value.is_null()))
     .then(|| {
         serde_json::json!({
             "entry_type": entry_type,
@@ -671,6 +656,7 @@ fn project_event(
             "model": model,
             "tokens": tokens,
             "file_touches": touches,
+            "tool_result": tool_result,
         })
     });
     let mut record = CoreRecord::new_selected(
@@ -718,3 +704,7 @@ fn capture_error(error: DirectJsonlAdapterError) -> CaptureError {
         other => CaptureError::InvalidPayload(other.to_string()),
     }
 }
+
+#[cfg(test)]
+#[path = "source_backed_result_tests.rs"]
+mod result_tests;

@@ -1,6 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 
-use ctx_history_core::{Confidence, FileChangeKind};
+use ctx_history_core::{
+    Confidence, FileChangeKind, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -18,8 +20,8 @@ const SESSION_HASH_DOMAIN: &[u8] = b"ctx-cline-nativepath-session-v2\0";
 pub(crate) const CLINE_NATIVE_PAGE_MAX_UNITS: usize = 64;
 pub(crate) const CLINE_NATIVE_FIXED_PAGE_UNITS: usize = 4;
 pub(crate) const CLINE_NATIVE_SESSION_PAGE_UNITS: usize = 1;
-pub(super) const CLINE_NATIVE_CORE_PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
-pub(super) const CLINE_NATIVE_MAX_RETAINED_ITEM_BYTES: usize = 64 * 1024;
+pub(super) const CLINE_NATIVE_CORE_PAGE_MAX_BYTES: usize = MAX_ENCODED_CORE_RECORD_BYTES;
+pub(super) const CLINE_NATIVE_MAX_RETAINED_ITEM_BYTES: usize = MAX_CORE_CONTENT_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ClineTaskIdentity(pub(crate) Arc<str>);
@@ -208,13 +210,16 @@ impl ClineEventRow {
         }
     }
 
-    pub(super) fn sparse_output(
+    pub(super) fn output(
         context: ClineEventContext<'_>,
         sub_index: u32,
         kind: ClineEventKind,
+        body: String,
         diagnostic: ClineSparseOutputDiagnostic,
     ) -> Self {
         let mut safe = Vec::new();
+        safe.extend_from_slice(body.as_bytes());
+        safe.push(0);
         safe.push(diagnostic.outcome as u8);
         safe.extend_from_slice(&diagnostic.exit_code.unwrap_or_default().to_le_bytes());
         safe.extend_from_slice(&diagnostic.duration_ms.unwrap_or_default().to_le_bytes());
@@ -232,7 +237,7 @@ impl ClineEventRow {
             kind,
             role: ClineEventRole::Unknown,
             occurred_at_millis: context.occurred_at_millis,
-            body: None,
+            body: Some(body.into_boxed_str()),
             content_hash: event_hash(context, sub_index, kind, ClineEventRole::Unknown, &safe),
             tool_call: None,
             sparse_output: Some(diagnostic),

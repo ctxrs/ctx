@@ -19,13 +19,10 @@ use super::model::{
     hex_digest, WarpNativeCounters, WarpNativeDigestChain, WarpNativeEvent, WarpNativeEventDraft,
     WarpNativeHierarchyEdge, WarpNativeMessageIdentity, WarpNativePageAccumulator,
     WarpNativeRejection, WarpNativeRejectionKind, WarpNativeSession, WarpNativeSink,
-    WarpNativeUnit, WARP_NATIVE_PAGE_MAX_BYTES, WARP_SOURCE_DIGEST_DOMAIN,
+    WarpNativeUnit, WARP_SOURCE_DIGEST_DOMAIN,
 };
 use crate::provider::sqlite::SqliteLengthPreflightGuard;
-use crate::{
-    record_evidence::RecordDigest, CaptureError, OutputOutcome, Result,
-    MAX_PROVIDER_SQLITE_VALUE_BYTES,
-};
+use crate::{record_evidence::RecordDigest, CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
 const WARP_SESSION_METADATA_MAX_BYTES: usize = 64 * 1024;
 const WARP_ORDERING_KEY_MAX_BYTES: usize = 240 * 1024;
@@ -169,18 +166,10 @@ impl<'a> WarpNativePageEmitter<'a> {
 
     fn push(
         &mut self,
-        mut unit: WarpNativeUnit,
-        native_key: String,
-        counters: &mut WarpNativeCounters,
+        unit: WarpNativeUnit,
+        _native_key: String,
+        _counters: &mut WarpNativeCounters,
     ) -> Result<()> {
-        if unit.estimated_bytes() > WARP_NATIVE_PAGE_MAX_BYTES {
-            counters.oversized_normalized_units =
-                counters.oversized_normalized_units.saturating_add(1);
-            unit = unit.into_oversized_rejection(
-                WarpNativeRejectionKind::OversizedNormalizedUnit,
-                native_key,
-            )?;
-        }
         let core_unit = unit.into_core();
         if !self.page.can_accept(&core_unit) {
             self.flush_core()?;

@@ -190,6 +190,122 @@ fn body(record: &CoreRecord) -> &str {
     record.content.normalized_body.as_deref().unwrap()
 }
 
+#[test]
+fn shelley_retains_complete_result_statuses_and_oversized_indivisible_rows() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = create_fixture(temp.path(), "ordinary message");
+    let complete_success = format!("{}shelley-oversized-tail", "s".repeat(9 * 1024 * 1024));
+    let fixtures = [
+        json!({
+            "Type": 6,
+            "ToolResult": complete_success,
+            "ToolUseID": "call-success",
+            "ToolName": "large_tool",
+            "Status": "success",
+        }),
+        json!({
+            "Type": "ContentTypeToolResult",
+            "ToolResult": "failure body",
+            "ToolUseID": "call-failure",
+            "Status": "failed",
+        }),
+        json!({
+            "Type": 6,
+            "ToolResult": "unknown body",
+            "ToolUseID": "call-unknown",
+        }),
+        json!({
+            "Type": 6,
+            "ToolResult": "first representation",
+            "Output": "second representation",
+        }),
+        json!({
+            "Type": 6,
+            "Display": "first fallback representation",
+            "Results": "second fallback representation",
+        }),
+    ];
+    let connection = Connection::open(&database).unwrap();
+    for (offset, fixture) in fixtures.into_iter().enumerate() {
+        connection
+            .execute(
+                "insert into messages (
+                     message_id, conversation_id, sequence_id, type, user_data, created_at
+                 ) values (?1, 'conversation-1', ?2, 'tool', ?3, ?4)",
+                params![
+                    format!("result-{offset}"),
+                    8_i64 + offset as i64,
+                    fixture.to_string(),
+                    format!("2026-07-28T20:01:0{offset}Z"),
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let adapter = discover_shelley_source_backed_exact_cwd(
+        crate::test_provider_sqlite_data_root(),
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
+    let mut scan = adapter.start_scan().unwrap();
+    let mut documents = Vec::new();
+    let mut rejections = Vec::new();
+    let mut oversized_page = false;
+    while let Some(page) = scan.next_page().unwrap() {
+        oversized_page |= page.retained_bytes > SHELLEY_PAGE_MAX_BYTES;
+        documents.extend(page.documents);
+        rejections.extend(page.rejections);
+    }
+    let receipt = scan.finish().unwrap();
+
+    assert!(
+        oversized_page,
+        "the page byte target must permit one large row"
+    );
+    assert_eq!(
+        receipt.certificate.parser_revision(),
+        SHELLEY_SOURCE_PARSER_REVISION
+    );
+    assert_eq!(rejections.len(), 2);
+    let outputs = documents
+        .iter()
+        .filter(|record| record.event_type == "tool_output")
+        .collect::<Vec<_>>();
+    assert_eq!(outputs.len(), 3);
+    assert_eq!(body(outputs[0]), complete_success);
+    assert!(body(outputs[0]).ends_with("shelley-oversized-tail"));
+    assert_eq!(body(outputs[1]), "failure body");
+    assert_eq!(body(outputs[2]), "unknown body");
+    assert_eq!(
+        outputs[0]
+            .content
+            .structured_content
+            .as_ref()
+            .unwrap()
+            .pointer("/provider_native_tool_result/call_ids/0")
+            .and_then(Value::as_str),
+        Some("call-success")
+    );
+    assert_eq!(
+        outputs
+            .iter()
+            .map(|record| {
+                record
+                    .content
+                    .structured_content
+                    .as_ref()
+                    .unwrap()
+                    .pointer("/provider_native_tool_result/outcome")
+                    .and_then(Value::as_str)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>(),
+        ["success", "failure", "unknown"]
+    );
+}
+
 fn sqlite_persistent_bytes(path: &Path) -> Vec<Vec<u8>> {
     // Stock WAL readers may update volatile SHM reader marks.
     ["", "-wal"]

@@ -34,9 +34,6 @@ use super::{
     DirectJsonlSession, DirectJsonlSourceRecord, DirectJsonlTouch,
 };
 
-const DIRECT_JSONL_EVENT_ENVELOPE_BYTES: usize = 1024;
-pub(super) const DIRECT_JSONL_MAX_FILE_TOUCHES_PER_RECORD: usize = 63;
-
 #[path = "reader_projection.rs"]
 mod projection;
 pub(super) use projection::ProjectedLine;
@@ -100,27 +97,4 @@ impl DirectJsonlProjector {
     pub(crate) fn session(&self) -> Option<&DirectJsonlSession> {
         self.session.as_ref()
     }
-}
-
-fn rejection_wire_bytes(rejection: &DirectJsonlRejection) -> usize {
-    128_usize.saturating_add(rejection.reason.len())
-}
-
-fn event_wire_bytes(event: &DirectJsonlEvent) -> usize {
-    DIRECT_JSONL_EVENT_ENVELOPE_BYTES
-        .saturating_add(event.provider_event_hash.len())
-        .saturating_add(event.lexical_text.len())
-        .saturating_add(serde_json::to_vec(&event.metadata).map_or(usize::MAX, |value| value.len()))
-        .saturating_add(
-            event
-                .touches
-                .iter()
-                .map(|touch| {
-                    touch
-                        .path
-                        .len()
-                        .saturating_add(touch.old_path.as_deref().map_or(0, str::len))
-                })
-                .sum::<usize>(),
-        )
 }

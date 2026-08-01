@@ -9,7 +9,8 @@ fn direct_core_projection_is_complete_and_self_contained() {
     assert!(production.contains("native_event_id = Some"));
     assert!(production.contains("PARSER_REVISION"));
     assert!(production.contains("validate_contract"));
-    assert!(production.contains("let body = lexical_body"));
+    assert!(production.contains("body = lexical_body"));
+    assert!(production.contains("let body = event.body.clone()"));
     for removed_api in [
         concat!("Lexical", "Document"),
         concat!("SourceRecord", "Locator"),

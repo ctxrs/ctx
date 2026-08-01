@@ -10,7 +10,9 @@ use crate::{
 
 use super::super::{
     normalization::native_jsonl_content_has,
-    result_content::{NativeJsonlResultExtractionError, NativeJsonlResultSubrecord},
+    result_content::{
+        extract_direct_result_content, NativeJsonlResultExtractionError, NativeJsonlResultSubrecord,
+    },
 };
 
 pub(super) fn qoder_event_identity(value: &Value) -> Option<&str> {
@@ -88,25 +90,28 @@ pub(super) fn enumerate_qoder_results(
     value: &Value,
 ) -> std::result::Result<Vec<NativeJsonlResultSubrecord<'_>>, NativeJsonlResultExtractionError> {
     if reject_redacted(value).is_err() {
-        let count = if value.get("toolUseResult").is_some()
-            || qoder_top_level_result(value).is_some()
+        let indices = if value.get("toolUseResult").is_some()
+            || qoder_has_top_level_result(value)
             || value
                 .get("type")
                 .and_then(Value::as_str)
                 .is_some_and(qoder_result_token)
         {
-            1
+            vec![0]
         } else if value.get("type").and_then(Value::as_str) == Some("user") {
-            let blocks = result_block_count(value.pointer("/message/content"))?;
-            if blocks != 0 {
-                blocks
+            let indices = result_block_indices(value.pointer("/message/content"))?;
+            if !indices.is_empty() {
+                indices
+            } else if value.pointer("/data/content").is_some() {
+                vec![0]
             } else {
-                usize::from(value.pointer("/data/content").is_some())
+                Vec::new()
             }
         } else {
-            0
+            Vec::new()
         };
-        return (0..count)
+        return indices
+            .into_iter()
             .map(|index| {
                 Ok(NativeJsonlResultSubrecord {
                     subrecord_index: u32::try_from(index)
@@ -118,6 +123,10 @@ pub(super) fn enumerate_qoder_results(
                 })
             })
             .collect();
+    }
+    let generic_top_level_result = qoder_top_level_result(value)?;
+    if value.get("toolUseResult").is_some() && generic_top_level_result.is_some() {
+        return Err(NativeJsonlResultExtractionError::InvalidShape);
     }
     if let Some(result) = value.get("toolUseResult") {
         reject_redacted(result)?;
@@ -134,7 +143,7 @@ pub(super) fn enumerate_qoder_results(
             outcome: native_result_outcome_with_record(result, value),
         }]);
     }
-    if let Some(result) = qoder_top_level_result(value).or_else(|| {
+    if let Some(result) = generic_top_level_result.or_else(|| {
         value
             .get("type")
             .and_then(Value::as_str)
@@ -189,8 +198,8 @@ fn enumerate_content_block_results<'a>(
         .as_array()
         .ok_or(NativeJsonlResultExtractionError::InvalidShape)?
         .iter()
-        .filter(|block| qoder_content_block_is_result(block))
         .enumerate()
+        .filter(|(_, block)| qoder_content_block_is_result(block))
         .map(|(index, block)| {
             let (content, redacted) =
                 match extract_result_ref(Some(block), &["content", "output", "result", "text"]) {
@@ -216,18 +225,19 @@ fn enumerate_content_block_results<'a>(
         .collect()
 }
 
-fn result_block_count(
+fn result_block_indices(
     content: Option<&Value>,
-) -> std::result::Result<usize, NativeJsonlResultExtractionError> {
+) -> std::result::Result<Vec<usize>, NativeJsonlResultExtractionError> {
     let Some(content) = content else {
-        return Ok(0);
+        return Ok(Vec::new());
     };
     Ok(content
         .as_array()
         .ok_or(NativeJsonlResultExtractionError::InvalidShape)?
         .iter()
-        .filter(|block| qoder_content_block_is_result(block))
-        .count())
+        .enumerate()
+        .filter_map(|(index, block)| qoder_content_block_is_result(block).then_some(index))
+        .collect())
 }
 
 fn first_content_result_block(content: Option<&Value>) -> Option<&Value> {
@@ -240,7 +250,7 @@ fn first_content_result_block(content: Option<&Value>) -> Option<&Value> {
 
 fn qoder_record_is_structural_output(value: &Value) -> bool {
     value.get("toolUseResult").is_some()
-        || qoder_top_level_result(value).is_some()
+        || qoder_has_top_level_result(value)
         || value
             .get("type")
             .and_then(Value::as_str)
@@ -251,12 +261,28 @@ fn qoder_record_is_structural_output(value: &Value) -> bool {
             .is_some_and(|blocks| blocks.iter().any(qoder_content_block_is_result))
 }
 
-fn qoder_top_level_result(value: &Value) -> Option<&Value> {
-    value.as_object().and_then(|object| {
+fn qoder_has_top_level_result(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
         object
-            .iter()
-            .find_map(|(key, value)| qoder_result_token(key).then_some(value))
+            .keys()
+            .any(|key| key != "toolUseResult" && qoder_result_token(key))
     })
+}
+
+fn qoder_top_level_result(
+    value: &Value,
+) -> std::result::Result<Option<&Value>, NativeJsonlResultExtractionError> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let mut results = object
+        .iter()
+        .filter(|(key, _)| key.as_str() != "toolUseResult" && qoder_result_token(key));
+    let result = results.next().map(|(_, value)| value);
+    if results.next().is_some() {
+        return Err(NativeJsonlResultExtractionError::InvalidShape);
+    }
+    Ok(result)
 }
 
 fn qoder_content_block_is_result(block: &Value) -> bool {
@@ -287,30 +313,8 @@ fn qoder_result_token(value: &str) -> bool {
 fn extract_result_ref<'a>(
     value: Option<&'a Value>,
     object_fields: &[&str],
-) -> std::result::Result<Option<&'a str>, NativeJsonlResultExtractionError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    reject_redacted(value)?;
-    match value {
-        Value::String(text) => Ok(Some(text)),
-        Value::Null => Ok(None),
-        Value::Object(object) => {
-            for field in object_fields {
-                if let Some(selected) = object.get(*field) {
-                    return match selected {
-                        Value::String(text) => Ok(Some(text)),
-                        Value::Null => Ok(None),
-                        _ => Err(NativeJsonlResultExtractionError::InvalidShape),
-                    };
-                }
-            }
-            Ok(None)
-        }
-        Value::Array(_) | Value::Bool(_) | Value::Number(_) => {
-            Err(NativeJsonlResultExtractionError::InvalidShape)
-        }
-    }
+) -> std::result::Result<Option<std::borrow::Cow<'a, str>>, NativeJsonlResultExtractionError> {
+    extract_direct_result_content(value, object_fields, true)
 }
 
 fn native_result_identity(value: &Value) -> Option<&str> {
@@ -515,7 +519,7 @@ mod tests {
         assert_eq!(qoder_role(&value), EventRole::Tool);
         let results = enumerate_qoder_results(&value).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].content, Some("top-level secret"));
+        assert_eq!(results[0].content.as_deref(), Some("top-level secret"));
         assert_eq!(results[0].call_id, Some("call-top"));
         assert_eq!(results[0].tool_name, Some("read_file"));
         assert_eq!(results[0].outcome.outcome, OutputOutcome::Success);
@@ -547,14 +551,14 @@ mod tests {
         assert_eq!(qoder_role(&value), EventRole::Tool);
         let results = enumerate_qoder_results(&value).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].content, Some("mixed secret"));
+        assert_eq!(results[0].content.as_deref(), Some("mixed secret"));
         assert_eq!(results[0].call_id, Some("call-mixed"));
         assert_eq!(results[0].tool_name, Some("shell"));
         assert_eq!(results[0].outcome.outcome, OutputOutcome::Success);
     }
 
     #[test]
-    fn future_result_shape_is_output_with_typed_metadata_only() {
+    fn future_result_shape_does_not_guess_arbitrary_descendant_content() {
         let value = json!({
             "type": "user",
             "uuid": "future-result",

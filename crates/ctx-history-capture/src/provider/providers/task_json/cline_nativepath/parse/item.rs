@@ -35,22 +35,28 @@ pub(super) struct RawEnvelope<'a> {
 }
 
 impl<'a> RawEnvelope<'a> {
-    pub(super) fn direct_result_body(&self) -> Option<&'a RawValue> {
-        self.output
-            .or(self.result)
-            .or(self.text)
-            .or(self.content)
-            .or(self.message)
-            .or(self.response)
-    }
-
-    pub(super) fn block_result_body(&self) -> Option<&'a RawValue> {
-        self.content
-            .or(self.result)
-            .or(self.output)
-            .or(self.text)
-            .or(self.response)
-            .or(self.message)
+    pub(super) fn unique_result_body(
+        &self,
+    ) -> Result<Option<&'a RawValue>, (ClineItemRejectionKind, String)> {
+        let candidates = [
+            self.output,
+            self.result,
+            self.text,
+            self.content,
+            self.message,
+            self.response,
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        match candidates.as_slice() {
+            [] => Ok(None),
+            [selected] => Ok(Some(*selected)),
+            _ => Err((
+                ClineItemRejectionKind::ConflictingDiscriminator,
+                "Cline result exposes more than one candidate body field".to_owned(),
+            )),
+        }
     }
 
     pub(super) fn retained_body(&self) -> Option<&'a RawValue> {
@@ -354,7 +360,7 @@ pub(super) fn push_explicit_result_blocks<'a>(
             block_outcome
         };
         push_explicit_outputs(
-            block.block_result_body(),
+            block.unique_result_body()?,
             OutputCandidateContext {
                 kind,
                 base_sub_index: u32::try_from(index)
@@ -398,7 +404,7 @@ pub(super) fn collect_explicit_output_leaves<'a>(
                             format!("malformed explicit Cline result value: {error}"),
                         )
                     })?
-                    .selected()
+                    .selected()?
                     .unwrap_or(item)
             } else {
                 item
@@ -406,6 +412,19 @@ pub(super) fn collect_explicit_output_leaves<'a>(
             collect_explicit_output_leaves(selected, leaves, depth.saturating_add(1))?;
         }
         return Ok(());
+    }
+    if text.starts_with('{') {
+        let selected = serde_json::from_str::<RawExplicitInner<'_>>(raw.get())
+            .map_err(|error| {
+                (
+                    ClineItemRejectionKind::MalformedRecord,
+                    format!("malformed explicit Cline result value: {error}"),
+                )
+            })?
+            .selected()?;
+        if let Some(selected) = selected {
+            return collect_explicit_output_leaves(selected, leaves, depth.saturating_add(1));
+        }
     }
     leaves.push(raw);
     Ok(())
@@ -470,11 +489,19 @@ struct RawExplicitInner<'a> {
     content: Option<&'a RawValue>,
     output: Option<&'a RawValue>,
     result: Option<&'a RawValue>,
+    ambiguous: bool,
 }
 
 impl<'a> RawExplicitInner<'a> {
-    fn selected(&self) -> Option<&'a RawValue> {
-        self.text.or(self.content).or(self.output).or(self.result)
+    fn selected(&self) -> Result<Option<&'a RawValue>, (ClineItemRejectionKind, String)> {
+        if self.ambiguous {
+            return Err((
+                ClineItemRejectionKind::ConflictingDiscriminator,
+                "Cline explicit result object exposes more than one candidate body field"
+                    .to_owned(),
+            ));
+        }
+        Ok(self.text.or(self.content).or(self.output).or(self.result))
     }
 }
 
@@ -505,17 +532,33 @@ impl<'de> Visitor<'de> for RawExplicitInnerVisitor {
             map.next_key::<BoundedString<MAX_JSON_KEY_BYTES>>()?
         {
             match field.as_deref() {
-                Some("text") if inner.text.is_none() => {
-                    inner.text = Some(map.next_value::<&RawValue>()?);
+                Some("text") => {
+                    let value = map.next_value::<&RawValue>()?;
+                    inner.ambiguous |= inner.text.replace(value).is_some()
+                        || inner.content.is_some()
+                        || inner.output.is_some()
+                        || inner.result.is_some();
                 }
-                Some("content") if inner.content.is_none() => {
-                    inner.content = Some(map.next_value::<&RawValue>()?);
+                Some("content") => {
+                    let value = map.next_value::<&RawValue>()?;
+                    inner.ambiguous |= inner.content.replace(value).is_some()
+                        || inner.text.is_some()
+                        || inner.output.is_some()
+                        || inner.result.is_some();
                 }
-                Some("output") if inner.output.is_none() => {
-                    inner.output = Some(map.next_value::<&RawValue>()?);
+                Some("output") => {
+                    let value = map.next_value::<&RawValue>()?;
+                    inner.ambiguous |= inner.output.replace(value).is_some()
+                        || inner.text.is_some()
+                        || inner.content.is_some()
+                        || inner.result.is_some();
                 }
-                Some("result") if inner.result.is_none() => {
-                    inner.result = Some(map.next_value::<&RawValue>()?);
+                Some("result") => {
+                    let value = map.next_value::<&RawValue>()?;
+                    inner.ambiguous |= inner.result.replace(value).is_some()
+                        || inner.text.is_some()
+                        || inner.content.is_some()
+                        || inner.output.is_some();
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
@@ -599,20 +642,11 @@ pub(super) fn parse_item(
             );
         }
     };
-    let failure_rows = projection
-        .outputs
-        .iter()
-        .filter(|output| {
-            matches!(
-                output.outcome.outcome,
-                OutputOutcome::Failure | OutputOutcome::Timeout
-            )
-        })
-        .count();
+    let output_rows = projection.outputs.len();
     let retained_units = projection
         .rows
         .len()
-        .saturating_add(failure_rows)
+        .saturating_add(output_rows)
         .saturating_add(projection.rows.iter().fold(0_usize, |count, row| {
             count.saturating_add(row.file_touches.len())
         }));
@@ -628,6 +662,51 @@ pub(super) fn parse_item(
             stats,
         );
     }
+    let mut output_outcomes = Vec::with_capacity(projection.outputs.len());
+    for output in projection.outputs {
+        stats.output_outcomes_observed = stats.output_outcomes_observed.saturating_add(1);
+        output_outcomes.push(output.outcome.clone());
+        let body = match output.body.map(decode_explicit_output_text).transpose() {
+            Ok(Some(body)) if !body.trim().is_empty() => body,
+            Ok(_) => continue,
+            Err((kind, detail)) => {
+                return rejected_item_with_key(
+                    component,
+                    native_index,
+                    envelope.native_id,
+                    observed_bytes,
+                    kind,
+                    &detail,
+                    native_key,
+                    stats,
+                );
+            }
+        };
+        let output_bytes = body.len();
+        projection.rows.push(ClineEventRow::output(
+            ClineEventContext {
+                task: identity,
+                component,
+                item: &native_key,
+                item_index: native_index,
+                role: ClineEventRole::Unknown,
+                occurred_at_millis: projection.occurred_at_millis,
+            },
+            output.sub_index,
+            match output.kind {
+                OutputObservationKind::Command => ClineEventKind::CommandOutput,
+                OutputObservationKind::Tool => ClineEventKind::ToolOutput,
+            },
+            body,
+            ClineSparseOutputDiagnostic {
+                outcome: output.outcome.outcome,
+                exit_code: output.outcome.exit_code,
+                duration_ms: output.outcome.duration_ms,
+                output_bytes,
+                call_id: output.call_id.map(String::into_boxed_str),
+            },
+        ));
+    }
     let retained_body_bytes = projection
         .rows
         .iter()
@@ -640,43 +719,10 @@ pub(super) fn parse_item(
             envelope.native_id,
             observed_bytes,
             ClineItemRejectionKind::OversizedRetainedItem,
-            "Cline retained item exceeds the 64 KiB Core item bound",
+            "Cline selected item content exceeds the shared Core content bound",
             native_key,
             stats,
         );
-    }
-
-    let mut output_outcomes = Vec::with_capacity(projection.outputs.len());
-    for output in projection.outputs {
-        stats.output_outcomes_observed = stats.output_outcomes_observed.saturating_add(1);
-        output_outcomes.push(output.outcome.clone());
-        if matches!(
-            output.outcome.outcome,
-            OutputOutcome::Failure | OutputOutcome::Timeout
-        ) {
-            projection.rows.push(ClineEventRow::sparse_output(
-                ClineEventContext {
-                    task: identity,
-                    component,
-                    item: &native_key,
-                    item_index: native_index,
-                    role: ClineEventRole::Unknown,
-                    occurred_at_millis: projection.occurred_at_millis,
-                },
-                output.sub_index,
-                match output.kind {
-                    OutputObservationKind::Command => ClineEventKind::CommandOutput,
-                    OutputObservationKind::Tool => ClineEventKind::ToolOutput,
-                },
-                ClineSparseOutputDiagnostic {
-                    outcome: output.outcome.outcome,
-                    exit_code: output.outcome.exit_code,
-                    duration_ms: output.outcome.duration_ms,
-                    output_bytes: output.body.map_or(0, |body| body.get().len()),
-                    call_id: output.call_id.clone().map(String::into_boxed_str),
-                },
-            ));
-        }
     }
     projection
         .rows
@@ -693,7 +739,7 @@ pub(super) fn parse_item(
             envelope.native_id,
             observed_bytes,
             ClineItemRejectionKind::OversizedRetainedItem,
-            "Cline Core projection exceeds its independent 4 MiB page lane",
+            "Cline Core projection exceeds the shared encoded Core record bound",
             native_key,
             stats,
         );
@@ -706,5 +752,87 @@ pub(super) fn parse_item(
         rejection: None,
         core_bytes,
         source_record: None,
+    }
+}
+
+fn decode_explicit_output_text(raw: &RawValue) -> Result<String, (ClineItemRejectionKind, String)> {
+    let value = serde_json::from_str::<Value>(raw.get()).map_err(|error| {
+        (
+            ClineItemRejectionKind::MalformedRecord,
+            format!("invalid selected Cline result content: {error}"),
+        )
+    })?;
+    Ok(provider_normalized_result_value(&value))
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn retains_complete_results_and_rejects_ambiguity_for_cline_and_roo() {
+        let identity = ClineTaskIdentity::new("shared-task");
+        let parse = |value: serde_json::Value| {
+            let raw = RawValue::from_string(value.to_string()).unwrap();
+            parse_item(
+                &raw,
+                ItemParseContext {
+                    identity: &identity,
+                    component: ClineEventComponent::ApiHistory,
+                    max_item_units: 60,
+                },
+                0,
+                &mut BTreeMap::new(),
+                &mut ClinePublicationStats::default(),
+            )
+        };
+
+        for (status, expected) in [
+            (Some("success"), OutputOutcome::Success),
+            (Some("failure"), OutputOutcome::Failure),
+            (None, OutputOutcome::Unknown),
+        ] {
+            let mut value = json!({
+                "role": "tool",
+                "tool_use_id": "call-1",
+                "content": format!("complete-{expected:?}"),
+            });
+            if let Some(status) = status {
+                value["status"] = json!(status);
+            }
+            let item = parse(value);
+            assert!(item.rejection.is_none());
+            assert_eq!(item.rows.len(), 1);
+            let expected_body = format!("complete-{expected:?}");
+            assert_eq!(item.rows[0].body.as_deref(), Some(expected_body.as_str()));
+            let output = item.rows[0].sparse_output.as_ref().unwrap();
+            assert_eq!(output.outcome, expected);
+            assert_eq!(output.call_id.as_deref(), Some("call-1"));
+        }
+
+        let large = format!("{}tail", "x".repeat(9 * 1024 * 1024));
+        let item = parse(json!({
+            "role": "tool",
+            "tool_use_id": "large-call",
+            "content": large,
+            "status": "success",
+        }));
+        assert!(item.rejection.is_none());
+        assert_eq!(
+            item.rows[0].body.as_deref().unwrap().len(),
+            9 * 1024 * 1024 + 4
+        );
+        assert!(item.rows[0].body.as_deref().unwrap().ends_with("tail"));
+
+        let ambiguous = parse(json!({
+            "role": "tool",
+            "content": "first",
+            "output": "second",
+        }));
+        assert_eq!(
+            ambiguous.rejection.as_ref().map(|value| value.kind),
+            Some(ClineItemRejectionKind::ConflictingDiscriminator)
+        );
     }
 }

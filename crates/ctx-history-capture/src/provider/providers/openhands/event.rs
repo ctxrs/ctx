@@ -121,7 +121,7 @@ pub(crate) fn decode_openhands_event_value(
     let entry_type = openhands_entry_type(&value);
     let event_type = openhands_event_type(&value, &entry_type);
     let role = openhands_role(&value, &entry_type);
-    let text = openhands_event_text(&value, &entry_type, event_type);
+    let text = openhands_event_text(&value, &entry_type, event_type)?;
     Ok(OpenHandsDecodedEvent {
         event_id,
         timestamp,
@@ -225,60 +225,73 @@ fn openhands_role(value: &Value, entry_type: &str) -> EventRole {
     }
 }
 
-fn openhands_event_text(value: &Value, entry_type: &str, event_type: EventType) -> String {
+fn openhands_event_text(
+    value: &Value,
+    entry_type: &str,
+    event_type: EventType,
+) -> Result<String, OpenHandsEventDecodeError> {
     if matches!(
         event_type,
         EventType::ToolOutput | EventType::CommandOutput | EventType::FileTouched
     ) {
-        if let Some(content) = value
-            .pointer("/observation/content")
-            .and_then(provider_value_text)
-        {
-            return content;
-        }
-        if let Some(output) = value.pointer("/observation/output").and_then(Value::as_str) {
-            return output.to_owned();
+        let candidates = ["content", "output", "result"]
+            .into_iter()
+            .filter_map(|field| value.pointer(&format!("/observation/{field}")))
+            .filter(|value| !value.is_null())
+            .collect::<Vec<_>>();
+        let selected = match candidates.as_slice() {
+            [] => None,
+            [selected] => Some(*selected),
+            _ => {
+                return Err(OpenHandsEventDecodeError::invalid(
+                    "OpenHands observation exposes more than one candidate result body field"
+                        .to_owned(),
+                ));
+            }
+        };
+        if let Some(content) = selected.and_then(provider_explicit_result_value_text) {
+            return Ok(content);
         }
         if let Some(error) = value
             .pointer("/observation/error")
             .and_then(Value::as_str)
             .or_else(|| value.get("error").and_then(Value::as_str))
         {
-            return error.to_owned();
+            return Ok(error.to_owned());
         }
     }
     if let Some(text) = value
         .pointer("/llm_message/content")
         .and_then(provider_explicit_result_value_text)
     {
-        return text;
+        return Ok(text);
     }
     if let Some(text) = value.get("content").and_then(provider_value_text) {
-        return text;
+        return Ok(text);
     }
     if let Some(text) = value.pointer("/action/message").and_then(Value::as_str) {
-        return text.to_owned();
+        return Ok(text.to_owned());
     }
     if let Some(text) = value.pointer("/action/thought").and_then(Value::as_str) {
-        return text.to_owned();
+        return Ok(text.to_owned());
     }
     if let Some(command) = value.pointer("/action/command").and_then(Value::as_str) {
-        return command.to_owned();
+        return Ok(command.to_owned());
     }
     if let Some(path) = value.pointer("/action/path").and_then(Value::as_str) {
         let command = value
             .pointer("/action/command")
             .and_then(Value::as_str)
             .unwrap_or("file");
-        return format!("{command} {path}");
+        return Ok(format!("{command} {path}"));
     }
     if let Some(prompt) = value.pointer("/action/prompt").and_then(Value::as_str) {
-        return prompt.to_owned();
+        return Ok(prompt.to_owned());
     }
     if event_type == EventType::Notice {
-        format!("OpenHands event: {entry_type}")
+        Ok(format!("OpenHands event: {entry_type}"))
     } else {
-        String::new()
+        Ok(String::new())
     }
 }
 
@@ -358,6 +371,24 @@ mod tests {
                 "provider record exceeds the {MAX_PROVIDER_JSONL_LINE_BYTES} byte limit (observed {} bytes)",
                 MAX_PROVIDER_JSONL_LINE_BYTES + 1
             )
+        );
+
+        let ambiguous = serde_json::to_vec(&json!({
+            "id": "ambiguous",
+            "timestamp": "2026-07-22T12:00:01Z",
+            "kind": "ObservationEvent",
+            "observation": {
+                "kind": "ExecuteBashObservation",
+                "content": "one",
+                "output": "two"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            decode_openhands_event(path, &ambiguous)
+                .unwrap_err()
+                .to_string(),
+            "OpenHands observation exposes more than one candidate result body field"
         );
     }
 }

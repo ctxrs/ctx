@@ -54,15 +54,9 @@ pub(super) struct CrushMessageProjection {
 
 pub(super) struct CrushOutputProjection {
     pub(super) outcome: OutputOutcomeMetadata,
-}
-
-impl CrushOutputProjection {
-    pub(super) fn retain_in_core(&self) -> bool {
-        matches!(
-            self.outcome.outcome,
-            OutputOutcome::Failure | OutputOutcome::Timeout
-        )
-    }
+    pub(super) call_id: Option<String>,
+    pub(super) tool_name: Option<String>,
+    pub(super) linkage_exact: bool,
 }
 
 pub(super) struct CrushChildMessageRow {
@@ -86,19 +80,19 @@ pub(super) fn project_message(
     let event_type = event_type(message, &parts);
     let output = matches!(event_type, EventType::ToolOutput | EventType::CommandOutput)
         .then(|| crush_output_projection(&parts));
-    let retain_core_event = output
-        .as_ref()
-        .is_none_or(CrushOutputProjection::retain_in_core);
-    let complete_text = output.is_none().then(|| parts_text(&parts)).flatten();
-    let event = if retain_core_event {
-        Some(CrushEventDraft {
-            event_type,
-            role: Some(provider_role(Some(&message.role))),
-            occurred_at_unix_ms: message.created_at,
-        })
+    let complete_text = if output.is_some() {
+        crush_normalized_result_content(&parts).filter(|body| !body.trim().is_empty())
     } else {
-        None
+        parts_text(&parts)
     };
+    if output.is_some() && complete_text.is_none() {
+        return Ok(CrushRecordProjection::Rejection);
+    }
+    let event = Some(CrushEventDraft {
+        event_type,
+        role: Some(provider_role(Some(&message.role))),
+        occurred_at_unix_ms: message.created_at,
+    });
     Ok(CrushRecordProjection::Message(Box::new(
         CrushMessageProjection {
             event,
@@ -253,8 +247,11 @@ fn crush_output_projection(parts: &Value) -> CrushOutputProjection {
         if !matches!(kind, Some("tool_result" | "shell_command")) {
             continue;
         }
-        crush_collect_outcome_value(item.get("data").unwrap_or(item), &mut aggregate);
+        let data = item.get("data").unwrap_or(item);
+        crush_collect_outcome_value(data, &mut aggregate);
+        crush_collect_linkage(data, &mut aggregate);
     }
+    let linkage_exact = !aggregate.linkage_ambiguous && aggregate.call_id.is_some();
     CrushOutputProjection {
         outcome: OutputOutcomeMetadata {
             outcome: if aggregate.timeout {
@@ -269,6 +266,13 @@ fn crush_output_projection(parts: &Value) -> CrushOutputProjection {
             exit_code: aggregate.exit_code,
             duration_ms: aggregate.duration_ms,
         },
+        call_id: (!aggregate.linkage_ambiguous)
+            .then_some(aggregate.call_id)
+            .flatten(),
+        tool_name: (!aggregate.linkage_ambiguous)
+            .then_some(aggregate.tool_name)
+            .flatten(),
+        linkage_exact,
     }
 }
 
@@ -279,6 +283,55 @@ struct CrushOutcomeAggregate {
     success: bool,
     exit_code: Option<i32>,
     duration_ms: Option<u64>,
+    call_id: Option<String>,
+    tool_name: Option<String>,
+    linkage_ambiguous: bool,
+}
+
+fn crush_collect_linkage(value: &Value, aggregate: &mut CrushOutcomeAggregate) {
+    let Some(object) = value.as_object() else {
+        aggregate.linkage_ambiguous = true;
+        return;
+    };
+    collect_exact_linkage_string(
+        object,
+        &["tool_call_id", "toolCallId", "call_id", "callId"],
+        &mut aggregate.call_id,
+        &mut aggregate.linkage_ambiguous,
+    );
+    collect_exact_linkage_string(
+        object,
+        &["name", "tool_name", "toolName"],
+        &mut aggregate.tool_name,
+        &mut aggregate.linkage_ambiguous,
+    );
+}
+
+fn collect_exact_linkage_string(
+    object: &serde_json::Map<String, Value>,
+    keys: &[&str],
+    selected: &mut Option<String>,
+    ambiguous: &mut bool,
+) {
+    const MAX_LINKAGE_BYTES: usize = 16 * 1024;
+    for key in keys {
+        let Some(value) = object.get(*key) else {
+            continue;
+        };
+        let Some(value) = value.as_str().map(str::trim) else {
+            *ambiguous = true;
+            continue;
+        };
+        if value.is_empty() || value.len() > MAX_LINKAGE_BYTES {
+            *ambiguous = true;
+            continue;
+        }
+        match selected.as_deref() {
+            Some(existing) if existing != value => *ambiguous = true,
+            Some(_) => {}
+            None => *selected = Some(value.to_owned()),
+        }
+    }
 }
 
 fn crush_collect_outcome_value(value: &Value, aggregate: &mut CrushOutcomeAggregate) {

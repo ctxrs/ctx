@@ -10,7 +10,9 @@ use crate::{
     OutputOutcome, OutputOutcomeMetadata, QWEN_CODE_SOURCE_FORMAT,
 };
 
-use super::super::result_content::{NativeJsonlResultExtractionError, NativeJsonlResultSubrecord};
+use super::super::result_content::{
+    extract_direct_result_content, NativeJsonlResultExtractionError, NativeJsonlResultSubrecord,
+};
 
 pub(crate) const fn qwen_code_source_backed_adapter() -> super::DirectJsonlFamilyAdapter {
     super::DirectJsonlFamilyAdapter::new(

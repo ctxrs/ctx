@@ -7,4 +7,4 @@ mod source;
 mod tests;
 
 pub(super) const CRUSH_CAPTURE_REVISION: u32 = 3;
-pub(super) const CRUSH_POLICY_REVISION: u32 = 6;
+pub(super) const CRUSH_POLICY_REVISION: u32 = 7;
