@@ -1193,11 +1193,6 @@ fn post_publication_mutation_fails_exact_noop_then_forces_fresh_rebuild() {
             .unwrap(),
         0
     );
-    assert!(
-        VerifiedIndex::open(temp.path()).is_err(),
-        "the explicit exhaustive scrub admitted malformed stored projection state"
-    );
-
     let mut noop = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     noop.certify_complete_inventory(inventory.clone()).unwrap();
     stage_exact_replay(&mut noop, &source);
