@@ -332,7 +332,7 @@ fn direct_jsonl_selected_object(value: &Value, fields: &[&str]) -> Option<Value>
                 .map(|selected| ((*field).to_owned(), selected.clone()))
         })
         .collect::<serde_json::Map<_, _>>();
-    (!selected.is_empty()).then(|| Value::Object(selected))
+    (!selected.is_empty()).then_some(Value::Object(selected))
 }
 
 fn direct_jsonl_lexical_text(
