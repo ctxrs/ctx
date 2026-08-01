@@ -15,7 +15,8 @@ use std::{
 use ctx_history_core::{
     GitObjectFormat, GitObjectId, RepositoryAlias, RepositoryAliasKind, RepositoryBinding,
     RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
-    RepositoryLocalRootAuthorization, CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
+    RepositoryLocalRootAuthorization,
+    CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
 };
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -25,8 +26,9 @@ mod geometry;
 
 pub(super) use geometry::negative_route_geometry_state;
 use geometry::{
-    path_identity_fingerprint, repository_geometry_state, repository_locator_fingerprint,
-    repository_mutable_evidence_state, route_fingerprint, validate_candidate_route,
+    path_identity_fingerprint, repository_geometry_state,
+    repository_local_root_authorization_fingerprint, repository_mutable_evidence_state,
+    route_fingerprint, validate_candidate_route,
 };
 
 const MAX_PARENT_COMPONENTS: usize = 64;
@@ -309,8 +311,12 @@ impl GitCertifier {
         let mutable_evidence_state =
             repository_mutable_evidence_state(&git_dir, &common_dir, branch.as_deref())?;
 
-        let locator_fingerprint =
-            repository_locator_fingerprint(&root, &git_dir, &common_dir, object_format)?;
+        let local_root_authorization_fingerprint = repository_local_root_authorization_fingerprint(
+            &root,
+            &git_dir,
+            &common_dir,
+            object_format,
+        )?;
         Ok(GitSnapshot {
             root,
             git_dir,
@@ -319,7 +325,7 @@ impl GitCertifier {
             branch,
             aliases,
             repository_geometry_state: repository_geometry.fingerprint,
-            locator_fingerprint,
+            local_root_authorization_fingerprint,
             mutable_evidence_state,
         })
     }
@@ -416,7 +422,7 @@ struct GitSnapshot {
     branch: Option<String>,
     aliases: Vec<RepositoryAlias>,
     repository_geometry_state: [u8; 32],
-    locator_fingerprint: [u8; 32],
+    local_root_authorization_fingerprint: [u8; 32],
     mutable_evidence_state: [u8; 32],
 }
 
@@ -475,8 +481,9 @@ impl GitSnapshot {
             git_object_format: Some(self.object_format),
             local_root_authorization: Some(RepositoryLocalRootAuthorization {
                 local_root: self.root.to_string_lossy().into_owned(),
-                locator_fingerprint_revision: CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION,
-                locator_fingerprint: self.locator_fingerprint,
+                local_root_authorization_fingerprint_revision:
+                    CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
+                local_root_authorization_fingerprint: self.local_root_authorization_fingerprint,
                 observed_at_unix_ms,
             }),
             evidence: vec![RepositoryEvidence {
@@ -528,13 +535,13 @@ impl CertifiedCandidate {
         {
             return Ok(None);
         }
-        let current = repository_locator_fingerprint(
+        let current = repository_local_root_authorization_fingerprint(
             &self.repository_root,
             &self.git_dir,
             &self.common_dir,
             object_format,
         )?;
-        if current != authorization.locator_fingerprint {
+        if current != authorization.local_root_authorization_fingerprint {
             return Ok(None);
         }
         let mutable_evidence_state = repository_mutable_evidence_state(
@@ -550,7 +557,7 @@ impl CertifiedCandidate {
         if closing_probe != probe_directory || closing_geometry != geometry {
             return Err(ProbeFailure::ConcurrentDrift);
         }
-        let closing = repository_locator_fingerprint(
+        let closing = repository_local_root_authorization_fingerprint(
             &self.repository_root,
             &self.git_dir,
             &self.common_dir,

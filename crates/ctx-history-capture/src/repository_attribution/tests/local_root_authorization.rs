@@ -2,17 +2,19 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 
-fn locator_fingerprint(annotation: &ctx_history_core::CoreRecordAnnotation) -> [u8; 32] {
+fn local_root_authorization_fingerprint(
+    annotation: &ctx_history_core::CoreRecordAnnotation,
+) -> [u8; 32] {
     annotation.repository_bindings[0]
         .local_root_authorization
         .as_ref()
         .unwrap()
-        .locator_fingerprint
+        .local_root_authorization_fingerprint
 }
 
 #[cfg(unix)]
 #[test]
-fn locator_fingerprint_ignores_mutable_git_state_and_path_renames() {
+fn local_root_authorization_fingerprint_ignores_mutable_git_state_and_path_renames() {
     let temp = TempDir::new().unwrap();
     let repo = repository(
         temp.path(),
@@ -23,7 +25,11 @@ fn locator_fingerprint_ignores_mutable_git_state_and_path_renames() {
         declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
         ..AttributionInput::default()
     });
-    let fingerprint = locator_fingerprint(&initial);
+    assert_eq!(
+        initial.metadata["repository_association"]["local_root_authorization_fingerprint_revision"],
+        ctx_history_core::CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION
+    );
+    let fingerprint = local_root_authorization_fingerprint(&initial);
 
     fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
     run_git(&repo, &["add", "tracked.txt"]);
@@ -42,7 +48,7 @@ fn locator_fingerprint_ignores_mutable_git_state_and_path_renames() {
         declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
         ..AttributionInput::default()
     });
-    assert_eq!(locator_fingerprint(&changed), fingerprint);
+    assert_eq!(local_root_authorization_fingerprint(&changed), fingerprint);
 
     let renamed = temp.path().join("renamed");
     fs::rename(&repo, &renamed).unwrap();
@@ -50,12 +56,12 @@ fn locator_fingerprint_ignores_mutable_git_state_and_path_renames() {
         declared_tool_workdir: Some(renamed.to_string_lossy().into_owned()),
         ..AttributionInput::default()
     });
-    assert_eq!(locator_fingerprint(&moved), fingerprint);
+    assert_eq!(local_root_authorization_fingerprint(&moved), fingerprint);
 }
 
 #[cfg(unix)]
 #[test]
-fn locator_fingerprint_matches_the_cross_repository_wire_encoding() {
+fn local_root_authorization_fingerprint_matches_the_cross_repository_wire_encoding() {
     use std::os::unix::fs::MetadataExt;
 
     let temp = TempDir::new().unwrap();
@@ -69,13 +75,13 @@ fn locator_fingerprint_matches_the_cross_repository_wire_encoding() {
         .as_ref()
         .unwrap();
     assert_eq!(
-        authorization.locator_fingerprint_revision,
-        ctx_history_core::CORE_REPOSITORY_LOCATOR_FINGERPRINT_REVISION
+        authorization.local_root_authorization_fingerprint_revision,
+        ctx_history_core::CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION
     );
 
     let git_dir = repo.join(".git");
     let mut digest = Sha256::new();
-    digest.update(ctx_history_core::CORE_REPOSITORY_LOCATOR_FINGERPRINT_DOMAIN);
+    digest.update(ctx_history_core::CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN);
     digest.update(1_u16.to_be_bytes());
     for (label, path) in [
         (b"certified_root".as_slice(), repo.as_path()),
@@ -93,19 +99,19 @@ fn locator_fingerprint_matches_the_cross_repository_wire_encoding() {
     digest.update(4_u64.to_be_bytes());
     digest.update(b"sha1");
     let expected: [u8; 32] = digest.finalize().into();
-    assert_eq!(authorization.locator_fingerprint, expected);
+    assert_eq!(authorization.local_root_authorization_fingerprint, expected);
 }
 
 #[cfg(unix)]
 #[test]
-fn locator_fingerprint_changes_for_recreated_root_git_dir_and_linked_worktree() {
+fn local_root_authorization_fingerprint_changes_for_recreated_root_git_dir_and_linked_worktree() {
     let temp = TempDir::new().unwrap();
     let repo = repository(temp.path(), "repo", None);
     let initial = attribute(AttributionInput {
         declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
         ..AttributionInput::default()
     });
-    let initial_fingerprint = locator_fingerprint(&initial);
+    let initial_fingerprint = local_root_authorization_fingerprint(&initial);
 
     let linked = temp.path().join("linked");
     run_git(
@@ -123,7 +129,10 @@ fn locator_fingerprint_changes_for_recreated_root_git_dir_and_linked_worktree() 
         declared_tool_workdir: Some(linked.to_string_lossy().into_owned()),
         ..AttributionInput::default()
     });
-    assert_ne!(locator_fingerprint(&linked_binding), initial_fingerprint);
+    assert_ne!(
+        local_root_authorization_fingerprint(&linked_binding),
+        initial_fingerprint
+    );
 
     let old_root = temp.path().join("old-root");
     fs::rename(&repo, &old_root).unwrap();
@@ -134,7 +143,7 @@ fn locator_fingerprint_changes_for_recreated_root_git_dir_and_linked_worktree() 
         declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
         ..AttributionInput::default()
     });
-    let recreated_root_fingerprint = locator_fingerprint(&recreated_root);
+    let recreated_root_fingerprint = local_root_authorization_fingerprint(&recreated_root);
     assert_ne!(recreated_root_fingerprint, initial_fingerprint);
 
     fs::rename(repo.join(".git"), repo.join(".git-old")).unwrap();
@@ -148,7 +157,7 @@ fn locator_fingerprint_changes_for_recreated_root_git_dir_and_linked_worktree() 
         ..AttributionInput::default()
     });
     assert_ne!(
-        locator_fingerprint(&recreated_git_dir),
+        local_root_authorization_fingerprint(&recreated_git_dir),
         recreated_root_fingerprint
     );
 }
@@ -227,7 +236,10 @@ fn linked_worktree_pointer_rebind_recertifies_local_authorization() {
         before.repository_bindings[0].worktree_id,
         rebound.repository_bindings[0].worktree_id
     );
-    assert_ne!(locator_fingerprint(&before), locator_fingerprint(&rebound));
+    assert_ne!(
+        local_root_authorization_fingerprint(&before),
+        local_root_authorization_fingerprint(&rebound)
+    );
 }
 
 #[cfg(unix)]
@@ -287,7 +299,10 @@ fn moved_linked_worktree_recertifies_new_root_without_stale_old_authorization() 
         before.repository_bindings[0].worktree_id,
         after.repository_bindings[0].worktree_id
     );
-    assert_eq!(locator_fingerprint(&before), locator_fingerprint(&after));
+    assert_eq!(
+        local_root_authorization_fingerprint(&before),
+        local_root_authorization_fingerprint(&after)
+    );
     assert_eq!(
         after.repository_bindings[0]
             .local_root_authorization

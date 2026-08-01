@@ -5,7 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ctx_history_core::{GitObjectFormat, CORE_REPOSITORY_LOCATOR_FINGERPRINT_DOMAIN};
+use ctx_history_core::{
+    GitObjectFormat, CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN,
+};
 use sha2::{Digest, Sha256};
 
 use super::{
@@ -665,13 +667,13 @@ fn update_mutable_evidence_entry(
 
 /// Revision 1 local-root authorization fingerprint.
 ///
-/// SHA-256 input is `CORE_REPOSITORY_LOCATOR_FINGERPRINT_DOMAIN`, big-endian
+/// SHA-256 input is `CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN`, big-endian
 /// u16 version 1, then `certified_root`, `git_dir`, and `common_dir`. Unix
 /// identities are `[tag=1][u64 label length][label][u64 dev][u64 ino]`;
 /// Windows identities are `[tag=2][u64 label length][label][u64 volume]
 /// [16-byte file id]`. Object format is `[tag=4][u64 value length]
 /// [sha1|sha256]`. Paths and mutable Git state are excluded.
-pub(super) fn repository_locator_fingerprint(
+pub(super) fn repository_local_root_authorization_fingerprint(
     root: &Path,
     git_dir: &Path,
     common_dir: &Path,
@@ -685,14 +687,14 @@ pub(super) fn repository_locator_fingerprint(
     #[cfg(any(unix, windows))]
     {
         let mut digest = Sha256::new();
-        digest.update(CORE_REPOSITORY_LOCATOR_FINGERPRINT_DOMAIN);
+        digest.update(CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN);
         digest.update(1_u16.to_be_bytes());
         for (label, path) in [
             (b"certified_root".as_slice(), root),
             (b"git_dir".as_slice(), git_dir),
             (b"common_dir".as_slice(), common_dir),
         ] {
-            update_repository_locator_entry(&mut digest, label, path)?;
+            update_repository_local_root_authorization_fingerprint_entry(&mut digest, label, path)?;
         }
         let object_format = object_format_name(object_format);
         digest.update([4]);
@@ -707,7 +709,7 @@ pub(super) fn repository_locator_fingerprint(
 }
 
 #[cfg(unix)]
-fn update_repository_locator_entry(
+fn update_repository_local_root_authorization_fingerprint_entry(
     digest: &mut Sha256,
     label: &[u8],
     path: &Path,
@@ -728,7 +730,7 @@ fn update_repository_locator_entry(
 }
 
 #[cfg(windows)]
-fn update_repository_locator_entry(
+fn update_repository_local_root_authorization_fingerprint_entry(
     digest: &mut Sha256,
     label: &[u8],
     path: &Path,
