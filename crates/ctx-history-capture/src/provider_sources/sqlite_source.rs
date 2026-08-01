@@ -19,7 +19,6 @@ use std::{
     ffi::{c_char, c_void, OsStr, OsString},
     fs::{File, Metadata, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    ops::Deref,
     path::{Component, Path, PathBuf},
     ptr,
     sync::{Arc, Mutex, MutexGuard},
@@ -749,8 +748,7 @@ use snapshot::{
     open_root_handle_sqlite_source_snapshot_for_test,
 };
 pub(crate) use snapshot::{
-    open_ctx_owned_sqlite_read_snapshot, open_root_handle_sqlite_source_snapshot,
-    retain_sqlite_source_directory_authority, CtxOwnedSqliteReadSnapshot,
+    open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
 };
 
 #[cfg(test)]

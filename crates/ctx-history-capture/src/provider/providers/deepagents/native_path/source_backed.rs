@@ -23,10 +23,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::super::{
-    complete_content::deepagents_write_record_digest,
     message::{
         core_eligible, deepagents_event_type, deepagents_messages_from_blob, DeepAgentsMessage,
     },
+    record_evidence::deepagents_write_record_digest,
     source::{
         deepagents_checkpoint_contexts, deepagents_logical_fingerprint, deepagents_validate_schema,
         deepagents_write_candidate_page, DeepAgentsThreadSummary, DeepAgentsWriteCandidate,
@@ -735,7 +735,7 @@ fn deepagents_core_record(
     Ok(record)
 }
 
-fn digest_bytes(digest: &crate::complete_content::CompleteContentBodyDigest) -> Option<[u8; 32]> {
+fn digest_bytes(digest: &crate::record_evidence::RecordDigest) -> Option<[u8; 32]> {
     let raw = digest.as_str().as_bytes();
     if raw.len() != 64 {
         return None;

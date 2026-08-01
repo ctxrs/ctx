@@ -64,14 +64,6 @@ pub(crate) enum NanoClawSourceBackedError {
     CountOverflow,
     #[error("NanoClaw source-backed scanner emitted inconsistent counts")]
     CountMismatch,
-    #[error("NanoClaw source-backed locator does not name this compound project")]
-    InvalidProjectMessageLocator,
-    #[error("NanoClaw project message no longer exists")]
-    MissingProjectMessage,
-    #[error("NanoClaw project message digest no longer matches the certified locator")]
-    StaleProjectMessageEvidence,
-    #[error("NanoClaw exact project-message query exceeded its bound")]
-    ExactQueryBoundExceeded,
     #[error("NanoClaw certified replay checkpoint is invalid: {0}")]
     InvalidReplayCheckpoint(&'static str),
 }
@@ -580,18 +572,7 @@ fn nanoclaw_core_record(
         native_item_key: &native_item_key,
         subrecord_selector: None,
     })?;
-    let seq = message
-        .seq
-        .map(|value| {
-            u64::try_from(value).map_err(|_| {
-                NanoClawSourceBackedError::Capture(CaptureError::InvalidPayload(
-                    "NanoClaw source-backed message seq must be nonnegative".to_owned(),
-                ))
-            })
-        })
-        .transpose()?;
-    let (event, exact_text) =
-        nanoclaw_core_event(session, message, seq, chrono::DateTime::UNIX_EPOCH);
+    let (event, exact_text) = nanoclaw_core_event(message, chrono::DateTime::UNIX_EPOCH);
     let mut body = exact_text;
     if body.is_empty() {
         body = format!("NanoClaw {message_source} message");

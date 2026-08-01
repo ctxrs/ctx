@@ -8,7 +8,7 @@ use super::{
     },
     ZedNativePathError, ZedNativeResult,
 };
-use crate::complete_content::CompleteContentBodyDigest;
+use crate::record_evidence::RecordDigest;
 
 const ZED_NATIVE_PAGE_ENCODING_ENVELOPE_BYTES: usize = 1_024;
 const ZED_NATIVE_PAGE_ITEM_ENCODING_ENVELOPE_BYTES: usize = 64;
@@ -32,7 +32,7 @@ impl ZedNativeEvent {
         sqlite_rowid: i64,
         thread_id: &str,
         draft: ZedDecodedCoreEvent,
-        record_digest: CompleteContentBodyDigest,
+        record_digest: RecordDigest,
     ) -> ZedNativeResult<Self> {
         let identity = event_identity(
             thread_id,

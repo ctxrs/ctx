@@ -352,7 +352,7 @@ impl ForgeCodeScanner {
             .and_then(|value| value.get("initiator"))
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let complete_content = ForgeCodeCompleteContentDigest::new(
+        let record_evidence = ForgeCodeRecordEvidence::new(
             rowid,
             &conversation_id,
             title.as_deref(),
@@ -364,8 +364,8 @@ impl ForgeCodeScanner {
         )?;
         let row = ForgeCodeConversationRow {
             rowid,
-            source_record_digest: complete_content.record_digest(),
-            canonical_record_bytes: complete_content.canonical_record_bytes(),
+            source_record_digest: record_evidence.record_digest(),
+            canonical_record_bytes: record_evidence.canonical_record_bytes(),
             conversation_id,
             title,
             workspace_id: hydrated.workspace_id,
@@ -441,11 +441,6 @@ impl ForgeCodeScanner {
                         provider_event_index,
                         occurred_at,
                     );
-                    if output_outcome.is_none() {
-                        complete_content.attach_message(&mut event, || {
-                            forgecode_message_text(parts, event_type)
-                        })?;
-                    }
                     if let Some(metadata) = event.metadata.as_object_mut() {
                         metadata.insert(
                             "source_record_ordinal".to_owned(),

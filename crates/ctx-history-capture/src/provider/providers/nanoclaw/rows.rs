@@ -1,10 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use rusqlite::{params_from_iter, Connection, OptionalExtension, Row};
+use rusqlite::{Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
-use crate::native_source::NativeSqliteValue;
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists,
 };
@@ -14,7 +12,6 @@ use super::position::{NanoClawFrontier, NanoClawMessageSource};
 
 const NANOCLAW_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 32;
 pub(super) const NANOCLAW_NATIVE_MAX_RECORD_BYTES: u64 = 1024 * 1024;
-pub(super) const NANOCLAW_NATIVE_SET_READ_MAX_ROWS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct NanoClawSessionRow {
@@ -296,31 +293,6 @@ pub(super) fn nanoclaw_fetch_session_candidate(
     .map_err(CaptureError::from)
 }
 
-pub(super) fn nanoclaw_session_candidate_by_rowid(
-    conn: &Connection,
-    columns: &BTreeSet<String>,
-    rowid: i64,
-) -> Result<Option<NanoClawSessionCandidate>> {
-    let projection = nanoclaw_session_projection(conn, columns)?;
-    let retained = nanoclaw_retained_length_expr(&projection);
-    let storage_classes = nanoclaw_session_storage_classes(columns, &projection).join(", ");
-    conn.query_row(
-        &format!("select rowid, {retained}, {storage_classes} from sessions s where rowid = ?1"),
-        [rowid],
-        |row| {
-            Ok(NanoClawSessionCandidate {
-                rowid: row.get(0)?,
-                retained_bytes: row.get(1)?,
-                storage_classes: (2..17)
-                    .map(|index| row.get(index))
-                    .collect::<rusqlite::Result<Vec<_>>>()?,
-            })
-        },
-    )
-    .optional()
-    .map_err(CaptureError::from)
-}
-
 fn nanoclaw_session_storage_classes(
     columns: &BTreeSet<String>,
     projection: &[String],
@@ -350,35 +322,6 @@ pub(super) fn nanoclaw_hydrate_native_session(
         |row| nanoclaw_session_from_row(row, 0),
     )
     .map_err(CaptureError::from)
-}
-
-pub(super) fn nanoclaw_hydrate_native_sessions(
-    conn: &Connection,
-    columns: &BTreeSet<String>,
-    rowids: &[i64],
-) -> Result<BTreeMap<i64, NanoClawSessionRow>> {
-    if rowids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    if rowids.len() > NANOCLAW_NATIVE_SET_READ_MAX_ROWS {
-        return Err(CaptureError::SystemInvariant(
-            "NanoClaw central set read exceeded its row bound",
-        ));
-    }
-    let projection = nanoclaw_session_projection(conn, columns)?.join(", ");
-    let parameters = (1..=rowids.len())
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut statement = conn.prepare(&format!(
-        "select s.rowid, {projection} from sessions s \
-         where s.rowid in ({parameters}) order by s.rowid"
-    ))?;
-    let rows = statement.query_map(params_from_iter(rowids.iter()), |row| {
-        Ok((row.get(0)?, nanoclaw_session_from_row(row, 1)?))
-    })?;
-    rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()
-        .map_err(CaptureError::from)
 }
 
 fn nanoclaw_session_from_row(row: &Row<'_>, offset: usize) -> rusqlite::Result<NanoClawSessionRow> {
@@ -639,37 +582,6 @@ pub(super) fn nanoclaw_hydrate_native_message(
     .map_err(CaptureError::from)
 }
 
-pub(super) fn nanoclaw_hydrate_native_messages(
-    conn: &Connection,
-    columns: &BTreeSet<String>,
-    source: NanoClawMessageSource,
-    rowids: &[i64],
-) -> Result<BTreeMap<i64, NanoClawMessageRow>> {
-    if rowids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    if rowids.len() > NANOCLAW_NATIVE_SET_READ_MAX_ROWS {
-        return Err(CaptureError::SystemInvariant(
-            "NanoClaw component set read exceeded its row bound",
-        ));
-    }
-    let projection = nanoclaw_message_projection(source, columns).join(", ");
-    let parameters = (1..=rowids.len())
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut statement = conn.prepare(&format!(
-        "select m.rowid, {projection} from {} m \
-         where m.rowid in ({parameters}) order by m.rowid",
-        source.table()
-    ))?;
-    let rows = statement.query_map(params_from_iter(rowids.iter()), |row| {
-        Ok((row.get(0)?, nanoclaw_message_from_row(row, 1, source)?))
-    })?;
-    rows.collect::<rusqlite::Result<BTreeMap<_, _>>>()
-        .map_err(CaptureError::from)
-}
-
 fn nanoclaw_message_from_row(
     row: &Row<'_>,
     offset: usize,
@@ -691,65 +603,6 @@ fn nanoclaw_message_from_row(
         source_session_id: row.get(offset + 11)?,
         on_wake: row.get(offset + 12)?,
     })
-}
-
-pub(super) fn nanoclaw_message_digest_values(
-    message: &NanoClawMessageRow,
-) -> Vec<NativeSqliteValue> {
-    vec![
-        NativeSqliteValue::Text(message.source.to_owned()),
-        NativeSqliteValue::Text(message.id.clone()),
-        nanoclaw_optional_i64_value(message.seq),
-        nanoclaw_optional_text_value(message.kind.clone()),
-        nanoclaw_optional_i64_value(message.timestamp),
-        nanoclaw_optional_text_value(message.status.clone()),
-        nanoclaw_optional_text_value(message.in_reply_to.clone()),
-        nanoclaw_optional_text_value(message.platform_id.clone()),
-        nanoclaw_optional_text_value(message.channel_type.clone()),
-        nanoclaw_optional_text_value(message.thread_id.clone()),
-        nanoclaw_optional_text_value(message.content.clone()),
-        nanoclaw_optional_text_value(message.trigger.clone()),
-        nanoclaw_optional_text_value(message.source_session_id.clone()),
-        nanoclaw_optional_i64_value(message.on_wake),
-    ]
-}
-
-pub(super) fn nanoclaw_logical_record_digest_bytes(values: &[NativeSqliteValue]) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(b"ctx-complete-content-sqlite-logical-row-v1\0");
-    digest.update((values.len() as u64).to_be_bytes());
-    for value in values {
-        match value {
-            NativeSqliteValue::Null => digest.update([0]),
-            NativeSqliteValue::Integer(value) => {
-                digest.update([1]);
-                digest.update(value.to_be_bytes());
-            }
-            NativeSqliteValue::RealBits(value) => {
-                digest.update([2]);
-                digest.update(value.to_be_bytes());
-            }
-            NativeSqliteValue::Text(value) => {
-                digest.update([3]);
-                digest.update((value.len() as u64).to_be_bytes());
-                digest.update(value.as_bytes());
-            }
-            NativeSqliteValue::Blob(value) => {
-                digest.update([4]);
-                digest.update((value.len() as u64).to_be_bytes());
-                digest.update(value);
-            }
-        }
-    }
-    digest.finalize().into()
-}
-
-fn nanoclaw_optional_text_value(value: Option<String>) -> NativeSqliteValue {
-    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Text)
-}
-
-fn nanoclaw_optional_i64_value(value: Option<i64>) -> NativeSqliteValue {
-    value.map_or(NativeSqliteValue::Null, NativeSqliteValue::Integer)
 }
 
 pub(super) fn nanoclaw_observed_bytes(retained_bytes: i64) -> Result<u64> {

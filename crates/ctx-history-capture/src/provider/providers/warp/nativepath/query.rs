@@ -23,7 +23,7 @@ use super::model::{
 };
 use crate::provider::sqlite::SqliteLengthPreflightGuard;
 use crate::{
-    complete_content::CompleteContentBodyDigest, CaptureError, OutputOutcome, Result,
+    record_evidence::RecordDigest, CaptureError, OutputOutcome, Result,
     MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
@@ -408,7 +408,7 @@ fn source_row_digest(label: &[u8], values: &[ValueRef<'_>]) -> Result<[u8; 32]> 
     Ok(hasher.finalize().into())
 }
 
-fn complete_content_record_digest(values: &[ValueRef<'_>]) -> Result<CompleteContentBodyDigest> {
+fn record_evidence_digest(values: &[ValueRef<'_>]) -> Result<RecordDigest> {
     const DOMAIN: &[u8] = b"ctx-complete-content-sqlite-logical-row-v1\0";
     let mut digest = Sha256::new();
     digest.update(DOMAIN);
@@ -452,9 +452,9 @@ fn complete_content_record_digest(values: &[ValueRef<'_>]) -> Result<CompleteCon
             }
         }
     }
-    CompleteContentBodyDigest::parse(format!("{:x}", digest.finalize())).ok_or(
-        CaptureError::SystemInvariant("Warp complete-content digest was not canonical SHA-256"),
-    )
+    RecordDigest::parse(format!("{:x}", digest.finalize())).ok_or(CaptureError::SystemInvariant(
+        "Warp record evidence was not canonical SHA-256",
+    ))
 }
 
 fn hash_bytes(hasher: &mut Sha256, value: &[u8]) -> Result<()> {

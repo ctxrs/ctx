@@ -10,8 +10,7 @@ mod identity;
 
 pub(super) use identity::{
     goose_message_identity_counts_sql, goose_native_message_identity,
-    goose_native_message_identity_at, goose_normalized_message_id_sql,
-    goose_require_canonical_native_order,
+    goose_normalized_message_id_sql, goose_require_canonical_native_order,
 };
 
 pub(super) fn goose_retained_length_expr(expressions: &[String]) -> String {

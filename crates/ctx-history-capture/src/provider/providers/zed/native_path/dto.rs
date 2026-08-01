@@ -3,10 +3,10 @@ use ctx_history_core::{EventRole, EventType};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    complete_content::CompleteContentBodyDigest,
     provider::native_ingestion::{
         NATIVE_INGESTION_PAGE_MAX_BYTES, NATIVE_INGESTION_PAGE_MAX_UNITS,
     },
+    record_evidence::RecordDigest,
 };
 
 use super::ZedNativeResult;
@@ -64,7 +64,7 @@ pub(crate) struct ZedNativeEvent {
     pub(super) sqlite_rowid: i64,
     pub(super) identity: ZedNativeEventIdentity,
     pub(super) native_order: ZedNativeOrder,
-    pub(super) record_digest: CompleteContentBodyDigest,
+    pub(super) record_digest: RecordDigest,
     pub(super) event_type: EventType,
     pub(super) role: EventRole,
     pub(super) occurred_at: DateTime<Utc>,

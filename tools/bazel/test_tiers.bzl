@@ -39,7 +39,6 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-cli:unit_tests",
     "//crates/ctx-cli:upgrade_tests",
     "//crates/ctx-cli:upgrade_analytics_tests",
-    "//crates/ctx-history-capture:complete_content_sqlite_tests",
     "//crates/ctx-history-capture:unit_tests",
     "//crates/ctx-history-core:unit_tests",
     "//crates/ctx-history-index:source_backed_recovery_tests",
@@ -55,10 +54,8 @@ RUST_FORMAT_TARGETS = [
 #
 # The focused capture target fail-closes on an exact reviewed inventory of
 # active-writer seams across JSONL, SQLite-WAL, document/tree, and event-file
-# families. The complete-content target retains the broader lifecycle,
-# mutation-race, landed-route, and hydration matrix. The CLI targets prove
-# real-shape admission/rejection, discovery, refresh, exact hydration, and
-# user-facing source-backed behavior.
+# families. The CLI targets prove real-shape admission/rejection, discovery,
+# refresh, and user-facing source-backed behavior.
 _CI_PROVIDER_TESTS = [
     "//crates/ctx-cli:native_provider_real_shapes_tests",
     "//crates/ctx-cli:native_provider_rejections_tests",
@@ -67,7 +64,7 @@ _CI_PROVIDER_TESTS = [
     "//crates/ctx-cli:setup_sources_import_tests",
     "//crates/ctx-cli:source_backed_content_tests",
     "//crates/ctx-history-capture:active_source_family_contract_tests",
-    "//crates/ctx-history-capture:complete_content_tests",
+    "//crates/ctx-history-capture:unit_tests",
 ]
 
 _CI_RUST_TESTS = [

@@ -211,7 +211,7 @@ fn hydrate_task_candidate(
         modified_value,
     ];
     let evidence_digest = source_row_digest(b"task\0", &source_values)?;
-    let complete_content_record_digest = complete_content_record_digest(&source_values)?;
+    let record_digest = record_evidence_digest(&source_values)?;
     builder.record_source(b"task\0", evidence_digest)?;
 
     let task_id = task_id.to_owned();
@@ -302,7 +302,7 @@ fn hydrate_task_candidate(
                     call_id: None,
                     occurred_at: occurred_at.or(task_modified),
                     body: message.body,
-                    source_record_digest: complete_content_record_digest.clone(),
+                    source_record_digest: record_digest.clone(),
                 })?;
                 record_retained_event_counters(counters, &event);
                 if message.tool_call {
@@ -331,7 +331,7 @@ fn hydrate_task_candidate(
                         call_id: call_id.clone(),
                         occurred_at: occurred_at.or(task_modified),
                         body: format!("tool result: {tool_name}"),
-                        source_record_digest: complete_content_record_digest.clone(),
+                        source_record_digest: record_digest.clone(),
                     })?;
                     record_retained_event_counters(counters, &event);
                     counters.result_events_created =
