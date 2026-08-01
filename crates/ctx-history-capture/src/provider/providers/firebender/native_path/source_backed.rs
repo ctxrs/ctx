@@ -247,7 +247,7 @@ fn exact_direct_string<'a>(
         if value.is_empty() {
             return None;
         }
-        match selected.as_deref() {
+        match selected {
             Some(existing) if existing != value => return None,
             Some(_) => {}
             None => selected = Some(value),

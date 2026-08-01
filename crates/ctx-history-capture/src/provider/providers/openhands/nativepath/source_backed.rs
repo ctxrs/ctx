@@ -566,16 +566,7 @@ pub(crate) fn project_leaf_job(
 }
 
 fn lexical_body(decoded: &OpenHandsDecodedEvent) -> Option<String> {
-    let text = if matches!(
-        decoded.event_type(),
-        ctx_history_core::EventType::ToolOutput
-            | ctx_history_core::EventType::CommandOutput
-            | ctx_history_core::EventType::FileTouched
-    ) {
-        decoded.text().to_owned()
-    } else {
-        decoded.text().to_owned()
-    };
+    let text = decoded.text().to_owned();
     (!text.trim().is_empty()).then_some(text)
 }
 
