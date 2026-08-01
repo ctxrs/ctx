@@ -23,10 +23,12 @@ use std::cell::Cell;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
+use super::parser::MAX_CURSOR_INPUT_PATHS;
 use super::{
     discover_cursor_transcripts,
     layout::CursorTranscriptPath,
-    parser::project_cursor_jsonl_record,
+    parser::{project_cursor_jsonl_record, CursorInputPathEvidence},
     projection::{CursorEventBody, CursorNativeEvent},
 };
 use crate::{
@@ -44,7 +46,7 @@ const NATIVE_EVENT_LOGICAL_KIND: &str = "cursor.logical-event-v3";
 const LOGICAL_SESSION_KIND: &str = "cursor-session";
 const LOGICAL_EVENT_KIND: &str = "cursor-event";
 const SOURCE_SCHEMA_VARIANT: &str = "cursor-agent-transcript-jsonl-v1";
-const PARSER_REVISION: &str = "cursor-shared-jsonl-v6-bounded-append-linkage";
+const PARSER_REVISION: &str = "cursor-shared-jsonl-v7-exact-repository-path-evidence";
 const EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
 const MAX_CURSOR_TOOL_CONTEXTS: usize = 256;
 
@@ -293,7 +295,7 @@ impl CursorLogicalEventIdentity {
 struct CursorToolContext {
     command: Option<String>,
     declared_workdir: Option<String>,
-    input_paths: Vec<String>,
+    input_paths: CursorInputPathEvidence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -399,6 +401,10 @@ impl CursorProjector {
                     input_paths: input_paths.clone(),
                 };
                 apply_cursor_context(&mut input, &context);
+                append_cursor_input_path_abstentions(
+                    &mut adapter_abstentions,
+                    &context.input_paths,
+                );
                 if *ambiguous_native_fields {
                     adapter_abstentions.push((
                         RepositoryEvidenceKind::ProviderNativeResult,
@@ -439,6 +445,10 @@ impl CursorProjector {
                 };
                 if let Some(context) = context {
                     apply_cursor_context(&mut input, &context);
+                    append_cursor_input_path_abstentions(
+                        &mut adapter_abstentions,
+                        &context.input_paths,
+                    );
                     input
                         .outcome_abstentions
                         .extend(cursor_outcome_abstentions(&context));
@@ -497,15 +507,49 @@ fn apply_cursor_context(
 ) {
     input.command = context.command.clone();
     input.declared_tool_workdir = context.declared_workdir.clone();
+    let CursorInputPathEvidence::Exact(paths) = &context.input_paths else {
+        return;
+    };
     input
         .file_observations
-        .extend(context.input_paths.iter().cloned().map(|path| {
+        .extend(paths.iter().cloned().map(|path| {
             crate::repository_attribution::UnscopedFileObservation {
                 path,
                 prior_path: None,
                 kind: RepositoryFileObservationKind::Unknown,
             }
         }));
+}
+
+fn append_cursor_input_path_abstentions(
+    abstentions: &mut Vec<(
+        RepositoryEvidenceKind,
+        RepositoryAbstentionReason,
+        &'static str,
+    )>,
+    evidence: &CursorInputPathEvidence,
+) {
+    let CursorInputPathEvidence::Inexact {
+        candidate_limit_exceeded,
+        invalid_shape,
+    } = evidence
+    else {
+        return;
+    };
+    if *candidate_limit_exceeded {
+        abstentions.push((
+            RepositoryEvidenceKind::FileActivity,
+            RepositoryAbstentionReason::CandidateLimitExceeded,
+            "cursor_tool_input_path_limit_exceeded",
+        ));
+    }
+    if *invalid_shape {
+        abstentions.push((
+            RepositoryEvidenceKind::FileActivity,
+            RepositoryAbstentionReason::Ambiguous,
+            "cursor_tool_input_path_shape_is_ambiguous",
+        ));
+    }
 }
 
 fn cursor_outcome_abstentions(

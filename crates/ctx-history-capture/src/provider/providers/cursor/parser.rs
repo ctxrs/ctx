@@ -1,9 +1,8 @@
 use std::fmt;
 
 use ctx_history_core::{EventRole, EventType};
-use serde::de::{
-    self, Deserialize, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor,
-};
+use serde::de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Value};
 use sha2::{Digest, Sha256};
 
@@ -11,7 +10,7 @@ use crate::Result;
 
 const MAX_CURSOR_ATOM_CHARS: usize = 512;
 const MAX_CURSOR_PATH_CHARS: usize = 4_096;
-const MAX_CURSOR_INPUT_PATHS: usize = 32;
+pub(super) const MAX_CURSOR_INPUT_PATHS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CursorRejectionKind {
@@ -37,7 +36,7 @@ pub(super) enum CursorSafePart {
         tool_name: Option<String>,
         command: Option<String>,
         declared_workdir: Option<String>,
-        input_paths: Vec<String>,
+        input_paths: CursorInputPathEvidence,
         ambiguous_native_fields: bool,
     },
     ToolResult {
@@ -45,6 +44,16 @@ pub(super) enum CursorSafePart {
         native_content: Value,
         call_id: Option<String>,
         ambiguous_linkage: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CursorInputPathEvidence {
+    Exact(Vec<String>),
+    Inexact {
+        candidate_limit_exceeded: bool,
+        invalid_shape: bool,
     },
 }
 
@@ -369,6 +378,12 @@ where
         .deserialize_map(CursorToolUseBlockVisitor)
         .map_err(de::Error::custom)?;
     evidence_deserializer.end().map_err(de::Error::custom)?;
+    let CursorToolInput {
+        command,
+        declared_workdir,
+        paths,
+        ..
+    } = evidence.input;
     Ok(Some(CursorSafePart::ToolUse {
         role: match cursor_role(classification.role.as_deref()) {
             EventRole::Unknown => EventRole::Assistant,
@@ -377,9 +392,9 @@ where
         native_content,
         call_id: evidence.call_id,
         tool_name: evidence.tool_name,
-        command: evidence.input.command,
-        declared_workdir: evidence.input.declared_workdir,
-        input_paths: evidence.input.paths,
+        command,
+        declared_workdir,
+        input_paths: paths.into_evidence(),
         ambiguous_native_fields: evidence.ambiguous_native_fields,
     }))
 }
@@ -594,7 +609,7 @@ impl<'de> Visitor<'de> for CursorToolResultBlockVisitor {
 struct CursorToolInput {
     command: Option<String>,
     declared_workdir: Option<String>,
-    paths: Vec<String>,
+    paths: CursorToolInputPaths,
     command_seen: bool,
     workdir_seen: bool,
     invalid_field: bool,
@@ -613,9 +628,55 @@ impl CursorToolInput {
             self.workdir_seen = true;
             self.declared_workdir = incoming.declared_workdir;
         }
-        self.paths.extend(incoming.paths);
+        self.paths.merge(incoming.paths);
         self.invalid_field |= incoming.invalid_field;
         ambiguous
+    }
+}
+
+#[derive(Debug, Default)]
+struct CursorToolInputPaths {
+    paths: Vec<String>,
+    observed_items: usize,
+    candidate_limit_exceeded: bool,
+    invalid_shape: bool,
+}
+
+impl CursorToolInputPaths {
+    fn observe(&mut self, path: Option<String>) {
+        if self.observed_items < MAX_CURSOR_INPUT_PATHS {
+            self.observed_items += 1;
+            if let Some(path) = path {
+                self.paths.push(path);
+            } else {
+                self.invalid_shape = true;
+            }
+        } else {
+            self.candidate_limit_exceeded = true;
+            self.invalid_shape |= path.is_none();
+        }
+    }
+
+    fn merge(&mut self, incoming: Self) {
+        let combined_items = self.observed_items.saturating_add(incoming.observed_items);
+        self.candidate_limit_exceeded |=
+            incoming.candidate_limit_exceeded || combined_items > MAX_CURSOR_INPUT_PATHS;
+        self.observed_items = combined_items.min(MAX_CURSOR_INPUT_PATHS);
+        let remaining = MAX_CURSOR_INPUT_PATHS.saturating_sub(self.paths.len());
+        self.paths
+            .extend(incoming.paths.into_iter().take(remaining));
+        self.invalid_shape |= incoming.invalid_shape;
+    }
+
+    fn into_evidence(self) -> CursorInputPathEvidence {
+        if self.candidate_limit_exceeded || self.invalid_shape {
+            CursorInputPathEvidence::Inexact {
+                candidate_limit_exceeded: self.candidate_limit_exceeded,
+                invalid_shape: self.invalid_shape,
+            }
+        } else {
+            CursorInputPathEvidence::Exact(self.paths)
+        }
     }
 }
 
@@ -664,20 +725,15 @@ impl<'de> Visitor<'de> for CursorToolInputVisitor {
                     input.workdir_seen = true;
                     input.declared_workdir = value;
                 }
-                "path" | "file_path" | "filePath" if input.paths.len() < MAX_CURSOR_INPUT_PATHS => {
-                    match map.next_value_seed(ExactBoundedStringSeed {
+                "path" | "file_path" | "filePath" => {
+                    let path = map.next_value_seed(CursorPathStringSeed {
                         max_chars: MAX_CURSOR_PATH_CHARS,
-                    })? {
-                        Some(path) => input.paths.push(path),
-                        None => input.invalid_field = true,
-                    }
+                    })?;
+                    input.paths.observe(path);
                 }
-                "paths" if input.paths.len() < MAX_CURSOR_INPUT_PATHS => {
-                    let mut decoded = map.next_value_seed(CursorPathsSeed)?;
-                    let remaining = MAX_CURSOR_INPUT_PATHS.saturating_sub(input.paths.len());
-                    input
-                        .paths
-                        .extend(decoded.drain(..decoded.len().min(remaining)));
+                "paths" => {
+                    let decoded = map.next_value_seed(CursorPathsSeed)?;
+                    input.paths.merge(decoded);
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
@@ -705,20 +761,20 @@ impl<'de> Visitor<'de> for CursorToolInputVisitor {
 struct CursorPathsSeed;
 
 impl<'de> DeserializeSeed<'de> for CursorPathsSeed {
-    type Value = Vec<String>;
+    type Value = CursorToolInputPaths;
 
     fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_seq(CursorPathsVisitor)
+        deserializer.deserialize_any(CursorPathsVisitor)
     }
 }
 
 struct CursorPathsVisitor;
 
 impl<'de> Visitor<'de> for CursorPathsVisitor {
-    type Value = Vec<String>;
+    type Value = CursorToolInputPaths;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a bounded array of Cursor input paths")
@@ -728,20 +784,197 @@ impl<'de> Visitor<'de> for CursorPathsVisitor {
     where
         A: SeqAccess<'de>,
     {
-        let mut paths = Vec::new();
-        while paths.len() < MAX_CURSOR_INPUT_PATHS {
-            let Some(path) = sequence.next_element_seed(ExactBoundedStringSeed {
-                max_chars: MAX_CURSOR_PATH_CHARS,
-            })?
-            else {
-                return Ok(paths);
-            };
-            if let Some(path) = path {
-                paths.push(path);
-            }
+        let mut paths = CursorToolInputPaths::default();
+        while let Some(path) = sequence.next_element_seed(CursorPathStringSeed {
+            max_chars: MAX_CURSOR_PATH_CHARS,
+        })? {
+            paths.observe(path);
         }
-        while sequence.next_element::<IgnoredAny>()?.is_some() {}
         Ok(paths)
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(invalid_cursor_paths())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(invalid_cursor_paths())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(invalid_cursor_paths())
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(invalid_cursor_paths())
+    }
+
+    fn visit_str<E>(self, _value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(invalid_cursor_paths())
+    }
+
+    fn visit_string<E>(self, _value: String) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(invalid_cursor_paths())
+    }
+
+    fn visit_none<E>(self) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(invalid_cursor_paths())
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(invalid_cursor_paths())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(invalid_cursor_paths())
+    }
+}
+
+fn invalid_cursor_paths() -> CursorToolInputPaths {
+    let mut paths = CursorToolInputPaths::default();
+    paths.observe(None);
+    paths
+}
+
+struct CursorPathStringSeed {
+    max_chars: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for CursorPathStringSeed {
+    type Value = Option<String>;
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(CursorPathStringVisitor {
+            max_chars: self.max_chars,
+        })
+    }
+}
+
+struct CursorPathStringVisitor {
+    max_chars: usize,
+}
+
+impl CursorPathStringVisitor {
+    fn exact(&self, value: &str) -> Option<String> {
+        (value.chars().count() <= self.max_chars).then(|| value.to_owned())
+    }
+}
+
+impl<'de> Visitor<'de> for CursorPathStringVisitor {
+    type Value = Option<String>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an exact bounded Cursor input path string")
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'de str) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(self.exact(value))
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(self.exact(value))
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok((value.chars().count() <= self.max_chars).then_some(value))
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_none<E>(self) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(None)
     }
 }
 

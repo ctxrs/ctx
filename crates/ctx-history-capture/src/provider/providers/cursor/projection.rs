@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::common::time::parse_rfc3339_utc;
 
-use super::parser::{CursorSafePart, CursorSanitizedRecord};
+use super::parser::{CursorInputPathEvidence, CursorSafePart, CursorSanitizedRecord};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct CursorNativeOrder {
@@ -27,7 +27,7 @@ pub(crate) enum CursorEventBody {
         tool_name: Option<String>,
         command: Option<String>,
         declared_workdir: Option<String>,
-        input_paths: Vec<String>,
+        input_paths: CursorInputPathEvidence,
         ambiguous_native_fields: bool,
     },
     ToolOutput {
