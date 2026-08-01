@@ -414,11 +414,7 @@ fn core_record(
     annotation: ctx_history_core::CoreRecordAnnotation,
 ) -> Result<Option<CoreRecord>> {
     let text = match &event.body {
-        CursorEventBody::Text { text }
-            if event.event_type == EventType::Message && event.complete_content_ref.is_some() =>
-        {
-            text.clone()
-        }
+        CursorEventBody::Text { text } if event.event_type == EventType::Message => text.clone(),
         CursorEventBody::ToolCall {
             tool_name,
             command,

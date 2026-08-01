@@ -10,6 +10,14 @@ use crate::{
 };
 
 #[test]
+fn obsolete_content_reference_surface_is_absent() {
+    let crate_root = include_str!("lib.rs");
+    for removed in [concat!("Content", "Ref"), concat!("mod content", "_ref;")] {
+        assert!(!crate_root.contains(removed), "found {removed}");
+    }
+}
+
+#[test]
 fn enum_string_roundtrips_and_defaults() {
     let visibility: Visibility = serde_json::from_str("\"sync_metadata\"").unwrap();
     assert_eq!(visibility, Visibility::SyncMetadata);

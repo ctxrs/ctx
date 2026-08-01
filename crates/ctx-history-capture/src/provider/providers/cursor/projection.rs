@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use ctx_history_core::{ContentRef, EventRole, EventType};
+use ctx_history_core::{EventRole, EventType};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -42,7 +42,6 @@ pub(crate) struct CursorNativeEvent {
     pub(crate) role: EventRole,
     pub(crate) occurred_at: Option<DateTime<Utc>>,
     pub(crate) body: CursorEventBody,
-    pub(crate) complete_content_ref: Option<ContentRef>,
     pub(crate) record_byte_start: u64,
     pub(crate) record_byte_end_exclusive: u64,
     pub(crate) record_sha256: [u8; 32],
@@ -59,21 +58,15 @@ pub(super) fn project_cursor_record(
         .enumerate()
         .map(|(part_ordinal, part)| {
             let part_ordinal = u32::try_from(part_ordinal).unwrap_or(u32::MAX);
-            let (event_type, role, body, complete_content_ref) = match part {
+            let (event_type, role, body) = match part {
                 CursorSafePart::BodyFree { event_type, role } => {
-                    (event_type, role, CursorEventBody::None, None)
+                    (event_type, role, CursorEventBody::None)
                 }
                 CursorSafePart::Text {
                     event_type,
                     role,
                     text,
-                    complete_content_ref,
-                } => (
-                    event_type,
-                    role,
-                    CursorEventBody::Text { text },
-                    complete_content_ref,
-                ),
+                } => (event_type, role, CursorEventBody::Text { text }),
                 CursorSafePart::ToolUse {
                     role,
                     call_id,
@@ -93,7 +86,6 @@ pub(super) fn project_cursor_record(
                         input_paths,
                         ambiguous_native_fields,
                     },
-                    None,
                 ),
                 CursorSafePart::ToolResult {
                     role,
@@ -106,7 +98,6 @@ pub(super) fn project_cursor_record(
                         call_id,
                         ambiguous_linkage,
                     },
-                    None,
                 ),
             };
             let encoded =
@@ -121,7 +112,6 @@ pub(super) fn project_cursor_record(
                 role,
                 occurred_at,
                 body,
-                complete_content_ref,
                 record_byte_start: record.byte_start,
                 record_byte_end_exclusive: record.byte_end_exclusive,
                 record_sha256: record.record_sha256,

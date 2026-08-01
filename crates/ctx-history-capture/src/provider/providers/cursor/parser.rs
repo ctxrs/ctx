@@ -1,10 +1,9 @@
 use std::fmt;
 
-use ctx_history_core::{ContentRef, EventRole, EventType};
+use ctx_history_core::{EventRole, EventType};
 use serde::de::{
     self, Deserialize, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor,
 };
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::Result;
@@ -29,7 +28,6 @@ pub(super) enum CursorSafePart {
         event_type: EventType,
         role: EventRole,
         text: String,
-        complete_content_ref: Option<ContentRef>,
     },
     ToolUse {
         role: EventRole,
@@ -377,44 +375,37 @@ impl<'de> Visitor<'de> for CursorTextBlockVisitor<'_> {
         let mut retained = None;
         while let Some(field) = map.next_key::<String>()? {
             if field == "text" {
-                retained = Some(map.next_value_seed(CursorMessageTextSeed { event_type })?);
+                retained = Some(map.next_value_seed(CursorMessageTextSeed)?);
             } else {
                 map.next_value::<IgnoredAny>()?;
             }
         }
-        let retained = retained.unwrap_or_else(|| retained_cursor_message_text(event_type, ""));
+        let text = retained.unwrap_or_default();
         Ok(Some(CursorSafePart::Text {
             event_type,
             role: cursor_role(self.classification.role.as_deref()),
-            text: retained.text,
-            complete_content_ref: retained.complete_content_ref,
+            text,
         }))
     }
 }
 
-struct CursorMessageTextSeed {
-    event_type: EventType,
-}
+struct CursorMessageTextSeed;
 
 impl<'de> DeserializeSeed<'de> for CursorMessageTextSeed {
-    type Value = CursorRetainedMessageText;
+    type Value = String;
 
     fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_string(CursorMessageTextVisitor {
-            event_type: self.event_type,
-        })
+        deserializer.deserialize_string(CursorMessageTextVisitor)
     }
 }
 
-struct CursorMessageTextVisitor {
-    event_type: EventType,
-}
+struct CursorMessageTextVisitor;
 
 impl Visitor<'_> for CursorMessageTextVisitor {
-    type Value = CursorRetainedMessageText;
+    type Value = String;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a Cursor message string")
@@ -424,90 +415,22 @@ impl Visitor<'_> for CursorMessageTextVisitor {
     where
         E: de::Error,
     {
-        Ok(retained_cursor_message_text(self.event_type, value))
+        Ok(value.to_owned())
     }
 
     fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(retained_cursor_message_text(self.event_type, value))
+        Ok(value.to_owned())
     }
 
     fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(retained_cursor_message_text(self.event_type, &value))
+        Ok(value)
     }
-}
-
-struct CursorRetainedMessageText {
-    text: String,
-    complete_content_ref: Option<ContentRef>,
-}
-
-fn retained_cursor_message_text(event_type: EventType, value: &str) -> CursorRetainedMessageText {
-    let complete_content_ref = (event_type == EventType::Message)
-        .then(|| ContentRef::from_bytes(value.as_bytes()))
-        .flatten();
-    CursorRetainedMessageText {
-        text: value.to_owned(),
-        complete_content_ref,
-    }
-}
-
-pub(crate) fn cursor_complete_content_message_record(
-    value: &Value,
-    physical_ordinal: u64,
-    subrecord_index: u32,
-    indexed_text: &str,
-) -> Option<(String, String, String)> {
-    let encoded = serde_json::to_vec(value).ok()?;
-    let classification = classify_cursor_line(&encoded).ok()?;
-    if !matches!(
-        classification.admission,
-        CursorRecordAdmission::UserMessage | CursorRecordAdmission::AssistantMessage
-    ) {
-        return None;
-    }
-    let content = match classification.location {
-        CursorContentLocation::Message => value.get("message")?.get("content")?.as_array()?,
-        CursorContentLocation::TopLevel => value.get("content")?.as_array()?,
-        CursorContentLocation::None => return None,
-    };
-    let mut projected_ordinal = 0_u32;
-    for (kind, block) in classification.block_kinds.iter().zip(content) {
-        match kind {
-            CursorBlockKind::Excluded => continue,
-            CursorBlockKind::ToolUse | CursorBlockKind::ToolResult => {
-                projected_ordinal = projected_ordinal.checked_add(1)?;
-            }
-            CursorBlockKind::Text => {
-                if projected_ordinal == subrecord_index {
-                    let complete_text = block.get("text").and_then(Value::as_str)?;
-                    let event_type = cursor_text_event_type(&classification);
-                    let role = cursor_role(classification.role.as_deref());
-                    if complete_text != indexed_text {
-                        return None;
-                    }
-                    let body = super::projection::CursorEventBody::Text {
-                        text: complete_text.to_owned(),
-                    };
-                    let encoded =
-                        serde_json::to_vec(&("cursor-event-payload-v1", event_type, role, &body))
-                            .ok()?;
-                    return Some((
-                        complete_text.to_owned(),
-                        format!("cursor-line-v1:{physical_ordinal}:{subrecord_index}"),
-                        format!("{:x}", Sha256::digest(encoded)),
-                    ));
-                }
-                projected_ordinal = projected_ordinal.checked_add(1)?;
-            }
-        }
-    }
-    None
 }
 
 struct CursorToolUseBlockVisitor<'a> {

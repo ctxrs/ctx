@@ -15,10 +15,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    native_source::{NativeLocator, NativeSourceError},
     provider::{
         providers::nanoclaw::{
-            position::nanoclaw_message_locator,
             project::{NanoClawProjectOpenError, NanoClawSourceBackedProject},
             projection::nanoclaw_core_event,
             source::{NanoClawNativeScanner, NanoClawNativeUnit, NanoClawPreparedUnit},
@@ -58,8 +56,6 @@ pub(crate) enum NanoClawSourceBackedError {
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
     CoreRecord(#[from] CoreRecordError),
-    #[error(transparent)]
-    NativeSource(#[from] NativeSourceError),
     #[error("NanoClaw source-backed scan counters overflowed")]
     CountOverflow,
     #[error("NanoClaw source-backed scanner emitted inconsistent counts")]
@@ -94,7 +90,6 @@ pub(crate) struct NanoClawDocumentTreeAdapter {
 
 struct NanoClawPreparedProjection {
     spool: File,
-    source_path: String,
     logical_fingerprint: [u8; 32],
     observation: SourceObservation,
     content_digest: [u8; 32],
@@ -285,8 +280,6 @@ fn prepare_nanoclaw_project(
         .map_err(nanoclaw_route_capture_error)?;
     let schema_fingerprint =
         sqlite_schema_fingerprint(central).map_err(nanoclaw_route_capture_error)?;
-    let source_path = project.root_path().display().to_string();
-
     let mut scanner = NanoClawNativeScanner::new(central, project.snapshot())
         .map_err(nanoclaw_route_capture_error)?;
     let mut spool = tempfile::tempfile_in(data_root)
@@ -313,10 +306,9 @@ fn prepare_nanoclaw_project(
                     source: message_source,
                     session,
                     message,
-                    locator,
                     ..
                 } => {
-                    let _ = (ordinal, message_source, session, message, locator);
+                    let _ = (ordinal, message_source, session, message);
                     retained_records =
                         checked_add(retained_records, 1).map_err(nanoclaw_route_error)?;
                     indexed_documents =
@@ -403,7 +395,6 @@ fn prepare_nanoclaw_project(
         .map_err(nanoclaw_route_capture_error)?;
     Ok(NanoClawPreparedProjection {
         spool,
-        source_path,
         logical_fingerprint,
         observation,
         content_digest: logical_fingerprint,
@@ -439,22 +430,18 @@ fn project_nanoclaw_prepared(
             .map_err(nanoclaw_route_capture_error)?;
         if let NanoClawPreparedUnit::Message {
             ordinal,
-            session_rowid,
             source: message_source,
-            message_rowid,
             session,
             message,
+            ..
         } = unit
         {
             let document = nanoclaw_core_record(
                 source,
                 ordinal,
                 message_source.label(),
-                &prepared.source_path,
                 &session,
                 &message.into_native(message_source),
-                nanoclaw_message_locator(session_rowid, message_source, message_rowid)
-                    .map_err(nanoclaw_route_capture_error)?,
             )
             .map_err(nanoclaw_route_error)?;
             sink.emit_core_record(document)?;
@@ -536,15 +523,12 @@ pub(crate) fn nanoclaw_source_key(
     )?)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn nanoclaw_core_record(
     source: &SourceKey,
     ordinal: u64,
     message_source: &str,
-    _source_path: &str,
     session: &super::super::rows::NanoClawSessionRow,
     message: &super::super::rows::NanoClawMessageRow,
-    native_locator: NativeLocator,
 ) -> NanoClawSourceBackedResult<CoreRecord> {
     let native_session_key = NativeSessionKey::composite(
         NANOCLAW_NATIVE_SESSION_NAMESPACE,
@@ -558,13 +542,13 @@ fn nanoclaw_core_record(
         logical_session_kind: NANOCLAW_LOGICAL_SESSION_KIND,
         native_session_key: &native_session_key,
     })?;
-    let native_item_key = NativeItemKey::composite(
-        NANOCLAW_NATIVE_EVENT_NAMESPACE,
-        vec![
-            TypedKey::utf8(message_source)?,
-            TypedKey::utf8(&message.id)?,
-        ],
-    )?;
+    let native_event_parts = vec![
+        TypedKey::utf8(message_source)?,
+        TypedKey::utf8(&message.id)?,
+    ];
+    let native_event_id = TypedKey::composite(native_event_parts.clone())?;
+    let native_item_key =
+        NativeItemKey::composite(NANOCLAW_NATIVE_EVENT_NAMESPACE, native_event_parts)?;
     let event_id = derive_event_id(EventIdentityInput {
         source,
         session_id,
@@ -577,7 +561,6 @@ fn nanoclaw_core_record(
     if body.is_empty() {
         body = format!("NanoClaw {message_source} message");
     }
-    let native_event_id = TypedKey::bytes(native_locator.value().to_vec())?;
     let provider_session_id = session
         .thread_id
         .clone()

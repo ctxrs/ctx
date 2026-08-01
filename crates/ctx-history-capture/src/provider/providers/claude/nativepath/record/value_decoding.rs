@@ -38,7 +38,6 @@ pub(super) fn complete_output_rows(
                 body: None,
                 body_sha256: None,
                 body_text_retention: None,
-                complete_body_ref: None,
                 tool_call: None,
                 tool_result: Some(ClaudeToolResult {
                     call_id: output.call_id.clone(),
