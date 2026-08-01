@@ -223,10 +223,28 @@ impl CodexNativeScanner {
 
         self.counters.typed_json_parses = self.counters.typed_json_parses.saturating_add(1);
         let decoded = parse_decoded_record(record, &owner);
+        let decoded = decoded.as_ref().ok_or(CaptureError::SystemInvariant(
+            "Codex output could not be decoded for complete Core publication",
+        ))?;
+        let projected_output = match project_codex_output(probe, &decoded.payload) {
+            Ok(Some(projected)) => projected,
+            Ok(None) => {
+                return Err(CaptureError::SystemInvariant(
+                    "Codex output has an unsupported Core body shape",
+                ));
+            }
+            Err(()) => {
+                self.reject(false);
+                return Ok(CodexRecordProjection {
+                    context_mutation: call_id.map(|call_id| {
+                        CodexContextMutation::Remove(linked_call_ids(call_id, context.as_ref()))
+                    }),
+                    ..CodexRecordProjection::default()
+                });
+            }
+        };
 
-        if let (Some(call_id), Some(context), Some(decoded)) =
-            (call_id, context.as_ref(), decoded.as_ref())
-        {
+        if let (Some(call_id), Some(context)) = (call_id, context.as_ref()) {
             if let Some(cell_id) =
                 crate::provider::codex::repository::running_continuation_cell_id(&decoded.payload)
             {
@@ -254,10 +272,10 @@ impl CodexNativeScanner {
             }
         }
 
-        let repository_result = decoded.as_ref().and_then(|decoded| {
+        let repository_result = context.as_ref().and_then(|context| {
             crate::provider::codex::repository::repository_result_evidence(
                 &decoded.payload,
-                context.as_ref()?,
+                context,
                 call_id?,
                 record_digest,
                 occurred_at.timestamp_millis(),
@@ -265,31 +283,11 @@ impl CodexNativeScanner {
             )
         });
 
-        let decoded = decoded.as_ref().ok_or(CaptureError::SystemInvariant(
-            "Codex output could not be decoded for complete Core publication",
-        ))?;
-        let normalized_body = match source_backed_display_text(probe, &decoded.payload) {
-            CodexSourceBackedDocumentEligibility::Eligible(body) => body,
-            CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay => {
-                return Err(CaptureError::SystemInvariant(
-                    "Codex output lost its selected Core body",
-                ));
-            }
-            CodexSourceBackedDocumentEligibility::ParserRevisionGap => {
-                return Err(CaptureError::SystemInvariant(
-                    "Codex output has an unsupported Core body shape",
-                ));
-            }
-        };
-        let structured_content = codex_result_value(&decoded.payload).cloned().map(|result| {
-            serde_json::json!({
-                "provider_native_tool_result": {
-                    "item_type": result_kind.item_type(),
-                    "call_id": call_id,
-                    "result": result,
-                }
-            })
-        });
+        let structured_content = Some(projected_tool_result_content(
+            result_kind,
+            call_id,
+            &projected_output,
+        ));
         let core_row = build_source_backed_sparse_output_row(
             self.raw_ordinal,
             provider_event_identity(&decoded.payload),
@@ -297,7 +295,7 @@ impl CodexNativeScanner {
             result_kind,
             context.as_ref(),
             &structural.outcome,
-            normalized_body,
+            projected_output.normalized_body,
             structured_content,
             repository_result,
             context
@@ -542,4 +540,178 @@ fn linked_call_ids(call_id: &str, context: Option<&CodexToolCallContext>) -> Vec
         }
     }
     call_ids
+}
+
+struct ProjectedCodexOutput {
+    normalized_body: String,
+    result_variant: Option<&'static str>,
+    result_metadata: Option<Value>,
+    invocation: Option<Value>,
+    duration: Option<Value>,
+}
+
+fn project_codex_output(
+    probe: &CodexRecordProbe<'_>,
+    payload: &Value,
+) -> std::result::Result<Option<ProjectedCodexOutput>, ()> {
+    if payload.get("type").and_then(Value::as_str) == Some("mcp_tool_call_end") {
+        return project_mcp_tool_call_end(payload).map(Some);
+    }
+    let Some(result) = codex_result_value(payload) else {
+        return Ok(None);
+    };
+    let projected = codex_output_content(result);
+    let normalized_body = match source_backed_display_text(probe, payload) {
+        CodexSourceBackedDocumentEligibility::Eligible(body) => body,
+        CodexSourceBackedDocumentEligibility::IntentionallyNonDisplay
+        | CodexSourceBackedDocumentEligibility::ParserRevisionGap => return Ok(None),
+    };
+    Ok(Some(ProjectedCodexOutput {
+        normalized_body,
+        result_variant: None,
+        result_metadata: projected.metadata,
+        invocation: None,
+        duration: None,
+    }))
+}
+
+fn project_mcp_tool_call_end(payload: &Value) -> std::result::Result<ProjectedCodexOutput, ()> {
+    payload
+        .get("call_id")
+        .and_then(Value::as_str)
+        .filter(|call_id| !call_id.is_empty() && call_id.len() <= MAX_CODEX_TOOL_CALL_ID_BYTES)
+        .ok_or(())?;
+    let invocation = payload
+        .get("invocation")
+        .and_then(Value::as_object)
+        .ok_or(())?;
+    invocation
+        .get("server")
+        .and_then(Value::as_str)
+        .filter(|server| !server.is_empty())
+        .ok_or(())?;
+    invocation
+        .get("tool")
+        .and_then(Value::as_str)
+        .filter(|tool| !tool.is_empty())
+        .ok_or(())?;
+    invocation.get("arguments").ok_or(())?;
+
+    let duration = payload
+        .get("duration")
+        .and_then(Value::as_object)
+        .ok_or(())?;
+    duration.get("secs").and_then(Value::as_u64).ok_or(())?;
+    duration
+        .get("nanos")
+        .and_then(Value::as_u64)
+        .filter(|nanos| *nanos < 1_000_000_000)
+        .ok_or(())?;
+
+    if payload.get("output").is_some() || payload.get("tools").is_some() {
+        return Err(());
+    }
+    let result = payload.get("result").and_then(Value::as_object).ok_or(())?;
+    if result.len() != 1 {
+        return Err(());
+    }
+    let (result_variant, result_value) = result.iter().next().ok_or(())?;
+    let result_variant = match result_variant.as_str() {
+        "Ok" => {
+            validate_mcp_call_tool_result(result_value)?;
+            "Ok"
+        }
+        "Err" => {
+            result_value
+                .as_str()
+                .filter(|message| !message.trim().is_empty())
+                .ok_or(())?;
+            "Err"
+        }
+        _ => return Err(()),
+    };
+    let projected = codex_output_content(result_value);
+    Ok(ProjectedCodexOutput {
+        normalized_body: projected.text.into_owned(),
+        result_variant: Some(result_variant),
+        result_metadata: projected.metadata,
+        invocation: Some(Value::Object(invocation.clone())),
+        duration: Some(Value::Object(duration.clone())),
+    })
+}
+
+fn validate_mcp_call_tool_result(result: &Value) -> std::result::Result<(), ()> {
+    let result = result.as_object().ok_or(())?;
+    let content = result.get("content").and_then(Value::as_array).ok_or(())?;
+    if result
+        .get("isError")
+        .is_some_and(|is_error| !is_error.is_boolean())
+        || result
+            .get("_meta")
+            .is_some_and(|metadata| !metadata.is_object())
+    {
+        return Err(());
+    }
+    for block in content {
+        let block = block.as_object().ok_or(())?;
+        let block_type = block
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|block_type| !block_type.is_empty())
+            .ok_or(())?;
+        match block_type {
+            "text" => {
+                block.get("text").and_then(Value::as_str).ok_or(())?;
+            }
+            "image" | "audio" => {
+                block.get("data").and_then(Value::as_str).ok_or(())?;
+                block.get("mimeType").and_then(Value::as_str).ok_or(())?;
+            }
+            "resource" => {
+                block.get("resource").and_then(Value::as_object).ok_or(())?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn projected_tool_result_content(
+    result_kind: CodexResultKind,
+    call_id: Option<&str>,
+    projected: &ProjectedCodexOutput,
+) -> Value {
+    let mut result = serde_json::Map::from_iter([
+        (
+            "item_type".to_owned(),
+            Value::String(result_kind.item_type().to_owned()),
+        ),
+        (
+            "call_id".to_owned(),
+            call_id.map_or(Value::Null, |call_id| Value::String(call_id.to_owned())),
+        ),
+        (
+            "result_content_location".to_owned(),
+            Value::String("normalized_body".to_owned()),
+        ),
+        ("result_content_complete".to_owned(), Value::Bool(true)),
+    ]);
+    if let Some(variant) = projected.result_variant {
+        result.insert(
+            "result_variant".to_owned(),
+            Value::String(variant.to_owned()),
+        );
+    }
+    if let Some(metadata) = projected.result_metadata.clone() {
+        result.insert("result_metadata".to_owned(), metadata);
+    }
+    if let Some(invocation) = projected.invocation.clone() {
+        result.insert("invocation".to_owned(), invocation);
+    }
+    if let Some(duration) = projected.duration.clone() {
+        result.insert("duration".to_owned(), duration);
+    }
+    serde_json::json!({
+        "provider_native_tool_result": Value::Object(result),
+    })
 }

@@ -201,6 +201,208 @@ fn output_heavy_scan_retains_complete_result_bodies() {
 }
 
 #[test]
+fn mcp_direct_result_minimal_synthetic_retains_text_and_linkage() {
+    let call_id = "exec-mcp-direct";
+    let output = "direct MCP result survives";
+    let contents = [
+        session_meta("mcp-direct-owner"),
+        jsonl(json!({
+            "timestamp": "2026-01-01T00:00:03Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "mcp_tool_call_end",
+                "call_id": call_id,
+                "invocation": {
+                    "server": "example",
+                    "tool": "read",
+                    "arguments": {"path": "/workspace/input.txt"}
+                },
+                "duration": {"secs": 0, "nanos": 42},
+                "result": {
+                    "Ok": {
+                        "content": [{"type": "text", "text": output}],
+                        "isError": false
+                    }
+                }
+            }
+        })),
+    ]
+    .concat();
+    let (_temp, path) = write_source(&contents);
+    let (scan, sink) = scan_collect(discover_one(&path, "mcp-direct-owner"), None);
+
+    assert_eq!(scan.counters.rejected_complete_records, 0);
+    assert_eq!(sink.rows.len(), 1);
+    let row = &sink.rows[0];
+    assert_eq!(row.event_type, EventType::ToolOutput);
+    assert_eq!(row.lexical_body, output);
+    let identity = row.provider_event_identity.as_ref().unwrap();
+    assert_eq!(identity.kind.as_str(), "call_id");
+    assert_eq!(identity.value, call_id);
+    let native = &row.structured_content.as_ref().unwrap()["provider_native_tool_result"];
+    assert_eq!(native["item_type"], "tool_result");
+    assert_eq!(native["call_id"], call_id);
+    assert_eq!(native["result_variant"], "Ok");
+    assert_eq!(native["result_content_location"], "normalized_body");
+    assert_eq!(native["result_content_complete"], true);
+    assert_eq!(native["result_metadata"]["content"][0]["type"], "text");
+    assert_eq!(native["invocation"]["server"], "example");
+    assert!(!serde_json::to_string(native).unwrap().contains(output));
+}
+
+#[test]
+fn mcp_direct_result_retains_complete_multi_block_content() {
+    let first = format!("MCP_RESULT_BEGIN-{}", "a".repeat(24_000));
+    let second = format!("{}-MCP_RESULT_END", "b".repeat(24_000));
+    let expected = format!("{first}\n{second}");
+    let contents = [
+        session_meta("mcp-complete-owner"),
+        jsonl(json!({
+            "timestamp": "2026-01-01T00:00:03Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "mcp_tool_call_end",
+                "call_id": "exec-mcp-complete",
+                "invocation": {"server": "example", "tool": "read", "arguments": {}},
+                "duration": {"secs": 0, "nanos": 42},
+                "result": {
+                    "Ok": {
+                        "content": [
+                            {"type": "text", "text": first},
+                            {"type": "text", "text": second}
+                        ]
+                    }
+                }
+            }
+        })),
+    ]
+    .concat();
+    let (_temp, path) = write_source(&contents);
+    let (scan, sink) = scan_collect(discover_one(&path, "mcp-complete-owner"), None);
+
+    assert_eq!(scan.counters.rejected_complete_records, 0);
+    assert_eq!(sink.rows.len(), 1);
+    assert_eq!(sink.rows[0].lexical_body, expected);
+    let native = &sink.rows[0].structured_content.as_ref().unwrap()["provider_native_tool_result"];
+    assert_eq!(native["result_variant"], "Ok");
+    assert_eq!(native["result_metadata"]["content"][0]["type"], "text");
+    assert_eq!(native["result_metadata"]["content"][1]["type"], "text");
+    let encoded = serde_json::to_string(native).unwrap();
+    assert!(!encoded.contains("MCP_RESULT_BEGIN"));
+    assert!(!encoded.contains("MCP_RESULT_END"));
+}
+
+#[test]
+fn mcp_direct_result_accepts_native_error_variants() {
+    let contents = [
+        session_meta("mcp-error-owner"),
+        jsonl(json!({
+            "timestamp": "2026-01-01T00:00:03Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "mcp_tool_call_end",
+                "call_id": "exec-mcp-tool-error",
+                "invocation": {"server": "example", "tool": "read", "arguments": {}},
+                "duration": {"secs": 0, "nanos": 42},
+                "result": {
+                    "Ok": {
+                        "content": [{"type": "text", "text": "tool-level failure"}],
+                        "isError": true
+                    }
+                }
+            }
+        })),
+        jsonl(json!({
+            "timestamp": "2026-01-01T00:00:04Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "mcp_tool_call_end",
+                "call_id": "exec-mcp-protocol-error",
+                "invocation": {"server": "example", "tool": "read", "arguments": {}},
+                "duration": {"secs": 0, "nanos": 43},
+                "result": {"Err": "protocol-level failure"}
+            }
+        })),
+    ]
+    .concat();
+    let (_temp, path) = write_source(&contents);
+    let (scan, sink) = scan_collect(discover_one(&path, "mcp-error-owner"), None);
+
+    assert_eq!(scan.counters.rejected_complete_records, 0);
+    assert_eq!(sink.rows.len(), 2);
+    assert_eq!(sink.rows[0].lexical_body, "tool-level failure");
+    assert_eq!(sink.rows[1].lexical_body, "protocol-level failure");
+    assert_eq!(
+        sink.rows[1].structured_content.as_ref().unwrap()["provider_native_tool_result"]
+            ["result_variant"],
+        "Err"
+    );
+    assert!(!serde_json::to_string(&sink.rows[1].structured_content)
+        .unwrap()
+        .contains("protocol-level failure"));
+}
+
+#[test]
+fn malformed_or_ambiguous_mcp_direct_results_are_rejected_locally() {
+    let malformed_results = [
+        json!({}),
+        json!({"Ok": {"content": []}, "Err": "ambiguous"}),
+        json!({"Unknown": {"content": []}}),
+        json!({"Ok": null}),
+        json!({"Ok": {"content": "not an array"}}),
+        json!({"Ok": {"content": [{"type": "text"}]}}),
+        json!({"Err": null}),
+    ];
+    let mut contents = session_meta("mcp-malformed-owner");
+    for (index, result) in malformed_results.iter().enumerate() {
+        contents.push_str(&jsonl(json!({
+            "timestamp": "2026-01-01T00:00:03Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "mcp_tool_call_end",
+                "call_id": format!("exec-mcp-malformed-{index}"),
+                "invocation": {"server": "example", "tool": "read", "arguments": {}},
+                "duration": {"secs": 0, "nanos": 42},
+                "result": result
+            }
+        })));
+    }
+    contents.push_str(&message("assistant", "later valid record"));
+    let (_temp, path) = write_source(&contents);
+    let (scan, sink) = scan_collect(discover_one(&path, "mcp-malformed-owner"), None);
+
+    assert_eq!(sink.rows.len(), 1);
+    assert_eq!(sink.rows[0].lexical_body, "later valid record");
+    assert_eq!(
+        scan.counters.malformed_records,
+        malformed_results.len() as u64
+    );
+    assert_eq!(
+        scan.counters.rejected_complete_records,
+        malformed_results.len() as u64
+    );
+}
+
+#[test]
+fn redacted_real_shape_fixture_retains_mcp_direct_result() {
+    let contents = include_str!("fixtures/mcp_tool_call_end_direct_result.jsonl");
+    let (_temp, path) = write_source(contents);
+    let (scan, sink) = scan_collect(discover_one(&path, "redacted-mcp-direct-result"), None);
+
+    assert_eq!(scan.counters.rejected_complete_records, 0);
+    assert_eq!(sink.rows.len(), 1);
+    assert_eq!(sink.rows[0].lexical_body, "REAL_SHAPE_DIRECT_RESULT");
+    let native = &sink.rows[0].structured_content.as_ref().unwrap()["provider_native_tool_result"];
+    assert_eq!(native["call_id"], "exec-redacted-real-shape");
+    assert_eq!(native["result_variant"], "Ok");
+    assert_eq!(native["result_metadata"]["isError"], false);
+    assert_eq!(
+        native["result_metadata"]["_meta"]["codex/toolSurface"]["kind"],
+        "browserUse"
+    );
+}
+
+#[test]
 fn source_backed_projection_prefilters_with_exact_scan_accounting() {
     let ignored = jsonl(json!({
         "type": "event_msg",

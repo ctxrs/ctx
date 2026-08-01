@@ -1,8 +1,7 @@
 use std::borrow::Cow;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
-use super::retention::codex_content_text;
 #[cfg(test)]
 use super::retention::{codex_exit_code, codex_wall_time_ms};
 #[cfg(test)]
@@ -121,7 +120,7 @@ fn codex_output_indicates_success(value: &Value) -> bool {
 }
 
 pub(crate) fn codex_result_content(payload: &Value) -> Option<Cow<'_, str>> {
-    codex_result_value(payload).map(codex_output_text)
+    codex_result_value(payload).map(|result| codex_output_content(result).text)
 }
 
 pub(crate) fn codex_result_value(payload: &Value) -> Option<&Value> {
@@ -142,15 +141,97 @@ pub(crate) fn codex_result_value(payload: &Value) -> Option<&Value> {
         .or_else(|| payload.get("result"))
 }
 
-pub(crate) fn codex_output_text(value: &Value) -> Cow<'_, str> {
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CodexOutputContent<'a> {
+    pub(crate) text: Cow<'a, str>,
+    pub(crate) metadata: Option<Value>,
+}
+
+/// Separates complete result content from its structured metadata.
+///
+/// Core stores `text` as the exact normalized body. `metadata` retains the
+/// native container shape and non-body fields without cloning the selected
+/// text a second time. Unknown structured values are serialized completely
+/// into `text`, so no content is dropped merely because its shape is newer.
+pub(crate) fn codex_output_content(value: &Value) -> CodexOutputContent<'_> {
     match value {
-        Value::String(text) => Cow::Borrowed(text),
-        Value::Null => Cow::Borrowed(""),
-        other => {
-            Cow::Owned(codex_content_text(other).unwrap_or_else(|| {
-                serde_json::to_string(other).unwrap_or_else(|_| other.to_string())
-            }))
+        Value::String(text) => CodexOutputContent {
+            text: Cow::Borrowed(text),
+            metadata: None,
+        },
+        Value::Null => CodexOutputContent {
+            text: Cow::Borrowed(""),
+            metadata: None,
+        },
+        Value::Array(items) => {
+            codex_array_output_content(items).unwrap_or_else(|| serialized_output_content(value))
         }
+        Value::Object(object) => {
+            codex_object_output_content(object).unwrap_or_else(|| serialized_output_content(value))
+        }
+        Value::Bool(_) | Value::Number(_) => serialized_output_content(value),
+    }
+}
+
+fn codex_array_output_content(items: &[Value]) -> Option<CodexOutputContent<'static>> {
+    if items.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::with_capacity(items.len());
+    let mut metadata = Vec::with_capacity(items.len());
+    for item in items {
+        let Value::Object(object) = item else {
+            return None;
+        };
+        let projected = codex_object_output_content(object)?;
+        parts.push(projected.text.into_owned());
+        metadata.push(projected.metadata.unwrap_or(Value::Null));
+    }
+    Some(CodexOutputContent {
+        text: Cow::Owned(parts.join("\n")),
+        metadata: metadata
+            .iter()
+            .any(|value| !value.is_null())
+            .then_some(Value::Array(metadata)),
+    })
+}
+
+fn codex_object_output_content(object: &Map<String, Value>) -> Option<CodexOutputContent<'static>> {
+    for key in [
+        "text",
+        "input_text",
+        "output_text",
+        "summary_text",
+        "content",
+    ] {
+        let Some(value) = object.get(key) else {
+            continue;
+        };
+        if !matches!(value, Value::String(_) | Value::Array(_) | Value::Object(_)) {
+            continue;
+        }
+        let projected = codex_output_content(value);
+        let mut metadata = object.clone();
+        match projected.metadata {
+            Some(child) => {
+                metadata.insert(key.to_owned(), child);
+            }
+            None => {
+                metadata.remove(key);
+            }
+        }
+        return Some(CodexOutputContent {
+            text: Cow::Owned(projected.text.into_owned()),
+            metadata: (!metadata.is_empty()).then_some(Value::Object(metadata)),
+        });
+    }
+    None
+}
+
+fn serialized_output_content(value: &Value) -> CodexOutputContent<'static> {
+    CodexOutputContent {
+        text: Cow::Owned(serde_json::to_string(value).unwrap_or_else(|_| value.to_string())),
+        metadata: None,
     }
 }
 
@@ -172,5 +253,49 @@ fn codex_output_exit_code(value: &Value) -> Option<i32> {
         Value::Array(items) => items.iter().find_map(codex_output_exit_code),
         Value::String(text) => codex_exit_code(text),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn output_content_keeps_exact_text_once_and_retains_block_metadata() {
+        let value = json!({
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second", "annotations": {"audience": ["user"]}}
+            ],
+            "isError": false,
+            "_meta": {"surface": "browser"}
+        });
+
+        let projected = codex_output_content(&value);
+        assert_eq!(projected.text, "first\nsecond");
+        let metadata = projected.metadata.unwrap();
+        assert_eq!(metadata["content"][0]["type"], "text");
+        assert_eq!(metadata["content"][1]["annotations"]["audience"][0], "user");
+        assert_eq!(metadata["isError"], false);
+        assert_eq!(metadata["_meta"]["surface"], "browser");
+        assert!(!serde_json::to_string(&metadata).unwrap().contains("first"));
+        assert!(!serde_json::to_string(&metadata).unwrap().contains("second"));
+    }
+
+    #[test]
+    fn unknown_mixed_content_is_serialized_completely_without_a_second_copy() {
+        let value = json!({
+            "content": [
+                {"type": "text", "text": "caption"},
+                {"type": "image", "mimeType": "image/png", "data": "complete-image-data"}
+            ],
+            "isError": false
+        });
+
+        let projected = codex_output_content(&value);
+        assert!(projected.text.contains("caption"));
+        assert!(projected.text.contains("complete-image-data"));
+        assert_eq!(projected.metadata.unwrap()["isError"], false);
     }
 }

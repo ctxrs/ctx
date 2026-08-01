@@ -14,7 +14,9 @@ pub(crate) use retention::{
 };
 #[cfg(test)]
 pub(crate) use tool::codex_tool_output_outcome;
-pub(crate) use tool::{codex_result_content, codex_result_value, CodexToolCallContext};
+pub(crate) use tool::{
+    codex_output_content, codex_result_content, codex_result_value, CodexToolCallContext,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CodexNativeEvent {

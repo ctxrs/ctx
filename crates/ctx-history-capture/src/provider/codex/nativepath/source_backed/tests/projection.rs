@@ -152,11 +152,13 @@ fn codex_exact_commit_result_publishes_scoped_outcome_and_complete_raw_output() 
     assert_eq!(outcome.linkage.result_call_id, "commit-call");
     assert_eq!(outcome.linkage.origin_event_sequence, 1);
     let structured = core.content.structured_content.as_ref().unwrap();
-    assert!(
-        structured["provider_content"]["provider_native_tool_result"]["result"]
-            .as_str()
-            .unwrap()
-            .contains(oid)
+    assert_eq!(
+        structured["provider_content"]["provider_native_tool_result"]["result_content_location"],
+        "normalized_body"
+    );
+    assert_eq!(
+        structured["provider_content"]["provider_native_tool_result"]["result_content_complete"],
+        true
     );
     assert!(core
         .content
@@ -169,7 +171,7 @@ fn codex_exact_commit_result_publishes_scoped_outcome_and_complete_raw_output() 
             ["raw_output_retained"],
         false
     );
-    assert!(serde_json::to_string(structured).unwrap().contains(oid));
+    assert!(!serde_json::to_string(structured).unwrap().contains(oid));
 }
 
 #[test]
@@ -467,8 +469,8 @@ fn codex_provider_identity_stays_complete_while_conflicting_route_abstains() {
     );
     assert_eq!(
         core.content.structured_content.as_ref().unwrap()["provider_content"]
-            ["provider_native_tool_result"]["result"],
-        "https://github.com/other/repository/pull/9"
+            ["provider_native_tool_result"]["result_content_location"],
+        "normalized_body"
     );
     assert_eq!(core.repository_bindings.len(), 1);
     assert_eq!(
@@ -1068,9 +1070,12 @@ fn indexed_core_keeps_over_16k_message_tool_arguments_and_successful_result() {
         result_core.content.normalized_body.as_deref(),
         Some(full_result.as_str())
     );
+    let structured_result = result_core.content.structured_content.as_ref().unwrap();
     assert_eq!(
-        result_core.content.structured_content.as_ref().unwrap()["provider_native_tool_result"]
-            ["result"],
-        full_result
+        structured_result["provider_native_tool_result"]["result_content_location"],
+        "normalized_body"
     );
+    assert!(!serde_json::to_string(structured_result)
+        .unwrap()
+        .contains(result_tail));
 }
