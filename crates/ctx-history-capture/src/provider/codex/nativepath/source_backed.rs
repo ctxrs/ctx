@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
-        mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
+        mpsc::{self, Receiver, SyncSender},
         Arc,
     },
     thread,
@@ -67,7 +67,6 @@ const CODEX_EXPLICIT_INVENTORY_REVISION_KIND: &str = "codex-explicit-session-inv
 const CODEX_EXPLICIT_DISCOVERY_REVISION: &str = "codex-explicit-session-file-v1";
 const CODEX_EXPLICIT_INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx/codex-explicit-session-inventory/v1\0";
 const MAX_CODEX_SCANNER_WORKERS: usize = 16;
-const COLD_LANE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Error)]
 pub enum CodexSourceBackedErrorV0 {

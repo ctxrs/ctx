@@ -405,6 +405,7 @@ fn source_backed_incremental_mixed_run_parallelizes_changed_leaves() {
         &index,
         ColdParallelOptionsV0 {
             scanner_workers: Some(4),
+            scanner_rendezvous: Some(2),
             ..ColdParallelOptionsV0::default()
         },
     )
