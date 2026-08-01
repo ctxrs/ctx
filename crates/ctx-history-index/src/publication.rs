@@ -3,9 +3,9 @@ mod manifest;
 mod verification;
 
 pub(crate) use generation::{
-    create_candidate_generation, load_active_generation_pointer, open_slot_index,
-    publish_active_generation_pointer, reclaim_inactive_generation_directories, sync_generation,
-    ActiveGenerationPointer, GenerationSlot, INDEX_GENERATIONS_DIRECTORY,
+    create_candidate_generation, lexical_index_settings, load_active_generation_pointer,
+    open_slot_index, publish_active_generation_pointer, reclaim_inactive_generation_directories,
+    sync_generation, ActiveGenerationPointer, GenerationSlot, INDEX_GENERATIONS_DIRECTORY,
 };
 #[cfg(test)]
 pub(crate) use manifest::manifest_path;

@@ -268,10 +268,8 @@ impl GenerationWriter {
             DurableMmapDirectory::open(candidate_path).map_err(tantivy::TantivyError::from)?;
         let index = Index::open(directory)?;
         validate_schema(&index.schema())?;
-        if index.settings() != &tantivy::IndexSettings::default() {
-            return Err(IndexError::WriterInvariant(
-                "candidate index settings do not match ctx defaults",
-            ));
+        if index.settings() != &publication::lexical_index_settings() {
+            return Err(IndexError::IndexSettingsMismatch(LEXICAL_SCHEMA_VERSION));
         }
         let metas = index.load_metas()?;
         if payload_generation_id(&metas)?.as_deref() != Some(generation_id) {
