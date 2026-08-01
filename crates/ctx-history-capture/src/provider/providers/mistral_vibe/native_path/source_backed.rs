@@ -524,6 +524,19 @@ fn mistral_vibe_output_linkage(value: &Value, output: OutputClassification) -> R
     }))
 }
 
+fn provider_native_event_id(value: &Value) -> Option<String> {
+    value
+        .get("message_id")
+        .or_else(|| value.get("tool_call_id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn contract(error: impl std::fmt::Display) -> CaptureError {
+    CaptureError::InvalidPayload(error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,17 +619,4 @@ mod tests {
         .unwrap();
         assert!(core_record(&source, &binding, JsonlRecordRef::for_test(&bytes, 2)).is_err());
     }
-}
-
-fn provider_native_event_id(value: &Value) -> Option<String> {
-    value
-        .get("message_id")
-        .or_else(|| value.get("tool_call_id"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_owned)
-}
-
-fn contract(error: impl std::fmt::Display) -> CaptureError {
-    CaptureError::InvalidPayload(error.to_string())
 }
