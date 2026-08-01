@@ -142,6 +142,14 @@ fn query(data_root: &Path, sql: &str) -> Vec<Vec<RawSqlValue>> {
         .rows
 }
 
+fn query_projection(data_root: &Path, sql: &str) -> Vec<Vec<RawSqlValue>> {
+    SourceBackedRelationalProjection::open_read_only(sql_compatibility_path(data_root))
+        .unwrap()
+        .raw_sql_query(sql, RawSqlOptions::default())
+        .unwrap()
+        .rows
+}
+
 fn sequence_value(value: u64) -> RawSqlValue {
     RawSqlValue::Text {
         value: format!("{value:020}"),
@@ -185,7 +193,17 @@ fn committed_generation_for(data_root: &Path, generation_id: &str) -> CommittedC
     committed_generation(&index).unwrap()
 }
 
-fn build_candidate(
+fn force_materializer_rebuild(data_root: &Path) {
+    let connection = rusqlite::Connection::open(sql_compatibility_path(data_root)).unwrap();
+    connection
+        .execute(
+            "UPDATE core_relational_state SET active_materializer_revision = 0",
+            [],
+        )
+        .unwrap();
+}
+
+fn build_rebuild_candidate(
     data_root: &Path,
     generation_id: &str,
 ) -> (
@@ -198,30 +216,22 @@ fn build_candidate(
     assert_eq!(index.generation_id(), generation_id);
     let generation = committed_generation(&index).unwrap();
     let destination = sql_compatibility_path(data_root);
-    let PreparedProjection::Candidate {
+    let PreparedProjection::RebuildCandidate {
         mut projection,
         path,
-    } = prepare_disposable_projection(&destination, &generation).unwrap()
+    } = prepare_projection(&destination, &generation).unwrap()
     else {
-        panic!("test generation unexpectedly needed no relational work");
+        panic!("test generation unexpectedly did not require a relational rebuild");
     };
     let plan = projection.plan_generation(&generation).unwrap();
-    let (rebuild, selection) = match &plan {
-        RelationalProjectionPlan::Rebuild => (true, RelationalSourceSelection::All),
-        RelationalProjectionPlan::CatchUp { changed_source_ids } => (
-            false,
-            RelationalSourceSelection::Changed(changed_source_ids),
-        ),
-        RelationalProjectionPlan::NoOp(_) => panic!("candidate unexpectedly became a no-op"),
-    };
-    let records =
-        relational_record_stream(&index, selection, &generation, MAX_SOURCE_EVENT_PAGE_ITEMS);
-    let receipt = if rebuild {
-        projection.rebuild_stream(&generation, records)
-    } else {
-        projection.catch_up_stream(&generation, records)
-    }
-    .unwrap();
+    assert_eq!(plan, RelationalProjectionPlan::Rebuild);
+    let records = relational_record_stream(
+        &index,
+        RelationalSourceSelection::All,
+        &generation,
+        MAX_SOURCE_EVENT_PAGE_ITEMS,
+    );
+    let receipt = projection.rebuild_stream(&generation, records).unwrap();
     (projection, path, generation, receipt)
 }
 
@@ -261,37 +271,209 @@ fn first_publish_seals_syncs_and_reopens_exact_generation() {
 }
 
 #[test]
-fn replace_existing_projection_publishes_only_the_new_generation() {
+fn live_catch_up_appends_rewrites_and_deletes_without_touching_a_candidate() {
     let temp = tempfile::tempdir().unwrap();
     let source = source();
-    let provider = temp.path().join("replace-existing.jsonl");
+    let provider = temp.path().join("live-catch-up.jsonl");
     let first_generation =
         replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
     run_after_core_publication(temp.path(), &first_generation).unwrap();
     let destination = sql_compatibility_path(temp.path());
-    let first_bytes = fs::read(&destination).unwrap();
+    let candidate = candidate_projection_path(&destination);
+    let candidate_sentinel = b"candidate-must-remain-untouched-on-live-catch-up";
+    fs::write(&candidate, candidate_sentinel).unwrap();
+    assert!(fs::metadata(&destination).unwrap().len() > candidate_sentinel.len() as u64);
 
-    let replacement_generation =
-        replace_generation(temp.path(), &source, 2, vec![record(&source, 2, &provider)]);
-    let run = run_after_core_publication(temp.path(), &replacement_generation).unwrap();
+    let appended_generation = replace_generation(
+        temp.path(),
+        &source,
+        2,
+        vec![record(&source, 1, &provider), record(&source, 2, &provider)],
+    );
+    let append = run_after_core_publication(temp.path(), &appended_generation).unwrap();
 
-    assert!(run.did_work);
-    assert_ne!(fs::read(&destination).unwrap(), first_bytes);
-    let metadata = SourceBackedRelationalProjection::open_read_only(&destination)
-        .unwrap()
-        .metadata()
-        .unwrap();
+    assert!(append.did_work);
+    assert_eq!(fs::read(&candidate).unwrap(), candidate_sentinel);
+    let metadata = projection_metadata(temp.path()).unwrap();
     assert_eq!(
         metadata.active_core_generation_id.as_deref(),
-        Some(replacement_generation.as_str())
+        Some(appended_generation.as_str())
     );
     assert_eq!(metadata.build_generation, 2);
     assert_eq!(
-        query(temp.path(), "SELECT event_seq FROM ctx_events"),
-        vec![vec![sequence_value(2)]]
+        query(
+            temp.path(),
+            "SELECT event_seq FROM ctx_events ORDER BY event_seq",
+        ),
+        vec![vec![sequence_value(1)], vec![sequence_value(2)]]
     );
-    assert!(!candidate_projection_path(&destination).exists());
-    assert_no_sqlite_sidecars(&destination);
+
+    let rewritten_generation =
+        replace_generation(temp.path(), &source, 3, vec![record(&source, 3, &provider)]);
+    let rewrite = run_after_core_publication(temp.path(), &rewritten_generation).unwrap();
+
+    assert!(rewrite.did_work);
+    assert_eq!(fs::read(&candidate).unwrap(), candidate_sentinel);
+    let metadata = projection_metadata(temp.path()).unwrap();
+    assert_eq!(
+        metadata.active_core_generation_id.as_deref(),
+        Some(rewritten_generation.as_str())
+    );
+    assert_eq!(metadata.build_generation, 3);
+    assert_eq!(
+        query(
+            temp.path(),
+            "SELECT event_seq FROM ctx_events ORDER BY event_seq",
+        ),
+        vec![vec![sequence_value(3)]]
+    );
+
+    let deleted_generation = delete_generation(temp.path(), &source);
+    let delete = run_after_core_publication(temp.path(), &deleted_generation).unwrap();
+
+    assert!(delete.did_work);
+    assert_eq!(fs::read(&candidate).unwrap(), candidate_sentinel);
+    let metadata = projection_metadata(temp.path()).unwrap();
+    assert_eq!(
+        metadata.active_core_generation_id.as_deref(),
+        Some(deleted_generation.as_str())
+    );
+    assert_eq!(metadata.build_generation, 4);
+    assert_eq!(metadata.event_count, 0);
+
+    let noop = run_after_core_publication(temp.path(), &deleted_generation).unwrap();
+
+    assert!(!noop.did_work);
+    assert_eq!(
+        projection_metadata(temp.path()).unwrap().build_generation,
+        4
+    );
+    assert_eq!(fs::read(&candidate).unwrap(), candidate_sentinel);
+}
+
+#[test]
+fn live_catch_up_record_error_rolls_back_partial_rows_and_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("live-catch-up-error.jsonl");
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    let destination = sql_compatibility_path(temp.path());
+    let candidate = candidate_projection_path(&destination);
+    let target_generation = replace_generation(
+        temp.path(),
+        &source,
+        2,
+        vec![record(&source, 1, &provider), record(&source, 2, &provider)],
+    );
+    let index = VerifiedIndex::open(source_backed_index_root(temp.path())).unwrap();
+    let generation = committed_generation(&index).unwrap();
+    assert_eq!(generation.generation_id, target_generation);
+    let PreparedProjection::LiveCatchUp(mut projection) =
+        prepare_projection(&destination, &generation).unwrap()
+    else {
+        panic!("incremental generation did not select live catch-up");
+    };
+    let RelationalProjectionPlan::CatchUp { changed_source_ids } =
+        projection.plan_generation(&generation).unwrap()
+    else {
+        panic!("live projection did not retain its catch-up plan");
+    };
+    let mut core_records = 0;
+    let records = relational_record_stream(
+        &index,
+        RelationalSourceSelection::Changed(&changed_source_ids),
+        &generation,
+        MAX_SOURCE_EVENT_PAGE_ITEMS,
+    )
+    .map(|record| {
+        let record = record?;
+        if matches!(&record, RelationalProjectionRecord::CoreRecord(_)) {
+            core_records += 1;
+            if core_records == 2 {
+                return Err(RelationalProjectionError::InvalidRecord(
+                    "injected Core stream interruption before commit".to_owned(),
+                ));
+            }
+        }
+        Ok(record)
+    });
+
+    let error = projection
+        .catch_up_stream(&generation, records)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("injected Core stream interruption"));
+    drop(projection);
+
+    let metadata = projection_metadata(temp.path()).unwrap();
+    assert_eq!(metadata.status, RelationalProjectionStatus::Behind);
+    assert_eq!(
+        metadata.active_core_generation_id.as_deref(),
+        Some(first_generation.as_str())
+    );
+    assert_eq!(
+        metadata.target_core_generation_id.as_deref(),
+        Some(target_generation.as_str())
+    );
+    assert_eq!(metadata.build_generation, 1);
+    assert_eq!(
+        query_projection(temp.path(), "SELECT event_seq FROM ctx_events"),
+        vec![vec![sequence_value(1)]]
+    );
+    assert!(!candidate.exists());
+
+    let retry = run_after_core_publication(temp.path(), &target_generation).unwrap();
+    assert!(retry.did_work);
+    assert_eq!(
+        query(
+            temp.path(),
+            "SELECT event_seq FROM ctx_events ORDER BY event_seq",
+        ),
+        vec![vec![sequence_value(1)], vec![sequence_value(2)]]
+    );
+}
+
+#[test]
+fn mismatched_receipt_cannot_publish_completed_status_or_advance_live_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source();
+    let provider = temp.path().join("receipt-mismatch.jsonl");
+    let first_generation =
+        replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
+    run_after_core_publication(temp.path(), &first_generation).unwrap();
+    let first_metadata = projection_metadata(temp.path()).unwrap();
+    let first_committed = committed_generation_for(temp.path(), &first_generation);
+    let stale_receipt = projection_receipt(&first_committed, &first_metadata);
+    let target_generation =
+        replace_generation(temp.path(), &source, 2, vec![record(&source, 2, &provider)]);
+
+    let run = run_with(temp.path(), &target_generation, move |_, _| {
+        Ok(ProjectionOutcome {
+            receipt: stale_receipt,
+            did_work: true,
+        })
+    })
+    .unwrap();
+
+    assert!(!run.did_work);
+    assert_eq!(run.status["status"], "error");
+    assert_eq!(
+        run.status["error_code"],
+        "source_relational_receipt_mismatch"
+    );
+    let metadata = projection_metadata(temp.path()).unwrap();
+    assert_eq!(
+        metadata.active_core_generation_id.as_deref(),
+        Some(first_generation.as_str())
+    );
+    assert_eq!(metadata.build_generation, first_metadata.build_generation);
+    assert_eq!(
+        query_projection(temp.path(), "SELECT event_seq FROM ctx_events"),
+        vec![vec![sequence_value(1)]]
+    );
 }
 
 #[test]
@@ -338,6 +520,7 @@ fn replacement_removes_stale_destination_and_candidate_sidecars() {
     let first_generation =
         replace_generation(temp.path(), &source, 1, vec![record(&source, 1, &provider)]);
     run_after_core_publication(temp.path(), &first_generation).unwrap();
+    force_materializer_rebuild(temp.path());
     let destination = sql_compatibility_path(temp.path());
     let candidate = candidate_projection_path(&destination);
     fs::write(sqlite_sidecar_path(&destination, "-wal"), b"stale wal").unwrap();
@@ -384,8 +567,9 @@ fn prepublication_replacement_failure_keeps_prior_projection_visible() {
     let destination = sql_compatibility_path(temp.path());
     let replacement_generation =
         replace_generation(temp.path(), &source, 2, vec![record(&source, 2, &provider)]);
+    force_materializer_rebuild(temp.path());
     let (projection, candidate, generation, receipt) =
-        build_candidate(temp.path(), &replacement_generation);
+        build_rebuild_candidate(temp.path(), &replacement_generation);
 
     let error = finish_candidate_publication_with(
         projection,
@@ -431,8 +615,9 @@ fn published_projection_is_reopened_and_wrong_generation_is_rejected() {
     run_after_core_publication(temp.path(), &first_generation).unwrap();
     let expected_generation =
         replace_generation(temp.path(), &source, 2, vec![record(&source, 2, &provider)]);
+    force_materializer_rebuild(temp.path());
     let (projection, candidate, generation, receipt) =
-        build_candidate(temp.path(), &expected_generation);
+        build_rebuild_candidate(temp.path(), &expected_generation);
     let destination = sql_compatibility_path(temp.path());
 
     let impostor_root = tempfile::tempdir().unwrap();
@@ -609,15 +794,7 @@ fn materializer_revision_mismatch_rebuilds_from_the_same_pinned_core_generation(
         vec![record(&source, 1, &provider_file)],
     );
     run_after_core_publication(temp.path(), &generation).unwrap();
-    let path = sql_compatibility_path(temp.path());
-    let connection = rusqlite::Connection::open(&path).unwrap();
-    connection
-        .execute(
-            "UPDATE core_relational_state SET active_materializer_revision = 0",
-            [],
-        )
-        .unwrap();
-    drop(connection);
+    force_materializer_rebuild(temp.path());
 
     assert!(generation_needs_catch_up(temp.path(), &generation));
     let rebuilt = run_after_core_publication(temp.path(), &generation).unwrap();
