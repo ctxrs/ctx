@@ -106,7 +106,7 @@ impl CodexSourceBackedRowV0 {
                     )
             });
         let repository_result_bytes = self.repository_result.as_ref().map_or(0, |evidence| {
-            evidence.command.capacity()
+            evidence.command.as_ref().map_or(0, String::capacity)
                 + evidence
                     .declared_workdir
                     .as_ref()
@@ -259,13 +259,14 @@ pub(super) fn build_source_backed_event_row(
     {
         context.tool_name.clone_from(&evidence.tool_name);
         context.exact_command.clone_from(&evidence.command);
+        context.command_too_large = evidence.command_too_large;
         context
             .declared_workdir
             .clone_from(&evidence.declared_workdir);
         context
             .continuation_cell_id
             .clone_from(&evidence.continuation_cell_id);
-        if evidence.command.is_some() {
+        if evidence.command.is_some() || evidence.command_too_large {
             context.origin_call_id = Some(call_id.clone());
             context.origin_event_sequence = Some(raw_ordinal);
         }

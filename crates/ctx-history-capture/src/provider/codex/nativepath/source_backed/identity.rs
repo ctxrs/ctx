@@ -260,7 +260,10 @@ pub(super) fn codex_core_record(
         .and_then(|evidence| evidence.declared_workdir.clone());
     let result_command = repository_result
         .as_ref()
-        .map(|evidence| evidence.command.clone());
+        .and_then(|evidence| evidence.command.clone());
+    let result_command_too_large = repository_result
+        .as_ref()
+        .is_some_and(|evidence| evidence.command_too_large);
     if let Some(evidence) = repository_result {
         native_tool_activities.push(evidence.structured_content.clone());
         provider_native_repository_aliases = evidence.provider_native_repository_aliases;
@@ -274,9 +277,15 @@ pub(super) fn codex_core_record(
         // Codex result records contribute a credential-free forge identity
         // only when an exact structured PR result carries one.
         provider_native_repository_aliases,
+        provider_native_context_ambiguous: false,
         session_cwd: session_cwd.clone(),
         declared_tool_workdir: result_declared_workdir,
         command: result_command,
+        command_disposition: if result_command_too_large {
+            crate::repository_attribution::CommandEvidenceDisposition::CommandTooLarge
+        } else {
+            crate::repository_attribution::CommandEvidenceDisposition::Analyze
+        },
         structured_content: None,
         file_observations: repository_files,
         vcs_observations: Vec::new(),
@@ -291,6 +300,11 @@ pub(super) fn codex_core_record(
             session_cwd: session_cwd.clone(),
             declared_tool_workdir: evidence.declared_workdir,
             command: evidence.command,
+            command_disposition: if evidence.command_too_large {
+                crate::repository_attribution::CommandEvidenceDisposition::CommandTooLarge
+            } else {
+                crate::repository_attribution::CommandEvidenceDisposition::Analyze
+            },
             structured_content: None,
             file_observations: evidence.file_observations,
             ..crate::repository_attribution::AttributionInput::default()

@@ -438,6 +438,7 @@ enum GeminiSelectedContent {
 #[derive(Debug, Default)]
 pub(super) struct GeminiRepositoryArgs {
     command: Option<String>,
+    command_too_large: bool,
     declared_workdir: Option<String>,
     file_paths: Vec<String>,
     ambiguous_native_fields: bool,
@@ -448,6 +449,7 @@ struct ProbedGeminiOutput {
     call_id: Option<String>,
     tool_name: Option<String>,
     command: Option<String>,
+    command_too_large: bool,
     declared_workdir: Option<String>,
     file_paths: Vec<String>,
     ambiguous_native_fields: bool,
@@ -486,6 +488,16 @@ struct GeminiRawString {
 impl GeminiRawString {
     fn exact(self) -> Option<String> {
         (!self.truncated).then_some(self.retained)
+    }
+
+    fn bounded_command(self) -> (Option<String>, bool) {
+        let too_large = self.truncated
+            || self.retained.len() > crate::repository_attribution::MAX_COMMAND_BYTES;
+        if too_large {
+            (None, true)
+        } else {
+            (Some(self.retained), false)
+        }
     }
 }
 

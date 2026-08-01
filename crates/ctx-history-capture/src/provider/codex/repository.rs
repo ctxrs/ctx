@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::events::codex_tool_name;
-use crate::repository_attribution::UnscopedFileObservation;
+use crate::repository_attribution::{UnscopedFileObservation, MAX_COMMAND_BYTES};
 
 #[path = "repository/outcomes.rs"]
 mod outcomes;
@@ -13,7 +13,6 @@ mod outcomes;
 pub(crate) use outcomes::{repository_result_evidence, CodexRepositoryResultEvidence};
 
 const MAX_STRUCTURED_ARGUMENT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 const MAX_WORKDIR_BYTES: usize = 16 * 1024;
 const MAX_CALL_ID_BYTES: usize = 1024;
 const MAX_CONTINUATION_CELL_ID_BYTES: usize = 1024;
@@ -27,6 +26,7 @@ const CODEX_COMMAND_DOMAIN: &[u8] = b"ctx/codex-nativepath/exact-command/v1\0";
 pub(crate) struct CodexRepositoryToolEvidence {
     pub(crate) tool_name: String,
     pub(crate) command: Option<String>,
+    pub(crate) command_too_large: bool,
     pub(crate) declared_workdir: Option<String>,
     pub(crate) continuation_cell_id: Option<String>,
     pub(crate) file_observations: Vec<UnscopedFileObservation>,
@@ -68,36 +68,44 @@ fn native_tool_evidence(payload: &Value, tool_name: String) -> Option<CodexRepos
     let arguments = exact_one_of(payload, "arguments", "input")?;
     let arguments = decode_top_level_argument_object(arguments)?;
 
-    let (command, declared_workdir, continuation_cell_id, schema, command_sha256) =
-        if tool_name == "exec_command" {
-            let command =
-                bounded_literal(arguments.get("cmd")?.as_str()?, MAX_COMMAND_BYTES, |_| true)?;
-            let declared_workdir = match arguments.get("workdir") {
-                Some(value) => Some(bounded_literal(value.as_str()?, MAX_WORKDIR_BYTES, |_| {
-                    true
-                })?),
-                None => None,
-            };
-            let command_sha256 = digest_hex(CODEX_COMMAND_DOMAIN, command.as_bytes());
-            (
-                Some(command),
-                declared_workdir,
-                None,
-                "codex_exec_command_args_v1",
-                Some(command_sha256),
-            )
-        } else {
-            let cell_id = bounded_literal(
-                arguments.get("cell_id")?.as_str()?,
-                MAX_CONTINUATION_CELL_ID_BYTES,
-                control_identifier,
-            )?;
-            (None, None, Some(cell_id), "codex_wait_args_v1", None)
+    let (
+        command,
+        command_too_large,
+        declared_workdir,
+        continuation_cell_id,
+        schema,
+        command_sha256,
+    ) = if tool_name == "exec_command" {
+        let raw_command = arguments.get("cmd")?.as_str()?;
+        let (command, command_too_large) = bounded_command(raw_command)?;
+        let declared_workdir = match arguments.get("workdir") {
+            Some(value) => Some(bounded_literal(value.as_str()?, MAX_WORKDIR_BYTES, |_| {
+                true
+            })?),
+            None => None,
         };
+        let command_sha256 = digest_hex(CODEX_COMMAND_DOMAIN, raw_command.trim().as_bytes());
+        (
+            command,
+            command_too_large,
+            declared_workdir,
+            None,
+            "codex_exec_command_args_v1",
+            Some(command_sha256),
+        )
+    } else {
+        let cell_id = bounded_literal(
+            arguments.get("cell_id")?.as_str()?,
+            MAX_CONTINUATION_CELL_ID_BYTES,
+            control_identifier,
+        )?;
+        (None, false, None, Some(cell_id), "codex_wait_args_v1", None)
+    };
 
     Some(CodexRepositoryToolEvidence {
         tool_name: tool_name.clone(),
         command,
+        command_too_large,
         declared_workdir,
         continuation_cell_id,
         file_observations: Vec::new(),
@@ -108,6 +116,7 @@ fn native_tool_evidence(payload: &Value, tool_name: String) -> Option<CodexRepos
                 "call_id": call_id,
                 "argument_schema": schema,
                 "command_sha256": command_sha256,
+                "command_evidence": if command_too_large { "too_large" } else { "exact" },
                 "raw_arguments_retained": false,
             }
         }),
@@ -129,8 +138,8 @@ fn nested_exec_tool_evidence(payload: &Value) -> Option<Vec<CodexRepositoryToolE
     for (index, call) in calls.into_iter().enumerate() {
         match call {
             StaticNestedToolCall::ExecCommand(arguments) => {
-                let command =
-                    bounded_literal(arguments.get("cmd")?.as_str()?, MAX_COMMAND_BYTES, |_| true)?;
+                let raw_command = arguments.get("cmd")?.as_str()?;
+                let (command, command_too_large) = bounded_command(raw_command)?;
                 let declared_workdir = match arguments.get("workdir") {
                     Some(value) => {
                         let value = bounded_literal(value.as_str()?, MAX_WORKDIR_BYTES, |_| true)?;
@@ -138,10 +147,12 @@ fn nested_exec_tool_evidence(payload: &Value) -> Option<Vec<CodexRepositoryToolE
                     }
                     None => None,
                 };
-                let command_sha256 = digest_hex(CODEX_COMMAND_DOMAIN, command.as_bytes());
+                let command_sha256 =
+                    digest_hex(CODEX_COMMAND_DOMAIN, raw_command.trim().as_bytes());
                 evidence.push(CodexRepositoryToolEvidence {
                     tool_name: "exec_command".to_owned(),
-                    command: Some(command),
+                    command,
+                    command_too_large,
                     declared_workdir,
                     continuation_cell_id: None,
                     file_observations: Vec::new(),
@@ -154,6 +165,7 @@ fn nested_exec_tool_evidence(payload: &Value) -> Option<Vec<CodexRepositoryToolE
                             "nested_activity_index": index,
                             "argument_schema": "codex_nested_exec_command_literal_v2",
                             "command_sha256": command_sha256,
+                            "command_evidence": if command_too_large { "too_large" } else { "exact" },
                             "raw_arguments_retained": false,
                         }
                     }),
@@ -186,6 +198,7 @@ fn nested_exec_tool_evidence(payload: &Value) -> Option<Vec<CodexRepositoryToolE
                 evidence.push(CodexRepositoryToolEvidence {
                     tool_name: "apply_patch".to_owned(),
                     command: None,
+                    command_too_large: false,
                     declared_workdir: None,
                     continuation_cell_id: None,
                     file_observations: patch_paths
@@ -593,6 +606,17 @@ fn bounded_literal(value: &str, maximum: usize, predicate: impl Fn(u8) -> bool) 
     .then(|| value.to_owned())
 }
 
+fn bounded_command(value: &str) -> Option<(Option<String>, bool)> {
+    let value = value.trim();
+    if value.is_empty() || value.contains('\0') {
+        return None;
+    }
+    if value.len() > MAX_COMMAND_BYTES {
+        return Some((None, true));
+    }
+    Some((Some(value.to_owned()), false))
+}
+
 fn control_identifier(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
 }
@@ -646,10 +670,11 @@ fn digest_hex(domain: &[u8], value: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ctx_history_core::RepositoryFileObservationKind;
+    use ctx_history_core::{RepositoryAbstentionReason, RepositoryFileObservationKind};
     use serde_json::json;
 
     use super::repository_tool_evidence;
+    use crate::repository_attribution::{attribute, AttributionInput, CommandEvidenceDisposition};
 
     #[test]
     fn accepts_only_one_top_level_native_argument_decode_and_redacts_it() {
@@ -674,6 +699,38 @@ mod tests {
             evidence.structured_content["provider_native_tool"]["raw_arguments_retained"],
             false
         );
+    }
+
+    #[test]
+    fn oversized_native_command_retains_typed_abstention_and_blocks_cwd_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("/usr/bin/git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .status()
+            .unwrap()
+            .success());
+        let oversized = "x".repeat(super::MAX_COMMAND_BYTES + 1);
+        let payload = json!({
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "oversized-command",
+            "arguments": json!({"cmd": oversized}).to_string(),
+        });
+        let evidence = repository_tool_evidence(&payload).remove(0);
+        assert!(evidence.command.is_none());
+        assert!(evidence.command_too_large);
+
+        let annotation = attribute(AttributionInput {
+            session_cwd: Some(temp.path().to_string_lossy().into_owned()),
+            command: evidence.command,
+            command_disposition: CommandEvidenceDisposition::CommandTooLarge,
+            ..AttributionInput::default()
+        });
+        assert!(annotation.repository_bindings.is_empty());
+        assert!(annotation.repository_abstentions.iter().any(|abstention| {
+            abstention.reason == RepositoryAbstentionReason::CommandTooLarge
+        }));
     }
 
     #[test]

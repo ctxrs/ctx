@@ -217,13 +217,14 @@ pub(super) fn decode_pending_tool_authority(
         context.tool_name.clone_from(&evidence.tool_name);
         context.session_cwd = owner.cwd.clone();
         context.exact_command.clone_from(&evidence.command);
+        context.command_too_large = evidence.command_too_large;
         context
             .declared_workdir
             .clone_from(&evidence.declared_workdir);
         context
             .continuation_cell_id
             .clone_from(&evidence.continuation_cell_id);
-        if context.exact_command.is_some() {
+        if context.exact_command.is_some() || context.command_too_large {
             context.origin_call_id = Some(call_id.clone());
             context.origin_event_sequence = Some(authority.raw_ordinal);
         }
@@ -419,7 +420,9 @@ pub(super) fn validate_checkpoint_source(
                         "pending continuation origin context is unavailable",
                     ));
                 };
-                if origin.exact_command.is_none() || origin.continuation_cell_id.is_some() {
+                if (origin.exact_command.is_none() && !origin.command_too_large)
+                    || origin.continuation_cell_id.is_some()
+                {
                     return Err(invalid_checkpoint_proof(
                         "pending continuation authority is not an exact origin command",
                     ));
@@ -460,6 +463,7 @@ pub(super) fn validate_checkpoint_source(
                 invalid_checkpoint_proof("pending continuation wait context is unavailable")
             })?;
             context.exact_command = origin.exact_command;
+            context.command_too_large = origin.command_too_large;
             context.session_cwd = origin.session_cwd;
             context.declared_workdir = origin.declared_workdir;
             context.origin_call_id = Some(origin_call_id.clone());

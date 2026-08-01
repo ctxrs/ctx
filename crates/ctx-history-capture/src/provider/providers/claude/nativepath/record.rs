@@ -209,10 +209,12 @@ impl SafeContent {
                 if represented_rows >= super::rows::CLAUDE_MAX_RECORD_ROWS {
                     return Err("Claude content exceeds the representable row limit");
                 }
+                let (command, command_too_large) = bounded_command(&block.input);
                 self.calls.push(ToolCallRequest {
                     call_id: block.id,
                     tool_name: block.name.clone(),
-                    command: bounded_input_string(&block.input, &["command"], 1024 * 1024),
+                    command,
+                    command_too_large,
                     declared_workdir: bounded_input_string(
                         &block.input,
                         &["workdir", "cwd"],
@@ -371,6 +373,20 @@ fn bounded_input_string(input: &Value, fields: &[&str], limit: usize) -> Option<
         .find_map(|field| input.get(*field).and_then(Value::as_str))
         .filter(|value| !value.trim().is_empty() && value.len() <= limit)
         .map(str::to_owned)
+}
+
+fn bounded_command(input: &Value) -> (Option<String>, bool) {
+    let Some(value) = input.get("command").and_then(Value::as_str) else {
+        return (None, false);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return (None, false);
+    }
+    if value.len() > crate::repository_attribution::MAX_COMMAND_BYTES {
+        return (None, true);
+    }
+    (Some(value.to_owned()), false)
 }
 
 fn safe_file_touches(input: &Value, tool_name: Option<&str>) -> Vec<ClaudeFileTouch> {

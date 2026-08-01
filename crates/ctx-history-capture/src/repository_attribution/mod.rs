@@ -24,10 +24,10 @@ use git::{
 };
 pub(crate) use outcome::{linked_outcome_evidence, LinkedOutcomeEvidence, LinkedOutcomeInput};
 use scoping::{path_string, scope_files, scope_outcomes, scope_vcs};
-use shell::analyze;
+use shell::{analyze, command_too_large};
 pub(crate) use shell::{
     bounded_outcome_evidence_relevant, bounded_outcome_plan, lexical_absolute,
-    BoundedOutcomeOperation, BoundedOutcomePlan, BoundedOutcomePlanDisposition,
+    BoundedOutcomeOperation, BoundedOutcomePlan, BoundedOutcomePlanDisposition, MAX_COMMAND_BYTES,
 };
 
 const MAX_PROVIDER_NATIVE_IDENTITIES: usize = 16;
@@ -58,6 +58,8 @@ pub(crate) struct AttributionInput {
     pub(crate) session_cwd: Option<String>,
     pub(crate) declared_tool_workdir: Option<String>,
     pub(crate) command: Option<String>,
+    pub(crate) command_disposition: CommandEvidenceDisposition,
+    pub(crate) provider_native_context_ambiguous: bool,
     pub(crate) structured_content: Option<Value>,
     pub(crate) file_observations: Vec<UnscopedFileObservation>,
     pub(crate) vcs_observations: Vec<UnscopedVcsObservation>,
@@ -65,6 +67,13 @@ pub(crate) struct AttributionInput {
     pub(crate) outcome_output_repository_path: Option<String>,
     pub(crate) outcome_observations: Vec<RepositoryOutcomeObservation>,
     pub(crate) outcome_abstentions: Vec<(RepositoryAbstentionReason, &'static str)>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandEvidenceDisposition {
+    #[default]
+    Analyze,
+    CommandTooLarge,
 }
 
 #[derive(Debug, Default)]
@@ -275,6 +284,24 @@ enum ProviderIdentityResolution {
     Abstained,
 }
 
+impl ProviderIdentityResolution {
+    fn was_attempted(&self) -> bool {
+        !matches!(self, Self::Absent)
+    }
+
+    fn binds_all_outcomes(&self, outcomes: &[RepositoryOutcomeObservation]) -> bool {
+        let Self::Binding(binding) = self else {
+            return false;
+        };
+        !outcomes.is_empty()
+            && outcomes.iter().all(|outcome| {
+                outcome.pull_request.as_ref().is_some_and(|pull_request| {
+                    binding.aliases.contains(&pull_request.forge_repository)
+                })
+            })
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn attribute(input: AttributionInput) -> CoreRecordAnnotation {
     RepositoryAttributor::default().attribute(input)
@@ -288,6 +315,7 @@ fn attribute_with_attributor(
         .activity_at_unix_ms
         .unwrap_or(CORE_MISSING_ACTIVITY_TIME_UNIX_MS);
     let mut outcome_observations = input.outcome_observations.clone();
+    let provider_native_context_ambiguous = input.provider_native_context_ambiguous;
     let outcome_operation_repository_path = input.outcome_operation_repository_path.clone();
     let outcome_output_repository_path = input.outcome_output_repository_path.clone();
     let mut annotation = CoreRecordAnnotation {
@@ -361,7 +389,10 @@ fn attribute_with_attributor(
     }
 
     let base = declared_workdir.as_deref().or(session_cwd.as_deref());
-    let command_analysis = analyze(input.command.as_deref(), base);
+    let command_analysis = match input.command_disposition {
+        CommandEvidenceDisposition::Analyze => analyze(input.command.as_deref(), base),
+        CommandEvidenceDisposition::CommandTooLarge => command_too_large(),
+    };
     annotation
         .repository_abstentions
         .extend(
@@ -396,7 +427,12 @@ fn attribute_with_attributor(
             .insert(kind, path_string(&candidate.path));
     }
 
-    if command_analysis.blocks_session_fallback && !outcome_observations.is_empty() {
+    let outcomes_have_provider_binding =
+        provider_identity.binds_all_outcomes(&outcome_observations);
+    if command_analysis.blocks_session_fallback
+        && !outcome_observations.is_empty()
+        && !outcomes_have_provider_binding
+    {
         push_abstention(
             &mut annotation,
             RepositoryEvidenceKind::ProviderNativeResult,
@@ -574,6 +610,8 @@ fn attribute_with_attributor(
     let attempted_specific = input.declared_tool_workdir.is_some()
         || more_specific_command
         || command_analysis.blocks_session_fallback
+        || provider_identity.was_attempted()
+        || provider_native_context_ambiguous
         || !file_inputs.is_empty()
         || !vcs_inputs.is_empty()
         || outcome_operation_path.is_some();
@@ -784,7 +822,7 @@ fn resolve_provider_native_identity(
 
 fn reconcile_provider_identity(
     annotation: &mut CoreRecordAnnotation,
-    certified: &mut Vec<CertifiedCandidate>,
+    certified: &mut [CertifiedCandidate],
     resolution: ProviderIdentityResolution,
 ) {
     let provider = match resolution {
@@ -821,11 +859,9 @@ fn reconcile_provider_identity(
             RepositoryAbstentionReason::ConflictingIdentity,
             "provider_native_identity_does_not_match_local_certificate",
         );
-        certified.clear();
-        // Provider-native logical identity has precedence over a conflicting
-        // local candidate, but it remains useful without local authorization.
-        // Keep that independent binding while downstream outcome association
-        // abstains from inventing a route to it.
+        // Provider-native identity has precedence for its own exact outcome
+        // segment. Other structured activity lanes remain independent and may
+        // certify additional repositories in the same event.
         annotation.repository_bindings.push(*provider);
         return;
     }

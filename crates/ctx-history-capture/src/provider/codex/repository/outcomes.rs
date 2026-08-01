@@ -12,7 +12,8 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodexRepositoryResultEvidence {
-    pub(crate) command: String,
+    pub(crate) command: Option<String>,
+    pub(crate) command_too_large: bool,
     pub(crate) declared_workdir: Option<String>,
     pub(crate) outcome_operation_repository_path: Option<String>,
     pub(crate) outcome_output_repository_path: Option<String>,
@@ -30,7 +31,28 @@ pub(crate) fn repository_result_evidence(
     observed_at_unix_ms: i64,
     result_outcome: &OutputOutcomeMetadata,
 ) -> Option<CodexRepositoryResultEvidence> {
-    let command = context.exact_command.as_deref()?;
+    let command = context.exact_command.as_deref();
+    if command.is_none() {
+        return context
+            .command_too_large
+            .then(|| CodexRepositoryResultEvidence {
+                command: None,
+                command_too_large: true,
+                declared_workdir: context.declared_workdir.clone(),
+                outcome_operation_repository_path: None,
+                outcome_output_repository_path: None,
+                structured_content: result_summary(
+                    context,
+                    result_call_id,
+                    result_record_sha256,
+                    0,
+                ),
+                provider_native_repository_aliases: Vec::new(),
+                outcomes: Vec::new(),
+                abstentions: Vec::new(),
+            });
+    }
+    let command = command?;
     let missing_output = super::repository_result_output(payload).is_none();
     let null_output = Value::Null;
     let output = super::repository_result_output(payload).unwrap_or(&null_output);
@@ -91,7 +113,8 @@ pub(crate) fn repository_result_evidence(
 
     let captured_outcomes = linked.outcomes.len();
     Some(CodexRepositoryResultEvidence {
-        command: command.to_owned(),
+        command: Some(command.to_owned()),
+        command_too_large: false,
         declared_workdir: context.declared_workdir.clone(),
         outcome_operation_repository_path: linked.outcome_operation_repository_path,
         outcome_output_repository_path: linked.outcome_output_repository_path,

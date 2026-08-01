@@ -10,7 +10,8 @@ use ctx_history_core::{
     GitObjectFormat, GitObjectId, RepositoryAbstentionReason, RepositoryAlias, RepositoryAliasKind,
     RepositoryCandidateKind, RepositoryEvidenceKind, RepositoryFileObservationKind,
     RepositoryOutcomeKind, RepositoryOutcomeLinkage, RepositoryOutcomeObservation,
-    RepositoryVcsObservationKind, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    RepositoryPullRequestIdentity, RepositoryVcsObservationKind,
+    CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
 };
 use tempfile::TempDir;
 
@@ -499,6 +500,80 @@ fn opaque_command_suppresses_only_command_and_session_guesses() {
     ));
 }
 
+#[test]
+fn conflicting_provider_identity_preserves_independent_multi_repository_evidence() {
+    let temp = TempDir::new().unwrap();
+    let session = repository(
+        temp.path(),
+        "session",
+        Some("https://github.com/acme/session.git"),
+    );
+    let workdir = repository(
+        temp.path(),
+        "workdir",
+        Some("https://github.com/acme/workdir.git"),
+    );
+    let activity = repository(
+        temp.path(),
+        "activity",
+        Some("https://github.com/acme/activity.git"),
+    );
+    let annotation = attribute(AttributionInput {
+        provider_native_repository_aliases: vec![forge("acme", "provider")],
+        session_cwd: Some(session.to_string_lossy().into_owned()),
+        declared_tool_workdir: Some(workdir.to_string_lossy().into_owned()),
+        command: Some(format!("git -C {} status", workdir.to_string_lossy())),
+        file_observations: vec![UnscopedFileObservation {
+            path: activity.join("tracked.txt").to_string_lossy().into_owned(),
+            prior_path: None,
+            kind: RepositoryFileObservationKind::Modified,
+        }],
+        vcs_observations: vec![UnscopedVcsObservation {
+            path: Some(activity.to_string_lossy().into_owned()),
+            kind: RepositoryVcsObservationKind::Commit,
+            object_id: None,
+            parent_object_ids: Vec::new(),
+            reference: None,
+        }],
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_bindings.len(), 3);
+    assert!(annotation.repository_bindings.iter().any(|binding| {
+        binding.logical_repository_id == "forge:github.com/acme/provider"
+            && binding.local_root_authorization.is_none()
+    }));
+    assert!(annotation.repository_bindings.iter().any(|binding| {
+        binding.logical_repository_id == "forge:github.com/acme/workdir"
+            && binding
+                .evidence
+                .iter()
+                .any(|evidence| evidence.kind == RepositoryEvidenceKind::DeclaredToolWorkdir)
+            && binding.evidence.iter().any(|evidence| {
+                evidence.kind == RepositoryEvidenceKind::CommandSpecificRepositoryPath
+            })
+    }));
+    let activity_binding = annotation
+        .repository_bindings
+        .iter()
+        .find(|binding| binding.logical_repository_id == "forge:github.com/acme/activity")
+        .unwrap();
+    assert_eq!(annotation.repository_file_observations.len(), 1);
+    assert_eq!(annotation.repository_vcs_observations.len(), 1);
+    assert_eq!(
+        annotation.repository_file_observations[0].repository_binding_id,
+        activity_binding.binding_id
+    );
+    assert_eq!(
+        annotation.repository_vcs_observations[0].repository_binding_id,
+        activity_binding.binding_id
+    );
+    assert!(has_reason(
+        &annotation,
+        RepositoryAbstentionReason::ConflictingIdentity
+    ));
+}
+
 fn exact_commit_outcome() -> RepositoryOutcomeObservation {
     RepositoryOutcomeObservation {
         kind: RepositoryOutcomeKind::Commit,
@@ -508,6 +583,29 @@ fn exact_commit_outcome() -> RepositoryOutcomeObservation {
         }],
         replacement_lineage: Vec::new(),
         pull_request: None,
+        observed_at_unix_ms: 1,
+        linkage: RepositoryOutcomeLinkage {
+            provider: "fixture".to_owned(),
+            origin_call_id: "origin".to_owned(),
+            result_call_id: "result".to_owned(),
+            origin_event_sequence: 1,
+            continuation_call_id_sha256: Vec::new(),
+            result_record_sha256: [7; 32],
+        },
+        outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    }
+}
+
+fn exact_pull_request_outcome(alias: RepositoryAlias) -> RepositoryOutcomeObservation {
+    RepositoryOutcomeObservation {
+        kind: RepositoryOutcomeKind::PullRequestCreated,
+        produced_object_ids: Vec::new(),
+        replacement_lineage: Vec::new(),
+        pull_request: Some(RepositoryPullRequestIdentity {
+            forge_repository: alias,
+            number: 42,
+            provider_id: Some("PR_42".to_owned()),
+        }),
         observed_at_unix_ms: 1,
         linkage: RepositoryOutcomeLinkage {
             provider: "fixture".to_owned(),
@@ -594,6 +692,39 @@ fn failed_explicit_outcome_route_never_uses_sole_provider_logical_binding() {
         .is_none());
     assert!(annotation.repository_vcs_observations.is_empty());
     assert!(has_reason(
+        &annotation,
+        RepositoryAbstentionReason::OutcomeRepositoryUnbound
+    ));
+}
+
+#[test]
+fn exact_pull_request_outcome_uses_provider_binding_without_a_live_local_route() {
+    let temp = TempDir::new().unwrap();
+    let missing = temp.path().join("moved-or-absent");
+    let alias = forge("acme", "provider-only");
+    let annotation = attribute(AttributionInput {
+        provider_native_repository_aliases: vec![alias.clone()],
+        command: Some("gh pr create --repo acme/provider-only".to_owned()),
+        outcome_operation_repository_path: Some(missing.to_string_lossy().into_owned()),
+        outcome_output_repository_path: Some(missing.to_string_lossy().into_owned()),
+        outcome_observations: vec![exact_pull_request_outcome(alias)],
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_bindings.len(), 1);
+    assert_eq!(
+        annotation.repository_bindings[0].logical_repository_id,
+        "forge:github.com/acme/provider-only"
+    );
+    assert!(annotation.repository_bindings[0]
+        .local_root_authorization
+        .is_none());
+    assert_eq!(annotation.repository_vcs_observations.len(), 1);
+    assert_eq!(
+        annotation.repository_vcs_observations[0].repository_binding_id,
+        annotation.repository_bindings[0].binding_id
+    );
+    assert!(!has_reason(
         &annotation,
         RepositoryAbstentionReason::OutcomeRepositoryUnbound
     ));
@@ -829,6 +960,34 @@ fn conflicting_or_unbounded_provider_native_identities_abstain() {
     assert!(has_reason(
         &independent,
         RepositoryAbstentionReason::ConflictingIdentity
+    ));
+
+    let no_session_fallback = attribute(AttributionInput {
+        provider_native_repository_aliases: vec![forge("acme", "one"), forge("acme", "two")],
+        session_cwd: Some(repository.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    assert!(no_session_fallback.repository_bindings.is_empty());
+    assert!(has_reason(
+        &no_session_fallback,
+        RepositoryAbstentionReason::ConflictingIdentity
+    ));
+}
+
+#[test]
+fn provider_prebounded_oversized_command_blocks_session_cwd_fallback() {
+    let temp = TempDir::new().unwrap();
+    let repository = repository(temp.path(), "session", None);
+    let annotation = attribute(AttributionInput {
+        session_cwd: Some(repository.to_string_lossy().into_owned()),
+        command_disposition: super::CommandEvidenceDisposition::CommandTooLarge,
+        ..AttributionInput::default()
+    });
+
+    assert!(annotation.repository_bindings.is_empty());
+    assert!(has_reason(
+        &annotation,
+        RepositoryAbstentionReason::CommandTooLarge
     ));
 }
 
