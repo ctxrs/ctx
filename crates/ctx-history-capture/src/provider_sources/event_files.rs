@@ -147,7 +147,6 @@ struct OwnedEventFileGroup {
     ordinal: usize,
     group_key: String,
     leaves: Vec<EventFileLeaf>,
-    leaf_ordinals: BTreeMap<String, usize>,
     observation_digest: [u8; 32],
 }
 
@@ -178,23 +177,12 @@ impl<'inventory> EventFileGroup<'inventory> {
         self.owned().leaves.get(leaf_ordinal)
     }
 
-    pub(crate) fn leaf_ordinal(&self, relative_file_key: &str) -> Option<usize> {
-        self.owned().leaf_ordinals.get(relative_file_key).copied()
-    }
-
     pub(crate) fn observation_digest(&self) -> [u8; 32] {
         self.owned().observation_digest
     }
 
     pub(crate) fn read_leaf_at(&self, leaf_ordinal: usize) -> EventFileInventoryResult<Vec<u8>> {
         self.inventory.read_leaf_at(self.index, leaf_ordinal)
-    }
-
-    pub(crate) fn revalidate_leaves(
-        &self,
-        leaf_ordinals: impl IntoIterator<Item = usize>,
-    ) -> EventFileInventoryResult<()> {
-        self.inventory.revalidate_leaves(self.index, leaf_ordinals)
     }
 }
 
@@ -205,7 +193,6 @@ pub(crate) struct EventFileInventory {
     selected_file: bool,
     root: ProviderSourceRoot,
     groups: Vec<OwnedEventFileGroup>,
-    group_ordinals: BTreeMap<String, usize>,
     observation_digest: [u8; 32],
     limits: EventFileLimits,
     classify: EventFileClassifier,
@@ -283,10 +270,6 @@ impl EventFileInventory {
                 ));
             }
         }
-        let group_ordinals = groups
-            .iter()
-            .map(|group| (group.group_key.clone(), group.ordinal))
-            .collect();
         let observation_digest = inventory_observation_digest(&groups);
         Ok(Self {
             selected_path,
@@ -294,7 +277,6 @@ impl EventFileInventory {
             selected_file,
             root,
             groups,
-            group_ordinals,
             observation_digest,
             limits,
             classify,
@@ -330,16 +312,6 @@ impl EventFileInventory {
         })
     }
 
-    pub(crate) fn group(&self, group_key: &str) -> Option<EventFileGroup<'_>> {
-        self.group_ordinals
-            .get(group_key)
-            .copied()
-            .map(|index| EventFileGroup {
-                inventory: self,
-                index,
-            })
-    }
-
     pub(crate) fn group_at(&self, group_ordinal: usize) -> Option<EventFileGroup<'_>> {
         self.groups.get(group_ordinal).map(|_| EventFileGroup {
             inventory: self,
@@ -349,32 +321,6 @@ impl EventFileInventory {
 
     pub(crate) fn observation_digest(&self) -> [u8; 32] {
         self.observation_digest
-    }
-
-    fn revalidate_leaves(
-        &self,
-        group_ordinal: usize,
-        leaf_ordinals: impl IntoIterator<Item = usize>,
-    ) -> EventFileInventoryResult<()> {
-        let group = self
-            .groups
-            .get(group_ordinal)
-            .ok_or_else(|| EventFileInventoryError::MissingGroup(group_ordinal.to_string()))?;
-        for leaf_ordinal in leaf_ordinals {
-            let leaf = group.leaves.get(leaf_ordinal).ok_or_else(|| {
-                invalid(
-                    self.selected_path(),
-                    format!(
-                        "event-file leaf ordinal {leaf_ordinal} is not present in group {:?}",
-                        group.group_key
-                    ),
-                )
-            })?;
-            self.verify_leaf(leaf)?;
-        }
-        self.root
-            .revalidate()
-            .map_err(|error| changed(self.root.named_path(), error))
     }
 
     pub(crate) fn revalidate_all(&self) -> EventFileInventoryResult<()> {
@@ -439,12 +385,6 @@ impl EventFileInventory {
             ));
         }
         Ok(bytes)
-    }
-
-    fn verify_leaf(&self, leaf: &EventFileLeaf) -> EventFileInventoryResult<()> {
-        let _opened = self.open_verified_leaf(leaf)?;
-        let _handle = transient_handle(TransientHandleKind::Leaf);
-        Ok(())
     }
 
     fn open_verified_leaf(
@@ -688,14 +628,12 @@ fn build_groups(leaves: Vec<EventFileLeaf>) -> EventFileInventoryResult<Vec<Owne
         .into_iter()
         .enumerate()
         .map(|(group_ordinal, (group_key, leaves))| {
-            let mut leaf_ordinals = BTreeMap::new();
             let leaves = leaves
                 .into_iter()
                 .enumerate()
-                .map(|(leaf_ordinal, (relative_file_key, mut leaf))| {
+                .map(|(leaf_ordinal, (_, mut leaf))| {
                     leaf.group_ordinal = group_ordinal;
                     leaf.leaf_ordinal = leaf_ordinal;
-                    leaf_ordinals.insert(relative_file_key, leaf_ordinal);
                     leaf
                 })
                 .collect::<Vec<_>>();
@@ -704,7 +642,6 @@ fn build_groups(leaves: Vec<EventFileLeaf>) -> EventFileInventoryResult<Vec<Owne
                 ordinal: group_ordinal,
                 group_key,
                 leaves,
-                leaf_ordinals,
                 observation_digest,
             })
         })

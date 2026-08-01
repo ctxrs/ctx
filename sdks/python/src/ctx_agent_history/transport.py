@@ -21,7 +21,6 @@ from .agent_history_v1 import (
     local_backend,
     normalize_event,
     normalize_import,
-    normalize_location,
     normalize_search,
     normalize_session,
     normalize_sources,
@@ -31,8 +30,6 @@ from .types import (
     ImportResponse,
     InitResponse,
     JsonObject,
-    LocateEventResponse,
-    LocateSessionResponse,
     SearchBackendMode,
     SearchResponse,
     ShowEventResponse,
@@ -111,12 +108,6 @@ class AgentHistoryTransport(Protocol):
         ...
 
     def show_session(self, session_id: str, *, mode: Optional[str] = None) -> ShowSessionResponse:
-        ...
-
-    def locate_event(self, event_id: str) -> LocateEventResponse:
-        ...
-
-    def locate_session(self, session_id: str) -> LocateSessionResponse:
         ...
 
     def ctx_version(self) -> Optional[str]:
@@ -316,28 +307,6 @@ class LocalCliAdapter:
             ),
         )
 
-    def locate_event(self, event_id: str) -> LocateEventResponse:
-        raw = self._json(["locate", "event", event_id, "--format", "json"])
-        return cast(
-            LocateEventResponse,
-            envelope(
-                "locateEvent",
-                local_backend(self.config, raw),
-                location=normalize_location(raw),
-            ),
-        )
-
-    def locate_session(self, session_id: str) -> LocateSessionResponse:
-        raw = self._json(["locate", "session", session_id, "--format", "json"])
-        return cast(
-            LocateSessionResponse,
-            envelope(
-                "locateSession",
-                local_backend(self.config, raw),
-                location=normalize_location(raw),
-            ),
-        )
-
     def ctx_version(self) -> Optional[str]:
         try:
             completed = self._run(["--version"])
@@ -488,12 +457,6 @@ class HostedAdapter:
 
     def show_session(self, session_id: str, **kwargs: Any) -> ShowSessionResponse:
         raise HostedTransportNotImplementedError("showSession")
-
-    def locate_event(self, event_id: str) -> LocateEventResponse:
-        raise HostedTransportNotImplementedError("locateEvent")
-
-    def locate_session(self, session_id: str) -> LocateSessionResponse:
-        raise HostedTransportNotImplementedError("locateSession")
 
     def ctx_version(self) -> Optional[str]:
         return None

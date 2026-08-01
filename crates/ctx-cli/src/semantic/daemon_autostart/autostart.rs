@@ -281,7 +281,7 @@ fn daemon_handoff_observation(
         Some(expected_config),
         now_ms,
     );
-    let refresh_job = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root));
+    let refresh_job = read_daemon_job_status(&daemon_core_refresh_job_path(data_root));
     let active_refresh = daemon_owned_source_refresh_is_active(
         status.as_ref(),
         refresh_job.as_ref(),

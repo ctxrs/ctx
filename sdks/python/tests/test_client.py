@@ -24,12 +24,42 @@ from ctx_agent_history import (
 )
 from ctx_agent_history.errors import CtxAgentHistoryCliError, CtxAgentHistoryProtocolError
 from ctx_agent_history.errors import CtxAgentHistoryTimeoutError, CtxAgentHistoryValidationError
+from ctx_agent_history.agent_history_v1 import normalize_import, normalize_sources
 from ctx_agent_history.transport import LocalCliAdapter
 from ctx_agent_history.types import AgentHistoryErrorCode, SearchHit
 import dogfood_local
 
 
 class LocalCliAdapterTests(unittest.TestCase):
+    def test_sources_and_import_preserve_legitimate_nested_source_semantics(self) -> None:
+        acquisition = {
+            "source": "local_scan",
+            "cursor": "opaque-checkpoint",
+        }
+        sources = normalize_sources(
+            {
+                "sources": [
+                    {
+                        "provider": "codex",
+                        "path": "/configured/root",
+                        "status": "available",
+                        "importable": True,
+                        "acquisition": acquisition,
+                    }
+                ]
+            }
+        )
+        self.assertEqual(sources[0]["acquisition"], acquisition)
+
+        imported = normalize_import(
+            {
+                "resume": False,
+                "totals": {},
+                "sources": [{"source": acquisition}],
+            }
+        )
+        self.assertEqual(imported["sources"][0]["source"], acquisition)
+
     def test_public_aliases_have_typed_signatures(self) -> None:
         show_event = inspect.signature(AgentHistoryClient.showEvent)
         show_session = inspect.signature(AgentHistoryClient.showSession)
@@ -120,10 +150,6 @@ class LocalCliAdapterTests(unittest.TestCase):
                 "showSession",
             )
             self.assertEqual(client.showSession("session-1")["operation"], "showSession")
-            self.assertEqual(client.locate_event("event-1")["operation"], "locateEvent")
-            self.assertEqual(client.locateEvent("event-1")["operation"], "locateEvent")
-            self.assertEqual(client.locate_session("session-1")["operation"], "locateSession")
-            self.assertEqual(client.locateSession("session-1")["operation"], "locateSession")
 
     def test_search_requires_query_term_or_file_before_cli(self) -> None:
         with fake_ctx(fail=True) as cli:
@@ -189,6 +215,9 @@ class LocalCliAdapterTests(unittest.TestCase):
                         "recordType": "event",
                         "itemType": "event",
                         "result_scope": "event",
+                        "provider": "codex",
+                        "provider_session_id": "codex-resume-uuid",
+                        "source_format": "codex_session_jsonl",
                         "rank": 1,
                         "retrieval_score": 0.98,
                         "citations": [{"target_type": "event", "label": "codex event"}],
@@ -219,6 +248,9 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertNotIn("recordType", hit)
         self.assertNotIn("itemType", hit)
         self.assertEqual(hit["resultType"], "event")
+        self.assertEqual(hit["provider"], "codex")
+        self.assertEqual(hit["providerSessionId"], "codex-resume-uuid")
+        self.assertEqual(hit["sourceFormat"], "codex_session_jsonl")
         self.assertEqual(hit["rank"], 1)
         self.assertEqual(hit["retrievalScore"], 0.98)
         self.assertEqual(hit["citations"][0]["targetType"], "event")
@@ -361,8 +393,6 @@ class DogfoodExampleTests(unittest.TestCase):
         self.assertEqual(snapshot.search["operation"], "search")
         self.assertEqual(snapshot.event["operation"], "showEvent")
         self.assertEqual(snapshot.session["operation"], "showSession")
-        self.assertEqual(snapshot.event_location["operation"], "locateEvent")
-        self.assertEqual(snapshot.session_location["operation"], "locateSession")
         self.assertEqual(snapshot.search["search"]["results"][0]["resultScope"], "event")
         self.assertEqual(
             snapshot.search["search"]["resultWindow"],
@@ -480,25 +510,6 @@ def _fake_ctx_script(
                     "format": "json",
                 }
             )
-        elif args[:2] == ["locate", "event"]:
-            payload.update(
-                {
-                    "payload_type": "event_location",
-                    "ctx_event_id": args[2],
-                    "ctx_session_id": "session-1",
-                    "provider": "codex",
-                    "source": {"path": "/tmp/session.jsonl", "exists": True},
-                }
-            )
-        elif args[:2] == ["locate", "session"]:
-            payload.update(
-                {
-                    "payload_type": "session_location",
-                    "ctx_session_id": args[2],
-                    "provider": "codex",
-                    "source": {"path": "/tmp/session.jsonl", "exists": True},
-                }
-            )
         elif command == "search":
             payload.update(
                 {
@@ -564,15 +575,45 @@ def assert_agent_history_v1_envelope(test: unittest.TestCase, payload: object) -
         test.assertEqual(value["resultWindow"]["moreAvailable"], value["pagination"]["hasMore"])
         test.assertNotIn("nextCursor", value["pagination"])
         for hit in value["results"]:
-            _assert_required_keys(test, hit, {"resultScope"})
+            _assert_required_keys(
+                test,
+                hit,
+                {"resultScope", "provider", "providerSessionId", "sourceFormat"},
+            )
             test.assertEqual(hit["rank"], 1)
             test.assertEqual(hit["retrievalScore"], 0.98)
     elif operation == "showEvent":
         _assert_required_keys(test, value, {"events"})
-    elif operation in {"locateEvent", "locateSession"}:
-        _assert_required_keys(test, value, {"ctxSessionId", "provider", "source"})
+        _assert_typed_show_events(test, value)
+    elif operation == "showSession":
+        _assert_required_keys(test, value, {"session", "events"})
+        _assert_required_keys(
+            test,
+            value["session"],
+            {"ctxSessionId", "provider", "providerSessionId", "sourceFormat"},
+        )
+        _assert_typed_show_events(test, value)
     elif operation == "error":
         _assert_required_keys(test, value, {"code", "message", "retryable"})
+
+
+def _assert_typed_show_events(test: unittest.TestCase, value: object) -> None:
+    if not isinstance(value, dict):
+        return
+    events = value.get("events")
+    test.assertIsInstance(events, list)
+    if not isinstance(events, list):
+        return
+    for event in events:
+        _assert_required_keys(
+            test,
+            event,
+            {"provider", "providerSessionId", "sourceFormat", "content"},
+        )
+        test.assertEqual(event["content"]["complete"], True)
+        test.assertEqual(event["content"]["policyStatus"], "selected")
+        for forbidden in ("source", "sourcePath", "sourceExists", "cursor", "preview"):
+            test.assertNotIn(forbidden, event)
 
 
 def _assert_required_keys(test: unittest.TestCase, payload: object, keys: set[str]) -> None:
@@ -601,8 +642,6 @@ EXPECTED_PAYLOAD_KEYS = {
     "search": "search",
     "showEvent": "event",
     "showSession": "session",
-    "locateEvent": "location",
-    "locateSession": "location",
     "error": "error",
 }
 

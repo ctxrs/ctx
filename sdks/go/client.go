@@ -97,18 +97,6 @@ type ShowEventOptions struct {
 	Window *int
 }
 
-// LocateSessionOptions configures Client.LocateSession.
-type LocateSessionOptions struct {
-	ID                string
-	Provider          string
-	ProviderSessionID string
-}
-
-// LocateEventOptions configures Client.LocateEvent.
-type LocateEventOptions struct {
-	ID string
-}
-
 func (c *Client) Status(ctx context.Context) (*StatusResponse, error) {
 	var out StatusResponse
 	if err := c.do(ctx, Operation{Name: "status", Args: []string{"status", "--format=json"}}, &out); err != nil {
@@ -263,37 +251,6 @@ func (c *Client) ShowEvent(ctx context.Context, opts ShowEventOptions) (*ShowEve
 	return &out, nil
 }
 
-func (c *Client) LocateSession(ctx context.Context, opts LocateSessionOptions) (*LocateSessionResponse, error) {
-	args := []string{"locate", "session"}
-	if opts.ID != "" {
-		args = append(args, opts.ID)
-	}
-	if opts.Provider != "" {
-		args = append(args, "--provider", opts.Provider)
-	}
-	if opts.ProviderSessionID != "" {
-		args = append(args, "--provider-session", opts.ProviderSessionID)
-	}
-	args = append(args, "--format", "json")
-	var out LocateSessionResponse
-	if err := c.do(ctx, Operation{Name: "locateSession", Args: args}, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (c *Client) LocateEvent(ctx context.Context, opts LocateEventOptions) (*LocateEventResponse, error) {
-	if opts.ID == "" {
-		return nil, sdkError(ErrorKindInvalidArgument, "locate event requires ID", nil)
-	}
-	args := []string{"locate", "event", opts.ID, "--format", "json"}
-	var out LocateEventResponse
-	if err := c.do(ctx, Operation{Name: "locateEvent", Args: args}, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
 func (c *Client) do(ctx context.Context, op Operation, out any) error {
 	if c.transport == nil {
 		return sdkError(ErrorKindTransportUnavailable, "ctxagenthistory client has no transport", nil)
@@ -354,10 +311,6 @@ func responseEnvelope(out any) (Envelope, bool) {
 	case *ShowSessionResponse:
 		return value.Envelope, true
 	case *ShowEventResponse:
-		return value.Envelope, true
-	case *LocateSessionResponse:
-		return value.Envelope, true
-	case *LocateEventResponse:
 		return value.Envelope, true
 	case *ErrorResponse:
 		return value.Envelope, true

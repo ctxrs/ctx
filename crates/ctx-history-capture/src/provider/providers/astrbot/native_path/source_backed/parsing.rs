@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{CertifiedSource, EventRole, EventType, ScannedSourceCounts};
-use ctx_history_index::LexicalDocument;
+use ctx_history_core::{CertifiedSource, CoreRecord, EventRole, EventType, ScannedSourceCounts};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -34,7 +33,12 @@ use super::{
     AstrBotSourceBackedErrorV0, AstrBotSourceBackedResultV0, PARSER_REVISION,
 };
 
-type PlatformUnitProjection = (Option<CoreUnit>, Option<String>, [u8; 32], Option<String>);
+type PlatformUnitProjection = (
+    Option<CoreUnit>,
+    Option<String>,
+    [u8; 32],
+    Option<(String, Value)>,
+);
 const SOURCE_BACKED_PAGE_ROWS: usize = 64;
 
 #[derive(Debug)]
@@ -150,15 +154,15 @@ fn timestamp(value: Option<i64>, fallback: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 pub(crate) trait AstrBotSourceBackedSinkV0 {
-    fn emit(&mut self, document: LexicalDocument) -> AstrBotSourceBackedResultV0<()>;
+    fn emit(&mut self, record: CoreRecord) -> AstrBotSourceBackedResultV0<()>;
 }
 
 impl<F> AstrBotSourceBackedSinkV0 for F
 where
-    F: FnMut(LexicalDocument) -> AstrBotSourceBackedResultV0<()>,
+    F: FnMut(CoreRecord) -> AstrBotSourceBackedResultV0<()>,
 {
-    fn emit(&mut self, document: LexicalDocument) -> AstrBotSourceBackedResultV0<()> {
-        self(document)
+    fn emit(&mut self, record: CoreRecord) -> AstrBotSourceBackedResultV0<()> {
+        self(record)
     }
 }
 
@@ -212,7 +216,7 @@ pub(crate) fn scan_astrbot_snapshot_v0(
         let mut candidate_index = 0;
         visit_conversations(
             conn,
-            &sql.conversation_hydration,
+            &sql.conversation_rows,
             &rowids,
             |physical_rowid, row| {
                 process_oversize_run(
@@ -259,10 +263,10 @@ pub(crate) fn scan_astrbot_snapshot_v0(
         conversation_after = candidates.last().map(|candidate| candidate.physical_rowid);
     }
 
-    if let (Some(initial), Some(after), Some(hydration)) = (
+    if let (Some(initial), Some(after), Some(rows_sql)) = (
         sql.platform_message_candidate_initial.as_deref(),
         sql.platform_message_candidate_after.as_deref(),
-        sql.platform_message_hydration.as_deref(),
+        sql.platform_message_rows.as_deref(),
     ) {
         let mut platform_after = None;
         loop {
@@ -283,7 +287,7 @@ pub(crate) fn scan_astrbot_snapshot_v0(
                 }
             }
             let mut candidate_index = 0;
-            visit_platform_messages(conn, hydration, &rowids, |physical_rowid, row| {
+            visit_platform_messages(conn, rows_sql, &rowids, |physical_rowid, row| {
                 process_oversize_run(
                     &candidates,
                     &mut candidate_index,
@@ -356,7 +360,7 @@ fn process_conversation_row(
     candidate: RowCandidate,
     row: ConversationRow,
     sink: &mut impl AstrBotSourceBackedSinkV0,
-    page: &mut Vec<LexicalDocument>,
+    page: &mut Vec<CoreRecord>,
     checkpoint_links: &mut BTreeMap<String, PlatformMessageLink>,
     counts: &mut ScannedSourceCounts,
     content_chain: &mut [u8; 32],
@@ -389,11 +393,11 @@ fn process_conversation_row(
             let complete_text = if content_is_array {
                 item.and_then(item_text)
                     .filter(|text| !text.trim().is_empty())
-                    .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?
+                    .ok_or(AstrBotSourceBackedErrorV0::MissingSelectedContent)?
             } else {
                 item.and_then(provider_value_text)
                     .filter(|text| !text.trim().is_empty())
-                    .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?
+                    .ok_or(AstrBotSourceBackedErrorV0::MissingSelectedContent)?
             };
             let session = conversation_session_fact(&row);
             let document = conversation_document(
@@ -420,20 +424,20 @@ fn process_conversation_row(
 
 fn emit_bounded(
     sink: &mut impl AstrBotSourceBackedSinkV0,
-    page: &mut Vec<LexicalDocument>,
-    document: LexicalDocument,
+    page: &mut Vec<CoreRecord>,
+    record: CoreRecord,
 ) -> AstrBotSourceBackedResultV0<()> {
-    page.push(document);
+    page.push(record);
     if page.len() == SOURCE_BACKED_PAGE_ROWS {
-        for document in page.drain(..) {
-            sink.emit(document)?;
+        for record in page.drain(..) {
+            sink.emit(record)?;
         }
     }
     Ok(())
 }
 
 fn source_backed_platform_unit(
-    row: PlatformMessageRow,
+    row: &PlatformMessageRow,
     native_ordinal: u64,
     checkpoint_links: &BTreeMap<String, PlatformMessageLink>,
 ) -> AstrBotSourceBackedResultV0<PlatformUnitProjection> {
@@ -442,17 +446,14 @@ fn source_backed_platform_unit(
         .llm_checkpoint_id
         .as_ref()
         .and_then(|checkpoint| checkpoint_links.get(checkpoint));
-    let Some(text) = row
-        .content
-        .as_deref()
-        .map(provider_json_text)
-        .as_ref()
-        .and_then(provider_value_text)
-        .filter(|text| !text.trim().is_empty())
+    let Some(provider_content) = row.content.as_deref().map(provider_json_text) else {
+        return Ok((None, None, row_sha256, None));
+    };
+    let Some(text) = provider_value_text(&provider_content).filter(|text| !text.trim().is_empty())
     else {
         return Ok((None, None, row_sha256, None));
     };
-    let session = platform_session_fact(&row, link);
+    let session = platform_session_fact(row, link);
     let role = if row.sender_id.as_deref() == row.user_id.as_deref() {
         Some(EventRole::User)
     } else {
@@ -472,7 +473,7 @@ fn source_backed_platform_unit(
         }),
         None,
         row_sha256,
-        Some(text),
+        Some((text, provider_content)),
     ))
 }
 
@@ -483,30 +484,30 @@ fn process_platform_row(
     row: PlatformMessageRow,
     checkpoint_links: &BTreeMap<String, PlatformMessageLink>,
     sink: &mut impl AstrBotSourceBackedSinkV0,
-    page: &mut Vec<LexicalDocument>,
+    page: &mut Vec<CoreRecord>,
     counts: &mut ScannedSourceCounts,
     content_chain: &mut [u8; 32],
     native_ordinal: &mut u64,
 ) -> AstrBotSourceBackedResultV0<()> {
     add_certified_bytes(counts, candidate.observed_bytes()?)?;
     add_complete(counts)?;
-    let (unit, rejection, row_digest, complete_text) =
-        source_backed_platform_unit(row, *native_ordinal, checkpoint_links)?;
+    let (unit, rejection, row_digest, selected_content) =
+        source_backed_platform_unit(&row, *native_ordinal, checkpoint_links)?;
     *content_chain = chain_hash(*content_chain, row_digest);
     if rejection.is_some() {
         add_rejected(counts)?;
     } else if let Some(unit) = unit {
         if let Some(event) = unit.event {
+            let (complete_text, provider_content) = selected_content
+                .as_ref()
+                .ok_or(AstrBotSourceBackedErrorV0::MissingSelectedContent)?;
             let document = platform_document(
                 source,
-                candidate.physical_rowid,
                 candidate.legacy_order.logical_id,
-                row_digest,
                 &unit.session,
                 &event,
-                complete_text
-                    .as_deref()
-                    .ok_or(AstrBotSourceBackedErrorV0::ExactConversationMismatch)?,
+                complete_text,
+                provider_content,
             )?;
             emit_bounded(sink, page, document)?;
             add_retained(counts)?;

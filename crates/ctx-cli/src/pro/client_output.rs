@@ -1,41 +1,27 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::Path,
-};
+use std::path::Path;
 
-use anyhow::{anyhow, bail, Result};
-use ctx_history_core::{CertifiedSource, SourceFrontier, SourceKey};
-use ctx_pro_host_protocol::{Capability, HelperMessage, HostMessage};
+use anyhow::Result;
+use ctx_pro_host_protocol::CoreMaterializationReceipt;
 
 use super::{protocol_error, ProClient, BATCH_TIMEOUT};
 
-#[path = "source_backed_pro_provider.rs"]
-mod source_backed_pro_provider;
-
-/// Synchronizes Pro from one already-published, generation-pinned Core source manifest.
-///
-/// Exact canonical content is hydrated through the supplied source resolver.
-/// Any helper or hydration failure leaves Core intact and Pro independently retryable.
-pub(crate) fn sync_source_manifest_materialization(
-    data_root: &Path,
-    manifest: ctx_pro_host_protocol::SourceManifest,
-    index: &ctx_history_index::VerifiedIndex,
-    resolver: &ctx_history_capture::SourceBackedResolverRegistry,
-) -> Result<ctx_pro_host_protocol::SourceManifestReceipt> {
-    source_backed_pro_provider::sync_generation_pinned_source_manifest(
-        data_root, manifest, index, resolver,
-    )
-    .map(|report| report.receipt)
+pub(crate) struct CoreMaterializationSyncOutcome {
+    pub(crate) receipt: CoreMaterializationReceipt,
+    pub(crate) did_work: bool,
 }
 
-/// Deferred Pro catch-up over the authoritative source-backed wire contract.
-///
-/// Core is already published before this coordinator runs. Any helper or
-/// hydration failure therefore leaves Core intact and Pro retryable from its
-/// independently committed per-source progress.
-#[path = "client_output/source_backed_feed.rs"]
-mod source_backed_feed;
+/// Synchronizes Pro from one already-published, generation-pinned Core feed.
+pub(crate) fn sync_core_materialization(
+    data_root: &Path,
+    index: &ctx_history_index::VerifiedIndex,
+) -> Result<CoreMaterializationSyncOutcome> {
+    core_materialization_feed::sync_generation_pinned_core(data_root, index).map(|report| {
+        CoreMaterializationSyncOutcome {
+            receipt: report.receipt,
+            did_work: !report.replayed,
+        }
+    })
+}
 
-#[cfg(test)]
-#[path = "client_output/tests.rs"]
-mod tests;
+#[path = "client_output/core_materialization_feed.rs"]
+mod core_materialization_feed;

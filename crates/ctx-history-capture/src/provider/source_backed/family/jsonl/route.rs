@@ -9,10 +9,9 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::ScannedSourceCounts;
 use ctx_history_core::{
     CaptureProvider, CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory,
-    EventHydrationRequest, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
-    SourceInventoryObservation, SourceKey, TypedKey,
+    CoreRecord, SourceInventoryObservation, SourceKey, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -24,8 +23,8 @@ use std::sync::{
 };
 
 use super::{
-    observe_opened_file, observe_opened_file_same_object, revalidate_frozen_prefix,
-    JsonlCheckpoint, JsonlFileObservation, JsonlProbe, JsonlRecordRef,
+    observe_opened_file, revalidate_frozen_prefix, JsonlCheckpoint, JsonlFileObservation,
+    JsonlProbe, JsonlRecordRef,
 };
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
@@ -37,7 +36,6 @@ use crate::{
     CaptureError, Result,
 };
 
-const FAMILY_PARSER_REVISION: &str = "borrowed-jsonl-family-v1";
 const FAMILY_POLICY_REVISION: &str = "borrowed-jsonl-certified-append-v1";
 const FAMILY_FRONTIER_KIND: &str = "borrowed-jsonl-family-checkpoint-v1";
 const FAMILY_SOURCE_REVISION_KIND: &str = "borrowed-jsonl-file-observation-v1";
@@ -45,10 +43,6 @@ const FAMILY_INVENTORY_AUTHORITY: &str = "borrowed-jsonl-provider-root-v1";
 const FAMILY_INVENTORY_REVISION: &str = "borrowed-jsonl-inventory-v1";
 const FAMILY_DISCOVERY_REVISION: &str = "borrowed-jsonl-discovery-v1";
 const FAMILY_INVENTORY_DOMAIN: &[u8] = b"ctx-borrowed-jsonl-inventory-v1\0";
-mod hydration;
-#[cfg(test)]
-use hydration::set_after_jsonl_group_open_hook;
-use hydration::{hydrate_batch, hydrate_single};
 mod leaf;
 #[cfg(test)]
 use leaf::family_scanner_worker_count_policy;
@@ -63,14 +57,6 @@ use revalidation::{
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct JsonlFamilyWork {
-    pub(crate) discoveries: usize,
-    pub(crate) leaf_opens: usize,
-    pub(crate) provider_projections: usize,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct JsonlFamilyScannerActivity {
     pub(crate) worker_count: usize,
     pub(crate) sources_started: usize,
@@ -80,10 +66,6 @@ pub(crate) struct JsonlFamilyScannerActivity {
 
 #[cfg(test)]
 thread_local! {
-    static FAMILY_DISCOVERIES: Cell<usize> = const { Cell::new(0) };
-    static FAMILY_LEAF_OPENS: Cell<usize> = const { Cell::new(0) };
-    static FAMILY_PROVIDER_PROJECTIONS: Cell<usize> = const { Cell::new(0) };
-    static FAMILY_PROVIDER_PROJECTION_BYTES: Cell<usize> = const { Cell::new(0) };
     static FAMILY_SCANNER_WORKERS_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
     static FAMILY_SCANNER_ACTIVITY: Cell<JsonlFamilyScannerActivity> =
         const { Cell::new(JsonlFamilyScannerActivity {
@@ -92,28 +74,6 @@ thread_local! {
             sources_completed: 0,
             peak_active_scanners: 0,
         }) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_jsonl_family_work() {
-    FAMILY_DISCOVERIES.set(0);
-    FAMILY_LEAF_OPENS.set(0);
-    FAMILY_PROVIDER_PROJECTIONS.set(0);
-    FAMILY_PROVIDER_PROJECTION_BYTES.set(0);
-}
-
-#[cfg(test)]
-pub(crate) fn jsonl_family_work() -> JsonlFamilyWork {
-    JsonlFamilyWork {
-        discoveries: FAMILY_DISCOVERIES.get(),
-        leaf_opens: FAMILY_LEAF_OPENS.get(),
-        provider_projections: FAMILY_PROVIDER_PROJECTIONS.get(),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn jsonl_family_projection_bytes() -> usize {
-    FAMILY_PROVIDER_PROJECTION_BYTES.get()
 }
 
 #[cfg(test)]
@@ -212,33 +172,25 @@ pub(crate) trait JsonlFamilyProjector: Send {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
-        emit: &mut dyn FnMut(LexicalDocument) -> Result<()>,
+        emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()>;
 
     fn finish(&mut self) -> Result<()> {
         Ok(())
     }
 
-    fn finish_projecting(
-        &mut self,
-        _emit: &mut dyn FnMut(LexicalDocument) -> Result<()>,
-    ) -> Result<()> {
+    fn finish_projecting(&mut self, _emit: &mut dyn FnMut(CoreRecord) -> Result<()>) -> Result<()> {
         self.finish()
     }
 
     fn rejected_records(&self) -> u64 {
         0
     }
-}
 
-pub(crate) trait JsonlFamilyHydrator {
-    fn hydrate(
-        &mut self,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure>;
-
-    fn finish(&mut self) -> std::result::Result<(), HydrationFailure> {
-        Ok(())
+    /// Opaque, contract-bounded provider state to carry into the next certified
+    /// suffix projection. The family persists the value without interpreting it.
+    fn provider_checkpoint(&self) -> Result<Option<TypedKey>> {
+        Ok(None)
     }
 }
 
@@ -262,11 +214,25 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
         imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>>;
 
-    fn hydrator(
+    /// Constructs a projector for a cold/replacement scan or from the opaque
+    /// provider state persisted at the validated prefix frontier. Certified
+    /// suffix scans also receive an exact event-identity lookup pinned to the
+    /// writer base; cold and replacement scans receive no lookup.
+    fn projector_with_provider_checkpoint(
         &self,
         leaf: &JsonlFamilyLeaf,
         source_file: Arc<OpenedProviderSourceFile>,
-    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure>;
+        imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        _base_event_lookup: Option<BaseEventIdentityLookup>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        if checkpoint.is_some() {
+            return Err(CaptureError::InvalidPayload(
+                "JSONL adapter does not accept provider checkpoint state".to_owned(),
+            ));
+        }
+        self.projector(leaf, source_file, imported_at)
+    }
 
     fn owns(&self, source: &SourceKey) -> bool {
         source.provider() == self.provider().as_str()
@@ -425,8 +391,6 @@ impl JsonlFamilyLeaf {
     }
 
     pub(crate) fn open_verified(&self) -> Result<Arc<OpenedProviderSourceFile>> {
-        #[cfg(test)]
-        FAMILY_LEAF_OPENS.with(|count| count.set(count.get().saturating_add(1)));
         let opened = self.authority.open_file(&self.authority_path)?;
         if observe_opened_file(&self.source_path, &opened)? != self.observation {
             return Err(CaptureError::SourceChangedDuringCapture);
@@ -434,9 +398,9 @@ impl JsonlFamilyLeaf {
         Ok(Arc::new(opened))
     }
 
-    fn open_for_hydration(&self) -> Result<(Arc<OpenedProviderSourceFile>, JsonlFileObservation)> {
-        #[cfg(test)]
-        FAMILY_LEAF_OPENS.with(|count| count.set(count.get().saturating_add(1)));
+    fn open_for_revalidation(
+        &self,
+    ) -> Result<(Arc<OpenedProviderSourceFile>, JsonlFileObservation)> {
         let opened = self.authority.open_file(&self.authority_path)?;
         let current = observe_opened_file(&self.source_path, &opened)?;
         if current != self.observation {
@@ -457,8 +421,6 @@ impl JsonlFamilyLeaf {
     }
 
     fn open_for_scan(&self) -> Result<(Self, Arc<OpenedProviderSourceFile>)> {
-        #[cfg(test)]
-        FAMILY_LEAF_OPENS.with(|count| count.set(count.get().saturating_add(1)));
         let opened = self.authority.open_file(&self.authority_path)?;
         let current = observe_opened_file(&self.source_path, &opened)?;
         if current == self.observation {
@@ -618,10 +580,11 @@ struct FamilyCheckpoint {
     represented_physical_records: u64,
     rejected_records: u64,
     indexed_documents: u64,
+    provider_checkpoint: Option<TypedKey>,
 }
 
 impl FamilyCheckpoint {
-    const VERSION: u32 = 3;
+    const VERSION: u32 = 4;
 
     fn valid_for(&self, adapter: &dyn JsonlFamilyAdapter, leaf: &JsonlFamilyLeaf) -> bool {
         self.version == Self::VERSION
@@ -629,6 +592,10 @@ impl FamilyCheckpoint {
             && binding_digest(leaf).is_ok_and(|digest| self.binding_digest == digest)
             && self.physical.is_internally_consistent()
             && self.physical.identity() == &physical_identity(adapter, leaf)
+            && self
+                .provider_checkpoint
+                .as_ref()
+                .is_none_or(|checkpoint| checkpoint.validate_contract().is_ok())
             && self
                 .represented_physical_records
                 .checked_add(self.rejected_records)
@@ -648,7 +615,6 @@ struct FamilyResident {
     owned_sources: HashMap<[u8; 32], SourceKey>,
     terminal_sources: HashMap<[u8; 32], TerminalSourceEvidence>,
     certified_inventory: Option<CertifiedSourceInventory>,
-    hydration_inventory: Option<JsonlFamilyInventory>,
 }
 
 pub(crate) fn jsonl_family_driver(
@@ -662,12 +628,6 @@ pub(crate) fn jsonl_family_driver(
     let owns_adapter = Arc::clone(&adapter);
     let owns_resident = Arc::clone(&resident);
     let revalidation_resident = Arc::clone(&resident);
-    let hydration_adapter = Arc::clone(&adapter);
-    let hydration_root = root.clone();
-    let hydration_resident = Arc::clone(&resident);
-    let batch_adapter = Arc::clone(&adapter);
-    let batch_root = root.clone();
-    let batch_resident = Arc::clone(&resident);
     let terminal_adapter = adapter;
     let terminal_root = root;
     let inventory_resident = Arc::clone(&resident);
@@ -685,18 +645,7 @@ pub(crate) fn jsonl_family_driver(
                 })
         },
         move |target| revalidate_target(&revalidation_resident, target),
-        move |request| {
-            hydrate_single(
-                &*hydration_adapter,
-                &hydration_root,
-                &hydration_resident,
-                request,
-            )
-        },
     )
-    .with_batch_hydration(move |request| {
-        hydrate_batch(&*batch_adapter, &batch_root, &batch_resident, request)
-    })
     .with_complete_inventory_revalidation(move |expected| {
         revalidate_complete_inventory(
             terminal_adapter.as_ref(),
@@ -715,7 +664,9 @@ fn capture(
     sink: &mut SourceBackedGenerationSink<'_>,
 ) -> SourceBackedRouteResult<()> {
     reset_terminal(resident)?;
-    let opening = discover(adapter, root).map_err(|error| route_discovery(adapter, error))?;
+    let opening = adapter
+        .discover(root)
+        .map_err(|error| route_discovery(adapter, error))?;
     if opening.root_missing() {
         return Err(SourceBackedRouteError::new(
             SourceBackedRouteErrorKind::Unavailable,
@@ -777,9 +728,18 @@ fn capture(
         }
     }
     let bases_by_descriptor = bases_by_descriptor(&bases)?;
-    let terminal_sources = scan_leaves(adapter, opening.leaves(), &bases_by_descriptor, sink)?;
+    let base_event_lookup = sink.writer.base_event_identity_lookup();
+    let terminal_sources = scan_leaves(
+        adapter,
+        opening.leaves(),
+        &bases_by_descriptor,
+        base_event_lookup,
+        sink,
+    )?;
 
-    let closing = discover(adapter, root).map_err(|error| route_discovery(adapter, error))?;
+    let closing = adapter
+        .discover(root)
+        .map_err(|error| route_discovery(adapter, error))?;
     let inventory = opening.certify_against(&closing).map_err(route_invalid)?;
     sink.certify_complete_inventory(inventory.clone())
         .map_err(route_internal)?;
@@ -801,7 +761,6 @@ fn capture(
     resident.owned_sources = owned_sources;
     resident.terminal_sources = terminal_sources;
     resident.certified_inventory = Some(inventory);
-    resident.hydration_inventory = Some(closing);
     Ok(())
 }
 
@@ -840,12 +799,6 @@ fn with_family_scanner_workers<T>(workers: usize, run: impl FnOnce() -> T) -> T 
     run()
 }
 
-fn discover(adapter: &dyn JsonlFamilyAdapter, root: &Path) -> Result<JsonlFamilyInventory> {
-    #[cfg(test)]
-    FAMILY_DISCOVERIES.with(|count| count.set(count.get().saturating_add(1)));
-    adapter.discover(root)
-}
-
 fn route_invalid(error: impl std::fmt::Display) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::InvalidSource, error.to_string())
 }
@@ -859,13 +812,6 @@ fn route_discovery(
 
 fn route_internal(error: impl std::fmt::Display) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, error.to_string())
-}
-
-fn hydration_error(kind: HydrationFailureKind, detail: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind,
-        detail: detail.to_string(),
-    }
 }
 
 fn contract_error(error: impl std::fmt::Display) -> CaptureError {

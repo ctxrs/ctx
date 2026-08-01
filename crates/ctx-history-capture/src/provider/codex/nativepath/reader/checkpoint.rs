@@ -161,6 +161,7 @@ pub(super) struct ValidatedCheckpoint {
     pub(super) complete_prefix_ends_with_terminal_nul_padding: bool,
     pub(super) pending_tool_contexts: BTreeMap<String, CodexToolCallContext>,
     pub(super) pending_tool_authorities: BTreeMap<String, CodexPendingToolAuthority>,
+    pub(super) pending_continuations: BTreeMap<String, String>,
 }
 
 pub(super) fn decode_pending_tool_authority(
@@ -197,7 +198,7 @@ pub(super) fn decode_pending_tool_authority(
             ));
         }
     };
-    let (call_id, context) = tool_context_from_row(&row).ok_or_else(|| {
+    let (call_id, mut context) = tool_context_from_row(&row).ok_or_else(|| {
         invalid_checkpoint_proof("pending tool-call authority has no correlation identity")
     })?;
     if !authority.matches_call_id(&call_id) {
@@ -205,6 +206,32 @@ pub(super) fn decode_pending_tool_authority(
             "pending tool-call authority correlation does not match checkpoint state",
         ));
     }
+    if let [evidence] =
+        crate::provider::codex::repository::repository_tool_evidence(&retained.payload).as_slice()
+    {
+        // Fresh source-backed projection redacts provider-native arguments
+        // from display/Core text. Append-proof reconstruction must recover
+        // that same bounded context, not revive the legacy preview.
+        context.command_preview = None;
+        context.arguments_preview = None;
+        context.tool_name.clone_from(&evidence.tool_name);
+        context.session_cwd = owner.cwd.clone();
+        context.exact_command.clone_from(&evidence.command);
+        context.command_too_large = evidence.command_too_large;
+        context
+            .declared_workdir
+            .clone_from(&evidence.declared_workdir);
+        context
+            .continuation_cell_id
+            .clone_from(&evidence.continuation_cell_id);
+        if context.exact_command.is_some() || context.command_too_large {
+            context.origin_call_id = Some(call_id.clone());
+            context.origin_event_sequence = Some(authority.raw_ordinal);
+        }
+    }
+    context.continuation_call_id_sha256 = authority.continuation_call_id_sha256().to_vec();
+    context.continuation_capacity_exceeded = authority.continuation_capacity_exceeded();
+    context.correlation_ambiguous = authority.correlation_ambiguous();
     Ok((call_id, bound_tool_context(context)))
 }
 
@@ -239,6 +266,7 @@ pub(super) fn validate_checkpoint_source(
     let mut pending_tool_record = Vec::new();
     let mut pending_tool_contexts = BTreeMap::new();
     let mut pending_tool_authorities = BTreeMap::new();
+    let mut pending_continuations = BTreeMap::new();
 
     while remaining != 0 {
         let wanted = usize::try_from(remaining.min(CHECKPOINT_READ_BUFFER_BYTES as u64))
@@ -373,12 +401,86 @@ pub(super) fn validate_checkpoint_source(
         }
     }
 
+    if hydrate_pending_tools {
+        for (call_id, authority) in &pending_tool_authorities {
+            if let Some(cell_id) = authority.continuation_cell_id() {
+                if authority.continuation_conflicted() {
+                    if pending_continuations
+                        .insert(cell_id.to_owned(), String::new())
+                        .is_some()
+                    {
+                        return Err(invalid_checkpoint_proof(
+                            "pending conflicted continuation cell is duplicated",
+                        ));
+                    }
+                    continue;
+                }
+                let Some(origin) = pending_tool_contexts.get(call_id) else {
+                    return Err(invalid_checkpoint_proof(
+                        "pending continuation origin context is unavailable",
+                    ));
+                };
+                if (origin.exact_command.is_none() && !origin.command_too_large)
+                    || origin.continuation_cell_id.is_some()
+                {
+                    return Err(invalid_checkpoint_proof(
+                        "pending continuation authority is not an exact origin command",
+                    ));
+                }
+                if pending_continuations
+                    .insert(cell_id.to_owned(), call_id.clone())
+                    .is_some()
+                {
+                    return Err(invalid_checkpoint_proof(
+                        "pending continuation cell is assigned more than once",
+                    ));
+                }
+            }
+        }
+        let wait_calls = pending_tool_contexts
+            .iter()
+            .filter_map(|(call_id, context)| {
+                context
+                    .continuation_cell_id
+                    .as_ref()
+                    .map(|cell_id| (call_id.clone(), cell_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (call_id, cell_id) in wait_calls {
+            let Some(origin_call_id) = pending_continuations.get(&cell_id) else {
+                continue;
+            };
+            if origin_call_id.is_empty() {
+                continue;
+            }
+            let origin = pending_tool_contexts
+                .get(origin_call_id)
+                .cloned()
+                .ok_or_else(|| {
+                    invalid_checkpoint_proof("pending continuation origin is unavailable")
+                })?;
+            let context = pending_tool_contexts.get_mut(&call_id).ok_or_else(|| {
+                invalid_checkpoint_proof("pending continuation wait context is unavailable")
+            })?;
+            context.exact_command = origin.exact_command;
+            context.command_too_large = origin.command_too_large;
+            context.session_cwd = origin.session_cwd;
+            context.declared_workdir = origin.declared_workdir;
+            context.origin_call_id = Some(origin_call_id.clone());
+            context.origin_event_sequence = origin.origin_event_sequence;
+            context.continuation_call_id_sha256 = origin.continuation_call_id_sha256;
+            context.continuation_capacity_exceeded = origin.continuation_capacity_exceeded;
+            context.correlation_ambiguous = origin.correlation_ambiguous;
+        }
+    }
+
     Ok(ValidatedCheckpoint {
         bytes_read: checkpoint.observation.len,
         complete_prefix_hasher,
         complete_prefix_ends_with_terminal_nul_padding,
         pending_tool_contexts,
         pending_tool_authorities,
+        pending_continuations,
     })
 }
 

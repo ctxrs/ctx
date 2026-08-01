@@ -42,7 +42,10 @@ fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
             break serde_json::from_slice::<Value>(&output.stdout).unwrap();
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("source-backed SQL projection") && Instant::now() < deadline {
+        if (stderr.contains("Core SQL projection")
+            || stderr.contains("source-backed SQL projection"))
+            && Instant::now() < deadline
+        {
             std::thread::sleep(Duration::from_millis(25));
             continue;
         }
@@ -362,9 +365,9 @@ fn corrected_manifested_file_retries_rejected_row_idempotently() {
         "none",
     ]));
     let first_source =
-        assert_source_backed_publication(&first, "claude", "claude_projects_jsonl_tree", 0);
+        assert_source_backed_publication(&first, "claude", "claude_projects_jsonl_tree", 1);
     assert_eq!(first_source["current_indexed_documents"], 1, "{first:#}");
-    assert_eq!(first_source["current_ignored_records"], 1, "{first:#}");
+    assert_eq!(first_source["current_ignored_records"], 0, "{first:#}");
     let first_generation = first_source["published_generation"]
         .as_str()
         .unwrap()

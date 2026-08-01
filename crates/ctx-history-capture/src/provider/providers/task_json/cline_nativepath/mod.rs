@@ -1,4 +1,4 @@
-//! Provider-owned Cline/Roo source discovery, parsing, and exact hydration.
+//! Provider-owned Cline/Roo source discovery, parsing, and Core projection.
 
 mod bounded;
 mod normalize;
@@ -13,8 +13,7 @@ mod source_backed_tests;
 pub(super) use reader::ClineNativeReader;
 pub(super) use source::{discover_cline_root, discover_roo_root};
 pub(crate) use source_backed::{
-    cline_task_json_source_backed_adapter, cline_task_json_source_backed_resolver,
-    roo_task_json_source_backed_adapter, roo_task_json_source_backed_resolver,
+    cline_task_json_source_backed_adapter, roo_task_json_source_backed_adapter,
 };
 
 use std::{io, path::PathBuf};

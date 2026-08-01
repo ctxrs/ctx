@@ -9,9 +9,9 @@ use thiserror::Error;
 use crate::{common::io::ProviderSourceRoot, CaptureError};
 
 #[cfg(test)]
-pub(crate) const GEMINI_NATIVEPATH_PARSER_REVISION: u32 = 6;
+pub(crate) const GEMINI_NATIVEPATH_PARSER_REVISION: u32 = 8;
 #[cfg(test)]
-pub(crate) const GEMINI_NATIVEPATH_POLICY_REVISION: u32 = 4;
+pub(crate) const GEMINI_NATIVEPATH_POLICY_REVISION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct GeminiFileObservation {
@@ -69,6 +69,7 @@ pub(crate) struct GeminiSession {
     pub(crate) agent_type: AgentType,
     pub(crate) started_at: Option<DateTime<Utc>>,
     pub(crate) cwd: Option<String>,
+    pub(crate) cwd_ambiguous: bool,
     pub(crate) native_kind: Option<String>,
 }
 
@@ -103,8 +104,14 @@ pub(crate) enum GeminiEventBody {
         calls: Vec<GeminiToolCall>,
     },
     OutputDiagnostic {
+        result: Option<Value>,
         call_id: Option<String>,
         tool_name: Option<String>,
+        command: Option<String>,
+        command_too_large: bool,
+        declared_workdir: Option<String>,
+        file_paths: Vec<String>,
+        ambiguous_native_fields: bool,
         outcome: String,
         exit_code: Option<i32>,
         duration_ms: Option<u64>,
@@ -127,9 +134,6 @@ pub(crate) struct GeminiToolCall {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct GeminiRetainedEvent {
     pub(crate) identity: GeminiEventIdentity,
-    /// Exact identity string emitted by the released positional v5/p3
-    /// publisher. Kept transiently so upgrades can recognize only that shape.
-    pub(crate) released_identity: String,
     pub(crate) native_order: GeminiNativeOrder,
     pub(crate) source_record: GeminiSourceRecordEvidence,
     pub(crate) event_type: EventType,
@@ -137,30 +141,9 @@ pub(crate) struct GeminiRetainedEvent {
     pub(crate) occurred_at: Option<DateTime<Utc>>,
     pub(crate) body: GeminiEventBody,
     pub(crate) body_sha256: [u8; 32],
-    /// Exact hash emitted by the released positional publisher. It is used
-    /// only to migrate an already-committed v5/p3 event to the current
-    /// normalized-payload hash authority and is never published as content.
-    pub(crate) released_body_sha256: [u8; 32],
     pub(crate) preview: String,
     pub(crate) searchable_text: String,
     pub(crate) safe_file_touches: Vec<String>,
-}
-
-/// Internal result-hydration mode retained by the sparse diagnostic parser.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GeminiNativePathProfile {
-    CoreOnly,
-    CoreAndTransientOutputs,
-}
-
-/// The source coordinate encoded into a generic transient output locator.
-/// It is intentionally small and deterministic so a Pro page can be retried
-/// independently of Core without reparsing a different source identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct GeminiSourceLocator {
-    pub(crate) path: PathBuf,
-    pub(crate) byte_start: u64,
-    pub(crate) byte_end_exclusive: u64,
 }
 
 /// The certified scanner position immediately before or after a page. It only
@@ -240,12 +223,6 @@ pub(crate) struct GeminiParserMetrics {
     pub(crate) native_record_bytes_observed: u64,
     pub(crate) native_result_records_observed: u64,
     pub(crate) native_result_record_bytes_observed: u64,
-    pub(crate) result_body_bytes_decoded_or_allocated: u64,
-    pub(crate) result_body_hashes_created: u64,
-    pub(crate) result_previews_created: u64,
-    pub(crate) result_file_touches_created: u64,
-    pub(crate) result_fts_documents_created: u64,
-    pub(crate) result_handoffs_created: u64,
     pub(crate) retained_messages: u64,
     pub(crate) retained_tool_calls: u64,
     pub(crate) retained_notices: u64,

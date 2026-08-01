@@ -88,6 +88,7 @@ impl CodexNativeScanner {
                 owner: replay.owner.clone(),
                 tool_contexts: BTreeMap::new(),
                 tool_authorities: BTreeMap::new(),
+                continuations: BTreeMap::new(),
                 complete_hasher: Sha256::new(),
                 full_hasher: Sha256::new(),
                 record_buffer: Vec::new(),
@@ -105,6 +106,7 @@ impl CodexNativeScanner {
             owner,
             tool_contexts,
             tool_authorities,
+            continuations,
             raw_ordinal,
             offset,
             complete_hasher,
@@ -117,6 +119,7 @@ impl CodexNativeScanner {
                     complete_prefix_ends_with_terminal_nul_padding,
                     pending_tool_contexts: tool_contexts,
                     pending_tool_authorities: tool_authorities,
+                    pending_continuations: continuations,
                 } = validated;
                 if complete_prefix_ends_with_terminal_nul_padding {
                     return Err(invalid_checkpoint_proof(
@@ -129,6 +132,7 @@ impl CodexNativeScanner {
                     Some(proof.checkpoint.owner.clone()),
                     tool_contexts,
                     tool_authorities,
+                    continuations,
                     proof.checkpoint.next_raw_ordinal(),
                     proof.checkpoint.complete_prefix_end(),
                     complete_prefix_hasher,
@@ -145,6 +149,7 @@ impl CodexNativeScanner {
                 (
                     CodexParseDisposition::FullGeneration,
                     None,
+                    BTreeMap::new(),
                     BTreeMap::new(),
                     BTreeMap::new(),
                     0,
@@ -172,6 +177,7 @@ impl CodexNativeScanner {
             owner,
             tool_contexts,
             tool_authorities,
+            continuations,
             complete_hasher: complete_hasher.clone(),
             full_hasher: complete_hasher,
             record_buffer: Vec::new(),
@@ -203,6 +209,7 @@ impl CodexNativeScanner {
         loop {
             let core_is_full = self.active_core_page.as_ref().is_some_and(|page| {
                 page.units() >= MAX_CODEX_PAGE_UNITS
+                    || page.serialized_bytes > MAX_CODEX_PAGE_BYTES
                     || page.physical_records >= MAX_CODEX_SOURCE_BACKED_PAGE_RECORDS
                     || self
                         .offset
@@ -294,7 +301,12 @@ impl CodexNativeScanner {
             let next_bytes = page
                 .serialized_bytes
                 .saturating_add(projection.core_serialized_bytes);
-            if next_units > MAX_CODEX_PAGE_UNITS || next_bytes > MAX_CODEX_PAGE_BYTES {
+            let next_byte_limit = if page.units() == 0 && projection.core_units() == 1 {
+                MAX_CODEX_SOURCE_BACKED_SINGLE_ROW_PAGE_BYTES
+            } else {
+                MAX_CODEX_PAGE_BYTES
+            };
+            if next_units > MAX_CODEX_PAGE_UNITS || next_bytes > next_byte_limit {
                 if page.has_progress() {
                     self.restore(position)?;
                     return self.emit_active_core_page().map(Some);

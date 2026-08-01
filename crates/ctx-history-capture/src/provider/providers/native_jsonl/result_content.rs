@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use ctx_history_core::CaptureProvider;
 use serde_json::Value;
 
@@ -5,10 +7,10 @@ use crate::provider::normalization::provider_output_event_is_failure;
 use crate::{OutputOutcome, OutputOutcomeMetadata};
 
 pub(crate) const GEMINI_RESULT_PROFILE: &str = "gemini-jsonl.result-body.v1";
-pub(crate) const TABNINE_RESULT_PROFILE: &str = "tabnine.result-body.v1";
-pub(crate) const FACTORY_DROID_RESULT_PROFILE: &str = "factory-droid.result-body.v1";
-pub(crate) const COPILOT_CLI_RESULT_PROFILE: &str = "copilot-cli.result-body.v1";
-pub(crate) const QWEN_CODE_RESULT_PROFILE: &str = "qwen-code.result-body.v1";
+pub(crate) const TABNINE_RESULT_PROFILE: &str = "tabnine.result-body.v2";
+pub(crate) const FACTORY_DROID_RESULT_PROFILE: &str = "factory-droid.result-body.v2";
+pub(crate) const COPILOT_CLI_RESULT_PROFILE: &str = "copilot-cli.result-body.v2";
+pub(crate) const QWEN_CODE_RESULT_PROFILE: &str = "qwen-code.result-body.v2";
 
 const GEMINI_RESULT_TYPES: &[&str] = &["gemini"];
 const TABNINE_RESULT_TYPES: &[&str] = &["tabnine", "gemini"];
@@ -23,7 +25,7 @@ pub(crate) enum NativeJsonlResultExtractionError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct NativeJsonlResultSubrecord<'a> {
     pub(super) subrecord_index: u32,
-    pub(super) content: Option<&'a str>,
+    pub(super) content: Option<Cow<'a, str>>,
     pub(super) call_id: Option<&'a str>,
     pub(super) tool_name: Option<&'a str>,
     pub(super) outcome: OutputOutcomeMetadata,
@@ -43,8 +45,12 @@ pub(super) fn enumerate_native_jsonl_result_subrecords<'a>(
         return enumerate_redacted_result_subrecords(profile, value);
     }
     match profile {
-        GEMINI_RESULT_PROFILE => enumerate_tool_call_results(value, GEMINI_RESULT_TYPES),
-        TABNINE_RESULT_PROFILE => enumerate_tool_call_results(value, TABNINE_RESULT_TYPES),
+        GEMINI_RESULT_PROFILE => {
+            enumerate_tool_call_results(value, GEMINI_RESULT_TYPES, false, false)
+        }
+        TABNINE_RESULT_PROFILE => {
+            enumerate_tool_call_results(value, TABNINE_RESULT_TYPES, true, true)
+        }
         COPILOT_CLI_RESULT_PROFILE => enumerate_copilot_results(value),
         _ => Err(NativeJsonlResultExtractionError::UnsupportedProfile),
     }
@@ -60,6 +66,8 @@ fn result_type_is_allowed(value: &Value, expected_types: &[&str]) -> bool {
 fn enumerate_tool_call_results<'a>(
     value: &'a Value,
     expected_types: &[&str],
+    allow_structured_content: bool,
+    preserve_native_index: bool,
 ) -> Result<Vec<NativeJsonlResultSubrecord<'a>>, NativeJsonlResultExtractionError> {
     if !result_type_is_allowed(value, expected_types) {
         return Ok(Vec::new());
@@ -70,11 +78,19 @@ fn enumerate_tool_call_results<'a>(
     let calls = calls
         .as_array()
         .ok_or(NativeJsonlResultExtractionError::InvalidShape)?;
+    let mut retained_index = 0_usize;
     calls
         .iter()
-        .filter(|call| call.get("result").is_some())
         .enumerate()
-        .map(|(index, call)| {
+        .filter(|(_, call)| call.get("result").is_some())
+        .map(|(native_index, call)| {
+            let index = if preserve_native_index {
+                native_index
+            } else {
+                let index = retained_index;
+                retained_index = retained_index.saturating_add(1);
+                index
+            };
             let subrecord_index =
                 u32::try_from(index).map_err(|_| NativeJsonlResultExtractionError::InvalidShape)?;
             let (content, redacted) = if reject_redacted(call).is_err() {
@@ -83,6 +99,7 @@ fn enumerate_tool_call_results<'a>(
                 extract_result_ref_preserving_subrecord(
                     call.get("result"),
                     &["content", "output", "text"],
+                    allow_structured_content,
                 )?
             };
             Ok(NativeJsonlResultSubrecord {
@@ -104,16 +121,24 @@ fn enumerate_redacted_result_subrecords<'a>(
     profile: &str,
     value: &'a Value,
 ) -> Result<Vec<NativeJsonlResultSubrecord<'a>>, NativeJsonlResultExtractionError> {
-    let count = match profile {
-        GEMINI_RESULT_PROFILE => redacted_tool_call_result_count(value, GEMINI_RESULT_TYPES)?,
-        TABNINE_RESULT_PROFILE => redacted_tool_call_result_count(value, TABNINE_RESULT_TYPES)?,
-        COPILOT_CLI_RESULT_PROFILE => usize::from(
-            value.get("type").and_then(Value::as_str) == Some("tool.execution_complete")
-                && value.get("data").is_some(),
-        ),
+    let indices = match profile {
+        GEMINI_RESULT_PROFILE => {
+            redacted_tool_call_result_indices(value, GEMINI_RESULT_TYPES, false)?
+        }
+        TABNINE_RESULT_PROFILE => {
+            redacted_tool_call_result_indices(value, TABNINE_RESULT_TYPES, true)?
+        }
+        COPILOT_CLI_RESULT_PROFILE
+            if value.get("type").and_then(Value::as_str) == Some("tool.execution_complete")
+                && value.get("data").is_some() =>
+        {
+            vec![0]
+        }
+        COPILOT_CLI_RESULT_PROFILE => Vec::new(),
         _ => return Err(NativeJsonlResultExtractionError::UnsupportedProfile),
     };
-    (0..count)
+    indices
+        .into_iter()
         .map(|index| {
             Ok(NativeJsonlResultSubrecord {
                 subrecord_index: u32::try_from(index)
@@ -127,29 +152,37 @@ fn enumerate_redacted_result_subrecords<'a>(
         .collect()
 }
 
-fn redacted_tool_call_result_count(
+fn redacted_tool_call_result_indices(
     value: &Value,
     expected_types: &[&str],
-) -> Result<usize, NativeJsonlResultExtractionError> {
+    preserve_native_index: bool,
+) -> Result<Vec<usize>, NativeJsonlResultExtractionError> {
     if !result_type_is_allowed(value, expected_types) {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let Some(calls) = value.get("toolCalls") else {
-        return Ok(0);
+        return Ok(Vec::new());
     };
-    Ok(calls
+    let native_indices = calls
         .as_array()
         .ok_or(NativeJsonlResultExtractionError::InvalidShape)?
         .iter()
-        .filter(|call| call.get("result").is_some())
-        .count())
+        .enumerate()
+        .filter_map(|(index, call)| call.get("result").is_some().then_some(index))
+        .collect::<Vec<_>>();
+    Ok(if preserve_native_index {
+        native_indices
+    } else {
+        (0..native_indices.len()).collect()
+    })
 }
 
 fn extract_result_ref_preserving_subrecord<'a>(
     value: Option<&'a Value>,
     object_fields: &[&str],
-) -> Result<(Option<&'a str>, bool), NativeJsonlResultExtractionError> {
-    match extract_direct_result_ref(value, object_fields) {
+    allow_structured_content: bool,
+) -> Result<(Option<Cow<'a, str>>, bool), NativeJsonlResultExtractionError> {
+    match extract_direct_result_content(value, object_fields, allow_structured_content) {
         Ok(content) => Ok((content, false)),
         Err(NativeJsonlResultExtractionError::Redacted) => Ok((None, true)),
         Err(error) => Err(error),
@@ -166,52 +199,70 @@ fn enumerate_copilot_results(
         return Ok(Vec::new());
     };
     reject_redacted(data)?;
-    let selected = if data.get("content").is_some() {
-        data.get("content")
-    } else if data.pointer("/result/content").is_some() {
-        if let Some(result) = data.get("result") {
-            reject_redacted(result)?;
-        }
-        data.pointer("/result/content")
-    } else {
-        if let Some(error) = data.get("error") {
-            reject_redacted(error)?;
-        }
-        data.pointer("/error/message")
-    };
+    let direct = data.get("content");
+    let result = data.pointer("/result/content");
+    let error = data.pointer("/error/message");
+    if [direct, result, error]
+        .into_iter()
+        .filter(Option::is_some)
+        .count()
+        > 1
+    {
+        return Err(NativeJsonlResultExtractionError::InvalidShape);
+    }
+    if result.is_some() {
+        reject_redacted(
+            data.get("result")
+                .ok_or(NativeJsonlResultExtractionError::InvalidShape)?,
+        )?;
+    }
+    if error.is_some() {
+        reject_redacted(
+            data.get("error")
+                .ok_or(NativeJsonlResultExtractionError::InvalidShape)?,
+        )?;
+    }
+    let selected = direct.or(result).or(error);
     Ok(vec![NativeJsonlResultSubrecord {
         subrecord_index: 0,
-        content: extract_direct_result_ref(selected, &[])?,
+        content: extract_direct_result_content(selected, &[], true)?,
         call_id: native_result_identity(data).or_else(|| native_result_identity(value)),
         tool_name: native_result_tool_name(data).or_else(|| native_result_tool_name(value)),
         outcome: native_result_outcome(data),
     }])
 }
 
-fn extract_direct_result_ref<'a>(
+pub(super) fn extract_direct_result_content<'a>(
     value: Option<&'a Value>,
     object_fields: &[&str],
-) -> Result<Option<&'a str>, NativeJsonlResultExtractionError> {
+    allow_structured_content: bool,
+) -> Result<Option<Cow<'a, str>>, NativeJsonlResultExtractionError> {
     let Some(value) = value else {
         return Ok(None);
     };
     reject_redacted(value)?;
     match value {
-        Value::String(text) => Ok(Some(text)),
+        Value::String(text) => Ok(Some(Cow::Borrowed(text))),
         Value::Null => Ok(None),
-        Value::Object(object) => {
-            for field in object_fields {
-                if let Some(selected) = object.get(*field) {
-                    return match selected {
-                        Value::String(text) => Ok(Some(text)),
-                        Value::Null => Ok(None),
-                        _ => Err(NativeJsonlResultExtractionError::InvalidShape),
-                    };
-                }
+        Value::Object(object) if !object_fields.is_empty() => {
+            let mut selected = object_fields.iter().filter_map(|field| object.get(*field));
+            let Some(selected_value) = selected.next() else {
+                return Ok(None);
+            };
+            if selected.next().is_some() {
+                return Err(NativeJsonlResultExtractionError::InvalidShape);
             }
-            Ok(None)
+            extract_direct_result_content(Some(selected_value), &[], allow_structured_content)
         }
-        Value::Array(_) | Value::Bool(_) | Value::Number(_) => {
+        Value::Object(_) | Value::Array(_) | Value::Bool(_) | Value::Number(_)
+            if allow_structured_content =>
+        {
+            serde_json::to_string(value)
+                .map(Cow::Owned)
+                .map(Some)
+                .map_err(|_| NativeJsonlResultExtractionError::InvalidShape)
+        }
+        Value::Object(_) | Value::Array(_) | Value::Bool(_) | Value::Number(_) => {
             Err(NativeJsonlResultExtractionError::InvalidShape)
         }
     }
@@ -366,6 +417,10 @@ fn normalized_result_key(key: &str) -> String {
 /// Returns the single allowlisted result-content profile for a direct native
 /// JSONL provider. The profile token is stable data: changing field selection
 /// or normalization requires a new token.
+///
+/// Antigravity and Windsurf intentionally have no profile: their admitted
+/// native dialects expose calls/messages but no stable result-bearing record
+/// shape. Qoder uses its stricter provider-specific parser instead.
 pub(crate) const fn native_jsonl_result_content_profile(
     provider: CaptureProvider,
 ) -> Option<&'static str> {
@@ -444,11 +499,11 @@ mod tests {
             enumerate_native_jsonl_result_subrecords(GEMINI_RESULT_PROFILE, &gemini).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].subrecord_index, 0);
-        assert_eq!(results[0].content, Some("zero"));
+        assert_eq!(results[0].content.as_deref(), Some("zero"));
         assert_eq!(results[0].call_id, Some("call-0"));
         assert_eq!(results[0].outcome.outcome, OutputOutcome::Success);
         assert_eq!(results[1].subrecord_index, 1);
-        assert_eq!(results[1].content, Some("two"));
+        assert_eq!(results[1].content.as_deref(), Some("two"));
         assert_eq!(results[1].tool_name, Some("shell"));
         assert_eq!(results[1].outcome.outcome, OutputOutcome::Failure);
         assert_eq!(results[1].outcome.exit_code, Some(9));
@@ -467,7 +522,11 @@ mod tests {
             let results =
                 enumerate_native_jsonl_result_subrecords(TABNINE_RESULT_PROFILE, &value).unwrap();
             assert_eq!(results.len(), 2, "{record_type}");
-            assert_eq!(results[0].content, Some("visible"), "{record_type}");
+            assert_eq!(
+                results[0].content.as_deref(),
+                Some("visible"),
+                "{record_type}"
+            );
             assert_eq!(results[0].call_id, Some("call-visible"), "{record_type}");
             assert_eq!(results[1].content, None, "{record_type}");
 
@@ -479,7 +538,7 @@ mod tests {
                 enumerate_native_jsonl_result_subrecords(TABNINE_RESULT_PROFILE, &single).unwrap();
             assert_eq!(single_results.len(), 1, "{record_type}");
             assert_eq!(
-                single_results[0].content,
+                single_results[0].content.as_deref(),
                 Some("reopened exactly"),
                 "{record_type}"
             );
@@ -516,11 +575,11 @@ mod tests {
             enumerate_native_jsonl_result_subrecords(GEMINI_RESULT_PROFILE, &partially_redacted)
                 .unwrap();
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0].content, Some("visible-zero"));
+        assert_eq!(results[0].content.as_deref(), Some("visible-zero"));
         assert_eq!(results[1].content, None);
         assert_eq!(results[1].outcome.outcome, OutputOutcome::Unknown);
         assert_eq!(results[2].subrecord_index, 2);
-        assert_eq!(results[2].content, Some("visible-two"));
+        assert_eq!(results[2].content.as_deref(), Some("visible-two"));
 
         let entirely_redacted = json!({
             "redacted": true,

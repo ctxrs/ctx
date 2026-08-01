@@ -16,7 +16,7 @@ pub(super) fn base_sources_for_root(
         .named_path();
     source_backed_base_sources(sink, |source| adapter.owns(source))
         .into_iter()
-        .filter_map(|source| match base_source_path(&source) {
+        .filter_map(|source| match base_source_path(adapter, &source) {
             Ok(path) if path.starts_with(root) => Some(Ok(source)),
             Ok(_) => None,
             Err(error) => Some(Err(error)),
@@ -24,9 +24,12 @@ pub(super) fn base_sources_for_root(
         .collect()
 }
 
-fn base_source_path(certificate: &CertifiedSource) -> Result<PathBuf> {
+fn base_source_path(
+    adapter: &dyn JsonlFamilyAdapter,
+    certificate: &CertifiedSource,
+) -> Result<PathBuf> {
     certificate.validate_contract().map_err(contract_error)?;
-    if certificate.parser_revision() != FAMILY_PARSER_REVISION {
+    if certificate.parser_revision() != adapter.parser_revision() {
         return Err(CaptureError::InvalidPayload(
             "JSONL base parser revision changed".to_owned(),
         ));

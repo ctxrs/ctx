@@ -2,26 +2,23 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use ctx_history_core::FileChangeKind;
+use serde::Serialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::file_touches::{
     inferred_file_change_kind, normalize_file_path, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
 };
 use crate::provider::normalization::{
-    provider_json_text, provider_local_preview, provider_normalized_result_value,
-    provider_timestamp_seconds, provider_value_text,
+    provider_normalized_result_value, provider_timestamp_seconds, provider_value_text,
 };
-use crate::{
-    OutputOutcome, OutputOutcomeMetadata, Result, PROVIDER_MAX_PREVIEW_CHARS,
-    PROVIDER_MAX_TEXT_CHARS,
-};
+use crate::{OutputOutcome, OutputOutcomeMetadata, Result};
 
 use super::stream::{GooseRetainedContentClass, GooseRetainedMessage};
 
 pub(super) struct GooseOutputProjection {
     pub(super) call_id: Option<String>,
+    pub(super) linkage_exact: bool,
     pub(super) outcome: OutputOutcomeMetadata,
 }
 
@@ -52,12 +49,6 @@ pub(super) fn goose_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> Dat
         .unwrap_or(fallback)
 }
 
-fn goose_content_text(content: &Value) -> Option<String> {
-    let mut parts = Vec::new();
-    goose_collect_text(content, &mut parts);
-    (!parts.is_empty()).then(|| parts.join("\n"))
-}
-
 /// Returns complete normalized Goose tool-response bodies in native array
 /// order. Only direct `toolResponse` blocks and their documented result fields
 /// are accepted; arbitrary object descendants are not searched. The caller
@@ -72,7 +63,7 @@ pub(crate) fn goose_normalized_result_content(content: &Value) -> Option<String>
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
-pub(crate) fn goose_complete_content_text(content: &Value) -> Option<String> {
+pub(crate) fn goose_message_text(content: &Value) -> Option<String> {
     let mut parts = Vec::new();
     goose_collect_complete_text(content, &mut parts);
     (!parts.is_empty()).then(|| parts.join("\n"))
@@ -118,28 +109,49 @@ fn goose_visit_tool_responses(
 }
 
 pub(super) fn goose_output_projection(content: &Value) -> GooseOutputProjection {
-    let mut aggregate = GooseOutcomeAggregate::default();
+    const MAX_LINKAGE_BYTES: usize = 16 * 1024;
+    let mut aggregate = GooseOutcomeAggregate {
+        linkage_bounded: true,
+        ..GooseOutcomeAggregate::default()
+    };
     goose_visit_tool_responses(content, &mut |object| {
-        if aggregate.call_id.is_none() {
-            aggregate.call_id = goose_tool_response_string(
-                object,
-                &["toolCallId", "tool_call_id", "call_id", "id"],
-            )
-            .or_else(|| {
-                object
-                    .get("toolCall")
-                    .and_then(|value| value.get("id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            });
+        if let Some(call_id) =
+            goose_tool_response_string(object, &["toolCallId", "tool_call_id", "call_id", "id"])
+                .or_else(|| {
+                    object
+                        .get("toolCall")
+                        .and_then(|value| value.get("id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+        {
+            let call_id = call_id.trim();
+            if call_id.is_empty() {
+                aggregate.linkage_ambiguous = true;
+            } else if call_id.len() > MAX_LINKAGE_BYTES {
+                aggregate.linkage_bounded = false;
+            } else if aggregate
+                .call_id
+                .as_deref()
+                .is_some_and(|selected| selected != call_id)
+            {
+                aggregate.linkage_ambiguous = true;
+            } else if aggregate.call_id.is_none() {
+                aggregate.call_id = Some(call_id.to_owned());
+            }
         }
         goose_collect_outcome(object, &mut aggregate);
         if let Some(result) = goose_tool_response_value(object) {
             goose_collect_outcome_value(result, &mut aggregate);
         }
     });
+    let linkage_exact =
+        !aggregate.linkage_ambiguous && aggregate.linkage_bounded && aggregate.call_id.is_some();
     GooseOutputProjection {
-        call_id: aggregate.call_id,
+        call_id: (!aggregate.linkage_ambiguous)
+            .then_some(aggregate.call_id)
+            .flatten(),
+        linkage_exact,
         outcome: OutputOutcomeMetadata {
             outcome: if aggregate.timeout {
                 OutputOutcome::Timeout
@@ -164,6 +176,8 @@ struct GooseOutcomeAggregate {
     exit_code: Option<i32>,
     duration_ms: Option<u64>,
     call_id: Option<String>,
+    linkage_ambiguous: bool,
+    linkage_bounded: bool,
 }
 
 fn goose_collect_outcome(
@@ -261,11 +275,6 @@ fn goose_collect_text(value: &Value, parts: &mut Vec<String>) {
         Value::Array(items) => {
             for item in items {
                 goose_collect_text(item, parts);
-                if parts.iter().map(|part| part.chars().count()).sum::<usize>()
-                    >= PROVIDER_MAX_TEXT_CHARS
-                {
-                    break;
-                }
             }
         }
         Value::Object(object) => {
@@ -347,7 +356,7 @@ pub(super) enum GooseNativeEventKind {
     ToolOutput,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(super) struct GooseNativeFileTouch {
     pub(super) ordinal: u32,
     pub(super) path: String,
@@ -377,29 +386,6 @@ pub(super) struct GooseNativeEvent {
     pub(super) file_touches: Vec<GooseNativeFileTouch>,
 }
 
-pub(super) fn goose_event_payload_hash(event: &GooseNativeEvent) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"ctx-goose-nativepath-canonical-event-v1\0");
-    digest.update(event.native_order.to_le_bytes());
-    digest.update(event.native_identity.as_bytes());
-    digest.update(event.provider_message_identity.as_bytes());
-    digest.update(event.session_identity.as_bytes());
-    digest.update(event.role.as_bytes());
-    digest.update(event.content.to_string().as_bytes());
-    digest.update(event.searchable_text.as_bytes());
-    digest.update(event.created_timestamp.unwrap_or_default().to_le_bytes());
-    if let Some(timestamp) = &event.timestamp {
-        digest.update(timestamp.as_bytes());
-    }
-    if let Some(tokens) = &event.tokens_json {
-        digest.update(tokens.as_bytes());
-    }
-    if let Some(metadata) = &event.metadata_json {
-        digest.update(metadata.as_bytes());
-    }
-    format!("{:x}", digest.finalize())
-}
-
 pub(super) fn normalize_goose_native_message(
     message: GooseRetainedMessage,
 ) -> Result<GooseNativeEvent> {
@@ -420,7 +406,7 @@ pub(super) fn normalize_goose_native_message(
         GooseRetainedContentClass::ToolCall => GooseNativeEventKind::ToolCall,
     };
     let searchable_text =
-        goose_content_text(&content).unwrap_or_else(|| format!("Goose {} message", message.role));
+        goose_message_text(&content).unwrap_or_else(|| format!("Goose {} message", message.role));
     let file_touches = if kind == GooseNativeEventKind::ToolCall {
         goose_native_file_touches(&content)?
     } else {
@@ -447,60 +433,43 @@ pub(super) fn normalize_goose_native_message(
     })
 }
 
-pub(super) fn normalize_goose_native_output_diagnostic(
+pub(super) fn normalize_goose_native_output(
     message: &super::stream::GooseScannedMessage,
-) -> Result<GooseNativeEvent> {
+) -> Result<Option<GooseNativeEvent>> {
     let outcome = message.output_outcome.ok_or_else(|| {
         crate::CaptureError::SystemInvariant(
             "Goose output diagnostic omitted its SQL-classified outcome",
         )
     })?;
-    if !matches!(outcome, OutputOutcome::Failure | OutputOutcome::Timeout) {
-        return Err(crate::CaptureError::SystemInvariant(
-            "Goose attempted to retain a successful or unknown output in Core",
-        ));
+    let Some(raw_content) = message.content_json.as_deref() else {
+        return Ok(None);
+    };
+    let content: Value = serde_json::from_str(raw_content).map_err(|error| {
+        crate::CaptureError::InvalidPayload(format!(
+            "Goose SQL-classified output {} changed while building its result: {error}",
+            message.native_identity
+        ))
+    })?;
+    if !content.is_array() {
+        return Ok(None);
     }
-    let (diagnostic, call_id, exit_code, duration_ms) =
-        if let Some(raw_content) = message.content_json.as_deref() {
-            let content: Value = serde_json::from_str(raw_content).map_err(|error| {
-                crate::CaptureError::InvalidPayload(format!(
-                    "Goose SQL-classified output {} changed while building its diagnostic: {error}",
-                    message.native_identity
-                ))
-            })?;
-            let projection = goose_output_projection(&content);
-            (
-                goose_normalized_result_content(&content)
-                    .unwrap_or_else(|| "Goose tool response failed".to_owned()),
-                projection.call_id,
-                projection.outcome.exit_code,
-                projection.outcome.duration_ms,
-            )
-        } else {
-            ("Goose tool response failed".to_owned(), None, None, None)
-        };
-    let searchable_text = provider_local_preview(&diagnostic, PROVIDER_MAX_TEXT_CHARS).0;
-    let output_preview = provider_local_preview(&searchable_text, PROVIDER_MAX_PREVIEW_CHARS).0;
-    let body = json!({
-        "message_id": message.provider_message_identity,
-        "row_id": message.native_order,
-        "role": message.role,
-        "output_preview": output_preview,
+    let projection = goose_output_projection(&content);
+    let Some(result_body) =
+        goose_normalized_result_content(&content).filter(|body| !body.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let linkage = json!({
         "result_outcome": goose_output_outcome_label(outcome),
-        "exit_code": exit_code,
-        "duration_ms": duration_ms,
-        "timed_out": outcome == OutputOutcome::Timeout,
-        "call_id": call_id,
-        "output_retention": "bounded_diagnostic",
-        "metadata": message.metadata_json.as_deref().map(provider_json_text),
-        "tokens": message.tokens_json.as_deref().map(provider_json_text),
-        "created_timestamp": message.created_timestamp,
-        "timestamp": message.timestamp,
+        "exit_code": projection.outcome.exit_code,
+        "duration_ms": projection.outcome.duration_ms,
+        "call_id": projection.call_id,
+        "linkage_exact": projection.linkage_exact,
     });
-    let retained_content_bytes = u64::try_from(body.to_string().len()).map_err(|_| {
+    let retained_content_bytes = u64::try_from(linkage.to_string().len()).map_err(|_| {
         crate::CaptureError::SystemInvariant("Goose diagnostic body length exceeds u64")
     })?;
-    Ok(GooseNativeEvent {
+    Ok(Some(GooseNativeEvent {
         sqlite_rowid: message.sqlite_rowid,
         native_order: message.native_order,
         native_identity: message.native_identity.clone(),
@@ -509,8 +478,8 @@ pub(super) fn normalize_goose_native_output_diagnostic(
         session_identity: message.session_identity.clone(),
         kind: GooseNativeEventKind::ToolOutput,
         role: message.role.clone(),
-        content: body,
-        searchable_text,
+        content: linkage,
+        searchable_text: result_body,
         created_timestamp: message.created_timestamp,
         timestamp: message.timestamp.clone(),
         tokens_json: None,
@@ -518,7 +487,7 @@ pub(super) fn normalize_goose_native_output_diagnostic(
         retained_content_bytes,
         logical_row_digest: message.logical_row_digest,
         file_touches: Vec::new(),
-    })
+    }))
 }
 
 fn goose_native_file_touches(content: &Value) -> Result<Vec<GooseNativeFileTouch>> {

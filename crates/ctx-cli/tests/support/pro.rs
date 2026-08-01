@@ -5,6 +5,25 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
+))]
+use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
+))]
+use ctx_history_relational::{
+    CommittedCoreGeneration, RelationalProjectionRecord, RelationalSourceHealth,
+    RelationalSourceMetadata, SourceBackedRelationalProjection,
+};
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
+))]
+use sha2::{Digest as _, Sha256};
+
 #[cfg(unix)]
 const PYTHON3_SHEBANG: &str = "#!/usr/bin/python3\n";
 
@@ -81,12 +100,183 @@ pub(crate) fn write_python_helper(path: &Path, body: &str) {
 ))]
 pub(crate) fn initialize_current_query_store(data_root: &Path) {
     initialize_pro_installation_identity(data_root);
-    let generation_id = super::initialize_generation_only_sql_projection(data_root);
+    let generation_id = initialize_provider_neutral_core_projection(data_root);
     assert!(!generation_id.is_empty());
     assert!(
         !data_root.join("work.sqlite").exists(),
         "Pro query fixtures must use only the fresh source-backed epoch"
     );
+}
+
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
+))]
+fn initialize_provider_neutral_core_projection(data_root: &Path) -> String {
+    let source_digest = [
+        175, 208, 244, 36, 180, 188, 63, 218, 129, 170, 29, 64, 65, 216, 117, 181, 87, 2, 144, 20,
+        105, 113, 110, 148, 100, 116, 65, 93, 202, 224, 111, 187,
+    ];
+    let descriptor_digest = [
+        228, 136, 202, 181, 26, 51, 96, 50, 4, 21, 154, 120, 18, 194, 115, 94, 26, 61, 151, 30,
+        190, 204, 19, 116, 24, 34, 103, 109, 63, 77, 114, 212,
+    ];
+    let source = serde_json::json!({
+        "provider": "golden",
+        "source_format": "golden_jsonl",
+        "schema_variant": "golden-v1",
+        "provider_identity_version": 1,
+        "anchor": {"CatalogLineage": vec![1_u8; 32]},
+        "identity": {
+            "contract_version": 1,
+            "entity_kind": "Source",
+            "digest": source_digest,
+            "source_digest": source_digest,
+            "source_descriptor_digest": vec![0_u8; 32],
+            "uuid": "afd0f424-b4bc-8fda-81aa-1d4041d875b5",
+        },
+    });
+    let session_id = serde_json::json!({
+        "contract_version": 1,
+        "entity_kind": "Session",
+        "digest": [
+            197, 33, 206, 47, 175, 208, 90, 191, 45, 157, 209, 244, 53, 79, 81, 8, 122,
+            251, 196, 109, 217, 48, 148, 110, 61, 131, 195, 254, 61, 124, 40, 84,
+        ],
+        "source_digest": source_digest,
+        "source_descriptor_digest": descriptor_digest,
+        "uuid": "c521ce2f-afd0-8abf-ad9d-d1f4354f5108",
+    });
+    let event_id = serde_json::json!({
+        "contract_version": 1,
+        "entity_kind": "Event",
+        "digest": [
+            216, 99, 203, 132, 107, 211, 192, 113, 235, 219, 83, 38, 196, 76, 137, 106,
+            44, 136, 49, 16, 137, 199, 221, 179, 12, 16, 95, 74, 24, 15, 80, 210,
+        ],
+        "source_digest": source_digest,
+        "source_descriptor_digest": descriptor_digest,
+        "uuid": "d863cb84-6bd3-8071-abdb-5326c44c896a",
+    });
+    let record: ctx_pro_host_protocol::CoreRecord = serde_json::from_value(serde_json::json!({
+        "record_version": 1,
+        "event_id": event_id,
+        "session_id": session_id,
+        "parent_session_id": null,
+        "root_session_id": session_id,
+        "source": source,
+        "provider_session_id": "golden-session",
+        "native_event_id": null,
+        "event_sequence": 1,
+        "occurred_at_unix_ms": 1700000000000_i64,
+        "event_type": "message",
+        "role": "assistant",
+        "agent_type": "primary",
+        "is_primary": true,
+        "workspace": null,
+        "branch": null,
+        "cwd": null,
+        "parser_revision": "golden-parser-v1",
+        "normalization_revision": 1,
+        "content": {
+            "policy_revision": 2,
+            "policy_status": "selected",
+            "normalized_body": "provider-neutral Pro query fixture",
+            "structured_content": null,
+        },
+        "metadata": {},
+        "repository_candidate_evidence": {
+            "repository_observation_revision": 2,
+            "bounded_shell_subset_revision": 1,
+            "association_policy_revision": 3,
+            "outcome_capture_revision": 2,
+            "candidates": [
+                {"kind": "session_cwd", "path": "/fixture/repository"},
+                {"kind": "file_activity_path", "path": "/fixture/repository/src/lib.rs"},
+            ],
+        },
+        "repository_bindings": [],
+        "repository_abstentions": [],
+        "repository_file_observations": [],
+        "repository_vcs_observations": [],
+    }))
+    .unwrap();
+    let source = record.source.clone();
+    let observation = serde_json::json!({
+        "source": source,
+        "revision_kind": "fixture-v1",
+        "revision": [1],
+    });
+    let certificate = serde_json::json!({
+        "observation": observation,
+        "parser_revision": "golden-parser-v1",
+        "content_digest": vec![1_u8; 32],
+        "counts": {
+            "complete_records": 1,
+            "retained_records": 1,
+            "rejected_records": 0,
+            "ignored_records": 0,
+            "indexed_documents": 1,
+            "certified_bytes": 1,
+        },
+        "frontier": null,
+    });
+
+    let index_root = data_root.join("search").join("lexical");
+    let mut writer = GenerationWriter::open(
+        &index_root,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 32 * 1024 * 1024,
+        },
+    )
+    .unwrap();
+    let relational_record = record.clone();
+    writer.begin_source(source).unwrap();
+    writer.add_core_record(record).unwrap();
+    writer
+        .certify_source(serde_json::from_value(certificate).unwrap())
+        .unwrap();
+    let core_receipt = writer.commit(|_| true).unwrap();
+    let verified = VerifiedIndex::open(index_root).unwrap();
+    assert_eq!(verified.generation_id(), core_receipt.generation_id);
+
+    let manifest = verified.manifest();
+    let sources = manifest
+        .sources
+        .iter()
+        .map(|certificate| RelationalSourceMetadata {
+            source: certificate.observation().source().clone(),
+            parser_revision: certificate.parser_revision().to_owned(),
+            revision_digest: Sha256::digest(serde_json::to_vec(certificate).unwrap()).into(),
+            indexed_event_count: certificate.counts().indexed_documents,
+            health: RelationalSourceHealth::Ready,
+        })
+        .collect::<Vec<_>>();
+    let source_id = sources[0].source.identity().as_uuid();
+    let relational_records = vec![
+        RelationalProjectionRecord::BeginSource(Box::new(sources[0].clone())),
+        RelationalProjectionRecord::CoreRecord(Box::new(relational_record)),
+        RelationalProjectionRecord::EndSource { source_id },
+    ];
+    let generation = CommittedCoreGeneration {
+        generation_id: verified.generation_id().to_owned(),
+        manifest_version: manifest.manifest_version,
+        core_record_version: manifest.core_record_version,
+        core_record_contract_fingerprint: manifest.core_record_contract_fingerprint.clone(),
+        lexical_schema_version: manifest.lexical_schema_version,
+        policy_schema_hash: manifest.policy_schema_hash.clone(),
+        indexed_documents: manifest.indexed_documents,
+        sources,
+    };
+    let mut projection =
+        SourceBackedRelationalProjection::open(data_root.join("relational.sqlite")).unwrap();
+    let relational_receipt = projection.rebuild(&generation, relational_records).unwrap();
+    assert_eq!(
+        relational_receipt.core_generation_id,
+        core_receipt.generation_id
+    );
+    core_receipt.generation_id
 }
 
 #[cfg(unix)]
@@ -150,18 +340,25 @@ send({
   'sequence': request['sequence'],
   'request_id': request['request_id'],
   'message': {'kind':'status','body':{
-    'state':'ready',
-    'authority':'source',
-    'source_receipt':{
-      'core_generation_id':'a' * 64,
-      'manifest_aggregate_sha256':'b' * 64,
-      'materializer_revision':'fake-source-materializer-v1',
-      'progress':{
-        'source_count':0,
-        'page_count':0,
-        'aggregate_sha256':'a06883447f8d08387e9a0198da74dc5681cc9cbc951a5eac8beb124fb3a772a7'
-      }
-    }
+    'currentness':'not_materialized',
+    'requested_core_generation_id':request['message']['body'].get('requested_core_generation_id'),
+    'core_receipt':None,
+    'coverage':'not_materialized',
+    'repository_coverage':{
+      'repository_candidate_events':0,
+      'logical_binding_events':0,
+      'certified_live_root_access_events':0,
+      'file_evidence_events':0,
+      'exact_commit_evidence_events':0,
+      'exact_pull_request_evidence_events':0
+    },
+    'access':{
+      'entitlement':'available',
+      'graph_key':'available',
+      'local_repository':'unavailable'
+    },
+    'supported_operations':['file_blame','commit_blame','pull_request_blame'],
+    'available_operations':[]
   }}
 })
 "#;
@@ -207,6 +404,38 @@ fn write_blame_helper_with_options(
     let active_generation =
         ctx_history_index::VerifiedIndex::open(data_root.join("search").join("lexical"))
             .expect("fake Pro blame helper requires an active verified Core generation");
+    let manifest = active_generation.manifest();
+    let source_states = manifest
+        .sources
+        .iter()
+        .zip(&manifest.core_record_aggregates)
+        .map(
+            |(source, aggregate)| ctx_pro_host_protocol::CoreSourceState {
+                source: source.observation().source().clone(),
+                core_record_accumulator: aggregate.core_record_accumulator().to_owned(),
+                event_count: source.counts().indexed_documents,
+            },
+        )
+        .collect::<Vec<_>>();
+    let core_head = ctx_pro_host_protocol::CoreGenerationHead::new(
+        active_generation.generation_id(),
+        manifest.manifest_version,
+        manifest.identity_version,
+        manifest.core_record_contract_fingerprint.clone(),
+        manifest.lexical_schema_version,
+        manifest.lexical_analyzer_version,
+        manifest.policy_schema_hash.clone(),
+        &source_states,
+    )
+    .expect("fake Pro blame helper requires an exact provider-neutral Core generation head");
+    let evidence_page = active_generation
+        .core_source_event_page(&source_states[0].source, None, 1)
+        .expect("fake Pro blame helper requires a readable provider-neutral Core event");
+    let evidence_record = &evidence_page.items[0].core_record;
+    let evidence_source = serde_json::to_string(&evidence_record.source).unwrap();
+    let evidence_session_id = serde_json::to_string(&evidence_record.session_id).unwrap();
+    let evidence_event_id = serde_json::to_string(&evidence_record.event_id).unwrap();
+    let evidence_event_sequence = evidence_record.event_sequence.to_string();
 
     const HELPER: &str = r#"#!/usr/bin/python3
 import json, os, struct, sys
@@ -222,6 +451,36 @@ def send(value):
     payload = json.dumps(value, separators=(',', ':')).encode()
     sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 1) + struct.pack('>I', len(payload)) + payload)
     sys.stdout.buffer.flush()
+
+def status_body(request):
+    return {
+      'currentness':'current',
+      'requested_core_generation_id':request['message']['body'].get('requested_core_generation_id'),
+      'core_receipt':{
+        'core_generation_id':'__CORE_GENERATION_ID__',
+        'core_record_contract_fingerprint':'__CORE_RECORD_CONTRACT_FINGERPRINT__',
+        'source_snapshot_sha256':'__CORE_SOURCE_SNAPSHOT_SHA256__',
+        'materializer_revision':'pro-query-fixture-v1',
+        'source_count':__CORE_SOURCE_COUNT__,
+        'event_count':__CORE_EVENT_COUNT__
+      },
+      'coverage':'complete',
+      'repository_coverage':{
+        'repository_candidate_events':1,
+        'logical_binding_events':1,
+        'certified_live_root_access_events':1,
+        'file_evidence_events':1,
+        'exact_commit_evidence_events':1,
+        'exact_pull_request_evidence_events':1
+      },
+      'access':{
+        'entitlement':'available',
+        'graph_key':'available',
+        'local_repository':'available'
+      },
+      'supported_operations':['file_blame','commit_blame','pull_request_blame'],
+      'available_operations':['file_blame','commit_blame','pull_request_blame']
+    }
 
 hello = receive()
 if 'query' not in hello['message']['body']['capabilities']:
@@ -247,20 +506,7 @@ if request['message']['kind'] != 'status':
 send({
   'sequence': request['sequence'],
   'request_id': request['request_id'],
-  'message': {'kind':'status','body':{
-    'state':'ready',
-    'authority':'source',
-    'source_receipt':{
-      'core_generation_id':'__CORE_GENERATION_ID__',
-      'manifest_aggregate_sha256':'b' * 64,
-      'materializer_revision':'fake-source-materializer-v1',
-      'progress':{
-        'source_count':0,
-        'page_count':0,
-        'aggregate_sha256':'a06883447f8d08387e9a0198da74dc5681cc9cbc951a5eac8beb124fb3a772a7'
-      }
-    }
-  }}
+  'message': {'kind':'status','body':status_body(request)}
 })
 request = receive()
 body = request['message']['body']
@@ -282,25 +528,24 @@ if body['limit'] < 1 or body['limit'] > 100:
     sys.exit(23)
 repository = target.get('repository') or 'ctxrs/ctx'
 repository_ref = {'id':'repository:' + repository, 'kind':'repository', 'display':repository}
+field_padding = 'x' * 8000 if __OVERSIZED_BLAME__ else ''
+evidence_citation = {
+  'core_generation_id':'__CORE_GENERATION_ID__',
+  'source':__EVIDENCE_SOURCE__,
+  'session_id':__EVIDENCE_SESSION_ID__,
+  'event_id':__EVIDENCE_EVENT_ID__,
+  'event_sequence':__EVIDENCE_EVENT_SEQUENCE__,
+  'byte_range':None,
+  'evidence_sha256':None
+}
 evidence = [{
   'number':1,
-  'citation':{
-    'event_id':'00000000-0000-0000-0000-000000000001',
-    'event_seq':1
-  }
+  'citation':evidence_citation
 }]
 if __OVERSIZED_BLAME__:
     evidence = [{
       'number':number,
-      'citation':{
-        'source_path':'x' * 8192,
-        'source_record_ordinal':number,
-        'byte_range':{
-          'start':number,
-          'end_exclusive':number + 1
-        },
-        'source_sha256':'a' * 64
-      }
+      'citation':evidence_citation
     } for number in range(1, 8 * 32 + 1)]
 evidence_numbers = [item['number'] for item in evidence]
 kind = target['kind']
@@ -312,11 +557,15 @@ if kind == 'commit':
     matches = [{
       'kind':'commit',
       'value':{
-        'fact_id':'fact:produced' + (':' + str(index + 1) if __OVERSIZED_BLAME__ else ''),
+        'fact_id':'fact:produced' + (':' + str(index + 1) if __OVERSIZED_BLAME__ else '') + field_padding,
         'fact_type':'git.commit.produced',
         'predicate':'produced_by',
         'subject':commit,
-        'object':{'id':'session:producer', 'kind':'session', 'display':'session-producer'},
+        'object':{
+          'id':'session:producer' + field_padding,
+          'kind':'session',
+          'display':'session-producer' + field_padding
+        },
         'fact_occurred_at_ms':None,
         'confidence':'explicit',
         'state':'asserted',
@@ -395,6 +644,14 @@ send({
     'next':None
   }}
 })
+request = receive()
+if request['message']['kind'] != 'status':
+    sys.exit(27)
+send({
+  'sequence': request['sequence'],
+  'request_id': request['request_id'],
+  'message': {'kind':'status','body':status_body(request)}
+})
 "#;
     let helper = HELPER
         .replace(
@@ -409,7 +666,21 @@ send({
             "__BLAME_ERROR_CLASS__",
             &blame_error_class.map_or_else(|| "None".to_owned(), |class| format!("'{class}'")),
         )
-        .replace("__CORE_GENERATION_ID__", active_generation.generation_id());
+        .replace("__CORE_GENERATION_ID__", &core_head.core_generation_id)
+        .replace(
+            "__CORE_RECORD_CONTRACT_FINGERPRINT__",
+            &core_head.core_record_contract_fingerprint,
+        )
+        .replace(
+            "__CORE_SOURCE_SNAPSHOT_SHA256__",
+            &core_head.source_snapshot_sha256,
+        )
+        .replace("__CORE_SOURCE_COUNT__", &core_head.source_count.to_string())
+        .replace("__CORE_EVENT_COUNT__", &core_head.event_count.to_string())
+        .replace("__EVIDENCE_SOURCE__", &evidence_source)
+        .replace("__EVIDENCE_SESSION_ID__", &evidence_session_id)
+        .replace("__EVIDENCE_EVENT_ID__", &evidence_event_id)
+        .replace("__EVIDENCE_EVENT_SEQUENCE__", &evidence_event_sequence);
     write_python_helper(path, &helper);
 }
 

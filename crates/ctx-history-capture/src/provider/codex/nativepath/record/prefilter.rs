@@ -1,8 +1,7 @@
 //! Pre-parse admission for raw Codex JSONL records.
 //!
 //! Codex rollout files are dominated by records the reader materializes
-//! nothing from: telemetry counters, agent-loop chatter, and result envelopes
-//! whose only projection is a counter. Handing those to the structural probe
+//! nothing from: telemetry counters and agent-loop chatter. Handing those to the structural probe
 //! costs a full `serde_json` walk plus borrowed-field extraction for state that
 //! is dropped on the next line.
 //!
@@ -57,8 +56,6 @@ pub(in super::super) enum CodexRecordAdmission {
 pub(in super::super) enum CodexSkipProjection {
     /// Nothing but the ignored-record counter.
     Ignored,
-    /// Nothing but the native-result counters.
-    NativeResult,
 }
 
 /// Classifies one raw Codex JSONL record before any parse, allocation, or hash.
@@ -78,9 +75,6 @@ pub(in super::super) fn prefilter_codex_record(record: &[u8]) -> CodexRecordAdmi
 ///
 /// * [`CodexRecordClass::Ignored`] increments one counter and returns an empty
 ///   projection.
-/// * [`CodexRecordClass::ExcludedResult`] with an ineligible kind increments
-///   the two native-result counters and returns an empty projection before it
-///   reads anything the probe decoded.
 ///
 /// Every other class reaches parsed state, so it stays on the probe path.
 pub(in super::super) fn codex_skip_projection(
@@ -88,11 +82,9 @@ pub(in super::super) fn codex_skip_projection(
 ) -> Option<CodexSkipProjection> {
     match class {
         CodexRecordClass::Ignored => Some(CodexSkipProjection::Ignored),
-        CodexRecordClass::ExcludedResult(kind) if !kind.is_eligible_output() => {
-            Some(CodexSkipProjection::NativeResult)
-        }
         CodexRecordClass::ExcludedResult(_)
         | CodexRecordClass::SessionMeta
+        | CodexRecordClass::TurnContext
         | CodexRecordClass::Retained(_) => None,
     }
 }

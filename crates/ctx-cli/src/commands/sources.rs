@@ -258,7 +258,7 @@ fn render_sources_human(
                 source_provider_cli_name(source.provider).to_owned(),
                 source.status.as_str().to_owned(),
                 human_path(&source.path, home),
-                human_source_format(&source.source_format),
+                human_source_format(source.source_format),
             ]);
         }
         for source in plugin_sources {

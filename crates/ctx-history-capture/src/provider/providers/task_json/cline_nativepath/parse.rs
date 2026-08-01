@@ -20,6 +20,7 @@ use crate::{
         visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
         PROVIDER_FILE_TOUCH_LIMIT_REJECTION,
     },
+    provider::normalization::provider_normalized_result_value,
     OutputObservationKind, OutputOutcome, OutputOutcomeMetadata,
 };
 

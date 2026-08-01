@@ -18,13 +18,14 @@ internal static class Program
         {
             ("wraps status as agent-history-v1", WrapsStatus),
             ("preserves additive response fields", PreservesAdditiveFields),
+            ("preserves legitimate source semantics", PreservesLegitimateSourceSemantics),
             ("builds local CLI operation arguments", BuildsOperationArguments),
             ("forces analytics off after ambient and user environment merging", ForcesAnalyticsOff),
             ("normalizes setup init status", NormalizesSetupInitStatus),
             ("builds search flags", BuildsSearchFlags),
             ("camelizes search retrieval json", CamelizesSearchRetrievalJson),
             ("rejects search without intent", RejectsSearchWithoutIntent),
-            ("wraps show and locate commands", WrapsShowAndLocate),
+            ("wraps show commands", WrapsShow),
             ("reports versioning metadata", ReportsVersioning),
             ("uses agent-history-v1 error codes", UsesAgentHistoryV1ErrorCodes),
             ("raises structured hosted placeholder errors", HostedPlaceholderError),
@@ -125,6 +126,24 @@ internal static class Program
         Equal("off", status.Status.Freshness!.Mode ?? "");
     }
 
+    private static async Task PreservesLegitimateSourceSemantics()
+    {
+        var acquisition = """{"source":"local_scan","cursor":"opaque-checkpoint"}""";
+        var sourceClient = new AgentHistoryClient(new RecordingTransport(
+            $$"""{"sources":[{"provider":"codex","path":"/configured/root","status":"available","importable":true,"acquisition":{{acquisition}}}]}"""));
+        var sources = await sourceClient.SourcesAsync();
+        var normalizedAcquisition = sources.Sources[0].ToJsonObject()["acquisition"]!.AsObject();
+        Equal("local_scan", normalizedAcquisition["source"]!.GetValue<string>());
+        Equal("opaque-checkpoint", normalizedAcquisition["cursor"]!.GetValue<string>());
+
+        var importClient = new AgentHistoryClient(new RecordingTransport(
+            $$"""{"resume":false,"totals":{},"sources":[{"source":{{acquisition}}}]}"""));
+        var imported = await importClient.ImportAsync();
+        var normalizedSource = imported.Import.Sources[0].ToJsonObject()["source"]!.AsObject();
+        Equal("local_scan", normalizedSource["source"]!.GetValue<string>());
+        Equal("opaque-checkpoint", normalizedSource["cursor"]!.GetValue<string>());
+    }
+
     private static async Task BuildsOperationArguments()
     {
         var transport = new RecordingTransport("""{"schema_version":1,"totals":{},"sources":[]}""");
@@ -196,6 +215,9 @@ internal static class Program
                   "recordType": "event",
                   "itemType": "event",
                   "result_scope": "event",
+                  "provider": "codex",
+                  "provider_session_id": "codex-resume-uuid",
+                  "source_format": "codex_session_jsonl",
                   "rank": 1,
                   "retrieval_score": 0.98,
                   "citations": [{"target_type":"event","label":"codex event"}]
@@ -221,6 +243,9 @@ internal static class Program
         True(!response.Search.Results[0].ToJsonObject().ContainsKey("recordType"), "search hit leaked recordType");
         True(!response.Search.Results[0].ToJsonObject().ContainsKey("itemType"), "search hit leaked itemType");
         Equal("event", response.Search.Results[0].ResultType ?? "");
+        Equal("codex", response.Search.Results[0].Provider ?? "");
+        Equal("codex-resume-uuid", response.Search.Results[0].ProviderSessionId ?? "");
+        Equal("codex_session_jsonl", response.Search.Results[0].SourceFormat ?? "");
         Equal(1.0, response.Search.Results[0].Rank ?? 0.0);
         Equal(0.98, response.Search.Results[0].RetrievalScore ?? 0.0);
         Equal("event", response.Search.Results[0].Citations[0].TargetType ?? "");
@@ -251,25 +276,20 @@ internal static class Program
         Equal(0, transport.Calls.Count);
     }
 
-    private static async Task WrapsShowAndLocate()
+    private static async Task WrapsShow()
     {
-        var transport = new RecordingTransport("""{"schema_version":1,"events":[],"source":{"path":"/tmp/source.jsonl"},"ctx_session_id":"session-1","provider":"codex"}""");
+        var transport = new RecordingTransport("""{"schema_version":1,"events":[],"ctx_session_id":"session-1","provider":"codex"}""");
         var client = new AgentHistoryClient(transport);
 
         await client.ShowEventAsync("event-1", new ShowEventOptions { Window = 2 });
         await client.ShowSessionAsync("session-1", new ShowSessionOptions { Mode = "full" });
         await client.ShowSessionAsync(new ShowSessionOptions { Provider = "codex", ProviderSessionId = "provider-session", Mode = "lite" });
-        await client.LocateEventAsync("event-1");
-        await client.LocateSessionAsync(new SessionLookupOptions { Provider = "codex", ProviderSessionId = "provider-session" });
 
         Equal("show event event-1 --format=json --window 2", Join(transport.Calls[0]));
         Equal("show session session-1 --mode full --format=json", Join(transport.Calls[1]));
         Equal("show session --provider codex --provider-session provider-session --mode lite --format=json", Join(transport.Calls[2]));
-        Equal("locate event event-1 --format=json", Join(transport.Calls[3]));
-        Equal("locate session --provider codex --provider-session provider-session --format=json", Join(transport.Calls[4]));
 
         await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.ShowEventAsync(""));
-        await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.LocateSessionAsync(new SessionLookupOptions { Provider = "codex" }));
     }
 
     private static async Task ReportsVersioning()
@@ -362,16 +382,16 @@ internal static class Program
                     }
                     break;
                 case "showEvent":
-                    _ = (await ClientFor(node["event"]).ShowEventAsync("event-1")).Event.Events;
+                    var shownEvent = (await ClientFor(node["event"]).ShowEventAsync("event-1")).Event.Event!;
+                    Equal("codex-fixture-session", shownEvent.ProviderSessionId ?? "");
+                    Equal("codex_session_jsonl", shownEvent.SourceFormat ?? "");
+                    Equal(true, shownEvent.Content!.Complete);
+                    Equal(CoreContentPolicyStatus.Selected, shownEvent.Content.PolicyStatus!.Value);
                     break;
                 case "showSession":
-                    _ = (await ClientFor(node["session"]).ShowSessionAsync("session-1")).Session.Events;
-                    break;
-                case "locateEvent":
-                    _ = (await ClientFor(node["location"]).LocateEventAsync("event-1")).Location.Source;
-                    break;
-                case "locateSession":
-                    _ = (await ClientFor(node["location"]).LocateSessionAsync("session-1")).Location.Source;
+                    var summary = (await ClientFor(node["session"]).ShowSessionAsync("session-1")).Session.Session!;
+                    Equal("codex-fixture-session", summary.ProviderSessionId ?? "");
+                    Equal("codex_session_jsonl", summary.SourceFormat ?? "");
                     break;
                 case "error":
                     True(node.ContainsKey("error"), $"{path} missing error payload");

@@ -233,14 +233,14 @@ try {
         "--no-daemon", "--format=json", "--progress", "none"
     )
     $importResult = Invoke-CtxRaw $importArguments
-    $sourceManifestRequired = $freshEpochRequired
+    $coreManifestRequired = $freshEpochRequired
     if ($importResult.ExitCode -eq 0) {
         $import = $importResult.Text
     } else {
         if ($importResult.Text -notmatch 'no foreground writer was started') {
             Fail ("ctx {0} failed: {1}" -f ($importArguments -join " "), $importResult.Text)
         }
-        $sourceManifestRequired = $true
+        $coreManifestRequired = $true
         $env:CTX_DAEMON_ENABLED = "true"
         $env:CTX_DAEMON_AUTOSTART_OFF = "0"
         try {
@@ -257,7 +257,7 @@ try {
         if ($import -notmatch '"current_source_count"\s*:\s*[1-9][0-9]*' -or
             $import -notmatch '"current_indexed_documents"\s*:\s*[1-9][0-9]*' -or
             $import -notmatch '"published_generation"\s*:\s*"[0-9a-f]{64}"') {
-            Fail "fixture import did not publish source-manifest authority"
+            Fail "fixture import did not publish Core-generation authority"
         }
     } elseif ($import -notmatch '"imported_events"\s*:\s*[1-9][0-9]*' -and
             ($import -notmatch '"imported_sources"\s*:\s*[1-9][0-9]*' -or
@@ -272,20 +272,20 @@ try {
         Fail "lexical search did not return the expected fixture result"
     }
     # Import and search execute in separate candidate processes. The expected
-    # hit plus the absence of the old Store proves fresh source-manifest
+    # hit plus the absence of the old Store proves fresh Core-generation
     # authority carried the fixture across that boundary.
     if (Test-Path -LiteralPath (Join-Path $dataRoot "work.sqlite")) {
         Fail "candidate created or opened the pre-v0.26 Store"
     }
-    if ($sourceManifestRequired) {
+    if ($coreManifestRequired) {
         $lexicalRoot = Join-Path $dataRoot "search\lexical"
-        if (-not (Test-Path -LiteralPath (Join-Path $lexicalRoot "meta.json") -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $lexicalRoot "active-generation.json") -PathType Leaf)) {
             Fail "candidate did not publish the fresh lexical generation"
         }
         $manifestRoot = Join-Path $lexicalRoot "ctx-generations"
-        $sourceManifests = @(Get-ChildItem -LiteralPath $manifestRoot -Filter "*.json" -File -ErrorAction SilentlyContinue)
-        if ($sourceManifests.Count -eq 0) {
-            Fail "candidate did not publish source-manifest authority"
+        $coreManifests = @(Get-ChildItem -LiteralPath $manifestRoot -Filter "*.json" -File -ErrorAction SilentlyContinue)
+        if ($coreManifests.Count -eq 0) {
+            Fail "candidate did not publish Core-generation authority"
         }
     }
 

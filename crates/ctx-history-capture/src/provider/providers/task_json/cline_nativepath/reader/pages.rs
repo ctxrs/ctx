@@ -42,7 +42,7 @@ impl ClineNativeReader {
                 component: source.component,
                 path: source.canonical_path.clone(),
                 kind: ClineComponentFailureKind::AuthorityBound,
-                message: "Cline certified page exceeds the 64-unit/4 MiB Core/8 MiB total contract"
+                message: "Cline certified page exceeds its unit or shared encoded Core bound"
                     .into(),
                 retryable: false,
             });
@@ -72,7 +72,7 @@ impl ClineNativeReader {
             CLINE_NATIVE_FIXED_PAGE_UNITS.saturating_add(CLINE_NATIVE_SESSION_PAGE_UNITS);
         if !owned_page_bounds_are_valid(core_bytes, core_units) {
             return Err(ClineNativePathError::Invariant {
-                message: "Cline metadata page exceeded the 4 MiB Core/8 MiB total page bounds"
+                message: "Cline metadata page exceeded its unit or shared encoded Core bound"
                     .to_owned(),
             });
         }

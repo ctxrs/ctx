@@ -52,12 +52,12 @@ SOURCE_BACKED_RECOVERY_FAULT_TAGS = [
 # exact Bazel reproduction. The runner receives only declared runfiles and
 # confines temporary state to Bazel's private test directory.
 sh_test(
-    name = "exact_manifest_and_tantivy_swap_process_death_matrix",
+    name = "inactive_generation_and_atomic_pointer_process_death_matrix",
     srcs = ["run-bazel-linux-fault-test.sh"],
     args = [
         "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
         "$(rootpath :libctx_source_recovery_fault.so)",
-        "exact_manifest_and_tantivy_swap_process_death_matrix",
+        "inactive_generation_and_atomic_pointer_process_death_matrix",
     ],
     data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
     size = "medium",
@@ -66,12 +66,12 @@ sh_test(
 )
 
 sh_test(
-    name = "retry_after_pre_meta_crash_reclaims_tantivy_candidate_files",
+    name = "retry_after_pre_pointer_crash_reclaims_inactive_generation",
     srcs = ["run-bazel-linux-fault-test.sh"],
     args = [
         "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
         "$(rootpath :libctx_source_recovery_fault.so)",
-        "retry_after_pre_meta_crash_reclaims_tantivy_candidate_files",
+        "retry_after_pre_pointer_crash_reclaims_inactive_generation",
     ],
     data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
     size = "medium",
@@ -127,12 +127,12 @@ sh_test(
 )
 
 sh_test(
-    name = "retry_resynchronizes_a_reused_manifest_before_meta_publication",
+    name = "retry_republishes_a_reclaimed_manifest_before_pointer_publication",
     srcs = ["run-bazel-linux-fault-test.sh"],
     args = [
         "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
         "$(rootpath :libctx_source_recovery_fault.so)",
-        "retry_resynchronizes_a_reused_manifest_before_meta_publication",
+        "retry_republishes_a_reclaimed_manifest_before_pointer_publication",
     ],
     data = SOURCE_BACKED_RECOVERY_FAULT_RUNFILES,
     size = "medium",
@@ -143,10 +143,10 @@ sh_test(
 test_suite(
     name = "fault_qualification",
     tests = [
-        ":exact_manifest_and_tantivy_swap_process_death_matrix",
+        ":inactive_generation_and_atomic_pointer_process_death_matrix",
         ":injected_enospc_and_write_sync_failures_preserve_previous_generation",
-        ":retry_after_pre_meta_crash_reclaims_tantivy_candidate_files",
-        ":retry_resynchronizes_a_reused_manifest_before_meta_publication",
+        ":retry_after_pre_pointer_crash_reclaims_inactive_generation",
+        ":retry_republishes_a_reclaimed_manifest_before_pointer_publication",
         ":writer_reopen_reclaims_abandoned_atomic_write_files",
     ],
 )

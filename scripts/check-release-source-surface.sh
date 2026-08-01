@@ -69,6 +69,7 @@ check_file() {
   # The same symbol anywhere else remains a retired top-level uninstall path.
   if [[ "${path}" != "crates/ctx-cli/src/pro/lifecycle_commands.rs" ]] \
     && [[ "${path}" != "crates/ctx-cli/src/pro/lifecycle_commands/tests.rs" ]] \
+    && [[ "${path}" != "crates/ctx-cli/src/pro/lifecycle_commands/uninstall.rs" ]] \
     && LC_ALL=C grep -n -E '(^|[^[:alnum:]_])run_uninstall([^[:alnum:]_]|$)' "${path}" >/dev/null 2>&1; then
     printf 'release source contains a removed top-level uninstall implementation: %s\n' "${path}" >&2
     failures=$((failures + 1))

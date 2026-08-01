@@ -76,9 +76,9 @@ mod tests {
     }
 
     fn retained_generation(index_root: &Path) -> Option<VerifiedIndex> {
-        index_root
-            .join("meta.json")
-            .is_file()
+        VerifiedIndex::active_generation_id(index_root)
+            .unwrap()
+            .is_some()
             .then(|| VerifiedIndex::open(index_root).unwrap())
     }
 
@@ -112,7 +112,7 @@ mod tests {
         assert_eq!(first.authority, second.authority);
         assert_eq!(first.catalog_lineage, second.catalog_lineage);
         assert_eq!(first.authority.revision(), 1);
-        assert!(!ctx_history_core::database_path(data_root.clone()).exists());
+        assert!(!data_root.join("work.sqlite").exists());
         let bytes = fs::read(catalog_root(&data_root).join(catalog_revision_filename(1))).unwrap();
         let text = String::from_utf8(bytes).unwrap();
         for forbidden in [
@@ -192,7 +192,7 @@ mod tests {
         let verified = VerifiedIndex::open(&index_root).unwrap();
         assert_eq!(verified.manifest().sources.len(), 1);
         assert_eq!(verified.manifest().indexed_documents, 1);
-        assert!(!ctx_history_core::database_path(data_root).exists());
+        assert!(!data_root.join("work.sqlite").exists());
     }
 
     #[test]

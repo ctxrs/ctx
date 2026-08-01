@@ -8,13 +8,11 @@ public final class SessionResult {
     private final Map<String, Object> fields;
     private final SessionSummary session;
     private final List<Event> events;
-    private final SourceLocation source;
 
     SessionResult(Map<String, Object> fields) {
         this.fields = AgentHistoryValue.copyObject(fields);
         this.session = SessionSummary.from(fields.get("session"));
         this.events = AgentHistoryValue.objectList(fields.get("events"), Event::new);
-        this.source = SourceLocation.from(fields.get("source"));
     }
 
     static SessionResult from(Object value) {
@@ -35,14 +33,6 @@ public final class SessionResult {
 
     public List<Event> events() {
         return events;
-    }
-
-    public SourceLocation getSource() {
-        return source;
-    }
-
-    public SourceLocation source() {
-        return source;
     }
 
     public String getMode() {

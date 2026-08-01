@@ -4,7 +4,6 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::native_source::NativeLocator;
 use crate::provider::provider_safe_path_segment;
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists,
@@ -12,8 +11,7 @@ use crate::provider::sqlite::{
 use crate::{CaptureError, Result};
 
 use super::position::{
-    nanoclaw_message_locator, nanoclaw_next_ordinal, NanoClawFrontier, NanoClawMessageSource,
-    NanoClawPositionPhase,
+    nanoclaw_next_ordinal, NanoClawFrontier, NanoClawMessageSource, NanoClawPositionPhase,
 };
 use super::project::{
     NanoClawDatabaseRead, NanoClawProjectDatabaseSnapshot, NanoClawProjectSnapshot,
@@ -180,8 +178,6 @@ pub(super) enum NanoClawNativeUnit {
         message_rowid: i64,
         session: NanoClawSessionRow,
         message: Box<NanoClawMessageRow>,
-        #[serde(skip)]
-        locator: NativeLocator,
     },
     Rejection {
         ordinal: u64,
@@ -726,7 +722,6 @@ impl<'connection, 'snapshot> NanoClawNativeScanner<'connection, 'snapshot> {
                 message_rowid: candidate.rowid,
                 session: active.row.clone(),
                 message: Box::new(message),
-                locator: nanoclaw_message_locator(active.rowid, candidate.source, candidate.rowid)?,
             },
             next_frontier,
         )))

@@ -4,11 +4,8 @@ use std::{
     path::Path,
 };
 
-use ctx_history_core::{
-    BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
-    HydrationFailureKind, NativeRecordCoordinate, SessionHydrationRequest, TypedKey,
-};
-use ctx_history_index::{LexicalDocument, VerifiedIndex, WriterOptions};
+use ctx_history_core::{CaptureProvider, CoreRecord, TypedKey};
+use ctx_history_index::{VerifiedIndex, WriterOptions};
 use serde_json::{json, Value};
 
 use super::source_backed::*;
@@ -133,18 +130,22 @@ fn collect(
     prior: Option<&ctx_history_core::CertifiedSource>,
 ) -> (
     CustomHistorySourceBackedOutcome,
-    Vec<LexicalDocument>,
+    Vec<CoreRecord>,
     Vec<usize>,
 ) {
     let mut documents = Vec::new();
     let mut page_bounds = Vec::new();
     let outcome = scan_custom_history_source_backed_explicit(input, prior, |_, page| {
-        page_bounds.push(page.documents.len());
-        documents.extend(page.documents);
+        page_bounds.push(page.records.len());
+        documents.extend(page.records);
         Ok(())
     })
     .unwrap();
     (outcome, documents, page_bounds)
+}
+
+fn body(record: &CoreRecord) -> &str {
+    record.content.normalized_body.as_deref().unwrap()
 }
 
 fn present(outcome: CustomHistorySourceBackedOutcome) -> CustomHistorySourceBackedReceipt {
@@ -256,14 +257,13 @@ fn cold_noop_and_append_emit_stable_ids_in_bounded_pages() {
     );
     assert!(cold_pages.len() >= 2);
     assert!(cold_pages.iter().all(|documents| *documents <= 64));
-    assert_eq!(cold_documents[0].body, long);
-    assert!(cold_documents[0].body.ends_with("custom-tail-sentinel"));
+    assert_eq!(body(&cold_documents[0]), long);
+    assert!(body(&cold_documents[0]).ends_with("custom-tail-sentinel"));
     assert_eq!(cold_documents[0].agent_type, "subagent");
     assert!(!cold_documents[0].is_primary);
-    assert_eq!(
-        cold_documents[0].source_path.as_deref(),
-        Some("/provider/demo/session.jsonl")
-    );
+    assert!(!serde_json::to_string(&cold_documents[0])
+        .unwrap()
+        .contains("/provider/demo/session.jsonl"));
     assert_eq!(
         cold_documents[0].parent_session_id,
         Some(cold_documents[0].root_session_id)
@@ -314,8 +314,8 @@ fn cold_noop_and_append_emit_stable_ids_in_bounded_pages() {
         CustomHistorySourceBackedDisposition::Append
     ));
     assert_eq!(append_documents.len(), 1);
-    assert_eq!(append_documents[0].body, "appended event");
-    assert_eq!(append_documents[0].touched_files, vec!["src/appended.rs"]);
+    assert_eq!(body(&append_documents[0]), "appended event");
+    assert!(append_documents[0].repository_file_observations.is_empty());
     assert!(revalidate_custom_history_source_backed(&input, &append.certificate).unwrap());
 }
 
@@ -347,7 +347,7 @@ fn append_that_closes_an_old_forward_reference_is_a_replacement() {
         CustomHistorySourceBackedDisposition::Replacement
     ));
     assert_eq!(closure_documents.len(), 1);
-    assert_eq!(closure_documents[0].body, "now retained");
+    assert_eq!(body(&closure_documents[0]), "now retained");
     assert_eq!(
         custom_history_source_backed_work().retained_events_before_prior_prefix,
         1
@@ -364,7 +364,7 @@ fn append_that_closes_an_old_forward_reference_is_a_replacement() {
         CustomHistorySourceBackedDisposition::Append
     ));
     assert_eq!(append_documents.len(), 1);
-    assert_eq!(append_documents[0].body, "ordinary append");
+    assert_eq!(body(&append_documents[0]), "ordinary append");
 }
 
 #[test]
@@ -400,7 +400,7 @@ fn rewrite_and_truncate_are_replacements_but_keep_native_ids_stable() {
         rewrite_documents[0].session_id,
         cold_documents[0].session_id
     );
-    assert_eq!(rewrite_documents[0].body, "rewritten body");
+    assert_eq!(body(&rewrite_documents[0]), "rewritten body");
 
     write_records(&path, &[manifest(), source(), session("root", None, true)]);
     let (truncate_outcome, truncate_documents, _) = collect(&input, Some(&rewrite.certificate));
@@ -454,12 +454,12 @@ fn malformed_complete_record_is_rejected_and_incomplete_tail_waits_for_append() 
         CustomHistorySourceBackedDisposition::Append
     ));
     assert_eq!(append_documents.len(), 1);
-    assert_eq!(append_documents[0].body, "completed after append");
+    assert_eq!(body(&append_documents[0]), "completed after append");
     assert_eq!(append.certificate.counts().rejected_records, 1);
 }
 
 #[test]
-fn exact_resolver_hydrates_grouped_records_and_rejects_stale_locator() {
+fn projected_records_are_complete_and_locator_free() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("hydrate.jsonl");
     let records = vec![
@@ -471,36 +471,29 @@ fn exact_resolver_hydrates_grouped_records_and_rejects_stale_locator() {
     ];
     write_records(&path, &records);
     let input = CustomHistorySourceBackedInput::explicit(&path, [10; 32]);
-    let (outcome, documents, _) = collect(&input, None);
-    let receipt = present(outcome);
-    let resolver = CustomHistorySourceBackedResolver::new([receipt.route.clone()]).unwrap();
-    let requests = documents
-        .iter()
-        .map(|document| {
-            EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap()
-        })
-        .collect::<Vec<_>>();
-
-    let first = resolver.hydrate_event(&requests[0]).unwrap();
-    assert_eq!(first.provider_bytes, b"alpha exact");
-    let session_request =
-        SessionHydrationRequest::new(documents[0].session_id, requests.clone()).unwrap();
-    let hydrated = resolver.hydrate_session(&session_request).unwrap();
+    let (outcome, records, _) = collect(&input, None);
+    present(outcome);
     assert_eq!(
-        hydrated
-            .iter()
-            .map(|record| record.provider_bytes.as_slice())
-            .collect::<Vec<_>>(),
-        vec![b"alpha exact".as_slice(), b"beta exact".as_slice()]
+        records.iter().map(body).collect::<Vec<_>>(),
+        vec!["alpha exact", "beta exact"]
     );
-    assert!(documents.iter().all(|document| matches!(
-        document.locator.coordinate(),
-        NativeRecordCoordinate::Jsonl {
-            native_session_key: Some(TypedKey::Composite(_)),
-            native_event_key: Some(_),
-            ..
-        }
-    )));
+    assert!(records
+        .iter()
+        .all(|record| record.native_event_id.is_some()));
+    let Some(TypedKey::Composite(identity)) = records[0].native_event_id.as_ref() else {
+        panic!("custom Core event identity must retain source selector parts");
+    };
+    assert_eq!(
+        &identity[..2],
+        &[
+            TypedKey::utf8("demo-agent").unwrap(),
+            TypedKey::utf8("source-a").unwrap(),
+        ]
+    );
+    assert_eq!(identity[2], TypedKey::utf8("event_id:event-a").unwrap());
+    let encoded = serde_json::to_string(&records).unwrap();
+    assert!(!encoded.contains("source_path"));
+    assert!(!encoded.contains("locator"));
 
     let rewritten = vec![
         manifest(),
@@ -510,12 +503,11 @@ fn exact_resolver_hydrates_grouped_records_and_rejects_stale_locator() {
         event(1, "event-b", "root", "beta exact"),
     ];
     write_records(&path, &rewritten);
-    let stale = resolver.hydrate_event(&requests[0]).unwrap_err();
-    assert_eq!(stale.kind, HydrationFailureKind::StaleRecordEvidence);
+    assert_eq!(body(&records[0]), "alpha exact");
 }
 
 #[test]
-fn registered_route_preserves_lifecycle_and_uses_zero_parse_grouped_hydration() {
+fn registered_route_preserves_lifecycle_and_reads_only_core_after_publication() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("registered.jsonl");
     let records = vec![
@@ -527,12 +519,10 @@ fn registered_route_preserves_lifecycle_and_uses_zero_parse_grouped_hydration() 
     ];
     write_records(&path, &records);
     let input = CustomHistorySourceBackedInput::explicit(&path, [14; 32]);
-    let (_, documents, _) = collect(&input, None);
-    let requests = documents
+    let (_, records, _) = collect(&input, None);
+    let event_ids = records
         .iter()
-        .map(|document| {
-            EventHydrationRequest::new(document.event_id, document.locator.clone()).unwrap()
-        })
+        .map(|record| record.event_id)
         .collect::<Vec<_>>();
 
     let mut registry = SourceBackedProviderRegistry::new();
@@ -550,6 +540,16 @@ fn registered_route_preserves_lifecycle_and_uses_zero_parse_grouped_hydration() 
     assert_eq!(cold.commit.indexed_documents, 2);
     assert_eq!(cold.sources.len(), 1);
     assert_eq!(custom_history_source_backed_work().projection_parses, 1);
+    let cold_index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert_eq!(
+        body(
+            &cold_index
+                .core_record_by_id(event_ids[0].as_uuid())
+                .unwrap()
+                .unwrap()
+        ),
+        "alpha exact"
+    );
 
     reset_custom_history_source_backed_work();
     let exact =
@@ -557,30 +557,6 @@ fn registered_route_preserves_lifecycle_and_uses_zero_parse_grouped_hydration() 
     assert_eq!(exact.commit.indexed_documents, 2);
     assert_eq!(exact.sources, cold.sources);
     assert_eq!(custom_history_source_backed_work().projection_parses, 0);
-
-    let batch = BatchHydrationRequest::new(requests.clone()).unwrap();
-    reset_custom_history_source_backed_work();
-    let hydrated = registry
-        .resolver_registry()
-        .hydrate_batch(&batch)
-        .unwrap()
-        .into_records();
-    assert_eq!(
-        hydrated
-            .iter()
-            .map(|record| record.provider_bytes.as_slice())
-            .collect::<Vec<_>>(),
-        vec![b"alpha exact".as_slice(), b"beta exact".as_slice()]
-    );
-    assert_eq!(
-        custom_history_source_backed_work(),
-        CustomHistorySourceBackedWork {
-            hydration_passes: 1,
-            hydration_source_opens: 1,
-            hydrated_records: 2,
-            ..CustomHistorySourceBackedWork::default()
-        }
-    );
 
     write_records(
         &path,
@@ -599,12 +575,14 @@ fn registered_route_preserves_lifecycle_and_uses_zero_parse_grouped_hydration() 
     assert_ne!(replacement.sources, exact.sources);
     assert_eq!(custom_history_source_backed_work().projection_parses, 1);
     assert_eq!(
-        registry
-            .resolver_registry()
-            .hydrate_event(&requests[0])
-            .unwrap_err()
-            .kind,
-        HydrationFailureKind::StaleRecordEvidence
+        body(
+            &VerifiedIndex::open_pinned(&index_root)
+                .unwrap()
+                .core_record_by_id(event_ids[0].as_uuid())
+                .unwrap()
+                .unwrap()
+        ),
+        "alpha replacement"
     );
 
     fs::remove_file(&path).unwrap();
@@ -614,14 +592,11 @@ fn registered_route_preserves_lifecycle_and_uses_zero_parse_grouped_hydration() 
     assert!(deleted.sources.is_empty());
     assert_eq!(deleted.removals.len(), 1);
     assert_eq!(custom_history_source_backed_work().projection_parses, 0);
-    assert_eq!(
-        registry
-            .resolver_registry()
-            .hydrate_event(&requests[0])
-            .unwrap_err()
-            .kind,
-        HydrationFailureKind::ConfirmedDeleted
-    );
+    assert!(VerifiedIndex::open_pinned(&index_root)
+        .unwrap()
+        .core_record_by_id(event_ids[0].as_uuid())
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -733,7 +708,7 @@ fn event_bodies_live_in_the_spool_or_one_bounded_emission_page() {
 
     let temp = tempdir().unwrap();
     let path = temp.path().join("bounded-spool.jsonl");
-    let body = "b".repeat(BODY_BYTES);
+    let expected_body = "b".repeat(BODY_BYTES);
     let mut records = Vec::with_capacity(3 + EVENTS);
     records.extend([manifest(), source(), session("root", None, true)]);
     for index in 0..EVENTS {
@@ -741,7 +716,7 @@ fn event_bodies_live_in_the_spool_or_one_bounded_emission_page() {
             u64::try_from(index).unwrap(),
             &format!("event-{index:03}"),
             "root",
-            &body,
+            &expected_body,
         ));
     }
     write_records(&path, &records);
@@ -752,7 +727,9 @@ fn event_bodies_live_in_the_spool_or_one_bounded_emission_page() {
     let work = custom_history_source_backed_work();
 
     assert_eq!(documents.len(), EVENTS);
-    assert!(documents.iter().all(|document| document.body == body));
+    assert!(documents
+        .iter()
+        .all(|document| body(document) == expected_body));
     assert!(pages.len() > 1);
     assert_eq!(work.projection_parses, 1);
     assert_eq!(work.source_read_passes, 1);
@@ -900,10 +877,11 @@ fn oversized_edge_id_fails_typed_bounds_before_catalog_retention() {
 }
 
 #[test]
-fn lexical_body_prefers_full_payload_over_native_preview_and_hydrates_identically() {
+fn core_body_prefers_full_payload_over_native_preview() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("preview.jsonl");
-    let full = format!("custom-full-{}-custom-preview-tail", "p".repeat(8_192));
+    let full = format!("custom-full-{}-custom-preview-tail", "p".repeat(16_512));
+    assert!(full.len() > 16_000);
     let mut record = event(0, "event-full", "root", &full);
     record["preview"] = Value::String("native preview only".to_owned());
     write_records(
@@ -912,17 +890,9 @@ fn lexical_body_prefers_full_payload_over_native_preview_and_hydrates_identicall
     );
     let input = CustomHistorySourceBackedInput::explicit(&path, [13; 32]);
     let (outcome, documents, _) = collect(&input, None);
-    let receipt = present(outcome);
-    assert_eq!(documents[0].body, full);
-    assert!(documents[0].body.ends_with("custom-preview-tail"));
-
-    let resolver = CustomHistorySourceBackedResolver::new([receipt.route]).unwrap();
-    let request =
-        EventHydrationRequest::new(documents[0].event_id, documents[0].locator.clone()).unwrap();
-    assert_eq!(
-        resolver.hydrate_event(&request).unwrap().provider_bytes,
-        documents[0].body.as_bytes()
-    );
+    present(outcome);
+    assert_eq!(body(&documents[0]), full);
+    assert!(body(&documents[0]).ends_with("custom-preview-tail"));
 }
 
 #[test]
@@ -930,11 +900,12 @@ fn source_backed_custom_adapter_has_no_preview_or_store_body_fallback() {
     let source = [
         include_str!("source_backed.rs"),
         include_str!("source_backed/parser.rs"),
-        include_str!("source_backed/resolver.rs"),
     ]
     .concat();
     assert!(!source.contains("MAX_BODY_PREVIEW_CHARS"));
     assert!(!source.contains("ctx_history_store"));
+    assert!(!source.contains("SourceRecordLocator"));
+    assert!(!source.contains("hydrate_"));
 }
 
 #[test]
@@ -964,7 +935,7 @@ fn explicit_inventory_ignores_siblings_and_certifies_deletion() {
     let (outcome, documents, _) = collect(&input, None);
     let receipt = present(outcome);
     assert_eq!(documents.len(), 1);
-    assert_eq!(documents[0].body, "selected-only");
+    assert_eq!(body(&documents[0]), "selected-only");
 
     fs::remove_file(&selected).unwrap();
     let (missing, emitted, pages) = collect(&input, Some(&receipt.certificate));

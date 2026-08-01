@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 
 use crate::stable_capture_uuid;
 
-use crate::{CaptureError, ProviderImportFailure, ProviderImportSummary, Result};
+use crate::{ProviderImportFailure, ProviderImportSummary};
 
 pub(crate) const CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES: usize = 512;
 
@@ -13,15 +13,8 @@ pub(crate) use nativepath::{
     observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,
     scan_custom_history_source_backed_explicit, CustomHistorySourceBackedDisposition,
     CustomHistorySourceBackedError, CustomHistorySourceBackedInput,
-    CustomHistorySourceBackedOutcome, CustomHistorySourceBackedResolver,
+    CustomHistorySourceBackedOutcome,
 };
-
-pub fn decode_custom_history_jsonl_v1_cursor(encoded: &str) -> Result<String> {
-    let _ = encoded;
-    Err(CaptureError::UnsupportedSchema(
-        "Custom History Store cursors were removed with legacy Store ingestion".to_owned(),
-    ))
-}
 
 pub(crate) fn push_provider_import_failure(
     summary: &mut ProviderImportSummary,
@@ -99,22 +92,6 @@ pub(crate) fn custom_history_internal_session_id(
     }));
     let id = stable_capture_uuid(&key, "custom-provider-session-id");
     format!("ctx-history-jsonl-v1-{id}")
-}
-
-pub fn custom_history_jsonl_v1_cursor_stream(
-    provider_key: &str,
-    source_id: &str,
-    source_format: &str,
-) -> String {
-    let key = custom_history_key(json!({
-        "schema": CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
-        "kind": "cursor_stream",
-        "provider_key": provider_key,
-        "source_id": source_id,
-        "source_format": source_format,
-    }));
-    let stream_id = stable_capture_uuid(&key, "custom-cursor-stream");
-    format!("provider:custom:{provider_key}:{stream_id}")
 }
 
 pub(crate) fn custom_history_key(value: Value) -> String {

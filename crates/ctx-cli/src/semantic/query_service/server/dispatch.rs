@@ -10,16 +10,15 @@ use crate::semantic::{
     model_contract::semantic_model_key,
     model_runtime::SharedSemanticRuntime,
     paths_status::{daemon_source_backed_refresh_job_path, read_daemon_job_status},
-    source_backed_refresh_coordinator::SourceBackedRefreshCoordinator,
+    source_backed_refresh_coordinator::CoreRefreshEngine,
 };
 
 use super::super::transport::DaemonIpcService;
-use super::hydration::handle_source_hydration_batch;
 
 pub(in crate::semantic) struct DaemonQueryDispatch<'a> {
     data_root: &'a Path,
     runtime: &'a SharedSemanticRuntime,
-    source_refresh: &'a SourceBackedRefreshCoordinator,
+    source_refresh: &'a CoreRefreshEngine,
     service: DaemonIpcService,
     token: &'a str,
     wakeup: Option<&'a DaemonWakeup>,
@@ -32,7 +31,7 @@ pub(in crate::semantic) struct DaemonQueryDispatch<'a> {
 pub(in crate::semantic) fn handle_daemon_query_stream<S: std::io::Write>(
     data_root: &Path,
     runtime: &SharedSemanticRuntime,
-    source_refresh: &SourceBackedRefreshCoordinator,
+    source_refresh: &CoreRefreshEngine,
     service: DaemonIpcService,
     token: &str,
     mut stream: S,
@@ -85,12 +84,6 @@ pub(in crate::semantic) fn handle_daemon_query_stream_inner<S: std::io::Write>(
     }
     let op = request.get("op").and_then(Value::as_str).unwrap_or("");
     if service == DaemonIpcService::SourceRefresh {
-        if op == "source_hydrate_batch" {
-            let response = handle_source_hydration_batch(data_root, source_refresh, &request);
-            serde_json::to_writer(&mut *stream, &response)?;
-            stream.write_all(b"\n")?;
-            return Ok(());
-        }
         if let Some(response) = source_refresh.handle_ipc_request(data_root, &request)? {
             writeln!(stream, "{}", serde_json::to_string(&response)?)?;
             return Ok(());

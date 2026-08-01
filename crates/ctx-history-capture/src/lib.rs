@@ -10,16 +10,17 @@ pub use provider_sources::{
     discover_provider_sources_for_provider, discover_provider_sources_for_provider_report,
     discover_provider_sources_for_provider_with_context,
     discover_provider_sources_for_provider_with_projects, discover_provider_sources_report,
-    discover_provider_sources_with_context, discover_provider_sources_with_projects,
-    discover_warp_sources_with_authority, observe_ordinary_file, provider_source_for_path,
-    provider_source_spec, provider_source_specs, resolve_lingma_discovery_authority,
-    resolve_warp_discovery_authority, validate_provider_source_roots_outside_data_root,
-    DiscoveredLingmaDatabase, DiscoveredWarpSource, DiscoveryContext, DiscoveryIssue,
-    DiscoveryIssueKind, DiscoveryPlatform, DiscoveryPlatformDirs, DiscoveryReport,
-    LingmaDatabaseCatalogLineage, LingmaDiscoveredInventory, LingmaDiscoveryUnavailable,
-    LingmaInventorySelector, LingmaVscodeClient, LingmaVscodeProfile, OrdinaryFileObservation,
-    ProviderCatalogSupport, ProviderDefaultLocation, ProviderImportSupport, ProviderSource,
-    ProviderSourceKind, ProviderSourceRootBoundaryError, ProviderSourceSpec, ProviderSourceStatus,
+    discover_provider_sources_with_context, discover_provider_sources_with_context_and_work_budget,
+    discover_provider_sources_with_projects, discover_warp_sources_with_authority,
+    observe_ordinary_file, provider_source_for_path, provider_source_spec, provider_source_specs,
+    resolve_lingma_discovery_authority, resolve_warp_discovery_authority,
+    validate_provider_source_roots_outside_data_root, DiscoveredLingmaDatabase,
+    DiscoveredWarpSource, DiscoveryContext, DiscoveryIssue, DiscoveryIssueKind, DiscoveryPlatform,
+    DiscoveryPlatformDirs, DiscoveryReport, LingmaDatabaseCatalogLineage,
+    LingmaDiscoveredInventory, LingmaDiscoveryUnavailable, LingmaInventorySelector,
+    LingmaVscodeClient, LingmaVscodeProfile, OrdinaryFileObservation, ProviderCatalogSupport,
+    ProviderDefaultLocation, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceRootBoundaryError, ProviderSourceSpec, ProviderSourceStatus,
     WarpDiscoveryUnavailable, WarpInstalledPlatform, WarpInstalledSurfaceKey, WarpReleaseChannel,
     WarpTerminalSurface, DISCOVERY_ENV_ALLOWLIST,
 };
@@ -67,18 +68,13 @@ pub(crate) const FORGECODE_SQLITE_SOURCE_FORMAT: &str = "forgecode_sqlite";
 pub(crate) const DEEPAGENTS_SQLITE_SOURCE_FORMAT: &str = "deepagents_sessions_sqlite";
 pub(crate) const MISTRAL_VIBE_SOURCE_FORMAT: &str = "mistral_vibe_session_jsonl";
 pub(crate) const MUX_SOURCE_FORMAT: &str = "mux_session_jsonl";
-pub(crate) const PROVIDER_MAX_TEXT_CHARS: usize = 16_000;
 pub(crate) const PROVIDER_MAX_PREVIEW_CHARS: usize = 4_000;
-
-pub mod complete_content;
 
 pub(crate) mod native_source;
 mod pro_output;
-pub use pro_output::{
-    OutputAssociations, OutputCommandContext, OutputNativeCoordinate, OutputObservationKind,
-    OutputOutcome, OutputOutcomeMetadata, OutputRepositoryContext, OutputSourceLocator,
-    ProOutputObservation,
-};
+pub(crate) mod record_evidence;
+pub(crate) mod repository_attribution;
+pub use pro_output::{OutputObservationKind, OutputOutcome, OutputOutcomeMetadata};
 
 mod error;
 pub use error::{CaptureError, ProviderJsonlInventoryLimit, ProviderSourceFailureKind, Result};
@@ -111,14 +107,6 @@ pub(crate) fn test_provider_sqlite_data_root() -> &'static std::path::Path {
 
 pub(crate) mod provider;
 pub use provider::adapter::{CaptureWorkLimit, ProviderAdapterContext, ProviderImportOptions};
-pub use provider::codex::{
-    hydrate_codex_locator, ingest_codex_source_backed_v0, CodexHydratedRecordV0,
-    CodexLocatorResolverV0, CodexSourceBackedCountersV0, CodexSourceBackedErrorV0,
-    CodexSourceBackedIngestReceiptV0, CodexSourceBackedPhaseTimingsV0, CodexSourceBackedResultV0,
-};
-pub use provider::custom_history_jsonl::{
-    custom_history_jsonl_v1_cursor_stream, decode_custom_history_jsonl_v1_cursor,
-};
 pub use provider::source_backed::register_nanoclaw_source_backed_route_with_base_sources;
 pub use provider::source_backed::{
     build_automatic_source_backed_registry, build_automatic_source_backed_registry_from_report,
@@ -130,14 +118,14 @@ pub use provider::source_backed::{
     register_hermes_explicit_source_backed_route, register_landed_source_backed_route,
     register_landed_source_backed_route_with_data_root, register_lingma_source_backed_route,
     register_nanoclaw_source_backed_route, register_shelley_source_backed_route,
-    register_warp_source_backed_route, source_backed_route_constructor,
-    source_backed_route_inventory, CrushProjectDatabaseV0, CrushProjectInventoryObservationV0,
-    CrushProjectInventorySourceV0, SourceBackedAutomaticRegistryBuild,
-    SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
-    SourceBackedCertifiedRemoval, SourceBackedCoordinatorError, SourceBackedCoordinatorResult,
-    SourceBackedGenerationSink, SourceBackedHydrationSupport, SourceBackedProviderRegistry,
-    SourceBackedProviderRouteMetadata, SourceBackedRefreshExecutor, SourceBackedRefreshProgress,
-    SourceBackedRefreshReceipt, SourceBackedResolverRegistry, SourceBackedRevalidationTarget,
+    register_warp_source_backed_route, source_backed_refresh_work_budget,
+    source_backed_route_constructor, source_backed_route_inventory, CrushProjectDatabaseV0,
+    CrushProjectInventoryObservationV0, CrushProjectInventorySourceV0,
+    SourceBackedAutomaticRegistryBuild, SourceBackedAutomaticRegistryIssue,
+    SourceBackedAutomaticUnavailableReason, SourceBackedCertifiedRemoval,
+    SourceBackedCoordinatorError, SourceBackedCoordinatorResult, SourceBackedGenerationSink,
+    SourceBackedProviderRegistry, SourceBackedProviderRouteMetadata, SourceBackedRefreshExecutor,
+    SourceBackedRefreshProgress, SourceBackedRefreshReceipt, SourceBackedRevalidationTarget,
     SourceBackedRoute, SourceBackedRouteConstructor, SourceBackedRouteDriver,
     SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteMetadata,
     SourceBackedRouteResult, SourceBackedRouteSelection, SourceBackedSelectorAuthority,

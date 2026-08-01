@@ -92,7 +92,7 @@ fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
             .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
         if status.as_ref().is_some_and(|status| {
             status["daemon"]["running"] == true
-                && status["daemon"]["source_refresh_endpoint"]["available"] == true
+                && status["daemon"]["core_refresh_endpoint"]["available"] == true
         }) {
             return daemon;
         }
@@ -108,7 +108,7 @@ fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
     assert_eq!(search["schema_version"], 1, "{search:#}");
     assert_eq!(search["query"], query, "{search:#}");
     assert_eq!(search["filters"]["provider"], provider, "{search:#}");
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     let results = search["results"].as_array().unwrap();
     assert_eq!(results.len(), 1, "{search:#}");
     assert_eq!(results[0]["provider"], provider, "{search:#}");
@@ -234,7 +234,7 @@ fn nanoclaw_import_preserves_text_timestamp_millis_and_integer_trigger() {
 
     assert!(
         !temp.path().join("work.sqlite").exists(),
-        "NanoClaw acceptance must use its provider-owned databases and source-backed index"
+        "NanoClaw acceptance must use its provider-owned databases and Core index"
     );
 
     let search = json_output(ctx(&temp).args([

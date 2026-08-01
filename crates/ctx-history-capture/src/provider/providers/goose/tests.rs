@@ -1,11 +1,21 @@
-use rusqlite::Connection;
-use serde_json::json;
+use serde_json::{json, Value};
 
-use super::normalization::{goose_normalized_result_content, goose_output_projection};
+use rusqlite::Connection;
+
+use super::{
+    normalization::{
+        goose_normalized_result_content, goose_output_projection, normalize_goose_native_output,
+    },
+    schema::GooseNativeSchema,
+    stream::{
+        goose_fetch_native_message_page, GooseMessageCellDisposition, GooseNativePageLimits,
+        GooseNativeRowKeyset, GOOSE_NATIVE_DEFAULT_PAGE_BYTES,
+    },
+};
 
 #[test]
 fn goose_result_content_is_unbounded_ordered_and_does_not_search_wrappers() {
-    let long = "x".repeat(crate::PROVIDER_MAX_TEXT_CHARS + 37);
+    let long = "x".repeat(16_037);
     let content = json!([
         {"type": "text", "output": "not a result"},
         {"type": "toolResponse", "toolResult": long.clone(), "result": "lower priority"},
@@ -56,80 +66,122 @@ fn goose_output_body_and_outcome_use_the_same_direct_tool_responses() {
     assert_eq!(output.outcome.duration_ms, Some(42));
 }
 
-pub(crate) fn create_goose_tables(conn: &Connection) {
-    conn.execute_batch(
-        "create table schema_version (version integer not null);
-         insert into schema_version values (14);
-         create table sessions (
-            id text primary key,
-            name text,
-            description text,
-            user_set_name integer not null default 0,
-            session_type text,
-            working_dir text,
-            created_at text,
-            updated_at text,
-            extension_data text,
-            total_tokens integer,
-            input_tokens integer,
-            output_tokens integer,
-            accumulated_total_tokens integer,
-            accumulated_input_tokens integer,
-            accumulated_output_tokens integer,
-            accumulated_cost real,
-            provider_name text,
-            model_config_json text,
-            goose_mode text,
-            archived_at text,
-            project_id text
-         );
-         create table messages (
-            id integer primary key,
-            message_id text,
-            session_id text not null,
-            role text not null,
-            content_json text not null,
-            created_timestamp integer,
-            timestamp text,
-            tokens text,
-            metadata_json text
-         );",
-    )
-    .unwrap();
+#[test]
+fn source_parser_keeps_success_failure_unknown_and_large_result_bodies() {
+    let ordered = scan_only_output(json!([
+        {
+            "type": "toolResponse",
+            "toolCallId": "ordered-call",
+            "toolResult": "first"
+        },
+        [{
+            "type": "toolResponse",
+            "toolCallId": "ordered-call",
+            "toolResult": "second"
+        }]
+    ]));
+    let ordered = normalize_goose_native_output(&ordered)
+        .unwrap()
+        .expect("nested direct Goose results");
+    assert_eq!(ordered.searchable_text, "first\nsecond");
+
+    for (status_field, status_value, expected_disposition, expected_outcome) in [
+        (
+            "status",
+            json!("success"),
+            GooseMessageCellDisposition::OutputSuccess,
+            "success",
+        ),
+        (
+            "isError",
+            json!(true),
+            GooseMessageCellDisposition::OutputFailure,
+            "failure",
+        ),
+        (
+            "status",
+            json!("future_state"),
+            GooseMessageCellDisposition::OutputUnknown,
+            "unknown",
+        ),
+    ] {
+        let mut response = serde_json::Map::from_iter([
+            ("type".to_owned(), json!("toolResponse")),
+            ("toolCallId".to_owned(), json!("call-1")),
+            ("toolResult".to_owned(), json!("complete native result")),
+        ]);
+        response.insert(status_field.to_owned(), status_value);
+        let scanned = scan_only_output(Value::Array(vec![Value::Object(response)]));
+        assert_eq!(scanned.disposition, expected_disposition);
+        let event = normalize_goose_native_output(&scanned)
+            .unwrap()
+            .expect("selected Goose result");
+        assert_eq!(event.searchable_text, "complete native result");
+        assert_eq!(event.content["result_outcome"], expected_outcome);
+        assert_eq!(event.content["call_id"], "call-1");
+        assert!(!event.content.to_string().contains("complete native result"));
+    }
+
+    let large = format!(
+        "goose-large-head-{}-goose-large-tail",
+        "x".repeat(8 * 1024 * 1024)
+    );
+    let scanned = scan_only_output(json!([{
+        "type": "toolResponse",
+        "toolCallId": "large-call",
+        "toolResult": large,
+        "status": "success"
+    }]));
+    let event = normalize_goose_native_output(&scanned)
+        .unwrap()
+        .expect("large Goose result");
+    assert!(event.searchable_text.len() > GOOSE_NATIVE_DEFAULT_PAGE_BYTES as usize);
+    assert!(event.searchable_text.starts_with("goose-large-head-"));
+    assert!(event.searchable_text.ends_with("-goose-large-tail"));
+
+    let status_only = scan_only_output(json!([{
+        "type": "toolResponse",
+        "status": "failed"
+    }]));
+    assert!(normalize_goose_native_output(&status_only)
+        .unwrap()
+        .is_none());
 }
 
-pub(super) fn insert_session(conn: &Connection, id: &str) {
-    conn.execute(
-        "insert into sessions (
-            id, name, user_set_name, session_type, working_dir, created_at, updated_at,
-            extension_data, total_tokens, accumulated_cost, provider_name, model_config_json,
-            goose_mode, project_id
-         ) values (
-            ?1, ?2, 1, 'chat', '/workspace/goose', '2026-07-18 00:00:00',
-            '2026-07-18 00:01:00', '{\"extension\":\"ctx\"}', 7, 0.25,
-            'test-provider', '{\"model_name\":\"test\"}', 'auto', 'goose-project'
-         )",
-        rusqlite::params![id, format!("Session {id}")],
+fn scan_only_output(content: Value) -> super::stream::GooseScannedMessage {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "create table sessions (id text primary key);
+             create table messages (
+                 id integer primary key,
+                 message_id text,
+                 session_id text not null,
+                 role text not null,
+                 content_json text not null
+             );
+             create table schema_version (version integer not null);
+             insert into schema_version values (14);
+             insert into sessions values ('session-1');",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into messages (id, message_id, session_id, role, content_json)
+             values (1, 'message-1', 'session-1', 'tool', ?1)",
+            [content.to_string()],
+        )
+        .unwrap();
+    let schema = GooseNativeSchema::probe(&connection).unwrap();
+    let mut rows = goose_fetch_native_message_page(
+        &connection,
+        &schema,
+        GooseNativeRowKeyset::Unstarted,
+        GooseNativePageLimits::default(),
     )
     .unwrap();
-}
-
-pub(super) fn insert_message(conn: &Connection, id: i64, session_id: &str, text: &str) {
-    conn.execute(
-        "insert into messages (
-            id, message_id, session_id, role, content_json, created_timestamp,
-            timestamp, tokens, metadata_json
-         ) values (?1, ?2, ?3, 'user', ?4, ?5, '2026-07-18 00:00:01',
-                   '{\"input\":1}', '{\"source\":\"test\"}')",
-        rusqlite::params![
-            id,
-            format!("message-{id}"),
-            session_id,
-            json!([{"type": "text", "text": text}]).to_string(),
-            1_784_332_800_i64.saturating_add(id),
-        ],
-    )
-    .unwrap();
+    assert_eq!(rows.len(), 1);
+    rows.remove(0)
 }
 
 mod source_backed;

@@ -19,7 +19,7 @@ fn pi_cli_import_search_flow() {
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
     let first_generation = imported["sources"][0]["published_generation"]
         .as_str()
-        .expect("Pi provider import must publish a source-backed generation");
+        .expect("Pi provider import must publish a Core generation");
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -52,14 +52,14 @@ fn pi_cli_import_search_flow() {
     assert_eq!(
         source_backed_count(
             &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'pi' AND fidelity = 'imported'"
+            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'pi'"
         ),
         1
     );
     assert_eq!(
         source_backed_count(
             &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi' AND fidelity = 'imported'"
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi'"
         ),
         4
     );
@@ -107,6 +107,6 @@ fn pi_cli_import_search_flow() {
     );
     assert!(
         !temp.path().join("work.sqlite").exists(),
-        "Pi acceptance must use the source-backed generation and relational projection"
+        "Pi acceptance must use the Core generation and relational projection"
     );
 }

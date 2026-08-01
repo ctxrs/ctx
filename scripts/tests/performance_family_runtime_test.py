@@ -110,7 +110,7 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
         self.assertTrue(snapshot.segments)
         return snapshot
 
-    def assert_complete_hydration(
+    def assert_complete_core_content(
         self,
         root: Path,
         env: dict[str, str],
@@ -139,23 +139,18 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
         result = results[0]
         self.assertEqual(result["provider"], corpus.provider)
         self.assertEqual(result["source_format"], corpus.source_format)
-        self.assertTrue(
-            str(result["source_path"]).endswith(corpus.source_path_suffix)
-        )
+        self.assertNotIn("source_path", result)
         show = run_json(
             [
                 "show",
                 "event",
                 result["ctx_event_id"],
-                "--content",
-                "complete",
                 "--format=json",
             ],
             env,
             root,
         )
         self.assertEqual(show["payload_type"], "event_window")
-        self.assertEqual(show["content_policy"], "complete")
         event = show["event"]
         self.assertEqual(event["provider"], corpus.provider)
         self.assertEqual(event["ctx_event_id"], result["ctx_event_id"])
@@ -164,11 +159,7 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
             event["content"],
             {
                 "complete": True,
-                "complete_content_available": True,
-                "origin": "provider_source",
-                "requested": "complete",
-                "source_verified": True,
-                "stored_truncated": False,
+                "policy_status": "selected",
             },
         )
         return result["ctx_event_id"]
@@ -227,7 +218,7 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
                         cold_snapshot = self.assert_family_state(
                             cold.packet, root, env, corpus
                         )
-                        cold_event_id = self.assert_complete_hydration(
+                        cold_event_id = self.assert_complete_core_content(
                             root, env, corpus, corpus.cold_query, corpus.cold_body
                         )
 
@@ -276,7 +267,7 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
                             len(replacement.manifest_names),
                             len(noop.manifest_names) + 1,
                         )
-                        replacement_event_id = self.assert_complete_hydration(
+                        replacement_event_id = self.assert_complete_core_content(
                             root,
                             env,
                             corpus,

@@ -92,19 +92,6 @@ pub(crate) enum ClineComponent {
     TaskIndex = 6,
 }
 
-impl ClineComponent {
-    pub(crate) fn file_name(self) -> &'static str {
-        match self {
-            Self::ApiHistory => API_FILE,
-            Self::UiMessages => UI_FILE,
-            Self::TaskMetadata => METADATA_FILE,
-            Self::FallbackHistory => ROO_FALLBACK_FILE,
-            Self::HistoryItem => ROO_HISTORY_ITEM_FILE,
-            Self::TaskIndex => ROO_TASK_INDEX_FILE,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct ClineFileStamp {
     len: u64,

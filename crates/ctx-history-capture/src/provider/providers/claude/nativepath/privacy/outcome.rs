@@ -31,10 +31,27 @@ pub(super) fn scan_outcome_range(
     let value = bytes
         .get(range)
         .ok_or_else(|| structural_error("Claude outcome range escaped its record"))?;
-    let mut scanner = OutcomeScanner::new(value, direct_tool_result);
+    let mut scanner = OutcomeScanner::new(value, direct_tool_result, false);
     scanner
         .scan()
         .map_err(|()| structural_error("malformed Claude structural outcome evidence"))?;
+    Ok(scanner.evidence)
+}
+
+pub(super) fn scan_direct_output_range(
+    bytes: &[u8],
+    range: Option<Range<usize>>,
+) -> Result<OutcomeEvidence, serde_json::Error> {
+    let Some(range) = range else {
+        return Ok(OutcomeEvidence::default());
+    };
+    let value = bytes
+        .get(range)
+        .ok_or_else(|| structural_error("Claude output range escaped its record"))?;
+    let mut scanner = OutcomeScanner::new(value, true, true);
+    scanner
+        .scan()
+        .map_err(|()| structural_error("malformed Claude structural output evidence"))?;
     Ok(scanner.evidence)
 }
 
@@ -128,6 +145,7 @@ struct OutcomeScanner<'a> {
     index: usize,
     nodes: usize,
     direct_tool_result: bool,
+    direct_is_error_success: bool,
     direct_exit_code: Option<i64>,
     direct_exit_code_snake: Option<i64>,
     direct_duration_ms: Option<i64>,
@@ -136,12 +154,13 @@ struct OutcomeScanner<'a> {
 }
 
 impl<'a> OutcomeScanner<'a> {
-    fn new(bytes: &'a [u8], direct_tool_result: bool) -> Self {
+    fn new(bytes: &'a [u8], direct_tool_result: bool, direct_is_error_success: bool) -> Self {
         Self {
             bytes,
             index: 0,
             nodes: 0,
             direct_tool_result,
+            direct_is_error_success,
             direct_exit_code: None,
             direct_exit_code_snake: None,
             direct_duration_ms: None,
@@ -211,7 +230,7 @@ impl<'a> OutcomeScanner<'a> {
             self.whitespace();
             let facts = self.value(depth + 1)?;
             if active {
-                self.apply_outcome_key(&self.bytes[key.clone()], facts);
+                self.apply_outcome_key(&self.bytes[key.clone()], facts, depth == 0);
             }
             if depth <= 8 {
                 self.apply_timeout_key(&self.bytes[key.clone()], facts);
@@ -253,7 +272,7 @@ impl<'a> OutcomeScanner<'a> {
         }
     }
 
-    fn apply_outcome_key(&mut self, raw: &[u8], facts: ValueFacts) {
+    fn apply_outcome_key(&mut self, raw: &[u8], facts: ValueFacts, direct: bool) {
         match outcome_key(raw) {
             OutcomeKey::ExitCode => {
                 if let Some(code) = facts.integer() {
@@ -273,7 +292,13 @@ impl<'a> OutcomeScanner<'a> {
                     self.evidence.failure |= !success;
                 }
             }
-            OutcomeKey::IsError | OutcomeKey::TimedOut => {
+            OutcomeKey::IsError => {
+                if let Some(is_error) = facts.bool_value() {
+                    self.evidence.failure |= is_error;
+                    self.evidence.success |= self.direct_is_error_success && direct && !is_error;
+                }
+            }
+            OutcomeKey::TimedOut => {
                 self.evidence.failure |= facts.bool_value().unwrap_or(false);
             }
             OutcomeKey::Status => {

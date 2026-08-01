@@ -1,7 +1,7 @@
 //! Provider-owned Continue NativePath discovery and normalization.
 //!
 //! Provider-private DTOs retain Continue's schema authority while the
-//! source-backed reader projects bounded lexical pages and exact locators.
+//! source-backed reader projects bounded, complete Core pages directly.
 
 mod decode;
 mod normalize;

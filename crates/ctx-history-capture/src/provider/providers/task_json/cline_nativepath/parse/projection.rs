@@ -53,7 +53,7 @@ pub(super) fn parse_api_projection<'a>(
             return Ok(projection);
         }
         push_explicit_outputs(
-            envelope.direct_result_body(),
+            envelope.unique_result_body()?,
             OutputCandidateContext {
                 kind: OutputObservationKind::Tool,
                 base_sub_index: 0,
@@ -176,7 +176,7 @@ pub(super) fn parse_api_block<'a>(
             block_outcome
         };
         push_explicit_outputs(
-            block.block_result_body(),
+            block.unique_result_body()?,
             OutputCandidateContext {
                 kind: OutputObservationKind::Tool,
                 base_sub_index: sub_index.saturating_mul(1_024),
@@ -279,7 +279,7 @@ pub(super) fn parse_ui_projection<'a>(
             )?;
         } else {
             push_explicit_outputs(
-                envelope.direct_result_body(),
+                envelope.unique_result_body()?,
                 OutputCandidateContext {
                     kind: OutputObservationKind::Command,
                     base_sub_index: 0,
@@ -332,7 +332,8 @@ pub(super) fn decode_retained_text(
     if raw.get().len() > CLINE_NATIVE_MAX_RETAINED_ITEM_BYTES {
         return Err((
             ClineItemRejectionKind::OversizedRetainedItem,
-            "Cline retained JSON string exceeds 64 KiB before unescaping".to_owned(),
+            "Cline retained JSON string exceeds the shared Core content bound before unescaping"
+                .to_owned(),
         ));
     }
     serde_json::from_str::<String>(raw.get())

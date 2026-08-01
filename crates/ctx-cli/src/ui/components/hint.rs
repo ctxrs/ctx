@@ -34,6 +34,29 @@ pub(crate) fn hint(
     document
 }
 
+fn labelled_text(context: &RenderContext, label: &str, text: &str) -> Document {
+    let prefix = format!("{label}: ");
+    let prefix_width = display_width(&prefix);
+    let text_width = context
+        .content_width()
+        .map(|width| width.saturating_sub(prefix_width).max(1));
+    let wrapped = wrap_text(text, text_width);
+    let mut document = Document::new();
+
+    for (index, text) in wrapped.into_iter().enumerate() {
+        let mut line = Line::new();
+        if index == 0 {
+            line.push(Span::new(label, Token::Label));
+            line.push(Span::text(": "));
+        } else {
+            line.push(Span::text(" ".repeat(prefix_width)));
+        }
+        line.push(Span::text(text));
+        document.push_line(line);
+    }
+    document
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,27 +83,4 @@ mod tests {
         );
         assert_eq!(rendered.matches(command).count(), 1, "{rendered}");
     }
-}
-
-fn labelled_text(context: &RenderContext, label: &str, text: &str) -> Document {
-    let prefix = format!("{label}: ");
-    let prefix_width = display_width(&prefix);
-    let text_width = context
-        .content_width()
-        .map(|width| width.saturating_sub(prefix_width).max(1));
-    let wrapped = wrap_text(text, text_width);
-    let mut document = Document::new();
-
-    for (index, text) in wrapped.into_iter().enumerate() {
-        let mut line = Line::new();
-        if index == 0 {
-            line.push(Span::new(label, Token::Label));
-            line.push(Span::text(": "));
-        } else {
-            line.push(Span::text(" ".repeat(prefix_width)));
-        }
-        line.push(Span::text(text));
-        document.push_line(line);
-    }
-    document
 }

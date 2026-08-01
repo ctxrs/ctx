@@ -22,6 +22,8 @@ TANTIVY_FEATURES = (
     "memmap2",
     "mmap",
     "tempfile",
+    "zstd",
+    "zstd-compression",
 )
 WORKSPACE_PACKAGES = (
     ("ctx", "crates/ctx-cli"),
@@ -95,7 +97,7 @@ license = "MIT"
 repository = "https://github.com/ctxrs/ctx"
 
 [workspace.dependencies]
-tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression", "columnar-zstd-compression"] }
+tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression", "zstd-compression", "columnar-zstd-compression"] }
 """,
             encoding="utf-8",
         )

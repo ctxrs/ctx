@@ -4,13 +4,9 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-#[cfg(test)]
-use ctx_history_core::StableEntityKind;
-use ctx_history_core::{
-    EventHydrationRequest, HydrationFailure, HydrationFailureKind, StableEntityId,
-};
+use ctx_history_core::StableEntityId;
 use ctx_history_index::{
-    EventRecord, SemanticEventCursor, VerifiedIndex, LEXICAL_SCHEMA_VERSION,
+    CoreEventRecord, SemanticEventCursor, VerifiedIndex, LEXICAL_SCHEMA_VERSION,
     MAX_SEMANTIC_EVENT_PAGE_ITEMS,
 };
 use rusqlite::{params, OptionalExtension};
@@ -29,12 +25,11 @@ use crate::semantic::{
 mod manifest;
 
 use manifest::{
-    hydration_failure_invalidates, hydration_failure_name, source_consumer_build_id,
-    source_contract_fingerprint, validate_flat_projection, validate_generation,
-    validate_generation_id, validate_page, validate_resolved_document,
-    AcknowledgedSourceProjection, SourceProjectionAcknowledgement, SourceProjectionFrontier,
-    SOURCE_ACKNOWLEDGEMENT_STATE, SOURCE_CONTRACT_VERSION, SOURCE_FRONTIER_STATE,
-    SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
+    semantic_policy_fingerprint, source_consumer_build_id, source_contract_fingerprint,
+    validate_flat_projection, validate_generation, validate_generation_id, validate_page,
+    validate_resolved_document, AcknowledgedSourceProjection, SourceProjectionAcknowledgement,
+    SourceProjectionFrontier, SOURCE_ACKNOWLEDGEMENT_STATE, SOURCE_CONTRACT_VERSION,
+    SOURCE_FRONTIER_STATE, SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
 };
 
 const SEARCH_DIRECTORY: &str = "search";
@@ -47,20 +42,15 @@ pub(in crate::semantic) fn source_backed_semantic_vector_path(data_root: &Path) 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SourceBackedSemanticGeneration {
     pub(super) core_generation_id: String,
+    pub(super) semantic_policy_fingerprint: String,
     /// Count of semantic-eligible records in this pinned Core generation.
     pub(super) semantic_documents: u64,
 }
 
 impl SourceBackedSemanticGeneration {
-    /// Binds semantic catch-up to one verified schema-v4 Core manifest.
-    ///
-    /// `semantic_documents` is supplied by the stable semantic-record feed
-    /// because a Core manifest counts all indexed event records, including
-    /// records that are not semantic document anchors.
-    pub(super) fn from_verified_index(
-        index: &VerifiedIndex,
-        semantic_documents: u64,
-    ) -> Result<Self> {
+    /// Binds semantic catch-up to one verified schema-v14 Core manifest and
+    /// mirrors its persisted exact semantic candidate count.
+    pub(super) fn from_verified_index(index: &VerifiedIndex) -> Result<Self> {
         let manifest = index.manifest();
         if LEXICAL_SCHEMA_VERSION != SOURCE_INPUT_LEXICAL_SCHEMA_VERSION
             || manifest.lexical_schema_version != SOURCE_INPUT_LEXICAL_SCHEMA_VERSION
@@ -75,7 +65,7 @@ impl SourceBackedSemanticGeneration {
                 "source-backed semantic manifest count does not match its verified index"
             ));
         }
-        if semantic_documents > manifest.indexed_documents {
+        if manifest.semantic_eligible_documents > manifest.indexed_documents {
             return Err(anyhow!(
                 "source-backed semantic document count exceeds its Core manifest"
             ));
@@ -88,7 +78,8 @@ impl SourceBackedSemanticGeneration {
         }
         let generation = Self {
             core_generation_id: manifest_generation_id,
-            semantic_documents,
+            semantic_policy_fingerprint: semantic_policy_fingerprint()?,
+            semantic_documents: manifest.semantic_eligible_documents,
         };
         validate_generation(&generation)?;
         Ok(generation)
@@ -100,20 +91,15 @@ pub(super) struct SourceBackedSemanticPage {
     pub(super) core_generation_id: String,
     /// Exclusive keyset cursor used to request this page.
     pub(super) after: Option<StableEntityId>,
-    pub(super) records: Vec<EventRecord>,
+    pub(super) records: Vec<CoreEventRecord>,
     pub(super) terminal: bool,
 }
 
-pub(in crate::semantic) trait SourceBackedSemanticResolver {
-    /// Rereads and verifies exact provider content for one committed typed
-    /// locator. The returned document may combine provider-native records
-    /// according to the semantic document contract, but it must not come from
-    /// a canonical body copy.
-    fn resolve_document(
-        &mut self,
-        event: &EventRecord,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<SemanticEventDocument, HydrationFailure>;
+pub(in crate::semantic) trait SourceBackedSemanticDocumentBuilder {
+    /// Builds one semantic document exclusively from complete records in the
+    /// same pinned Core generation. `None` is an intentional policy filter.
+    fn build_document(&mut self, record: &CoreEventRecord)
+        -> Result<Option<SemanticEventDocument>>;
 }
 
 pub(in crate::semantic) trait SourceBackedSemanticEmbedder {
@@ -130,30 +116,38 @@ pub(in crate::semantic) struct SourceBackedSemanticOutcome {
     pub(in crate::semantic) deleted_chunks: usize,
     pub(in crate::semantic) ready: bool,
     pub(in crate::semantic) work_remaining: bool,
-    pub(in crate::semantic) unavailable: Option<HydrationFailureKind>,
 }
 
 #[derive(Debug)]
 struct StoredSourceDocument {
     stable_event_identity: Vec<u8>,
-    locator_json: Vec<u8>,
 }
 
 impl SemanticVectorStore {
-    pub(in crate::semantic) fn reconcile_source_backed_index<R, E>(
+    pub(in crate::semantic) fn reconcile_source_backed_index<B, E>(
         &mut self,
         index: &VerifiedIndex,
-        resolver: &mut R,
+        builder: &mut B,
         embedder: &mut E,
     ) -> Result<SourceBackedSemanticOutcome>
     where
-        R: SourceBackedSemanticResolver,
+        B: SourceBackedSemanticDocumentBuilder,
         E: SourceBackedSemanticEmbedder,
     {
         semantic_owned_sidecar_result((|| {
-            let semantic_documents = index.semantic_eligible_event_count()?;
-            let generation =
-                SourceBackedSemanticGeneration::from_verified_index(index, semantic_documents)?;
+            let generation = SourceBackedSemanticGeneration::from_verified_index(index)?;
+            if self
+                .acknowledged_source_projection(
+                    &generation.core_generation_id,
+                    Some(generation.semantic_documents),
+                )?
+                .is_some()
+            {
+                return Ok(SourceBackedSemanticOutcome {
+                    ready: true,
+                    ..SourceBackedSemanticOutcome::default()
+                });
+            }
             let frontier = self.begin_or_resume_source_generation(&generation)?;
             let after = frontier
                 .after_identity
@@ -163,7 +157,8 @@ impl SemanticVectorStore {
             let cursor = after.map(|after| {
                 SemanticEventCursor::new(generation.core_generation_id.clone(), after)
             });
-            let page = index.semantic_event_page(cursor.as_ref(), MAX_SEMANTIC_EVENT_PAGE_ITEMS)?;
+            let page =
+                index.core_semantic_event_page(cursor.as_ref(), MAX_SEMANTIC_EVENT_PAGE_ITEMS)?;
             if page.generation_id != generation.core_generation_id
                 || page.eligible_total != generation.semantic_documents
             {
@@ -180,21 +175,21 @@ impl SemanticVectorStore {
                     records: page.items,
                     terminal: page.terminal,
                 },
-                resolver,
+                builder,
                 embedder,
             )
         })())
     }
 
-    pub(super) fn reconcile_source_backed_page<R, E>(
+    pub(super) fn reconcile_source_backed_page<B, E>(
         &mut self,
         generation: &SourceBackedSemanticGeneration,
         page: SourceBackedSemanticPage,
-        resolver: &mut R,
+        builder: &mut B,
         embedder: &mut E,
     ) -> Result<SourceBackedSemanticOutcome>
     where
-        R: SourceBackedSemanticResolver,
+        B: SourceBackedSemanticDocumentBuilder,
         E: SourceBackedSemanticEmbedder,
     {
         semantic_owned_sidecar_result((|| {
@@ -202,8 +197,12 @@ impl SemanticVectorStore {
             let mut frontier = self.begin_or_resume_source_generation(generation)?;
             validate_page(&frontier, &page)?;
 
+            // Page records are strictly unique and identity ordered. Pinning
+            // their reuse lookup once keeps every decision on the same flat
+            // generation even when this page publishes replacement segments.
+            let existing_events = self.flat_active_event_lookup()?;
             let mut outcome = SourceBackedSemanticOutcome::default();
-            for event in page.records {
+            for record in page.records {
                 if frontier.processed_documents >= frontier.semantic_documents {
                     return Err(SemanticVectorStoreError::reset_required(
                         "source-backed semantic page exceeds its manifest-backed document count",
@@ -211,52 +210,41 @@ impl SemanticVectorStore {
                     .into());
                 }
                 outcome.records_scanned = outcome.records_scanned.saturating_add(1);
-                let stable_identity = event.event_id.encode_canonical()?.to_vec();
-                let locator_json = serde_json::to_vec(&event.locator)?;
-                let prior = self.stored_source_document(event.event_id.as_uuid())?;
+                let stable_identity = record.event_id.encode_canonical()?.to_vec();
+                let prior = self.stored_source_document(record.event_id.as_uuid())?;
                 if prior.as_ref().is_some_and(|prior| {
                     prior.stable_event_identity.as_slice() != stable_identity.as_slice()
                 }) {
                     return Err(SemanticVectorStoreError::storage_conflict(format!(
                         "source-backed semantic compact identity collision at {}",
-                        event.event_id.as_uuid()
+                        record.event_id.as_uuid()
                     ))
                     .into());
                 }
 
-                let evidence_changed = prior
-                    .as_ref()
-                    .is_some_and(|prior| prior.locator_json != locator_json);
-                if evidence_changed {
+                let Some(document) = builder.build_document(&record)? else {
                     outcome.invalidated_chunks = outcome
                         .invalidated_chunks
-                        .saturating_add(self.invalidate_source_event(event.event_id.as_uuid())?);
-                }
-
-                let request = EventHydrationRequest::new(event.event_id, event.locator.clone())?;
-                let document = match resolver.resolve_document(&event, &request) {
-                    Ok(document) => document,
-                    Err(failure) => {
-                        if evidence_changed || hydration_failure_invalidates(failure.kind) {
-                            outcome.invalidated_chunks = outcome.invalidated_chunks.saturating_add(
-                                self.invalidate_source_event(event.event_id.as_uuid())?,
-                            );
-                        }
-                        frontier.last_failure =
-                            Some(hydration_failure_name(failure.kind).to_owned());
-                        self.store_source_frontier(&frontier)?;
-                        outcome.unavailable = Some(failure.kind);
-                        outcome.work_remaining = true;
-                        return Ok(outcome);
-                    }
+                        .saturating_add(self.invalidate_source_event(record.event_id.as_uuid())?);
+                    outcome.records_filtered = outcome.records_filtered.saturating_add(1);
+                    frontier.processed_documents =
+                        frontier.processed_documents.checked_add(1).ok_or_else(|| {
+                            SemanticVectorStoreError::reset_required(
+                                "source-backed semantic frontier document count overflowed",
+                            )
+                        })?;
+                    frontier.after_identity = Some(stable_identity);
+                    frontier.last_failure = None;
+                    self.store_source_frontier(&frontier)?;
+                    continue;
                 };
-                validate_resolved_document(&event, &document)?;
+                validate_resolved_document(&record, &document)?;
 
                 let source_text = semantic_source_text(&document.text);
-                if semantic_hydrated_source_is_control(&source_text) {
+                if semantic_core_content_is_control(&source_text) {
                     outcome.invalidated_chunks = outcome
                         .invalidated_chunks
-                        .saturating_add(self.invalidate_source_event(event.event_id.as_uuid())?);
+                        .saturating_add(self.invalidate_source_event(record.event_id.as_uuid())?);
                     outcome.records_filtered = outcome.records_filtered.saturating_add(1);
                     frontier.processed_documents =
                         frontier.processed_documents.checked_add(1).ok_or_else(|| {
@@ -269,12 +257,16 @@ impl SemanticVectorStore {
                     self.store_source_frontier(&frontier)?;
                     continue;
                 }
-                let source_text_sha256 = semantic_document_hash(&document, &source_text);
-                let existing_hash = self
-                    .existing_hashes_for_event_ids(&[document.event_id])?
-                    .remove(&document.event_id);
-                let reusable = !evidence_changed
-                    && existing_hash.as_deref() == Some(source_text_sha256.as_str());
+                let source_text_sha256 = semantic_document_hash(
+                    &document,
+                    &source_text,
+                    &generation.semantic_policy_fingerprint,
+                );
+                let reusable = existing_events
+                    .event(document.event_id)
+                    .is_some_and(|event| {
+                        event.source_text_hash.to_hex().as_str() == source_text_sha256.as_str()
+                    });
                 if reusable {
                     outcome.records_reused = outcome.records_reused.saturating_add(1);
                 } else {
@@ -282,8 +274,8 @@ impl SemanticVectorStore {
                         semantic_chunks_for_document(&document, &source_text, &source_text_sha256);
                     if chunks.is_empty() {
                         return Err(anyhow!(
-                            "source-backed semantic resolver returned an empty document for {}",
-                            event.event_id
+                            "Core semantic projection produced an empty document for {}",
+                            record.event_id
                         ));
                     }
                     let embeddings = embedder.embed_chunks(&chunks)?;
@@ -303,9 +295,8 @@ impl SemanticVectorStore {
                 }
 
                 self.store_resolved_source_document(
-                    event.event_id,
+                    record.event_id,
                     &stable_identity,
-                    &locator_json,
                     &source_text_sha256,
                     &frontier,
                 )?;
@@ -383,10 +374,11 @@ impl SemanticVectorStore {
             if self.source_frontier()?.is_some() {
                 return Ok(None);
             }
-            let fingerprint = source_contract_fingerprint();
+            let fingerprint = source_contract_fingerprint()?;
             if acknowledgement.contract_version != SOURCE_CONTRACT_VERSION
                 || acknowledgement.contract_fingerprint != fingerprint
                 || acknowledgement.core_generation_id != core_generation_id
+                || acknowledgement.semantic_policy_fingerprint != semantic_policy_fingerprint()?
                 || acknowledgement.consumer_build_id
                     != source_consumer_build_id(&fingerprint, core_generation_id)
                 || expected_semantic_documents
@@ -441,63 +433,16 @@ impl SemanticVectorStore {
         })()
     }
 
-    #[cfg(test)]
-    pub(super) fn source_backed_frontier_generation(&self) -> Result<Option<String>> {
-        semantic_owned_sidecar_result(
-            self.source_frontier()
-                .map(|frontier| frontier.map(|frontier| frontier.core_generation_id)),
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn source_backed_hashes_for_generation(
-        &self,
-        core_generation_id: &str,
-        event_ids: &[Uuid],
-    ) -> Result<HashMap<Uuid, String>> {
-        semantic_owned_sidecar_result((|| {
-            validate_generation_id(core_generation_id)?;
-            if event_ids.is_empty() || !self.source_backed_generation_ready(core_generation_id)? {
-                return Ok(HashMap::new());
-            }
-            let mut hashes = HashMap::new();
-            let mut statement = self.conn.prepare(
-                "SELECT stable_event_identity, source_text_sha256
-                 FROM semantic_source_documents
-                 WHERE event_id = ?1 AND core_generation_id = ?2",
-            )?;
-            for event_id in event_ids {
-                let row = statement
-                    .query_row(params![event_id.to_string(), core_generation_id], |row| {
-                        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .optional()?;
-                let Some((identity, hash)) = row else {
-                    continue;
-                };
-                let stable = StableEntityId::decode_canonical(&identity)?;
-                if stable.as_uuid() != *event_id || stable.entity_kind() != StableEntityKind::Event
-                {
-                    return Err(SemanticVectorStoreError::reset_required(
-                        "source-backed semantic metadata contains an invalid stable identity",
-                    )
-                    .into());
-                }
-                hashes.insert(*event_id, hash);
-            }
-            Ok(hashes)
-        })())
-    }
-
     fn begin_or_resume_source_generation(
         &self,
         generation: &SourceBackedSemanticGeneration,
     ) -> Result<SourceProjectionFrontier> {
-        let fingerprint = source_contract_fingerprint();
+        let fingerprint = source_contract_fingerprint()?;
         if let Some(frontier) = self.source_frontier()? {
             if frontier.contract_version == SOURCE_CONTRACT_VERSION
                 && frontier.contract_fingerprint == fingerprint
                 && frontier.core_generation_id == generation.core_generation_id
+                && frontier.semantic_policy_fingerprint == generation.semantic_policy_fingerprint
                 && frontier.semantic_documents == generation.semantic_documents
             {
                 return Ok(frontier);
@@ -507,6 +452,7 @@ impl SemanticVectorStore {
             contract_version: SOURCE_CONTRACT_VERSION,
             contract_fingerprint: fingerprint.clone(),
             core_generation_id: generation.core_generation_id.clone(),
+            semantic_policy_fingerprint: generation.semantic_policy_fingerprint.clone(),
             consumer_build_id: source_consumer_build_id(
                 &fingerprint,
                 &generation.core_generation_id,
@@ -581,17 +527,15 @@ impl SemanticVectorStore {
     fn stored_source_document(&self, event_id: Uuid) -> Result<Option<StoredSourceDocument>> {
         self.conn
             .query_row(
-                "SELECT stable_event_identity, locator_json, source_text_sha256, core_generation_id
+                "SELECT stable_event_identity, source_text_sha256, core_generation_id
                  FROM semantic_source_documents WHERE event_id = ?1",
                 [event_id.to_string()],
                 |row| {
                     let stable_event_identity = row.get(0)?;
-                    let locator_json = row.get(1)?;
-                    let _source_text_sha256 = row.get::<_, String>(2)?;
-                    let _core_generation_id = row.get::<_, String>(3)?;
+                    let _source_text_sha256 = row.get::<_, String>(1)?;
+                    let _core_generation_id = row.get::<_, String>(2)?;
                     Ok(StoredSourceDocument {
                         stable_event_identity,
-                        locator_json,
                     })
                 },
             )
@@ -603,25 +547,22 @@ impl SemanticVectorStore {
         &self,
         event_id: StableEntityId,
         stable_identity: &[u8],
-        locator_json: &[u8],
         source_text_sha256: &str,
         frontier: &SourceProjectionFrontier,
     ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO semantic_source_documents
-             (event_id, stable_event_identity, locator_json, source_text_sha256,
-              core_generation_id, consumer_build_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             (event_id, stable_event_identity, source_text_sha256, core_generation_id,
+              consumer_build_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(event_id) DO UPDATE SET
                 stable_event_identity = excluded.stable_event_identity,
-                locator_json = excluded.locator_json,
                 source_text_sha256 = excluded.source_text_sha256,
                 core_generation_id = excluded.core_generation_id,
                 consumer_build_id = excluded.consumer_build_id",
             params![
                 event_id.as_uuid().to_string(),
                 stable_identity,
-                locator_json,
                 source_text_sha256,
                 frontier.core_generation_id,
                 frontier.consumer_build_id,
@@ -678,6 +619,7 @@ impl SemanticVectorStore {
             contract_version: frontier.contract_version,
             contract_fingerprint: frontier.contract_fingerprint.clone(),
             core_generation_id: frontier.core_generation_id.clone(),
+            semantic_policy_fingerprint: frontier.semantic_policy_fingerprint.clone(),
             consumer_build_id: frontier.consumer_build_id.clone(),
             semantic_documents: frontier.semantic_documents,
             projected_documents,
@@ -709,10 +651,9 @@ impl SemanticVectorStore {
     }
 }
 
-/// The metadata feed deliberately does not inspect indexed or stored body
-/// text. Control-message exclusion happens only after exact provider content
-/// has been hydrated for the generation-bound locator.
-pub(in crate::semantic) fn semantic_hydrated_source_is_control(text: &str) -> bool {
+/// Control-message exclusion is applied only after complete normalized Core
+/// content has crossed the generation pin.
+pub(in crate::semantic) fn semantic_core_content_is_control(text: &str) -> bool {
     let user = text
         .strip_prefix("user:\n")
         .unwrap_or(text)

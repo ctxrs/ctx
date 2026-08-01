@@ -6,17 +6,13 @@ mod registry;
 use std::{
     fs,
     path::PathBuf,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, BatchHydrationRequest, BatchHydrationResult,
-    EventIdentityInput, LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate,
-    NativeSessionKey, ScannedSourceCounts, SessionHydrationRequest, SessionIdentityInput,
-    SourceAnchor, SourceInventoryObservation, SourceObservation, SourceRecordLocator, TypedKey,
+    derive_event_id, derive_session_id, CoreRecord, EventIdentityInput, NativeItemKey,
+    NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceInventoryObservation, SourceObservation, TypedKey,
 };
 use ctx_history_index::VerifiedIndex;
 use tempfile::tempdir;
@@ -90,50 +86,6 @@ fn fixture_session_id(source: &SourceKey) -> ctx_history_core::StableEntityId {
     .unwrap()
 }
 
-fn fixture_event_request(source: &SourceKey, native_event_id: &str) -> EventHydrationRequest {
-    let session_id = fixture_session_id(source);
-    let item_key =
-        NativeItemKey::native_id("message", TypedKey::utf8(native_event_id).unwrap()).unwrap();
-    let event_id = derive_event_id(EventIdentityInput {
-        source,
-        session_id,
-        logical_item_kind: "message",
-        native_item_key: &item_key,
-        subrecord_selector: None,
-    })
-    .unwrap();
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::ProviderNative {
-            namespace: "ordered-batch-test".to_owned(),
-            coordinate: TypedKey::utf8(native_event_id).unwrap(),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        [41; 32],
-    )
-    .unwrap();
-    EventHydrationRequest::new(event_id, locator).unwrap()
-}
-
-fn fixture_hydrated_record(request: &EventHydrationRequest) -> HydratedProviderRecord {
-    HydratedProviderRecord {
-        event_id: request.event_id(),
-        provider_bytes: request.event_id().as_uuid().as_bytes().to_vec(),
-    }
-}
-
-fn fixture_batch_result(request: &BatchHydrationRequest) -> BatchHydrationResult {
-    BatchHydrationResult::new(
-        request
-            .events()
-            .iter()
-            .map(fixture_hydrated_record)
-            .collect(),
-    )
-    .unwrap()
-}
-
 fn fixture_executable_route(
     provider: CaptureProvider,
     selected_source_format: &'static str,
@@ -151,112 +103,46 @@ fn fixture_executable_route(
     .unwrap()
 }
 
-fn fixture_batch_resolver(
-    source: &SourceKey,
-    hydrate_batch: impl Fn(&BatchHydrationRequest) -> Result<BatchHydrationResult, HydrationFailure>
-        + Send
-        + Sync
-        + 'static,
-) -> SourceBackedResolverRegistry {
-    let owned_source = source.clone();
-    let driver = SourceBackedRouteDriver::new(
-        |_sink| Ok(()),
-        move |candidate| owned_source.exact_descriptor_eq(candidate),
-        |_target| false,
-        |request| Ok(fixture_hydrated_record(request)),
-    )
-    .with_batch_hydration(hydrate_batch);
-    let mut registry = SourceBackedProviderRegistry::new();
-    registry.register(fixture_executable_route(
-        CaptureProvider::Gemini,
-        GEMINI_CLI_SOURCE_FORMAT,
-        driver,
-    ));
-    registry.resolver_registry()
-}
-
 fn fixture_route(
     provider: CaptureProvider,
     source_format: &'static str,
     lineage: u8,
-    coordinate: NativeRecordCoordinate,
-    provider_bytes: Vec<u8>,
-) -> (SourceBackedRoute, EventHydrationRequest) {
-    fixture_route_with_selected_format(
-        provider,
-        source_format,
-        source_format,
-        lineage,
-        coordinate,
-        provider_bytes,
-    )
-}
-
-fn fixture_route_with_selected_format(
-    provider: CaptureProvider,
-    selected_source_format: &'static str,
-    certified_source_format: &'static str,
-    lineage: u8,
-    coordinate: NativeRecordCoordinate,
-    provider_bytes: Vec<u8>,
-) -> (SourceBackedRoute, EventHydrationRequest) {
+) -> SourceBackedRoute {
     let source = SourceKey::derive(
         provider.as_str(),
-        certified_source_format,
+        source_format,
         "coordinator-test-v1",
         1,
         SourceAnchor::CatalogLineage([lineage; 32]),
     )
     .unwrap();
-    let session_key =
-        NativeSessionKey::native_id("session", TypedKey::utf8("session").unwrap()).unwrap();
-    let session_id = derive_session_id(SessionIdentityInput {
-        source: &source,
-        logical_session_kind: "session",
-        native_session_key: &session_key,
-    })
-    .unwrap();
-    let item_key = NativeItemKey::native_id("message", TypedKey::U64(1)).unwrap();
+    let session_id = fixture_session_id(&source);
     let event_id = derive_event_id(EventIdentityInput {
         source: &source,
         session_id,
         logical_item_kind: "message",
-        native_item_key: &item_key,
+        native_item_key: &NativeItemKey::native_id("message", TypedKey::U64(1)).unwrap(),
         subrecord_selector: None,
     })
     .unwrap();
-    let revision_digest = [lineage.saturating_add(10); 32];
-    let record_digest = [lineage.saturating_add(20); 32];
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        coordinate,
-        LocatorRevisionPolicy::ExactSourceRevision,
-        Some(revision_digest),
-        record_digest,
-    )
-    .unwrap();
-    let request = EventHydrationRequest::new(event_id, locator.clone()).unwrap();
-    let document = LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some("session".to_owned()),
-        branch: None,
-        source_path: Some(format!("/fixture/{}", provider.as_str())),
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: 1,
-        occurred_at_unix_ms: Some(1),
-        event_type: "message".to_owned(),
-        role: Some("user".to_owned()),
-        body: format!("{} preview", provider.as_str()),
-        workspace: None,
-        cwd: None,
-        touched_files: Vec::new(),
-    };
+        session_id,
+        source.clone(),
+        1,
+        "message",
+        "primary",
+        true,
+        "coordinator-test-v1",
+        format!("{} body", provider.as_str()),
+    )
+    .unwrap();
+    record.provider_session_id = Some("session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(1));
+    record.occurred_at_unix_ms = Some(1);
+    record.role = Some("user".to_owned());
+    let revision_digest = [lineage.saturating_add(10); 32];
     let observation =
         SourceObservation::new(source.clone(), "fixture-revision", vec![lineage]).unwrap();
     let certificate = CertifiedSource::certify(
@@ -274,13 +160,11 @@ fn fixture_route_with_selected_format(
     )
     .unwrap();
     let scan_certificate = certificate.clone();
-    let scan_document = document.clone();
-    let owned_source = source.clone();
     let revalidation_certificate = certificate;
-    let hydrated_bytes = provider_bytes;
+    let owned_source = source;
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
-            sink.replace_source(scan_certificate.clone(), [scan_document.clone()])
+            sink.replace_source(scan_certificate.clone(), [record.clone()])
                 .map_err(route_coordinator_error)
         },
         move |candidate| candidate.exact_descriptor_eq(&owned_source),
@@ -288,27 +172,13 @@ fn fixture_route_with_selected_format(
             SourceBackedRevalidationTarget::Source(source) => source == &revalidation_certificate,
             SourceBackedRevalidationTarget::Deletion(_) => false,
         },
-        move |request| {
-            Ok(HydratedProviderRecord {
-                event_id: request.event_id(),
-                provider_bytes: hydrated_bytes.clone(),
-            })
-        },
     );
-    let provider_source = fixture_provider_source(
-        provider,
-        selected_source_format,
-        ProviderImportSupport::Native,
-    );
-    (
-        SourceBackedRoute::automatic(
-            provider_source,
-            SourceBackedSelectorAuthority::DiscoveredWinner,
-            driver,
-        )
-        .unwrap(),
-        request,
+    SourceBackedRoute::automatic(
+        fixture_provider_source(provider, source_format, ProviderImportSupport::Native),
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        driver,
     )
+    .unwrap()
 }
 
 fn fixture_provider_source(

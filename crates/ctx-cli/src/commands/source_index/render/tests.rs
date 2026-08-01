@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use unicode_width::UnicodeWidthStr as _;
 
 use super::{
-    render_locate_document, render_search_document, render_show_document, render_show_jsonl,
-    render_show_markdown, render_show_text,
+    render_search_document, render_show_document, render_show_jsonl, render_show_markdown,
+    render_show_text,
 };
 use crate::{
     cli::Cli,
@@ -79,7 +79,6 @@ fn show_value() -> Value {
         "provider": "codex",
         "provider_session_id": "demo-unicode-session",
         "mode": "lite",
-        "content_policy": "complete",
         "format": "text",
         "events": [
             {
@@ -103,55 +102,6 @@ fn show_value() -> Value {
                 "text": "Done.",
             },
         ],
-    })
-}
-
-fn locate_session_value() -> Value {
-    json!({
-        "target": "session",
-        "ctx_session_id": SESSION_ID,
-        "provider": "codex",
-        "provider_session_id": "demo-unicode-session",
-        "source": {
-            "path": "/tmp/ctx/history/demo-unicode-session.jsonl",
-            "source_format": "codex_session_jsonl_tree",
-            "exists": true,
-        },
-        "resume": {
-            "available": true,
-            "command": "codex resume demo-unicode-session",
-        },
-    })
-}
-
-fn locate_event_value() -> Value {
-    json!({
-        "target": "event",
-        "ctx_event_id": EVENT_ID,
-        "ctx_session_id": SESSION_ID,
-        "provider": "codex",
-        "provider_session_id": "demo-unicode-session",
-        "event_type": "message",
-        "role": "assistant",
-        "source": {
-            "path": "/tmp/ctx/history/demo-unicode-session.jsonl",
-            "source_format": "codex_session_jsonl_tree",
-            "exists": false,
-        },
-        "source_record": {
-            "kind": "jsonl",
-            "byte_offset": 128,
-            "byte_length": 64,
-            "ordinal": 7,
-        },
-        "complete_content": {
-            "locator_available": true,
-            "available": false,
-        },
-        "resume": {
-            "available": true,
-            "command": "codex resume demo-unicode-session",
-        },
     })
 }
 
@@ -207,10 +157,6 @@ fn primary_renderers_match_reference_goldens_at_80_columns() {
     assert_eq!(
         render_show_document(&show_value(), &context).render_plain(),
         include_str!("goldens/show.txt")
-    );
-    assert_eq!(
-        render_locate_document(&locate_event_value(), &context).render_plain(),
-        include_str!("goldens/locate.txt")
     );
 }
 
@@ -310,8 +256,6 @@ fn primary_verbose_narrow_and_long_id_cases_preserve_reference_atoms() {
             render_search_document(&search_value(), false, &context),
             render_search_document(&search_value(), true, &context),
             render_show_document(&show_value(), &context),
-            render_locate_document(&locate_session_value(), &context),
-            render_locate_document(&locate_event_value(), &context),
         ];
         for document in documents {
             assert_fits(&document, &context);
@@ -326,14 +270,6 @@ fn primary_verbose_narrow_and_long_id_cases_preserve_reference_atoms() {
         assert_value_survives_layout(&shown, EVENT_ID);
         assert_value_survives_layout(&shown, SECOND_EVENT_ID);
         assert_value_survives_layout(&shown, SESSION_ID);
-
-        let located = render_locate_document(&locate_event_value(), &context).render_plain();
-        assert_value_survives_layout(&located, EVENT_ID);
-        assert_value_survives_layout(&located, SESSION_ID);
-        assert!(!located.contains("source_exists"));
-        assert!(!located.contains("locator_available"));
-        assert!(!located.contains("available: false"));
-        assert!(!located.contains("source_record_"));
     }
 }
 
@@ -389,13 +325,11 @@ fn search_candidate_warning_and_more_available_footer_are_actionable() {
 }
 
 #[test]
-fn commands_are_semantically_styled_and_locate_omits_routine_booleans() {
+fn commands_are_semantically_styled() {
     let context = context(80, ColorMode::Always);
     for document in [
         render_search_document(&search_value(), false, &context),
         render_search_document(&empty_search_value(), false, &context),
-        render_locate_document(&locate_session_value(), &context),
-        render_locate_document(&locate_event_value(), &context),
     ] {
         assert!(
             document
@@ -406,14 +340,6 @@ fn commands_are_semantically_styled_and_locate_omits_routine_booleans() {
             "renderer omitted a semantic command span"
         );
     }
-
-    let available = render_locate_document(&locate_session_value(), &context).render_plain();
-    assert!(!available.contains("exists"));
-    assert!(!available.contains("available"));
-    assert!(!available.contains("true"));
-    let missing = render_locate_document(&locate_event_value(), &context).render_plain();
-    assert!(missing.contains("Status   missing\n"));
-    assert!(!missing.contains("false"));
 }
 
 #[test]
@@ -426,16 +352,12 @@ fn styled_output_strips_to_plain_and_canonical_bytes_ignore_color() {
             render_search_document(&search_value(), true, &styled),
             render_search_document(&empty_search_value(), false, &styled),
             render_show_document(&show_value(), &styled),
-            render_locate_document(&locate_session_value(), &styled),
-            render_locate_document(&locate_event_value(), &styled),
         ];
         let plain_documents = [
             render_search_document(&search_value(), false, &plain),
             render_search_document(&search_value(), true, &plain),
             render_search_document(&empty_search_value(), false, &plain),
             render_show_document(&show_value(), &plain),
-            render_locate_document(&locate_session_value(), &plain),
-            render_locate_document(&locate_event_value(), &plain),
         ];
 
         for (styled_document, plain_document) in styled_documents.into_iter().zip(plain_documents) {
@@ -484,7 +406,6 @@ fn compatibility_string_and_raw_format_renderers_keep_their_existing_bytes() {
             "provider: codex\n",
             "provider_session_id: demo-unicode-session\n",
             "mode: lite\n",
-            "content: complete\n",
             "format: text\n\n",
             "[2026-07-30T12:00:00.000Z] user message ",
             "01900001-0000-7000-8000-000000000002\n",

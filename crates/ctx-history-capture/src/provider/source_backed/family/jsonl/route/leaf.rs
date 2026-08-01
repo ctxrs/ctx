@@ -2,10 +2,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    CertifiedSource, CertifiedSourceAppend, ScannedSourceCounts, SourceFrontier, SourceKey,
-    SourceObservation, TypedKey,
+    CertifiedSource, CertifiedSourceAppend, CoreRecord, ScannedSourceCounts, SourceFrontier,
+    SourceKey, SourceObservation, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
+use ctx_history_index::BaseEventIdentityLookup;
 
 use super::super::{
     JsonlCheckpoint, JsonlFileObservation, JsonlProbe, JsonlReader, JsonlSourceChange,
@@ -14,8 +14,7 @@ use super::super::{
 use super::{
     binding_digest, contract_error, route_internal, route_invalid, FamilyCheckpoint,
     JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyLeaf, TerminalSourceEvidence,
-    FAMILY_FRONTIER_KIND, FAMILY_PARSER_REVISION, FAMILY_POLICY_REVISION,
-    FAMILY_SOURCE_REVISION_KIND,
+    FAMILY_FRONTIER_KIND, FAMILY_POLICY_REVISION, FAMILY_SOURCE_REVISION_KIND,
 };
 #[cfg(test)]
 use super::{jsonl_family_scanner_probe, record_jsonl_family_scanner_activity};
@@ -43,41 +42,48 @@ fn scan_leaf_serial(
     adapter: &dyn JsonlFamilyAdapter,
     leaf: &JsonlFamilyLeaf,
     base: Option<&CertifiedSource>,
+    base_event_lookup: &BaseEventIdentityLookup,
     sink: &mut SourceBackedGenerationSink<'_>,
 ) -> SourceBackedRouteResult<TerminalSourceEvidence> {
     let mut staging_started = false;
     let mut append_staging = false;
-    let prepared = prepare_leaf(adapter, leaf, base, &mut |append, documents| {
-        if !staging_started {
-            if append {
-                let expected = base.ok_or_else(|| {
-                    CaptureError::InvalidPayload("JSONL append has no base".to_owned())
-                })?;
-                let staged = sink
-                    .begin_source_append(leaf.source().clone())
-                    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-                if staged != expected {
-                    return Err(CaptureError::InvalidPayload(
-                        "JSONL append base changed before staging".to_owned(),
-                    ));
+    let prepared = prepare_leaf(
+        adapter,
+        leaf,
+        base,
+        base_event_lookup,
+        &mut |append, core_records| {
+            if !staging_started {
+                if append {
+                    let expected = base.ok_or_else(|| {
+                        CaptureError::InvalidPayload("JSONL append has no base".to_owned())
+                    })?;
+                    let staged = sink
+                        .begin_source_append(leaf.source().clone())
+                        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+                    if staged != expected {
+                        return Err(CaptureError::InvalidPayload(
+                            "JSONL append base changed before staging".to_owned(),
+                        ));
+                    }
+                } else {
+                    sink.begin_source(leaf.source().clone())
+                        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
                 }
-            } else {
-                sink.begin_source(leaf.source().clone())
+                staging_started = true;
+                append_staging = append;
+            } else if append_staging != append {
+                return Err(CaptureError::SystemInvariant(
+                    "JSONL publication mode changed during one leaf scan",
+                ));
+            }
+            for record in core_records {
+                sink.add_core_record(record)
                     .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
             }
-            staging_started = true;
-            append_staging = append;
-        } else if append_staging != append {
-            return Err(CaptureError::SystemInvariant(
-                "JSONL publication mode changed during one leaf scan",
-            ));
-        }
-        for document in documents {
-            sink.add_document(document)
-                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
     .map_err(route_invalid)?;
 
     let PreparedLeaf {
@@ -130,6 +136,7 @@ pub(super) fn scan_leaves(
     adapter: &dyn JsonlFamilyAdapter,
     leaves: &[JsonlFamilyLeaf],
     bases: &HashMap<[u8; 32], &CertifiedSource>,
+    base_event_lookup: BaseEventIdentityLookup,
     sink: &mut SourceBackedGenerationSink<'_>,
 ) -> SourceBackedRouteResult<HashMap<[u8; 32], TerminalSourceEvidence>> {
     let worker_count = family_scanner_worker_count(sink.recommended_leaf_workers(leaves.len()));
@@ -140,7 +147,13 @@ pub(super) fn scan_leaves(
         for leaf in leaves {
             #[cfg(test)]
             let _active_scanner = scanner_probe.as_ref().map(|probe| probe.enter());
-            let evidence = scan_leaf_serial(adapter, leaf, base_for_leaf(bases, leaf), sink)?;
+            let evidence = scan_leaf_serial(
+                adapter,
+                leaf,
+                base_for_leaf(bases, leaf),
+                &base_event_lookup,
+                sink,
+            )?;
             if terminal_sources
                 .insert(leaf.source().exact_descriptor_digest(), evidence)
                 .is_some()
@@ -172,7 +185,8 @@ pub(super) fn scan_leaves(
                 adapter,
                 leaf,
                 job.leaf().base.as_ref(),
-                &mut |append, documents| {
+                &base_event_lookup,
+                &mut |append, core_records| {
                     if !staging_started {
                         let begin = if append {
                             let base = job.leaf().base.clone().ok_or_else(|| {
@@ -196,8 +210,8 @@ pub(super) fn scan_leaves(
                             "parallel JSONL publication mode changed during one leaf scan",
                         ));
                     }
-                    for document in documents {
-                        emitter.emit_document(document).map_err(|_| {
+                    for record in core_records {
+                        emitter.emit_core_record(record).map_err(|_| {
                             CaptureError::SystemInvariant(
                                 "JSONL parallel scan was cancelled during replacement",
                             )
@@ -284,7 +298,8 @@ fn prepare_leaf(
     adapter: &dyn JsonlFamilyAdapter,
     leaf: &JsonlFamilyLeaf,
     base: Option<&CertifiedSource>,
-    emit_page: &mut dyn FnMut(bool, Vec<LexicalDocument>) -> Result<()>,
+    base_event_lookup: &BaseEventIdentityLookup,
+    emit_page: &mut dyn FnMut(bool, Vec<CoreRecord>) -> Result<()>,
 ) -> Result<PreparedLeaf> {
     let (leaf, opened) = leaf.open_for_scan()?;
     let previous = base.and_then(|base| decode_checkpoint(adapter, &leaf, base).ok());
@@ -357,7 +372,13 @@ fn prepare_leaf(
     } else {
         None
     };
-    let mut projector = adapter.projector(&leaf, opened, DateTime::<Utc>::UNIX_EPOCH)?;
+    let mut projector = adapter.projector_with_provider_checkpoint(
+        &leaf,
+        opened,
+        DateTime::<Utc>::UNIX_EPOCH,
+        resumed.and_then(|checkpoint| checkpoint.provider_checkpoint.as_ref()),
+        is_append.then(|| base_event_lookup.clone()),
+    )?;
     let mut physical_records = resumed.map_or_else(
         || {
             leaf.identity_probe
@@ -371,25 +392,17 @@ fn prepare_leaf(
         resumed.map_or(0, |checkpoint| checkpoint.represented_physical_records);
     let mut documents = resumed.map_or(0, |checkpoint| checkpoint.indexed_documents);
     loop {
-        let mut page_documents = Vec::new();
+        let mut page_core_records = Vec::new();
         let page = reader.visit_page(&mut |record| -> Result<()> {
             physical_records = checked_increment(physical_records)?;
             let before = documents;
-            #[cfg(test)]
-            {
-                super::FAMILY_PROVIDER_PROJECTIONS
-                    .with(|count| count.set(count.get().saturating_add(1)));
-                super::FAMILY_PROVIDER_PROJECTION_BYTES.with(|bytes| {
-                    bytes.set(bytes.get().saturating_add(record.bytes().len()));
-                });
-            }
-            projector.project(record, &mut |document| {
-                if !document.source.exact_descriptor_eq(leaf.source()) {
+            projector.project(record, &mut |core_record| {
+                if !core_record.source.exact_descriptor_eq(leaf.source()) {
                     return Err(CaptureError::InvalidPayload(
                         "JSONL projector changed the bound source".to_owned(),
                     ));
                 }
-                page_documents.push(document);
+                page_core_records.push(core_record);
                 documents = checked_increment(documents)?;
                 Ok(())
             })?;
@@ -398,27 +411,27 @@ fn prepare_leaf(
             }
             Ok(())
         })?;
-        if !page_documents.is_empty() {
-            emit_page(is_append, page_documents)?;
+        if !page_core_records.is_empty() {
+            emit_page(is_append, page_core_records)?;
         }
         if page.is_none() {
             break;
         }
     }
     let before_finish = documents;
-    let mut final_documents = Vec::new();
-    projector.finish_projecting(&mut |document| {
-        if !document.source.exact_descriptor_eq(leaf.source()) {
+    let mut final_core_records = Vec::new();
+    projector.finish_projecting(&mut |core_record| {
+        if !core_record.source.exact_descriptor_eq(leaf.source()) {
             return Err(CaptureError::InvalidPayload(
                 "JSONL projector changed the bound source".to_owned(),
             ));
         }
-        final_documents.push(document);
+        final_core_records.push(core_record);
         documents = checked_increment(documents)?;
         Ok(())
     })?;
-    if !final_documents.is_empty() {
-        emit_page(is_append, final_documents)?;
+    if !final_core_records.is_empty() {
+        emit_page(is_append, final_core_records)?;
     }
     let rejected_records = resumed
         .map_or(leaf.identity_probe_rejected_records, |checkpoint| {
@@ -428,6 +441,7 @@ fn prepare_leaf(
         .ok_or_else(|| {
             CaptureError::InvalidPayload("JSONL rejected count overflowed".to_owned())
         })?;
+    let provider_checkpoint = projector.provider_checkpoint()?;
     if documents != before_finish {
         represented_records = physical_records;
     }
@@ -447,6 +461,7 @@ fn prepare_leaf(
         represented_physical_records: represented_records,
         rejected_records,
         indexed_documents: documents,
+        provider_checkpoint,
     };
     let terminal_checkpoint = outcome.checkpoint().clone();
     let certificate = certify(adapter, &leaf, checkpoint)
@@ -510,7 +525,7 @@ fn certify(
     CertifiedSource::certify_with_frontier(
         source_observation(&leaf.source, &leaf.observation).map_err(route_invalid)?,
         source_observation(&leaf.source, &leaf.observation).map_err(route_invalid)?,
-        FAMILY_PARSER_REVISION,
+        adapter.parser_revision(),
         *checkpoint.physical.complete_prefix_sha256(),
         ScannedSourceCounts {
             complete_records,
@@ -534,7 +549,7 @@ fn decode_checkpoint(
     leaf.source
         .validate_exact_descriptor(certificate.observation().source())
         .map_err(contract_error)?;
-    if certificate.parser_revision() != FAMILY_PARSER_REVISION {
+    if certificate.parser_revision() != adapter.parser_revision() {
         return Err(CaptureError::InvalidPayload(
             "JSONL base parser revision changed".to_owned(),
         ));

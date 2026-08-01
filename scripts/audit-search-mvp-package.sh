@@ -107,7 +107,7 @@ if grep_files 'work-[r]ecord-(publish|report|vcs)[[:space:]]*=' \
 fi
 
 if ! grep -Fxq \
-  'tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression", "columnar-zstd-compression"] }' \
+  'tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "lz4-compression", "zstd-compression", "columnar-zstd-compression"] }' \
   Cargo.toml; then
   fail 'workspace Tantivy dependency must keep the exact 0.26.1 release feature contract'
 fi

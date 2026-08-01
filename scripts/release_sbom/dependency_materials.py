@@ -26,6 +26,7 @@ TANTIVY_FEATURES = [
     "columnar-zstd-compression",
     "lz4-compression",
     "mmap",
+    "zstd-compression",
 ]
 TANTIVY_RESOLVED_FEATURES = [
     "columnar-zstd-compression",
@@ -35,6 +36,8 @@ TANTIVY_RESOLVED_FEATURES = [
     "memmap2",
     "mmap",
     "tempfile",
+    "zstd",
+    "zstd-compression",
 ]
 WORKSPACE_RELEASE_PACKAGES = {
     "ctx-history-core",

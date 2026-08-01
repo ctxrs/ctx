@@ -7,7 +7,7 @@ use serde::{
 };
 use serde_json::Value;
 
-use super::rows::CodexSessionRow;
+use super::rows::{CodexSessionGitMetadata, CodexSessionRow};
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::codex::catalog::{codex_parent_session_id, codex_source_kind};
 use crate::provider::codex::events::{CodexExitCodeParser, CodexWallTimeParser};
@@ -30,10 +30,6 @@ pub(super) enum CodexResultKind {
 }
 
 impl CodexResultKind {
-    pub(super) const fn is_eligible_output(self) -> bool {
-        !matches!(self, Self::OtherResult)
-    }
-
     pub(super) const fn item_type(self) -> &'static str {
         match self {
             Self::FunctionCallOutput => "function_call_output",
@@ -47,6 +43,7 @@ impl CodexResultKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CodexRecordClass {
     SessionMeta,
+    TurnContext,
     Retained(CodexRetainedKind),
     ExcludedResult(CodexResultKind),
     Ignored,
@@ -277,9 +274,7 @@ pub(super) fn classify_codex_record(line: &[u8]) -> serde_json::Result<CodexReco
         .and_then(|payload| payload.item_type.as_deref());
     let class = codex_record_class(envelope.record_type.as_ref(), item_type);
     let output = match class {
-        CodexRecordClass::ExcludedResult(kind) if kind.is_eligible_output() => {
-            Some(probe_structural_output(line)?)
-        }
+        CodexRecordClass::ExcludedResult(_) => Some(probe_structural_output(line)?),
         _ => None,
     };
     Ok(CodexRecordProbe {
@@ -299,6 +294,7 @@ pub(super) fn classify_codex_record(line: &[u8]) -> serde_json::Result<CodexReco
 pub(super) fn codex_record_class(record_type: &str, item_type: Option<&str>) -> CodexRecordClass {
     match record_type {
         "session_meta" => CodexRecordClass::SessionMeta,
+        "turn_context" => CodexRecordClass::TurnContext,
         "compacted" => CodexRecordClass::Retained(CodexRetainedKind::Compacted),
         "response_item" => classify_response_item(item_type),
         "event_msg" => classify_event_message(item_type),
@@ -385,6 +381,17 @@ struct CodexSessionMetaPayload {
     agent_nickname: Option<String>,
     agent_role: Option<String>,
     model_provider: Option<String>,
+    git: Option<CodexSessionGitMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexTurnContextEnvelope {
+    payload: CodexTurnContextPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexTurnContextPayload {
+    cwd: String,
 }
 
 pub(super) fn parse_session_meta(line: &[u8]) -> Option<CodexSessionRow> {
@@ -416,7 +423,21 @@ pub(super) fn parse_session_meta(line: &[u8]) -> Option<CodexSessionRow> {
         external_agent_id: payload.agent_nickname.and_then(nonempty),
         role_hint: payload.agent_role.and_then(nonempty),
         model_provider: payload.model_provider.and_then(nonempty),
+        git: payload.git.and_then(|git| {
+            let git = CodexSessionGitMetadata {
+                commit_hash: git.commit_hash.and_then(nonempty),
+                branch: git.branch.and_then(nonempty),
+                repository_url: git.repository_url.and_then(nonempty),
+            };
+            (git.commit_hash.is_some() || git.branch.is_some() || git.repository_url.is_some())
+                .then_some(git)
+        }),
     })
+}
+
+pub(super) fn parse_turn_context_cwd(line: &[u8]) -> Option<String> {
+    let envelope = serde_json::from_slice::<CodexTurnContextEnvelope>(line).ok()?;
+    nonempty(envelope.payload.cwd)
 }
 
 fn nonempty(value: String) -> Option<String> {

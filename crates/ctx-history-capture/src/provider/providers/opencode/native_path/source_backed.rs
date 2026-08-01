@@ -1,23 +1,19 @@
 //! Shared source-backed projection for the OpenCode SQLite dialect family.
 //!
 //! This module owns provider-local discovery, parsing, certification, lexical
-//! projection, replacement streaming, and exact-row hydration. Atomic
+//! projection, replacement streaming, and complete direct Core records. Atomic
 //! publication remains owned by the shared coordinator.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
-#[cfg(test)]
-use ctx_history_core::SessionHydrationRequest;
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, EventIdentityInput,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceRecordLocator, SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CoreRecord,
+    CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use rusqlite::{limits::Limit, types::ValueRef, Connection, Row};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -29,8 +25,7 @@ use super::{
     },
     model::{OpenCodeNativeEventKind, OpenCodeNativeFileTouch, OpenCodeNativeSchemaFamily},
     query::{
-        source_backed_decode_order, source_backed_event_digest, source_backed_event_sql,
-        source_backed_native_record_identity,
+        source_backed_decode_order, source_backed_event_sql, source_backed_native_record_identity,
     },
     schema::OpenCodeNativeSchema,
 };
@@ -69,7 +64,7 @@ pub(crate) enum OpenCodeSourceBackedError {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Route(#[from] SourceBackedRouteError),
     #[error("OpenCode-family source-backed counter overflow")]
@@ -83,12 +78,10 @@ pub(crate) enum OpenCodeSourceBackedError {
 pub(crate) type OpenCodeSourceBackedResult<T> = Result<T, OpenCodeSourceBackedError>;
 
 mod adapter;
-mod hydration;
 mod projection;
 
 pub(crate) use adapter::register as register_source_backed_route;
-pub(crate) use hydration::OpenCodeSourceBackedExactResolver;
-use projection::{decode_source_event_row, lexical_document, retained_projection};
+use projection::{core_record, decode_source_event_row, retained_projection};
 
 /// Provider-local hook consumed later by the shared registration layer.
 #[derive(Clone, Copy, Debug)]
@@ -103,35 +96,6 @@ impl OpenCodeSourceBackedRegistration {
 
     pub(crate) const fn provider(self) -> CaptureProvider {
         self.dialect.provider
-    }
-
-    pub(crate) const fn source_format(self) -> &'static str {
-        self.dialect.source_format
-    }
-
-    #[cfg(test)]
-    pub(crate) fn scan(
-        self,
-        path: &Path,
-        emit: &mut dyn FnMut(Vec<LexicalDocument>) -> OpenCodeSourceBackedResult<()>,
-    ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
-        scan_source(
-            crate::test_provider_sqlite_data_root(),
-            path,
-            self.dialect,
-            &mut |output| match output {
-                OpenCodeScanOutput::Begin(_) => Ok(()),
-                OpenCodeScanOutput::Document(document) => emit(vec![document]),
-            },
-        )
-    }
-
-    pub(crate) fn exact_resolver(
-        self,
-        data_root: impl Into<PathBuf>,
-        path: impl Into<PathBuf>,
-    ) -> OpenCodeSourceBackedExactResolver {
-        OpenCodeSourceBackedExactResolver::new(self, data_root, path)
     }
 
     fn owns_source(self, source: &SourceKey) -> bool {
@@ -213,7 +177,7 @@ struct OpenCodeAuthorizedSnapshot {
 #[allow(clippy::large_enum_variant)]
 enum OpenCodeScanOutput {
     Begin(SourceKey),
-    Document(LexicalDocument),
+    Document(CoreRecord),
 }
 
 #[derive(Debug)]
@@ -285,26 +249,6 @@ impl SqliteSourceValue {
             _ => None,
         }
     }
-}
-
-#[cfg(test)]
-fn scan_source(
-    data_root: &Path,
-    path: &Path,
-    dialect: &'static OpenCodeSqliteDialect,
-    emit: &mut dyn FnMut(OpenCodeScanOutput) -> OpenCodeSourceBackedResult<()>,
-) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
-    let authorized = open_root_authorized_snapshot_retained(data_root, path)?;
-    let observation = observe_logical_source(authorized.sqlite_snapshot.connection()?, dialect)?;
-    let scan = scan_pinned_source(
-        path,
-        dialect,
-        &observation,
-        authorized.sqlite_snapshot,
-        emit,
-    )?;
-    authorized.source_root.revalidate()?;
-    Ok(scan)
 }
 
 fn scan_pinned_source(
@@ -426,7 +370,7 @@ fn stream_logical_rows(
         let session = sessions.get(&event.session_identity).ok_or_else(|| {
             OpenCodeSourceBackedError::MissingSession(event.session_identity.clone())
         })?;
-        let document = lexical_document(
+        let document = core_record(
             source,
             schema.family,
             path,
@@ -571,30 +515,11 @@ fn schema_family_for_source(
     })
 }
 
-fn open_root_authorized_snapshot(
-    data_root: &Path,
-    path: &Path,
-) -> OpenCodeSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
-    let authorized = open_root_authorized_snapshot_retained(data_root, path)?;
-    Ok((authorized.source_root, authorized.sqlite_snapshot))
-}
-
 fn open_root_authorized_snapshot_retained(
     data_root: &Path,
     path: &Path,
 ) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
     open_root_authorized_snapshot_retained_with_hook(data_root, path, || {})
-}
-
-#[cfg(test)]
-fn open_root_authorized_snapshot_with_hook(
-    data_root: &Path,
-    path: &Path,
-    after_authorize: impl FnOnce(),
-) -> OpenCodeSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
-    let authorized =
-        open_root_authorized_snapshot_retained_with_hook(data_root, path, after_authorize)?;
-    Ok((authorized.source_root, authorized.sqlite_snapshot))
 }
 
 fn open_root_authorized_snapshot_retained_with_hook(
@@ -725,13 +650,6 @@ fn hash_source_event(hasher: &mut Sha256, event: &SourceEventRow) {
     }]);
     hash_bytes(hasher, &event.projection_bytes);
     event.source_data.hash_into(hasher);
-}
-
-fn source_event_row_digest(event: &SourceEventRow) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"ctx-opencode-family-logical-row-v1\0");
-    hash_source_event(&mut hasher, event);
-    hasher.finalize().into()
 }
 
 fn hash_native_order(hasher: &mut Sha256, order: &super::model::OpenCodeNativeOrder) {

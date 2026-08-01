@@ -34,15 +34,14 @@ pub(super) fn parse_opened_auggie_source(
     let root = serde_json::from_slice::<Value>(&bytes).map_err(|error| {
         CaptureError::InvalidPayload(format!("invalid Auggie session JSON: {error}"))
     })?;
-    let data = AuggieSessionData::parse(&root, &before.canonical_path, context)?;
+    let data = AuggieSessionData::parse(&root, context)?;
     let session = ParsedAuggieSession {
         provider_session_id: data.provider_session_id.clone(),
         parent_provider_session_id: data.parent_provider_session_id.clone(),
         root_provider_session_id: data.root_provider_session_id.clone(),
         cwd: data.cwd.clone(),
-        raw_source_path: data.raw_source_path.clone(),
     };
-    let events = parse_events(&data, &root)?;
+    let events = parse_events(&data)?;
     Ok(ParsedAuggieSource {
         stamp: before,
         content_digest: Sha256::digest(&bytes).into(),
@@ -51,21 +50,11 @@ pub(super) fn parse_opened_auggie_source(
     })
 }
 
-fn parse_events(data: &AuggieSessionData<'_>, root: &Value) -> Result<Vec<ParsedAuggieEvent>> {
+fn parse_events(data: &AuggieSessionData<'_>) -> Result<Vec<ParsedAuggieEvent>> {
     let mut events = Vec::new();
     let mut provider_event_index = 0_u64;
-    let chat_history_key = if root.get("chatHistory").is_some() {
-        "chatHistory"
-    } else {
-        "chat_history"
-    };
     for (chat_index, entry) in data.chat_history.iter().enumerate() {
         let exchange = entry.get("exchange").unwrap_or(entry);
-        let json_pointer = if entry.get("exchange").is_some() {
-            format!("/{chat_history_key}/{chat_index}/exchange")
-        } else {
-            format!("/{chat_history_key}/{chat_index}")
-        };
         let base_time = auggie_entry_time(entry, Some(exchange)).unwrap_or_else(|| {
             data.started_at + Duration::milliseconds(saturating_i64(chat_index).saturating_mul(2))
         });
@@ -105,7 +94,6 @@ fn parse_events(data: &AuggieSessionData<'_>, root: &Value) -> Result<Vec<Parsed
                 chat_index,
                 message_kind,
                 native_event_id,
-                json_pointer: json_pointer.clone(),
             });
             provider_event_index =
                 provider_event_index

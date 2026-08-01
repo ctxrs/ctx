@@ -17,9 +17,13 @@ large dependency footprint.
 - `search(SearchOptions)` -> `SearchResponse`
 - `showEvent(String, ShowEventOptions)` -> `ShowEventResponse`
 - `showSession(String, ShowSessionOptions)` -> `ShowSessionResponse`
-- `locateEvent(String)` -> `LocateEventResponse`
-- `locateSession(String)` -> `LocateSessionResponse`
 - `version()` -> `VersionInfo`
+
+`SearchHit`, `Event`, and `SessionSummary` expose provider identity, including
+`providerSessionId` and `sourceFormat`; Codex uses `providerSessionId` as its
+resume UUID. `Event.content()` returns typed Core completeness and
+selected/redacted/omitted policy metadata. Event source paths, cursors,
+source-location objects, and preview bodies are not exposed.
 
 All data responses extend `AgentHistoryEnvelope`, with `contractVersion`,
 `schemaVersion`, `operation`, backend metadata, `asMap()`, and operation payload
@@ -37,7 +41,7 @@ sdks/jvm/scripts/test
 
 The test script also compiles and runs `examples/ToyAgentHistoryApp.java`, a fake
 transport toy app that exercises `status`, `search`, `showEvent`, and
-`locateEvent` without reading local private history.
+`showSession` without reading local private history.
 
 ## Tests
 

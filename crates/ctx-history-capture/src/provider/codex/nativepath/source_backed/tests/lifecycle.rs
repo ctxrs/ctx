@@ -1,5 +1,48 @@
 use super::*;
 
+fn events_with_body(
+    index: &VerifiedIndex,
+    session_id: StableEntityId,
+    body: &str,
+) -> Vec<(StableEntityId, u64, TypedKey)> {
+    index
+        .events_for_session(session_id.as_uuid())
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| {
+            let core = index
+                .core_record_by_id(event.event_id.as_uuid())
+                .unwrap()
+                .unwrap();
+            (core.content.normalized_body.as_deref() == Some(body)).then(|| {
+                (
+                    event.event_id,
+                    event.event_sequence,
+                    core.native_event_id.unwrap(),
+                )
+            })
+        })
+        .collect()
+}
+
+fn event_identity_at_sequence(
+    index: &VerifiedIndex,
+    session_id: StableEntityId,
+    event_sequence: u64,
+) -> (StableEntityId, TypedKey) {
+    let event = index
+        .events_for_session(session_id.as_uuid())
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_sequence == event_sequence)
+        .unwrap();
+    let core = index
+        .core_record_by_id(event.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    (event.event_id, core.native_event_id.unwrap())
+}
+
 #[test]
 fn cold_scanner_worker_policy_honors_default_reservations_and_requests() {
     assert_eq!(
@@ -132,7 +175,7 @@ fn source_backed_changed_leaf_parallel_matches_single_lane_semantics() {
                     },
                     &format!(
                         "parallel semantic sentinel source {index}; \
-                         ordered locator sentinel event {event_index}"
+                         ordered Core sentinel event {event_index}"
                     ),
                 )
             })
@@ -171,12 +214,19 @@ fn source_backed_changed_leaf_parallel_matches_single_lane_semantics() {
     assert_eq!(parallel.counters.emitted_pages, 32);
     assert_eq!(single.commit.indexed_documents, 1_040);
     assert_eq!(parallel.commit.indexed_documents, 1_040);
+    assert_eq!(single.counters.repository_full_git_certification_probes, 1);
+    assert_eq!(
+        parallel.counters.repository_full_git_certification_probes,
+        4
+    );
     let mut single_counters = single.counters;
     let mut parallel_counters = parallel.counters;
     single_counters.scanner_workers = 0;
     parallel_counters.scanner_workers = 0;
     single_counters.peak_active_scanners = 0;
     parallel_counters.peak_active_scanners = 0;
+    single_counters.repository_full_git_certification_probes = 0;
+    parallel_counters.repository_full_git_certification_probes = 0;
     assert_eq!(single_counters, parallel_counters);
 
     let single_verified = VerifiedIndex::open(&single_index).unwrap();
@@ -210,8 +260,8 @@ fn source_backed_changed_leaf_parallel_matches_single_lane_semantics() {
         search_event_ids(&parallel_verified, "parallel semantic sentinel")
     );
     assert_eq!(
-        search_event_ids(&single_verified, "ordered locator sentinel"),
-        search_event_ids(&parallel_verified, "ordered locator sentinel")
+        search_event_ids(&single_verified, "ordered Core sentinel"),
+        search_event_ids(&parallel_verified, "ordered Core sentinel")
     );
     drop(single_verified);
     drop(parallel_verified);
@@ -274,12 +324,26 @@ fn source_backed_changed_leaf_parallel_matches_single_lane_semantics() {
     assert_eq!(parallel_mixed.counters.replayed_sources, 8);
     assert_eq!(parallel_mixed.counters.catalog_source_body_reads, 8);
     assert_eq!(parallel_mixed.counters.catalog_session_meta_parses, 8);
+    assert_eq!(
+        single_mixed
+            .counters
+            .repository_full_git_certification_probes,
+        1
+    );
+    assert_eq!(
+        parallel_mixed
+            .counters
+            .repository_full_git_certification_probes,
+        8
+    );
     let mut normalized_single_mixed = single_mixed.counters;
     let mut normalized_parallel_mixed = parallel_mixed.counters;
     normalized_single_mixed.scanner_workers = 0;
     normalized_parallel_mixed.scanner_workers = 0;
     normalized_single_mixed.peak_active_scanners = 0;
     normalized_parallel_mixed.peak_active_scanners = 0;
+    normalized_single_mixed.repository_full_git_certification_probes = 0;
+    normalized_parallel_mixed.repository_full_git_certification_probes = 0;
     assert_eq!(normalized_single_mixed, normalized_parallel_mixed);
     assert_eq!(
         single_mixed.commit.generation_id,
@@ -573,26 +637,244 @@ fn source_backed_cold_append_and_replay_keep_cumulative_counts() {
         appended_counts
     );
 
-    let source = codex_source_key(native_session_id).unwrap();
-    let locator = SourceRecordLocator::new(
-        source,
-        NativeRecordCoordinate::Jsonl {
-            byte_offset: append_offset,
-            byte_length: appended_bytes.len() as u64,
-            physical_ordinal: 2,
-            native_session_key: Some(TypedKey::utf8(native_session_id).unwrap()),
-            native_event_key: Some(TypedKey::U64(2)),
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        Sha256::digest(&appended_bytes).into(),
-    )
-    .unwrap();
-    let hydrated = hydrate_codex_locator(&sessions, &locator).unwrap();
-    assert_eq!(hydrated.provider_bytes, appended_bytes);
+    let appended_event = appended_events
+        .iter()
+        .find(|event| event.event_sequence == 2)
+        .unwrap();
+    let core = replayed_index
+        .core_record_by_id(appended_event.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert!(matches!(core.native_event_id, Some(TypedKey::Composite(_))));
     assert_eq!(
-        hydrated.decoded_display_text.as_deref(),
+        core.content.normalized_body.as_deref(),
         Some("append sentinel")
+    );
+}
+
+#[test]
+fn fallback_identity_is_rewrite_stable_and_duplicate_occurrences_are_distinct() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000061";
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let stable_first = message("user", "rewrite stable first sentinel");
+    let duplicate = message("assistant", "rewrite stable duplicate sentinel");
+    let stable_last = message("user", "rewrite stable last sentinel");
+    let initial_tool = identity_exec_call(
+        "rewrite-stable-provider-call",
+        "printf providernativeoldmarker",
+    );
+
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            stable_first.clone(),
+            duplicate.clone(),
+            duplicate.clone(),
+            initial_tool,
+            stable_last.clone(),
+        ],
+    );
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let initial = VerifiedIndex::open(&index).unwrap();
+    let initial_first = events_with_body(&initial, session_id, "rewrite stable first sentinel");
+    let initial_duplicates =
+        events_with_body(&initial, session_id, "rewrite stable duplicate sentinel");
+    let initial_last = events_with_body(&initial, session_id, "rewrite stable last sentinel");
+    let initial_tool_identity = event_identity_at_sequence(&initial, session_id, 4);
+    assert_eq!(initial_first.len(), 1);
+    assert_eq!(initial_duplicates.len(), 2);
+    assert_eq!(initial_last.len(), 1);
+    assert_ne!(initial_duplicates[0].0, initial_duplicates[1].0);
+    assert_ne!(initial_duplicates[0].2, initial_duplicates[1].2);
+    assert_eq!(initial_first[0].1, 1);
+    assert_eq!(initial_last[0].1, 5);
+    drop(initial);
+
+    let changed_tool = identity_exec_call(
+        "rewrite-stable-provider-call",
+        "printf providernativenewmarker",
+    );
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            message("system", "inserted earlier record sentinel"),
+            stable_first.clone(),
+            duplicate.clone(),
+            duplicate.clone(),
+            changed_tool.clone(),
+            stable_last.clone(),
+        ],
+    );
+    let insertion = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(insertion.counters.replaced_sources, 1);
+    let after_insertion = VerifiedIndex::open(&index).unwrap();
+    let inserted_first = events_with_body(
+        &after_insertion,
+        session_id,
+        "rewrite stable first sentinel",
+    );
+    let inserted_duplicates = events_with_body(
+        &after_insertion,
+        session_id,
+        "rewrite stable duplicate sentinel",
+    );
+    let inserted_last =
+        events_with_body(&after_insertion, session_id, "rewrite stable last sentinel");
+    let changed_tool_identity = event_identity_at_sequence(&after_insertion, session_id, 5);
+    assert_eq!(inserted_first[0].0, initial_first[0].0);
+    assert_eq!(
+        inserted_duplicates
+            .iter()
+            .map(|event| (&event.0, &event.2))
+            .collect::<Vec<_>>(),
+        initial_duplicates
+            .iter()
+            .map(|event| (&event.0, &event.2))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        inserted_duplicates
+            .iter()
+            .map(|event| event.1)
+            .collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+    assert_eq!(inserted_last[0].0, initial_last[0].0);
+    assert_eq!(changed_tool_identity, initial_tool_identity);
+    assert_eq!(inserted_first[0].1, 2);
+    assert_eq!(inserted_last[0].1, 6);
+    drop(after_insertion);
+
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            stable_first,
+            duplicate.clone(),
+            duplicate,
+            changed_tool,
+            stable_last,
+        ],
+    );
+    let deletion = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(deletion.counters.replaced_sources, 1);
+    let after_deletion = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(
+        events_with_body(&after_deletion, session_id, "rewrite stable first sentinel")[0].0,
+        initial_first[0].0
+    );
+    assert_eq!(
+        events_with_body(
+            &after_deletion,
+            session_id,
+            "rewrite stable duplicate sentinel"
+        ),
+        initial_duplicates
+    );
+    assert_eq!(
+        events_with_body(&after_deletion, session_id, "rewrite stable last sentinel")[0].0,
+        initial_last[0].0
+    );
+    assert_eq!(
+        event_identity_at_sequence(&after_deletion, session_id, 4),
+        initial_tool_identity
+    );
+}
+
+#[test]
+fn append_after_prior_duplicates_resumes_occurrence_and_matches_rewrite_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000062";
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let duplicate = message("assistant", "append prior duplicate identity sentinel");
+
+    write_session(
+        &sessions,
+        native_session_id,
+        &[duplicate.clone(), duplicate.clone()],
+    );
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let initial = VerifiedIndex::open(&index).unwrap();
+    let initial_duplicates = events_with_body(
+        &initial,
+        session_id,
+        "append prior duplicate identity sentinel",
+    );
+    assert_eq!(initial_duplicates.len(), 2);
+    assert_ne!(initial_duplicates[0].0, initial_duplicates[1].0);
+    assert_ne!(initial_duplicates[0].2, initial_duplicates[1].2);
+    drop(initial);
+
+    OpenOptions::new()
+        .append(true)
+        .open(session_path(&sessions, native_session_id))
+        .unwrap()
+        .write_all(format!("{duplicate}\n").as_bytes())
+        .unwrap();
+    let append = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(append.counters.appended_sources, 1);
+    assert_eq!(append.counters.complete_records_scanned, 1);
+    assert_eq!(append.counters.staged_documents, 1);
+    let after_append = VerifiedIndex::open(&index).unwrap();
+    let appended_duplicates = events_with_body(
+        &after_append,
+        session_id,
+        "append prior duplicate identity sentinel",
+    );
+    assert_eq!(appended_duplicates.len(), 3);
+    assert_eq!(&appended_duplicates[..2], initial_duplicates.as_slice());
+    assert_ne!(appended_duplicates[2].0, appended_duplicates[0].0);
+    assert_ne!(appended_duplicates[2].0, appended_duplicates[1].0);
+    assert_ne!(appended_duplicates[2].2, appended_duplicates[0].2);
+    assert_ne!(appended_duplicates[2].2, appended_duplicates[1].2);
+    drop(after_append);
+
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            message("user", "inserted before appended duplicates sentinel"),
+            duplicate.clone(),
+            duplicate.clone(),
+            duplicate,
+        ],
+    );
+    let rewrite = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(rewrite.counters.replaced_sources, 1);
+    let after_rewrite = VerifiedIndex::open(&index).unwrap();
+    let rewritten_duplicates = events_with_body(
+        &after_rewrite,
+        session_id,
+        "append prior duplicate identity sentinel",
+    );
+    assert_eq!(rewritten_duplicates.len(), 3);
+    assert_eq!(
+        rewritten_duplicates
+            .iter()
+            .map(|event| (&event.0, &event.2))
+            .collect::<Vec<_>>(),
+        appended_duplicates
+            .iter()
+            .map(|event| (&event.0, &event.2))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        rewritten_duplicates
+            .iter()
+            .map(|event| event.1)
+            .collect::<Vec<_>>(),
+        vec![2, 3, 4]
     );
 }
 
@@ -652,7 +934,7 @@ fn active_source_family_contract_codex_rewrite_with_failed_append_proof_replaces
             .as_uuid(),
         )
         .unwrap();
-    assert_eq!(after_events[0].event_id, before_events[0].event_id);
+    assert_ne!(after_events[0].event_id, before_events[0].event_id);
 }
 
 #[test]
@@ -983,7 +1265,7 @@ fn active_source_family_contract_codex_terminal_prefix_proof_rejects_post_hash_r
     let discovery = discover_codex_catalog_sources(&catalog);
     assert!(discovery.rejections.is_empty());
     let source = discovery.sources.into_iter().next().unwrap();
-    let opened = open_codex_source_capability(&source).unwrap();
+    let opened = crate::provider::codex::nativepath::open_codex_source_capability(&source).unwrap();
     let certified_observation =
         opened_codex_file_observation(&source.source_path, opened.file()).unwrap();
     let certified_digest = Sha256::digest(&original).into();

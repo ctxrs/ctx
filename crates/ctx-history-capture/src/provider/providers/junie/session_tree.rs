@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use crate::common::io::{
     open_provider_source_path, read_provider_jsonl_line_or_skip_oversized,
-    OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderJsonlLineRead, ProviderSourceRoot,
+    OpenedProviderSourcePath, ProviderJsonlLineRead, ProviderSourceRoot,
 };
 use crate::provider::normalization::provider_local_preview;
 use crate::provider::provider_safe_path_segment;
@@ -36,40 +36,6 @@ pub(super) struct JunieSessionPath {
     pub(super) events_path: PathBuf,
     pub(super) index_meta: JunieIndexMeta,
     pub(super) require_supported_events: bool,
-    authority: ProviderSourceRoot,
-    events_relative: PathBuf,
-    index_authority: Option<ProviderSourceRoot>,
-    index_relative: Option<PathBuf>,
-}
-
-impl JunieSessionPath {
-    pub(super) fn open_events(&self) -> Result<OpenedProviderSourceFile> {
-        self.authority.open_file(&self.events_relative)
-    }
-
-    pub(super) fn open_index(&self) -> Result<Option<OpenedProviderSourceFile>> {
-        let (Some(authority), Some(relative)) = (
-            self.index_authority.as_ref(),
-            self.index_relative.as_deref(),
-        ) else {
-            return Ok(None);
-        };
-        match authority.open_file(relative) {
-            Ok(file) => Ok(Some(file)),
-            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(None)
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    pub(super) fn revalidate_root(&self) -> Result<()> {
-        self.authority.revalidate()?;
-        if let Some(index_authority) = &self.index_authority {
-            index_authority.revalidate()?;
-        }
-        Ok(())
-    }
 }
 
 struct JunieIndex {
@@ -128,10 +94,6 @@ pub(super) fn visit_junie_session_event_paths(
                 events_path,
                 index_meta,
                 require_supported_events: true,
-                authority: authority.clone(),
-                events_relative,
-                index_authority: Some(index_authority.clone()),
-                index_relative: Some(index_relative),
             },
             0,
         )?;
@@ -172,10 +134,6 @@ pub(super) fn visit_junie_session_event_paths(
                     events_path,
                     index_meta,
                     require_supported_events: true,
-                    authority: authority.clone(),
-                    events_relative,
-                    index_authority: Some(index_authority.clone()),
-                    index_relative: Some(index_relative),
                 },
                 0,
             )?;
@@ -224,10 +182,6 @@ pub(super) fn visit_junie_session_event_paths(
                 events_path: authority.named_path().join(&events_relative),
                 index_meta: meta,
                 require_supported_events: true,
-                authority: authority.clone(),
-                events_relative,
-                index_authority: Some(authority.clone()),
-                index_relative: Some(index_relative.clone()),
             },
             ordinal,
         )?;
@@ -282,10 +236,6 @@ pub(super) fn visit_junie_session_event_paths(
                     ..JunieIndexMeta::default()
                 },
                 require_supported_events: false,
-                authority: authority.clone(),
-                events_relative,
-                index_authority: Some(authority.clone()),
-                index_relative: Some(index_relative.clone()),
             },
             ordinal,
         )?;

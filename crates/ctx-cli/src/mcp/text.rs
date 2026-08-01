@@ -54,7 +54,6 @@ fn render_status_text(value: &Value) -> String {
         );
     }
     push_component_summary(&mut out, "catalog", value.get("catalog"));
-    push_component_summary(&mut out, "resolver", value.get("resolver"));
     push_component_summary(&mut out, "source_refresh", value.get("refresh"));
     if let Some(refresh) = value.get("refresh") {
         push_object_summary(
@@ -87,12 +86,12 @@ fn render_status_text(value: &Value) -> String {
         );
         push_component_summary(
             &mut out,
-            "pro_source_manifest_receipt",
+            "pro_core_materialization_receipt",
             pro_projection.get("receipt"),
         );
         push_key_value(
             &mut out,
-            "pro_source_manifest_receipt_generation",
+            "pro_core_materialization_receipt_generation",
             pro_projection
                 .get("receipt")
                 .and_then(|receipt| receipt.get("core_generation_id")),
@@ -306,7 +305,7 @@ fn push_status_daemon_summary(out: &mut String, daemon: Option<&Value>) {
             &[("path", "path"), ("active", "active"), ("pid", "pid")],
         );
     }
-    if let Some(endpoint) = daemon.get("source_refresh_endpoint") {
+    if let Some(endpoint) = daemon.get("core_refresh_endpoint") {
         push_object_summary(
             out,
             "daemon_endpoint",
@@ -322,7 +321,7 @@ fn push_status_daemon_summary(out: &mut String, daemon: Option<&Value>) {
     let Some(jobs) = daemon.get("jobs") else {
         return;
     };
-    let job_parts = ["source_backed_refresh"]
+    let job_parts = ["core_refresh"]
         .into_iter()
         .filter_map(|key| {
             jobs.get(key)

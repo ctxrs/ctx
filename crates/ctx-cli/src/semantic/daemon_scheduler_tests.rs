@@ -1,12 +1,11 @@
 use std::{path::Path, sync::mpsc, thread, time::Duration};
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, EventIdentityInput, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceObservation, SourceRecordLocator,
-    TypedKey,
+    derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
+    NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceFrontier, SourceObservation, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, LexicalDocument, WriterOptions};
+use ctx_history_index::{GenerationWriter, WriterOptions, MAX_SEMANTIC_EVENT_PAGE_ITEMS};
 use serde_json::{json, Value};
 
 use crate::{
@@ -15,10 +14,9 @@ use crate::{
     semantic::{
         daemon::{install_daemon_test_job_hooks, DaemonTestJobHooks},
         source_backed_refresh_coordinator::{
-            coordinate_source_backed_refresh, source_backed_index_root,
-            SourceBackedRefreshCoordinator, SourceBackedRefreshCurrent,
-            SourceBackedRefreshExecution, SourceBackedRefreshMode, SourceBackedRefreshPublication,
-            SourceBackedRefreshTimings,
+            coordinate_source_backed_refresh, source_backed_index_root, CoreRefreshEngine,
+            SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshMode,
+            SourceBackedRefreshPublication, SourceBackedRefreshTimings,
         },
         source_epoch_status_report,
     },
@@ -26,14 +24,13 @@ use crate::{
 };
 
 use super::{
-    daemon_job_should_backoff, daemon_mode_runs_source_backed_pro_catch_up,
-    daemon_mode_runs_source_backed_relational_catch_up,
-    daemon_mode_runs_source_backed_semantic_projection, daemon_semantic_job_path,
-    daemon_source_backed_refresh_job_path, persist_pro_status, persist_relational_status,
+    daemon_core_refresh_job_path, daemon_job_should_backoff, daemon_mode_runs_core_pro_catch_up,
+    daemon_mode_runs_core_relational_catch_up, daemon_mode_runs_core_semantic_projection,
+    daemon_semantic_job_path, persist_pro_status, persist_relational_status,
     prepare_pro_retry_for_generation, read_daemon_job_status, read_pro_status,
     record_daemon_job_retry, restore_daemon_consumer_retries,
-    run_daemon_scheduler_cycle_with_activity, run_pro_catch_up_with_retry, write_daemon_job_status,
-    DaemonRetryBackoff, DaemonRuntime,
+    run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
+    run_pro_catch_up_with_retry, write_daemon_job_status, DaemonRetryBackoff, DaemonRuntime,
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";
@@ -72,17 +69,6 @@ fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefr
         generation_id: receipt.generation_id.clone(),
         published_explicit_source_catalog:
             crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
-        source_manifest: Some(
-            ctx_pro_host_protocol::SourceManifest::new(
-                receipt.generation_id,
-                Vec::new(),
-                Vec::new(),
-            )
-            .unwrap(),
-        ),
-        resolver: Some(std::sync::Arc::new(
-            ctx_history_capture::SourceBackedProviderRegistry::new().resolver_registry(),
-        )),
         scanned_routes: 0,
         unsupported_routes: 0,
         certified_source_count: 0,
@@ -111,7 +97,7 @@ fn readiness_source() -> ctx_history_core::SourceKey {
     .unwrap()
 }
 
-fn readiness_document(source: &ctx_history_core::SourceKey) -> LexicalDocument {
+fn readiness_record(source: &ctx_history_core::SourceKey) -> CoreRecord {
     let native_session = TypedKey::utf8("readiness-session").unwrap();
     let session_key = NativeSessionKey::native_id("session", native_session.clone()).unwrap();
     let session_id = derive_session_id(SessionIdentityInput {
@@ -130,40 +116,121 @@ fn readiness_document(source: &ctx_history_core::SourceKey) -> LexicalDocument {
         subrecord_selector: None,
     })
     .unwrap();
-    LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator: SourceRecordLocator::new(
-            source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset: 0,
-                byte_length: 128,
-                physical_ordinal: 0,
-                native_session_key: Some(native_session),
-                native_event_key: Some(TypedKey::U64(0)),
-            },
-            LocatorRevisionPolicy::StableRecordEvidence,
-            None,
-            [9; 32],
-        )
-        .unwrap(),
-        provider_session_id: Some("readiness-session".to_owned()),
-        branch: Some("main".to_owned()),
-        source_path: Some("/provider/codex/readiness-boundary.jsonl".to_owned()),
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: 0,
-        occurred_at_unix_ms: Some(1_700_000_000_000),
-        event_type: "message".to_owned(),
-        role: Some("assistant".to_owned()),
-        body: format!("exact lexical hit for {READINESS_QUERY}"),
-        workspace: Some("ctx".to_owned()),
-        cwd: Some("/work/ctx".to_owned()),
-        touched_files: vec!["src/lib.rs".to_owned()],
+        session_id,
+        source.clone(),
+        0,
+        "message",
+        "primary",
+        true,
+        "daemon-scheduler-test-v1",
+        format!("exact lexical hit for {READINESS_QUERY}"),
+    )
+    .unwrap();
+    record.provider_session_id = Some("readiness-session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(0));
+    record.branch = Some("main".to_owned());
+    record.occurred_at_unix_ms = Some(1_700_000_000_000);
+    record.role = Some("assistant".to_owned());
+    record.workspace = Some("ctx".to_owned());
+    record.cwd = Some("/work/ctx".to_owned());
+    record.validate_contract().unwrap();
+    record
+}
+
+fn semantic_catch_up_record(source: &ctx_history_core::SourceKey, sequence: u64) -> CoreRecord {
+    let native_session = TypedKey::utf8("semantic-catch-up-session").unwrap();
+    let session_key = NativeSessionKey::native_id("session", native_session).unwrap();
+    let session_id = derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: "thread",
+        native_session_key: &session_key,
+    })
+    .unwrap();
+    let native_item = NativeItemKey::native_id(
+        "message",
+        TypedKey::utf8(format!("semantic-catch-up-event-{sequence}")).unwrap(),
+    )
+    .unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: "message",
+        native_item_key: &native_item,
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let mut record = CoreRecord::new_selected(
+        event_id,
+        session_id,
+        session_id,
+        source.clone(),
+        sequence,
+        "message",
+        "primary",
+        true,
+        "daemon-scheduler-semantic-catch-up-test-v1",
+        format!("eligible semantic catch-up event {sequence}"),
+    )
+    .unwrap();
+    record.provider_session_id = Some("semantic-catch-up-session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(sequence));
+    record.occurred_at_unix_ms = Some(1_700_000_000_000 + sequence as i64);
+    record.role = Some("user".to_owned());
+    record.validate_contract().unwrap();
+    record
+}
+
+fn publish_semantic_catch_up_generation(data_root: &Path, event_count: u64) -> String {
+    let source = readiness_source();
+    let mut writer = GenerationWriter::open(
+        source_backed_index_root(data_root),
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 32 * 1024 * 1024,
+        },
+    )
+    .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for sequence in 0..event_count {
+        writer
+            .add_core_record(semantic_catch_up_record(&source, sequence))
+            .unwrap();
     }
+    let certified_bytes = event_count * 128;
+    let observation = SourceObservation::new(source.clone(), "regular-file-v1", vec![2]).unwrap();
+    writer
+        .certify_source(
+            CertifiedSource::certify_with_frontier(
+                observation.clone(),
+                observation,
+                "codex-parser-v1",
+                [8; 32],
+                ScannedSourceCounts {
+                    complete_records: event_count,
+                    retained_records: event_count,
+                    indexed_documents: event_count,
+                    certified_bytes,
+                    ..ScannedSourceCounts::default()
+                },
+                Some(
+                    SourceFrontier::new(
+                        "jsonl-byte-offset",
+                        TypedKey::U64(certified_bytes),
+                        certified_bytes,
+                        [8; 32],
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let receipt = writer.commit(|_| true).unwrap();
+    assert_eq!(receipt.semantic_eligible_documents, event_count);
+    receipt.generation_id
 }
 
 fn readiness_certificate(source: &ctx_history_core::SourceKey) -> CertifiedSource {
@@ -196,7 +263,7 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
     )
     .unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(readiness_document(&source)).unwrap();
+    writer.add_core_record(readiness_record(&source)).unwrap();
     writer
         .certify_source(readiness_certificate(&source))
         .unwrap();
@@ -205,8 +272,6 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
         generation_id: receipt.generation_id,
         published_explicit_source_catalog:
             crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
-        source_manifest: None,
-        resolver: None,
         scanned_routes: 1,
         unsupported_routes: 0,
         certified_source_count: 1,
@@ -288,7 +353,6 @@ fn core_publication_is_ready_and_searchable_while_relational_receipt_is_pending(
         let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let _hooks = install_daemon_test_job_hooks(DaemonTestJobHooks {
             calls: calls.clone(),
-            history_refresh: None,
             relational_projection: Some(json!({
                 "status": "completed",
                 "pending": false,
@@ -305,7 +369,7 @@ fn core_publication_is_ready_and_searchable_while_relational_receipt_is_pending(
                     .expect("release blocked relational test job");
             })),
         });
-        let coordinator = SourceBackedRefreshCoordinator::with_executor(std::sync::Arc::new(
+        let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
             move |execution: SourceBackedRefreshExecution<'_>| {
                 let publication = publish_readiness_generation(execution.index_root);
                 execution.report_progress("committed", 1, 1, None)?;
@@ -350,7 +414,7 @@ fn core_publication_is_ready_and_searchable_while_relational_receipt_is_pending(
         .recv_timeout(Duration::from_secs(10))
         .expect("relational catch-up did not reach the deterministic blocker");
 
-    let core_job = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+    let core_job = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root))
         .expect("Core terminal receipt");
     let relational_job =
         super::read_relational_status(&data_root).expect("relational pending receipt");
@@ -429,7 +493,6 @@ fn install_jobs(
 ) -> super::super::daemon::DaemonTestJobHookGuard {
     install_daemon_test_job_hooks(DaemonTestJobHooks {
         calls,
-        history_refresh: None,
         relational_projection,
         semantic_index,
         relational_blocker: None,
@@ -439,7 +502,7 @@ fn install_jobs(
 #[test]
 fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
     let temp = tempfile::tempdir().unwrap();
-    let coordinator = SourceBackedRefreshCoordinator::with_executor(std::sync::Arc::new(
+    let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
             Ok(publish_empty_authoritative_generation(execution.index_root))
         },
@@ -455,8 +518,7 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
         Some(&coordinator),
     )
     .unwrap();
-    let core_job =
-        read_daemon_job_status(&daemon_source_backed_refresh_job_path(temp.path())).unwrap();
+    let core_job = read_daemon_job_status(&daemon_core_refresh_job_path(temp.path())).unwrap();
     let generation = core_job["published_generation"]
         .as_str()
         .unwrap()
@@ -468,10 +530,6 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
     );
     assert!(!coordinator.has_pending_request());
     assert!(super::relational_generation_needs_catch_up(
-        temp.path(),
-        &generation
-    ));
-    assert!(super::pro_generation_needs_catch_up(
         temp.path(),
         &generation
     ));
@@ -538,7 +596,7 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
         Some(&coordinator),
     )
     .unwrap();
-    assert!(pro.continue_immediately);
+    assert!(!pro.continue_immediately);
     assert_eq!(&*calls.borrow(), &["relational_projection"]);
     let pro_status = read_pro_status(temp.path()).expect("Pro attempt receipt");
     assert_eq!(pro_status["status"], "error", "{pro_status:#}");
@@ -584,9 +642,118 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
 }
 
 #[test]
+fn idle_semantic_catch_up_continues_past_one_page_and_drains_to_terminal() {
+    const ELIGIBLE_EVENTS: u64 = MAX_SEMANTIC_EVENT_PAGE_ITEMS as u64 + 1;
+
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_semantic_catch_up_generation(temp.path(), ELIGIBLE_EVENTS);
+    let index = coordinate_source_backed_refresh(temp.path(), SourceBackedRefreshMode::Off)
+        .unwrap()
+        .pin
+        .into_index();
+    let first_page = index
+        .core_semantic_event_page(None, MAX_SEMANTIC_EVENT_PAGE_ITEMS)
+        .unwrap();
+    assert_eq!(first_page.eligible_total, ELIGIBLE_EVENTS);
+    assert_eq!(first_page.items.len(), MAX_SEMANTIC_EVENT_PAGE_ITEMS);
+    assert!(!first_page.terminal);
+    let terminal_page = index
+        .core_semantic_event_page(
+            first_page.next_cursor.as_ref(),
+            MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+        )
+        .unwrap();
+    assert_eq!(terminal_page.items.len(), 1);
+    assert!(terminal_page.terminal);
+
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut runtime = DaemonRuntime::default();
+    runtime.sidecar_drain.generation = Some(generation.clone());
+    runtime.sidecar_drain.relational_attempted_generation = Some(generation.clone());
+
+    {
+        let _jobs = install_jobs(
+            calls.clone(),
+            None,
+            Some(json!({
+                "status": "budget_exhausted",
+                "source_records_scanned": MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+                "source_generation_ready": false,
+                "source_work_remaining": true,
+            })),
+        );
+        let first = run_daemon_scheduler_cycle_with_activity(
+            &daemon_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(first.did_work);
+        assert!(first.continue_immediately);
+    }
+    let first_status = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
+    assert_eq!(first_status["core_generation_id"], generation);
+    assert_eq!(
+        first_status["source_records_scanned"],
+        MAX_SEMANTIC_EVENT_PAGE_ITEMS
+    );
+    assert_eq!(first_status["source_work_remaining"], true);
+
+    {
+        let _jobs = install_jobs(
+            calls.clone(),
+            None,
+            Some(json!({
+                "status": "ready",
+                "source_records_scanned": 1,
+                "source_generation_ready": true,
+                "source_work_remaining": false,
+            })),
+        );
+        let terminal = run_daemon_scheduler_cycle_with_activity(
+            &daemon_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(terminal.did_work);
+        assert!(terminal.continue_immediately);
+    }
+    let terminal_status = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
+    assert_eq!(terminal_status["status"], "ready");
+    assert_eq!(terminal_status["core_generation_id"], generation);
+    assert_eq!(terminal_status["source_records_scanned"], 1);
+    assert_eq!(terminal_status["source_work_remaining"], false);
+    assert_eq!(&*calls.borrow(), &["semantic_index", "semantic_index"]);
+
+    let drained = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(!drained.did_work);
+    assert!(!drained.continue_immediately);
+    assert!(runtime.sidecar_drain.generation.is_none());
+    assert_eq!(&*calls.borrow(), &["semantic_index", "semantic_index"]);
+}
+
+#[test]
 fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() {
     let temp = tempfile::tempdir().unwrap();
-    let coordinator = SourceBackedRefreshCoordinator::with_executor(std::sync::Arc::new(
+    let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
             Ok(publish_empty_authoritative_generation(execution.index_root))
         },
@@ -603,8 +770,8 @@ fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() 
         Some(&coordinator),
     )
     .unwrap();
-    let generation = read_daemon_job_status(&daemon_source_backed_refresh_job_path(temp.path()))
-        .unwrap()["published_generation"]
+    let generation = read_daemon_job_status(&daemon_core_refresh_job_path(temp.path())).unwrap()
+        ["published_generation"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -644,7 +811,7 @@ fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() 
         Some(&coordinator),
     )
     .unwrap();
-    assert!(pro.continue_immediately);
+    assert!(!pro.continue_immediately);
     let first_pro_status = read_pro_status(temp.path()).unwrap();
     assert_eq!(first_pro_status["status"], "error");
     assert_eq!(first_pro_status["retryable"], false);
@@ -677,31 +844,98 @@ fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() 
 }
 
 #[test]
-fn source_refresh_only_mode_excludes_source_backed_pro_catch_up() {
-    assert!(daemon_mode_runs_source_backed_pro_catch_up(
-        DaemonMode::Full
+fn local_completed_pro_status_cannot_suppress_scheduler_validation() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
+        |execution: SourceBackedRefreshExecution<'_>| {
+            Ok(publish_empty_authoritative_generation(execution.index_root))
+        },
     ));
-    assert!(!daemon_mode_runs_source_backed_pro_catch_up(
+    let mut runtime = DaemonRuntime::default();
+    let core = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(core.continue_immediately);
+    let generation = coordinator
+        .pinned_core_publication()
+        .expect("pinned Core publication")
+        .generation_id()
+        .to_owned();
+    runtime.sidecar_drain.generation = None;
+    runtime.sidecar_drain.pro_attempted_generation = None;
+    persist_pro_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "completed",
+            "pending": false,
+            "retryable": false,
+            "core_generation_id": generation,
+            "receipt_core_generation_id": generation,
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "last_attempt_duration_us": 1,
+            "error_code": null,
+            "last_error": null,
+        }),
+    )
+    .unwrap();
+
+    let scheduled =
+        run_pending_core_pro_catch_up(temp.path(), &mut runtime, Some(&coordinator)).unwrap();
+
+    let scheduled = scheduled.expect("local completion must still validate the helper");
+    assert!(!scheduled.did_work);
+    assert!(
+        !scheduled.continue_immediately,
+        "validated replay must wait for the normal daemon interval"
+    );
+    assert_eq!(
+        runtime.sidecar_drain.pro_attempted_generation.as_deref(),
+        Some(generation.as_str())
+    );
+}
+
+#[test]
+fn pro_catch_up_requests_immediate_drain_only_after_materializer_work() {
+    let replay = super::core_pro_catch_up_iteration(false);
+    assert!(!replay.did_work);
+    assert!(!replay.continue_immediately);
+
+    let materialized = super::core_pro_catch_up_iteration(true);
+    assert!(materialized.did_work);
+    assert!(materialized.continue_immediately);
+}
+
+#[test]
+fn source_refresh_only_mode_excludes_source_backed_pro_catch_up() {
+    assert!(daemon_mode_runs_core_pro_catch_up(DaemonMode::Full));
+    assert!(!daemon_mode_runs_core_pro_catch_up(
         DaemonMode::SourceRefreshOnly
     ));
 }
 
 #[test]
 fn source_refresh_only_mode_excludes_source_backed_relational_catch_up() {
-    assert!(daemon_mode_runs_source_backed_relational_catch_up(
-        DaemonMode::Full
-    ));
-    assert!(!daemon_mode_runs_source_backed_relational_catch_up(
+    assert!(daemon_mode_runs_core_relational_catch_up(DaemonMode::Full));
+    assert!(!daemon_mode_runs_core_relational_catch_up(
         DaemonMode::SourceRefreshOnly
     ));
 }
 
 #[test]
 fn source_refresh_only_mode_excludes_source_backed_semantic_projection() {
-    assert!(daemon_mode_runs_source_backed_semantic_projection(
-        DaemonMode::Full
-    ));
-    assert!(!daemon_mode_runs_source_backed_semantic_projection(
+    assert!(daemon_mode_runs_core_semantic_projection(DaemonMode::Full));
+    assert!(!daemon_mode_runs_core_semantic_projection(
         DaemonMode::SourceRefreshOnly
     ));
 }
@@ -893,7 +1127,7 @@ fn relational_retry_runs_across_core_noop_backoff_and_recovers_independently() {
     let temp = tempfile::tempdir().unwrap();
     let generation = publish_empty_core_generation(temp.path());
     write_daemon_job_status(
-        &daemon_source_backed_refresh_job_path(temp.path()),
+        &daemon_core_refresh_job_path(temp.path()),
         &json!({
             "status": "completed",
             "reason": "unchanged",
@@ -957,8 +1191,7 @@ fn relational_retry_runs_across_core_noop_backoff_and_recovers_independently() {
     assert_eq!(restarted.relational_retry.consecutive_failures, 0);
     assert_eq!(restarted.history_retry.consecutive_failures, 1);
     assert_eq!(
-        read_daemon_job_status(&daemon_source_backed_refresh_job_path(temp.path())).unwrap()
-            ["status"],
+        read_daemon_job_status(&daemon_core_refresh_job_path(temp.path())).unwrap()["status"],
         "completed"
     );
 }
@@ -974,7 +1207,7 @@ fn semantic_retry_runs_across_core_backoff_while_relational_waits_and_recovers_a
     );
     persist_relational_status(temp.path(), &relational).unwrap();
     write_daemon_job_status(
-        &daemon_source_backed_refresh_job_path(temp.path()),
+        &daemon_core_refresh_job_path(temp.path()),
         &json!({
             "status": "completed",
             "reason": "unchanged",

@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::errors::{
-    encode_length_prefixed, validate_bytes, validate_nonempty_bytes, validate_text,
-    ProjectionContractError, ProjectionContractResult, MAX_KEY_NAMESPACE_BYTES, MAX_LOCATOR_BYTES,
-    MAX_LOCATOR_KIND_BYTES, MAX_TYPED_KEY_BYTES, MAX_TYPED_KEY_COMPONENTS,
+    encode_length_prefixed, validate_bytes, validate_text, ProjectionContractError,
+    ProjectionContractResult, MAX_KEY_NAMESPACE_BYTES, MAX_TYPED_KEY_BYTES,
+    MAX_TYPED_KEY_COMPONENTS,
 };
 
 /// Exact provider-native key material.
@@ -50,32 +50,11 @@ impl TypedKey {
     pub fn from_f64(value: f64) -> Self {
         Self::F64Bits(value.to_bits())
     }
-}
 
-/// Hydration/citation evidence. A locator is intentionally not identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NativeLocator {
-    kind: String,
-    value: Vec<u8>,
-}
-
-impl NativeLocator {
-    pub fn new(kind: impl Into<String>, value: Vec<u8>) -> ProjectionContractResult<Self> {
-        let locator = Self {
-            kind: kind.into(),
-            value,
-        };
-        validate_text("native_locator_kind", &locator.kind, MAX_LOCATOR_KIND_BYTES)?;
-        validate_nonempty_bytes("native_locator", &locator.value, MAX_LOCATOR_BYTES)?;
-        Ok(locator)
-    }
-
-    pub fn kind(&self) -> &str {
-        &self.kind
-    }
-
-    pub fn value(&self) -> &[u8] {
-        &self.value
+    pub fn validate_contract(&self) -> ProjectionContractResult<()> {
+        let mut encoded = Vec::new();
+        encode_typed_key(&mut encoded, self)?;
+        validate_bytes("typed_key", &encoded, MAX_TYPED_KEY_BYTES)
     }
 }
 

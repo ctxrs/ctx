@@ -78,6 +78,46 @@ pub(crate) fn reclaim_abandoned_atomic_writes(directory_path: &Path) -> io::Resu
     Ok(())
 }
 
+/// Atomically replaces `target` with an already-synchronized staged file.
+///
+/// Both paths must have the same parent so the operation cannot degrade into a
+/// cross-filesystem copy. The published file and its directory entry are
+/// synchronized before this function returns. Windows uses `MoveFileExW` with
+/// `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`; directory flushing is
+/// intentionally skipped there because it is not a reliable Windows durability
+/// primitive.
+pub fn durable_atomic_replace_file(source: &Path, target: &Path) -> io::Result<()> {
+    let source_parent = source.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("source path {} has no parent directory", source.display()),
+        )
+    })?;
+    let target_parent = target.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("target path {} has no parent directory", target.display()),
+        )
+    })?;
+    if source_parent != target_parent {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "atomic replacement requires one directory: {} and {} differ",
+                source_parent.display(),
+                target_parent.display()
+            ),
+        ));
+    }
+
+    // Acquire the directory synchronization handle before publication so a
+    // failure to open it cannot occur after the target becomes visible.
+    let parent_sync = ParentDirectorySync::open(target_parent)?;
+    replace_file(source, target)?;
+    File::open(target)?.sync_all()?;
+    parent_sync.sync()
+}
+
 fn is_atomic_temporary_file(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
@@ -337,6 +377,27 @@ mod tests {
 
         assert_eq!(directory.atomic_read(path).unwrap(), b"replacement");
         assert_no_temporary_files(temporary_directory.path());
+    }
+
+    #[test]
+    fn durable_staged_file_replacement_supports_first_publish_and_replace() {
+        let temporary_directory = tempdir().unwrap();
+        let target = temporary_directory.path().join("projection.sqlite");
+        let first = temporary_directory.path().join("projection.first");
+        fs::write(&first, b"first").unwrap();
+        File::open(&first).unwrap().sync_all().unwrap();
+
+        durable_atomic_replace_file(&first, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"first");
+        assert!(!first.exists());
+
+        let replacement = temporary_directory.path().join("projection.replacement");
+        fs::write(&replacement, b"replacement").unwrap();
+        File::open(&replacement).unwrap().sync_all().unwrap();
+
+        durable_atomic_replace_file(&replacement, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"replacement");
+        assert!(!replacement.exists());
     }
 
     #[test]

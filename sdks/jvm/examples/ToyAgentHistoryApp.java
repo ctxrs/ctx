@@ -1,6 +1,5 @@
 import java.util.LinkedHashMap;
 import java.util.Map;
-import rs.ctx.agenthistory.LocateEventResponse;
 import rs.ctx.agenthistory.AgentHistoryClient;
 import rs.ctx.agenthistory.AgentHistoryOperation;
 import rs.ctx.agenthistory.AgentHistoryOptions;
@@ -20,7 +19,6 @@ public final class ToyAgentHistoryApp {
                 .refresh("off")
                 .limit(Integer.valueOf(5)));
         ShowEventResponse shown = client.showEvent("evt-toy-1", AgentHistoryOptions.showEvent().window(Integer.valueOf(1)));
-        LocateEventResponse located = client.locateEvent("evt-toy-1");
 
         System.out.println("status.initialized=" + status.getStatus().getInitialized());
         System.out.println("search.results=" + search.getSearch().getResults().size());
@@ -28,7 +26,7 @@ public final class ToyAgentHistoryApp {
                 + "/" + search.getSearch().getResultWindow().getLimit()
                 + " more=" + search.getSearch().getResultWindow().getMoreAvailable());
         System.out.println("show.event=" + shown.getEvent().getEvent().getCtxEventId());
-        System.out.println("locate.path=" + located.getLocation().getSource().getPath());
+        System.out.println("show.providerSession=" + shown.getEvent().getEvent().getProviderSessionId());
     }
 
     private static final class FakeAgentHistoryTransport implements AgentHistoryTransport {
@@ -60,18 +58,10 @@ public final class ToyAgentHistoryApp {
                     + "}");
             responses.put("showEvent", "{"
                     + "\"event\":{\"ctx_event_id\":\"evt-toy-1\",\"ctx_session_id\":\"ses-toy-1\","
+                    + "\"provider\":\"codex\",\"provider_session_id\":\"provider-toy-1\","
                     + "\"sequence\":1,\"event_type\":\"message\",\"role\":\"assistant\","
-                    + "\"source\":\"codex\",\"text\":\"toy local agent history result\"},"
-                    + "\"events\":[{\"ctx_event_id\":\"evt-toy-1\",\"ctx_session_id\":\"ses-toy-1\",\"sequence\":1}],"
-                    + "\"source\":{\"path\":\"/tmp/ctx-jvm-toy/session.jsonl\",\"cursor\":\"line:1\",\"exists\":false}"
-                    + "}");
-            responses.put("locateEvent", "{"
-                    + "\"ctx_session_id\":\"ses-toy-1\","
-                    + "\"ctx_event_id\":\"evt-toy-1\","
-                    + "\"provider\":\"codex\","
-                    + "\"provider_session_id\":\"provider-toy-1\","
-                    + "\"source\":{\"path\":\"/tmp/ctx-jvm-toy/session.jsonl\",\"cursor\":\"line:1\",\"exists\":false},"
-                    + "\"resume\":{\"cursor\":\"line:1\"}"
+                    + "\"text\":\"toy local agent history result\"},"
+                    + "\"events\":[{\"ctx_event_id\":\"evt-toy-1\",\"ctx_session_id\":\"ses-toy-1\",\"sequence\":1}]"
                     + "}");
         }
 

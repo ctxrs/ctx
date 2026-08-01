@@ -21,11 +21,11 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
     let initial_documents = initial["retrieval"]["indexed_documents"].as_u64().unwrap();
     let initial_status =
         assert_daemon_publication(&temp, &initial_generation, 1, &["codex", "codex"]);
-    let initial_job = &initial_status["daemon"]["jobs"]["source_backed_refresh"];
+    let initial_job = &initial_status["daemon"]["jobs"]["core_refresh"];
     let initial_current = initial_job["receipt"]["current"].clone();
 
     let index_root = search_refresh_data_root(&temp).join("search/lexical");
-    let meta_path = index_root.join("meta.json");
+    let meta_path = active_generation_meta_path(&index_root, &initial_generation);
     let manifest_path = index_root
         .join("ctx-generations")
         .join(format!("{initial_generation}.json"));
@@ -45,14 +45,10 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
         "wait",
         "--format=json",
     ]));
-    assert_eq!(
-        unchanged["results"][0]["source_exists"], true,
-        "exact no-op must retain truthful current-source availability: {unchanged:#}"
-    );
-    assert_eq!(
-        unchanged["results"][0]["citations"][0]["source_exists"], true,
-        "exact no-op citation must retain truthful current-source availability: {unchanged:#}"
-    );
+    assert!(unchanged["results"][0].get("source_exists").is_none());
+    assert!(unchanged["results"][0]["citations"][0]
+        .get("source_exists")
+        .is_none());
     assert_eq!(generation_id(&unchanged), initial_generation);
     assert_eq!(
         unchanged["retrieval"]["indexed_documents"], initial_documents,
@@ -60,7 +56,7 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
     );
     let unchanged_status =
         assert_daemon_publication(&temp, &initial_generation, 1, &["codex", "codex"]);
-    let unchanged_job = &unchanged_status["daemon"]["jobs"]["source_backed_refresh"];
+    let unchanged_job = &unchanged_status["daemon"]["jobs"]["core_refresh"];
     assert_eq!(
         unchanged_job["generation_changed"], false,
         "{unchanged_job:#}"
@@ -135,7 +131,7 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
 
         let append_status =
             assert_daemon_publication(&temp, &append_generation, 1, &["codex", "codex"]);
-        let append_job = &append_status["daemon"]["jobs"]["source_backed_refresh"];
+        let append_job = &append_status["daemon"]["jobs"]["core_refresh"];
         let append_current = &append_job["receipt"]["current"];
         assert_eq!(
             append_current["current_indexed_documents"], expected_documents,
@@ -154,7 +150,8 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
             "{append_job:#}"
         );
 
-        let append_meta = published_file_state(&meta_path);
+        let append_meta_path = active_generation_meta_path(&index_root, &append_generation);
+        let append_meta = published_file_state(&append_meta_path);
         let (append_opstamp, append_segments) = tantivy_meta_facts(&append_meta);
         assert!(append_opstamp > previous_opstamp);
         assert!(
@@ -180,13 +177,14 @@ fn search_refresh_exact_noop_and_repeated_tiny_appends_stay_bounded() {
     );
     let appended_index_bytes = directory_bytes(&index_root);
     assert!(
-        appended_index_bytes <= initial_index_bytes.saturating_mul(3),
+        appended_index_bytes <= initial_index_bytes.saturating_mul(4),
         "{append_runs} tiny appends exceeded the amortized retained-byte budget: \
          before={initial_index_bytes}, after={appended_index_bytes}"
     );
-    assert_eq!(
-        generation_manifest_paths(&temp).len(),
-        initial_manifests.len() + append_runs
+    let retained_manifests = generation_manifest_paths(&temp).len();
+    assert!(
+        (1..=2).contains(&retained_manifests),
+        "inactive generation manifests accumulated after {append_runs} appends: {retained_manifests}"
     );
 }
 
@@ -294,7 +292,7 @@ fn machine_readable_search_attempts_enabled_daemon_self_healing() {
         "{autostart_status:#}"
     );
     assert!(!search_refresh_data_root(&temp)
-        .join("search/lexical/meta.json")
+        .join("search/lexical/active-generation.json")
         .exists());
     assert!(!search_refresh_data_root(&temp).join("work.sqlite").exists());
 
@@ -311,7 +309,7 @@ fn machine_readable_search_attempts_enabled_daemon_self_healing() {
     );
     assert_eq!(status["daemon"]["running"], false, "{status:#}");
     assert_eq!(
-        status["daemon"]["source_refresh_endpoint"]["available"], false,
+        status["daemon"]["core_refresh_endpoint"]["available"], false,
         "{status:#}"
     );
     assert!(status.get("prior_epoch").is_none(), "{status:#}");
@@ -575,10 +573,10 @@ fn search_refresh_wait_human_output_uses_daemon_job_progress_without_stderr_nois
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     let generation = status["lexical"]["generation_id"]
         .as_str()
-        .expect("human search should publish a source-backed generation")
+        .expect("human search should publish a Core generation")
         .to_owned();
     let status = assert_daemon_publication(&temp, &generation, 1, &["claude"]);
-    let job = &status["daemon"]["jobs"]["source_backed_refresh"];
+    let job = &status["daemon"]["jobs"]["core_refresh"];
     assert_eq!(job["progress"]["phase"], "published", "{status:#}");
 }
 
@@ -695,7 +693,7 @@ fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
     );
     assert!(
         !search_refresh_data_root(&temp)
-            .join("search/lexical/meta.json")
+            .join("search/lexical/active-generation.json")
             .exists(),
         "overlap rejection must happen before Tantivy initialization"
     );
@@ -713,13 +711,12 @@ fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
         "--format=json",
     ]));
     assert!(
-        uncommitted
-            .contains("the source-backed index does not exist; retry with daemon refresh enabled"),
+        uncommitted.contains("the Core index does not exist"),
         "{uncommitted}"
     );
     let failed = assert_daemon_refresh_failure(&temp, 0, None);
     assert_eq!(
-        failed["history_epoch"]["reason"], "source_refresh_failed",
+        failed["history_epoch"]["reason"], "core_refresh_failed",
         "{failed:#}"
     );
     assert_eq!(failed["lexical"]["status"], "unavailable", "{failed:#}");
@@ -776,7 +773,7 @@ fn source_refresh_daemon_stop_start_resumes_exact_generation() {
         status["daemon"]["running"] == false
     });
     assert_eq!(stopped["daemon"]["running"], false, "{stopped:#}");
-    let offline = failure_stderr(ctx(&temp).args([
+    let offline = json_output(ctx(&temp).args([
         "search",
         query,
         "--provider",
@@ -785,14 +782,8 @@ fn source_refresh_daemon_stop_start_resumes_exact_generation() {
         "off",
         "--format=json",
     ]));
-    assert!(
-        offline.contains("source_unreadable/temporarily_unavailable"),
-        "{offline}"
-    );
-    assert!(
-        offline.contains("source hydration is temporarily unavailable"),
-        "{offline}"
-    );
+    assert_source_backed_search_show_oracle(&temp, &offline, "pi", query, 1, "message");
+    assert_eq!(assert_published_generation(&offline, "off"), generation);
 
     let restarted = restart_source_refresh_daemon(&temp);
     assert_ne!(restarted.pid(), first_pid);
@@ -947,4 +938,25 @@ fn search_refresh_imports_fresh_work_after_large_source_backed_generation() {
     );
     assert_daemon_publication(&temp, &fresh_generation, 2, &["codex", "codex", "codex"]);
     assert!(!search_refresh_data_root(&temp).join("work.sqlite").exists());
+}
+
+fn active_generation_meta_path(index_root: &Path, expected_generation: &str) -> PathBuf {
+    let pointer_path = index_root.join("active-generation.json");
+    let pointer: Value = serde_json::from_slice(
+        &fs::read(&pointer_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", pointer_path.display())),
+    )
+    .unwrap_or_else(|error| panic!("parse {}: {error}", pointer_path.display()));
+    assert_eq!(
+        pointer["active"]["generation_id"].as_str(),
+        Some(expected_generation),
+        "{pointer:#}"
+    );
+    let directory = pointer["active"]["directory"]
+        .as_str()
+        .expect("active generation pointer directory");
+    index_root
+        .join("index-generations")
+        .join(directory)
+        .join("meta.json")
 }

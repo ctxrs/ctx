@@ -1,12 +1,17 @@
+#[cfg(test)]
+use std::cell::Cell;
+
 use std::{
     error::Error as StdError,
+    io,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, SyncSender},
+        mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError},
         Arc,
     },
     thread,
+    time::Duration,
 };
 
 use super::SourceBackedGenerationSink;
@@ -32,12 +37,23 @@ const MAX_PARALLEL_LEAF_WORKERS: usize = 16;
 const INDEXER_THREAD_CAP: usize = 8;
 const RUNTIME_THREAD_RESERVATION: usize = 2;
 const SOURCE_WORKER_THREAD_PREFIX: &str = "ctx-src-scan";
+const WORKER_FAILURE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-pub(crate) fn source_backed_leaf_worker_budget(indexer_threads: usize) -> usize {
+#[cfg(test)]
+thread_local! {
+    static INJECT_WORKER_SPAWN_FAILURE_AT: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+pub fn source_backed_refresh_work_budget(indexer_threads: usize) -> usize {
     let available_parallelism = thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1);
     leaf_worker_budget_for_parallelism(indexer_threads, available_parallelism)
+}
+
+#[cfg(test)]
+pub(crate) fn source_backed_leaf_worker_budget(indexer_threads: usize) -> usize {
+    source_backed_refresh_work_budget(indexer_threads)
 }
 
 fn leaf_worker_budget_for_parallelism(
@@ -61,6 +77,16 @@ fn bounded_leaf_worker_count(job_count: usize, requested_workers: usize) -> usiz
 fn source_worker_thread_name(worker_index: usize) -> String {
     debug_assert!(worker_index < MAX_PARALLEL_LEAF_WORKERS);
     format!("{SOURCE_WORKER_THREAD_PREFIX}{worker_index:02}")
+}
+
+#[cfg(test)]
+fn worker_spawn_failure_is_injected(worker_index: usize) -> bool {
+    INJECT_WORKER_SPAWN_FAILURE_AT.with(|injected| injected.get() == Some(worker_index))
+}
+
+#[cfg(not(test))]
+fn worker_spawn_failure_is_injected(_worker_index: usize) -> bool {
+    false
 }
 
 impl SourceBackedGenerationSink<'_> {
@@ -145,7 +171,13 @@ impl SourceBackedGenerationSink<'_> {
             });
         }
 
-        let worker_count = bounded_leaf_worker_count(jobs.len(), worker_count);
+        let worker_count =
+            bounded_leaf_worker_count(jobs.len(), worker_count.min(self.leaf_worker_budget));
+        if worker_count == 0 {
+            return Err(ParallelLeafScanError::InvalidWorkerCount {
+                job_count: jobs.len(),
+            });
+        }
         let mut states = jobs
             .iter()
             .enumerate()
@@ -158,43 +190,70 @@ impl SourceBackedGenerationSink<'_> {
         let cancellation = Arc::new(AtomicBool::new(false));
 
         thread::scope(|scope| {
-            // A shared zero-capacity channel bounds the whole transport to one
-            // accepted message while preserving each worker's FIFO job and
-            // document order. Cross-worker arrival order is intentionally not
-            // generation identity: the writer stages by exact source and its
-            // manifest canonicalizes sources before deriving the generation
-            // ID. The focused 1-vs-N regression locks down that invariant.
-            let (sender, receiver) = mpsc::sync_channel::<ParallelLeafWorkerEvent<R, E>>(0);
+            // Each worker gets one rendezvous lane. The caller drains the lane
+            // for job 0, then job 1, and so on, making writer application order
+            // independent of worker scheduling while bounding transport to at
+            // most one blocked message per worker.
+            let (failure_sender, failure_receiver) =
+                mpsc::sync_channel::<ParallelLeafWorkerEvent<R, E>>(worker_count);
+            let mut receivers = Vec::with_capacity(worker_count);
             let mut handles = Vec::with_capacity(worker_count);
             for (worker_index, jobs) in stripes.into_iter().enumerate() {
-                let worker_sender = sender.clone();
+                let (worker_sender, worker_receiver) =
+                    mpsc::sync_channel::<ParallelLeafWorkerEvent<R, E>>(0);
+                receivers.push(worker_receiver);
                 let worker_cancellation = Arc::clone(&cancellation);
+                let worker_failure_sender = failure_sender.clone();
                 let scan = &scan;
                 let worker_name = source_worker_thread_name(worker_index);
-                let handle = thread::Builder::new()
-                    .name(worker_name)
-                    .spawn_scoped(scope, move || {
-                        run_leaf_worker(
+                let spawn = if worker_spawn_failure_is_injected(worker_index) {
+                    Err(io::Error::other(
+                        "injected parallel source worker spawn failure",
+                    ))
+                } else {
+                    thread::Builder::new()
+                        .name(worker_name)
+                        .spawn_scoped(scope, move || {
+                            run_leaf_worker(
+                                worker_index,
+                                jobs,
+                                &worker_sender,
+                                &worker_failure_sender,
+                                &worker_cancellation,
+                                scan,
+                            );
+                        })
+                };
+                match spawn {
+                    Ok(handle) => handles.push((worker_index, handle)),
+                    Err(source) => {
+                        cancellation.store(true, Ordering::Release);
+                        drop(receivers);
+                        drop(failure_sender);
+                        drop(failure_receiver);
+                        for (_, handle) in handles {
+                            let _ = handle.join();
+                        }
+                        return Err(ParallelLeafScanError::WorkerSpawn {
                             worker_index,
-                            jobs,
-                            &worker_sender,
-                            &worker_cancellation,
-                            scan,
-                        );
-                    })
-                    .unwrap_or_else(|error| {
-                        panic!("failed to spawn parallel source worker {worker_index}: {error}")
-                    });
-                handles.push((worker_index, handle));
+                            source,
+                        });
+                    }
+                }
             }
-            drop(sender);
+            drop(failure_sender);
 
-            let mut result =
-                self.consume_parallel_leaf_events(&receiver, &mut states, &mut results);
+            let mut result = self.consume_parallel_leaf_events(
+                &receivers,
+                &failure_receiver,
+                &mut states,
+                &mut results,
+            );
             if result.is_err() {
                 cancellation.store(true, Ordering::Release);
             }
-            drop(receiver);
+            drop(receivers);
+            drop(failure_receiver);
 
             let mut join_error = None;
             for (worker_index, handle) in handles {
@@ -232,7 +291,8 @@ impl SourceBackedGenerationSink<'_> {
 
     fn consume_parallel_leaf_events<R, E>(
         &mut self,
-        receiver: &Receiver<ParallelLeafWorkerEvent<R, E>>,
+        receivers: &[Receiver<ParallelLeafWorkerEvent<R, E>>],
+        failure_receiver: &Receiver<ParallelLeafWorkerEvent<R, E>>,
         states: &mut [ParallelLeafJobState],
         results: &mut [Option<R>],
     ) -> Result<(), ParallelLeafScanError<E>>
@@ -241,11 +301,33 @@ impl SourceBackedGenerationSink<'_> {
     {
         let mut returned_jobs = 0_usize;
         while returned_jobs < states.len() {
-            let event = receiver.recv().map_err(|_| {
-                ParallelLeafScanProtocolError::TransportDisconnected {
-                    unfinished_jobs: states.len().saturating_sub(returned_jobs),
+            let worker_index = states[returned_jobs].worker_index;
+            let receiver = receivers.get(worker_index).ok_or({
+                ParallelLeafScanProtocolError::WrongWorker {
+                    job_index: returned_jobs,
+                    expected_worker: worker_index,
+                    observed_worker: receivers.len(),
                 }
             })?;
+            let event = loop {
+                match failure_receiver.try_recv() {
+                    Ok(failure) => break failure,
+                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+                }
+                match receiver.recv_timeout(WORKER_FAILURE_POLL_INTERVAL) {
+                    Ok(event) => break event,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => match failure_receiver.try_recv() {
+                        Ok(failure) => break failure,
+                        Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
+                            return Err(ParallelLeafScanProtocolError::TransportDisconnected {
+                                unfinished_jobs: states.len().saturating_sub(returned_jobs),
+                            }
+                            .into())
+                        }
+                    },
+                }
+            };
             match event {
                 ParallelLeafWorkerEvent::Protocol {
                     worker_index,
@@ -328,6 +410,7 @@ fn run_leaf_worker<J, R, E, F>(
     worker_index: usize,
     jobs: Vec<(usize, J)>,
     sender: &SyncSender<ParallelLeafWorkerEvent<R, E>>,
+    failure_sender: &SyncSender<ParallelLeafWorkerEvent<R, E>>,
     cancellation: &AtomicBool,
     scan: &F,
 ) where
@@ -362,7 +445,7 @@ fn run_leaf_worker<J, R, E, F>(
             }
             Ok(Err(ParallelLeafScanWorkerError::Provider(error))) => {
                 cancellation.store(true, Ordering::Release);
-                let _ = sender.send(ParallelLeafWorkerEvent::Failed {
+                let _ = failure_sender.send(ParallelLeafWorkerEvent::Failed {
                     worker_index,
                     job_index: *job_index,
                     error,
@@ -374,7 +457,7 @@ fn run_leaf_worker<J, R, E, F>(
                     return;
                 }
                 cancellation.store(true, Ordering::Release);
-                let _ = sender.send(ParallelLeafWorkerEvent::Cancelled {
+                let _ = failure_sender.send(ParallelLeafWorkerEvent::Cancelled {
                     worker_index,
                     job_index: *job_index,
                 });
@@ -382,7 +465,7 @@ fn run_leaf_worker<J, R, E, F>(
             }
             Err(_) => {
                 cancellation.store(true, Ordering::Release);
-                let _ = sender.send(ParallelLeafWorkerEvent::Panicked {
+                let _ = failure_sender.send(ParallelLeafWorkerEvent::Panicked {
                     worker_index,
                     job_index: *job_index,
                 });

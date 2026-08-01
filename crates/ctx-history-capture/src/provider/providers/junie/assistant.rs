@@ -16,6 +16,7 @@ pub(super) struct JunieStepAgg {
     pub(super) exit_code: Option<i32>,
     pub(super) duration_ms: Option<u64>,
     pub(super) timed_out: bool,
+    pub(super) invalid_output_shape: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,9 +106,7 @@ pub(crate) fn junie_merge_buffered_agent_event(
                 .map(|value| format!("failure-{value}-{source_line_number}"))
                 .unwrap_or_else(|| format!("failure-{source_line_number}"));
             junie_ensure_assistant(buffer, occurred_at);
-            buffer
-                .results
-                .insert(step_id, format!("Junie failed: {message}"));
+            buffer.results.insert(step_id, message.to_owned());
             true
         }
         "ToolBlockUpdatedEvent"
@@ -139,6 +138,9 @@ pub(super) fn junie_step_output_projection(
     step: &JunieStepAgg,
 ) -> Option<JunieStepOutputProjection<'_>> {
     if !step.changes.is_empty() {
+        return None;
+    }
+    if step.invalid_output_shape {
         return None;
     }
     let details = step
@@ -179,8 +181,7 @@ pub(super) fn junie_step_output_projection(
     };
     Some(JunieStepOutputProjection {
         details,
-        // The record-set locator addresses StepOutput by first-seen step order. Use the same
-        // stable association instead of a mutable provider update ID.
+        // Associate output with the first-seen step order rather than a mutable provider update ID.
         call_id: format!("step:{}", step.order),
         tool_name: if step.command.is_some() {
             "Bash"
@@ -274,6 +275,7 @@ pub(super) fn junie_merge_step(
             exit_code: None,
             duration_ms: None,
             timed_out: false,
+            invalid_output_shape: false,
         });
     if let Some(text) = agent_event.get("text").and_then(Value::as_str) {
         if !text.trim().is_empty() {
@@ -291,31 +293,66 @@ pub(super) fn junie_merge_step(
     if let Some(changes) = agent_event.get("changes").and_then(Value::as_array) {
         step.changes = changes.clone();
     }
-    if let Some(details) = agent_event.get("details").and_then(Value::as_str) {
-        if !details.trim().is_empty() {
-            step.details = Some(details.to_owned());
+    if let Some(details) = agent_event.get("details") {
+        match details {
+            Value::String(details) if !details.trim().is_empty() => {
+                step.details = Some(details.to_owned());
+            }
+            Value::Null | Value::String(_) => {}
+            _ => step.invalid_output_shape = true,
         }
     }
-    if let Some(status) = agent_event.get("status").and_then(Value::as_str) {
-        if !status.trim().is_empty() {
-            step.status = Some(status.to_owned());
+    if let Some(status) = agent_event.get("status") {
+        match status {
+            Value::String(status) if !status.trim().is_empty() => {
+                step.status = Some(status.to_owned());
+            }
+            Value::Null | Value::String(_) => {}
+            _ => step.invalid_output_shape = true,
         }
     }
-    step.exit_code = ["exitCode", "exit_code"]
+    let exit_codes = ["exitCode", "exit_code"]
         .iter()
-        .find_map(|key| agent_event.get(*key).and_then(Value::as_i64))
-        .and_then(|code| i32::try_from(code).ok())
-        .or(step.exit_code);
-    step.duration_ms = ["durationMs", "duration_ms"]
+        .filter_map(|key| agent_event.get(*key))
+        .filter(|value| !value.is_null())
+        .map(|value| value.as_i64().and_then(|code| i32::try_from(code).ok()))
+        .collect::<Vec<_>>();
+    if exit_codes.iter().any(Option::is_none)
+        || exit_codes
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            > 1
+    {
+        step.invalid_output_shape = true;
+    } else if let Some(code) = exit_codes.into_iter().flatten().next() {
+        step.exit_code = Some(code);
+    }
+    let durations = ["durationMs", "duration_ms"]
         .iter()
-        .find_map(|key| {
-            agent_event.get(*key).and_then(|value| {
-                value
-                    .as_u64()
-                    .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-            })
+        .filter_map(|key| agent_event.get(*key))
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
         })
-        .or(step.duration_ms);
+        .collect::<Vec<_>>();
+    if durations.iter().any(Option::is_none)
+        || durations
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            > 1
+    {
+        step.invalid_output_shape = true;
+    } else if let Some(duration) = durations.into_iter().flatten().next() {
+        step.duration_ms = Some(duration);
+    }
     step.timed_out |= ["timedOut", "timed_out", "timeout"].iter().any(|key| {
         agent_event
             .get(*key)

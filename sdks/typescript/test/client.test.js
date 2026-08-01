@@ -13,6 +13,7 @@ import {
   LocalCliAdapter,
   createHostedAgentHistoryClient,
   createLocalAgentHistoryClient,
+  toAgentHistoryEnvelope,
 } from "../src/index.js";
 import { runDogfoodToy } from "../examples/dogfood-toy.js";
 
@@ -135,21 +136,19 @@ test("builds search flags and normalizes nested CLI search output", async () => 
           ctx_event_id: "00000000-0000-0000-0000-000000000101",
           ctx_session_id: "00000000-0000-0000-0000-000000000102",
           provider_session_id: "codex-session",
+          provider: "codex",
+          source_format: "codex_session_jsonl",
           event_seq: 7,
           result_type: "event",
           result_scope: "event",
           rank: 1,
           retrieval_score: 0.98,
-          source_path: "/tmp/session.jsonl",
-          source_exists: true,
           why_matched: ["text"],
           citations: [
             {
               target_type: "event",
               ctx_event_id: "00000000-0000-0000-0000-000000000101",
               ctx_session_id: "00000000-0000-0000-0000-000000000102",
-              source_path: "/tmp/session.jsonl",
-              source_exists: true,
             },
           ],
         },
@@ -183,16 +182,15 @@ test("builds search flags and normalizes nested CLI search output", async () => 
   assert.equal(result.search.results[0].ctxEventId, "00000000-0000-0000-0000-000000000101");
   assert.equal(result.search.results[0].ctxSessionId, "00000000-0000-0000-0000-000000000102");
   assert.equal(result.search.results[0].providerSessionId, "codex-session");
+  assert.equal(result.search.results[0].provider, "codex");
+  assert.equal(result.search.results[0].sourceFormat, "codex_session_jsonl");
   assert.equal(result.search.results[0].eventSeq, 7);
   assert.equal(result.search.results[0].resultType, "event");
   assert.equal(result.search.results[0].resultScope, "event");
   assert.equal(result.search.results[0].rank, 1);
   assert.equal(result.search.results[0].retrievalScore, 0.98);
-  assert.equal(result.search.results[0].sourcePath, "/tmp/session.jsonl");
-  assert.equal(result.search.results[0].sourceExists, true);
   assert.equal(result.search.results[0].whyMatched[0], "text");
   assert.equal(result.search.results[0].citations[0].targetType, "event");
-  assert.equal(result.search.results[0].citations[0].sourcePath, "/tmp/session.jsonl");
   assert.equal(result.search.retrieval.requestedMode, "hybrid");
   assert.equal(result.search.retrieval.effectiveMode, "lexical");
   assert.equal(result.search.retrieval.semanticWeight, 0.0);
@@ -267,14 +265,12 @@ test("rejects search without query, term, or file before invoking CLI", async ()
   assert.equal(calls.length, 0);
 });
 
-test("wraps show and locate commands by ctx id and provider session id", async () => {
+test("wraps show commands by ctx id and provider session id", async () => {
   const { client, calls } = mockClient(() => "{}");
 
   await client.showEvent("00000000-0000-0000-0000-000000000002", { window: 3 });
   await client.showSession("00000000-0000-0000-0000-000000000003", { mode: "full" });
   await client.showSession({ provider: "codex", providerSession: "codex-session", mode: "log" });
-  await client.locateEvent("00000000-0000-0000-0000-000000000004");
-  await client.locateSession({ provider: "codex", providerSession: "codex-session" });
 
   assert.deepEqual(
     calls.map((call) => call.args.slice(2)),
@@ -309,19 +305,62 @@ test("wraps show and locate commands by ctx id and provider session id", async (
         "--format",
         "json",
       ],
-      ["locate", "event", "00000000-0000-0000-0000-000000000004", "--format", "json"],
-      [
-        "locate",
-        "session",
-        "--provider",
-        "codex",
-        "--provider-session",
-        "codex-session",
-        "--format",
-        "json",
-      ],
     ],
   );
+});
+
+test("normalizes typed Core show metadata", () => {
+  const event = toAgentHistoryEnvelope("showEvent", {
+    event: {
+      ctx_event_id: "event-1",
+      ctx_session_id: "session-1",
+      provider: "codex",
+      provider_session_id: "codex-resume-uuid",
+      source_format: "codex_session_jsonl",
+      text: "complete body",
+      content: {
+        complete: true,
+        policy_status: "selected",
+      },
+    },
+    events: [],
+  });
+  assert.equal(event.event.event.providerSessionId, "codex-resume-uuid");
+  assert.equal(event.event.event.sourceFormat, "codex_session_jsonl");
+  assert.deepEqual(event.event.event.content, {
+    complete: true,
+    policyStatus: "selected",
+  });
+
+  const session = toAgentHistoryEnvelope("showSession", {
+    session: {
+      ctx_session_id: "session-1",
+      provider: "codex",
+      provider_session_id: "codex-resume-uuid",
+      source_format: "codex_session_jsonl",
+    },
+    events: [],
+  });
+  assert.equal(session.session.session.providerSessionId, "codex-resume-uuid");
+  assert.equal(session.session.session.sourceFormat, "codex_session_jsonl");
+});
+
+test("preserves legitimate source semantics in sources and import payloads", () => {
+  const acquisition = {
+    source: "local_scan",
+    cursor: "opaque-checkpoint",
+  };
+  const sources = toAgentHistoryEnvelope("sources", {
+    sources: [{ provider: "codex", path: "/configured/root", acquisition }],
+  });
+  assert.deepEqual(sources.sources[0].acquisition, acquisition);
+
+  const imported = toAgentHistoryEnvelope("import", {
+    resume: false,
+    totals: {},
+    sources: [{ source: acquisition }],
+  });
+  assert.deepEqual(imported.import.sources[0].source, acquisition);
 });
 
 test("reports versioning metadata", async () => {
@@ -367,7 +406,7 @@ test("hosted client is an explicit placeholder", async () => {
   await assert.rejects(() => client.status(), CtxUnsupportedError);
 });
 
-test("dogfood toy app runs status/search/show/locate with mocked ctx", async () => {
+test("dogfood toy app runs status/search/show with mocked ctx", async () => {
   assert.deepEqual(await runDogfoodToy({ env: {} }), {
     ready: true,
     query: "local agent history",
@@ -376,8 +415,8 @@ test("dogfood toy app runs status/search/show/locate with mocked ctx", async () 
     moreAvailable: true,
     eventCount: 1,
     sessionMode: "lite",
-    eventPath: "/tmp/ctx-sdk-dogfood/session.jsonl",
-    sessionPath: "/tmp/ctx-sdk-dogfood/session.jsonl",
+    eventProviderSession: "codex-fixture-session",
+    sessionProviderSession: "codex-fixture-session",
   });
 });
 
@@ -420,10 +459,6 @@ function operationFromFixtureName(name) {
       return "showEvent";
     case "show-session":
       return "showSession";
-    case "locate-event":
-      return "locateEvent";
-    case "locate-session":
-      return "locateSession";
     default:
       throw new Error(`unknown agent-history-v1 fixture operation in ${name}`);
   }
@@ -466,6 +501,11 @@ function assertFixturePayload(entry, fixture) {
         );
         assert.equal(fixture.search.results[0].rank, 1, `${entry} search.results[0].rank`);
         assert.equal(
+          fixture.search.results[0].sourceFormat,
+          "codex_session_jsonl",
+          `${entry} search.results[0].sourceFormat`,
+        );
+        assert.equal(
           fixture.search.results[0].retrievalScore,
           0.98,
           `${entry} search.results[0].retrievalScore`,
@@ -475,16 +515,22 @@ function assertFixturePayload(entry, fixture) {
     case "showEvent":
       assert.ok(Array.isArray(fixture.event.events), `${entry} event.events`);
       assert.equal(typeof fixture.event.events[0].ctxEventId, "string", `${entry} event id`);
+      assert.equal(fixture.event.events[0].content.complete, true, `${entry} content complete`);
+      assert.equal(fixture.event.events[0].content.policyStatus, "selected", `${entry} policy`);
       break;
     case "showSession":
       assert.ok(Array.isArray(fixture.session.events), `${entry} session.events`);
       assert.equal(typeof fixture.session.mode, "string", `${entry} session.mode`);
-      break;
-    case "locateEvent":
-    case "locateSession":
-      assert.equal(typeof fixture.location.ctxSessionId, "string", `${entry} location session id`);
-      assert.equal(typeof fixture.location.provider, "string", `${entry} location provider`);
-      assert.equal(typeof fixture.location.source, "object", `${entry} location source`);
+      assert.equal(
+        fixture.session.session.providerSessionId,
+        "codex-fixture-session",
+        `${entry} resume id`,
+      );
+      assert.equal(
+        fixture.session.session.sourceFormat,
+        "codex_session_jsonl",
+        `${entry} session source format`,
+      );
       break;
     case "error":
       assert.equal(typeof fixture.error.code, "string", `${entry} error.code`);

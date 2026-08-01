@@ -20,9 +20,9 @@ pub use discovery::{
     discover_provider_sources_for_provider_report,
     discover_provider_sources_for_provider_with_context,
     discover_provider_sources_for_provider_with_projects, discover_provider_sources_report,
-    discover_provider_sources_with_context, discover_provider_sources_with_projects,
-    provider_source_for_path, validate_provider_source_roots_outside_data_root,
-    ProviderSourceRootBoundaryError,
+    discover_provider_sources_with_context, discover_provider_sources_with_context_and_work_budget,
+    discover_provider_sources_with_projects, provider_source_for_path,
+    validate_provider_source_roots_outside_data_root, ProviderSourceRootBoundaryError,
 };
 #[cfg(test)]
 pub(crate) use event_files::count_event_file_io;
@@ -47,10 +47,9 @@ pub use specs::{provider_source_spec, provider_source_specs};
 #[cfg(test)]
 pub(crate) use sqlite_source::SqliteSourceSnapshotCounters;
 pub(crate) use sqlite_source::{
-    open_ctx_owned_sqlite_read_snapshot, open_root_handle_sqlite_source_snapshot,
-    retain_sqlite_source_directory_authority, CtxOwnedSqliteReadSnapshot, SqliteLogicalSnapshot,
-    SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
-    SqliteSourceReadSnapshot,
+    open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
+    SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceDirectoryAuthority,
+    SqliteSourceEvidence, SqliteSourceReadSnapshot,
 };
 pub use types::{
     DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderCatalogSupport,

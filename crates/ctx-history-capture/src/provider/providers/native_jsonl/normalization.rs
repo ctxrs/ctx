@@ -5,11 +5,7 @@ use ctx_history_core::{AgentType, CaptureProvider, EventRole, EventType, Session
 use serde_json::{json, Value};
 
 use crate::common::time::parse_rfc3339_utc;
-use crate::provider::normalization::{
-    provider_capped_json, provider_capped_json_value, provider_policy_body,
-    provider_policy_event_text, provider_result_identifier_evidence,
-    provider_result_outcome_evidence, provider_role, provider_value_text,
-};
+use crate::provider::normalization::{provider_capped_json, provider_role, provider_value_text};
 use crate::PROVIDER_MAX_PREVIEW_CHARS;
 
 use super::native_path::{
@@ -18,7 +14,6 @@ use super::native_path::{
     factory_droid_session_relationships, windsurf_event_role, windsurf_event_text,
     windsurf_event_type,
 };
-use super::result_content::native_jsonl_result_content_profile;
 pub(crate) fn antigravity_tool_call_text(value: &Value) -> Option<String> {
     value.as_array().and_then(|calls| {
         let names: Vec<&str> = calls
@@ -189,68 +184,6 @@ pub(super) fn native_jsonl_session_metadata_from_normalized_header(
         "source_path": path.display().to_string(),
         "header": normalized_header_metadata,
     })
-}
-
-pub(crate) fn native_jsonl_normalized_payload(
-    provider: CaptureProvider,
-    value: &Value,
-    line_number: usize,
-) -> Value {
-    let event_type = native_jsonl_event_type(provider, value);
-    let entry_type = native_jsonl_entry_type(provider, value);
-    let text = if event_type == EventType::ToolOutput
-        && native_jsonl_result_content_profile(provider).is_some()
-    {
-        String::new()
-    } else {
-        native_jsonl_event_text(provider, value, event_type, &entry_type)
-    };
-    let retained_text = provider_policy_event_text(event_type, &text, value);
-    let result_evidence = provider_result_identifier_evidence(event_type, &text, value);
-    let result_outcome = provider_result_outcome_evidence(event_type, value);
-    let event_id = native_jsonl_event_id(provider, value, line_number);
-    let tool_calls = if provider == CaptureProvider::Antigravity {
-        value.get("tool_calls").map(|calls| {
-            provider_capped_json_value(
-                &provider_policy_body(EventType::ToolCall, calls),
-                PROVIDER_MAX_PREVIEW_CHARS,
-            )
-        })
-    } else {
-        None
-    };
-    json!({
-        "entry_type": entry_type,
-        "event_id": event_id,
-        "native_step_index": value.get("step_index").and_then(Value::as_u64),
-        "text": retained_text.text,
-        "text_retention": retained_text.retention.as_json(),
-        "result_evidence": result_evidence,
-        "result_outcome": result_outcome,
-        "tool_calls": tool_calls,
-        "body": provider_capped_json(
-            &provider_policy_body(event_type, value),
-            PROVIDER_MAX_PREVIEW_CHARS,
-        ),
-    })
-}
-
-pub(crate) fn native_jsonl_event_id(
-    provider: CaptureProvider,
-    value: &Value,
-    line_number: usize,
-) -> String {
-    if provider == CaptureProvider::Antigravity {
-        if let Some(step_index) = value.get("step_index").and_then(Value::as_u64) {
-            return format!("step-{step_index}");
-        }
-    }
-    value
-        .get("id")
-        .or_else(|| value.get("uuid"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("line-{line_number}"))
 }
 
 pub(crate) fn native_jsonl_entry_type(provider: CaptureProvider, value: &Value) -> String {

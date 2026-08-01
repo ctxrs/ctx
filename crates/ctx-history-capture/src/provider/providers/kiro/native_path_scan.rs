@@ -1,4 +1,4 @@
-use rusqlite::{params_from_iter, types::ValueRef, Connection, Row};
+use rusqlite::{types::ValueRef, Connection, Row};
 
 use crate::MAX_PROVIDER_SQLITE_VALUE_BYTES;
 
@@ -27,42 +27,6 @@ pub(super) fn stream_rows(
             .checked_add(1)
             .ok_or(KiroSourceBackedErrorV0::CountOverflow)?;
         visit(row)?;
-    }
-    Ok(decoded)
-}
-
-pub(super) fn load_key_batch(
-    connection: &Connection,
-    phase: KiroPhase,
-    keys: &[String],
-) -> KiroSourceBackedResultV0<Vec<KiroConversationRow>> {
-    if keys.is_empty() {
-        return Ok(Vec::new());
-    }
-    let placeholders = (1..=keys.len())
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "with matched as (
-             select {}, row_number() over (
-                 partition by key collate binary order by rowid
-             ) as requested_ordinal
-             from {}
-             where typeof(key) = 'text'
-               and key collate binary in ({placeholders})
-         )
-         select {} from matched where requested_ordinal <= 2
-         order by key collate binary, rowid",
-        selected_columns(phase),
-        phase.table(),
-        selected_columns(phase),
-    );
-    let mut statement = connection.prepare(&sql)?;
-    let mut rows = statement.query(params_from_iter(keys))?;
-    let mut decoded = Vec::with_capacity(keys.len());
-    while let Some(row) = rows.next()? {
-        decoded.push(decode_row(row, phase)?);
     }
     Ok(decoded)
 }

@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::provider::normalization::{
-    provider_capped_json, provider_local_preview, provider_policy_body, provider_policy_event_text,
+    provider_local_preview, provider_policy_body, provider_policy_event_text,
     provider_result_identifier_evidence, provider_result_outcome_evidence, provider_role,
     provider_value_text,
 };
@@ -65,7 +65,7 @@ pub(super) fn mux_core_event(row: &MuxMessageRow, occurred_at: DateTime<Utc>) ->
             "result_evidence": result_evidence,
             "result_outcome": result_outcome,
             "source_format": MUX_SOURCE_FORMAT,
-            "body": provider_capped_json(&retained_body, PROVIDER_MAX_PREVIEW_CHARS),
+            "body": retained_body,
         }),
     }
 }
@@ -273,8 +273,7 @@ pub(crate) fn mux_result_content(value: &Value) -> Option<String> {
     }
 }
 
-/// Cheap aggregate output classification performed before event identity, result hashing, or
-/// verified-content locator construction.
+/// Cheap aggregate output classification performed before event identity and Core projection.
 ///
 /// Mux stores several dynamic-tool parts in one message. Keep that message cardinality and retain
 /// every native call association in source order; the transient output contract must not force the

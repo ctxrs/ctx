@@ -18,13 +18,7 @@ use super::layout::{
     HermesSqliteValue,
 };
 
-// These constants remain the authority for the persisted Hermes frontier and
-// locator wire contracts exercised at the serialization boundary.
-#[allow(dead_code)]
-pub(super) const HERMES_FRONTIER_VERSION: u32 = 1;
-#[allow(dead_code)]
-pub(super) const HERMES_LOCATOR_KIND: &str = "hermes-sqlite-row-v1";
-const HERMES_FRONTIER_BYTES: usize = 1 + 8 + 8;
+const HERMES_FRONTIER_ACCOUNTING_BYTES: usize = 1 + 8 + 8;
 const HERMES_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 9;
 const HERMES_NATIVE_ROW_BATCH: usize = 64;
 
@@ -32,27 +26,6 @@ const HERMES_NATIVE_ROW_BATCH: usize = 64;
 pub(super) enum HermesPhase {
     Sessions,
     Messages,
-}
-
-impl HermesPhase {
-    #[allow(dead_code)]
-    fn tag(self) -> u8 {
-        match self {
-            Self::Sessions => 1,
-            Self::Messages => 2,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn from_tag(tag: u8) -> Result<Self> {
-        match tag {
-            1 => Ok(Self::Sessions),
-            2 => Ok(Self::Messages),
-            _ => Err(CaptureError::InvalidPayload(
-                "Hermes cursor has an unknown phase".to_owned(),
-            )),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -69,31 +42,6 @@ impl HermesFrontier {
             next_ordinal: 0,
             rowid: i64::MIN,
         }
-    }
-
-    // Keep the codec local to the frontier type so persisted cursor shape stays
-    // explicit even when the current scanner transfers the typed frontier.
-    #[allow(dead_code)]
-    pub(super) fn encode(self) -> Vec<u8> {
-        let mut value = Vec::with_capacity(HERMES_FRONTIER_BYTES);
-        value.push(self.phase.tag());
-        value.extend_from_slice(&self.next_ordinal.to_be_bytes());
-        value.extend_from_slice(&hermes_ordered_i64(self.rowid).to_be_bytes());
-        value
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn decode(value: &[u8]) -> Result<Self> {
-        if value.len() != HERMES_FRONTIER_BYTES {
-            return Err(CaptureError::InvalidPayload(
-                "Hermes cursor has an invalid frontier width".to_owned(),
-            ));
-        }
-        Ok(Self {
-            phase: HermesPhase::from_tag(value[0])?,
-            next_ordinal: decode_u64(&value[1..9])?,
-            rowid: hermes_unordered_i64(decode_u64(&value[9..17])?),
-        })
     }
 }
 
@@ -443,8 +391,7 @@ impl<'connection> HermesRowReader<'connection> {
             rowid: candidate.rowid,
         };
         let hydration_limit_exceeded = observed_bytes > MAX_PROVIDER_SQLITE_VALUE_BYTES;
-        let native_page_limit_exceeded =
-            observed_bytes > NATIVE_INGESTION_PAGE_MAX_BYTES && candidate.indivisible;
+        let native_page_limit_exceeded = observed_bytes > NATIVE_INGESTION_PAGE_MAX_BYTES;
         if hydration_limit_exceeded || native_page_limit_exceeded {
             let limit = if hydration_limit_exceeded {
                 MAX_PROVIDER_SQLITE_VALUE_BYTES
@@ -592,7 +539,7 @@ fn checked_reader_counter(value: u64, name: &str) -> Result<u64> {
 
 fn rejection_owned_bytes(reason: &str) -> usize {
     // Ordinal, locator, frontier, record tag, and the length-prefixed reason.
-    (8 + 9 + HERMES_FRONTIER_BYTES + 1 + 8).saturating_add(reason.len())
+    (8 + 9 + HERMES_FRONTIER_ACCOUNTING_BYTES + 1 + 8).saturating_add(reason.len())
 }
 
 fn with_length_preflight<T>(
@@ -646,22 +593,4 @@ fn storage_error_reason(schema: &HermesSchema, phase: HermesPhase, code: i64) ->
     Ok(format!(
         "Hermes {record} {column} has an unsupported SQLite storage class"
     ))
-}
-
-#[allow(dead_code)]
-fn decode_u64(bytes: &[u8]) -> Result<u64> {
-    let bytes: [u8; 8] = bytes.try_into().map_err(|_| {
-        CaptureError::InvalidPayload("Hermes cursor integer has an invalid width".to_owned())
-    })?;
-    Ok(u64::from_be_bytes(bytes))
-}
-
-#[allow(dead_code)]
-fn hermes_ordered_i64(value: i64) -> u64 {
-    (value as u64) ^ (1_u64 << 63)
-}
-
-#[allow(dead_code)]
-fn hermes_unordered_i64(value: u64) -> i64 {
-    (value ^ (1_u64 << 63)) as i64
 }

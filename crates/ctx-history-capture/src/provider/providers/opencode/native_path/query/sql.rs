@@ -1,5 +1,3 @@
-use sha2::{Digest, Sha256};
-
 use crate::{CaptureError, Result};
 
 use super::super::{
@@ -10,8 +8,6 @@ use super::super::{
     model::{OpenCodeNativeOrder, OpenCodeNativeSchemaFamily},
     schema::OpenCodeNativeSchema,
 };
-use super::OpenCodeRetainedJson;
-
 const JSON_HINT_BYTES: usize = 256;
 
 pub(super) fn source_backed_event_source_sql(schema: &OpenCodeNativeSchema) -> String {
@@ -143,77 +139,6 @@ pub(super) fn decode_order(
             "OpenCode source-backed index contains an unknown order tag",
         )),
     }
-}
-
-pub(super) fn event_digest(
-    family: OpenCodeNativeSchemaFamily,
-    native_identity: &str,
-    native_order: &OpenCodeNativeOrder,
-    time_created: i64,
-    time_updated: i64,
-    retained: &OpenCodeRetainedJson,
-) -> Result<String> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"ctx-opencode-nativepath-retained-event-v2\0");
-    hash_str(&mut hasher, family.label());
-    hash_str(&mut hasher, native_identity);
-    hash_order(&mut hasher, native_order);
-    hash_str(&mut hasher, &retained.effective_type);
-    hash_str(&mut hasher, &retained.role);
-    hasher.update(time_created.to_le_bytes());
-    hasher.update(time_updated.to_le_bytes());
-    let canonical = serde_json::to_vec(&retained.body).map_err(|error| {
-        CaptureError::InvalidPayload(format!(
-            "OpenCode retained projection cannot be hashed: {error}"
-        ))
-    })?;
-    hasher.update((canonical.len() as u64).to_le_bytes());
-    hasher.update(canonical);
-    Ok(super::super::schema::hex_digest(hasher.finalize().into()))
-}
-
-fn hash_order(hasher: &mut Sha256, order: &OpenCodeNativeOrder) {
-    match order {
-        OpenCodeNativeOrder::ExplicitSequence {
-            session_id,
-            sequence,
-            message_id,
-        } => {
-            hasher.update([1]);
-            hash_str(hasher, session_id);
-            hasher.update(sequence.to_le_bytes());
-            hash_str(hasher, message_id);
-        }
-        OpenCodeNativeOrder::SynthesizedSequence {
-            session_id,
-            time_created,
-            message_id,
-        } => {
-            hasher.update([2]);
-            hash_str(hasher, session_id);
-            hasher.update(time_created.to_le_bytes());
-            hash_str(hasher, message_id);
-        }
-        OpenCodeNativeOrder::MessagePart {
-            session_id,
-            message_time_created,
-            message_id,
-            part_time_created,
-            part_id,
-        } => {
-            hasher.update([3]);
-            hash_str(hasher, session_id);
-            hasher.update(message_time_created.to_le_bytes());
-            hash_str(hasher, message_id);
-            hasher.update(part_time_created.to_le_bytes());
-            hash_str(hasher, part_id);
-        }
-    }
-}
-
-fn hash_str(hasher: &mut Sha256, value: &str) {
-    hasher.update((value.len() as u64).to_le_bytes());
-    hasher.update(value.as_bytes());
 }
 
 pub(super) fn native_record_identity(

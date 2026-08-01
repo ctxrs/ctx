@@ -17,9 +17,7 @@ pub use identity::{
     derive_event_id, derive_session_id, EventIdentityInput, SessionIdentityInput, StableEntityId,
     StableEntityKind, IDENTITY_VERSION, STABLE_ENTITY_ID_CANONICAL_LEN,
 };
-pub use native::{
-    NativeItemKey, NativeLocator, NativeSessionKey, PositionStability, SubrecordSelector, TypedKey,
-};
+pub use native::{NativeItemKey, NativeSessionKey, PositionStability, SubrecordSelector, TypedKey};
 pub use source::{
     CertifiedSourceDeletion, CertifiedSourceInventory, SourceAnchor, SourceInventoryObservation,
     SourceKey, SourceObservation,

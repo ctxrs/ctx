@@ -56,6 +56,43 @@ fn structural_output_marks_metadata_only_failures_as_non_display() {
 }
 
 #[test]
+fn structural_output_admits_genuine_mcp_direct_result_wrappers() {
+    for (is_error, expected_outcome) in [
+        (false, crate::OutputOutcome::Unknown),
+        (true, crate::OutputOutcome::Failure),
+    ] {
+        let line = serde_json::json!({
+            "timestamp": "2026-07-16T12:16:29.573Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "mcp_tool_call_end",
+                "call_id": "exec-real-shape",
+                "invocation": {"server": "node_repl", "tool": "js", "arguments": {}},
+                "duration": {"secs": 0, "nanos": 42},
+                "result": {
+                    "Ok": {
+                        "content": [{"type": "text", "text": "complete result"}],
+                        "isError": is_error
+                    }
+                }
+            }
+        })
+        .to_string();
+        let probe = super::record::classify_codex_record(line.as_bytes()).unwrap();
+        assert!(matches!(
+            probe.class,
+            super::record::CodexRecordClass::ExcludedResult(
+                super::record::CodexResultKind::OtherResult
+            )
+        ));
+        assert_eq!(probe.call_id.as_deref(), Some("exec-real-shape"));
+        let structural = probe.output.unwrap();
+        assert!(structural.has_exact_display_field);
+        assert_eq!(structural.outcome.outcome, expected_outcome);
+    }
+}
+
+#[test]
 fn source_backed_display_contract_distinguishes_non_display_from_revision_gaps() {
     use super::rows::CodexSourceBackedDocumentEligibility;
 

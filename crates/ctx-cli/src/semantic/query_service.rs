@@ -1,20 +1,12 @@
 use std::{
-    collections::{HashMap, HashSet},
     path::Path,
     time::{Duration as StdDuration, Instant},
 };
 
 use anyhow::{anyhow, Result};
-use ctx_history_core::{
-    BatchHydrationRequest, EventHydrationRequest, HydrationFailure, HydrationFailureKind,
-    MAX_BATCH_HYDRATION_EVENTS,
-};
-#[cfg(test)]
-use ctx_history_core::{CaptureProvider, EventRole, EventType};
-use ctx_history_index::{EventRecord, EventSearchCandidate, EventSearchFilters, VerifiedIndex};
+use ctx_history_index::{EventSearchCandidate, EventSearchFilters, VerifiedIndex};
 use serde_json::{json, Value};
 use thiserror::Error;
-use uuid::Uuid;
 
 use crate::compact_json;
 
@@ -28,25 +20,15 @@ use super::{
     },
     vector_store_search::scan_exact_generation,
 };
-#[cfg(test)]
-use super::{
-    model_contract::SEMANTIC_DIMENSIONS,
-    vector_store::{
-        SemanticChunkDocument, SourceBackedSemanticEmbedder, SourceBackedSemanticResolver,
-    },
-    SemanticEventDocument,
-};
-
 mod transport;
 #[cfg(test)]
 pub(in crate::semantic) use transport::*;
 #[cfg(not(test))]
 pub(in crate::semantic) use transport::{
-    daemon_query_request, daemon_service_endpoint_path, daemon_source_hydration_request,
-    daemon_source_refresh_request, read_daemon_service_endpoint_identity, DaemonIpcService,
-    DaemonQueryEndpoint, DaemonQueryResponseTooLarge, DaemonSourceRefreshServiceUnavailable,
+    daemon_query_request, daemon_service_endpoint_path, daemon_source_refresh_request,
+    read_daemon_service_endpoint_identity, DaemonIpcService, DaemonQueryEndpoint,
+    DaemonSourceRefreshServiceUnavailable,
 };
-mod hydration_budget;
 mod semantic_filters;
 mod server;
 use self::semantic_filters::source_event_matches_filters;
@@ -57,6 +39,8 @@ pub(in crate::semantic) use server::{
     daemon_can_begin_idle_shutdown, observe_daemon_query_activity, start_daemon_query_service,
     start_daemon_source_refresh_service, DaemonQueryActivity, DaemonQueryService,
 };
+
+const MAX_SEMANTIC_CORE_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 #[error("source-backed semantic search is not ready ({code}): {detail}")]
@@ -109,240 +93,7 @@ pub(crate) struct SourceBackedSemanticQueryPin {
     pinned: Option<PinnedFlatGeneration>,
 }
 
-#[derive(Debug, Error)]
-#[error(
-    "generation-bound source hydration failed ({code}/{failure_kind}, refresh_scheduled={refresh_scheduled}): {detail}"
-)]
-pub(crate) struct SourceHydrationUnavailable {
-    code: String,
-    failure_kind: &'static str,
-    detail: String,
-    refresh_scheduled: bool,
-}
-
-impl SourceHydrationUnavailable {
-    fn new(
-        code: impl Into<String>,
-        failure_kind: &'static str,
-        detail: impl Into<String>,
-        refresh_scheduled: bool,
-    ) -> Self {
-        Self {
-            code: code.into(),
-            failure_kind,
-            detail: detail.into(),
-            refresh_scheduled,
-        }
-    }
-
-    pub(crate) fn code(&self) -> &str {
-        &self.code
-    }
-
-    fn retryable_after_refresh(&self) -> bool {
-        matches!(
-            self.failure_kind,
-            "temporarily_unavailable"
-                | "confirmed_deleted"
-                | "stale_source_evidence"
-                | "stale_record_evidence"
-                | "missing_record"
-        )
-    }
-
-    fn hydration_failure(&self) -> HydrationFailure {
-        HydrationFailure {
-            kind: match self.failure_kind {
-                "confirmed_deleted" => HydrationFailureKind::ConfirmedDeleted,
-                "stale_source_evidence" => HydrationFailureKind::StaleSourceEvidence,
-                "stale_record_evidence" => HydrationFailureKind::StaleRecordEvidence,
-                "missing_record" => HydrationFailureKind::MissingRecord,
-                "unsupported_parser_revision" => HydrationFailureKind::UnsupportedParserRevision,
-                "invalid_locator" => HydrationFailureKind::InvalidLocator,
-                "content_too_large" => HydrationFailureKind::ContentTooLarge,
-                _ => HydrationFailureKind::TemporarilyUnavailable,
-            },
-            detail: self.to_string(),
-        }
-    }
-}
-
-const SOURCE_HYDRATION_RESPONSE_MAX_BYTES: u64 = 64 * 1024 * 1024;
-const SOURCE_HYDRATION_RETAINED_ITEM_OVERHEAD_BYTES: usize = 512;
-const SOURCE_HYDRATION_REQUEST_TRANSPORT_OVERHEAD_BYTES: usize = 256;
-const SOURCE_HYDRATION_TIMEOUT: StdDuration = StdDuration::from_secs(10);
-const SOURCE_HYDRATION_RECOVERY_TIMEOUT: StdDuration = StdDuration::from_secs(5);
-const SOURCE_HYDRATION_RECOVERY_RETRY: StdDuration = StdDuration::from_millis(50);
-const SOURCE_SEARCH_DISPLAY_MAX_CHARS: usize = 2_048;
-
-#[derive(Debug)]
-struct SourceHydrationOperationBudget {
-    limit_bytes: usize,
-    retained_bytes: usize,
-}
-
-impl SourceHydrationOperationBudget {
-    fn new(limit_bytes: usize) -> Self {
-        Self {
-            limit_bytes,
-            retained_bytes: 0,
-        }
-    }
-
-    fn remaining_response_bytes(&self) -> Result<u64> {
-        let remaining = self.limit_bytes.saturating_sub(self.retained_bytes);
-        if remaining == 0 {
-            return Err(source_hydration_budget_exceeded(
-                "operation-wide source hydration allowance is exhausted before the next daemon request",
-            ));
-        }
-        u64::try_from(remaining).map_err(|_| {
-            source_hydration_budget_exceeded(
-                "operation-wide source hydration allowance exceeds the transport byte domain",
-            )
-        })
-    }
-
-    fn retain_batch(&mut self, items: &[(Uuid, String)]) -> Result<()> {
-        let batch_bytes = items.iter().try_fold(0usize, |total, (_, text)| {
-            retained_source_hydration_text_bytes(text)
-                .and_then(|bytes| total.checked_add(bytes))
-                .ok_or_else(|| {
-                    source_hydration_budget_exceeded(
-                        "source hydration retained-byte accounting overflowed",
-                    )
-                })
-        })?;
-        let retained_bytes = self
-            .retained_bytes
-            .checked_add(batch_bytes)
-            .ok_or_else(|| {
-                source_hydration_budget_exceeded(
-                    "source hydration operation retained-byte accounting overflowed",
-                )
-            })?;
-        if retained_bytes > self.limit_bytes {
-            return Err(source_hydration_budget_exceeded(
-                "source hydration response exceeds the operation-wide retained-byte allowance",
-            ));
-        }
-        self.retained_bytes = retained_bytes;
-        Ok(())
-    }
-}
-
-fn retained_source_hydration_text_bytes(text: &String) -> Option<usize> {
-    escaped_json_string_bytes(text)
-        .max(text.capacity())
-        .checked_add(SOURCE_HYDRATION_RETAINED_ITEM_OVERHEAD_BYTES)
-}
-
-fn escaped_json_string_bytes(value: &str) -> usize {
-    value.bytes().fold(0usize, |total, byte| {
-        total.saturating_add(match byte {
-            b'"' | b'\\' | b'\x08' | b'\x09' | b'\x0a' | b'\x0c' | b'\x0d' => 2,
-            0x00..=0x1f => 6,
-            _ => 1,
-        })
-    })
-}
-
-fn source_hydration_budget_exceeded(detail: impl Into<String>) -> anyhow::Error {
-    SourceHydrationUnavailable::new(
-        "hydration_budget_exceeded",
-        "content_too_large",
-        detail,
-        false,
-    )
-    .into()
-}
-
-fn map_source_hydration_request_error(error: anyhow::Error) -> anyhow::Error {
-    if error
-        .downcast_ref::<DaemonQueryResponseTooLarge>()
-        .is_some()
-    {
-        source_hydration_budget_exceeded(
-            "daemon source hydration response exceeded the remaining operation-wide transport allowance",
-        )
-    } else {
-        error.context(
-            "request daemon generation-bound source hydration without rediscovery fallback",
-        )
-    }
-}
-
-fn preflight_source_hydration_payload(payload: &Value) -> Result<()> {
-    let payload_bytes = hydration_budget::serialized_json_bytes(payload).map_err(|error| {
-        source_hydration_budget_exceeded(format!(
-            "source hydration request size could not be measured safely: {error}"
-        ))
-    })?;
-    let payload_limit = server::DAEMON_QUERY_REQUEST_MAX_BYTES
-        .checked_sub(SOURCE_HYDRATION_REQUEST_TRANSPORT_OVERHEAD_BYTES)
-        .ok_or_else(|| {
-            source_hydration_budget_exceeded(
-                "daemon source hydration request allowance is smaller than its transport envelope",
-            )
-        })?;
-    if payload_bytes > payload_limit {
-        return Err(source_hydration_budget_exceeded(format!(
-            "source hydration request metadata requires {payload_bytes} bytes; maximum is {payload_limit}"
-        )));
-    }
-    Ok(())
-}
-
 impl PinnedSourceBackedGeneration {
-    #[cfg(test)]
-    pub(crate) fn source_hydration_error_for_test(
-        code: &'static str,
-        failure_kind: &'static str,
-    ) -> anyhow::Error {
-        SourceHydrationUnavailable::new(code, failure_kind, "test-only internal detail", false)
-            .into()
-    }
-
-    pub(crate) fn source_hydration_code(error: &anyhow::Error) -> Option<&str> {
-        error
-            .downcast_ref::<SourceHydrationUnavailable>()
-            .map(SourceHydrationUnavailable::code)
-    }
-
-    pub(crate) fn source_hydration_retryable(error: &anyhow::Error) -> bool {
-        error
-            .downcast_ref::<SourceHydrationUnavailable>()
-            .is_some_and(SourceHydrationUnavailable::retryable_after_refresh)
-    }
-
-    pub(crate) fn source_hydration_failure(error: &anyhow::Error) -> Option<HydrationFailure> {
-        error
-            .downcast_ref::<SourceHydrationUnavailable>()
-            .map(SourceHydrationUnavailable::hydration_failure)
-    }
-
-    pub(crate) fn hydrate_source_search_page(
-        index: &VerifiedIndex,
-        data_root: &Path,
-        events: &[&EventRecord],
-    ) -> Result<HashMap<Uuid, String>> {
-        hydrate_source_events_via_daemon(
-            index,
-            data_root,
-            events,
-            "search_display",
-            Some(SOURCE_SEARCH_DISPLAY_MAX_CHARS),
-        )
-    }
-
-    pub(crate) fn hydrate_source_complete_events(
-        index: &VerifiedIndex,
-        data_root: &Path,
-        events: &[&EventRecord],
-    ) -> Result<HashMap<Uuid, String>> {
-        hydrate_source_events_via_daemon(index, data_root, events, "complete", None)
-    }
-
     pub(crate) fn pin_semantic_query_for_source_generation(
         index: &VerifiedIndex,
         data_root: &Path,
@@ -438,353 +189,6 @@ impl PinnedSourceBackedGeneration {
             Some(query_embed_ms),
         )
     }
-
-    #[cfg(test)]
-    pub(crate) fn semantic_candidates_for_source_generation_with_embedding(
-        index: &VerifiedIndex,
-        data_root: &Path,
-        filters: &EventSearchFilters,
-        candidate_limit: usize,
-        embedding: &[f32],
-    ) -> Result<(Vec<EventSearchCandidate>, Value)> {
-        let pin = Self::pin_semantic_query_for_source_generation(index, data_root)?;
-        let Some(pinned) = pin.pinned.as_ref() else {
-            return Ok((Vec::new(), json!({"vector_backend": "flat_f32"})));
-        };
-        source_semantic_candidates_with_embedding(
-            index,
-            pinned,
-            filters,
-            candidate_limit,
-            embedding,
-            None,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn install_source_generation_flat_fixture(
-        index: &VerifiedIndex,
-        data_root: &Path,
-        embedding: &[f32],
-        exact_source_texts: HashMap<Uuid, String>,
-    ) -> Result<()> {
-        if embedding.len() != SEMANTIC_DIMENSIONS {
-            return Err(anyhow!(
-                "source generation fixture embedding has {} dimensions, expected {SEMANTIC_DIMENSIONS}",
-                embedding.len()
-            ));
-        }
-        let mut vector_store =
-            SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root))?;
-        let mut resolver = ExactSourceFixtureResolver {
-            texts: exact_source_texts,
-        };
-        let mut embedder = ExactSourceFixtureEmbedder {
-            embedding: embedding.to_vec(),
-        };
-        for _ in 0..1_024 {
-            let outcome =
-                vector_store.reconcile_source_backed_index(index, &mut resolver, &mut embedder)?;
-            if let Some(unavailable) = outcome.unavailable {
-                return Err(anyhow!(
-                    "source generation fixture hydration was unavailable: {unavailable:?}"
-                ));
-            }
-            if outcome.ready {
-                let semantic_documents = index.semantic_eligible_event_count()?;
-                if !vector_store.source_backed_generation_ready_exact(
-                    index.generation_id(),
-                    semantic_documents,
-                )? {
-                    return Err(anyhow!(
-                        "source generation fixture did not publish an exact flat-F32 acknowledgement"
-                    ));
-                }
-                return Ok(());
-            }
-            if !outcome.work_remaining {
-                return Err(anyhow!(
-                    "source generation fixture stopped before publishing its flat-F32 acknowledgement"
-                ));
-            }
-        }
-        Err(anyhow!(
-            "source generation fixture exceeded its bounded projection page count"
-        ))
-    }
-}
-
-fn hydrate_source_events_via_daemon(
-    index: &VerifiedIndex,
-    data_root: &Path,
-    events: &[&EventRecord],
-    mode: &'static str,
-    max_chars: Option<usize>,
-) -> Result<HashMap<Uuid, String>> {
-    if events.is_empty() {
-        return Ok(HashMap::new());
-    }
-    if events.len() > MAX_BATCH_HYDRATION_EVENTS {
-        return Err(source_hydration_budget_exceeded(format!(
-            "source hydration request has {} items; maximum is {MAX_BATCH_HYDRATION_EVENTS}",
-            events.len()
-        )));
-    }
-
-    let mut operation_budget =
-        SourceHydrationOperationBudget::new(SOURCE_HYDRATION_RESPONSE_MAX_BYTES as usize);
-    let recovery_deadline = Instant::now() + SOURCE_HYDRATION_RECOVERY_TIMEOUT;
-    let requests = events
-        .iter()
-        .map(|event| {
-            event.event_id.validate_contract()?;
-            event.session_id.validate_contract()?;
-            event.locator.validate_contract()?;
-            if event.event_id.source_digest() != event.locator.source().identity().digest()
-                || event.event_id.source_descriptor_digest()
-                    != event.locator.source().exact_descriptor_digest()
-                || event.session_id.source_digest() != event.locator.source().identity().digest()
-                || event.session_id.source_descriptor_digest()
-                    != event.locator.source().exact_descriptor_digest()
-            {
-                return Err(anyhow!(
-                    "source-backed presentation identity does not match its generation locator"
-                ));
-            }
-            EventHydrationRequest::new(event.event_id, event.locator.clone())
-                .and_then(|request| request.with_source_path_hint(event.source_path.clone()))
-                .map_err(anyhow::Error::from)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let request = BatchHydrationRequest::new(requests)?;
-    let items = request
-        .events()
-        .iter()
-        .map(|event| {
-            json!({
-                "event_identity": event.event_id(),
-                "locator": event.locator(),
-                "source_path": event.source_path_hint(),
-            })
-        })
-        .collect::<Vec<_>>();
-    let payload = compact_json(json!({
-        "schema_version": 1,
-        "op": "source_hydrate_batch",
-        "generation_id": index.generation_id(),
-        "mode": mode,
-        "max_chars": max_chars,
-        "items": items,
-    }));
-    drop(request);
-    preflight_source_hydration_payload(&payload)?;
-    let remaining_response_bytes = operation_budget.remaining_response_bytes()?;
-    let mut response = loop {
-        let response = match daemon_source_hydration_request(
-                data_root,
-                payload.clone(),
-                SOURCE_HYDRATION_TIMEOUT,
-                remaining_response_bytes,
-            ) {
-                Ok(Some(response)) => response,
-                Ok(None) => {
-                    return Err(SourceHydrationUnavailable::new(
-                        "resolver_service_unavailable",
-                        "temporarily_unavailable",
-                        "daemon generation-bound source hydration service is unavailable; no provider rediscovery or stored preview fallback was attempted",
-                        false,
-                    )
-                    .into())
-                }
-                Err(error)
-                    if error
-                        .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
-                        .is_some() =>
-                {
-                    return Err(SourceHydrationUnavailable::new(
-                        "resolver_service_unavailable",
-                        "temporarily_unavailable",
-                        format!("{error:#}; no provider rediscovery or stored preview fallback was attempted"),
-                        false,
-                    )
-                    .into())
-                }
-                Err(error) => return Err(map_source_hydration_request_error(error)),
-            };
-        let resolver_recovery_pending = response.get("ok").and_then(Value::as_bool) != Some(true)
-            && response.get("code").and_then(Value::as_str)
-                == Some("resolver_generation_unavailable")
-            && response.get("refresh_scheduled").and_then(Value::as_bool) == Some(true);
-        if !resolver_recovery_pending || Instant::now() >= recovery_deadline {
-            break response;
-        }
-        std::thread::sleep(SOURCE_HYDRATION_RECOVERY_RETRY);
-    };
-    if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        let code = response
-            .get("code")
-            .and_then(Value::as_str)
-            .unwrap_or("source_hydration_unavailable");
-        let kind = response
-            .get("failure_kind")
-            .and_then(Value::as_str)
-            .unwrap_or("temporarily_unavailable");
-        let detail = response
-            .get("detail")
-            .or_else(|| response.get("error"))
-            .and_then(Value::as_str)
-            .unwrap_or("daemon source hydration failed");
-        let refresh_scheduled = response
-            .get("refresh_scheduled")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let kind = source_hydration_failure_kind(kind).ok_or_else(|| {
-            anyhow!("daemon source hydration returned unknown failure kind {kind:?}")
-        })?;
-        return Err(SourceHydrationUnavailable::new(code, kind, detail, refresh_scheduled).into());
-    }
-    if response.get("generation_id").and_then(Value::as_str) != Some(index.generation_id()) {
-        return Err(SourceHydrationUnavailable::new(
-            "resolver_generation_mismatch",
-            "stale_source_evidence",
-            format!(
-                "daemon source hydration response does not match pinned generation {}",
-                index.generation_id()
-            ),
-            true,
-        )
-        .into());
-    }
-    let results = response
-        .get_mut("items")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| anyhow!("daemon source hydration response has no item array"))?;
-    if results.len() != events.len() {
-        return Err(anyhow!(
-            "daemon source hydration returned {} items for a {}-item request",
-            results.len(),
-            events.len()
-        ));
-    }
-    let mut hydrated = HashMap::with_capacity(events.len());
-    let mut returned_event_ids = HashSet::with_capacity(events.len());
-    let mut batch_hydrated = Vec::with_capacity(events.len());
-    for (expected, value) in events.iter().zip(results) {
-        let event_id = value
-            .get("event_id")
-            .and_then(Value::as_str)
-            .and_then(|value| Uuid::parse_str(value).ok())
-            .ok_or_else(|| anyhow!("daemon source hydration item has no valid event ID"))?;
-        if event_id != expected.event_id.as_uuid() || !returned_event_ids.insert(event_id) {
-            return Err(anyhow!(
-                    "daemon source hydration response is reordered, duplicated, or mismatched at event {}",
-                    expected.event_id
-                ));
-        }
-        let text_value = value.get_mut("text").ok_or_else(|| {
-            anyhow!(
-                "daemon source hydration returned no content for event {}",
-                expected.event_id
-            )
-        })?;
-        let mut text = match text_value.take() {
-            Value::String(text) if !text.is_empty() => text,
-            _ => {
-                return Err(anyhow!(
-                    "daemon source hydration returned empty content for event {}",
-                    expected.event_id
-                ))
-            }
-        };
-        if let Some(max_chars) = max_chars {
-            if let Some((byte_index, _)) = text.char_indices().nth(max_chars) {
-                text.truncate(byte_index);
-            }
-        }
-        batch_hydrated.push((event_id, text));
-    }
-    operation_budget.retain_batch(&batch_hydrated)?;
-    hydrated.extend(batch_hydrated);
-    Ok(hydrated)
-}
-
-fn source_hydration_failure_kind(value: &str) -> Option<&'static str> {
-    match value {
-        "temporarily_unavailable" => Some("temporarily_unavailable"),
-        "confirmed_deleted" => Some("confirmed_deleted"),
-        "stale_source_evidence" => Some("stale_source_evidence"),
-        "stale_record_evidence" => Some("stale_record_evidence"),
-        "missing_record" => Some("missing_record"),
-        "unsupported_parser_revision" => Some("unsupported_parser_revision"),
-        "invalid_locator" => Some("invalid_locator"),
-        "content_too_large" => Some("content_too_large"),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-struct ExactSourceFixtureResolver {
-    texts: HashMap<Uuid, String>,
-}
-
-#[cfg(test)]
-impl SourceBackedSemanticResolver for ExactSourceFixtureResolver {
-    fn resolve_document(
-        &mut self,
-        event: &EventRecord,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<SemanticEventDocument, HydrationFailure> {
-        if request.event_id() != event.event_id || request.locator() != &event.locator {
-            return Err(HydrationFailure {
-                kind: HydrationFailureKind::InvalidLocator,
-                detail: "fixture source request did not match the pinned event".to_owned(),
-            });
-        }
-        let text = self
-            .texts
-            .get(&event.event_id.as_uuid())
-            .cloned()
-            .ok_or_else(|| HydrationFailure {
-                kind: HydrationFailureKind::MissingRecord,
-                detail: "fixture exact provider content is absent".to_owned(),
-            })?;
-        Ok(SemanticEventDocument {
-            event_id: event.event_id.as_uuid(),
-            history_record_id: None,
-            session_id: Some(event.session_id.as_uuid()),
-            seq: event.event_sequence,
-            occurred_at_ms: event.occurred_at_unix_ms.unwrap_or_default(),
-            anchor_occurred_at_ms: event.occurred_at_unix_ms.unwrap_or_default(),
-            event_type: EventType::Message,
-            role: Some(EventRole::User),
-            rank_bucket: "source_generation_fixture".to_owned(),
-            provider: Some(CaptureProvider::Codex),
-            source_format: Some(event.source_format.clone()),
-            agent_type: None,
-            session_is_primary: Some(event.is_primary),
-            cwd: event.cwd.clone(),
-            raw_source_path: event.source_path.clone(),
-            record_title: None,
-            record_kind: Some(event.event_type.clone()),
-            record_workspace: event.workspace.clone(),
-            text,
-        })
-    }
-}
-
-#[cfg(test)]
-struct ExactSourceFixtureEmbedder {
-    embedding: Vec<f32>,
-}
-
-#[cfg(test)]
-impl SourceBackedSemanticEmbedder for ExactSourceFixtureEmbedder {
-    fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
-        Ok(chunks
-            .iter()
-            .map(|_| self.embedding.clone())
-            .collect::<Vec<_>>())
-    }
 }
 
 fn source_semantic_candidates_with_embedding(
@@ -811,23 +215,46 @@ fn source_semantic_candidates_with_embedding(
         let raw_candidates = search.hits.len();
         let mut filtered = 0_usize;
         let mut non_positive = 0_usize;
-        let mut candidates = Vec::with_capacity(raw_candidates);
+        let mut positive_hits = Vec::with_capacity(raw_candidates);
         for hit in search.hits {
             if !hit.similarity.is_finite() || hit.similarity <= 0.0 {
                 non_positive = non_positive.saturating_add(1);
                 continue;
             }
-            let event = index.event_by_id(hit.event_id)?.ok_or_else(|| {
+            positive_hits.push(hit);
+        }
+        let event_ids = positive_hits
+            .iter()
+            .map(|hit| hit.event_id)
+            .collect::<Vec<_>>();
+        let records = index
+            .core_events_by_ids_if_bounded(
+                &event_ids,
+                SEMANTIC_EXACT_TOP_K_MAX,
+                MAX_SEMANTIC_CORE_BATCH_BYTES,
+            )?
+            .ok_or_else(|| {
                 source_semantic_not_ready(
                     "semantic_projection_event_mismatch",
                     format!(
-                        "flat-F32 event {} is absent from Core generation {}",
-                        hit.event_id,
+                        "flat-F32 event batch does not map exactly to Core generation {}",
                         index.generation_id()
                     ),
                 )
             })?;
-            if event.event_type != "message" || event.role.as_deref() != Some("user") {
+        let mut candidates = Vec::with_capacity(records.len());
+        for (hit, record) in positive_hits.into_iter().zip(records) {
+            if record.event_id.as_uuid() != hit.event_id {
+                return Err(source_semantic_not_ready(
+                    "semantic_projection_event_mismatch",
+                    format!(
+                        "flat-F32 event {} does not match its ordered Core record in generation {}",
+                        hit.event_id,
+                        index.generation_id()
+                    ),
+                ));
+            }
+            if record.event_type != "message" || record.role.as_deref() != Some("user") {
                 return Err(source_semantic_not_ready(
                     "semantic_projection_event_mismatch",
                     format!(
@@ -837,12 +264,12 @@ fn source_semantic_candidates_with_embedding(
                     ),
                 ));
             }
-            if !source_event_matches_filters(&event, filters) {
+            if !source_event_matches_filters(&record.event, filters) {
                 filtered = filtered.saturating_add(1);
                 continue;
             }
             candidates.push(EventSearchCandidate {
-                event,
+                event: record.event,
                 score: hit.similarity,
             });
         }

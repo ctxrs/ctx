@@ -600,7 +600,7 @@ fn analytics_payloads_omit_sensitive_command_data() {
     ] {
         assert!(
             search_properties.get(retired_store_property).is_none(),
-            "source-backed search emitted retired Store property {retired_store_property}"
+            "Core search emitted retired Store property {retired_store_property}"
         );
     }
     assert!(search_properties.get("query_duration_bucket").is_some());
@@ -688,7 +688,7 @@ fn search_analytics_reports_empty_source_backed_generation() {
     ] {
         assert!(
             properties.get(retired_store_property).is_none(),
-            "source-backed search emitted retired Store property {retired_store_property}"
+            "Core search emitted retired Store property {retired_store_property}"
         );
     }
     assert!(data_root.join("search/lexical").is_dir());
@@ -753,7 +753,7 @@ fn search_analytics_reports_existing_indexed_content() {
     ] {
         assert!(
             properties.get(retired_store_property).is_none(),
-            "source-backed search emitted retired Store property {retired_store_property}"
+            "Core search emitted retired Store property {retired_store_property}"
         );
     }
     assert_analytics_properties_are_allowlisted(properties);

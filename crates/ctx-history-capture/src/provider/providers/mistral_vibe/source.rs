@@ -111,7 +111,7 @@ impl MistralVibeSessionObservation {
     }
 }
 
-pub(crate) fn mistral_vibe_complete_content_revision_from_admitted(
+pub(crate) fn mistral_vibe_source_revision_from_admitted(
     metadata: &Metadata,
     messages: &Metadata,
 ) -> Result<String> {

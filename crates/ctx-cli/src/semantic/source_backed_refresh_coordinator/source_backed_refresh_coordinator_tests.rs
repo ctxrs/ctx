@@ -44,8 +44,6 @@ fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPubl
             tempfile::tempdir().unwrap().path(),
         )
         .unwrap(),
-        source_manifest: None,
-        resolver: None,
         scanned_routes: 1,
         unsupported_routes: 0,
         certified_source_count: 1,
@@ -68,8 +66,12 @@ fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPubl
     }
 }
 
-fn test_resolver() -> Arc<SourceBackedResolverRegistry> {
-    Arc::new(ctx_history_capture::SourceBackedProviderRegistry::new().resolver_registry())
+fn empty_test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
+    let mut publication = test_publication(generation_id);
+    publication.certified_source_count = 0;
+    publication.certified_source_bytes = 0;
+    publication.current = SourceBackedRefreshCurrent::default();
+    publication
 }
 
 fn request_id(response: &Value) -> String {
@@ -78,20 +80,6 @@ fn request_id(response: &Value) -> String {
         .and_then(Value::as_str)
         .expect("request ID")
         .to_owned()
-}
-
-#[test]
-fn recovered_resolver_is_available_before_a_successor_refresh() {
-    let temp = tempfile::tempdir().unwrap();
-    let coordinator = SourceBackedRefreshCoordinator::new();
-    coordinator.install_recovered_resolver("retained-generation".to_owned(), test_resolver());
-
-    let retained = coordinator
-        .resolver_for_generation(temp.path(), "retained-generation")
-        .unwrap();
-
-    assert_eq!(retained.generation_id(), "retained-generation");
-    assert!(retained.source_manifest().is_none());
 }
 
 fn test_catalog_authority(revision: u64, digest_byte: u8) -> ExplicitSourceCatalogAuthority {
@@ -112,7 +100,7 @@ mod receipt_tests;
 #[test]
 fn differing_catalog_authority_queues_a_serial_successor() {
     let temp = tempfile::tempdir().unwrap();
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
     let first_authority = test_catalog_authority(1, 0x11);
     let second_authority = test_catalog_authority(2, 0x22);
     let request = |authority: &ExplicitSourceCatalogAuthority| {
@@ -184,8 +172,93 @@ fn differing_catalog_authority_queues_a_serial_successor() {
 }
 
 #[test]
+fn active_and_pending_refreshes_are_bounded_with_a_typed_busy_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = CoreRefreshEngine::new();
+    let request = |revision: u64| {
+        let digest_byte = u8::try_from(revision).unwrap();
+        let authority = test_catalog_authority(revision, digest_byte);
+        coordinator
+            .handle_ipc_request(
+                temp.path(),
+                &json!({
+                    "schema_version": 1,
+                    "op": SOURCE_REFRESH_REQUEST_OP,
+                    "mode": "wait",
+                    "explicit_source_catalog": authority.to_json(),
+                }),
+            )
+            .unwrap()
+            .expect("source refresh response")
+    };
+
+    let accepted = (1..=SOURCE_REFRESH_ACTIVE_PENDING_LIMIT)
+        .map(|revision| request(u64::try_from(revision).unwrap()))
+        .collect::<Vec<_>>();
+    assert!(accepted.iter().all(|response| response["ok"] == true));
+    assert_eq!(
+        accepted
+            .iter()
+            .map(request_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        SOURCE_REFRESH_ACTIVE_PENDING_LIMIT
+    );
+
+    let busy = request(99);
+    assert_eq!(busy["ok"], false);
+    assert_eq!(busy["status"], "busy");
+    assert_eq!(busy["error_code"], "source_refresh_queue_full");
+    assert_eq!(busy["reason"], "queue_full");
+    assert_eq!(busy["retryable"], true);
+    assert_eq!(
+        busy["active_pending_requests"],
+        SOURCE_REFRESH_ACTIVE_PENDING_LIMIT
+    );
+    assert_eq!(
+        busy["max_active_pending_requests"],
+        SOURCE_REFRESH_ACTIVE_PENDING_LIMIT
+    );
+    assert!(busy.get("request_id").is_none());
+}
+
+#[test]
+fn terminal_history_is_trimmed_independently_from_inflight_capacity() {
+    let coordinator = CoreRefreshEngine::new();
+    let total = SOURCE_REFRESH_ATTEMPT_HISTORY + 3;
+    let mut request_ids = Vec::with_capacity(total);
+
+    for generation in 0..total {
+        let previous = format!("generation-{generation}");
+        let published = format!("generation-{}", generation.saturating_add(1));
+        let request = coordinator.enqueue(Some(previous));
+        request_ids.push(request_id(&request));
+        let run = coordinator
+            .run_next_with(
+                |_, _| Ok(test_publication(published.clone())),
+                || Ok(Some(published.clone())),
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+            .expect("queued refresh");
+        assert!(!run.failed);
+    }
+
+    assert!(request_ids[..3]
+        .iter()
+        .all(|request_id| coordinator.status(request_id).is_none()));
+    assert!(request_ids[3..]
+        .iter()
+        .all(|request_id| coordinator.status(request_id).is_some()));
+
+    let next = coordinator.enqueue(Some(format!("generation-{total}")));
+    assert_eq!(next["request_state"], "queued");
+    assert!(coordinator.has_pending_request());
+}
+
+#[test]
 fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
     assert_eq!(
         coordinator.executor.implementation_name(),
         std::any::type_name::<CaptureOwnedSourceBackedRefreshExecutor>()
@@ -379,7 +452,7 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
     assert_eq!(replay.unsupported_routes, 1);
     assert_eq!(replay.published_explicit_source_catalog, empty_catalog);
 
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
     let request = coordinator.enqueue_periodic(&data_root).unwrap();
     let request_id = request_id(&request);
     let generation_id = replay.generation_id.clone();
@@ -403,6 +476,104 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
     assert_eq!(
         coordinator.status(&request_id).unwrap()["request_state"],
         "published"
+    );
+}
+
+#[test]
+fn automatic_refresh_replaces_a_zstd_settings_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+    let discovery = DiscoveryContext::new(
+        &home,
+        &cwd,
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    );
+    let report = DiscoveryReport {
+        sources: vec![ProviderSource {
+            provider: CaptureProvider::Warp,
+            path: temp.path().join("missing-unsupported.sqlite"),
+            exists: false,
+            source_format: "warp_sqlite",
+            source_kind: ProviderSourceKind::DetectionOnly,
+            import_support: ProviderImportSupport::Unsupported,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Unsupported,
+            unsupported_reason: Some("fixture has no executable source-backed route"),
+        }],
+        issues: Vec::new(),
+    };
+    let mut progress = |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+    let baseline = refresh_all_provider_sources(
+        &discovery,
+        report.clone(),
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        &mut progress,
+    )
+    .unwrap();
+    let pointer_path = index_root.join("active-generation.json");
+    let pointer_before = std::fs::read(&pointer_path).unwrap();
+    let pointer: Value = serde_json::from_slice(&pointer_before).unwrap();
+    let old_directory = pointer["active"]["directory"].as_str().unwrap();
+    let old_generation_path = index_root.join("index-generations").join(old_directory);
+    let meta_path = old_generation_path.join("meta.json");
+    let mut meta: Value = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+    meta["index_settings"]["docstore_compression"] =
+        Value::String("zstd(compression_level=1)".to_owned());
+    meta["index_settings"]["docstore_blocksize"] = Value::from(64 * 1024);
+    std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    assert!(matches!(
+        VerifiedIndex::open(&index_root),
+        Err(IndexError::IndexSettingsMismatch(_))
+    ));
+    assert!(open_published_generation(&data_root).unwrap().is_none());
+
+    let coordinator = CoreRefreshEngine::new();
+    let queued = coordinator.enqueue_periodic(&data_root).unwrap();
+    assert!(queued["previous_generation"].is_null());
+    let run = coordinator
+        .run_next_with(
+            |_, _| {
+                let mut progress =
+                    |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+                refresh_all_provider_sources(
+                    &discovery,
+                    report,
+                    StdDuration::ZERO,
+                    &data_root,
+                    &index_root,
+                    None,
+                    &mut progress,
+                )
+            },
+            || {
+                Ok(open_published_generation(&data_root)?
+                    .map(|index| index.generation_id().to_owned()))
+            },
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("queued automatic rebuild");
+
+    assert!(!run.failed);
+    assert!(run.did_work);
+    assert_eq!(run.job["published_generation"], baseline.generation_id);
+    assert_ne!(std::fs::read(&pointer_path).unwrap(), pointer_before);
+    assert!(!old_generation_path.exists());
+    assert_eq!(
+        pin_active_verified_generation(&data_root)
+            .unwrap()
+            .generation_id(),
+        baseline.generation_id
     );
 }
 
@@ -450,7 +621,7 @@ mod codex_union_tests;
 fn duplicate_concurrent_requests_launch_one_writer() {
     const REQUESTS: usize = 16;
 
-    let coordinator = Arc::new(SourceBackedRefreshCoordinator::new());
+    let coordinator = Arc::new(CoreRefreshEngine::new());
     let barrier = Arc::new(Barrier::new(REQUESTS));
     let mut threads = Vec::new();
     for _ in 0..REQUESTS {
@@ -530,7 +701,7 @@ fn duplicate_concurrent_requests_launch_one_writer() {
 
 #[test]
 fn unchanged_nonempty_publication_is_no_op_by_generation_identity() {
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
     let request = coordinator.enqueue(Some("generation-1".to_owned()));
     let request_id = request_id(&request);
     let run = coordinator
@@ -554,13 +725,14 @@ fn unchanged_nonempty_publication_is_no_op_by_generation_identity() {
 #[test]
 fn concurrent_refresh_request_uses_active_generation_without_reopening_inflight_metadata() {
     let temp = tempfile::tempdir().unwrap();
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
     let request = coordinator.enqueue(None);
     assert_eq!(request["request_state"], "queued");
 
     let index_root = source_backed_index_root(temp.path());
-    std::fs::create_dir_all(&index_root).unwrap();
-    std::fs::write(index_root.join("meta.json"), b"in-flight metadata").unwrap();
+    let inactive = index_root.join("index-generations/in-flight");
+    std::fs::create_dir_all(&inactive).unwrap();
+    std::fs::write(inactive.join("meta.json"), b"in-flight metadata").unwrap();
 
     let coalesced = coordinator
         .handle_ipc_request(
@@ -579,7 +751,7 @@ fn concurrent_refresh_request_uses_active_generation_without_reopening_inflight_
 #[test]
 fn wait_request_during_running_refresh_queues_one_fresh_successor() {
     let temp = tempfile::tempdir().unwrap();
-    let coordinator = Arc::new(SourceBackedRefreshCoordinator::new());
+    let coordinator = Arc::new(CoreRefreshEngine::new());
     let first = coordinator.enqueue(None);
     let first_request_id = request_id(&first);
     let started = Arc::new(Barrier::new(2));
@@ -661,7 +833,7 @@ fn ipc_job_records_source_refresh_only_search_autostart_provenance() {
         }),
     )
     .unwrap();
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
 
     let response = coordinator
         .handle_ipc_request(
@@ -688,7 +860,7 @@ fn ipc_job_records_source_refresh_only_search_autostart_provenance() {
 
 #[test]
 fn failed_refresh_retains_the_previous_published_generation() {
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
     let request = coordinator.enqueue(Some("generation-1".to_owned()));
     let request_id = request_id(&request);
     let run = coordinator
@@ -729,17 +901,12 @@ fn failed_refresh_retains_the_previous_published_generation() {
 
 #[test]
 fn unverified_returned_generation_is_never_recorded_as_published() {
-    let coordinator = SourceBackedRefreshCoordinator::new();
+    let coordinator = CoreRefreshEngine::new();
     let request = coordinator.enqueue(Some("generation-1".to_owned()));
     let request_id = request_id(&request);
-    let resolver = test_resolver();
     let run = coordinator
         .run_next_with(
-            |_, _| {
-                let mut publication = test_publication("generation-2");
-                publication.resolver = Some(resolver);
-                Ok(publication)
-            },
+            |_, _| Ok(test_publication("generation-2")),
             || Ok(Some("generation-1".to_owned())),
             |_| Ok(()),
             |_| Ok(()),
@@ -757,107 +924,53 @@ fn unverified_returned_generation_is_never_recorded_as_published() {
     assert!(status["last_error"]
         .as_str()
         .is_some_and(|error| error.contains("returned generation generation-2")));
-    assert!(!coordinator.has_retained_resolver_for_test("generation-2"));
 }
 
 #[test]
-fn verified_publication_atomically_installs_generation_bound_resolver() {
+fn verified_publication_atomically_installs_pinned_core_receipt() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
-    let missing_coordinator = SourceBackedRefreshCoordinator::new();
-    let missing = missing_coordinator
-        .resolver_for_generation(&data_root, "missing-generation")
-        .expect_err("missing daemon resolver must fail typed");
-    assert_eq!(
-        missing,
-        SourceBackedResolverAccessError::Missing {
-            requested_generation: "missing-generation".to_owned(),
-        }
-    );
-    assert!(missing_coordinator.has_pending_request());
-
-    let resolver = test_resolver();
-    let executor_resolver = Arc::clone(&resolver);
-    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let writer = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?;
-            let receipt = writer.commit(|_| true)?;
-            let mut publication = test_publication(receipt.generation_id.clone());
-            publication.source_manifest = Some(
-                SourceManifest::new(receipt.generation_id, Vec::new(), Vec::new())
-                    .map_err(|error| anyhow!(error.message))?,
-            );
-            publication.resolver = Some(Arc::clone(&executor_resolver));
-            publication.certified_source_count = 0;
-            publication.certified_source_bytes = 0;
-            publication.current = SourceBackedRefreshCurrent::default();
-            Ok(publication)
-        },
-    ));
-    coordinator.enqueue_periodic(&data_root).unwrap();
-
-    let run = coordinator.run_next(&data_root).expect("queued refresh");
-    let generation_id = run.job["published_generation"]
-        .as_str()
-        .expect("published generation");
-    let retained = coordinator
-        .resolver_for_generation(&data_root, generation_id)
-        .expect("exact generation resolver");
-
-    assert_eq!(retained.generation_id(), generation_id);
-    assert!(std::ptr::eq(retained.resolver(), resolver.as_ref()));
-    assert_eq!(
-        retained
-            .source_manifest()
-            .expect("retained source manifest")
-            .core_generation_id,
-        generation_id
-    );
-    assert!(!coordinator.has_pending_request());
-
-    let error = coordinator
-        .resolver_for_generation(&data_root, "stale-query-generation")
-        .expect_err("generation mismatch must not return a resolver");
-    assert_eq!(
-        error,
-        SourceBackedResolverAccessError::GenerationMismatch {
-            requested_generation: "stale-query-generation".to_owned(),
-            retained_generation: generation_id.to_owned(),
-        }
-    );
-    assert!(coordinator.has_pending_request());
-}
-
-#[test]
-fn one_post_commit_open_pins_probe_retirement_and_relational_catch_up() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    fs::create_dir_all(&data_root).unwrap();
-    let old_store = ctx_history_core::database_path(data_root.clone());
-    fs::write(&old_store, b"obsolete-store").unwrap();
-
-    let resolver = test_resolver();
-    let executor_resolver = Arc::clone(&resolver);
-    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
             let receipt = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 WriterOptions::default(),
             )?
             .commit(|_| true)?;
-            let mut publication = test_publication(receipt.generation_id.clone());
-            publication.source_manifest = Some(
-                SourceManifest::new(receipt.generation_id, Vec::new(), Vec::new())
-                    .map_err(|error| anyhow!(error.message))?,
-            );
-            publication.resolver = Some(Arc::clone(&executor_resolver));
-            publication.certified_source_count = 0;
-            publication.certified_source_bytes = 0;
-            publication.current = SourceBackedRefreshCurrent::default();
-            Ok(publication)
+            Ok(empty_test_publication(receipt.generation_id))
+        },
+    ));
+    coordinator.enqueue_periodic(&data_root).unwrap();
+
+    let run = coordinator.run_next(&data_root).expect("queued refresh");
+    let pinned = coordinator
+        .pinned_core_publication()
+        .expect("pinned Core publication");
+
+    assert!(!run.failed);
+    assert_eq!(pinned.generation_id(), run.job["published_generation"]);
+    assert_eq!(
+        pinned.receipt().published_generation,
+        pinned
+            .verified_index()
+            .expect("verified Core index")
+            .generation_id()
+    );
+    assert!(!coordinator.has_pending_request());
+}
+
+#[test]
+fn one_post_commit_open_supplies_core_pin_to_relational_catch_up() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let receipt = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                WriterOptions::default(),
+            )?
+            .commit(|_| true)?;
+            Ok(empty_test_publication(receipt.generation_id))
         },
     ));
     coordinator.enqueue_periodic(&data_root).unwrap();
@@ -877,39 +990,31 @@ fn one_post_commit_open_pins_probe_retirement_and_relational_catch_up() {
         (run, relational)
     });
 
-    assert_eq!(
-        verified_opens, 1,
-        "the post-commit probe must supply retirement and relational catch-up"
-    );
+    assert_eq!(verified_opens, 1, "the committed Core pin must be reused");
     assert!(!run.failed);
-    assert!(!old_store.exists());
     assert_eq!(relational.status["status"], "completed");
     assert!(run.job["timings_us"]["publication_probe"]
-        .as_u64()
-        .is_some_and(|duration| duration > 0));
-    assert!(run.job["timings_us"]["retirement"]
         .as_u64()
         .is_some_and(|duration| duration > 0));
     assert!(relational.status["last_attempt_duration_us"]
         .as_u64()
         .is_some_and(|duration| duration > 0));
-
-    let retained = coordinator
-        .retained_published_generation()
-        .expect("retained generation authority");
+    let pinned = coordinator
+        .pinned_core_publication()
+        .expect("pinned Core publication");
     assert_eq!(
-        retained
+        pinned
             .verified_index()
-            .expect("generation-bound verified pin")
+            .expect("verified Core index")
             .generation_id(),
-        retained.generation_id()
+        pinned.generation_id()
     );
 }
 
 #[test]
 fn failed_post_commit_probe_is_not_reopened_in_the_same_cycle() {
     let temp = tempfile::tempdir().unwrap();
-    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(TestExecutor {
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(TestExecutor {
         calls: Arc::new(AtomicUsize::new(0)),
         generation_id: "claimed-generation".to_owned(),
         failure: None,
@@ -933,102 +1038,15 @@ fn failed_post_commit_probe_is_not_reopened_in_the_same_cycle() {
 }
 
 #[test]
-fn generation_lease_keeps_concurrent_a_search_show_alive_while_b_publishes() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let coordinator = Arc::new(SourceBackedRefreshCoordinator::new());
-    coordinator.enqueue(None);
-    let resolver_a = test_resolver();
-    let run_a = coordinator
-        .run_next_with(
-            |_, _| {
-                let mut publication = test_publication("generation-a");
-                publication.resolver = Some(resolver_a);
-                Ok(publication)
-            },
-            || Ok(Some("generation-a".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .expect("A publication");
-    assert!(!run_a.failed);
-    coordinator.enqueue(Some("generation-a".to_owned()));
-
-    let start_publication = Arc::new(Barrier::new(2));
-    let publication_finished = Arc::new(Barrier::new(2));
-    let lease_a = std::thread::scope(|scope| {
-        let query_coordinator = Arc::clone(&coordinator);
-        let query_root = data_root.clone();
-        let query_start = Arc::clone(&start_publication);
-        let query_finished = Arc::clone(&publication_finished);
-        let query = scope.spawn(move || {
-            let lease = query_coordinator
-                .resolver_for_generation(&query_root, "generation-a")
-                .expect("A search/show resolver lease");
-            query_start.wait();
-            query_finished.wait();
-            assert_eq!(lease.generation_id(), "generation-a");
-            lease
-        });
-
-        let publisher_coordinator = Arc::clone(&coordinator);
-        let publisher_start = Arc::clone(&start_publication);
-        let publisher_finished = Arc::clone(&publication_finished);
-        let publisher = scope.spawn(move || {
-            publisher_start.wait();
-            let resolver_b = test_resolver();
-            let run = publisher_coordinator
-                .run_next_with(
-                    |_, _| {
-                        let mut publication = test_publication("generation-b");
-                        publication.resolver = Some(resolver_b);
-                        Ok(publication)
-                    },
-                    || Ok(Some("generation-b".to_owned())),
-                    |_| Ok(()),
-                    |_| Ok(()),
-                )
-                .expect("B publication");
-            publisher_finished.wait();
-            run
-        });
-
-        let lease = query.join().expect("A query");
-        let run_b = publisher.join().expect("B publisher");
-        assert!(!run_b.failed);
-        lease
-    });
-
-    assert_eq!(
-        coordinator
-            .resolver_for_generation(&data_root, "generation-b")
-            .unwrap()
-            .generation_id(),
-        "generation-b"
-    );
-    coordinator.prune_retired_resolvers_for_test();
-    assert!(coordinator.has_retained_resolver_for_test("generation-a"));
-    drop(lease_a);
-    coordinator.prune_retired_resolvers_for_test();
-    assert!(!coordinator.has_retained_resolver_for_test("generation-a"));
-}
-
-#[test]
-fn trailing_publication_failure_keeps_success_and_installed_resolver() {
-    let temp = tempfile::tempdir().unwrap();
-    let coordinator = SourceBackedRefreshCoordinator::new();
-    let resolver = test_resolver();
+fn trailing_publication_failure_keeps_committed_success() {
+    let coordinator = CoreRefreshEngine::new();
     let failed_callbacks = AtomicUsize::new(0);
     let request = coordinator.enqueue(Some("generation-a".to_owned()));
     let request_id = request_id(&request);
 
     let run = coordinator
         .run_next_with(
-            |_, _| {
-                let mut publication = test_publication("generation-b");
-                publication.resolver = Some(resolver);
-                Ok(publication)
-            },
+            |_, _| Ok(test_publication("generation-b")),
             || Ok(Some("generation-b".to_owned())),
             |_| Err(anyhow!("injected cleanup failure after commit")),
             |_| {
@@ -1046,378 +1064,105 @@ fn trailing_publication_failure_keeps_success_and_installed_resolver() {
         .is_some_and(|error| error.contains("injected cleanup failure after commit")));
     assert_eq!(failed_callbacks.load(Ordering::SeqCst), 0);
     assert_eq!(
-        coordinator
-            .resolver_for_generation(temp.path(), "generation-b")
-            .unwrap()
-            .generation_id(),
-        "generation-b"
-    );
-    assert_eq!(
         coordinator.status(&request_id).unwrap()["request_state"],
         "published"
     );
 }
 
 #[test]
-fn typed_source_hydration_failure_queues_refresh_without_fallback() {
-    let coordinator = SourceBackedRefreshCoordinator::new();
-    let resolver = test_resolver();
-    coordinator.enqueue(Some("generation-1".to_owned()));
-    let run = coordinator
-        .run_next_with(
-            |_, _| {
-                let mut publication = test_publication("generation-2");
-                publication.resolver = Some(resolver);
-                Ok(publication)
-            },
-            || Ok(Some("generation-2".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .expect("queued refresh");
-    assert!(!run.failed);
-    assert!(!coordinator.has_pending_request());
-
-    let failure = HydrationFailure {
-        kind: HydrationFailureKind::StaleSourceEvidence,
-        detail: "source changed after publication".to_owned(),
-    };
-    let returned = coordinator.handle_hydration_failure(
-        Path::new("/typed-source-failure"),
-        "generation-2",
-        failure.clone(),
-    );
-
-    assert_eq!(returned, failure);
-    assert!(coordinator.has_pending_request());
-    for kind in [
-        HydrationFailureKind::TemporarilyUnavailable,
-        HydrationFailureKind::ConfirmedDeleted,
-        HydrationFailureKind::StaleSourceEvidence,
-        HydrationFailureKind::StaleRecordEvidence,
-        HydrationFailureKind::MissingRecord,
-    ] {
-        assert!(hydration_failure_queues_refresh(kind));
-    }
-    assert!(!hydration_failure_queues_refresh(
-        HydrationFailureKind::UnsupportedParserRevision
-    ));
-    assert!(!hydration_failure_queues_refresh(
-        HydrationFailureKind::InvalidLocator
-    ));
-}
-
-#[test]
-fn verified_activation_retires_old_store_family_idempotently() {
+fn restart_discards_incomplete_candidate_and_publishes_from_last_good() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
-    fs::create_dir_all(&data_root).unwrap();
-    let old_artifacts = [
-        "work.sqlite",
-        "work.sqlite-wal",
-        "work.sqlite-shm",
-        "work.sqlite-journal",
-        "work.sqlite.event-search-bulk.lock.sqlite",
-        "work.sqlite.event-search-bulk.lock.sqlite-wal",
-        "vectors.sqlite",
-        "vectors.sqlite-wal",
-        "semantic-worker.lock",
-        "semantic-worker.json.7.tmp",
-        "work.sqlite.ctx-native-cold-00000000-0000-4000-8000-000000000000.sqlite",
-    ]
-    .map(|name| data_root.join(name));
-    for path in &old_artifacts {
-        fs::write(path, b"old-store-sentinel").unwrap();
-    }
-    for directory in ["objects", "spool", "semantic-vectors"] {
-        let nested = data_root.join(directory).join("nested");
-        fs::create_dir_all(&nested).unwrap();
-        fs::write(nested.join("old-history-artifact"), b"old").unwrap();
-    }
-    let preserved = [
-        data_root.join("config.toml"),
-        data_root.join("install.json"),
-        data_root.join("usage.sqlite"),
-        data_root.join("logs/daemon.log"),
-        data_root.join("search/semantic/current"),
-        data_root.join("relational/current"),
-    ];
-    for path in &preserved {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, b"current-state").unwrap();
-    }
-    let calls = Arc::new(AtomicUsize::new(0));
-    let executor_calls = calls.clone();
-    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+    let first = CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
-            executor_calls.fetch_add(1, Ordering::SeqCst);
-            let writer = ctx_history_index::GenerationWriter::open(
+            let _writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 WriterOptions::default(),
             )?;
-            let receipt = writer.commit(|_| true)?;
-            Ok(test_publication(receipt.generation_id))
+            Err(anyhow!("injected cancellation before commit"))
         },
     ));
-    let queued = coordinator.enqueue_periodic(&data_root).unwrap();
-
-    let run = coordinator.run_next(&data_root).expect("queued refresh");
-
-    assert!(!run.failed);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(queued["daemon_mode"], "full");
-    assert_eq!(queued["trigger"], "periodic");
-    assert_eq!(queued["trigger_provenance"], "daemon_scheduler");
-    assert!(source_backed_index_root(&data_root)
-        .join("meta.json")
-        .is_file());
-    for path in &old_artifacts {
-        assert!(
-            !path.exists(),
-            "verified activation retained {}",
-            path.display()
-        );
-    }
-    for directory in ["objects", "spool", "semantic-vectors"] {
-        assert!(data_root
-            .join(directory)
-            .join("nested/old-history-artifact")
-            .is_file());
-    }
-    for path in preserved {
-        assert_eq!(fs::read(path).unwrap(), b"current-state");
-    }
-    remove_old_store_family(&data_root).expect("cleanup is idempotent");
-    assert!(run.job["published_generation"].is_string());
-}
-
-#[cfg(unix)]
-#[test]
-fn old_store_cleanup_preserves_all_directory_targets() {
-    use std::os::unix::fs::symlink;
-
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let outside = temp.path().join("outside");
-    fs::create_dir_all(&data_root).unwrap();
-    fs::create_dir_all(&outside).unwrap();
-    fs::write(outside.join("sentinel"), b"outside").unwrap();
-    let database = ctx_history_core::database_path(data_root.clone());
-    fs::write(&database, b"old-store").unwrap();
-    symlink(&outside, data_root.join("objects")).unwrap();
-
-    remove_old_store_family(&data_root).unwrap();
-
-    assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"outside");
-    assert!(!database.exists());
-    assert!(data_root.join("objects").is_symlink());
-}
-
-#[test]
-fn verified_generation_mismatch_never_retires_old_store() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let writer = ctx_history_index::GenerationWriter::open(
-        source_backed_index_root(&data_root),
-        WriterOptions::default(),
-    )
-    .unwrap();
-    let receipt = writer.commit(|_| true).unwrap();
-    let database = ctx_history_core::database_path(data_root.clone());
-    fs::write(&database, b"old-store").unwrap();
-
-    let error = complete_verified_source_epoch(&data_root, "different-generation")
-        .expect_err("generation mismatch must block retirement");
-
-    assert!(format!("{error:#}").contains(&receipt.generation_id));
-    assert_eq!(fs::read(database).unwrap(), b"old-store");
-}
-
-#[test]
-fn completed_refresh_skips_generation_reopen_when_no_old_store_exists() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    fs::create_dir_all(&data_root).unwrap();
-
-    complete_verified_source_epoch(&data_root, "already-retired").unwrap();
-
-    assert!(!source_backed_index_root(&data_root).exists());
-}
-
-#[test]
-fn failed_pre_activation_refresh_leaves_old_store_bytes_for_forward_retry() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    fs::create_dir_all(&data_root).unwrap();
-    let database = ctx_history_core::database_path(data_root.clone());
-    fs::write(&database, b"old-store-before-failed-activation").unwrap();
-    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(TestExecutor {
-        calls: Arc::new(AtomicUsize::new(0)),
-        generation_id: "unused-generation".to_owned(),
-        failure: Some("provider-neutral executor failed".to_owned()),
-    }));
-    coordinator.enqueue_periodic(&data_root).unwrap();
-
-    let run = coordinator.run_next(&data_root).expect("queued refresh");
-
-    assert!(run.failed);
-    assert!(run.job["published_generation"].is_null());
-    assert!(run.job["last_error"]
-        .as_str()
-        .is_some_and(|error| error.contains("provider-neutral executor failed")));
-    assert_eq!(
-        fs::read(&database).unwrap(),
-        b"old-store-before-failed-activation"
-    );
-    assert!(open_published_generation(&data_root).unwrap().is_none());
-}
-
-#[test]
-fn cold_failed_writer_artifacts_are_retried_as_no_prior_generation() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    fs::create_dir_all(&data_root).unwrap();
-    let database = ctx_history_core::database_path(data_root.clone());
-    let wal = PathBuf::from(format!("{}-wal", database.display()));
-    fs::write(&database, b"old-store").unwrap();
-    fs::write(&wal, b"old-wal").unwrap();
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let executor_attempts = attempts.clone();
-    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let writer = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?;
-            if executor_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err(anyhow!("injected cold writer failure before commit"));
-            }
-            let receipt = writer.commit(|_| true)?;
-            Ok(test_publication(receipt.generation_id))
-        },
-    ));
-
-    let first_request = coordinator.enqueue_periodic(&data_root).unwrap();
-    let first_run = coordinator.run_next(&data_root).expect("first refresh");
-    assert!(first_run.failed);
-    assert!(first_run.job["published_generation"].is_null());
-    assert!(source_backed_index_root(&data_root)
-        .join("meta.json")
-        .is_file());
-    assert!(matches!(
-        VerifiedIndex::open(source_backed_index_root(&data_root)),
-        Err(IndexError::MissingCommitPayload)
-    ));
+    first.enqueue_periodic(&data_root).unwrap();
+    let failed = first.run_next(&data_root).expect("cancelled refresh");
+    assert!(failed.failed);
     assert!(pin_published_generation(&data_root).unwrap().is_none());
-    assert_eq!(fs::read(&database).unwrap(), b"old-store");
-    assert_eq!(fs::read(&wal).unwrap(), b"old-wal");
+    drop(first);
 
-    let retry_request = coordinator
-        .enqueue_periodic(&data_root)
-        .expect("incomplete cold generation must enqueue for retry");
-    let retry_run = coordinator.run_next(&data_root).expect("retry refresh");
-
-    assert_ne!(request_id(&first_request), request_id(&retry_request));
-    assert!(!retry_run.failed);
-    assert!(retry_run.did_work);
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    let published = retry_run.job["published_generation"]
-        .as_str()
-        .expect("retry publication");
-    let pinned = pin_published_generation(&data_root)
-        .unwrap()
-        .expect("verified retry generation");
-    assert_eq!(pinned.generation_id(), published);
-    assert!(!database.exists());
-    assert!(!wal.exists());
-}
-
-#[test]
-fn restart_reconciliation_finishes_commit_before_cleanup_without_rebuild() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let index_root = source_backed_index_root(&data_root);
-    let writer =
-        ctx_history_index::GenerationWriter::open(&index_root, WriterOptions::default()).unwrap();
-    let receipt = writer.commit(|_| true).unwrap();
-    let database = ctx_history_core::database_path(data_root.clone());
-    let wal = PathBuf::from(format!("{}-wal", database.display()));
-    fs::write(&database, b"old-store-after-commit").unwrap();
-    fs::write(&wal, b"old-wal-after-commit").unwrap();
-
-    reconcile_verified_source_epoch(&data_root).unwrap();
-    reconcile_verified_source_epoch(&data_root).unwrap();
-
-    assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().generation_id(),
-        receipt.generation_id
-    );
-    assert!(!database.exists());
-    assert!(!wal.exists());
-}
-
-#[test]
-fn restart_reconciliation_does_not_open_the_index_without_legacy_store_leaves() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let index_root = source_backed_index_root(&data_root);
-    fs::create_dir_all(&index_root).unwrap();
-    fs::write(index_root.join("meta.json"), b"not valid Tantivy metadata").unwrap();
-
-    reconcile_verified_source_epoch(&data_root).unwrap();
-}
-
-#[cfg(unix)]
-#[test]
-fn cleanup_failure_after_commit_is_retried_on_restart_without_rebuild() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    fs::create_dir_all(&data_root).unwrap();
-    let database = ctx_history_core::database_path(data_root.clone());
-    let blocker = temp.path().join("held-old-store");
-    fs::write(&database, b"old-store-after-commit").unwrap();
-    fs::hard_link(&database, &blocker).unwrap();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let executor_calls = Arc::clone(&calls);
-    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+    let restarted = CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
-            executor_calls.fetch_add(1, Ordering::SeqCst);
-            let writer = ctx_history_index::GenerationWriter::open(
+            let receipt = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 WriterOptions::default(),
-            )?;
-            let receipt = writer.commit(|_| true)?;
-            Ok(test_publication(receipt.generation_id))
+            )?
+            .commit(|_| true)?;
+            Ok(empty_test_publication(receipt.generation_id))
         },
     ));
-    coordinator.enqueue_periodic(&data_root).unwrap();
+    restarted.enqueue_periodic(&data_root).unwrap();
+    let published = restarted.run_next(&data_root).expect("restart refresh");
 
-    let run = coordinator.run_next(&data_root).expect("published refresh");
-    let generation_id = run.job["published_generation"]
-        .as_str()
-        .expect("published generation")
-        .to_owned();
-
-    assert!(!run.failed);
-    assert_eq!(run.job["status"], "completed");
-    assert!(run.job["post_publication_error"]
-        .as_str()
-        .is_some_and(|error| error.contains("hard-linked old Store file")));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert!(database.is_file());
-
-    fs::remove_file(blocker).unwrap();
-    reconcile_verified_source_epoch(&data_root).unwrap();
-    reconcile_verified_source_epoch(&data_root).unwrap();
-
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(!published.failed);
+    let pinned = restarted
+        .pinned_core_publication()
+        .expect("restart publication pin");
     assert_eq!(
-        VerifiedIndex::open(source_backed_index_root(&data_root))
-            .unwrap()
-            .generation_id(),
-        generation_id
+        pinned.generation_id(),
+        published.job["published_generation"]
     );
-    assert!(!database.exists());
+}
+
+#[test]
+fn restart_after_commit_replays_noop_without_identity_churn() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let first = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let receipt = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                WriterOptions::default(),
+            )?
+            .commit(|_| true)?;
+            Err(anyhow!(
+                "injected cancellation after commit {}",
+                receipt.generation_id
+            ))
+        },
+    ));
+    first.enqueue_periodic(&data_root).unwrap();
+    let failed = first.run_next(&data_root).expect("cancelled refresh");
+    assert!(failed.failed);
+    let committed = pin_published_generation(&data_root)
+        .unwrap()
+        .expect("atomic commit survives cancellation")
+        .generation_id()
+        .to_owned();
+    drop(first);
+
+    let restarted = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let receipt = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                WriterOptions::default(),
+            )?
+            .commit(|_| true)?;
+            Ok(empty_test_publication(receipt.generation_id))
+        },
+    ));
+    let queued = restarted.enqueue_periodic(&data_root).unwrap();
+    assert_eq!(queued["previous_generation"], committed);
+    let replay = restarted.run_next(&data_root).expect("restart replay");
+
+    assert!(!replay.failed);
+    assert!(!replay.did_work);
+    assert_eq!(replay.job["published_generation"], committed);
+    assert_eq!(
+        restarted
+            .pinned_core_publication()
+            .expect("restart publication pin")
+            .receipt()
+            .published_generation,
+        committed
+    );
 }
 
 #[test]
@@ -1434,14 +1179,14 @@ fn active_generation_pin_fails_closed_when_core_state_is_missing() {
 fn activated_generation_missing_commit_payload_remains_typed_corruption() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
-    let coordinator = SourceBackedRefreshCoordinator::with_executor(Arc::new(
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
             let writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 WriterOptions::default(),
             )?;
             let receipt = writer.commit(|_| true)?;
-            Ok(test_publication(receipt.generation_id))
+            Ok(empty_test_publication(receipt.generation_id))
         },
     ));
     coordinator.enqueue_periodic(&data_root).unwrap();
@@ -1449,19 +1194,29 @@ fn activated_generation_missing_commit_payload_remains_typed_corruption() {
     assert!(!run.failed);
     write_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root), &run.job).unwrap();
 
-    let meta_path = source_backed_index_root(&data_root).join("meta.json");
+    let index_root = source_backed_index_root(&data_root);
+    let pointer: Value =
+        serde_json::from_slice(&std::fs::read(index_root.join("active-generation.json")).unwrap())
+            .unwrap();
+    let directory = pointer["active"]["directory"].as_str().unwrap();
+    let meta_path = index_root
+        .join("index-generations")
+        .join(directory)
+        .join("meta.json");
     let mut meta: Value = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
     assert!(meta.as_object_mut().unwrap().remove("payload").is_some());
     std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
 
-    let error = coordinator
+    drop(coordinator);
+    let restarted = CoreRefreshEngine::new();
+    let error = restarted
         .enqueue_periodic(&data_root)
         .expect_err("activated generation corruption must fail closed");
     assert!(matches!(
         error.downcast_ref::<IndexError>(),
         Some(IndexError::MissingCommitPayload)
     ));
-    assert!(!coordinator.has_pending_request());
+    assert!(!restarted.has_pending_request());
 
     let error = match pin_active_verified_generation(&data_root) {
         Ok(_) => panic!("corrupt active Core state must fail closed before blame"),

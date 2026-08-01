@@ -110,8 +110,6 @@ fn register_openhands_route_with_options(
 ) -> SourceBackedCoordinatorResult<()> {
     let adapter = OpenHandsEventFileAdapterV2::new(source.path.clone());
     let scan_adapter = adapter.clone();
-    let hydration_adapter = adapter.clone();
-    let batch_hydration_adapter = adapter;
     let terminal_state = Arc::new(Mutex::new(None::<OpenHandsTerminalScan>));
     let scan_terminal_state = Arc::clone(&terminal_state);
     let source_terminal_state = Arc::clone(&terminal_state);
@@ -236,12 +234,10 @@ fn register_openhands_route_with_options(
         },
         openhands_owns_source,
         move |target| bind_openhands_target(&source_terminal_state, target),
-        move |request| hydration_adapter.hydrate_event(request),
     )
     .with_complete_inventory_revalidation(move |expected| {
         revalidate_openhands_inventory(&inventory_terminal_state, expected)
-    })
-    .with_batch_hydration(move |request| batch_hydration_adapter.hydrate_batch(request));
+    });
 
     registry.register(executable_route(
         source,

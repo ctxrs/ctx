@@ -14,12 +14,11 @@ Operation = Literal[
     "search",
     "showEvent",
     "showSession",
-    "locateEvent",
-    "locateSession",
     "error",
 ]
 BackendKind = Literal["local", "hosted"]
 SearchBackendMode = Literal["hybrid", "semantic", "lexical"]
+CoreContentPolicyStatus = Literal["selected", "redacted", "omitted"]
 
 
 class _BackendRequired(TypedDict):
@@ -108,9 +107,6 @@ class Citation(TypedDict, total=False):
     provider: Optional[str]
     sessionId: Optional[str]
     eventSeq: Optional[int]
-    sourcePath: Optional[str]
-    sourceExists: Optional[bool]
-    cursor: Optional[str]
 
 
 class _SearchHitRequired(TypedDict):
@@ -128,11 +124,9 @@ class SearchHit(_SearchHitRequired, total=False):
     retrievalScore: Optional[float]
     resultType: Optional[str]
     provider: Optional[str]
+    sourceFormat: Optional[str]
     timestamp: Optional[str]
     cwd: Optional[str]
-    sourcePath: Optional[str]
-    sourceExists: Optional[bool]
-    cursor: Optional[str]
     whyMatched: list[str]
     citations: list[Citation]
     suggestedNextCommands: list[str]
@@ -181,25 +175,27 @@ class SearchResult(_SearchResultRequired, total=False):
     truncation: JsonObject
 
 
-class SourceLocation(TypedDict, total=False):
-    path: Optional[str]
-    cursor: Optional[str]
-    exists: Optional[bool]
-    sourceId: Optional[str]
-    sourceFormat: Optional[str]
+class _CoreContentMetadataRequired(TypedDict):
+    complete: bool
+    policyStatus: CoreContentPolicyStatus
+
+
+class CoreContentMetadata(_CoreContentMetadataRequired, total=False):
+    policyReason: Optional[str]
 
 
 class Event(TypedDict, total=False):
     ctxEventId: Optional[str]
     ctxSessionId: Optional[str]
+    provider: Optional[str]
+    providerSessionId: Optional[str]
+    sourceFormat: Optional[str]
     sequence: Optional[int]
     eventType: Optional[str]
     role: Optional[str]
     occurredAt: Optional[str]
-    source: Optional[JsonValue]
-    cursor: Optional[str]
     text: Optional[str]
-    preview: Optional[str]
+    content: CoreContentMetadata
     citations: list[Citation]
 
 
@@ -209,34 +205,21 @@ class _EventResultRequired(TypedDict):
 
 class EventResult(_EventResultRequired, total=False):
     event: Event
-    source: SourceLocation
 
 
 class SessionSummary(TypedDict, total=False):
     ctxSessionId: Optional[str]
     provider: Optional[str]
     providerSessionId: Optional[str]
+    sourceFormat: Optional[str]
     title: Optional[str]
 
 
 class SessionResult(TypedDict, total=False):
     session: SessionSummary
     events: list[Event]
-    source: SourceLocation
     mode: Optional[str]
     format: Optional[str]
-
-
-class _LocationResultRequired(TypedDict):
-    ctxSessionId: str
-    provider: str
-    source: SourceLocation
-
-
-class LocationResult(_LocationResultRequired, total=False):
-    ctxEventId: Optional[str]
-    providerSessionId: Optional[str]
-    resume: JsonObject
 
 
 AgentHistoryErrorCode = Literal[
@@ -344,26 +327,6 @@ ShowSessionResponse = TypedDict(
         "session": SessionResult,
     },
 )
-LocateEventResponse = TypedDict(
-    "LocateEventResponse",
-    {
-        "contractVersion": Literal["agent-history-v1"],
-        "schemaVersion": Literal[1],
-        "operation": Literal["locateEvent"],
-        "backend": Backend,
-        "location": LocationResult,
-    },
-)
-LocateSessionResponse = TypedDict(
-    "LocateSessionResponse",
-    {
-        "contractVersion": Literal["agent-history-v1"],
-        "schemaVersion": Literal[1],
-        "operation": Literal["locateSession"],
-        "backend": Backend,
-        "location": LocationResult,
-    },
-)
 ErrorResponse = TypedDict(
     "ErrorResponse",
     {
@@ -384,7 +347,5 @@ AgentHistoryResponse = Union[
     SearchResponse,
     ShowEventResponse,
     ShowSessionResponse,
-    LocateEventResponse,
-    LocateSessionResponse,
     ErrorResponse,
 ]

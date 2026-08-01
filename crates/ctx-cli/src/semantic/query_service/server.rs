@@ -7,14 +7,11 @@ use std::{
 #[cfg(unix)]
 use std::{fs, net::Shutdown, os::unix::net::UnixStream};
 
-use crate::semantic::source_backed_refresh_coordinator::SourceBackedRefreshCoordinator;
+use crate::semantic::source_backed_refresh_coordinator::CoreRefreshEngine;
 
-use super::hydration_budget::SOURCE_HYDRATION_MAX_BYTES;
 use super::transport::{remove_daemon_service_endpoint, DaemonIpcService};
 
 mod dispatch;
-mod hydration;
-mod request_validation;
 mod transport;
 #[cfg(windows)]
 #[path = "windows_security.rs"]
@@ -25,17 +22,13 @@ mod windows_security;
 pub(in crate::semantic) use dispatch::{
     handle_daemon_query_stream, handle_daemon_query_stream_inner,
 };
-#[allow(unused_imports)]
-pub(in crate::semantic) use hydration::{
-    handle_source_hydration_batch, handle_source_hydration_batch_with,
-};
 pub(in crate::semantic) use transport::*;
 
 pub(in crate::semantic) struct DaemonQueryService {
     pub(in crate::semantic) data_root: PathBuf,
     pub(in crate::semantic) service: DaemonIpcService,
     pub(in crate::semantic) activity: Arc<DaemonQueryActivity>,
-    pub(in crate::semantic) source_refresh: Arc<SourceBackedRefreshCoordinator>,
+    pub(in crate::semantic) source_refresh: Arc<CoreRefreshEngine>,
     pub(in crate::semantic) thread: Option<std::thread::JoinHandle<()>>,
     #[cfg(unix)]
     pub(in crate::semantic) socket_path: PathBuf,
@@ -50,12 +43,6 @@ pub(in crate::semantic) struct DaemonQueryService {
 pub(in crate::semantic) const DAEMON_QUERY_REQUEST_MAX_BYTES: usize = 256 * 1024;
 pub(in crate::semantic) const DAEMON_QUERY_REQUEST_READ_TIMEOUT: StdDuration =
     StdDuration::from_secs(2);
-pub(in crate::semantic) const DAEMON_SOURCE_HYDRATION_MAX_ITEMS: usize =
-    ctx_history_core::MAX_BATCH_HYDRATION_EVENTS;
-pub(in crate::semantic) const DAEMON_SOURCE_HYDRATION_MAX_WORKERS: usize = 8;
-pub(in crate::semantic) const DAEMON_SOURCE_HYDRATION_MAX_RESPONSE_BYTES: usize =
-    SOURCE_HYDRATION_MAX_BYTES;
-
 impl Drop for DaemonQueryService {
     fn drop(&mut self) {
         self.activity.stop();

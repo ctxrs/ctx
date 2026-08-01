@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ctx_history_core::{EventRole, EventType};
+use ctx_history_core::{EventRole, EventType, RepositoryAbstentionReason};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -20,8 +20,10 @@ use super::parser::{
     read_gemini_transcript_pages_from_frontier, reset_gemini_parse_counters, GeminiNativeEventIds,
     MAX_GEMINI_FILE_TOUCHES_PER_EVENT, MAX_GEMINI_FILE_TOUCH_BYTES_PER_EVENT,
     MAX_GEMINI_NATIVE_PAGE_BYTES, MAX_GEMINI_NATIVE_PAGE_RECORDS,
+    MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES,
 };
-use crate::{CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS};
+use super::source_backed::{project_gemini_test_events, GeminiSourceNativeItemIds};
+use crate::{CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES};
 
 fn fixture_root(temp: &TempDir) -> PathBuf {
     temp.path().join(".gemini")
@@ -91,4 +93,3 @@ mod paging;
 mod parsing;
 mod resume;
 mod retention;
-mod source_backed;

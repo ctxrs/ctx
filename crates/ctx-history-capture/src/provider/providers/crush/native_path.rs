@@ -13,73 +13,26 @@ use crate::{
 };
 
 use super::{
-    projection::{CrushFileRow, CrushMessageRow, CrushReadFileRow, CrushSessionRow},
-    source::{optional_file_columns, optional_read_file_columns, session_columns},
+    projection::{CrushMessageRow, CrushSessionRow},
+    source::session_columns,
 };
 
-const CRUSH_NATIVE_MAX_ROW_BYTES: u64 = 6 * 1024 * 1024;
-const CRUSH_NATIVE_PAGE_OVERHEAD_BYTES: usize = 4 * 1024;
 const CRUSH_NATIVE_MAX_EVENT_TOUCHES: usize = 3_000;
-
-// The query decoder remains phase-complete even though the release source-backed
-// route currently emits only message rows.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CrushNativePhase {
-    Sessions,
-    Messages,
-    Files,
-    ReadFiles,
-}
-
-impl CrushNativePhase {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Sessions => "sessions",
-            Self::Messages => "messages",
-            Self::Files => "files",
-            Self::ReadFiles => "read_files",
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CrushNativeFrontier {
-    phase: CrushNativePhase,
     after_rowid: Option<i64>,
-    next_ordinal: u64,
 }
 
-// This is the per-row hydration result. Boxing the 400-byte message row merely
-// to approach the 184-byte session variant would add an allocation per row.
-// Non-message variants remain part of the phase-complete query data shape.
-#[allow(clippy::large_enum_variant, dead_code)]
-enum CrushHydratedRow {
-    Session {
-        row: CrushSessionRow,
-        retained_bytes: usize,
-    },
-    Message {
-        row: CrushMessageRow,
-        session: Option<CrushSessionRow>,
-        digest_values: Vec<NativeSqliteValue>,
-        retained_bytes: usize,
-    },
-    File {
-        row: CrushFileRow,
-        retained_bytes: usize,
-    },
-    ReadFile {
-        row: CrushReadFileRow,
-        retained_bytes: usize,
-    },
+struct CrushLoadedRow {
+    row: CrushMessageRow,
+    session: Option<CrushSessionRow>,
+    digest_values: Vec<NativeSqliteValue>,
 }
 
 struct CrushNativeSchema {
     session_columns: BTreeSet<String>,
     message_columns: BTreeSet<String>,
-    file_columns: Option<BTreeSet<String>>,
-    read_file_columns: Option<BTreeSet<String>>,
     schema_fingerprint: String,
 }
 
@@ -87,8 +40,6 @@ fn read_native_schema(connection: &Connection) -> Result<CrushNativeSchema> {
     Ok(CrushNativeSchema {
         session_columns: session_columns(connection)?,
         message_columns: super::source::message_columns(connection)?,
-        file_columns: optional_file_columns(connection)?,
-        read_file_columns: optional_read_file_columns(connection)?,
         schema_fingerprint: sqlite_schema_fingerprint(connection)?,
     })
 }

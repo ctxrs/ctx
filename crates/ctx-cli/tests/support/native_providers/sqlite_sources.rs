@@ -204,7 +204,7 @@ fn tabnine_cli_imports_default_agent_home_searches_and_reimports() {
             &temp,
             "SELECT COUNT(*) FROM ctx_events WHERE provider = 'tabnine'"
         ),
-        6
+        7
     );
 
     let search = json_output(ctx(&temp).args([
@@ -283,7 +283,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
             &temp,
             "SELECT COUNT(*) FROM ctx_events WHERE provider = 'deepagents'"
         ),
-        2
+        3
     );
 
     let search = json_output(ctx(&temp).args([
@@ -311,7 +311,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
             &temp,
             "SELECT COUNT(*) FROM ctx_events WHERE provider = 'deepagents'"
         ),
-        2
+        3
     );
 }
 
@@ -333,8 +333,8 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "crush_sqlite",
             "crush/v1/crush.db",
             "crush sqlite search oracle request",
-            1,
-            3,
+            2,
+            4,
         ),
         (
             "goose",
@@ -343,7 +343,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "goose/v14/sessions.db",
             "goose sqlite search oracle",
             1,
-            2,
+            3,
         ),
         (
             "kiro-cli",
@@ -361,7 +361,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "forgecode/v1/forge.db",
             "forgecode oracle",
             1,
-            2,
+            3,
         ),
     ] {
         let temp = tempdir();
@@ -379,7 +379,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
         } else {
             Some(fixture)
         };
-        let _daemon = (stored_provider != "crush").then(|| start_isolated_provider_daemon(&temp));
+        let _daemon = start_isolated_provider_daemon(&temp);
 
         let mut first_command = ctx(&temp);
         if stored_provider == "crush" {
@@ -422,8 +422,8 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
                      WHERE provider = 'crush' AND provider_session_id = 'crush-child' \
                      AND event_type = 'command_output'",
                 ),
-                0,
-                "the successful child-only shell command output must remain absent from Core"
+                1,
+                "the successful child-only shell command output must remain in self-contained Core"
             );
             assert_eq!(
                 source_backed_count(
@@ -453,13 +453,10 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
 
         let result = &search["results"].as_array().unwrap()[0];
         let ctx_event_id = result["ctx_event_id"].as_str().unwrap();
-        let located =
-            json_output(ctx(&temp).args(["locate", "event", ctx_event_id, "--format=json"]));
-        assert_eq!(located["provider"], stored_provider);
-        assert_eq!(located["source"]["source_format"], source_format);
-        assert!(located["source"]["path"]
-            .as_str()
-            .is_some_and(|path| path.ends_with(".db") || path.ends_with(".sqlite3")));
+        let shown = json_output(ctx(&temp).args(["show", "event", ctx_event_id, "--format=json"]));
+        assert_eq!(shown["event"]["provider"], stored_provider);
+        assert_eq!(shown["event"]["source_format"], source_format);
+        assert!(shown["event"].get("source_path").is_none());
 
         let mut second_command = ctx(&temp);
         if stored_provider == "crush" {

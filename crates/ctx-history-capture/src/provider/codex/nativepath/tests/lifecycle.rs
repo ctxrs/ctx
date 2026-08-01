@@ -146,9 +146,11 @@ fn append_resumes_at_complete_prefix_and_preserves_suffix_ordinal() {
 
     assert_eq!(second.disposition, CodexParseDisposition::AppendDelta);
     assert_eq!(second.counters.prefix_bytes_read, initial.len() as u64);
-    assert_eq!(sink.rows.len(), 1);
-    assert_eq!(sink.rows[0].raw_ordinal, 3);
-    assert_eq!(sink.rows[0].event_type, EventType::ToolCall);
+    assert_eq!(sink.rows.len(), 2);
+    assert_eq!(sink.rows[0].raw_ordinal, 2);
+    assert_eq!(sink.rows[0].event_type, EventType::ToolOutput);
+    assert_eq!(sink.rows[1].raw_ordinal, 3);
+    assert_eq!(sink.rows[1].event_type, EventType::ToolCall);
     assert_eq!(second.next_raw_ordinal, 4);
     assert_eq!(second.counters.native_result_records, 1);
 }
@@ -269,8 +271,9 @@ fn append_restarts_at_an_incomplete_records_original_ordinal() {
         complete_prefix.len() as u64
     );
     assert_eq!(appended.counters.native_result_records, 1);
-    assert_eq!(sink.rows.len(), 1);
-    assert_eq!(sink.rows[0].raw_ordinal, 3);
+    assert_eq!(sink.rows.len(), 2);
+    assert_eq!(sink.rows[0].raw_ordinal, 2);
+    assert_eq!(sink.rows[1].raw_ordinal, 3);
     assert_eq!(appended.next_raw_ordinal, 4);
 }
 
@@ -328,7 +331,7 @@ fn checkpoint_round_trip_contains_control_state_but_no_event_body() {
     assert!(!wire.contains("command"));
     assert!(!wire.contains("arguments_preview"));
     let decoded_wire = serde_json::from_str::<Value>(&wire).unwrap();
-    assert_eq!(decoded_wire["version"], 5);
+    assert_eq!(decoded_wire["version"], 7);
     assert_eq!(
         decoded_wire["pending_tool_authorities"]
             .as_array()
@@ -432,7 +435,7 @@ fn append_proof_cannot_cross_canonical_locator_identity() {
         .unwrap();
     assert_eq!(proof.generation.get(), 73);
     assert_eq!(proof.identity.canonical_source_key, "canonical-proof-a");
-    assert_eq!(proof.identity.locator, first_path);
+    assert_eq!(proof.identity.source_path, first_path);
 
     let error = CodexNativeScanner::new_source_backed_v0(
         discover_one(&second_path, "proof-owner"),

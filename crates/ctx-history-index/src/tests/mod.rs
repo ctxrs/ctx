@@ -1,10 +1,11 @@
 use std::sync::atomic::Ordering;
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSourceInventory, EventIdentityInput,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
-    SourceInventoryObservation, SourceObservation, TypedKey,
+    derive_event_id, derive_session_id, CertifiedSourceInventory, CoreRecord, CoreRecordAnnotation,
+    EventIdentityInput, NativeItemKey, NativeSessionKey, RepositoryBinding, RepositoryEvidence,
+    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
+    RepositoryFileObservationKind, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceFrontier, SourceInventoryObservation, SourceObservation, TypedKey,
 };
 use tantivy::{
     collector::DocSetCollector, indexer::NoMergePolicy, query::AllQuery,
@@ -129,7 +130,7 @@ fn stage_exact_replay(writer: &mut GenerationWriter, source: &SourceKey) -> Cert
     base
 }
 
-fn document(source: &SourceKey, sequence: u64, body: &str) -> LexicalDocument {
+fn document(source: &SourceKey, sequence: u64, body: &str) -> CoreRecord {
     document_for_session(source, "session", sequence, body)
 }
 
@@ -138,7 +139,7 @@ fn document_for_session(
     native_session_id: &str,
     sequence: u64,
     body: &str,
-) -> LexicalDocument {
+) -> CoreRecord {
     let native_session_coordinate = TypedKey::utf8(native_session_id).unwrap();
     let session_key =
         NativeSessionKey::native_id("session", native_session_coordinate.clone()).unwrap();
@@ -161,40 +162,38 @@ fn document_for_session(
         subrecord_selector: None,
     })
     .unwrap();
-    LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator: SourceRecordLocator::new(
-            source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset: sequence * 100,
-                byte_length: 100,
-                physical_ordinal: sequence,
-                native_session_key: Some(native_session_coordinate),
-                native_event_key: Some(TypedKey::U64(sequence)),
-            },
-            LocatorRevisionPolicy::StableRecordEvidence,
-            None,
-            [sequence as u8; 32],
-        )
-        .unwrap(),
-        provider_session_id: Some(native_session_id.to_owned()),
-        branch: Some("main".to_owned()),
-        source_path: Some(format!("/history/{native_session_id}.jsonl")),
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: sequence,
-        occurred_at_unix_ms: Some(1_700_000_000_000 + sequence as i64),
-        event_type: "message".to_owned(),
-        role: Some("user".to_owned()),
-        body: body.to_owned(),
-        workspace: Some("ctx".to_owned()),
-        cwd: Some("/work/ctx".to_owned()),
-        touched_files: vec!["src/lib.rs".to_owned()],
-    }
+        session_id,
+        source.clone(),
+        sequence,
+        "message",
+        "primary",
+        true,
+        "index-test-core-record-v1",
+        body,
+    )
+    .unwrap();
+    record.provider_session_id = Some(native_session_id.to_owned());
+    record.native_event_id = Some(TypedKey::U64(sequence));
+    record.branch = Some("main".to_owned());
+    record.occurred_at_unix_ms = Some(1_700_000_000_000 + sequence as i64);
+    record.role = Some("user".to_owned());
+    record.workspace = Some("ctx".to_owned());
+    record.cwd = Some("/work/ctx".to_owned());
+    record
+}
+
+fn with_annotation(mut record: CoreRecord, annotation: CoreRecordAnnotation) -> CoreRecord {
+    record.content.structured_content = annotation.structured_content;
+    record.metadata = annotation.metadata;
+    record.repository_candidate_evidence = annotation.repository_candidate_evidence;
+    record.repository_bindings = annotation.repository_bindings;
+    record.repository_abstentions = annotation.repository_abstentions;
+    record.repository_file_observations = annotation.repository_file_observations;
+    record.repository_vcs_observations = annotation.repository_vcs_observations;
+    record
 }
 
 fn filtered_session_ids(index: &VerifiedIndex, filters: EventSearchFilters) -> Vec<Uuid> {
@@ -211,6 +210,27 @@ fn filtered_session_ids(index: &VerifiedIndex, filters: EventSearchFilters) -> V
 fn sorted_uuids(mut ids: Vec<Uuid>) -> Vec<Uuid> {
     ids.sort();
     ids
+}
+
+fn indexed_document(record: CoreRecord) -> TantivyDocument {
+    let schema = lexical_schema();
+    let fields = fields_from_schema(&schema).unwrap();
+    let encoded = record.encode_stored().unwrap();
+    let content_bytes = core_content_bytes(&record.content).unwrap();
+    let source_fields = IndexSourceFields::new(&record.source, &source_token(&record.source));
+    IndexDocument::from_core(fields, record, encoded, content_bytes, source_fields)
+        .unwrap()
+        .into_tantivy_document()
+}
+
+fn decoded_stored_core(searcher: &Searcher, address: tantivy::DocAddress) -> CoreRecord {
+    let fields = fields_from_schema(searcher.schema()).unwrap();
+    let document: TantivyDocument = searcher.doc(address).unwrap();
+    let encoded = document
+        .get_first(fields.core_record)
+        .and_then(|value| value.as_bytes())
+        .unwrap();
+    CoreRecord::decode_stored(encoded).unwrap()
 }
 
 fn collect_source_pages(
@@ -256,17 +276,21 @@ fn publish_unchecked_generation(
     prepared.set_payload(
         &serde_json::to_string(&CommitPayload {
             version: COMMIT_PAYLOAD_VERSION,
-            generation_id,
+            generation_id: generation_id.clone(),
         })
         .unwrap(),
     );
     prepared.commit().unwrap();
     writer.wait_merging_threads().unwrap();
-    sync_directory(root).unwrap();
+    let pointer = load_active_generation_pointer(root).unwrap().unwrap();
+    let active =
+        GenerationSlot::new(generation_id, pointer.active().directory().to_owned()).unwrap();
+    publish_active_generation_pointer(root, &ActiveGenerationPointer::new(active, None).unwrap())
+        .unwrap();
 }
 
 fn open_unverified_generation(root: &Path) -> (Searcher, GenerationManifest) {
-    let directory = DurableMmapDirectory::open(root).unwrap();
+    let directory = DurableMmapDirectory::open(active_generation_path(root)).unwrap();
     let index = Index::open(directory).unwrap();
     let metas = index.load_metas().unwrap();
     let manifest = load_manifest_for_metas(root, &metas).unwrap();
@@ -276,6 +300,12 @@ fn open_unverified_generation(root: &Path) -> (Searcher, GenerationManifest) {
         .try_into()
         .unwrap();
     (reader.searcher(), manifest)
+}
+
+fn active_generation_path(root: &Path) -> PathBuf {
+    let pointer = load_active_generation_pointer(root).unwrap().unwrap();
+    root.join(INDEX_GENERATIONS_DIRECTORY)
+        .join(pointer.active().directory())
 }
 
 fn multisegment_fixture(
@@ -295,7 +325,7 @@ fn multisegment_fixture(
         writer.begin_source(current.clone()).unwrap();
         for sequence in 1..=documents_per_source {
             writer
-                .add_document(document_for_session(
+                .add_core_record(document_for_session(
                     &current,
                     &format!("session-{source_index}"),
                     sequence,

@@ -313,15 +313,6 @@ impl RootAuthorizedProviderSqliteSnapshot {
             .map_err(map_sqlite_source_access_error)
     }
 
-    fn evidence(&self) -> Result<&SqliteSourceEvidence> {
-        self.snapshot
-            .as_ref()
-            .ok_or(CaptureError::SystemInvariant(
-                "provider SQLite source snapshot is inactive",
-            ))
-            .map(SqliteSourceReadSnapshot::evidence)
-    }
-
     fn finish(mut self) -> Result<SqliteSourceEvidence> {
         let snapshot = self.snapshot.take().ok_or(CaptureError::SystemInvariant(
             "provider SQLite source snapshot is inactive",
@@ -382,19 +373,7 @@ impl ReadOnlySqliteConnection {
             .connection()
     }
 
-    pub(crate) fn evidence(&self) -> Result<&SqliteSourceEvidence> {
-        self.snapshot
-            .as_ref()
-            .ok_or(CaptureError::SystemInvariant(
-                "provider SQLite source snapshot is inactive",
-            ))?
-            .evidence()
-    }
-
-    #[allow(
-        dead_code,
-        reason = "named provider adapters adopt explicit finish in their separately owned migrations"
-    )]
+    #[cfg(test)]
     pub(crate) fn finish(mut self) -> Result<SqliteSourceEvidence> {
         self.snapshot
             .take()

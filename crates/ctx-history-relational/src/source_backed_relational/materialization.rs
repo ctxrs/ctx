@@ -1,40 +1,51 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ctx_history_core::{
-    EventRole, FileChangeKind, ProjectionContractError, SourceKey, SourceResolverContractError,
-    StableEntityId, StableEntityKind,
+    CoreContentPolicyStatus, CoreRecord, ProjectionContractError, RepositoryBinding, SourceKey,
 };
-use rusqlite::{params, Connection, Statement};
+use rusqlite::{params, Connection, OptionalExtension, Statement};
+use serde::Serialize;
+use uuid::Uuid;
 
 use super::{
-    hex,
-    manifest::{ManifestSource, ValidatedManifest},
-    sqlite_i64, sqlite_u64, RelationalEventMetadata, RelationalFileTouchMetadata,
-    RelationalProjectionError, RelationalProjectionRecord, RelationalSessionMetadata,
-    RelationalSourceMetadata, Result,
+    manifest::ValidatedGeneration, sqlite_i64, sqlite_u64, sqlite_u64_ordered_text,
+    RelationalProjectionError, RelationalProjectionRecord, RelationalSourceMetadata, Result,
 };
 
-const MAX_METADATA_TEXT_BYTES: usize = 64 * 1024;
-const MAX_PATH_BYTES: usize = 64 * 1024;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct ProjectionCounts {
+    pub(super) sources: i64,
+    pub(super) sessions: i64,
+    pub(super) events: i64,
+    pub(super) repository_bindings: i64,
+    pub(super) file_observations: i64,
+    pub(super) vcs_observations: i64,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct SourceProjectionSnapshot {
+    pub(super) counts: ProjectionCounts,
+    session_ids: BTreeSet<String>,
+}
 
 pub(super) fn materialize_records<I>(
     conn: &Connection,
     expected: BTreeSet<String>,
-    manifest: &ValidatedManifest,
+    generation: &ValidatedGeneration,
     records: I,
 ) -> Result<()>
 where
     I: Iterator<Item = Result<RelationalProjectionRecord>>,
 {
-    configure_bulk_materialization(conn)?;
-    let deferred_indexes = defer_secondary_indexes_for_full_load(conn, &expected, manifest)?;
+    conn.execute_batch("PRAGMA cache_size = -65536; PRAGMA temp_store = MEMORY;")?;
     let mut statements = MaterializationStatements::prepare(conn)?;
     let mut current: Option<OpenSource> = None;
     let mut received = BTreeSet::new();
+
     for record in records {
-        let record = record?;
-        match record {
+        match record? {
             RelationalProjectionRecord::BeginSource(metadata) => {
+                let metadata = *metadata;
                 if current.is_some() {
                     return stream_order("a source began before the prior source ended");
                 }
@@ -47,41 +58,52 @@ where
                 if !received.insert(source_id.clone()) {
                     return stream_order(format!("source {source_id} appeared more than once"));
                 }
-                let source = manifest.sources.get(&source_id).ok_or_else(|| {
+                let expected_source = generation.sources.get(&source_id).ok_or_else(|| {
                     RelationalProjectionError::InvalidRecord(format!(
-                        "source {source_id} is absent from the manifest"
+                        "source {source_id} is absent from the pinned Core generation"
                     ))
                 })?;
                 metadata
                     .source
-                    .validate_exact_descriptor(source.certificate.observation().source())
+                    .validate_exact_descriptor(&expected_source.source)
                     .map_err(contract_record_error)?;
-                validate_source_metadata(&metadata)?;
-                statements.insert_source(&metadata, source)?;
+                if metadata.revision_digest != expected_source.revision_digest
+                    || metadata.parser_revision != expected_source.parser_revision
+                    || metadata.indexed_event_count != expected_source.indexed_event_count
+                    || metadata.health != expected_source.health
+                {
+                    return invalid_record("source metadata does not match the pinned generation");
+                }
+                let source_key = statements.insert_source(&metadata)?;
                 current = Some(OpenSource {
                     source_id,
                     source: metadata.source,
-                    expected_events: source.certificate.counts().indexed_documents,
+                    source_key,
+                    parser_revision: metadata.parser_revision,
+                    expected_events: metadata.indexed_event_count,
                     received_events: 0,
                 });
             }
-            RelationalProjectionRecord::Session(session) => {
-                let open = current_source(&current)?;
-                validate_session(&session, &open.source)?;
-                statements.insert_session(&open.source_id, &session)?;
-            }
-            RelationalProjectionRecord::Event(event) => {
-                let open = current_source_mut(&mut current)?;
-                validate_event(&event, &open.source)?;
-                statements.insert_event(&open.source_id, &event)?;
+            RelationalProjectionRecord::CoreRecord(record) => {
+                let open = current.as_mut().ok_or_else(|| {
+                    RelationalProjectionError::InvalidStreamOrder(
+                        "a Core record appeared outside a source scope".to_owned(),
+                    )
+                })?;
+                record.validate_contract().map_err(core_record_error)?;
+                record
+                    .source
+                    .validate_exact_descriptor(&open.source)
+                    .map_err(contract_record_error)?;
+                if record.parser_revision != open.parser_revision {
+                    return invalid_record(
+                        "event parser revision does not match its source metadata",
+                    );
+                }
+                statements.insert_core_record(open.source_key, &record)?;
                 open.received_events = open.received_events.checked_add(1).ok_or(
                     RelationalProjectionError::CountOverflow("source event count"),
                 )?;
-            }
-            RelationalProjectionRecord::FileTouch(file) => {
-                let open = current_source(&current)?;
-                validate_file_touch(&file, &open.source)?;
-                statements.insert_file_touch(&open.source_id, &file)?;
             }
             RelationalProjectionRecord::EndSource { source_id } => {
                 let open = current.take().ok_or_else(|| {
@@ -113,493 +135,416 @@ where
             received: received.into_iter().collect(),
         });
     }
-    drop(statements);
-    restore_secondary_indexes(conn, deferred_indexes)?;
     Ok(())
-}
-
-fn configure_bulk_materialization(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "PRAGMA cache_size = -65536;
-         PRAGMA temp_store = MEMORY;",
-    )?;
-    Ok(())
-}
-
-fn defer_secondary_indexes_for_full_load(
-    conn: &Connection,
-    expected: &BTreeSet<String>,
-    manifest: &ValidatedManifest,
-) -> Result<Vec<String>> {
-    if expected.is_empty() || expected.len() != manifest.sources.len() {
-        return Ok(Vec::new());
-    }
-    let table_rows_exist: bool = conn.query_row(
-        "SELECT EXISTS (
-            SELECT 1 FROM source_backed_sources
-            UNION ALL SELECT 1 FROM source_backed_sessions
-            UNION ALL SELECT 1 FROM source_backed_events
-            UNION ALL SELECT 1 FROM source_backed_files_touched
-         )",
-        [],
-        |row| row.get(0),
-    )?;
-    if table_rows_exist {
-        return Ok(Vec::new());
-    }
-
-    let indexes = {
-        let mut statement = conn.prepare(
-            "SELECT name, sql
-             FROM sqlite_schema
-             WHERE type = 'index'
-               AND sql IS NOT NULL
-               AND tbl_name IN (
-                   'source_backed_sources',
-                   'source_backed_sessions',
-                   'source_backed_events',
-                   'source_backed_files_touched'
-               )
-             ORDER BY name",
-        )?;
-        let indexes = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        indexes
-    };
-    for (name, _) in &indexes {
-        conn.execute_batch(&format!("DROP INDEX {}", quoted_identifier(name)))?;
-    }
-    Ok(indexes.into_iter().map(|(_, sql)| sql).collect())
-}
-
-fn restore_secondary_indexes(conn: &Connection, indexes: Vec<String>) -> Result<()> {
-    for sql in indexes {
-        conn.execute_batch(&sql)?;
-    }
-    Ok(())
-}
-
-fn quoted_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 struct OpenSource {
     source_id: String,
     source: SourceKey,
+    source_key: i64,
+    parser_revision: String,
     expected_events: u64,
     received_events: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct ProjectionCounts {
-    pub(super) sources: i64,
-    pub(super) sessions: i64,
-    pub(super) events: i64,
-    pub(super) file_touches: i64,
-}
-
-#[derive(Debug, Default)]
-pub(super) struct SourceProjectionSnapshot {
-    pub(super) counts: ProjectionCounts,
-    session_ids: BTreeSet<String>,
 }
 
 struct MaterializationStatements<'conn> {
     source: Statement<'conn>,
     session: Statement<'conn>,
     event: Statement<'conn>,
-    file_touch: Statement<'conn>,
+    repository_binding: Statement<'conn>,
+    repository_binding_key: Statement<'conn>,
+    event_repository: Statement<'conn>,
+    alias: Statement<'conn>,
+    evidence: Statement<'conn>,
+    abstention: Statement<'conn>,
+    file: Statement<'conn>,
+    vcs: Statement<'conn>,
+    vcs_parent: Statement<'conn>,
 }
 
 impl<'conn> MaterializationStatements<'conn> {
     fn prepare(conn: &'conn Connection) -> Result<Self> {
         Ok(Self {
             source: conn.prepare(
-                "INSERT INTO source_backed_sources (
-            source_id, source_identity, source_descriptor_json, certificate_json,
-            certificate_digest, provider, source_format, source_root, source_path, cwd,
-            revision_kind, parser_revision, certified_bytes, content_digest_hex,
-            indexed_event_count
-         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
-         )",
+                "INSERT INTO core_sources (
+                    source_id, source_digest, provider, source_format, schema_variant,
+                    provider_identity_version, parser_revision, revision_digest,
+                    indexed_event_count, health
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 RETURNING source_key",
             )?,
             session: conn.prepare(
-                "INSERT INTO source_backed_sessions (
-            ctx_session_id, session_identity, source_id, parent_ctx_session_id,
-            parent_session_identity, root_ctx_session_id, root_session_identity,
-            provider_session_id, external_agent_id, agent_type, role_hint, is_primary,
-            branch, workspace, cwd, source_path, status, fidelity, started_at_ms,
-            ended_at_ms
-         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-            ?15, ?16, ?17, ?18, ?19, ?20
-         )
-         ON CONFLICT(ctx_session_id) DO UPDATE SET
-            parent_ctx_session_id = excluded.parent_ctx_session_id,
-            parent_session_identity = excluded.parent_session_identity,
-            root_ctx_session_id = excluded.root_ctx_session_id,
-            root_session_identity = excluded.root_session_identity,
-            provider_session_id = excluded.provider_session_id,
-            external_agent_id = excluded.external_agent_id,
-            agent_type = excluded.agent_type,
-            role_hint = excluded.role_hint,
-            is_primary = excluded.is_primary,
-            branch = excluded.branch,
-            workspace = excluded.workspace,
-            cwd = excluded.cwd,
-            source_path = excluded.source_path,
-            status = excluded.status,
-            fidelity = excluded.fidelity,
-            started_at_ms = excluded.started_at_ms,
-            ended_at_ms = excluded.ended_at_ms
-         WHERE source_backed_sessions.session_identity = excluded.session_identity
-           AND source_backed_sessions.source_id = excluded.source_id",
+                "INSERT INTO core_sessions (
+                    ctx_session_id, session_digest, source_key, parent_ctx_session_id,
+                    parent_session_digest, root_ctx_session_id, root_session_digest,
+                    provider_session_id, agent_type, is_primary, branch, workspace, cwd,
+                    first_event_seq, started_at_ms, ended_at_ms, health
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                    ?14, ?15, ?15, 'ready'
+                 )
+                 ON CONFLICT(ctx_session_id) DO UPDATE SET
+                    parent_ctx_session_id = CASE
+                        WHEN excluded.first_event_seq < core_sessions.first_event_seq
+                        THEN excluded.parent_ctx_session_id ELSE core_sessions.parent_ctx_session_id END,
+                    parent_session_digest = CASE
+                        WHEN excluded.first_event_seq < core_sessions.first_event_seq
+                        THEN excluded.parent_session_digest ELSE core_sessions.parent_session_digest END,
+                    root_ctx_session_id = CASE
+                        WHEN excluded.first_event_seq < core_sessions.first_event_seq
+                        THEN excluded.root_ctx_session_id ELSE core_sessions.root_ctx_session_id END,
+                    root_session_digest = CASE
+                        WHEN excluded.first_event_seq < core_sessions.first_event_seq
+                        THEN excluded.root_session_digest ELSE core_sessions.root_session_digest END,
+                    provider_session_id = CASE
+                        WHEN excluded.first_event_seq < core_sessions.first_event_seq
+                        THEN excluded.provider_session_id ELSE core_sessions.provider_session_id END,
+                    agent_type = CASE
+                        WHEN excluded.first_event_seq < core_sessions.first_event_seq
+                        THEN excluded.agent_type ELSE core_sessions.agent_type END,
+                    is_primary = CASE
+                        WHEN excluded.first_event_seq < core_sessions.first_event_seq
+                        THEN excluded.is_primary ELSE core_sessions.is_primary END,
+                    branch = CASE
+                        WHEN excluded.first_event_seq < core_sessions.first_event_seq
+                        THEN excluded.branch ELSE core_sessions.branch END,
+                    workspace = CASE
+                        WHEN excluded.first_event_seq < core_sessions.first_event_seq
+                        THEN excluded.workspace ELSE core_sessions.workspace END,
+                    cwd = CASE
+                        WHEN excluded.first_event_seq < core_sessions.first_event_seq
+                        THEN excluded.cwd ELSE core_sessions.cwd END,
+                    first_event_seq = MIN(core_sessions.first_event_seq, excluded.first_event_seq),
+                    started_at_ms = CASE
+                        WHEN core_sessions.started_at_ms IS NULL THEN excluded.started_at_ms
+                        WHEN excluded.started_at_ms IS NULL THEN core_sessions.started_at_ms
+                        ELSE MIN(core_sessions.started_at_ms, excluded.started_at_ms) END,
+                    ended_at_ms = CASE
+                        WHEN core_sessions.ended_at_ms IS NULL THEN excluded.ended_at_ms
+                        WHEN excluded.ended_at_ms IS NULL THEN core_sessions.ended_at_ms
+                        ELSE MAX(core_sessions.ended_at_ms, excluded.ended_at_ms) END
+                 WHERE core_sessions.session_digest = excluded.session_digest
+                   AND core_sessions.source_key = excluded.source_key
+                 RETURNING session_key",
             )?,
             event: conn.prepare(
-                "INSERT INTO source_backed_events (
-            ctx_event_id, event_identity, source_id, ctx_session_id, session_identity, event_seq,
-            event_type, role, occurred_at_ms, fidelity, native_locator_json, record_digest
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO core_events (
+                    ctx_event_id, event_digest, session_key, native_event_id_json, event_seq,
+                    event_type, role, occurred_at_ms, normalization_revision,
+                    content_policy_revision, content_policy_status
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 RETURNING event_key",
             )?,
-            file_touch: conn.prepare(
-                "INSERT INTO source_backed_files_touched (
-            ctx_file_touch_id, source_id, ctx_event_id, event_identity, ctx_session_id,
-            session_identity, path, old_path, change_kind, line_count_delta,
-            confidence, created_at_ms, updated_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            repository_binding: conn.prepare(
+                "INSERT OR IGNORE INTO core_repository_bindings (
+                    descriptor_key, binding_id, logical_repository_id, checkout_id,
+                    worktree_id, git_object_format, association_policy_revision
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?,
+            repository_binding_key: conn.prepare(
+                "SELECT repository_binding_key
+                 FROM core_repository_bindings
+                 WHERE descriptor_key = ?1",
+            )?,
+            event_repository: conn.prepare(
+                "INSERT INTO core_event_repositories (event_key, repository_binding_key)
+                 VALUES (?1, ?2)",
+            )?,
+            alias: conn.prepare(
+                "INSERT INTO core_repository_aliases (
+                    repository_binding_key, ordinal, kind, host, namespace, name, remote_name
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?,
+            evidence: conn.prepare(
+                "INSERT INTO core_repository_evidence (
+                    repository_binding_key, ordinal, kind, confidence
+                 ) VALUES (?1, ?2, ?3, ?4)",
+            )?,
+            abstention: conn.prepare(
+                "INSERT INTO core_repository_abstentions (
+                    event_key, ordinal, evidence_kind, reason, association_policy_revision
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?,
+            file: conn.prepare(
+                "INSERT INTO core_file_observations (
+                    event_key, repository_binding_key, ordinal, relative_path,
+                    prior_relative_path, observation_kind, observed_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?,
+            vcs: conn.prepare(
+                "INSERT INTO core_vcs_observations (
+                    event_key, repository_binding_key, ordinal, observation_kind,
+                    object_format, object_id, reference_name, relative_path, observed_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )?,
+            vcs_parent: conn.prepare(
+                "INSERT INTO core_vcs_parent_objects (
+                    event_key, observation_ordinal, parent_ordinal, object_format, object_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
             )?,
         })
     }
 
-    fn insert_source(
-        &mut self,
-        metadata: &RelationalSourceMetadata,
-        manifest: &ManifestSource,
-    ) -> Result<()> {
-        let certificate = &manifest.certificate;
-        let source = certificate.observation().source();
-        self.source.execute(params![
-            source.identity().as_uuid().to_string(),
-            source
-                .identity()
-                .encode_canonical()
-                .map_err(contract_record_error)?
-                .as_slice(),
-            serde_json::to_vec(source)?,
-            manifest.certificate_json,
-            manifest.certificate_digest.as_slice(),
-            source.provider(),
-            source.source_format(),
-            metadata.source_root,
-            metadata.source_path,
-            metadata.cwd,
-            certificate.observation().revision_kind(),
-            certificate.parser_revision(),
-            sqlite_i64(certificate.counts().certified_bytes, "certified bytes")?,
-            hex(certificate.content_digest()),
-            sqlite_i64(
-                certificate.counts().indexed_documents,
-                "source indexed documents"
-            )?,
-        ])?;
-        Ok(())
+    fn insert_source(&mut self, metadata: &RelationalSourceMetadata) -> Result<i64> {
+        let source = &metadata.source;
+        self.source
+            .query_row(
+                params![
+                    source.identity().as_uuid().to_string(),
+                    source.identity().digest().as_slice(),
+                    source.provider(),
+                    source.source_format(),
+                    source.schema_variant(),
+                    i64::from(source.provider_identity_version()),
+                    metadata.parser_revision,
+                    metadata.revision_digest.as_slice(),
+                    sqlite_i64(metadata.indexed_event_count, "source indexed events")?,
+                    metadata.health.as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
-    fn insert_session(
-        &mut self,
-        source_id: &str,
-        session: &RelationalSessionMetadata,
-    ) -> Result<()> {
-        let changed = self.session.execute(params![
-            session.session_id.as_uuid().to_string(),
-            session
-                .session_id
-                .encode_canonical()
-                .map_err(contract_record_error)?
-                .as_slice(),
-            source_id,
-            session.parent_session_id.map(|id| id.as_uuid().to_string()),
-            session
-                .parent_session_id
-                .map(StableEntityId::encode_canonical)
-                .transpose()
-                .map_err(contract_record_error)?
-                .map(|identity| identity.to_vec()),
-            session.root_session_id.as_uuid().to_string(),
-            session
-                .root_session_id
-                .encode_canonical()
-                .map_err(contract_record_error)?
-                .as_slice(),
-            session.provider_session_id,
-            session.external_agent_id,
-            session.agent_type.as_str(),
-            session.role_hint,
-            i64::from(session.is_primary),
-            session.branch,
-            session.workspace,
-            session.cwd,
-            session.source_path,
-            session.status.as_str(),
-            session.fidelity.as_str(),
-            session.started_at_unix_ms,
-            session.ended_at_unix_ms,
-        ])?;
-        if changed == 1 {
-            Ok(())
-        } else {
-            invalid_record("session UUID collides with a different stable identity")
+    fn insert_core_record(&mut self, source_key: i64, record: &CoreRecord) -> Result<()> {
+        let session_key = self.insert_session(source_key, record)?;
+        let event_key = self.insert_event(session_key, record)?;
+        self.insert_repository_metadata(event_key, record)
+    }
+
+    fn insert_session(&mut self, source_key: i64, record: &CoreRecord) -> Result<i64> {
+        let session_key = self
+            .session
+            .query_row(
+                params![
+                    record.session_id.as_uuid().to_string(),
+                    record.session_id.digest().as_slice(),
+                    source_key,
+                    record.parent_session_id.map(|id| id.as_uuid().to_string()),
+                    record.parent_session_id.map(|id| id.digest().to_vec()),
+                    record.root_session_id.as_uuid().to_string(),
+                    record.root_session_id.digest().as_slice(),
+                    record.provider_session_id,
+                    record.agent_type,
+                    i64::from(record.is_primary),
+                    record.branch,
+                    record.workspace,
+                    record.cwd,
+                    sqlite_u64_ordered_text(record.event_sequence),
+                    record.occurred_at_unix_ms,
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        session_key.ok_or_else(|| {
+            RelationalProjectionError::InvalidRecord(
+                "session UUID collides with a different Core identity".to_owned(),
+            )
+        })
+    }
+
+    fn insert_event(&mut self, session_key: i64, record: &CoreRecord) -> Result<i64> {
+        let native_event_id = record
+            .native_event_id
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        self.event
+            .query_row(
+                params![
+                    record.event_id.as_uuid().to_string(),
+                    record.event_id.digest().as_slice(),
+                    session_key,
+                    native_event_id,
+                    sqlite_u64_ordered_text(record.event_sequence),
+                    record.event_type,
+                    record.role,
+                    record.occurred_at_unix_ms,
+                    i64::from(record.normalization_revision),
+                    i64::from(record.content.policy_revision),
+                    content_policy_status(&record.content.policy_status),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    fn insert_repository_metadata(&mut self, event_key: i64, record: &CoreRecord) -> Result<()> {
+        let mut binding_keys = BTreeMap::new();
+        for binding in &record.repository_bindings {
+            let descriptor_key = repository_descriptor_key(binding)?;
+            let git_object_format = binding
+                .git_object_format
+                .as_ref()
+                .map(enum_text)
+                .transpose()?;
+            let inserted = self.repository_binding.execute(params![
+                descriptor_key,
+                binding.binding_id,
+                binding.logical_repository_id,
+                binding.checkout_id,
+                binding.worktree_id,
+                git_object_format,
+                i64::from(binding.association_policy_revision),
+            ])?;
+            let repository_binding_key = self
+                .repository_binding_key
+                .query_row([&descriptor_key], |row| row.get::<_, i64>(0))?;
+            if inserted != 0 {
+                for (ordinal, alias) in binding.aliases.iter().enumerate() {
+                    self.alias.execute(params![
+                        repository_binding_key,
+                        sqlite_i64(ordinal as u64, "repository alias ordinal")?,
+                        enum_text(&alias.kind)?,
+                        alias.host,
+                        alias.namespace.join("/"),
+                        alias.name,
+                        alias.remote_name,
+                    ])?;
+                }
+                for (ordinal, evidence) in binding.evidence.iter().enumerate() {
+                    self.evidence.execute(params![
+                        repository_binding_key,
+                        sqlite_i64(ordinal as u64, "repository evidence ordinal")?,
+                        enum_text(&evidence.kind)?,
+                        enum_text(&evidence.confidence)?,
+                    ])?;
+                }
+            }
+            self.event_repository
+                .execute(params![event_key, repository_binding_key])?;
+            binding_keys.insert(binding.binding_id.clone(), repository_binding_key);
         }
-    }
-
-    fn insert_event(&mut self, source_id: &str, event: &RelationalEventMetadata) -> Result<()> {
-        self.event.execute(params![
-            event.event_id.as_uuid().to_string(),
-            event
-                .event_id
-                .encode_canonical()
-                .map_err(contract_record_error)?
-                .as_slice(),
-            source_id,
-            event.session_id.as_uuid().to_string(),
-            event
-                .session_id
-                .encode_canonical()
-                .map_err(contract_record_error)?
-                .as_slice(),
-            sqlite_i64(event.event_sequence, "event sequence")?,
-            event.event_type.as_str(),
-            event.role.map(EventRole::as_str),
-            event.occurred_at_unix_ms,
-            event.fidelity.as_str(),
-            serde_json::to_vec(&event.locator)?,
-            event.locator.record_digest().as_slice(),
-        ])?;
-        Ok(())
-    }
-
-    fn insert_file_touch(
-        &mut self,
-        source_id: &str,
-        file: &RelationalFileTouchMetadata,
-    ) -> Result<()> {
-        self.file_touch.execute(params![
-            file.file_touch_id.to_string(),
-            source_id,
-            file.event_id.map(|id| id.as_uuid().to_string()),
-            file.event_id
-                .map(StableEntityId::encode_canonical)
-                .transpose()
-                .map_err(contract_record_error)?
-                .map(|identity| identity.to_vec()),
-            file.session_id.map(|id| id.as_uuid().to_string()),
-            file.session_id
-                .map(StableEntityId::encode_canonical)
-                .transpose()
-                .map_err(contract_record_error)?
-                .map(|identity| identity.to_vec()),
-            file.path,
-            file.old_path,
-            file.change_kind.map(FileChangeKind::as_str),
-            file.line_count_delta,
-            file.confidence.as_str(),
-            file.created_at_unix_ms,
-            file.updated_at_unix_ms,
-        ])?;
-        Ok(())
-    }
-}
-
-fn validate_source_metadata(metadata: &RelationalSourceMetadata) -> Result<()> {
-    metadata
-        .source
-        .validate_contract()
-        .map_err(contract_record_error)?;
-    validate_optional_text(
-        "source_root",
-        metadata.source_root.as_deref(),
-        MAX_PATH_BYTES,
-    )?;
-    validate_optional_text(
-        "source_path",
-        metadata.source_path.as_deref(),
-        MAX_PATH_BYTES,
-    )?;
-    validate_optional_text("cwd", metadata.cwd.as_deref(), MAX_PATH_BYTES)
-}
-
-fn validate_session(session: &RelationalSessionMetadata, source: &SourceKey) -> Result<()> {
-    validate_entity(session.session_id, StableEntityKind::Session, source)?;
-    for relation in [session.parent_session_id, Some(session.root_session_id)]
-        .into_iter()
-        .flatten()
-    {
-        relation
-            .validate_contract()
-            .map_err(contract_record_error)?;
-        if relation.entity_kind() != StableEntityKind::Session {
-            return invalid_record("session relationship has a non-session identity");
+        for (ordinal, abstention) in record.repository_abstentions.iter().enumerate() {
+            self.abstention.execute(params![
+                event_key,
+                sqlite_i64(ordinal as u64, "repository abstention ordinal")?,
+                enum_text(&abstention.evidence_kind)?,
+                enum_text(&abstention.reason)?,
+                i64::from(abstention.association_policy_revision),
+            ])?;
         }
+        for (ordinal, observation) in record.repository_file_observations.iter().enumerate() {
+            let repository_binding_key = binding_key(
+                &binding_keys,
+                &observation.repository_binding_id,
+                "file observation",
+            )?;
+            self.file.execute(params![
+                event_key,
+                repository_binding_key,
+                sqlite_i64(ordinal as u64, "file observation ordinal")?,
+                observation.relative_path,
+                observation.prior_relative_path,
+                enum_text(&observation.kind)?,
+                record.occurred_at_unix_ms,
+            ])?;
+        }
+        for (ordinal, observation) in record.repository_vcs_observations.iter().enumerate() {
+            let repository_binding_key = binding_key(
+                &binding_keys,
+                &observation.repository_binding_id,
+                "VCS observation",
+            )?;
+            self.vcs.execute(params![
+                event_key,
+                repository_binding_key,
+                sqlite_i64(ordinal as u64, "VCS observation ordinal")?,
+                enum_text(&observation.kind)?,
+                observation
+                    .object_id
+                    .as_ref()
+                    .map(|id| enum_text(&id.format))
+                    .transpose()?,
+                observation.object_id.as_ref().map(|id| id.hex.as_str()),
+                observation.reference,
+                observation.relative_path,
+                record.occurred_at_unix_ms,
+            ])?;
+            for (parent_ordinal, parent) in observation.parent_object_ids.iter().enumerate() {
+                self.vcs_parent.execute(params![
+                    event_key,
+                    sqlite_i64(ordinal as u64, "VCS observation ordinal")?,
+                    sqlite_i64(parent_ordinal as u64, "VCS parent ordinal")?,
+                    enum_text(&parent.format)?,
+                    parent.hex,
+                ])?;
+            }
+        }
+        Ok(())
     }
-    validate_optional_text(
-        "provider_session_id",
-        session.provider_session_id.as_deref(),
-        MAX_METADATA_TEXT_BYTES,
-    )?;
-    validate_optional_text(
-        "external_agent_id",
-        session.external_agent_id.as_deref(),
-        MAX_METADATA_TEXT_BYTES,
-    )?;
-    validate_optional_text(
-        "role_hint",
-        session.role_hint.as_deref(),
-        MAX_METADATA_TEXT_BYTES,
-    )?;
-    validate_optional_text("branch", session.branch.as_deref(), MAX_METADATA_TEXT_BYTES)?;
-    validate_optional_text(
-        "workspace",
-        session.workspace.as_deref(),
-        MAX_METADATA_TEXT_BYTES,
-    )?;
-    validate_optional_text("cwd", session.cwd.as_deref(), MAX_PATH_BYTES)?;
-    validate_optional_text(
-        "source_path",
-        session.source_path.as_deref(),
-        MAX_PATH_BYTES,
-    )
 }
 
-fn validate_event(event: &RelationalEventMetadata, source: &SourceKey) -> Result<()> {
-    validate_entity(event.event_id, StableEntityKind::Event, source)?;
-    validate_entity(event.session_id, StableEntityKind::Session, source)?;
-    event
-        .locator
-        .validate_contract()
-        .map_err(resolver_record_error)?;
-    if !event.locator.source().exact_descriptor_eq(source) {
-        return invalid_record("event locator does not match the active source");
-    }
-    Ok(())
+fn repository_descriptor_key(binding: &RepositoryBinding) -> Result<String> {
+    serde_json::to_string(&(
+        binding.binding_id.as_str(),
+        binding.logical_repository_id.as_str(),
+        binding.checkout_id.as_deref(),
+        binding.worktree_id.as_deref(),
+        &binding.aliases,
+        &binding.git_object_format,
+        &binding.evidence,
+        binding.association_policy_revision,
+    ))
+    .map_err(Into::into)
 }
 
-fn validate_file_touch(file: &RelationalFileTouchMetadata, source: &SourceKey) -> Result<()> {
-    validate_text("path", &file.path, MAX_PATH_BYTES)?;
-    validate_optional_text("old_path", file.old_path.as_deref(), MAX_PATH_BYTES)?;
-    if let Some(event_id) = file.event_id {
-        validate_entity(event_id, StableEntityKind::Event, source)?;
-    }
-    if let Some(session_id) = file.session_id {
-        validate_entity(session_id, StableEntityKind::Session, source)?;
-    }
-    Ok(())
+fn binding_key(
+    binding_keys: &BTreeMap<String, i64>,
+    binding_id: &str,
+    relation: &'static str,
+) -> Result<i64> {
+    binding_keys.get(binding_id).copied().ok_or_else(|| {
+        RelationalProjectionError::InvalidRecord(format!(
+            "{relation} references absent repository binding {binding_id}"
+        ))
+    })
 }
 
-fn validate_entity(id: StableEntityId, kind: StableEntityKind, source: &SourceKey) -> Result<()> {
-    id.validate_contract().map_err(contract_record_error)?;
-    if id.entity_kind() != kind {
-        return invalid_record("stable identity has the wrong entity kind");
-    }
-    if id.source_digest() != source.identity().digest()
-        || id.source_descriptor_digest() != source.exact_descriptor_digest()
-    {
-        return invalid_record("stable identity does not belong to the active source");
-    }
-    Ok(())
-}
-
-pub(super) fn validate_projected_generation(
-    conn: &Connection,
-    manifest: &ValidatedManifest,
-) -> Result<ProjectionCounts> {
-    let counts = projection_counts(conn)?;
-    validate_generation_counts(counts, manifest)?;
-    validate_all_session_relationships(conn, manifest)?;
-    let dangling_event_or_file_relations: i64 = conn.query_row(
-        "SELECT
-            (SELECT COUNT(*) FROM source_backed_events event
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM source_backed_sessions session
-                 WHERE session.ctx_session_id = event.ctx_session_id
-                   AND session.session_identity = event.session_identity
-             ))
-          + (SELECT COUNT(*) FROM source_backed_files_touched file
-             WHERE file.ctx_event_id IS NOT NULL
-               AND NOT EXISTS (
-                   SELECT 1 FROM source_backed_events event
-                   WHERE event.ctx_event_id = file.ctx_event_id
-                     AND event.event_identity = file.event_identity
-               ))
-          + (SELECT COUNT(*) FROM source_backed_files_touched file
-             WHERE file.ctx_session_id IS NOT NULL
-               AND NOT EXISTS (
-                   SELECT 1 FROM source_backed_sessions session
-                   WHERE session.ctx_session_id = file.ctx_session_id
-                     AND session.session_identity = file.session_identity
-               ))",
-        [],
-        |row| row.get(0),
-    )?;
-    if dangling_event_or_file_relations != 0 {
-        return invalid_record("event or file relationships have mismatched stable identities");
-    }
-    Ok(counts)
-}
-
-fn validate_all_session_relationships(
-    conn: &Connection,
-    manifest: &ValidatedManifest,
-) -> Result<()> {
-    let mut relationships = conn.prepare(
-        "SELECT child.parent_ctx_session_id, child.parent_session_identity
-         FROM source_backed_sessions AS child
-         WHERE child.parent_ctx_session_id IS NOT NULL
-           AND NOT EXISTS (
-               SELECT 1 FROM source_backed_sessions AS parent
-               WHERE parent.ctx_session_id = child.parent_ctx_session_id
-                 AND parent.session_identity = child.parent_session_identity
-           )
-         UNION ALL
-         SELECT child.root_ctx_session_id, child.root_session_identity
-         FROM source_backed_sessions AS child
+pub(super) fn prune_orphan_repository_bindings(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM core_repository_bindings
          WHERE NOT EXISTS (
-             SELECT 1 FROM source_backed_sessions AS root
-             WHERE root.ctx_session_id = child.root_ctx_session_id
-               AND root.session_identity = child.root_session_identity
+             SELECT 1
+             FROM core_event_repositories AS event_repository
+                  INDEXED BY core_event_repositories_binding
+             WHERE event_repository.repository_binding_key =
+                   core_repository_bindings.repository_binding_key
          )",
+        [],
     )?;
-    validate_absent_relationships(relationships.query([])?, manifest)?;
     Ok(())
 }
 
 pub(super) fn projection_counts(conn: &Connection) -> Result<ProjectionCounts> {
     conn.query_row(
         "SELECT
-            (SELECT COUNT(*) FROM source_backed_sources),
-            (SELECT COUNT(*) FROM source_backed_sessions),
-            (SELECT COUNT(*) FROM source_backed_events),
-            (SELECT COUNT(*) FROM source_backed_files_touched)",
+            (SELECT COUNT(*) FROM core_sources),
+            (SELECT COUNT(*) FROM core_sessions),
+            (SELECT COUNT(*) FROM core_events),
+            (SELECT COUNT(*) FROM core_event_repositories),
+            (SELECT COUNT(*) FROM core_file_observations),
+            (SELECT COUNT(*) FROM core_vcs_observations)",
         [],
         |row| {
             Ok(ProjectionCounts {
                 sources: row.get(0)?,
                 sessions: row.get(1)?,
                 events: row.get(2)?,
-                file_touches: row.get(3)?,
+                repository_bindings: row.get(3)?,
+                file_observations: row.get(4)?,
+                vcs_observations: row.get(5)?,
             })
         },
     )
-    .map_err(RelationalProjectionError::from)
+    .map_err(Into::into)
 }
 
 pub(super) fn stored_projection_counts(conn: &Connection) -> Result<ProjectionCounts> {
     conn.query_row(
-        "SELECT source_count, session_count, event_count, file_touch_count
-         FROM source_backed_relational_state
+        "SELECT source_count, session_count, event_count, repository_binding_count,
+                file_observation_count, vcs_observation_count
+         FROM core_relational_state
          WHERE singleton = 1",
         [],
         |row| {
@@ -607,11 +552,13 @@ pub(super) fn stored_projection_counts(conn: &Connection) -> Result<ProjectionCo
                 sources: row.get(0)?,
                 sessions: row.get(1)?,
                 events: row.get(2)?,
-                file_touches: row.get(3)?,
+                repository_bindings: row.get(3)?,
+                file_observations: row.get(4)?,
+                vcs_observations: row.get(5)?,
             })
         },
     )
-    .map_err(RelationalProjectionError::from)
+    .map_err(Into::into)
 }
 
 pub(super) fn source_projection_snapshot(
@@ -619,32 +566,59 @@ pub(super) fn source_projection_snapshot(
     source_ids: &BTreeSet<String>,
 ) -> Result<SourceProjectionSnapshot> {
     let mut snapshot = SourceProjectionSnapshot::default();
-    let mut source_count = conn.prepare(
-        "SELECT COUNT(*)
-         FROM source_backed_sources
+    let mut source = conn.prepare(
+        "SELECT source_key
+         FROM core_sources
          WHERE source_id = ?1",
     )?;
     let mut sessions = conn.prepare(
         "SELECT ctx_session_id
-         FROM source_backed_sessions INDEXED BY source_backed_sessions_source
-         WHERE source_id = ?1",
+         FROM core_sessions INDEXED BY core_sessions_source
+         WHERE source_key = ?1",
     )?;
     let mut event_count = conn.prepare(
         "SELECT COUNT(*)
-         FROM source_backed_events INDEXED BY source_backed_events_source
-         WHERE source_id = ?1",
+         FROM core_sessions AS session INDEXED BY core_sessions_source
+         JOIN core_events AS event INDEXED BY core_events_session_seq
+           ON event.session_key = session.session_key
+         WHERE session.source_key = ?1",
+    )?;
+    let mut repository_count = conn.prepare(
+        "SELECT COUNT(*)
+         FROM core_sessions AS session INDEXED BY core_sessions_source
+         JOIN core_events AS event INDEXED BY core_events_session_seq
+           ON event.session_key = session.session_key
+         JOIN core_event_repositories AS repository
+           ON repository.event_key = event.event_key
+         WHERE session.source_key = ?1",
     )?;
     let mut file_count = conn.prepare(
         "SELECT COUNT(*)
-         FROM source_backed_files_touched INDEXED BY source_backed_files_source
-         WHERE source_id = ?1",
+         FROM core_sessions AS session INDEXED BY core_sessions_source
+         JOIN core_events AS event INDEXED BY core_events_session_seq
+           ON event.session_key = session.session_key
+         JOIN core_file_observations AS file ON file.event_key = event.event_key
+         WHERE session.source_key = ?1",
     )?;
-    for source_id in source_ids {
-        let sources: i64 = source_count.query_row([source_id], |row| row.get(0))?;
-        snapshot.counts.sources =
-            checked_add_count(snapshot.counts.sources, sources, "source count")?;
+    let mut vcs_count = conn.prepare(
+        "SELECT COUNT(*)
+         FROM core_sessions AS session INDEXED BY core_sessions_source
+         JOIN core_events AS event INDEXED BY core_events_session_seq
+           ON event.session_key = session.session_key
+         JOIN core_vcs_observations AS vcs ON vcs.event_key = event.event_key
+         WHERE session.source_key = ?1",
+    )?;
 
-        let mut rows = sessions.query([source_id])?;
+    for source_id in source_ids {
+        let source_key = source
+            .query_row([source_id], |row| row.get::<_, i64>(0))
+            .optional()?;
+        let Some(source_key) = source_key else {
+            continue;
+        };
+        snapshot.counts.sources = checked_add_count(snapshot.counts.sources, 1, "source count")?;
+
+        let mut rows = sessions.query([source_key])?;
         while let Some(row) = rows.next()? {
             let session_id: String = row.get(0)?;
             if !snapshot.session_ids.insert(session_id) {
@@ -653,73 +627,74 @@ pub(super) fn source_projection_snapshot(
             snapshot.counts.sessions =
                 checked_add_count(snapshot.counts.sessions, 1, "session count")?;
         }
-
-        let events: i64 = event_count.query_row([source_id], |row| row.get(0))?;
-        snapshot.counts.events = checked_add_count(snapshot.counts.events, events, "event count")?;
-
-        let file_touches: i64 = file_count.query_row([source_id], |row| row.get(0))?;
-        snapshot.counts.file_touches = checked_add_count(
-            snapshot.counts.file_touches,
-            file_touches,
-            "file touch count",
+        snapshot.counts.events = checked_add_count(
+            snapshot.counts.events,
+            event_count.query_row([source_key], |row| row.get(0))?,
+            "event count",
+        )?;
+        snapshot.counts.repository_bindings = checked_add_count(
+            snapshot.counts.repository_bindings,
+            repository_count.query_row([source_key], |row| row.get(0))?,
+            "repository binding count",
+        )?;
+        snapshot.counts.file_observations = checked_add_count(
+            snapshot.counts.file_observations,
+            file_count.query_row([source_key], |row| row.get(0))?,
+            "file observation count",
+        )?;
+        snapshot.counts.vcs_observations = checked_add_count(
+            snapshot.counts.vcs_observations,
+            vcs_count.query_row([source_key], |row| row.get(0))?,
+            "VCS observation count",
         )?;
     }
     Ok(snapshot)
 }
 
-pub(super) fn validate_no_unaffected_cascade_dependencies(
+pub(super) fn validate_projected_generation(
     conn: &Connection,
-    affected_source_ids: &BTreeSet<String>,
-) -> Result<()> {
-    validate_reference_sources(
-        conn,
-        "SELECT dependent.source_id
-         FROM source_backed_sessions AS target
-              INDEXED BY source_backed_sessions_source
-         JOIN source_backed_events AS dependent
-              INDEXED BY source_backed_events_session_seq
-           ON dependent.ctx_session_id = target.ctx_session_id
-         WHERE target.source_id = ?1",
-        affected_source_ids,
-        affected_source_ids,
-        "an unaffected event references a replaced session",
+    generation: &ValidatedGeneration,
+) -> Result<ProjectionCounts> {
+    let counts = projection_counts(conn)?;
+    validate_generation_counts(counts, generation)?;
+
+    let invalid_foreign_keys: i64 =
+        conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    let invalid_sources: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM core_sources AS source
+         WHERE source.indexed_event_count != (
+             SELECT COUNT(*)
+             FROM core_sessions AS session INDEXED BY core_sessions_source
+             JOIN core_events AS event INDEXED BY core_events_session_seq
+               ON event.session_key = session.session_key
+             WHERE session.source_key = source.source_key
+         )",
+        [],
+        |row| row.get(0),
     )?;
-    validate_reference_sources(
+    if invalid_foreign_keys != 0 || invalid_sources != 0 {
+        return invalid_record("projected Core ownership or counts are incoherent");
+    }
+    validate_identity_rows(conn, "SELECT source_id, source_digest FROM core_sources")?;
+    validate_identity_rows(
         conn,
-        "SELECT dependent.source_id
-         FROM source_backed_sessions AS target
-              INDEXED BY source_backed_sessions_source
-         JOIN source_backed_files_touched AS dependent
-              INDEXED BY source_backed_files_session_reference
-           ON dependent.ctx_session_id = target.ctx_session_id
-         WHERE target.source_id = ?1",
-        affected_source_ids,
-        affected_source_ids,
-        "an unaffected file touch references a replaced session",
+        "SELECT ctx_session_id, session_digest FROM core_sessions",
     )?;
-    validate_reference_sources(
-        conn,
-        "SELECT dependent.source_id
-         FROM source_backed_events AS target
-              INDEXED BY source_backed_events_source
-         JOIN source_backed_files_touched AS dependent
-              INDEXED BY source_backed_files_event_reference
-           ON dependent.ctx_event_id = target.ctx_event_id
-         WHERE target.source_id = ?1",
-        affected_source_ids,
-        affected_source_ids,
-        "an unaffected file touch references a replaced event",
-    )
+    validate_identity_rows(conn, "SELECT ctx_event_id, event_digest FROM core_events")?;
+    validate_session_relationships(conn)?;
+    Ok(counts)
 }
 
 pub(super) fn validate_incremental_projected_generation(
     conn: &Connection,
-    manifest: &ValidatedManifest,
+    generation: &ValidatedGeneration,
     prior_counts: ProjectionCounts,
     old: &SourceProjectionSnapshot,
     new: &SourceProjectionSnapshot,
     changed_source_ids: &BTreeSet<String>,
-    relationship_scope_changed: bool,
 ) -> Result<ProjectionCounts> {
     let counts = ProjectionCounts {
         sources: replace_count(
@@ -740,186 +715,220 @@ pub(super) fn validate_incremental_projected_generation(
             new.counts.events,
             "event count",
         )?,
-        file_touches: replace_count(
-            prior_counts.file_touches,
-            old.counts.file_touches,
-            new.counts.file_touches,
-            "file touch count",
+        repository_bindings: replace_count(
+            prior_counts.repository_bindings,
+            old.counts.repository_bindings,
+            new.counts.repository_bindings,
+            "repository binding count",
+        )?,
+        file_observations: replace_count(
+            prior_counts.file_observations,
+            old.counts.file_observations,
+            new.counts.file_observations,
+            "file observation count",
+        )?,
+        vcs_observations: replace_count(
+            prior_counts.vcs_observations,
+            old.counts.vcs_observations,
+            new.counts.vcs_observations,
+            "VCS observation count",
         )?,
     };
-    validate_generation_counts(counts, manifest)?;
-    validate_changed_rows(conn, manifest, changed_source_ids)?;
+    validate_generation_counts(counts, generation)?;
+    validate_changed_rows(conn, changed_source_ids)?;
 
     let affected_session_ids = old
         .session_ids
         .union(&new.session_ids)
         .cloned()
         .collect::<BTreeSet<_>>();
-    validate_session_reverse_dependencies(conn, manifest, &affected_session_ids)?;
-    if relationship_scope_changed {
-        validate_all_session_relationships(conn, manifest)?;
-    }
+    validate_session_reverse_lineage(conn, &affected_session_ids)?;
     Ok(counts)
 }
 
 fn validate_generation_counts(
     counts: ProjectionCounts,
-    manifest: &ValidatedManifest,
+    generation: &ValidatedGeneration,
 ) -> Result<()> {
-    let projected_events = sqlite_u64(counts.events, "event_count")?;
-    if projected_events != manifest.indexed_documents {
+    let projected_events = sqlite_u64(counts.events, "event count")?;
+    if projected_events != generation.indexed_documents {
         return Err(RelationalProjectionError::GenerationEventCountMismatch {
-            expected: manifest.indexed_documents,
+            expected: generation.indexed_documents,
             projected: projected_events,
         });
     }
-    let source_count = sqlite_u64(counts.sources, "source_count")?;
-    if source_count != manifest.sources.len() as u64 {
-        return invalid_record("projected source count does not match the manifest");
+    if sqlite_u64(counts.sources, "source count")? != generation.sources.len() as u64 {
+        return invalid_record("projected source count does not match the Core generation");
     }
     Ok(())
 }
 
-fn validate_changed_rows(
-    conn: &Connection,
-    manifest: &ValidatedManifest,
-    source_ids: &BTreeSet<String>,
-) -> Result<()> {
+fn validate_changed_rows(conn: &Connection, source_ids: &BTreeSet<String>) -> Result<()> {
+    let mut source = conn.prepare(
+        "SELECT source_key, source_id, source_digest, indexed_event_count
+         FROM core_sources
+         WHERE source_id = ?1",
+    )?;
     let mut sessions = conn.prepare(
-        "SELECT child.parent_ctx_session_id, child.parent_session_identity
-         FROM source_backed_sessions AS child INDEXED BY source_backed_sessions_source
-         WHERE child.source_id = ?1
-           AND child.parent_ctx_session_id IS NOT NULL
-           AND NOT EXISTS (
-               SELECT 1 FROM source_backed_sessions AS parent
-               WHERE parent.ctx_session_id = child.parent_ctx_session_id
-                 AND parent.session_identity = child.parent_session_identity
-           )
-         UNION ALL
-         SELECT child.root_ctx_session_id, child.root_session_identity
-         FROM source_backed_sessions AS child INDEXED BY source_backed_sessions_source
-         WHERE child.source_id = ?1
-           AND NOT EXISTS (
-               SELECT 1 FROM source_backed_sessions AS root
-               WHERE root.ctx_session_id = child.root_ctx_session_id
-                 AND root.session_identity = child.root_session_identity
-           )",
+        "SELECT child.ctx_session_id, child.session_digest,
+                child.parent_ctx_session_id, child.parent_session_digest,
+                parent.session_digest,
+                child.root_ctx_session_id, child.root_session_digest,
+                root.session_digest
+         FROM core_sessions AS child INDEXED BY core_sessions_source
+         LEFT JOIN core_sessions AS parent
+           ON parent.ctx_session_id = child.parent_ctx_session_id
+         LEFT JOIN core_sessions AS root
+           ON root.ctx_session_id = child.root_ctx_session_id
+         WHERE child.source_key = ?1",
     )?;
     let mut events = conn.prepare(
-        "SELECT EXISTS (
-            SELECT 1
-            FROM source_backed_events AS event
-                 INDEXED BY source_backed_events_source
-            WHERE event.source_id = ?1
-              AND NOT EXISTS (
-                  SELECT 1 FROM source_backed_sessions AS session
-                  WHERE session.ctx_session_id = event.ctx_session_id
-                    AND session.session_identity = event.session_identity
-              )
-        )",
-    )?;
-    let mut files = conn.prepare(
-        "SELECT EXISTS (
-            SELECT 1
-            FROM source_backed_files_touched AS file
-                 INDEXED BY source_backed_files_source
-            WHERE file.source_id = ?1
-              AND (
-                  (file.ctx_event_id IS NOT NULL
-                   AND NOT EXISTS (
-                       SELECT 1 FROM source_backed_events AS event
-                       WHERE event.ctx_event_id = file.ctx_event_id
-                         AND event.event_identity = file.event_identity
-                   ))
-                  OR (file.ctx_session_id IS NOT NULL
-                      AND NOT EXISTS (
-                          SELECT 1 FROM source_backed_sessions AS session
-                          WHERE session.ctx_session_id = file.ctx_session_id
-                            AND session.session_identity = file.session_identity
-                      ))
-              )
-        )",
+        "SELECT event.ctx_event_id, event.event_digest
+         FROM core_sessions AS session INDEXED BY core_sessions_source
+         JOIN core_events AS event INDEXED BY core_events_session_seq
+           ON event.session_key = session.session_key
+         WHERE session.source_key = ?1",
     )?;
     for source_id in source_ids {
-        validate_absent_relationships(sessions.query([source_id])?, manifest)?;
-        if events.query_row([source_id], |row| row.get::<_, bool>(0))?
-            || files.query_row([source_id], |row| row.get::<_, bool>(0))?
-        {
-            return invalid_record("event or file relationships have mismatched stable identities");
+        let Some((source_key, stored_source_id, source_digest, indexed_events)) = source
+            .query_row([source_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .optional()?
+        else {
+            return invalid_record(format!("changed source {source_id} was not materialized"));
+        };
+        validate_identity_pair(&stored_source_id, &source_digest)?;
+
+        let mut session_rows = sessions.query([source_key])?;
+        while let Some(row) = session_rows.next()? {
+            let session_id: String = row.get(0)?;
+            let session_digest: Vec<u8> = row.get(1)?;
+            validate_identity_pair(&session_id, &session_digest)?;
+            validate_lineage_reference(row.get(2)?, row.get(3)?, row.get(4)?, "parent session")?;
+            validate_lineage_reference(row.get(5)?, row.get(6)?, row.get(7)?, "root session")?;
+        }
+
+        let mut event_rows = events.query([source_key])?;
+        let mut actual_events = 0_i64;
+        while let Some(row) = event_rows.next()? {
+            validate_identity_pair(&row.get::<_, String>(0)?, &row.get::<_, Vec<u8>>(1)?)?;
+            actual_events = checked_add_count(actual_events, 1, "event count")?;
+        }
+        if actual_events != indexed_events {
+            return invalid_record("changed source event count does not match Core metadata");
         }
     }
     Ok(())
 }
 
-fn validate_session_reverse_dependencies(
+fn validate_identity_rows(conn: &Connection, sql: &str) -> Result<()> {
+    let mut statement = conn.prepare(sql)?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        validate_identity_pair(&row.get::<_, String>(0)?, &row.get::<_, Vec<u8>>(1)?)?;
+    }
+    Ok(())
+}
+
+fn validate_identity_pair(id: &str, digest: &[u8]) -> Result<()> {
+    let uuid = Uuid::parse_str(id)
+        .map_err(|_| RelationalProjectionError::InvalidRecord("stored UUID is malformed".into()))?;
+    if digest.len() != 32 {
+        return invalid_record("stored identity digest is malformed");
+    }
+    let mut expected_uuid = [0_u8; 16];
+    expected_uuid.copy_from_slice(&digest[..16]);
+    expected_uuid[6] = 0x80 | (expected_uuid[6] & 0x0f);
+    expected_uuid[8] = 0x80 | (expected_uuid[8] & 0x3f);
+    if Uuid::from_bytes(expected_uuid) != uuid {
+        return invalid_record("stored UUID collides with a different full identity digest");
+    }
+    Ok(())
+}
+
+fn validate_session_relationships(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT child.parent_ctx_session_id, child.parent_session_digest,
+                parent.session_digest
+         FROM core_sessions AS child
+         LEFT JOIN core_sessions AS parent
+           ON parent.ctx_session_id = child.parent_ctx_session_id
+         WHERE child.parent_ctx_session_id IS NOT NULL
+            OR child.parent_session_digest IS NOT NULL
+         UNION ALL
+         SELECT child.root_ctx_session_id, child.root_session_digest,
+                root.session_digest
+         FROM core_sessions AS child
+         LEFT JOIN core_sessions AS root
+           ON root.ctx_session_id = child.root_ctx_session_id",
+    )?;
+    let rows = statement.query([])?;
+    validate_lineage_rows(rows)
+}
+
+fn validate_session_reverse_lineage(
     conn: &Connection,
-    manifest: &ValidatedManifest,
     affected_session_ids: &BTreeSet<String>,
 ) -> Result<()> {
     let mut parent = conn.prepare(
-        "SELECT child.parent_ctx_session_id, child.parent_session_identity
-         FROM source_backed_sessions AS child
-              INDEXED BY source_backed_sessions_parent_reference
-         WHERE child.parent_ctx_session_id = ?1
-           AND NOT EXISTS (
-               SELECT 1 FROM source_backed_sessions AS target
-               WHERE target.ctx_session_id = child.parent_ctx_session_id
-                 AND target.session_identity = child.parent_session_identity
-           )",
+        "SELECT child.parent_ctx_session_id, child.parent_session_digest,
+                target.session_digest
+         FROM core_sessions AS child INDEXED BY core_sessions_parent
+         LEFT JOIN core_sessions AS target
+           ON target.ctx_session_id = child.parent_ctx_session_id
+         WHERE child.parent_ctx_session_id = ?1",
     )?;
     let mut root = conn.prepare(
-        "SELECT child.root_ctx_session_id, child.root_session_identity
-         FROM source_backed_sessions AS child
-              INDEXED BY source_backed_sessions_root_reference
-         WHERE child.root_ctx_session_id = ?1
-           AND NOT EXISTS (
-               SELECT 1 FROM source_backed_sessions AS target
-               WHERE target.ctx_session_id = child.root_ctx_session_id
-                 AND target.session_identity = child.root_session_identity
-           )",
+        "SELECT child.root_ctx_session_id, child.root_session_digest,
+                target.session_digest
+         FROM core_sessions AS child INDEXED BY core_sessions_root
+         LEFT JOIN core_sessions AS target
+           ON target.ctx_session_id = child.root_ctx_session_id
+         WHERE child.root_ctx_session_id = ?1",
     )?;
     for session_id in affected_session_ids {
-        validate_absent_relationships(parent.query([session_id])?, manifest)?;
-        validate_absent_relationships(root.query([session_id])?, manifest)?;
+        validate_lineage_rows(parent.query([session_id])?)?;
+        validate_lineage_rows(root.query([session_id])?)?;
     }
     Ok(())
 }
 
-fn validate_absent_relationships(
-    mut rows: rusqlite::Rows<'_>,
-    manifest: &ValidatedManifest,
-) -> Result<()> {
+fn validate_lineage_rows(mut rows: rusqlite::Rows<'_>) -> Result<()> {
     while let Some(row) = rows.next()? {
-        let target_id: String = row.get(0)?;
-        let identity: Vec<u8> = row.get(1)?;
-        let identity =
-            StableEntityId::decode_canonical(&identity).map_err(contract_record_error)?;
-        if identity.entity_kind() != StableEntityKind::Session
-            || identity.as_uuid().to_string() != target_id
-            || !manifest.permits_absent_relationship_target(identity)
-        {
-            return invalid_record("session relationships reference absent sessions");
-        }
+        validate_lineage_reference(
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<Vec<u8>>>(1)?,
+            row.get::<_, Option<Vec<u8>>>(2)?,
+            "session lineage",
+        )?;
     }
     Ok(())
 }
 
-fn validate_reference_sources(
-    conn: &Connection,
-    sql: &str,
-    target_source_ids: &BTreeSet<String>,
-    affected_source_ids: &BTreeSet<String>,
-    detail: &'static str,
+fn validate_lineage_reference(
+    target_id: Option<String>,
+    reference_digest: Option<Vec<u8>>,
+    target_digest: Option<Vec<u8>>,
+    relation: &'static str,
 ) -> Result<()> {
-    let mut statement = conn.prepare(sql)?;
-    for target_source_id in target_source_ids {
-        let mut rows = statement.query([target_source_id])?;
-        while let Some(row) = rows.next()? {
-            let source_id: String = row.get(0)?;
-            if !affected_source_ids.contains(&source_id) {
-                return invalid_record(detail);
-            }
-        }
+    if target_id.is_none() && reference_digest.is_none() && target_digest.is_none() {
+        return Ok(());
+    }
+    let (Some(target_id), Some(reference_digest)) = (target_id, reference_digest) else {
+        return invalid_record(format!("projected {relation} identity is incomplete"));
+    };
+    validate_identity_pair(&target_id, &reference_digest)?;
+    if target_digest
+        .as_deref()
+        .is_some_and(|target| target != reference_digest)
+    {
+        return invalid_record(format!("projected {relation} identity is incoherent"));
     }
     Ok(())
 }
@@ -941,41 +950,26 @@ fn replace_count(total: i64, old: i64, new: i64, label: &'static str) -> Result<
     checked_add_count(retained, new, label)
 }
 
-fn current_source(current: &Option<OpenSource>) -> Result<&OpenSource> {
-    current.as_ref().ok_or_else(|| {
-        RelationalProjectionError::InvalidStreamOrder(
-            "a relational record appeared outside a source scope".to_owned(),
-        )
-    })
-}
-
-fn current_source_mut(current: &mut Option<OpenSource>) -> Result<&mut OpenSource> {
-    current.as_mut().ok_or_else(|| {
-        RelationalProjectionError::InvalidStreamOrder(
-            "a relational record appeared outside a source scope".to_owned(),
-        )
-    })
-}
-
-fn validate_text(field: &'static str, value: &str, maximum: usize) -> Result<()> {
-    if value.is_empty() || value.len() > maximum {
-        return invalid_record(format!("{field} is empty or exceeds {maximum} bytes"));
+fn content_policy_status(status: &CoreContentPolicyStatus) -> &'static str {
+    match status {
+        CoreContentPolicyStatus::Selected => "selected",
+        CoreContentPolicyStatus::Redacted { .. } => "redacted",
+        CoreContentPolicyStatus::Omitted { .. } => "omitted",
     }
-    Ok(())
 }
 
-fn validate_optional_text(field: &'static str, value: Option<&str>, maximum: usize) -> Result<()> {
-    if let Some(value) = value {
-        validate_text(field, value, maximum)?;
+fn enum_text(value: &impl Serialize) -> Result<String> {
+    match serde_json::to_value(value)? {
+        serde_json::Value::String(value) => Ok(value),
+        _ => invalid_record("Core enum did not serialize as text"),
     }
-    Ok(())
 }
 
 fn contract_record_error(error: ProjectionContractError) -> RelationalProjectionError {
     RelationalProjectionError::InvalidRecord(error.to_string())
 }
 
-fn resolver_record_error(error: SourceResolverContractError) -> RelationalProjectionError {
+fn core_record_error(error: ctx_history_core::CoreRecordError) -> RelationalProjectionError {
     RelationalProjectionError::InvalidRecord(error.to_string())
 }
 

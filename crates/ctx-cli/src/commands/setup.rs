@@ -99,7 +99,6 @@ pub(crate) fn run_setup(
         "history_epoch": source.report["history_epoch"].clone(),
         "lexical": source.report["lexical"].clone(),
         "catalog": source.report["catalog"].clone(),
-        "resolver": source.report["resolver"].clone(),
         "refresh": source.report["refresh"].clone(),
         "refresh_request": refresh_request,
         "semantic": source.report["semantic"].clone(),

@@ -162,24 +162,10 @@ pub(super) fn decode_f64(span: JsonSpan<'_>) -> Option<f64> {
     }
 }
 
-pub(super) fn decode_i64(span: JsonSpan<'_>) -> Option<i64> {
-    (span.kind == JsonKind::Number)
-        .then(|| std::str::from_utf8(span.raw).ok()?.parse().ok())
-        .flatten()
-}
-
 pub(super) fn decode_u64(span: JsonSpan<'_>) -> Option<u64> {
     (span.kind == JsonKind::Number)
         .then(|| std::str::from_utf8(span.raw).ok()?.parse().ok())
         .flatten()
-}
-
-pub(super) fn decode_bool(span: JsonSpan<'_>) -> Option<bool> {
-    match span.raw {
-        b"true" if span.kind == JsonKind::Bool => Some(true),
-        b"false" if span.kind == JsonKind::Bool => Some(false),
-        _ => None,
-    }
 }
 
 pub(super) struct ObjectIter<'a> {

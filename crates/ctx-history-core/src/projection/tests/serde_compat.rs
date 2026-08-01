@@ -125,8 +125,4 @@ fn public_projection_serde_forms_remain_stable() {
             "revision_scope": null,
         }})
     );
-    assert_eq!(
-        serde_json::to_value(NativeLocator::new("jsonl", vec![4, 5]).unwrap()).unwrap(),
-        serde_json::json!({"kind": "jsonl", "value": [4, 5]})
-    );
 }

@@ -4,10 +4,7 @@ use std::{
     sync::Mutex,
 };
 
-use ctx_history_core::{
-    BatchHydrationRequest, BatchHydrationResult, CaptureProvider, ContentSourceResolver,
-    HydrationFailure, SourceKey,
-};
+use ctx_history_core::{CaptureProvider, SourceKey};
 use sha2::{Digest, Sha256};
 
 use super::{
@@ -39,8 +36,6 @@ struct OpenCodeDocumentTreeAdapter {
     data_root: PathBuf,
     registration: OpenCodeSourceBackedRegistration,
     path: PathBuf,
-    #[cfg(test)]
-    work_observer: Option<OpenCodeWorkObserver>,
 }
 
 #[derive(Debug)]
@@ -83,9 +78,6 @@ pub(super) struct OpenCodeSqliteWorkCounters {
     pub(super) active_snapshots: u64,
     pub(super) max_active_snapshots: u64,
 }
-
-#[cfg(test)]
-type OpenCodeWorkObserver = std::sync::Arc<Mutex<Vec<OpenCodeSqliteWorkCounters>>>;
 
 impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
     type Leaf = OpenCodeDocumentLeaf;
@@ -130,7 +122,7 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
             &mut |output| match output {
                 OpenCodeScanOutput::Begin(source) => sink.begin_source(source).map_err(Into::into),
                 OpenCodeScanOutput::Document(document) => {
-                    sink.emit_document(document).map_err(Into::into)
+                    sink.emit_core_record(document).map_err(Into::into)
                 }
             },
         )
@@ -193,13 +185,7 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
                     .revalidate()
                     .map_err(|error| route_error(error.into()))?;
                 (leaf.terminal_revalidate)().map_err(|error| route_error(error.into()))?;
-                let counters = finalize_work_counters(leaf, exact_replay)?;
-                #[cfg(test)]
-                if let Some(observer) = &self.work_observer {
-                    observer.lock().unwrap().push(counters);
-                }
-                #[cfg(not(test))]
-                let _ = counters;
+                finalize_work_counters(leaf, exact_replay)?;
                 Ok(tree.tree_fingerprint)
             }
             OpenCodeTreeAuthority::Missing {
@@ -212,15 +198,6 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
             }
         }
     }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        self.registration
-            .exact_resolver(self.data_root.clone(), self.path.clone())
-            .hydrate_batch(request)
-    }
 }
 
 pub(crate) fn register(
@@ -229,25 +206,7 @@ pub(crate) fn register(
     selection: SourceBackedRouteSelection,
     data_root: &Path,
 ) -> SourceBackedCoordinatorResult<()> {
-    register_adapter(
-        registry,
-        source,
-        selection,
-        data_root,
-        #[cfg(test)]
-        None,
-    )
-}
-
-#[cfg(test)]
-pub(super) fn register_with_work_observer(
-    registry: &mut SourceBackedProviderRegistry,
-    source: ProviderSource,
-    selection: SourceBackedRouteSelection,
-    data_root: &Path,
-    work_observer: OpenCodeWorkObserver,
-) -> SourceBackedCoordinatorResult<()> {
-    register_adapter(registry, source, selection, data_root, Some(work_observer))
+    register_adapter(registry, source, selection, data_root)
 }
 
 fn register_adapter(
@@ -255,7 +214,6 @@ fn register_adapter(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
     data_root: &Path,
-    #[cfg(test)] work_observer: Option<OpenCodeWorkObserver>,
 ) -> SourceBackedCoordinatorResult<()> {
     let registration = registration_for_provider(source.provider).ok_or_else(|| {
         invalid_route(
@@ -267,8 +225,6 @@ fn register_adapter(
         data_root: data_root.to_path_buf(),
         registration,
         path: source.path.clone(),
-        #[cfg(test)]
-        work_observer,
     };
     register_replacement_document_tree_route(registry, source, selection, adapter)
 }

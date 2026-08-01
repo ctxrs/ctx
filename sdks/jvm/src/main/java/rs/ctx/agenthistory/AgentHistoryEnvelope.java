@@ -120,17 +120,7 @@ public class AgentHistoryEnvelope {
                 fields.put("event", eventResult(camel));
                 break;
             case "showSession":
-                fields.put("session", pick(camel, "session", "events", "source", "mode", "format"));
-                break;
-            case "locateEvent":
-            case "locateSession":
-                fields.put("location", pick(camel,
-                        "ctxSessionId",
-                        "ctxEventId",
-                        "provider",
-                        "providerSessionId",
-                        "source",
-                        "resume"));
+                fields.put("session", pick(camel, "session", "events", "mode", "format"));
                 break;
             default:
                 Map<String, Object> error = new LinkedHashMap<>();
@@ -176,14 +166,7 @@ public class AgentHistoryEnvelope {
     }
 
     private static Map<String, Object> eventResult(Map<String, Object> camel) {
-        Map<String, Object> out = pick(camel, "event", "events", "source");
-        if (out.get("source") == null) {
-            Map<String, Object> event = AgentHistoryValue.objectOrNull(camel.get("event"));
-            if (event != null) {
-                out.put("source", event.get("source"));
-            }
-        }
-        return out;
+        return pick(camel, "event", "events");
     }
 
     private static Map<String, Object> pick(Map<String, Object> raw, String... keys) {

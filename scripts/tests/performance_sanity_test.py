@@ -772,7 +772,7 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
         self.assertTrue(snapshot.segments)
         return snapshot
 
-    def assert_complete_hydration(
+    def assert_complete_core_content(
         self,
         root: Path,
         env: dict[str, str],
@@ -805,25 +805,18 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
             result = results[0]
             self.assertEqual(result["provider"], provider)
             self.assertEqual(result["source_format"], source_formats[provider])
-            self.assertTrue(
-                Path(result["source_path"])
-                .resolve()
-                .is_relative_to(corpus.root(provider).resolve())
-            )
+            self.assertNotIn("source_path", result)
             show = run_json(
                 [
                     "show",
                     "event",
                     result["ctx_event_id"],
-                    "--content",
-                    "complete",
                     "--format=json",
                 ],
                 env,
                 root,
             )
             self.assertEqual(show["payload_type"], "event_window")
-            self.assertEqual(show["content_policy"], "complete")
             event = show["event"]
             self.assertEqual(event["provider"], provider)
             self.assertEqual(event["ctx_event_id"], result["ctx_event_id"])
@@ -837,11 +830,7 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
                 event["content"],
                 {
                     "complete": True,
-                    "complete_content_available": True,
-                    "origin": "provider_source",
-                    "requested": "complete",
-                    "source_verified": True,
-                    "stored_truncated": False,
+                    "policy_status": "selected",
                 },
             )
 
@@ -857,7 +846,7 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
         cold, snapshot, corpus = self.run_representative_top_provider_refresh(
             available_cpus,
             force_single_cpu=forced_single_cpu,
-            verify_hydration=True,
+            verify_core_content=True,
         )
 
         source_workers = require_parallel_source_workers(cold)
@@ -876,7 +865,7 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
             serial, _, _ = self.run_representative_top_provider_refresh(
                 available_cpus,
                 force_single_cpu=True,
-                verify_hydration=False,
+                verify_core_content=False,
             )
             serial_seconds = serial.elapsed_seconds
             speedup = serial.elapsed_seconds / cold.elapsed_seconds
@@ -909,7 +898,7 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
         available_cpus: set[int],
         *,
         force_single_cpu: bool,
-        verify_hydration: bool,
+        verify_core_content: bool,
     ) -> tuple[RefreshPerformanceSample, RefreshSnapshot, RepresentativeCorpus]:
         daemon_affinity = {min(available_cpus)} if force_single_cpu else None
         with tempfile.TemporaryDirectory(
@@ -948,8 +937,8 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
                 snapshot = self.assert_representative_refresh(
                     cold.packet, root, env, corpus
                 )
-                if verify_hydration:
-                    self.assert_complete_hydration(root, env, corpus)
+                if verify_core_content:
+                    self.assert_complete_core_content(root, env, corpus)
             finally:
                 stop_daemon(
                     daemon,

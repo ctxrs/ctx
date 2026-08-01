@@ -181,7 +181,6 @@ pub(super) fn parse_message_call_block(
     }
 
     let mut id = None;
-    let kind = Some("tool_call".to_owned());
     let mut direct_name = None;
     let mut function_name = None;
     let mut file_touches = Vec::new();
@@ -202,7 +201,6 @@ pub(super) fn parse_message_call_block(
     }
     Ok(Some(RawContinueMessageCall {
         id,
-        kind,
         name: function_name.or(direct_name),
         file_touches,
     }))
@@ -390,9 +388,6 @@ pub(super) fn parse_tool_call_state(
     let mut tool_call_id = None;
     let mut tool_call = None;
     let mut status = None;
-    let mut exit_code = None;
-    let mut duration_ms = None;
-    let mut timed_out = None;
     for field in state.as_object().map_err(scan_error)? {
         let (key, value) = field.map_err(scan_error)?;
         if key.is("toolCallId") {
@@ -401,12 +396,6 @@ pub(super) fn parse_tool_call_state(
             tool_call = parse_tool_call(value, stats)?;
         } else if key.is("status") {
             status = retained_bounded_string(value, MAX_TOOL_STATUS_BYTES, stats)?;
-        } else if key.is("exitCode") {
-            exit_code = decode_i64(value);
-        } else if key.is("durationMs") {
-            duration_ms = decode_i64(value);
-        } else if key.is("timedOut") {
-            timed_out = decode_bool(value);
         }
     }
     Ok(
@@ -415,9 +404,6 @@ pub(super) fn parse_tool_call_state(
                 tool_call_id,
                 tool_call,
                 status,
-                exit_code,
-                duration_ms,
-                timed_out,
             },
         ),
     )
@@ -493,7 +479,6 @@ pub(super) fn parse_tool_call(
     }
 
     let mut id = None;
-    let mut kind = None;
     let mut name = None;
     let mut function_name = None;
     let mut file_touches = Vec::new();
@@ -501,8 +486,6 @@ pub(super) fn parse_tool_call(
         let (key, value) = field.map_err(scan_error)?;
         if key.is("id") {
             id = retained_bounded_string(value, MAX_CALL_ID_BYTES, stats)?;
-        } else if key.is("type") || key.is("kind") {
-            kind = Some("tool_call".to_owned());
         } else if key.is("name") {
             name = retained_bounded_string(value, MAX_TOOL_NAME_BYTES, stats)?;
         } else if key.is("function") {
@@ -516,7 +499,6 @@ pub(super) fn parse_tool_call(
     let retained_request_identity = id.is_some() || name.is_some() || function_name.is_some();
     Ok(retained_request_identity.then_some(RawContinueToolCall {
         id,
-        kind,
         name,
         function_name,
         file_touches,

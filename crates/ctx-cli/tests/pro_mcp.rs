@@ -248,7 +248,10 @@ fn mcp_blame_returns_exact_typed_json_and_complete_text_fallback() {
     let text = result["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("matches: 1"));
     assert!(text.contains("object.display: session-producer"));
-    assert!(text.contains("event_id: 00000000-0000-0000-0000-000000000001"));
+    let event_id = structured["evidence"][0]["citation"]["event_id"]["uuid"]
+        .as_str()
+        .expect("Core evidence event UUID");
+    assert!(text.contains(&format!("\"uuid\":\"{event_id}\"")), "{text}");
     assert!(!text.contains("omitted"));
     assert!(!text.contains("payload_type"));
 }
@@ -325,9 +328,12 @@ fn mcp_blame_fails_intact_when_helper_page_exceeds_aggregate_cap() {
         result["structuredContent"]["error_code"],
         "invalid_response"
     );
-    assert!(result["content"][0]["text"]
-        .as_str()
-        .is_some_and(|text| text.contains("lower `limit`")));
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("lower `limit`")),
+        "{result:#}"
+    );
     assert!(result["structuredContent"].get("matches").is_none());
     assert!(result["structuredContent"].get("evidence").is_none());
     assert!(result["structuredContent"].get("next").is_none());

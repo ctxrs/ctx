@@ -50,11 +50,7 @@ pub(super) fn bounded_failure(mut error: String) -> String {
     error
 }
 
-pub(super) fn update_cli_session(
-    session: &mut CodeBuddySessionState,
-    value: &Value,
-    imported_at: DateTime<Utc>,
-) {
+pub(super) fn update_cli_session(session: &mut CodeBuddySessionState, value: &Value) {
     if let Some(session_id) = value
         .get("sessionId")
         .and_then(Value::as_str)
@@ -71,36 +67,12 @@ pub(super) fn update_cli_session(
             .filter(|value| !value.is_empty() && value.len() <= 8 * 1024)
             .map(str::to_owned);
     }
-    let Some(occurred_at) = cli_message_time(value, imported_at) else {
-        return;
-    };
-    let prior_start = session
-        .started_at
-        .as_deref()
-        .and_then(|value| value.parse::<DateTime<Utc>>().ok());
-    let prior_end = session
-        .ended_at
-        .as_deref()
-        .and_then(|value| value.parse::<DateTime<Utc>>().ok());
-    session.started_at = Some(
-        prior_start
-            .map(|prior| prior.min(occurred_at))
-            .unwrap_or(occurred_at)
-            .to_rfc3339(),
-    );
-    session.ended_at = Some(
-        prior_end
-            .map(|prior| prior.max(occurred_at))
-            .unwrap_or(occurred_at)
-            .to_rfc3339(),
-    );
 }
 
 pub(super) fn cli_core_row(
     context: &ProviderAdapterContext,
     session: &mut CodeBuddySessionState,
     session_title: &mut Option<String>,
-    ordinal: u64,
     physical_line: usize,
     value: Value,
 ) -> Result<CodeBuddyRecordClassification> {
@@ -108,9 +80,7 @@ pub(super) fn cli_core_row(
     let role = value.get("role").and_then(Value::as_str).map(str::to_owned);
     let ref_type = value.get("type").and_then(Value::as_str).map(str::to_owned);
     let event_type = codebuddy_event_type(role.as_deref(), ref_type.as_deref(), &value);
-    let explicit_native_message_id = codebuddy_cli_explicit_native_message_id(&value);
-    let native_message_id = explicit_native_message_id
-        .clone()
+    let native_message_id = codebuddy_cli_explicit_native_message_id(&value)
         .unwrap_or_else(|| format!("line-{physical_line}"));
     let occurred_at = cli_message_time(&value, context.imported_at).unwrap_or(context.imported_at);
     if !codebuddy_is_message_record(role.as_deref(), ref_type.as_deref()) {
@@ -124,19 +94,12 @@ pub(super) fn cli_core_row(
         session.generated_title.clone_from(session_title);
     }
     let provider_session_id = session.provider_session_id();
-    let started_at = session.started_at()?.unwrap_or(occurred_at);
     let (session, event) = codebuddy_normalized_rows(
         &CodeBuddySessionInput {
             provider_session_id: &provider_session_id,
-            started_at,
-            ended_at: session.ended_at()?,
             cwd: session.cwd.as_deref(),
         },
         CodeBuddyEventInput {
-            provider_event_index: stable_provider_event_index(
-                explicit_native_message_id.as_deref(),
-                ordinal,
-            ),
             native_message_id,
             event_type,
             role,
@@ -155,7 +118,6 @@ pub(super) fn extension_core_row(
     metadata: &CodeBuddyExtensionMetadata,
     session: &mut CodeBuddySessionState,
     session_title: &mut Option<String>,
-    ordinal: u64,
     message_ref: &Value,
     message_modified: Option<std::time::SystemTime>,
     raw_message: Value,
@@ -187,7 +149,6 @@ pub(super) fn extension_core_row(
         message_modified,
         context.imported_at,
     );
-    update_session_times(session, occurred_at);
     if !codebuddy_is_message_record(role.as_deref(), ref_type.as_deref()) {
         return Ok(CodeBuddyRecordClassification::SkippedMetadata);
     }
@@ -206,12 +167,9 @@ pub(super) fn extension_core_row(
     let (session, event) = codebuddy_normalized_rows(
         &CodeBuddySessionInput {
             provider_session_id: &provider_session_id,
-            started_at: session.started_at()?.unwrap_or(occurred_at),
-            ended_at: session.ended_at()?,
             cwd: cwd.as_deref(),
         },
         CodeBuddyEventInput {
-            provider_event_index: stable_provider_event_index(Some(&message_id), ordinal),
             native_message_id: message_id,
             event_type,
             role,
@@ -234,24 +192,6 @@ pub(super) fn codebuddy_is_message_record(role: Option<&str>, ref_type: Option<&
     }
 }
 
-pub(super) fn stable_provider_event_index(
-    native_message_id: Option<&str>,
-    native_ordinal: u64,
-) -> u64 {
-    let Some(native_message_id) = native_message_id else {
-        return native_ordinal;
-    };
-    let mut digest = Sha256::new();
-    digest.update(b"ctx-codebuddy-native-message-index-v1\0");
-    digest.update((native_message_id.len() as u64).to_be_bytes());
-    digest.update(native_message_id.as_bytes());
-    u64::from_be_bytes(
-        digest.finalize()[..8]
-            .try_into()
-            .expect("SHA-256 is 32 bytes"),
-    )
-}
-
 pub(super) fn codebuddy_cli_explicit_native_message_id(value: &Value) -> Option<String> {
     value
         .get("id")
@@ -263,26 +203,6 @@ pub(super) fn codebuddy_cli_explicit_native_message_id(value: &Value) -> Option<
                 && !id.chars().any(char::is_control)
         })
         .map(str::to_owned)
-}
-
-pub(super) fn update_session_times(
-    session: &mut CodeBuddySessionState,
-    occurred_at: DateTime<Utc>,
-) {
-    let started = session
-        .started_at
-        .as_deref()
-        .and_then(|value| value.parse::<DateTime<Utc>>().ok())
-        .map(|value| value.min(occurred_at))
-        .unwrap_or(occurred_at);
-    let ended = session
-        .ended_at
-        .as_deref()
-        .and_then(|value| value.parse::<DateTime<Utc>>().ok())
-        .map(|value| value.max(occurred_at))
-        .unwrap_or(occurred_at);
-    session.started_at = Some(started.to_rfc3339());
-    session.ended_at = Some(ended.to_rfc3339());
 }
 
 pub(super) fn codebuddy_event_type(

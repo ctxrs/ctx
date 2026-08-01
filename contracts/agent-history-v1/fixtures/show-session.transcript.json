@@ -11,23 +11,27 @@
       "ctxSessionId": "22222222-2222-4222-8222-222222222222",
       "provider": "codex",
       "providerSessionId": "codex-fixture-session",
+      "sourceFormat": "codex_session_jsonl",
       "title": "Fixture session"
     },
     "events": [
       {
         "ctxEventId": "11111111-1111-4111-8111-111111111111",
         "ctxSessionId": "22222222-2222-4222-8222-222222222222",
+        "provider": "codex",
+        "providerSessionId": "codex-fixture-session",
+        "sourceFormat": "codex_session_jsonl",
         "sequence": 1,
         "eventType": "message",
         "role": "assistant",
-        "text": "local agent history search result"
+        "text": "local agent history search result",
+        "structuredContent": ["transcript", {"complete": true}, null],
+        "content": {
+          "complete": true,
+          "policyStatus": "selected"
+        }
       }
     ],
-    "source": {
-      "path": "/tmp/ctx-sdk-fixture/session.jsonl",
-      "exists": true,
-      "sourceFormat": "codex_session_jsonl"
-    },
     "mode": "lite",
     "format": "json"
   }

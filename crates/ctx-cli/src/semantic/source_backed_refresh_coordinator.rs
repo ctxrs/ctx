@@ -1,7 +1,9 @@
+#[cfg(test)]
+use std::fs;
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, VecDeque},
-    fmt, fs,
+    collections::VecDeque,
+    fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
     time::{Duration as StdDuration, Instant as StdInstant},
@@ -9,23 +11,21 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_capture::{
-    build_automatic_source_backed_registry_from_report, discover_provider_sources_with_context,
+    build_automatic_source_backed_registry_from_report,
+    discover_provider_sources_with_context_and_work_budget, source_backed_refresh_work_budget,
     validate_provider_source_roots_outside_data_root, CaptureError, DiscoveryContext,
     DiscoveryReport, ProviderSourceStatus, SourceBackedAutomaticRegistryIssue,
     SourceBackedAutomaticUnavailableReason, SourceBackedProviderRegistry,
-    SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress,
-    SourceBackedResolverRegistry, SourceBackedRouteError, SourceBackedRouteErrorKind,
-    SourceBackedRouteResult,
+    SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress, SourceBackedRouteError,
+    SourceBackedRouteErrorKind, SourceBackedRouteResult,
 };
 #[cfg(test)]
 use ctx_history_core::CaptureProvider;
-use ctx_history_core::{
-    utc_now, CertifiedSource, HydrationFailure, HydrationFailureKind, ScannedSourceCounts,
+use ctx_history_core::{utc_now, CertifiedSource, ScannedSourceCounts};
+use ctx_history_index::{
+    generation_incompatibility_requires_rebuild, IndexError, VerifiedIndex, WriterOptions,
 };
-use ctx_history_index::{IndexError, VerifiedIndex, WriterOptions};
-use ctx_pro_host_protocol::{SourceManifest, SourceRemoval};
 use serde_json::{json, Value};
-use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
@@ -49,15 +49,8 @@ use super::{
 mod capture_refresh;
 mod coordinator_state;
 mod current_state;
-mod old_store_retirement;
-mod recovery;
 
-#[cfg(test)]
-pub(in crate::semantic) use capture_refresh::install_test_discovery_context;
-use capture_refresh::{
-    execute_capture_owned_refresh, execute_source_backed_refresh, hydration_failure_queues_refresh,
-    recover_capture_owned_resolver,
-};
+use capture_refresh::{execute_capture_owned_refresh, execute_source_backed_refresh};
 #[cfg(test)]
 use capture_refresh::{
     execute_capture_owned_refresh_with, refresh_all_provider_sources,
@@ -65,11 +58,11 @@ use capture_refresh::{
 };
 #[cfg(test)]
 use coordinator_state::CaptureOwnedSourceBackedRefreshExecutor;
-pub(in crate::semantic) use coordinator_state::SourceBackedRefreshCoordinator;
+pub(in crate::semantic) use coordinator_state::CoreRefreshEngine;
 use coordinator_state::SourceBackedRefreshProgressUpdate;
 pub(crate) use coordinator_state::{
-    GenerationBoundSourceBackedResolver, SourceBackedRefreshExecution, SourceBackedRefreshExecutor,
-    SourceBackedRefreshReceipt, SourceBackedRefreshTimings, SourceBackedResolverAccessError,
+    PinnedCorePublication, SourceBackedRefreshExecution, SourceBackedRefreshExecutor,
+    SourceBackedRefreshReceipt, SourceBackedRefreshTimings,
 };
 pub(crate) use current_state::SourceBackedRefreshCurrent;
 
@@ -78,15 +71,12 @@ const LEXICAL_DIRECTORY: &str = "lexical";
 const SOURCE_REFRESH_REQUEST_OP: &str = "source_refresh_request";
 const SOURCE_REFRESH_STATUS_OP: &str = "source_refresh_status";
 const SOURCE_REFRESH_ATTEMPT_HISTORY: usize = 64;
+const SOURCE_REFRESH_ACTIVE_PENDING_LIMIT: usize = 8;
 const SOURCE_REFRESH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
 const SOURCE_REFRESH_IPC_TIMEOUT: StdDuration = StdDuration::from_secs(2);
 const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
 const SOURCE_REFRESH_BUILD_ISSUE_LIMIT: usize = 8;
 const TERMINAL_COVERAGE_ERROR_CODE: &str = "all_provider_terminal_coverage_unavailable";
-// Covers a search/show generation pin crossing the daemon IPC boundary; an
-// acquired Arc lease keeps its exact resolver alive beyond this grace.
-const SOURCE_RESOLVER_RETIREMENT_GRACE: StdDuration = StdDuration::from_secs(5 * 60);
-
 thread_local! {
     /// Weak, exact-generation handoff for the synchronous daemon publication
     /// cycle. The coordinator's generation authority owns the strong pin; this
@@ -211,13 +201,6 @@ pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) generation_id: String,
     /// Exact explicit-source catalog snapshot registered into this publication.
     pub(crate) published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
-    /// Exact metadata-only Pro handoff for this Core generation. Test
-    /// executors may omit it; the capture-owned production executor never does.
-    pub(crate) source_manifest: Option<SourceManifest>,
-    /// Resolver built from the exact automatic registry used for this
-    /// publication. Production refreshes always supply it; injected test
-    /// executors may omit it when resolver behavior is irrelevant.
-    pub(crate) resolver: Option<Arc<SourceBackedResolverRegistry>>,
     pub(crate) scanned_routes: usize,
     pub(crate) unsupported_routes: usize,
     pub(crate) certified_source_count: usize,
@@ -236,10 +219,10 @@ fn published_generation_id(data_root: &Path) -> Result<Option<String>> {
 
 fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> {
     let index_root = source_backed_index_root(data_root);
-    if !index_root.join("meta.json").is_file() {
+    if !index_root.is_dir() {
         if let Some(generation_id) = published_generation_receipt(data_root)? {
             bail!(
-                "verified source-backed lexical generation {generation_id} is missing from {}",
+                "verified Core generation {generation_id} is missing from {}",
                 index_root.display()
             );
         }
@@ -247,22 +230,19 @@ fn open_published_generation(data_root: &Path) -> Result<Option<VerifiedIndex>> 
     }
     match open_verified_index(&index_root) {
         Ok(index) => Ok(Some(index)),
-        // Tantivy creates schema-only meta.json before the first ctx commit.
-        // It is replaceable only while no durable publication receipt proves
-        // that a real generation was activated. Once publication succeeds,
-        // the same typed error is corruption and remains fail-closed.
-        Err(IndexError::MissingCommitPayload)
-            if published_generation_receipt(data_root)?.is_none()
-                && source_backed_lexical_artifact_is_uncommitted_schema_only(&index_root)? =>
-        {
+        Err(IndexError::MissingActiveGenerationPointer) => {
+            if let Some(generation_id) = published_generation_receipt(data_root)? {
+                bail!(
+                    "verified Core generation {generation_id} is missing from {}",
+                    index_root.display()
+                );
+            }
             Ok(None)
         }
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "open verified source-backed lexical index {}",
-                index_root.display()
-            )
-        }),
+        Err(error) if generation_incompatibility_requires_rebuild(&error) => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("open verified Core index {}", index_root.display()))
+        }
     }
 }
 
@@ -277,42 +257,17 @@ fn verify_source_backed_publication(
             verified.generation_id()
         );
     }
-    if publication.source_manifest.is_some() && publication.resolver.is_some() {
-        let manifest = verified.manifest();
-        let verified_current =
-            SourceBackedRefreshCurrent::from_sources(&manifest.sources, manifest.removals.len())?;
-        if verified_current != publication.current
-            || publication.certified_source_count != verified_current.source_count
-            || publication.certified_source_bytes != verified_current.certified_source_bytes
-            || manifest.indexed_documents != verified_current.indexed_documents
-        {
-            bail!(
-                "source-backed refresh publication facts do not match its exact verified generation"
-            );
-        }
+    let manifest = verified.manifest();
+    let verified_current =
+        SourceBackedRefreshCurrent::from_sources(&manifest.sources, manifest.removals.len())?;
+    if verified_current != publication.current
+        || publication.certified_source_count != verified_current.source_count
+        || publication.certified_source_bytes != verified_current.certified_source_bytes
+        || manifest.indexed_documents != verified_current.indexed_documents
+    {
+        bail!("Core refresh publication facts do not match its exact verified generation");
     }
     Ok(())
-}
-
-pub(in crate::semantic) fn source_backed_lexical_artifact_is_uncommitted_schema_only(
-    index_root: &Path,
-) -> Result<bool> {
-    let meta_path = index_root.join("meta.json");
-    let meta: Value = serde_json::from_slice(
-        &fs::read(&meta_path)
-            .with_context(|| format!("read lexical metadata {}", meta_path.display()))?,
-    )
-    .with_context(|| format!("parse lexical metadata {}", meta_path.display()))?;
-    Ok(source_backed_meta_is_uncommitted_schema_only(&meta))
-}
-
-fn source_backed_meta_is_uncommitted_schema_only(meta: &Value) -> bool {
-    meta.get("payload").is_none_or(Value::is_null)
-        && meta.get("opstamp").and_then(Value::as_u64) == Some(0)
-        && meta
-            .get("segments")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty)
 }
 
 fn published_generation_receipt(data_root: &Path) -> Result<Option<String>> {
@@ -338,84 +293,30 @@ fn retained_generation_hint(data_root: &Path) -> Result<Option<String>> {
                 .filter(|generation_id| !generation_id.is_empty())
                 .map(str::to_owned)
         });
-    let meta_path = source_backed_index_root(data_root).join("meta.json");
-    if !meta_path.is_file() {
+    let index_root = source_backed_index_root(data_root);
+    if !index_root.is_dir() {
         if let Some(generation_id) = receipt_generation {
             bail!(
-                "retained lexical generation hint {generation_id} has no metadata at {}",
-                meta_path.display()
+                "retained lexical generation hint {generation_id} has no active generation at {}",
+                index_root.display()
             );
         }
         return Ok(None);
     }
-    let meta: Value = serde_json::from_slice(
-        &fs::read(&meta_path)
-            .with_context(|| format!("read retained lexical metadata {}", meta_path.display()))?,
-    )
-    .with_context(|| format!("parse retained lexical metadata {}", meta_path.display()))?;
-    let payload = match meta.get("payload").and_then(Value::as_str) {
-        Some(payload) => payload,
-        None if receipt_generation.is_none()
-            && source_backed_meta_is_uncommitted_schema_only(&meta) =>
-        {
-            return Ok(None);
+    match VerifiedIndex::active_generation_id(&index_root) {
+        Ok(Some(generation_id)) => Ok(Some(generation_id)),
+        Ok(None) => {
+            let Some(generation_id) = receipt_generation else {
+                return Ok(None);
+            };
+            bail!(
+                "retained lexical generation hint {generation_id} has no active generation at {}",
+                index_root.display()
+            )
         }
-        None => return Err(IndexError::MissingCommitPayload.into()),
-    };
-    let payload: Value =
-        serde_json::from_str(payload).context("parse retained lexical generation payload")?;
-    let meta_generation = payload
-        .get("generation_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("retained lexical metadata has no generation ID"))?;
-    // Tantivy's atomically published payload is the data-plane authority. The
-    // daemon job receipt can lag it when the process dies after commit but
-    // before the coordinator persists its final status. A successor refresh
-    // rewrites that stale bookkeeping; startup must not reject the valid
-    // generation or require a foreground writer first.
-    Ok(Some(meta_generation.to_owned()))
-}
-
-#[cfg(test)]
-fn complete_verified_source_epoch(data_root: &Path, generation_id: &str) -> Result<()> {
-    if !old_store_retirement::is_required(data_root)? {
-        return Ok(());
+        Err(error) if generation_incompatibility_requires_rebuild(&error) => Ok(receipt_generation),
+        Err(error) => Err(error.into()),
     }
-    let verified = open_verified_index(&source_backed_index_root(data_root))
-        .context("reopen source-backed generation before retiring the old Store family")?;
-    complete_verified_source_epoch_with(data_root, generation_id, &verified)
-}
-
-fn complete_verified_source_epoch_with(
-    data_root: &Path,
-    generation_id: &str,
-    verified: &VerifiedIndex,
-) -> Result<()> {
-    if verified.generation_id() != generation_id {
-        bail!(
-            "active source-backed generation {} changed before retiring old Store state for {generation_id}",
-            verified.generation_id()
-        );
-    }
-    remove_old_store_family(data_root)?;
-    Ok(())
-}
-
-pub(in crate::semantic) fn reconcile_verified_source_epoch(data_root: &Path) -> Result<()> {
-    recovery::reconcile_persisted_refresh_job(data_root)?;
-    if !old_store_retirement::is_required(data_root)? {
-        return Ok(());
-    }
-    let Some(verified) = open_published_generation(data_root)? else {
-        return Ok(());
-    };
-    let generation_id = verified.generation_id().to_owned();
-    complete_verified_source_epoch_with(data_root, &generation_id, &verified)
-}
-
-fn remove_old_store_family(data_root: &Path) -> Result<()> {
-    old_store_retirement::retire(data_root)
 }
 
 pub(crate) struct PinnedSourceBackedGeneration {
@@ -464,6 +365,13 @@ pub(crate) fn coordinate_source_backed_refresh(
     coordinate_source_backed_refresh_with_catalog(data_root, mode, None, true)
 }
 
+pub(crate) fn coordinate_core_refresh_without_autostart(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+) -> Result<SourceBackedRefreshObservation> {
+    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, false)
+}
+
 fn coordinate_source_backed_refresh_with_catalog(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
@@ -475,7 +383,7 @@ fn coordinate_source_backed_refresh_with_catalog(
             bail!("explicit source catalog imports require daemon refresh mode `wait`");
         }
         let pin = pin_published_generation(data_root)?.ok_or_else(|| {
-            anyhow!("the source-backed index does not exist; retry with daemon refresh enabled")
+            anyhow!("the Core index does not exist; retry with daemon refresh enabled")
         })?;
         return Ok(SourceBackedRefreshObservation {
             mode,
@@ -640,12 +548,12 @@ fn wait_for_published_generation(
                     })?;
                 let pin = pin_published_generation(data_root)?.ok_or_else(|| {
                     anyhow!(
-                        "daemon published source-backed generation {expected}, but no verified generation can be opened"
+                        "daemon published Core generation {expected}, but no verified generation can be opened"
                     )
                 })?;
                 if pin.generation_id() != expected {
                     bail!(
-                        "daemon reported source-backed generation {expected}, but the verified published generation is {}",
+                        "daemon reported Core generation {expected}, but the verified published generation is {}",
                         pin.generation_id()
                     );
                 }
@@ -951,10 +859,6 @@ pub(crate) fn pin_active_verified_generation(
 #[cfg(test)]
 #[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests_retained_generation_tests.rs"]
 mod retained_generation_tests;
-
-#[cfg(test)]
-#[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests_recovery.rs"]
-mod recovery_tests;
 
 #[cfg(test)]
 #[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests.rs"]

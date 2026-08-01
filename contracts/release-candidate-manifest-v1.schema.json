@@ -107,7 +107,8 @@
           "const": [
             "columnar-zstd-compression",
             "lz4-compression",
-            "mmap"
+            "mmap",
+            "zstd-compression"
           ]
         },
         "resolved_crate_features": {
@@ -118,7 +119,9 @@
             "lz4_flex",
             "memmap2",
             "mmap",
-            "tempfile"
+            "tempfile",
+            "zstd",
+            "zstd-compression"
           ]
         },
         "dependency_closure": {

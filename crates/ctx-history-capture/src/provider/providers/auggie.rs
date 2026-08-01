@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
@@ -15,15 +13,10 @@ pub(super) struct AuggieSessionData<'a> {
     pub(super) chat_history: &'a [Value],
     pub(super) started_at: DateTime<Utc>,
     pub(super) cwd: Option<String>,
-    pub(super) raw_source_path: String,
 }
 
 impl<'a> AuggieSessionData<'a> {
-    pub(super) fn parse(
-        session: &'a Value,
-        path: &Path,
-        context: &ProviderAdapterContext,
-    ) -> Result<Self> {
+    pub(super) fn parse(session: &'a Value, context: &ProviderAdapterContext) -> Result<Self> {
         let provider_session_id = provider_string_field(session, &["sessionId", "session_id"])
             .ok_or_else(|| {
                 CaptureError::InvalidPayload("Auggie session JSON is missing sessionId".to_owned())
@@ -63,7 +56,6 @@ impl<'a> AuggieSessionData<'a> {
                 "cwd",
             ],
         );
-        let raw_source_path = path.display().to_string();
         Ok(Self {
             provider_session_id,
             parent_provider_session_id: provider_string_field(
@@ -81,7 +73,6 @@ impl<'a> AuggieSessionData<'a> {
             started_at,
             cwd,
             chat_history,
-            raw_source_path,
         })
     }
 }

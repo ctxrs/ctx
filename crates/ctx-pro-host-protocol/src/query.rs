@@ -3,9 +3,9 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{
-    ErrorClass, EvidenceCitation, ProtocolError, ResourceKind, ResourceRef,
-    SourceManifestReceiptIdentity, MAX_BLAME_ATTRIBUTIONS_PER_MATCH, MAX_BLAME_CURSOR_BYTES,
-    MAX_BLAME_EVIDENCE, MAX_BLAME_RESULTS, MAX_BLAME_TARGET_BYTES, MAX_CITATIONS_PER_FACT,
+    CoreMaterializationReceiptIdentity, ErrorClass, EvidenceCitation, ProtocolError, ResourceKind,
+    ResourceRef, MAX_BLAME_ATTRIBUTIONS_PER_MATCH, MAX_BLAME_CURSOR_BYTES, MAX_BLAME_EVIDENCE,
+    MAX_BLAME_RESULTS, MAX_BLAME_TARGET_BYTES, MAX_CITATIONS_PER_FACT,
 };
 
 #[path = "query_pull_request_selector.rs"]
@@ -16,15 +16,15 @@ use pull_request_selector::{pull_request_selector_kind, PullRequestSelectorKind}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum QuerySnapshotExpectation {
-    Source {
-        receipt: SourceManifestReceiptIdentity,
+    Core {
+        receipt: CoreMaterializationReceiptIdentity,
     },
 }
 
 impl QuerySnapshotExpectation {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
-            Self::Source { receipt } => receipt.validate(),
+            Self::Core { receipt } => receipt.validate(),
         }
     }
 }

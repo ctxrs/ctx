@@ -101,8 +101,6 @@ pub(crate) enum CommandRoot {
     Import(ImportArgs),
     #[command(about = "Show an indexed session or event")]
     Show(ShowArgs),
-    #[command(about = "Locate evidence for an indexed session or event")]
-    Locate(LocateArgs),
     #[command(about = "Search indexed agent history")]
     Search(SearchArgs),
     #[command(
@@ -291,41 +289,6 @@ pub(crate) enum ShowTarget {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct LocateArgs {
-    #[command(subcommand)]
-    pub(crate) target: LocateTarget,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum LocateTarget {
-    #[command(about = "Locate provider/source metadata for a session")]
-    Session(LocateSessionArgs),
-    #[command(about = "Locate provider/source metadata for an event")]
-    Event(LocateEventArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocateSessionArgs {
-    #[arg(help = "ctx session id or unambiguous id prefix")]
-    pub(crate) id: Option<String>,
-    #[arg(long, value_parser = parse_provider_arg)]
-    #[arg(hide_possible_values = true)]
-    pub(crate) provider: Option<ProviderArg>,
-    #[arg(long = "provider-session")]
-    pub(crate) provider_session: Option<String>,
-    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
-    pub(crate) format: JsonOutputFormat,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocateEventArgs {
-    #[arg(help = "ctx event id or unambiguous id prefix")]
-    pub(crate) id: String,
-    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
-    pub(crate) format: JsonOutputFormat,
-}
-
-#[derive(Debug, Args)]
 pub(crate) struct SearchArgs {
     #[arg(help = "Natural-language query to search local agent history")]
     pub(crate) query: Option<String>,
@@ -413,7 +376,7 @@ pub(crate) struct SearchArgs {
         long,
         value_enum,
         help = "Search backend override: hybrid, semantic, or lexical",
-        long_help = "Search backend override. By default ctx uses lexical search unless local semantic search is enabled in config, then hybrid. hybrid combines Tantivy source-backed lexical evidence and semantic vector evidence; lexical uses only the Tantivy source-backed lexical index; semantic requires local semantic search to be enabled and ready."
+        long_help = "Search backend override. By default ctx uses lexical search unless local semantic search is enabled in config, then hybrid. hybrid combines self-contained Core lexical evidence and semantic vector evidence; lexical uses only the Tantivy Core index; semantic requires local semantic search to be enabled and ready."
     )]
     pub(crate) backend: Option<SearchBackendArg>,
     #[arg(

@@ -19,7 +19,6 @@ use std::{
     ffi::{c_char, c_void, OsStr, OsString},
     fs::{File, Metadata, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    ops::Deref,
     path::{Component, Path, PathBuf},
     ptr,
     sync::{Arc, Mutex, MutexGuard},
@@ -123,10 +122,15 @@ pub(crate) struct SqliteSourceSnapshotCounters {
     immutable_snapshot_opens: u64,
     copied_snapshot_opens: u64,
     source_bytes_copied: u64,
+    #[cfg(test)]
     logical_projection_passes: u64,
+    #[cfg(test)]
     logical_rows_projected: u64,
+    #[cfg(test)]
     documents_staged: u64,
+    #[cfg(test)]
     logical_noops: u64,
+    #[cfg(test)]
     logical_replacements: u64,
     terminal_fences: u64,
     terminal_revalidations: u64,
@@ -136,13 +140,6 @@ pub(crate) struct SqliteSourceSnapshotCounters {
     max_active_snapshot_bytes: u64,
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "counter accessors are consumed by the downstream SQLite family integration"
-    )
-)]
 impl SqliteSourceSnapshotCounters {
     pub(crate) const fn immutable_snapshot_opens(self) -> u64 {
         self.immutable_snapshot_opens
@@ -156,22 +153,27 @@ impl SqliteSourceSnapshotCounters {
         self.source_bytes_copied
     }
 
+    #[cfg(test)]
     pub(crate) const fn logical_projection_passes(self) -> u64 {
         self.logical_projection_passes
     }
 
+    #[cfg(test)]
     pub(crate) const fn logical_rows_projected(self) -> u64 {
         self.logical_rows_projected
     }
 
+    #[cfg(test)]
     pub(crate) const fn documents_staged(self) -> u64 {
         self.documents_staged
     }
 
+    #[cfg(test)]
     pub(crate) const fn logical_noops(self) -> u64 {
         self.logical_noops
     }
 
+    #[cfg(test)]
     pub(crate) const fn logical_replacements(self) -> u64 {
         self.logical_replacements
     }
@@ -188,6 +190,7 @@ impl SqliteSourceSnapshotCounters {
         self.active_snapshots
     }
 
+    #[cfg(test)]
     pub(crate) const fn active_snapshot_bytes(self) -> u64 {
         self.active_snapshot_bytes
     }
@@ -196,6 +199,7 @@ impl SqliteSourceSnapshotCounters {
         self.max_active_snapshots
     }
 
+    #[cfg(test)]
     pub(crate) const fn max_active_snapshot_bytes(self) -> u64 {
         self.max_active_snapshot_bytes
     }
@@ -208,13 +212,6 @@ struct SqliteSourceSnapshotContext {
 }
 
 impl SqliteSourceSnapshotContext {
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "counter snapshots are consumed by the downstream SQLite family integration"
-        )
-    )]
     fn snapshot(&self) -> SqliteSourceSnapshotCounters {
         *self.lock()
     }
@@ -226,6 +223,7 @@ impl SqliteSourceSnapshotContext {
         Ok(())
     }
 
+    #[cfg(test)]
     fn record_logical_projection(
         &self,
         rows: u64,
@@ -442,17 +440,11 @@ impl SqliteSourceDirectoryAuthority {
         &self.snapshot_context.data_root
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "counter snapshots are consumed by the downstream SQLite family integration"
-        )
-    )]
     pub(crate) fn snapshot_counters(&self) -> SqliteSourceSnapshotCounters {
         self.snapshot_context.snapshot()
     }
 
+    #[cfg(test)]
     pub(crate) fn record_logical_projection(
         &self,
         rows: u64,
@@ -590,15 +582,9 @@ pub(crate) struct SqliteSourceReadSnapshot {
     native_evidence: SqliteFamilyEvidence,
     sqlite_evidence: SqliteSnapshotEvidence,
     evidence: SqliteSourceEvidence,
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "retained for bounded snapshot observability")
-    )]
+    #[cfg(test)]
     strategy: SqliteSourceSnapshotStrategy,
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "retained for bounded snapshot observability")
-    )]
+    #[cfg(test)]
     copied_bytes: u64,
     _snapshot_directory: Option<TempDir>,
     snapshot_activity: Option<SqliteSourceSnapshotActivity>,
@@ -749,8 +735,7 @@ use snapshot::{
     open_root_handle_sqlite_source_snapshot_for_test,
 };
 pub(crate) use snapshot::{
-    open_ctx_owned_sqlite_read_snapshot, open_root_handle_sqlite_source_snapshot,
-    retain_sqlite_source_directory_authority, CtxOwnedSqliteReadSnapshot,
+    open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
 };
 
 #[cfg(test)]

@@ -175,7 +175,11 @@ fn scan_collect(
         assert!(page.core_rows.is_empty());
         let units = page.source_backed_rows.len();
         assert!(units <= MAX_CODEX_PAGE_ROWS);
-        assert!(page.serialized_bytes <= MAX_CODEX_PAGE_BYTES);
+        assert!(
+            page.serialized_bytes <= MAX_CODEX_PAGE_BYTES
+                || (units == 1
+                    && page.serialized_bytes <= MAX_CODEX_SOURCE_BACKED_SINGLE_ROW_PAGE_BYTES)
+        );
         assert_eq!(
             page.next_safe_frontier
                 .next_raw_ordinal

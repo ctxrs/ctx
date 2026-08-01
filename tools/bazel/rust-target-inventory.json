@@ -34,14 +34,16 @@
         "test:pro_mcp": "//crates/ctx-cli:pro_mcp_tests",
         "test:pro_qualification": "//crates/ctx-cli:pro_qualification_tests",
         "test:pro_release_helper": "//crates/ctx-cli:pro_release_helper_tests",
+        "test:pro_test_control": "//crates/ctx-cli:pro_test_control_tests",
         "test:pro_test_support": "//crates/ctx-cli:pro_test_support_tests",
+        "test:raw_output_policy": "//crates/ctx-cli:raw_output_policy_tests",
         "test:search_refresh": "//crates/ctx-cli:search_refresh_tests",
         "test:search_show_locate_sql": "//crates/ctx-cli:search_show_locate_sql_tests",
         "test:search_source_identity_filters": "//crates/ctx-cli:search_source_identity_filters_tests",
         "test:setup_sources_import": "//crates/ctx-cli:setup_sources_import_tests",
         "test:skill": "//crates/ctx-cli:skill_tests",
         "test:slash_command_e2e": "//crates/ctx-cli:slash_command_e2e_tests",
-        "test:source_backed_content": "//crates/ctx-cli:source_backed_content_tests",
+        "test:self_contained_core_content": "//crates/ctx-cli:self_contained_core_content_tests",
         "test:status_store_cutover": "//crates/ctx-cli:status_store_cutover_tests",
         "test:stats": "//crates/ctx-cli:stats_tests",
         "test:upgrade": "//crates/ctx-cli:upgrade_tests",
@@ -54,7 +56,9 @@
       "manifest": "crates/ctx-history-capture/Cargo.toml",
       "targets": {
         "lib:ctx_history_capture": "//crates/ctx-history-capture:lib",
-        "test:complete_content_sqlite": "//crates/ctx-history-capture:complete_content_sqlite_tests"
+        "test:codex_direct_result": "//crates/ctx-history-capture:codex_direct_result_tests",
+        "test:repository_shell_outcomes": "//crates/ctx-history-capture:repository_shell_outcomes_tests",
+        "test:self_contained_core_final_locator_removal": "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests"
       },
       "native_unit": "//crates/ctx-history-capture:unit_tests"
     },

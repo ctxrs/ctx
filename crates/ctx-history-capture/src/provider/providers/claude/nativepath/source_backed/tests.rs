@@ -1,656 +1,698 @@
-use std::{
-    fs::{self, OpenOptions},
-    io::Write,
-    path::{Path, PathBuf},
-};
+use super::*;
+use ctx_history_core::{CertifiedSource, ScannedSourceCounts, SourceObservation};
+use ctx_history_index::{GenerationWriter, WriterOptions};
 
-use ctx_history_core::{
-    BatchHydrationRequest, CaptureProvider, ContentSourceResolver, EventHydrationRequest,
-    HydrationFailureKind, LocatorRevisionPolicy, NativeRecordCoordinate, SourceRecordLocator,
-    TypedKey,
-};
-use ctx_history_index::{VerifiedIndex, WriterOptions};
-use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+#[test]
+fn claude_body_above_the_page_target_is_retained_whole() {
+    let body = format!(
+        "{}claude-full-body-tail",
+        "x".repeat(8 * 1024 * 1024 + 64 * 1024)
+    );
+    let bytes = serde_json::json!({
+        "type": "user",
+        "sessionId": "large-body-session",
+        "timestamp": "2026-07-31T12:00:00Z",
+        "message": {"role": "user", "content": body},
+    })
+    .to_string()
+    .into_bytes();
+    assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+    let locator = ClaudePhysicalLocator {
+        path: PathBuf::from("large-body-session.jsonl"),
+        byte_start: 0,
+        byte_end_exclusive: bytes.len() as u64,
+        line_number: 1,
+        record_sha256: Sha256::digest(&bytes).into(),
+    };
 
-use crate::{
-    provider::source_backed::{
-        family::jsonl::{
-            jsonl_family_projection_bytes, jsonl_family_work, jsonl_prefix_hash_bytes,
-            reset_jsonl_family_work, reset_jsonl_prefix_hash_bytes, JsonlFamilyWork,
-        },
-        refresh_source_backed_generation, register_landed_source_backed_route,
-        SourceBackedProviderRegistry, SourceBackedRouteSelection,
-    },
-    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
-    ProviderSourceStatus,
-};
+    let parsed = parse_native_record(&bytes, 0, &locator).unwrap();
 
-fn registry(root: &Path) -> SourceBackedProviderRegistry {
-    registry_for_roots(&[(root, SourceBackedRouteSelection::Automatic)])
-}
-
-fn registry_for_roots(
-    roots: &[(&Path, SourceBackedRouteSelection)],
-) -> SourceBackedProviderRegistry {
-    let mut registry = SourceBackedProviderRegistry::new();
-    for (root, selection) in roots {
-        let source = ProviderSource {
-            provider: CaptureProvider::Claude,
-            path: (*root).to_path_buf(),
-            exists: true,
-            source_format: "claude_projects_jsonl_tree",
-            source_kind: ProviderSourceKind::NativeHistory,
-            import_support: ProviderImportSupport::Native,
-            catalog_support: ProviderCatalogSupport::None,
-            status: ProviderSourceStatus::Available,
-            unsupported_reason: None,
-        };
-        register_landed_source_backed_route(&mut registry, source, *selection).unwrap();
-    }
-    registry
+    assert_eq!(parsed.rows.len(), 1);
+    assert_eq!(parsed.rows[0].body.as_deref(), Some(body.as_str()));
+    assert!(parsed.rows[0]
+        .body
+        .as_deref()
+        .is_some_and(|value| value.ends_with("claude-full-body-tail")));
 }
 
 #[test]
-fn shared_family_empty_automatic_root_coexists_with_distinct_explicit_replay() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let automatic = temp.path().join(".claude/projects");
-    let explicit = temp.path().join("explicit/projects");
-    fs::create_dir_all(&automatic).unwrap();
-    write_lines(
-        &session_path(&explicit, "-project", "session-1"),
-        &[message("session-1", "message-1", "explicit body")],
-    );
-    let registry = registry_for_roots(&[
-        (&automatic, SourceBackedRouteSelection::Automatic),
-        (&explicit, SourceBackedRouteSelection::ExplicitManual),
-    ]);
-    let index_root = temp.path().join("index");
-
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(cold.sources.len(), 1);
-    let replay =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(replay.sources, cold.sources);
-    assert_eq!(replay.commit.generation_id, cold.commit.generation_id);
-    let source = replay.sources[0].observation().source();
-    let event = VerifiedIndex::open(&index_root)
+fn claude_oversized_command_abstains_without_session_cwd_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    assert!(std::process::Command::new("/usr/bin/git")
+        .args(["init", "-q"])
+        .current_dir(temp.path())
+        .status()
         .unwrap()
-        .source_event_page(source, None, 1)
-        .unwrap()
-        .items
-        .remove(0);
-    let hydrated = registry
-        .resolver_registry()
-        .hydrate_event(&EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
+        .success());
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "assistant",
+        "uuid": "oversized-command-record",
+        "sessionId": "test-session",
+        "timestamp": "2026-08-01T12:00:00Z",
+        "cwd": temp.path(),
+        "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "oversized-command",
+                "name": "Bash",
+                "input": {"command": "x".repeat(1024 * 1024 + 1)}
+            }]
+        }
+    }))
+    .unwrap();
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
         .unwrap();
-    assert_eq!(hydrated.provider_bytes, b"explicit body");
+
+    let [record] = emitted.as_slice() else {
+        panic!("expected exactly one Claude tool-call record");
+    };
+    assert!(record.repository_bindings.is_empty());
+    assert!(record
+        .repository_abstentions
+        .iter()
+        .any(|abstention| { abstention.reason == RepositoryAbstentionReason::CommandTooLarge }));
 }
 
-fn writer_options() -> WriterOptions {
-    WriterOptions {
+fn fallback_row(body: &str, ordinal: u64) -> ClaudeRetainedRow {
+    let bytes = serde_json::json!({
+        "type": "user",
+        "sessionId": "fallback-session",
+        "timestamp": "2026-07-31T12:00:00Z",
+        "message": {"role": "user", "content": body},
+    })
+    .to_string()
+    .into_bytes();
+    let locator = ClaudePhysicalLocator {
+        path: PathBuf::from("fallback-session.jsonl"),
+        byte_start: 0,
+        byte_end_exclusive: bytes.len() as u64,
+        line_number: ordinal + 1,
+        record_sha256: Sha256::digest(&bytes).into(),
+    };
+    parse_native_record(&bytes, ordinal, &locator)
+        .unwrap()
+        .rows
+        .into_iter()
+        .next()
+        .unwrap()
+}
+
+fn fallback_event_ids(bodies: &[&str]) -> Vec<StableEntityId> {
+    let key = ClaudeSessionKey {
+        root_session_id: "fallback-session".to_owned(),
+        workflow_run_id: None,
+        agent_id: None,
+    };
+    let source = source_key(&key).unwrap();
+    let session_id = session_identity(&source, &session_typed_key(&key).unwrap()).unwrap();
+    let mut state = FallbackEventIdentityState::default();
+    bodies
+        .iter()
+        .enumerate()
+        .map(|(ordinal, body)| {
+            let row = fallback_row(body, ordinal as u64);
+            let fallback = next_fallback_event_identity(&row, &source, session_id, &mut state)
+                .unwrap()
+                .unwrap();
+            let native_item_key = native_item_key(&row, Some(fallback)).unwrap();
+            derive_event_id(EventIdentityInput {
+                source: &source,
+                session_id,
+                logical_item_kind: LOGICAL_EVENT_KIND,
+                native_item_key: &native_item_key,
+                subrecord_selector: None,
+            })
+            .unwrap()
+        })
+        .collect()
+}
+
+fn fallback_event_id(
+    row: &ClaudeRetainedRow,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    state: &mut FallbackEventIdentityState,
+) -> (StableEntityId, TypedKey) {
+    let fallback = next_fallback_event_identity(row, source, session_id, state)
+        .unwrap()
+        .unwrap();
+    let native_item_key = native_item_key(row, Some(fallback)).unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let native_event_id = native_event_typed_key(row, Some(fallback)).unwrap();
+    (event_id, native_event_id)
+}
+
+fn base_lookup_with_events(
+    source: &SourceKey,
+    session_id: StableEntityId,
+    events: &[(StableEntityId, TypedKey)],
+) -> (tempfile::TempDir, BaseEventIdentityLookup) {
+    let temp = tempfile::tempdir().unwrap();
+    let options = WriterOptions {
         indexer_threads: 1,
         memory_bytes: 15_000_000,
-    }
-}
-
-#[test]
-fn shared_family_claude_noop_replacement_lineage_and_hydration_oracle() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let projects = temp.path().join(".claude/projects");
-    let primary = session_path(&projects, "-project", "session-1");
-    let subagent = projects.join("-project/session-1/subagents/agent-review.jsonl");
-    write_lines(
-        &primary,
-        &[
-            message("session-1", "message-1", "claude exact"),
-            message("session-1", "message-2", "claude response"),
-        ],
-    );
-    write_lines(
-        &subagent,
-        &[message("session-1", "subagent-message", "subagent body")],
-    );
-    let registry = registry(&projects);
-    let index_root = temp.path().join("index");
-
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(cold.sources.len(), 2);
-    assert_eq!(
-        cold.sources
-            .iter()
-            .map(|source| source.counts().indexed_documents)
-            .sum::<u64>(),
-        3
-    );
-
-    reset_jsonl_family_work();
-    let unchanged =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(jsonl_family_work().provider_projections, 0);
-    assert_eq!(unchanged.sources, cold.sources);
-    assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
-    assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
-
-    let primary_source = cold
-        .sources
-        .iter()
-        .find(|source| source.counts().indexed_documents == 2)
-        .unwrap()
-        .observation()
-        .source();
-    let index = VerifiedIndex::open(&index_root).unwrap();
-    let mut events = index
-        .source_event_page(primary_source, None, 10)
-        .unwrap()
-        .items;
-    events.sort_by_key(|event| event.event_sequence);
-    assert!(events.iter().all(|event| {
-        event.parent_session_id.is_none()
-            && event.root_session_id == event.session_id
-            && event.agent_type == "primary"
-            && event.is_primary
-            && event.branch.as_deref() == Some("main")
-            && event.cwd.as_deref() == Some("/workspace/project")
-            && event.locator.revision_policy() == LocatorRevisionPolicy::StableRecordEvidence
-    }));
-    let requests = events
-        .iter()
-        .rev()
-        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
-        .collect::<Vec<_>>();
-    reset_jsonl_family_work();
-    let hydrated = registry
-        .resolver_registry()
-        .hydrate_batch(&BatchHydrationRequest::new(requests.clone()).unwrap())
-        .unwrap()
-        .into_records();
-    assert_eq!(
-        hydrated
-            .iter()
-            .map(|record| record.provider_bytes.as_slice())
-            .collect::<Vec<_>>(),
-        vec![b"claude response".as_slice(), b"claude exact".as_slice()]
-    );
-    assert_eq!(
-        jsonl_family_work(),
-        JsonlFamilyWork {
-            discoveries: 0,
-            leaf_opens: 1,
-            provider_projections: 0,
-        }
-    );
-    let mut digest = Sha256::new();
-    for (request, record) in requests.iter().zip(hydrated) {
-        digest.update(request.event_id().digest());
-        digest.update((record.provider_bytes.len() as u64).to_be_bytes());
-        digest.update(record.provider_bytes);
-    }
-    assert_eq!(
-        format!("{:x}", digest.finalize()),
-        "c454f0ccd49ec9598691b60c969a1c6f77b7aa685de2a40289e5dac8ab32394a"
-    );
-
-    let before = fs::read_to_string(&primary).unwrap();
-    let rewritten = before.replace("claude exact", "claude other");
-    assert_eq!(rewritten.len(), before.len());
-    fs::write(&primary, rewritten).unwrap();
-    reset_jsonl_family_work();
-    let rewrite =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(
-        jsonl_family_work().provider_projections,
-        2,
-        "same-length Claude rewrite is one replacement pass"
-    );
-    assert_ne!(rewrite.commit.generation_id, cold.commit.generation_id);
-
-    let rewrite_primary = rewrite
-        .sources
-        .iter()
-        .find(|source| source.counts().indexed_documents == 2)
-        .unwrap();
-    let rewrite_frontier = rewrite_primary.frontier().unwrap();
-    let frozen_prefix_digest = *rewrite_frontier.certified_prefix_digest();
-    let mut appended = message("session-1", "message-3", "claude growth");
-    let appended_object = appended.as_object_mut().unwrap();
-    appended_object.remove("cwd");
-    appended_object.remove("version");
-    appended_object.remove("gitBranch");
-    append_record(&primary, &appended);
-    let replacement_payload_bytes = fs::read(&primary).unwrap().len() - 3;
-    reset_jsonl_family_work();
-    reset_jsonl_prefix_hash_bytes();
-    let growth =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(
-        jsonl_family_work().provider_projections,
-        3,
-        "Claude growth must replay prior session metadata"
-    );
-    assert_eq!(
-        jsonl_family_projection_bytes(),
-        replacement_payload_bytes,
-        "replacement-only Claude reparses every payload byte"
-    );
-    assert_eq!(
-        jsonl_prefix_hash_bytes(),
-        0,
-        "replacement-only Claude does not attempt append certification"
-    );
-    let growth_primary = growth
-        .sources
-        .iter()
-        .find(|source| source.counts().indexed_documents == 3)
-        .unwrap();
-    assert_eq!(growth_primary.counts().complete_records, 3);
-    assert_eq!(growth_primary.counts().indexed_documents, 3);
-    assert_eq!(
-        growth_primary.frontier().unwrap().certified_prefix_bytes(),
-        fs::metadata(&primary).unwrap().len()
-    );
-    assert_ne!(
-        growth_primary.frontier().unwrap().certified_prefix_digest(),
-        &frozen_prefix_digest
-    );
-    assert_eq!(
-        growth
-            .sources
-            .iter()
-            .map(|source| source.counts().indexed_documents)
-            .sum::<u64>(),
-        4
-    );
-    let mut primary_events = VerifiedIndex::open(&index_root)
-        .unwrap()
-        .source_event_page(growth_primary.observation().source(), None, 10)
-        .unwrap()
-        .items;
-    primary_events.sort_by_key(|event| event.event_sequence);
-    let appended_event = primary_events.last().unwrap();
-    assert_eq!(appended_event.branch.as_deref(), Some("main"));
-    assert_eq!(appended_event.cwd.as_deref(), Some("/workspace/project"));
-
-    let subagent_event = VerifiedIndex::open(&index_root)
-        .unwrap()
-        .source_event_page(
-            growth
-                .sources
-                .iter()
-                .find(|source| source.counts().indexed_documents == 1)
-                .unwrap()
-                .observation()
-                .source(),
-            None,
-            4,
-        )
-        .unwrap()
-        .items
-        .remove(0);
-    assert_eq!(subagent_event.agent_type, "subagent");
-    assert!(!subagent_event.is_primary);
-    assert!(subagent_event.parent_session_id.is_some());
-    assert_eq!(
-        subagent_event.root_session_id,
-        subagent_event.parent_session_id.unwrap()
-    );
-}
-
-#[test]
-fn shared_family_claude_hydrates_every_projected_compound_row_by_native_key() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let projects = temp.path().join(".claude/projects");
-    let path = session_path(&projects, "-project", "session-1");
-    write_lines(
-        &path,
-        &[
-            message("session-1", "message-1", "message body"),
-            json!({
-                "sessionId": "session-1",
-                "type": "system",
-                "uuid": "notice-1",
-                "summary": "notice body"
-            }),
-            json!({
-                "sessionId": "session-1",
-                "type": "summary",
-                "uuid": "summary-1",
-                "summary": "summary body"
-            }),
-            json!({
-                "sessionId": "session-1",
-                "type": "assistant",
-                "uuid": "tool-only-1",
-                "message": {
-                    "role": "assistant",
-                    "content": [{
-                        "type": "tool_use",
-                        "id": "call-pure",
-                        "name": "Read",
-                        "input": {"file_path": "src/lib.rs"}
-                    }]
-                }
-            }),
-            json!({
-                "sessionId": "session-1",
-                "type": "assistant",
-                "uuid": "compound-1",
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": "compound body"},
-                        {
-                            "type": "tool_use",
-                            "id": "call-compound",
-                            "name": "Edit",
-                            "input": {"file_path": "src/main.rs"}
-                        }
-                    ]
-                }
-            }),
-            json!({
-                "sessionId": "session-1",
-                "type": "user",
-                "uuid": "failed-output-1",
-                "message": {
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": "call-failed",
-                        "is_error": true,
-                        "content": "provider output is not retained"
-                    }]
-                }
-            }),
-            json!({
-                "sessionId": "session-1",
-                "type": "user",
-                "uuid": "timeout-output-1",
-                "toolUseResult": {"status": "timeout"},
-                "message": {
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": "call-timeout",
-                        "status": "timeout",
-                        "content": "provider output is not retained"
-                    }]
-                }
-            }),
-        ],
-    );
-    let registry = registry(&projects);
-    let index_root = temp.path().join("index");
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(cold.sources.len(), 1);
-    assert_eq!(cold.sources[0].counts().indexed_documents, 8);
-
-    let source = cold.sources[0].observation().source();
-    let mut events = VerifiedIndex::open(&index_root)
-        .unwrap()
-        .source_event_page(source, None, 12)
-        .unwrap()
-        .items;
-    events.sort_by_key(|event| event.event_sequence);
-    assert_eq!(
-        events
-            .iter()
-            .map(|event| event.event_type.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "message",
-            "notice",
-            "summary",
-            "tool_call",
-            "message",
-            "tool_call",
-            "tool_output",
-            "tool_output",
-        ]
-    );
-    let requests = events
-        .iter()
-        .rev()
-        .map(|event| EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap())
-        .collect::<Vec<_>>();
-    let hydrated = registry
-        .resolver_registry()
-        .hydrate_batch(&BatchHydrationRequest::new(requests).unwrap())
-        .unwrap()
-        .into_records();
-    assert_eq!(
-        hydrated
-            .iter()
-            .map(|record| String::from_utf8(record.provider_bytes.clone()).unwrap())
-            .collect::<Vec<_>>(),
-        vec![
-            "tool output timeout call-timeout",
-            "tool output failure call-failed",
-            "tool call Edit call-compound src/main.rs",
-            "compound body",
-            "tool call Read call-pure src/lib.rs",
-            "summary body",
-            "notice body",
-            "message body",
-        ]
-    );
-
-    let first = &events[0];
-    let second = &events[1];
-    let mismatched_identity =
-        EventHydrationRequest::new(second.event_id, first.locator.clone()).unwrap();
-    let failure = registry
-        .resolver_registry()
-        .hydrate_event(&mismatched_identity)
-        .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
-
-    let NativeRecordCoordinate::Jsonl {
-        byte_offset,
-        byte_length,
-        physical_ordinal,
-        native_session_key,
-        ..
-    } = first.locator.coordinate()
-    else {
-        panic!("Claude locator must remain JSONL")
     };
-    let mutated_locator = SourceRecordLocator::new(
-        first.locator.source().clone(),
-        NativeRecordCoordinate::Jsonl {
-            byte_offset: *byte_offset,
-            byte_length: *byte_length,
-            physical_ordinal: *physical_ordinal,
-            native_session_key: native_session_key.clone(),
-            native_event_key: Some(TypedKey::utf8("mutated-event").unwrap()),
-        },
-        first.locator.revision_policy(),
-        first.locator.certified_source_revision_digest().copied(),
-        *first.locator.record_digest(),
-    )
-    .unwrap();
-    let failure = registry
-        .resolver_registry()
-        .hydrate_event(&EventHydrationRequest::new(first.event_id, mutated_locator).unwrap())
-        .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
-}
-
-#[test]
-fn shared_family_claude_hydrates_full_source_text_beyond_index_retention() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let projects = temp.path().join(".claude/projects");
-    let path = session_path(&projects, "-project", "session-1");
-    let long_message = format!("{}ordinary-unique-tail", "m".repeat(20_000));
-    let long_compound = format!("{}compound-unique-tail", "c".repeat(20_000));
-    write_lines(
-        &path,
-        &[
-            message("session-1", "message-long", &long_message),
-            json!({
-                "sessionId": "session-1",
-                "type": "system",
-                "uuid": "notice-1",
-                "summary": "source-authored notice"
-            }),
-            json!({
-                "sessionId": "session-1",
-                "type": "assistant",
-                "uuid": "compound-long",
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": long_compound},
-                        {
-                            "type": "tool_use",
-                            "id": "call-long",
-                            "name": "Read",
-                            "input": {"file_path": "src/long.rs"}
-                        }
-                    ]
-                }
-            }),
-        ],
-    );
-    let registry = registry(&projects);
-    let index_root = temp.path().join("index");
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    let mut events = VerifiedIndex::open(&index_root)
-        .unwrap()
-        .source_event_page(cold.sources[0].observation().source(), None, 8)
-        .unwrap()
-        .items;
-    events.sort_by_key(|event| event.event_sequence);
-    assert_eq!(events.len(), 4);
-    let hydrated = registry
-        .resolver_registry()
-        .hydrate_batch(
-            &BatchHydrationRequest::new(
-                events
-                    .iter()
-                    .map(|event| {
-                        EventHydrationRequest::new(event.event_id, event.locator.clone()).unwrap()
-                    })
-                    .collect(),
+    let mut writer = GenerationWriter::open(temp.path(), options.clone()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for (index, (event_id, native_event_id)) in events.iter().enumerate() {
+        let event_sequence = u64::try_from(index).unwrap() + 1;
+        let mut record = CoreRecord::new_selected(
+            *event_id,
+            session_id,
+            session_id,
+            source.clone(),
+            event_sequence,
+            "message",
+            "primary",
+            true,
+            PARSER_REVISION,
+            "Claude fallback lookup test",
+        )
+        .unwrap();
+        record.provider_session_id = Some("fallback-session".to_owned());
+        record.native_event_id = Some(native_event_id.clone());
+        record.occurred_at_unix_ms = Some(i64::try_from(event_sequence).unwrap());
+        record.role = Some("user".to_owned());
+        writer.add_core_record(record).unwrap();
+    }
+    let observation =
+        SourceObservation::new(source.clone(), "fallback-test-source-v1", vec![1]).unwrap();
+    let count = u64::try_from(events.len()).unwrap();
+    writer
+        .certify_source(
+            CertifiedSource::certify(
+                observation.clone(),
+                observation,
+                PARSER_REVISION,
+                [1; 32],
+                ScannedSourceCounts {
+                    complete_records: count,
+                    retained_records: count,
+                    indexed_documents: count,
+                    certified_bytes: count,
+                    ..ScannedSourceCounts::default()
+                },
             )
             .unwrap(),
         )
-        .unwrap()
-        .into_records()
-        .into_iter()
-        .map(|record| String::from_utf8(record.provider_bytes).unwrap())
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+    let writer = GenerationWriter::open(temp.path(), options).unwrap();
+    let lookup = writer.base_event_identity_lookup();
+    drop(writer);
+    (temp, lookup)
+}
+
+#[test]
+fn duplicate_call_ids_are_ambiguous_and_result_linkage_abstains() {
+    let mut pending_calls = HashMap::new();
+    let mut capacity_exceeded = false;
+    for command in ["git commit -m first", "git commit -m second"] {
+        remember_pending_call(
+            &mut pending_calls,
+            &mut capacity_exceeded,
+            "duplicate-call",
+            PendingCallState::Exact(PendingCall {
+                command: Some(command.to_owned()),
+                command_too_large: false,
+                declared_workdir: Some("/tmp/repository".to_owned()),
+                event_sequence: 1,
+            }),
+        );
+    }
+    assert!(matches!(
+        pending_calls.get("duplicate-call"),
+        Some(PendingCallState::Ambiguous)
+    ));
+
+    let mut input = AttributionInput::default();
+    let (context, abstained) = resolve_pending_call(
+        &mut pending_calls,
+        Some("duplicate-call"),
+        capacity_exceeded,
+        &mut input,
+    );
+    assert!(context.is_none());
+    assert!(abstained);
+    let annotation = RepositoryAttributor::default().attribute(input);
+    assert!(annotation.repository_vcs_observations.is_empty());
+    assert!(annotation.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
+            && abstention.detail.as_deref() == Some("claude_tool_result_call_id_is_ambiguous")
+    }));
+}
+
+fn test_projector() -> ClaudeProjector {
+    let key = ClaudeSessionKey {
+        root_session_id: "test-session".to_owned(),
+        workflow_run_id: None,
+        agent_id: None,
+    };
+    let binding = Binding {
+        project_dir: PathBuf::from("/tmp/project"),
+        key: key.clone(),
+        layout: SessionLayout::Primary,
+    };
+    ClaudeProjector {
+        source: source_key(&key).unwrap(),
+        source_path: "test-session.jsonl".to_owned(),
+        identities: identities(&binding).unwrap(),
+        binding,
+        session: ClaudeSessionMetadata::new(key),
+        attributor: RepositoryAttributor::default(),
+        pending_calls: HashMap::new(),
+        linkage_capacity_exceeded: false,
+        rejected_records: 0,
+        fallback_identities: FallbackEventIdentityState::default(),
+    }
+}
+
+#[test]
+fn sixty_five_small_result_blocks_are_all_emitted() {
+    let content = (0..65)
+        .map(|index| {
+            serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": format!("call-{index}"),
+                "content": format!("result-{index}"),
+                "is_error": false,
+            })
+        })
         .collect::<Vec<_>>();
-    assert_eq!(hydrated[0], long_message);
-    assert!(hydrated[0].ends_with("ordinary-unique-tail"));
-    assert_eq!(hydrated[1], "source-authored notice");
-    assert_eq!(hydrated[2], long_compound);
-    assert!(hydrated[2].ends_with("compound-unique-tail"));
-    assert_eq!(hydrated[3], "tool call Read call-long src/long.rs");
-}
-
-#[test]
-fn shared_family_claude_same_length_rewrite_is_stale_record_evidence() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let projects = temp.path().join(".claude/projects");
-    let path = session_path(&projects, "-project", "session-1");
-    write_lines(&path, &[message("session-1", "message-1", "original body")]);
-    let registry = registry(&projects);
-    let index_root = temp.path().join("index");
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    let event = VerifiedIndex::open(&index_root)
-        .unwrap()
-        .source_event_page(cold.sources[0].observation().source(), None, 1)
-        .unwrap()
-        .items
-        .remove(0);
-    let before = fs::read_to_string(&path).unwrap();
-    let after = before.replace("original body", "rewritten bod");
-    assert_eq!(before.len(), after.len());
-    fs::write(&path, after).unwrap();
-
-    let failure = registry
-        .resolver_registry()
-        .hydrate_event(&EventHydrationRequest::new(event.event_id, event.locator).unwrap())
-        .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
-}
-
-#[cfg(unix)]
-#[test]
-fn shared_family_claude_accepts_hardlinked_leaves_without_resident_file_handles() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let projects = temp.path().join(".claude/projects");
-    let first = session_path(&projects, "-project", "session-1");
-    write_lines(
-        &first,
-        &[message("session-1", "message-1", "hardlink body")],
-    );
-    fs::hard_link(&first, session_path(&projects, "-project", "session-2")).unwrap();
-    let result = refresh_source_backed_generation(
-        temp.path().join("index"),
-        &registry(&projects),
-        writer_options(),
-    )
-    .unwrap();
-    assert_eq!(result.sources.len(), 2);
-}
-
-#[test]
-fn shared_family_claude_complete_deletion_and_missing_root_are_distinct() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let projects = temp.path().join(".claude/projects");
-    let path = session_path(&projects, "-project", "session-1");
-    write_lines(&path, &[message("session-1", "message-1", "delete body")]);
-    let registry = registry(&projects);
-    let index_root = temp.path().join("index");
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_eq!(cold.sources.len(), 1);
-
-    fs::remove_file(&path).unwrap();
-    let deleted =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert!(deleted.sources.is_empty());
-
-    fs::remove_dir_all(&projects).unwrap();
-    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
-    assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().generation_id(),
-        deleted.commit.generation_id
-    );
-}
-
-fn session_path(projects: &Path, project: &str, session: &str) -> PathBuf {
-    projects.join(project).join(format!("{session}.jsonl"))
-}
-
-fn message(session: &str, uuid: &str, text: &str) -> Value {
-    json!({
-        "sessionId": session,
+    let bytes = serde_json::to_vec(&serde_json::json!({
         "type": "user",
-        "uuid": uuid,
-        "timestamp": "2026-01-01T00:00:00.000Z",
-        "cwd": "/workspace/project",
-        "version": "2.1.219",
-        "gitBranch": "main",
+        "uuid": "sixty-five-results",
+        "sessionId": "test-session",
+        "timestamp": "2026-08-01T12:00:00Z",
+        "message": {"role": "user", "content": content},
+    }))
+    .unwrap();
+    assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(emitted.len(), 65);
+    assert_eq!(projector.rejected_records(), 0);
+    assert_eq!(
+        emitted.first().unwrap().content.normalized_body.as_deref(),
+        Some("result-0")
+    );
+    assert_eq!(
+        emitted.last().unwrap().content.normalized_body.as_deref(),
+        Some("result-64")
+    );
+}
+
+#[test]
+fn malformed_empty_and_row_overflow_records_are_counted_rejections() {
+    let malformed = b"{\"type\":\"user\",\"sessionId\":\"test-session\",\"message\":";
+    let empty =
+        br#"{"type":"user","sessionId":"test-session","message":{"role":"user","content":[]}}"#;
+    let overflow_content = (0..=CLAUDE_MAX_RECORD_ROWS)
+        .map(|_| serde_json::json!({"type": "tool_result"}))
+        .collect::<Vec<_>>();
+    let overflow = serde_json::to_vec(&serde_json::json!({
+        "type": "user",
+        "uuid": "overflow-results",
+        "sessionId": "test-session",
+        "message": {"role": "user", "content": overflow_content},
+    }))
+    .unwrap();
+    assert!(overflow.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+    let locator = ClaudePhysicalLocator {
+        path: PathBuf::from("overflow-results.jsonl"),
+        byte_start: 0,
+        byte_end_exclusive: overflow.len() as u64,
+        line_number: 1,
+        record_sha256: Sha256::digest(&overflow).into(),
+    };
+    let overflow_error = parse_native_record(&overflow, 0, &locator).unwrap_err();
+    assert!(overflow_error
+        .to_string()
+        .contains("Claude result exceeds the representable row limit"));
+
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(malformed, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(projector.rejected_records(), 1);
+    projector
+        .project(JsonlRecordRef::for_test(empty, 1), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(projector.rejected_records(), 2);
+    projector
+        .project(JsonlRecordRef::for_test(&overflow, 2), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(emitted.is_empty());
+    assert_eq!(projector.rejected_records(), 3);
+}
+
+#[test]
+fn exact_linked_unknown_tool_result_is_emitted_without_outcome_evidence() {
+    let call = br#"{"type":"assistant","uuid":"call-record","sessionId":"test-session","message":{"role":"assistant","content":[{"type":"tool_use","id":"unknown-call","name":"Read","input":{"file_path":"src/lib.rs"}}]}}"#;
+    let result = br#"{"type":"user","uuid":"result-record","sessionId":"test-session","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"unknown-call","content":"exact unknown output"}]}}"#;
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(call, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+    projector
+        .project(JsonlRecordRef::for_test(result, 1), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(emitted.len(), 2);
+    assert!(emitted[1]
+        .content
+        .normalized_body
+        .as_deref()
+        .is_some_and(|body| body.contains("exact unknown output")));
+    assert!(emitted[1].repository_vcs_observations.is_empty());
+}
+
+#[test]
+fn over_8_mib_tool_result_is_admitted_complete_without_structured_body_duplication() {
+    let tail = "claude_large_result_tail_complete";
+    let full_result = format!("{} {tail}", "x".repeat(9 * 1024 * 1024));
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "user",
+        "uuid": "large-result-record",
+        "sessionId": "test-session",
+        "timestamp": "2026-08-01T12:00:00Z",
         "message": {
             "role": "user",
-            "content": [{"type": "text", "text": text}]
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "large-result-call",
+                "content": full_result,
+                "is_error": false
+            }]
         }
-    })
+    }))
+    .unwrap();
+    assert!(bytes.len() > 8 * 1024 * 1024);
+    assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    let [record] = emitted.as_slice() else {
+        panic!("expected exactly one Claude result record");
+    };
+    assert_eq!(
+        record.content.normalized_body.as_deref(),
+        Some(full_result.as_str())
+    );
+    let structured = record.content.structured_content.as_ref().unwrap();
+    assert_eq!(structured["result_content_location"], "normalized_body");
+    assert_eq!(structured["result_content_complete"], true);
+    let encoded_structured = serde_json::to_vec(structured).unwrap();
+    assert!(encoded_structured.len() < 4 * 1024);
+    assert!(!String::from_utf8(encoded_structured)
+        .unwrap()
+        .contains(tail));
+    record.validate_contract().unwrap();
+    record.encode_stored().unwrap();
 }
 
-fn write_lines(path: &Path, lines: &[Value]) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let mut bytes = Vec::new();
-    for line in lines {
-        serde_json::to_writer(&mut bytes, line).unwrap();
-        bytes.push(b'\n');
+#[test]
+fn claude_large_tool_arguments_keep_both_complete_core_representations() {
+    let tail = "claude_large_tool_argument_tail_complete";
+    let full_argument = format!("{}{tail}", "x".repeat(8 * 1024 * 1024));
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "assistant",
+        "uuid": "large-tool-call-record",
+        "sessionId": "test-session",
+        "timestamp": "2026-08-01T12:00:00Z",
+        "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "large-tool-call",
+                "name": "custom_complete_tool",
+                "input": {"prompt": &full_argument}
+            }]
+        }
+    }))
+    .unwrap();
+    assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    let [record] = emitted.as_slice() else {
+        panic!("expected exactly one Claude tool-call record");
+    };
+    let normalized = record.content.normalized_body.as_deref().unwrap();
+    let structured = record.content.structured_content.as_ref().unwrap();
+    assert!(normalized.contains(tail));
+    assert_eq!(
+        structured["input"]["prompt"].as_str(),
+        Some(full_argument.as_str())
+    );
+    assert!(
+        normalized.len() + serde_json::to_vec(structured).unwrap().len()
+            > ctx_history_core::MAX_CORE_CONTENT_BYTES
+    );
+    record.validate_contract().unwrap();
+    record.encode_stored().unwrap();
+}
+
+#[test]
+fn source_storage_project_path_never_becomes_core_workspace() {
+    let source_storage = "/home/private-user/.claude/projects/-home-private-user-secret-project";
+    let logical_workspace = "/workspace/provider-native-project";
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "user",
+        "uuid": "privacy-record",
+        "sessionId": "test-session",
+        "timestamp": "2026-08-01T12:00:00Z",
+        "cwd": logical_workspace,
+        "message": {"role": "user", "content": "privacy-safe message"}
+    }))
+    .unwrap();
+    let mut projector = test_projector();
+    projector.binding.project_dir = PathBuf::from(source_storage);
+    projector.source_path = format!("{source_storage}/test-session.jsonl");
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    let [record] = emitted.as_slice() else {
+        panic!("expected exactly one Claude message record");
+    };
+    assert_eq!(record.workspace, None);
+    assert_eq!(record.cwd.as_deref(), Some(logical_workspace));
+    let encoded = String::from_utf8(record.encode_stored().unwrap()).unwrap();
+    assert!(!encoded.contains(source_storage));
+    assert!(!encoded.contains("/home/private-user/.claude/projects"));
+}
+
+#[test]
+fn checkpoint_byte_overflow_degrades_to_typed_linkage_capacity() {
+    let mut projector = test_projector();
+    projector.remember_pending_call(
+        "oversized-call",
+        PendingCallState::Exact(PendingCall {
+            command: Some("x".repeat(MAX_PROJECTOR_CHECKPOINT_BYTES)),
+            command_too_large: false,
+            declared_workdir: Some("/tmp/project".to_owned()),
+            event_sequence: 1,
+        }),
+    );
+
+    assert!(projector.pending_calls.is_empty());
+    assert!(projector.linkage_capacity_exceeded);
+    assert!(encode_projector_checkpoint(&projector).is_ok());
+    let mut input = AttributionInput::default();
+    let (context, abstained) = resolve_pending_call(
+        &mut projector.pending_calls,
+        Some("oversized-call"),
+        projector.linkage_capacity_exceeded,
+        &mut input,
+    );
+    assert!(context.is_none());
+    assert!(abstained);
+    assert!(input
+        .outcome_abstentions
+        .iter()
+        .any(|(reason, _)| { *reason == RepositoryAbstentionReason::LinkageCapacityExceeded }));
+}
+
+#[test]
+fn fallback_event_ids_survive_insert_and_delete_before_with_stable_duplicates() {
+    let baseline = fallback_event_ids(&["prefix", "target", "suffix"]);
+    let inserted = fallback_event_ids(&["inserted", "prefix", "target", "suffix"]);
+    let deleted = fallback_event_ids(&["target", "suffix"]);
+    assert_eq!(baseline[1], inserted[2]);
+    assert_eq!(baseline[1], deleted[0]);
+    assert_eq!(baseline[2], inserted[3]);
+    assert_eq!(baseline[2], deleted[1]);
+
+    let duplicates = fallback_event_ids(&["duplicate", "duplicate"]);
+    let replayed = fallback_event_ids(&["duplicate", "duplicate"]);
+    assert_ne!(duplicates[0], duplicates[1]);
+    assert_eq!(duplicates, replayed);
+}
+
+#[test]
+fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
+    let key = ClaudeSessionKey {
+        root_session_id: "fallback-session".to_owned(),
+        workflow_run_id: None,
+        agent_id: None,
+    };
+    let binding = Binding {
+        project_dir: PathBuf::from("/tmp/project"),
+        key: key.clone(),
+        layout: SessionLayout::Primary,
+    };
+    let source = source_key(&key).unwrap();
+    let identities = identities(&binding).unwrap();
+    let mut cold_identity_state = FallbackEventIdentityState::default();
+    let prefix_events = [fallback_row("duplicate", 0), fallback_row("duplicate", 1)]
+        .iter()
+        .map(|row| {
+            fallback_event_id(
+                row,
+                &source,
+                identities.session_id,
+                &mut cold_identity_state,
+            )
+        })
+        .collect::<Vec<_>>();
+    let (_base, base_lookup) =
+        base_lookup_with_events(&source, identities.session_id, &prefix_events);
+    let mut pending_calls = HashMap::new();
+    let mut linkage_capacity_exceeded = false;
+    remember_pending_call(
+        &mut pending_calls,
+        &mut linkage_capacity_exceeded,
+        "cross-append-call",
+        PendingCallState::Exact(PendingCall {
+            command: Some("git commit -m prefix".to_owned()),
+            command_too_large: false,
+            declared_workdir: Some("/tmp/project".to_owned()),
+            event_sequence: 0,
+        }),
+    );
+    let mut projector = ClaudeProjector {
+        source: source.clone(),
+        source_path: "fallback-session.jsonl".to_owned(),
+        binding: binding.clone(),
+        identities,
+        session: ClaudeSessionMetadata::new(key),
+        attributor: RepositoryAttributor::default(),
+        pending_calls,
+        linkage_capacity_exceeded,
+        rejected_records: 0,
+        fallback_identities: FallbackEventIdentityState::default(),
+    };
+    let checkpoint = encode_projector_checkpoint(&projector).unwrap();
+    for occurrence in 0_u64..1_024 {
+        let mut digest = [0; 32];
+        digest[..8].copy_from_slice(&occurrence.to_be_bytes());
+        projector
+            .fallback_identities
+            .next_occurrences
+            .insert(digest, occurrence + 1);
     }
-    fs::write(path, bytes).unwrap();
-}
+    assert_eq!(encode_projector_checkpoint(&projector).unwrap(), checkpoint);
+    let mut restored = decode_projector_checkpoint(&checkpoint, &binding).unwrap();
 
-fn append_record(path: &Path, record: &Value) {
-    let mut file = OpenOptions::new().append(true).open(path).unwrap();
-    serde_json::to_writer(&mut file, record).unwrap();
-    file.write_all(b"\n").unwrap();
+    let suffix_row = fallback_row("duplicate", 2);
+    let mut append_identity_state = FallbackEventIdentityState::new(Some(base_lookup));
+    let suffix_event = fallback_event_id(
+        &suffix_row,
+        &source,
+        projector.identities.session_id,
+        &mut append_identity_state,
+    );
+    let replayed = fallback_event_ids(&["duplicate", "duplicate", "duplicate"]);
+    assert_eq!(prefix_events[0].0, replayed[0]);
+    assert_eq!(prefix_events[1].0, replayed[1]);
+    assert_eq!(suffix_event.0, replayed[2]);
+    assert_ne!(prefix_events[0].0, suffix_event.0);
+    assert_ne!(prefix_events[1].0, suffix_event.0);
+
+    remember_pending_call(
+        &mut restored.pending_calls,
+        &mut restored.linkage_capacity_exceeded,
+        "cross-append-call",
+        PendingCallState::Exact(PendingCall {
+            command: Some("git commit -m suffix".to_owned()),
+            command_too_large: false,
+            declared_workdir: Some("/tmp/project".to_owned()),
+            event_sequence: 1_u64 << 16,
+        }),
+    );
+    let mut input = AttributionInput::default();
+    let (context, abstained) = resolve_pending_call(
+        &mut restored.pending_calls,
+        Some("cross-append-call"),
+        restored.linkage_capacity_exceeded,
+        &mut input,
+    );
+    assert!(context.is_none());
+    assert!(abstained);
+    assert_eq!(
+        input.outcome_abstentions,
+        vec![(
+            RepositoryAbstentionReason::ProviderOutputUnjoined,
+            "claude_tool_result_call_id_is_ambiguous"
+        )]
+    );
 }

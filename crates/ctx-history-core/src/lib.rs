@@ -111,7 +111,7 @@ macro_rules! text_enum {
 }
 
 pub mod archive;
-mod content_ref;
+mod core_record;
 pub mod dtos;
 pub mod history_jsonl;
 pub mod paths;
@@ -120,19 +120,33 @@ pub mod projection;
 pub mod provider;
 mod result_compaction;
 pub mod source;
-pub mod source_resolver;
 pub mod sync;
 
 pub use archive::SessionHistoryArchive;
-pub use content_ref::ContentRef;
+pub use core_record::{
+    core_record_contract_fingerprint, CoreContent, CoreContentPolicyStatus, CoreRecord,
+    CoreRecordAnnotation, CoreRecordError, CoreRecordResult, GitObjectFormat, GitObjectId,
+    RepositoryAbstention, RepositoryAbstentionReason, RepositoryAlias, RepositoryAliasKind,
+    RepositoryBinding, RepositoryCandidate, RepositoryCandidateEvidence, RepositoryCandidateKind,
+    RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
+    RepositoryFileObservation, RepositoryFileObservationKind, RepositoryLocalRootAuthorization,
+    RepositoryObjectReplacement, RepositoryOutcomeKind, RepositoryOutcomeLinkage,
+    RepositoryOutcomeObservation, RepositoryPullRequestIdentity, RepositoryVcsObservation,
+    RepositoryVcsObservationKind, CORE_BOUNDED_SHELL_SUBSET_REVISION, CORE_CONTENT_POLICY_REVISION,
+    CORE_MISSING_ACTIVITY_TIME_UNIX_MS, CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
+    CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION, CORE_REPOSITORY_CONTRACT_REVISION,
+    CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN,
+    CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
+    CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
+};
 pub use dtos::{
-    AgentType, Artifact, ArtifactKind, CitationReference, Confidence, ContextCitation,
-    ContextCitationType, ContextLinks, ContextPagination, ContextTruncation, Event, EventRole,
-    EventType, FileChangeKind, FileTouched, HistoryRecord, HistoryRecordLink,
-    HistoryRecordLinkTargetType, HistoryRecordLinkType, HistoryRecordMetadata, HistoryRecordStatus,
-    HistoryRecordTag, RecordEdge, RecordEdgeType, Run, RunStatus, RunType, Session, SessionEdge,
-    SessionEdgeType, SessionStatus, Summary, SummaryKind, Tag, TagKind, VcsChange, VcsChangeKind,
-    VcsHost, VcsKind, VcsWorkspace,
+    AgentType, Artifact, ArtifactKind, CitationReference, Confidence, Event, EventRole, EventType,
+    FileChangeKind, FileTouched, HistoryRecord, HistoryRecordLink, HistoryRecordLinkTargetType,
+    HistoryRecordLinkType, HistoryRecordMetadata, HistoryRecordStatus, HistoryRecordTag,
+    RecordEdge, RecordEdgeType, Run, RunStatus, RunType, Session, SessionEdge, SessionEdgeType,
+    SessionStatus, Summary, SummaryKind, Tag, TagKind, VcsChange, VcsChangeKind, VcsHost, VcsKind,
+    VcsWorkspace,
 };
 pub use history_jsonl::{
     CtxHistoryJsonlEdgeRecord, CtxHistoryJsonlEventRecord, CtxHistoryJsonlFileTouchRecord,
@@ -140,16 +154,15 @@ pub use history_jsonl::{
     CtxHistoryJsonlSourceRecord, CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
 };
 pub use paths::{
-    blob_dir, config_path, database_path, default_data_root, device_path, history_dir, logs_dir,
-    managed_data_root, object_dir,
+    config_path, default_data_root, device_path, history_dir, logs_dir, managed_data_root,
 };
 pub use projection::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend,
     CertifiedSourceDeletion, CertifiedSourceInventory, EventIdentityInput, NativeItemKey,
-    NativeLocator, NativeSessionKey, PositionStability, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
-    SourceInventoryObservation, SourceKey, SourceObservation, StableEntityId, StableEntityKind,
-    SubrecordSelector, TypedKey, IDENTITY_VERSION,
+    NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey,
+    SourceObservation, StableEntityId, StableEntityKind, SubrecordSelector, TypedKey,
+    IDENTITY_VERSION,
 };
 pub use provider::{
     provider_support_matrix_schema_version, ProviderArtifactDescriptor, ProviderCursorCheckpoint,
@@ -159,12 +172,6 @@ pub use provider::{
 };
 pub use result_compaction::compact_result_payload;
 pub use source::{CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind};
-pub use source_resolver::{
-    BatchHydrationRequest, BatchHydrationResult, ContentSourceResolver, EventHydrationRequest,
-    HydratedProviderRecord, HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy,
-    NativeRecordCoordinate, SessionHydrationRequest, SourceRecordLocator,
-    SourceResolverContractError, MAX_BATCH_HYDRATION_EVENTS, NATIVE_LOCATOR_VERSION,
-};
 pub use sync::{
     AuditActorKind, AuditLogEntry, EntityTimestamps, Fidelity, RedactionState, SyncAlias,
     SyncBatch, SyncBatchStatus, SyncCursor, SyncDirection, SyncMetadata, SyncOutboxItem,

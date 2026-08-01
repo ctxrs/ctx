@@ -282,13 +282,3 @@ pub(super) fn count_overflow(dialect: TaskJsonNativeDialect) -> TaskJsonSourceBa
         provider: dialect.display_name,
     }
 }
-
-pub(super) fn hydration_failure(
-    kind: HydrationFailureKind,
-    detail: impl ToString,
-) -> HydrationFailure {
-    HydrationFailure {
-        kind,
-        detail: detail.to_string(),
-    }
-}

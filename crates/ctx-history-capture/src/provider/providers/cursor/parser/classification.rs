@@ -5,7 +5,10 @@ use serde::{
     Deserialize,
 };
 
-use super::{BoundedStringVisitor, CursorRejectionKind, MAX_CURSOR_ATOM_CHARS};
+use super::{
+    bounded_strings::{BoundedStringVisitor, MAX_CURSOR_ATOM_CHARS},
+    CursorRejectionKind,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CursorContentLocation {
@@ -26,6 +29,7 @@ pub(super) enum CursorRecordAdmission {
 pub(super) enum CursorBlockKind {
     Text,
     ToolUse,
+    ToolResult,
     Excluded,
 }
 
@@ -166,9 +170,16 @@ impl<'de> Visitor<'de> for CursorClassificationVisitor {
         let mut block_kinds = content.kinds;
         match admission {
             CursorRecordAdmission::AssistantMessage => {}
-            CursorRecordAdmission::UserMessage | CursorRecordAdmission::TurnEndedSummary => {
+            CursorRecordAdmission::UserMessage => {
                 for kind in &mut block_kinds {
                     if *kind == CursorBlockKind::ToolUse {
+                        *kind = CursorBlockKind::Excluded;
+                    }
+                }
+            }
+            CursorRecordAdmission::TurnEndedSummary => {
+                for kind in &mut block_kinds {
+                    if matches!(kind, CursorBlockKind::ToolUse | CursorBlockKind::ToolResult) {
                         *kind = CursorBlockKind::Excluded;
                     }
                 }
@@ -426,6 +437,7 @@ impl<'de> Visitor<'de> for ClassifiedBlockVisitor {
                 kind = Some(match map.next_value::<BoundedAtom>()?.0.as_str() {
                     "text" => CursorBlockKind::Text,
                     "tool_use" => CursorBlockKind::ToolUse,
+                    "tool_result" => CursorBlockKind::ToolResult,
                     _ => CursorBlockKind::Excluded,
                 });
             } else {

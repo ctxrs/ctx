@@ -11,8 +11,6 @@ pub(super) fn scan_conversations(
     let mut statement = prepare_conversation_candidates(conn)?;
     let limit = conversation_hydration_limit()?;
     let mut rows = statement.query(rusqlite::params![limit, 0])?;
-    #[cfg(test)]
-    super::super::super::source_backed::record_warp_projection_query();
     let mut hierarchy = BTreeMap::new();
     let mut emissions = Vec::new();
     while let Some(row) = rows.next()? {

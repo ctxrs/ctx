@@ -17,11 +17,11 @@ ctx search "sqlite migration failed" --workspace ctx
 ctx show event <ctx-event-id> --window 5
 ```
 
-Normal `ctx search` uses `--refresh background`, which serves existing indexes
-while default-on daemon maintenance refreshes history. Semantic coverage remains
-disabled unless explicitly enabled.
+Normal `ctx search` uses `--refresh background`, which serves the active Core
+generation while default-on daemon maintenance requests a Core refresh.
+Semantic coverage remains disabled unless explicitly enabled.
 Rerun the same search with `--refresh off` when the task requires a strictly
-read-only query over the existing index.
+read-only query over the active Core generation.
 
 Use `ctx sql` only when normal search does not express the question, such as
 exact counts, joins, audits, or scripting over stable `ctx_*` views. It is
@@ -86,7 +86,7 @@ guarantee that every provider has native cursor resume.
 
 ## JSON For Harnesses
 
-Agents should prefer default text for reading search, show, and locate output.
+Agents should prefer default text for reading search and show output.
 JSON is for scripts, harnesses, `jq`, or exact field extraction; it is usually
 much larger and consumes more context.
 
@@ -98,6 +98,10 @@ ctx search "release blocker" --format json | jq '.results[0].ctx_event_id'
 ctx show event <ctx-event-id> --window 5 --format json
 ctx show session <ctx-session-id> --format json
 ```
+
+Show's positional IDs are ctx-owned. `provider_session_id` is provider-owned
+metadata; for Codex it is the resume UUID. To open a Codex session by that UUID,
+use `ctx show session --provider codex --provider-session <uuid>`.
 
 Use cited search snippets and `show` output as retrieved material when the next
 step is to brief another agent.

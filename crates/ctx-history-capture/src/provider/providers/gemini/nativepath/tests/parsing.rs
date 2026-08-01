@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn gemini_nativepath_retains_core_rows_without_header_or_result_material() {
+fn gemini_nativepath_retains_core_rows_with_exact_result_material() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
     let output_sentinel = "NATIVEPATH_SYNTHETIC_OUTPUT_GEMINI_PRIVATE";
@@ -62,12 +62,12 @@ fn gemini_nativepath_retains_core_rows_without_header_or_result_material() {
 
     let (outcome, rows) = scan_collect(&source, None);
 
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 5);
     assert_eq!(
         rows.iter()
             .map(|row| row.native_order.raw_ordinal)
             .collect::<Vec<_>>(),
-        [1, 2, 3, 5]
+        [1, 2, 3, 4, 5]
     );
     assert_eq!(
         rows.iter().map(|row| row.event_type).collect::<Vec<_>>(),
@@ -75,6 +75,7 @@ fn gemini_nativepath_retains_core_rows_without_header_or_result_material() {
             EventType::Message,
             EventType::Message,
             EventType::ToolCall,
+            EventType::ToolOutput,
             EventType::Notice
         ]
     );
@@ -84,24 +85,22 @@ fn gemini_nativepath_retains_core_rows_without_header_or_result_material() {
         rows[2].safe_file_touches,
         vec!["safe-request.txt".to_owned()]
     );
-    assert!(matches!(rows[3].body, GeminiEventBody::StateNotice { .. }));
-    assert!(rows.iter().all(|row| {
-        !format!("{row:?}").contains(output_sentinel)
-            && !row
-                .safe_file_touches
-                .iter()
-                .any(|path| path.contains("output-only"))
-    }));
+    assert!(matches!(
+        &rows[3].body,
+        GeminiEventBody::OutputDiagnostic {
+            result: Some(serde_json::Value::String(value)),
+            ..
+        } if value == output_sentinel
+    ));
+    assert!(matches!(rows[4].body, GeminiEventBody::StateNotice { .. }));
+    assert!(rows.iter().all(|row| !row
+        .safe_file_touches
+        .iter()
+        .any(|path| path.contains("output-only"))));
     assert_eq!(outcome.metrics.header_records, 1);
     assert_eq!(outcome.metrics.native_result_records_observed, 1);
     assert!(outcome.metrics.native_result_record_bytes_observed > 0);
-    assert_eq!(outcome.metrics.result_body_bytes_decoded_or_allocated, 0);
-    assert_eq!(outcome.metrics.result_body_hashes_created, 0);
-    assert_eq!(outcome.metrics.result_previews_created, 0);
-    assert_eq!(outcome.metrics.result_file_touches_created, 0);
-    assert_eq!(outcome.metrics.result_fts_documents_created, 0);
-    assert_eq!(outcome.metrics.result_handoffs_created, 0);
-    assert_eq!(outcome.checkpoint.retained_event_count, 4);
+    assert_eq!(outcome.checkpoint.retained_event_count, 5);
     assert_eq!(outcome.signals.source_change, GeminiSourceChange::Fresh);
     assert_eq!(
         outcome.signals.publication_shape,
@@ -109,6 +108,48 @@ fn gemini_nativepath_retains_core_rows_without_header_or_result_material() {
     );
     assert!(!outcome.signals.emitted_zero_rows);
     assert!(outcome.signals.cursor_advance_allowed);
+}
+
+#[test]
+fn gemini_large_tool_arguments_keep_both_complete_core_representations() {
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let tail = "gemini_large_tool_argument_tail_complete";
+    let full_argument = format!("{}{tail}", "x".repeat(8 * 1024 * 1024));
+    let tool_call = json!({
+        "id": "large-tool-call-record",
+        "timestamp": "2026-01-01T00:00:03.000Z",
+        "type": "gemini",
+        "toolCalls": [{
+            "id": "large-call-1",
+            "name": "custom_complete_tool",
+            "args": {"prompt": &full_argument}
+        }]
+    });
+    assert!(serde_json::to_vec(&tool_call).unwrap().len() <= MAX_PROVIDER_JSONL_LINE_BYTES);
+    let path = write_transcript(&root, &[header("large-tool-session", "main"), tool_call]);
+    let source = rediscover(&root, &path);
+    let (_, rows) = scan_collect(&source, None);
+    let records = project_gemini_test_events(&source, rows).unwrap();
+
+    let [record] = records.as_slice() else {
+        panic!("expected exactly one Gemini tool-call record");
+    };
+    let normalized = record.content.normalized_body.as_deref().unwrap();
+    let structured = record.content.structured_content.as_ref().unwrap();
+    assert!(normalized.contains(tail));
+    assert_eq!(
+        structured
+            .pointer("/details/calls/0/args/prompt")
+            .and_then(Value::as_str),
+        Some(full_argument.as_str())
+    );
+    assert!(
+        normalized.len() + serde_json::to_vec(structured).unwrap().len()
+            > ctx_history_core::MAX_CORE_CONTENT_BYTES
+    );
+    record.validate_contract().unwrap();
+    record.encode_stored().unwrap();
 }
 
 #[test]
@@ -244,13 +285,13 @@ fn gemini_nativepath_structural_rejections_advance_with_durable_detail_and_resum
 }
 
 #[test]
-fn gemini_nativepath_hydration_failure_keeps_later_siblings_replayable() {
+fn gemini_nativepath_decoding_failure_keeps_later_siblings_replayable() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
     let path = write_transcript(
         &root,
         &[
-            header("hydration-retry", "main"),
+            header("decoding-retry", "main"),
             json!({
                 "timestamp": "2026-01-01T00:00:01.000Z",
                 "type": "user",
@@ -281,7 +322,7 @@ fn gemini_nativepath_hydration_failure_keeps_later_siblings_replayable() {
 }
 
 #[test]
-fn gemini_nativepath_invalid_hydration_size_and_touch_rows_do_not_block_later_records() {
+fn gemini_nativepath_invalid_decoding_size_and_touch_rows_do_not_block_later_records() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
     let overflow_calls = (0..=MAX_GEMINI_FILE_TOUCHES_PER_EVENT)
@@ -322,17 +363,14 @@ fn gemini_nativepath_invalid_hydration_size_and_touch_rows_do_not_block_later_re
 
     let (outcome, rows) = scan_collect(&source, None);
 
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].native_order.raw_ordinal, 4);
-    assert_eq!(outcome.rejected_records, 3);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].native_order.raw_ordinal, 2);
+    assert_eq!(rows[1].native_order.raw_ordinal, 4);
+    assert_eq!(outcome.rejected_records, 2);
     assert!(outcome
         .rejections
         .iter()
         .any(|rejection| rejection.reason.contains("missing a nonempty native id")));
-    assert!(outcome
-        .rejections
-        .iter()
-        .any(|rejection| rejection.reason.contains("retained event exceeds")));
     assert!(outcome
         .rejections
         .iter()
@@ -505,4 +543,392 @@ fn gemini_nativepath_physical_growth_with_only_incomplete_bytes_is_append_delta(
     );
     assert_eq!(completed_rows.len(), 1);
     assert_eq!(completed_rows[0].native_order.raw_ordinal, 2);
+}
+
+fn native_repository(temp: &TempDir) -> PathBuf {
+    use std::process::Command;
+
+    let path = temp.path().join("native-repo");
+    fs::create_dir(&path).unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&path)
+        .status()
+        .unwrap()
+        .success());
+    fs::create_dir(path.join("src")).unwrap();
+    fs::write(path.join("src/lib.rs"), "pub fn gemini() {}\n").unwrap();
+    path
+}
+
+fn record_has_reason(
+    record: &ctx_history_core::CoreRecord,
+    reason: RepositoryAbstentionReason,
+) -> bool {
+    record
+        .repository_abstentions
+        .iter()
+        .any(|abstention| abstention.reason == reason)
+}
+
+#[test]
+fn gemini_exact_native_result_args_id_and_content_are_retained() {
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let repo = native_repository(&temp);
+    let output_sentinel = "RESULT_PROSE_MUST_NOT_BECOME_REPOSITORY_EVIDENCE";
+    let path = write_transcript(
+        &root,
+        &[
+            json!({
+                "sessionId": "gemini-exact-native",
+                "startTime": "2026-07-31T12:00:00Z",
+                "kind": "main",
+                "directories": [repo]
+            }),
+            json!({
+                "id": "call-record",
+                "timestamp": "2026-07-31T12:00:01Z",
+                "type": "gemini",
+                "toolCalls": [{
+                    "id": "call-1",
+                    "name": "run_shell_command",
+                    "args": {
+                        "command": "git status",
+                        "dir_path": repo,
+                        "path": "src/lib.rs"
+                    }
+                }]
+            }),
+            json!({
+                "id": "result-record",
+                "timestamp": "2026-07-31T12:00:02Z",
+                "type": "gemini",
+                "toolCalls": [{
+                    "id": "call-1",
+                    "name": "run_shell_command",
+                    "args": {
+                        "command": "git status",
+                        "dir_path": repo,
+                        "path": "src/lib.rs"
+                    },
+                    "result": [{"functionResponse": {"response": output_sentinel}}],
+                    "status": "success"
+                }]
+            }),
+        ],
+    );
+    let source = rediscover(&root, &path);
+    let (_, rows) = scan_collect(&source, None);
+    assert_eq!(rows.len(), 2);
+    assert!(matches!(
+        &rows[1].body,
+        GeminiEventBody::OutputDiagnostic {
+            call_id,
+            command,
+            declared_workdir,
+            file_paths,
+            ..
+        } if call_id.as_deref() == Some("call-1")
+            && command.as_deref() == Some("git status")
+            && declared_workdir.as_deref() == Some(repo.to_string_lossy().as_ref())
+            && file_paths == &["src/lib.rs".to_owned()]
+    ));
+
+    let records = project_gemini_test_events(&source, rows).unwrap();
+    assert_eq!(records.len(), 2);
+    let result = &records[1];
+    assert_eq!(result.repository_bindings.len(), 1);
+    assert_eq!(
+        result
+            .repository_candidate_evidence
+            .paths(ctx_history_core::RepositoryCandidateKind::DeclaredToolWorkdir)
+            .collect::<Vec<_>>(),
+        vec![repo.to_string_lossy().as_ref()]
+    );
+    assert!(result
+        .repository_file_observations
+        .iter()
+        .any(|observation| observation.relative_path == "src/lib.rs"));
+    assert!(!record_has_reason(
+        result,
+        RepositoryAbstentionReason::ProviderOutputUnjoined
+    ));
+    assert!(serde_json::to_string(&records)
+        .unwrap()
+        .contains(output_sentinel));
+}
+
+#[test]
+fn gemini_oversized_command_abstains_without_session_cwd_fallback() {
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let repo = native_repository(&temp);
+    let path = write_transcript(
+        &root,
+        &[
+            json!({
+                "sessionId": "gemini-oversized-command",
+                "startTime": "2026-08-01T12:00:00Z",
+                "kind": "main",
+                "directories": [repo]
+            }),
+            json!({
+                "id": "oversized-command-record",
+                "timestamp": "2026-08-01T12:00:01Z",
+                "type": "gemini",
+                "toolCalls": [{
+                    "id": "oversized-command",
+                    "name": "run_shell_command",
+                    "args": {
+                        "command": "x".repeat(
+                            crate::repository_attribution::MAX_COMMAND_BYTES + 1
+                        )
+                    }
+                }]
+            }),
+        ],
+    );
+    let source = rediscover(&root, &path);
+    let (_, rows) = scan_collect(&source, None);
+    let records = project_gemini_test_events(&source, rows).unwrap();
+
+    let [record] = records.as_slice() else {
+        panic!("expected exactly one Gemini tool-call record");
+    };
+    assert!(record.repository_bindings.is_empty());
+    assert!(record_has_reason(
+        record,
+        RepositoryAbstentionReason::CommandTooLarge
+    ));
+}
+
+#[test]
+fn gemini_commit_rewrite_and_pr_results_require_exact_structured_outcomes() {
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let repo = native_repository(&temp);
+    let commands = [
+        ("commit", "git commit -m bounded"),
+        ("rewrite", "git commit --amend --no-edit"),
+        ("pr", "gh pr create --title bounded --body bounded"),
+    ];
+    let mut values = vec![json!({
+        "sessionId": "gemini-outcome-abstentions",
+        "startTime": "2026-07-31T12:00:00Z",
+        "kind": "main",
+        "directories": [repo]
+    })];
+    for (name, command) in commands {
+        values.push(json!({
+            "id": format!("{name}-call-record"),
+            "type": "gemini",
+            "toolCalls": [{
+                "id": format!("{name}-call"),
+                "name": "run_shell_command",
+                "args": {"command": command, "dir_path": repo}
+            }]
+        }));
+        values.push(json!({
+            "id": format!("{name}-result-record"),
+            "type": "gemini",
+            "toolCalls": [{
+                "id": format!("{name}-call"),
+                "name": "run_shell_command",
+                "args": {"command": command, "dir_path": repo},
+                "result": {"content": "success prose is not an exact outcome"},
+                "status": "success"
+            }]
+        }));
+    }
+    let path = write_transcript(&root, &values);
+    let source = rediscover(&root, &path);
+    let (_, rows) = scan_collect(&source, None);
+    let records = project_gemini_test_events(&source, rows).unwrap();
+    assert_eq!(records.len(), 6);
+    for result in [&records[1], &records[3], &records[5]] {
+        assert!(result.repository_vcs_observations.is_empty());
+    }
+    assert!(record_has_reason(
+        &records[1],
+        RepositoryAbstentionReason::OutcomeResultInadmissible
+    ));
+    assert!(record_has_reason(
+        &records[3],
+        RepositoryAbstentionReason::HistoryRewriteUnlinked
+    ));
+    assert!(record_has_reason(
+        &records[5],
+        RepositoryAbstentionReason::OutcomeResultInadmissible
+    ));
+}
+
+#[test]
+fn gemini_outcomes_require_an_exact_linked_successful_value() {
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let repo = native_repository(&temp);
+    let oid = "a".repeat(40);
+    let mut values = vec![json!({
+        "sessionId": "gemini-exact-outcomes",
+        "startTime": "2026-07-31T12:00:00Z",
+        "kind": "main",
+        "directories": [repo]
+    })];
+    for (name, status) in [
+        ("success", Some("success")),
+        ("failure", Some("failure")),
+        ("unknown", None),
+    ] {
+        values.push(json!({
+            "id": format!("{name}-call-record"),
+            "type": "gemini",
+            "toolCalls": [{
+                "id": format!("{name}-call"),
+                "name": "run_shell_command",
+                "args": {"command": "git commit -m exact", "dir_path": repo}
+            }]
+        }));
+        let mut result = json!({
+            "id": format!("{name}-result-record"),
+            "type": "gemini",
+            "toolCalls": [{
+                "id": format!("{name}-call"),
+                "result": {"content": {"commit_oid": oid}}
+            }]
+        });
+        if let Some(status) = status {
+            result["toolCalls"][0]["status"] = json!(status);
+        }
+        values.push(result);
+    }
+    values.push(json!({
+        "id": "orphan-result-record",
+        "type": "gemini",
+        "toolCalls": [{
+            "id": "orphan-call",
+            "args": {"command": "git commit -m exact", "dir_path": repo},
+            "result": {"content": {"commit_oid": oid}},
+            "status": "success"
+        }]
+    }));
+    let path = write_transcript(&root, &values);
+    let source = rediscover(&root, &path);
+    let (_, rows) = scan_collect(&source, None);
+    let records = project_gemini_test_events(&source, rows).unwrap();
+
+    assert_eq!(records.len(), 7);
+    assert_eq!(records[1].repository_vcs_observations.len(), 1);
+    assert!(records[3].repository_vcs_observations.is_empty());
+    assert!(records[5].repository_vcs_observations.is_empty());
+    assert!(records[6].repository_vcs_observations.is_empty());
+    assert!(record_has_reason(
+        &records[3],
+        RepositoryAbstentionReason::OutcomeResultInadmissible
+    ));
+    assert!(record_has_reason(
+        &records[5],
+        RepositoryAbstentionReason::OutcomeResultInadmissible
+    ));
+    assert!(record_has_reason(
+        &records[6],
+        RepositoryAbstentionReason::ProviderOutputUnjoined
+    ));
+}
+
+#[test]
+fn gemini_first_turn_native_shape_keeps_real_history_cross_provider_parity_unproven() {
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let repo = native_repository(&temp);
+    let path = write_transcript(
+        &root,
+        &[
+            json!({
+                "sessionId": "gemini-unproven-first-turn",
+                "startTime": "2026-07-31T12:00:00Z",
+                "kind": "main",
+                "projectHash": "opaque-not-repository-authority"
+            }),
+            json!({
+                "id": "dynamic-call",
+                "type": "gemini",
+                "toolCalls": [{
+                    "id": "dynamic",
+                    "name": "run_shell_command",
+                    "args": {"command": "cd $REPO && git status", "path": "$REPO/src/lib.rs"}
+                }]
+            }),
+            json!({
+                "id": "orphan-result",
+                "type": "gemini",
+                "toolCalls": [{
+                    "id": "never-observed-call",
+                    "name": "run_shell_command",
+                    "args": {"command": "git status", "dir_path": repo},
+                    "result": ["native result without an observed matching call"],
+                    "status": "success"
+                }]
+            }),
+        ],
+    );
+    let source = rediscover(&root, &path);
+    let (_, rows) = scan_collect(&source, None);
+    let records = project_gemini_test_events(&source, rows).unwrap();
+    assert_eq!(records.len(), 2);
+    assert!(records[0].repository_bindings.is_empty());
+    assert!(records[0]
+        .repository_candidate_evidence
+        .paths(ctx_history_core::RepositoryCandidateKind::SessionCwd)
+        .next()
+        .is_none());
+    assert!(record_has_reason(
+        &records[0],
+        RepositoryAbstentionReason::DynamicPath
+    ));
+    assert_eq!(records[1].repository_bindings.len(), 1);
+    assert!(record_has_reason(
+        &records[1],
+        RepositoryAbstentionReason::ProviderOutputUnjoined
+    ));
+    assert!(records[1].repository_vcs_observations.is_empty());
+}
+
+#[test]
+fn gemini_multiple_native_directories_abstain_instead_of_selecting_one() {
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let repo = native_repository(&temp);
+    let other = temp.path().join("other");
+    fs::create_dir(&other).unwrap();
+    let path = write_transcript(
+        &root,
+        &[
+            json!({
+                "sessionId": "gemini-ambiguous-directories",
+                "startTime": "2026-07-31T12:00:00Z",
+                "kind": "main",
+                "directories": [repo, other]
+            }),
+            json!({
+                "id": "message",
+                "type": "user",
+                "content": "no repository prose scanning"
+            }),
+        ],
+    );
+    let source = rediscover(&root, &path);
+    let (_, rows) = scan_collect(&source, None);
+    let records = project_gemini_test_events(&source, rows).unwrap();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].repository_bindings.is_empty());
+    assert!(records[0]
+        .repository_candidate_evidence
+        .paths(ctx_history_core::RepositoryCandidateKind::SessionCwd)
+        .next()
+        .is_none());
+    assert!(record_has_reason(
+        &records[0],
+        RepositoryAbstentionReason::Ambiguous
+    ));
 }

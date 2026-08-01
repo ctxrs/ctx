@@ -24,6 +24,14 @@ filegroup(
     ),
 )
 
+filegroup(
+    name = "test_fixtures",
+    srcs = glob([
+        "src/provider/**/tests/fixtures/**",
+        "tests/fixtures/**",
+    ]),
+)
+
 COMMON_RUSTC_ENV = {
     "CARGO_MANIFEST_DIR": "crates/ctx-history-capture",
 }
@@ -62,6 +70,7 @@ ctx_rust_test(
         "//:provider_import_policy",
         "//:provider_support_matrix",
         "//:public_test_fixtures",
+        ":test_fixtures",
     ],
     edition = crate_edition(),
     aliases = aliases(
@@ -86,9 +95,22 @@ ctx_rust_test(
 )
 
 ctx_rust_test(
-    name = "complete_content_sqlite_tests",
-    srcs = ["tests/complete_content_sqlite.rs"],
-    crate_root = "tests/complete_content_sqlite.rs",
+    name = "self_contained_core_final_locator_removal_tests",
+    srcs = [
+        "tests/self_contained_core_final_locator_removal.rs",
+        "//crates/ctx-history-core:src/lib.rs",
+    ] + PROD_SRCS,
+    crate_name = "self_contained_core_final_locator_removal",
+    crate_root = "tests/self_contained_core_final_locator_removal.rs",
+    edition = crate_edition(),
+)
+
+ctx_rust_test(
+    name = "codex_direct_result_tests",
+    srcs = ["tests/codex_direct_result.rs"],
+    crate_name = "codex_direct_result",
+    crate_root = "tests/codex_direct_result.rs",
+    compile_data = [":test_fixtures"],
     edition = crate_edition(),
     aliases = aliases(
         normal_dev = True,
@@ -97,10 +119,33 @@ ctx_rust_test(
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
-    ) + [
-        ":lib",
-        "//crates/ctx-history-core:lib",
+    ) + [":lib"] + CTX_HISTORY_CAPTURE_DEPS,
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = COMMON_RUSTC_ENV,
+)
+
+ctx_rust_test(
+    name = "repository_shell_outcomes_tests",
+    srcs = [
+        "tests/repository_shell_outcomes.rs",
+        "src/repository_attribution/outcome.rs",
+        "src/repository_attribution/shell.rs",
+        "src/repository_attribution/shell/outcome_plan.rs",
     ],
+    crate_name = "repository_shell_outcomes",
+    crate_root = "tests/repository_shell_outcomes.rs",
+    edition = crate_edition(),
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [":lib"] + CTX_HISTORY_CAPTURE_DEPS,
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
         proc_macro_dev = True,
@@ -124,13 +169,5 @@ sh_test(
         "safe-presubmit",
         "source-backed",
         "source-family-contract",
-    ],
-)
-
-test_suite(
-    name = "complete_content_tests",
-    tests = [
-        ":complete_content_sqlite_tests",
-        ":unit_tests",
     ],
 )

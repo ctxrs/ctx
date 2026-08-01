@@ -4,15 +4,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    AdmitSourceManifestPageRequest, AuthorizationRequest, AuthorizationResult,
-    BeginSourceManifestAdmissionRequest, BlameRequest, BlameResult, ConfirmGraphKeyDeletionRequest,
-    DeleteSourceRequest, ErrorClass, FinishAdmittedSourceManifestRequest,
-    FinishSourceManifestAdmissionRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
-    MaterializeSourcePagesRequest, PrepareGraphKeyDeletionRequest, PrepareSourceRequest,
-    ProtocolError, ReadSourceProgressPageRequest, SourceDeleted, SourceManifestAdmissionBegan,
-    SourceManifestAdmitted, SourceManifestFinished, SourceManifestPageAdmitted,
-    SourceManifestReceipt, SourcePagesMaterialized, SourcePrepared, SourceProgressPage,
-    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+    ApplyCoreEventDeltaPageRequest, ApplyCoreSourceDeltaPageRequest, AuthorizationRequest,
+    AuthorizationResult, BeginCoreMaterializationRequest, BlameRequest, BlameResult,
+    ConfirmGraphKeyDeletionRequest, CoreEventDeltaPageApplied, CoreEventStatePage,
+    CoreEventStatePageRequest, CoreMaterializationBegan, CoreMaterializationFinished,
+    CoreMaterializationReceipt, CoreSourceDeltaPageApplied, ErrorClass,
+    FinishCoreMaterializationRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
+    PrepareGraphKeyDeletionRequest, ProtocolError, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -79,9 +77,8 @@ impl<'de> Deserialize<'de> for HelperEnvelope {
     }
 }
 
-// `AdmitSourceManifestPage` is 1,080 bytes versus 736 bytes for the next-largest
-// variant. Boxing it would add a heap allocation per page at this serialization
-// boundary without changing the protocol representation, so retain it by value.
+// Core record pages intentionally carry complete records and can dominate this
+// enum's stack size. Boxing changes only the Rust representation, never wire V1.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -96,14 +93,11 @@ pub enum HostMessage {
     PrepareGraphKeyDeletion(PrepareGraphKeyDeletionRequest),
     ConfirmGraphKeyDeletion(ConfirmGraphKeyDeletionRequest),
     Status(StatusRequest),
-    BeginSourceManifestAdmission(BeginSourceManifestAdmissionRequest),
-    AdmitSourceManifestPage(AdmitSourceManifestPageRequest),
-    FinishSourceManifestAdmission(FinishSourceManifestAdmissionRequest),
-    ReadSourceProgressPage(ReadSourceProgressPageRequest),
-    PrepareSource(PrepareSourceRequest),
-    MaterializeSourcePages(MaterializeSourcePagesRequest),
-    DeleteSource(DeleteSourceRequest),
-    FinishAdmittedSourceManifest(FinishAdmittedSourceManifestRequest),
+    BeginCoreMaterialization(BeginCoreMaterializationRequest),
+    ApplyCoreSourceDeltaPage(ApplyCoreSourceDeltaPageRequest),
+    CoreEventStatePage(CoreEventStatePageRequest),
+    ApplyCoreEventDeltaPage(ApplyCoreEventDeltaPageRequest),
+    FinishCoreMaterialization(FinishCoreMaterializationRequest),
     Blame(BlameRequest),
 }
 
@@ -120,14 +114,11 @@ pub enum HelperMessage {
     GraphKeyDeletionPrepared(GraphKeyDeletionPrepared),
     GraphKeyDeleted(GraphKeyDeleted),
     Status(StatusResult),
-    SourceManifestAdmissionBegan(SourceManifestAdmissionBegan),
-    SourceManifestPageAdmitted(SourceManifestPageAdmitted),
-    SourceManifestAdmitted(SourceManifestAdmitted),
-    SourceProgressPage(SourceProgressPage),
-    SourcePrepared(SourcePrepared),
-    SourcePagesMaterialized(SourcePagesMaterialized),
-    SourceDeleted(SourceDeleted),
-    SourceManifestFinished(SourceManifestFinished),
+    CoreMaterializationBegan(CoreMaterializationBegan),
+    CoreSourceDeltaPageApplied(CoreSourceDeltaPageApplied),
+    CoreEventStatePage(CoreEventStatePage),
+    CoreEventDeltaPageApplied(CoreEventDeltaPageApplied),
+    CoreMaterializationFinished(CoreMaterializationFinished),
     Blame(BlameResult),
     Error(ProtocolError),
 }
@@ -139,7 +130,7 @@ pub enum Capability {
     EntitlementAuthorization,
     GraphKeyDeletion,
     Status,
-    SourceMaterialization,
+    CoreMaterialization,
     Query,
     GitRead,
 }
@@ -150,7 +141,7 @@ impl Capability {
             Self::EntitlementAuthorization => "entitlement_authorization",
             Self::GraphKeyDeletion => "graph_key_deletion",
             Self::Status => "status",
-            Self::SourceMaterialization => "source_materialization",
+            Self::CoreMaterialization => "core_materialization",
             Self::Query => "query",
             Self::GitRead => "git_read",
         }
@@ -191,53 +182,317 @@ pub struct HelloResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StatusRequest {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GraphState {
-    NotMaterialized,
-    NeedsRebuild,
-    Partial,
-    NeedsResume,
-    Ready,
+pub struct StatusRequest {
+    pub requested_core_generation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MaterializationAuthority {
-    Source,
+pub enum CoreProjectionCurrentness {
+    NotMaterialized,
+    Partial,
+    Stale,
+    NeedsRebuild,
+    Current,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializedCoverage {
+    NotMaterialized,
+    Partial,
+    Complete,
+    Empty,
+    Abstained,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProAccessState {
+    Available,
+    Locked,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProAccessStatus {
+    pub entitlement: ProAccessState,
+    pub graph_key: ProAccessState,
+    pub local_repository: ProAccessState,
+}
+
+impl ProAccessStatus {
+    fn global_prerequisites_available(&self) -> bool {
+        self.entitlement == ProAccessState::Available && self.graph_key == ProAccessState::Available
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProOperation {
+    FileBlame,
+    CommitBlame,
+    PullRequestBlame,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryCoverage {
+    pub repository_candidate_events: u64,
+    pub logical_binding_events: u64,
+    pub certified_live_root_access_events: u64,
+    pub file_evidence_events: u64,
+    pub exact_commit_evidence_events: u64,
+    pub exact_pull_request_evidence_events: u64,
+}
+
+impl RepositoryCoverage {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn validate_for_receipt(
+        &self,
+        receipt: Option<&CoreMaterializationReceipt>,
+    ) -> Result<(), ProtocolError> {
+        let Some(receipt) = receipt else {
+            if self.is_empty() {
+                return Ok(());
+            }
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "repository coverage requires a completed Core receipt",
+            ));
+        };
+        for (label, count) in [
+            (
+                "repository candidate events",
+                self.repository_candidate_events,
+            ),
+            ("logical binding events", self.logical_binding_events),
+            (
+                "certified live-root access events",
+                self.certified_live_root_access_events,
+            ),
+            ("file evidence events", self.file_evidence_events),
+            (
+                "exact commit evidence events",
+                self.exact_commit_evidence_events,
+            ),
+            (
+                "exact pull-request evidence events",
+                self.exact_pull_request_evidence_events,
+            ),
+        ] {
+            if count > receipt.event_count {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    format!("repository coverage {label} exceeds Core receipt event count"),
+                ));
+            }
+        }
+        if self.logical_binding_events > self.repository_candidate_events {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "repository coverage logical binding events exceed candidate coverage",
+            ));
+        }
+        for (label, count) in [
+            (
+                "certified live-root access events",
+                self.certified_live_root_access_events,
+            ),
+            ("file evidence events", self.file_evidence_events),
+            (
+                "exact commit evidence events",
+                self.exact_commit_evidence_events,
+            ),
+            (
+                "exact pull-request evidence events",
+                self.exact_pull_request_evidence_events,
+            ),
+        ] {
+            if count > self.logical_binding_events {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    format!("repository coverage {label} exceeds logical binding coverage"),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusResult {
-    pub state: GraphState,
-    pub authority: MaterializationAuthority,
-    pub source_receipt: Option<SourceManifestReceipt>,
+    pub currentness: CoreProjectionCurrentness,
+    pub requested_core_generation_id: Option<String>,
+    pub core_receipt: Option<CoreMaterializationReceipt>,
+    pub coverage: MaterializedCoverage,
+    pub repository_coverage: RepositoryCoverage,
+    pub access: ProAccessStatus,
+    pub supported_operations: BTreeSet<ProOperation>,
+    pub available_operations: BTreeSet<ProOperation>,
 }
 
 impl StatusResult {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        if let Some(receipt) = &self.source_receipt {
+        if let Some(receipt) = &self.core_receipt {
             receipt.validate()?;
         }
-        match self.authority {
-            MaterializationAuthority::Source => {
-                if self.state == GraphState::Ready && self.source_receipt.is_none() {
+        self.repository_coverage
+            .validate_for_receipt(self.core_receipt.as_ref())?;
+        if let Some(generation) = &self.requested_core_generation_id {
+            validate_lower_sha256(generation, "requested Core generation")?;
+        }
+        match self.currentness {
+            CoreProjectionCurrentness::NotMaterialized => {
+                if self.core_receipt.is_some()
+                    || self.coverage != MaterializedCoverage::NotMaterialized
+                {
                     return Err(ProtocolError::new(
                         ErrorClass::Sequence,
-                        "ready source status requires a completed receipt",
+                        "unmaterialized Core status cannot carry a receipt or coverage",
                     ));
                 }
-                if self.state != GraphState::Ready && self.source_receipt.is_some() {
+            }
+            CoreProjectionCurrentness::Current => {
+                let receipt = self.core_receipt.as_ref().ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "current Core status requires a completed receipt",
+                    )
+                })?;
+                if self
+                    .requested_core_generation_id
+                    .as_deref()
+                    .is_some_and(|requested| requested != receipt.core_generation_id)
+                {
                     return Err(ProtocolError::new(
                         ErrorClass::Sequence,
-                        "incomplete source status cannot report a completed receipt",
+                        "current Core status receipt does not match the requested generation",
                     ));
                 }
+            }
+            CoreProjectionCurrentness::Stale => {
+                let receipt = self.core_receipt.as_ref().ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "stale Core status requires the last completed receipt",
+                    )
+                })?;
+                if self
+                    .requested_core_generation_id
+                    .as_deref()
+                    .is_none_or(|requested| requested == receipt.core_generation_id)
+                {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "stale Core status requires distinct requested and receipt generations",
+                    ));
+                }
+            }
+            CoreProjectionCurrentness::Partial | CoreProjectionCurrentness::NeedsRebuild => {}
+        }
+        let terminal_coverage = matches!(
+            self.coverage,
+            MaterializedCoverage::Complete
+                | MaterializedCoverage::Empty
+                | MaterializedCoverage::Abstained
+        );
+        if terminal_coverage != (self.currentness == CoreProjectionCurrentness::Current) {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "terminal materialized coverage requires a current Core projection",
+            ));
+        }
+        if let Some(receipt) = &self.core_receipt {
+            let valid_terminal_mapping = match self.coverage {
+                MaterializedCoverage::Empty => {
+                    receipt.event_count == 0 && self.repository_coverage.is_empty()
+                }
+                MaterializedCoverage::Abstained => {
+                    receipt.event_count > 0 && self.repository_coverage.logical_binding_events == 0
+                }
+                MaterializedCoverage::Complete => {
+                    receipt.event_count > 0 && self.repository_coverage.logical_binding_events > 0
+                }
+                MaterializedCoverage::NotMaterialized | MaterializedCoverage::Partial => true,
+            };
+            if !valid_terminal_mapping {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    "materialized coverage does not match the completed Core receipt and repository coverage",
+                ));
+            }
+        }
+        if !self
+            .available_operations
+            .is_subset(&self.supported_operations)
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::InvalidRequest,
+                "available Pro operations must be a subset of supported operations",
+            ));
+        }
+        let globally_ready = self.currentness == CoreProjectionCurrentness::Current
+            && self.coverage == MaterializedCoverage::Complete
+            && self.access.global_prerequisites_available();
+        if !globally_ready && !self.available_operations.is_empty() {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "unready Core coverage, entitlement, or graph key cannot advertise available blame operations",
+            ));
+        }
+        for operation in &self.available_operations {
+            let prerequisites_available = match operation {
+                ProOperation::FileBlame => {
+                    self.access.local_repository == ProAccessState::Available
+                        && self.repository_coverage.certified_live_root_access_events > 0
+                        && self.repository_coverage.file_evidence_events > 0
+                        && self.repository_coverage.exact_commit_evidence_events > 0
+                }
+                ProOperation::CommitBlame => {
+                    self.repository_coverage.exact_commit_evidence_events > 0
+                }
+                ProOperation::PullRequestBlame => {
+                    self.repository_coverage.exact_pull_request_evidence_events > 0
+                }
+            };
+            if !prerequisites_available {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    match operation {
+                        ProOperation::FileBlame => {
+                            "file blame requires local-repository access, certified live-root access, file evidence, and exact commit evidence"
+                        }
+                        ProOperation::CommitBlame => {
+                            "commit blame requires exact commit evidence"
+                        }
+                        ProOperation::PullRequestBlame => {
+                            "pull-request blame requires exact pull-request evidence"
+                        }
+                    },
+                ));
             }
         }
         Ok(())
     }
+}
+
+fn validate_lower_sha256(value: &str, label: &'static str) -> Result<(), ProtocolError> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Ok(());
+    }
+    Err(ProtocolError::new(
+        ErrorClass::InvalidRequest,
+        format!("{label} must be lowercase SHA-256"),
+    ))
 }

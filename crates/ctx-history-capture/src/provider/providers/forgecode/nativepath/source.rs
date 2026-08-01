@@ -9,7 +9,6 @@ use std::{
 };
 
 use chrono::Duration;
-use ctx_history_core::EventType;
 use rusqlite::Connection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -33,22 +32,18 @@ use crate::{
         SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
         SqliteSourceReadSnapshot,
     },
-    CaptureError, OutputAssociations, OutputNativeCoordinate, OutputObservationKind, OutputOutcome,
-    OutputOutcomeMetadata, OutputSourceLocator, ProOutputObservation, ProviderAdapterContext,
-    ProviderImportFailure, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
+    CaptureError, ProviderAdapterContext, ProviderImportFailure, Result,
+    MAX_PROVIDER_SQLITE_VALUE_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
-use super::super::complete_content::ForgeCodeCompleteContentDigest;
 use super::super::event::{
     forgecode_event, forgecode_event_type, forgecode_for_each_metric_file_touch_with_limit,
-    forgecode_message_parts, forgecode_message_text, forgecode_normalized_result_content,
-    forgecode_timestamp, forgecode_tool_result_call_id, forgecode_tool_result_is_error,
-    ForgeCodeFileTouch, ForgeCodeNativeEvent,
+    forgecode_message_parts, forgecode_timestamp, ForgeCodeFileTouch, ForgeCodeNativeEvent,
 };
+use super::super::record_evidence::ForgeCodeRecordEvidence;
 
 pub(super) const FORGECODE_NATIVE_PARSER_REVISION: u32 = 1;
-pub(super) const FORGECODE_NATIVE_POLICY_REVISION: u32 = 6;
-pub(super) const FORGECODE_NATIVE_LOCATOR_KIND: &str = "forgecode-conversation-row-v1";
+pub(super) const FORGECODE_NATIVE_POLICY_REVISION: u32 = 7;
 pub(super) const FORGECODE_NATIVE_PAGE_MAX_BYTES: usize = 6 * 1024 * 1024;
 const FORGECODE_NATIVE_PAGE_REJECTION_RESERVE_BYTES: usize = 4 * 1024;
 const FORGECODE_NATIVE_PAGE_CONTENT_MAX_BYTES: usize =
@@ -57,7 +52,6 @@ const FORGECODE_NATIVE_MAX_MESSAGES_PER_PAGE: usize = 16;
 const FORGECODE_NATIVE_MAX_TOUCHES_PER_MESSAGE: usize = 64;
 const FORGECODE_NATIVE_MAX_METRIC_TOUCHES: usize = 64;
 const FORGECODE_NATIVE_MAX_EVENT_BYTES: usize = 2 * 1024 * 1024;
-const FORGECODE_NATIVE_MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const FORGECODE_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 64 * 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -399,7 +393,7 @@ fn forgecode_logical_fingerprint(
 }
 
 fn forgecode_decoded_row_digest(row: &ForgeCodeDecodedRow) -> Result<[u8; 32]> {
-    Ok(ForgeCodeCompleteContentDigest::new(
+    Ok(ForgeCodeRecordEvidence::new(
         row.rowid,
         &row.conversation_id,
         row.title.as_deref(),
@@ -432,7 +426,6 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodeScanner {
     frontier: ForgeCodeFrontier,
     context: ProviderAdapterContext,
     source_root: Option<String>,
-    wants_outputs: bool,
     exhausted: bool,
     active_decoded: Option<ForgeCodeDecodedRow>,
     active_terminal: bool,
@@ -442,20 +435,17 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodeScanner {
 
 #[derive(Debug)]
 pub(in crate::provider::providers::forgecode) struct ForgeCodePage {
-    // Frontier and output-byte accounting remain part of the bounded page
-    // contract even when the Core coordinator consumes only next_frontier.
+    // The expected frontier remains part of the bounded page contract even
+    // when the Core coordinator consumes only next_frontier.
     #[allow(dead_code)]
     pub(in crate::provider::providers::forgecode) expected_frontier: ForgeCodeFrontier,
     pub(in crate::provider::providers::forgecode) next_frontier: ForgeCodeFrontier,
     pub(in crate::provider::providers::forgecode) terminal: bool,
     pub(in crate::provider::providers::forgecode) row: Option<ForgeCodeConversationRow>,
     pub(in crate::provider::providers::forgecode) events: Vec<ForgeCodeRetainedEvent>,
-    pub(in crate::provider::providers::forgecode) outputs: Vec<ProOutputObservation>,
     pub(in crate::provider::providers::forgecode) touches: Vec<ForgeCodeFileTouch>,
     pub(in crate::provider::providers::forgecode) rejections: Vec<ProviderImportFailure>,
     pub(in crate::provider::providers::forgecode) retained_bytes: usize,
-    #[allow(dead_code)]
-    pub(in crate::provider::providers::forgecode) retained_output_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -476,10 +466,6 @@ pub(in crate::provider::providers::forgecode) struct ForgeCodeConversationRow {
     pub(in crate::provider::providers::forgecode) updated_at: Option<String>,
     pub(in crate::provider::providers::forgecode) context_metadata: Value,
     pub(in crate::provider::providers::forgecode) metrics_metadata: Option<Value>,
-    // Exact context cardinality remains provider evidence for staging Pro.
-    #[allow(dead_code)]
-    pub(in crate::provider::providers::forgecode) context_message_count: usize,
-    pub(in crate::provider::providers::forgecode) initiator: Option<String>,
 }
 
 struct ForgeCodeHydratedRow {
@@ -666,7 +652,6 @@ fn estimated_row_bytes(row: &ForgeCodeConversationRow) -> usize {
         .saturating_add(row.title.as_deref().map(str::len).unwrap_or_default())
         .saturating_add(row.created_at.len())
         .saturating_add(row.updated_at.as_deref().map(str::len).unwrap_or_default())
-        .saturating_add(row.initiator.as_deref().map(str::len).unwrap_or_default())
         .saturating_add(
             serde_json::to_vec(&row.context_metadata)
                 .map(|bytes| bytes.len())
@@ -711,63 +696,6 @@ fn estimated_touch_bytes(touch: &ForgeCodeFileTouch) -> usize {
 
 fn estimated_rejection_bytes(rejection: &ProviderImportFailure) -> usize {
     rejection.error.len().saturating_add(64)
-}
-
-fn estimated_output_bytes(output: &ProOutputObservation) -> usize {
-    let optional = |value: Option<&str>| value.map(str::len).unwrap_or_default();
-    let repository_bytes = output
-        .associations
-        .repository
-        .as_ref()
-        .map(|repository| {
-            repository
-                .repository_id
-                .len()
-                .saturating_add(optional(repository.checkout_id.as_deref()))
-                .saturating_add(optional(repository.worktree_id.as_deref()))
-                .saturating_add(optional(repository.object_format.as_deref()))
-        })
-        .unwrap_or_default();
-    let command_bytes = output
-        .command
-        .as_ref()
-        .map(|command| {
-            command
-                .tool_name
-                .len()
-                .saturating_add(command.command.len())
-                .saturating_add(optional(command.working_directory.as_deref()))
-        })
-        .unwrap_or_default();
-    output
-        .coordinate
-        .unit_key
-        .len()
-        .saturating_add(optional(output.coordinate.native_record_id.as_deref()))
-        .saturating_add(output.associations.direct_session_id.len())
-        .saturating_add(output.associations.root_session_id.len())
-        .saturating_add(optional(output.associations.parent_session_id.as_deref()))
-        .saturating_add(optional(output.associations.provider_session_id.as_deref()))
-        .saturating_add(optional(output.associations.agent_id.as_deref()))
-        .saturating_add(repository_bytes)
-        .saturating_add(optional(output.call_id.as_deref()))
-        .saturating_add(command_bytes)
-        .saturating_add(output.locator.kind.len())
-        .saturating_add(output.locator.payload.len())
-        .saturating_add(output.content.len())
-        .saturating_add(512)
-}
-
-fn output_outcome(parts: super::super::event::ForgeCodeMessageParts<'_>) -> OutputOutcomeMetadata {
-    OutputOutcomeMetadata {
-        outcome: match forgecode_tool_result_is_error(parts) {
-            Some(true) => OutputOutcome::Failure,
-            Some(false) => OutputOutcome::Success,
-            None => OutputOutcome::Unknown,
-        },
-        exit_code: None,
-        duration_ms: None,
-    }
 }
 
 pub(super) fn ordered_rowid(rowid: i64) -> u64 {

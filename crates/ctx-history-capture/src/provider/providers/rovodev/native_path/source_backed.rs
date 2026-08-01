@@ -12,21 +12,12 @@ use std::{
     sync::Mutex,
 };
 
-#[cfg(test)]
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
-
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, BatchHydrationRequest, BatchHydrationResult,
-    CaptureProvider, EventIdentityInput, EventRole, EventType, HydratedProviderRecord,
-    HydrationFailure, HydrationFailureKind, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, SourceRecordLocator,
-    SourceResolverContractError, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
+    EventIdentityInput, EventRole, EventType, NativeItemKey, NativeSessionKey,
+    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
+    SourceObservation, StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -45,9 +36,9 @@ use crate::{
             visit_provider_file_touch_drafts_with_limit, MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
         },
         normalization::{
-            provider_block_text, provider_message_id, provider_output_event_is_failure,
-            provider_result_outcome_evidence, provider_role_from_message, provider_string_field,
-            provider_timestamp_from_fields,
+            provider_block_text, provider_explicit_result_value_text, provider_message_id,
+            provider_output_event_is_failure, provider_result_outcome_evidence,
+            provider_role_from_message, provider_string_field, provider_timestamp_from_fields,
         },
         source_backed::{
             family::document::{
@@ -72,11 +63,10 @@ const LOGICAL_SESSION_KIND: &str = "rovodev-session";
 const LOGICAL_EVENT_KIND: &str = "rovodev-event";
 const SOURCE_SCHEMA_VARIANT: &str = "rovodev-session-json-tree-v1";
 const SOURCE_REVISION_KIND: &str = "rovodev-session-tree-revision-v1";
-const PARSER_REVISION: &str = "rovodev-source-backed-v1";
+const PARSER_REVISION: &str = "rovodev-source-backed-v2";
 const RELATIVE_CONTEXT_FILE: &str = "session_context.json";
 const MESSAGE_OBJECT_KIND: &str = "message_history";
 const FILE_HASH_BUFFER_BYTES: usize = 64 * 1024;
-const SOURCE_BACKED_MAX_RECORD_BYTES: usize = 6 * 1024 * 1024;
 const SOURCE_BACKED_MAX_JSON_DEPTH: usize = 128;
 const SOURCE_BACKED_MAX_COLLECTION_ELEMENTS: usize = 65_536;
 const SOURCE_BACKED_MAX_FAILURE_BYTES: usize = 4 * 1024;
@@ -90,7 +80,7 @@ pub(crate) enum RovoDevSourceBackedError {
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
-    Resolver(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("Rovo Dev source-backed discovery requires an authoritative sessions directory")]
@@ -105,44 +95,9 @@ pub(crate) enum RovoDevSourceBackedError {
     CountMismatch,
     #[error("Rovo Dev source-backed event coordinate exceeds its supported range")]
     CoordinateOverflow,
-    #[error("locator is not a Rovo Dev session-tree record")]
-    InvalidLocator,
 }
 
 pub(crate) type RovoDevSourceBackedResult<T> = Result<T, RovoDevSourceBackedError>;
-
-#[derive(Debug, Clone, Default)]
-struct RovoDevWorkCounters {
-    #[cfg(test)]
-    body_parses: Option<Arc<AtomicUsize>>,
-    #[cfg(test)]
-    ancestor_header_probes: Option<Arc<AtomicUsize>>,
-    #[cfg(test)]
-    lineage_visits: Option<Arc<AtomicUsize>>,
-}
-
-impl RovoDevWorkCounters {
-    fn record_body_parse(&self) {
-        #[cfg(test)]
-        if let Some(count) = self.body_parses.as_ref() {
-            count.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    fn record_ancestor_header_probe(&self) {
-        #[cfg(test)]
-        if let Some(count) = self.ancestor_header_probes.as_ref() {
-            count.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    fn record_lineage_visit(&self) {
-        #[cfg(test)]
-        if let Some(count) = self.lineage_visits.as_ref() {
-            count.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-}
 
 #[derive(Debug)]
 struct FileSnapshot {
@@ -369,7 +324,6 @@ fn bounded_failure(error: impl Into<String>) -> String {
 #[derive(Debug)]
 struct RovoDevSnapshot {
     frozen: RovoDevSessionObservation,
-    context_sha256: [u8; 32],
     source_sha256: [u8; 32],
     certified_bytes: u64,
     document: std::result::Result<PreparedDocument, String>,
@@ -379,9 +333,7 @@ impl RovoDevSnapshot {
     fn read(
         source: &RovoDevOpenedSource,
         context: &ProviderAdapterContext,
-        counters: &RovoDevWorkCounters,
     ) -> RovoDevSourceBackedResult<Self> {
-        counters.record_body_parse();
         let files = source.open_files()?;
         let context_oversized =
             source.opening.context_length() > MAX_PROVIDER_JSONL_LINE_BYTES as u64;
@@ -428,7 +380,6 @@ impl RovoDevSnapshot {
         files.revalidate()?;
         Ok(Self {
             frozen: source.opening.clone(),
-            context_sha256: context_file.sha256,
             source_sha256,
             certified_bytes,
             document,
@@ -601,7 +552,6 @@ pub(crate) struct RovoDevTreeAuthority {
     authority: ProviderSourceRoot,
     sources: Vec<RovoDevOpenedSource>,
     lineage: Mutex<RovoDevLineageCache>,
-    counters: RovoDevWorkCounters,
 }
 
 type RovoDevDocumentTree = CompleteDocumentTree<RovoDevDocumentLeaf, RovoDevTreeAuthority>;
@@ -613,7 +563,6 @@ enum RovoDevSourceBackedDisposition {
 
 fn discover_rovodev_source_backed(
     sessions_root: &Path,
-    counters: RovoDevWorkCounters,
 ) -> RovoDevSourceBackedResult<RovoDevSourceBackedDisposition> {
     match fs::symlink_metadata(sessions_root) {
         Err(error)
@@ -629,14 +578,13 @@ fn discover_rovodev_source_backed(
     }
     let canonical_root = fs::canonicalize(sessions_root)?;
     let authority = ProviderSourceRoot::open(&canonical_root)?;
-    bind_document_tree(authority, counters)
+    bind_document_tree(authority)
         .map(Box::new)
         .map(RovoDevSourceBackedDisposition::Complete)
 }
 
 fn bind_document_tree(
     authority: ProviderSourceRoot,
-    counters: RovoDevWorkCounters,
 ) -> RovoDevSourceBackedResult<RovoDevDocumentTree> {
     let discovery = authoritative_discovery(authority.named_path())?;
     let mut sources = Vec::with_capacity(discovery.sources().len());
@@ -696,7 +644,6 @@ fn bind_document_tree(
             authority,
             sources,
             lineage: Mutex::new(lineage),
-            counters,
         },
     ))
 }
@@ -832,64 +779,11 @@ fn unique_message_ids(snapshot: &RovoDevSnapshot) -> HashSet<String> {
 pub(crate) struct RovoDevDocumentTreeAdapter {
     root: PathBuf,
     context: ProviderAdapterContext,
-    #[cfg(test)]
-    projection_scans: Option<Arc<AtomicUsize>>,
-    #[cfg(test)]
-    hydration_scans: Option<Arc<AtomicUsize>>,
-    #[cfg(test)]
-    terminal_revalidation_hook: Option<Arc<dyn Fn() + Send + Sync>>,
-    counters: RovoDevWorkCounters,
 }
 
 impl RovoDevDocumentTreeAdapter {
     pub(crate) fn new(root: PathBuf, context: ProviderAdapterContext) -> Self {
-        Self {
-            root,
-            context,
-            #[cfg(test)]
-            projection_scans: None,
-            #[cfg(test)]
-            hydration_scans: None,
-            #[cfg(test)]
-            terminal_revalidation_hook: None,
-            counters: RovoDevWorkCounters::default(),
-        }
-    }
-
-    #[cfg(test)]
-    fn with_projection_scans(mut self, scans: Arc<AtomicUsize>) -> Self {
-        self.projection_scans = Some(scans);
-        self
-    }
-
-    #[cfg(test)]
-    fn with_hydration_scans(mut self, scans: Arc<AtomicUsize>) -> Self {
-        self.hydration_scans = Some(scans);
-        self
-    }
-
-    #[cfg(test)]
-    fn with_body_parses(mut self, count: Arc<AtomicUsize>) -> Self {
-        self.counters.body_parses = Some(count);
-        self
-    }
-
-    #[cfg(test)]
-    fn with_ancestor_header_probes(mut self, count: Arc<AtomicUsize>) -> Self {
-        self.counters.ancestor_header_probes = Some(count);
-        self
-    }
-
-    #[cfg(test)]
-    fn with_lineage_visits(mut self, count: Arc<AtomicUsize>) -> Self {
-        self.counters.lineage_visits = Some(count);
-        self
-    }
-
-    #[cfg(test)]
-    fn with_terminal_revalidation_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
-        self.terminal_revalidation_hook = Some(hook);
-        self
+        Self { root, context }
     }
 }
 
@@ -906,9 +800,7 @@ impl ReplacementDocumentTree for RovoDevDocumentTreeAdapter {
     }
 
     fn discover_complete(&self) -> SourceBackedRouteResult<RovoDevDocumentTree> {
-        match discover_rovodev_source_backed(&self.root, self.counters.clone())
-            .map_err(rovodev_route_error)?
-        {
+        match discover_rovodev_source_backed(&self.root).map_err(rovodev_route_error)? {
             RovoDevSourceBackedDisposition::Complete(tree) => Ok(*tree),
             RovoDevSourceBackedDisposition::Unavailable => Err(SourceBackedRouteError::new(
                 SourceBackedRouteErrorKind::Unavailable,
@@ -923,41 +815,20 @@ impl ReplacementDocumentTree for RovoDevDocumentTreeAdapter {
         leaf: &Self::Leaf,
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
-        #[cfg(test)]
-        if let Some(scans) = self.projection_scans.as_ref() {
-            scans.fetch_add(1, Ordering::Relaxed);
-        }
         document::scan_rovodev_document(authority, leaf, &self.context, sink)
     }
 
     fn revalidate_complete(&self, tree: &RovoDevDocumentTree) -> SourceBackedRouteResult<[u8; 32]> {
-        #[cfg(test)]
-        if let Some(hook) = self.terminal_revalidation_hook.as_ref() {
-            hook();
-        }
         tree.authority
             .revalidate_opening()
             .map_err(rovodev_route_error)?;
-        match discover_rovodev_source_backed(&self.root, self.counters.clone())
-            .map_err(rovodev_route_error)?
-        {
+        match discover_rovodev_source_backed(&self.root).map_err(rovodev_route_error)? {
             RovoDevSourceBackedDisposition::Complete(tree) => Ok(tree.tree_fingerprint),
             RovoDevSourceBackedDisposition::Unavailable => Err(SourceBackedRouteError::new(
                 SourceBackedRouteErrorKind::SourceChanged,
                 "Rovo Dev sessions root disappeared before terminal revalidation",
             )),
         }
-    }
-
-    fn hydrate_group(
-        &self,
-        request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        #[cfg(test)]
-        if let Some(scans) = self.hydration_scans.as_ref() {
-            scans.fetch_add(1, Ordering::Relaxed);
-        }
-        document::hydrate_rovodev_group(&self.root, &self.context, request)
     }
 }
 

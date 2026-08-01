@@ -5,8 +5,9 @@
 //! projection path, not at the legacy canonical Store path. The writer is
 //! advanced only after a certified Core commit through
 //! `SourceBackedRelationalProjection::catch_up`. Query admission fails closed
-//! while that projection is absent, behind, or bound to a different Core
-//! generation; Core search success remains independent.
+//! while an active Core generation's projection is absent, behind, or bound to
+//! a different generation. Without active Core, only the canonical empty
+//! projection is admissible; Core search success remains independent.
 
 use std::path::{Path, PathBuf};
 
@@ -61,8 +62,10 @@ impl SqlCompatibility {
     /// without its relational consumer fails closed instead of falling back to
     /// stale canonical rows. A completely fresh root initializes only the
     /// disposable relational schema. `work.sqlite` is never inspected: 1.0
-    /// source-backed history is a new data epoch, and verified activation
-    /// retires obsolete Store leaves instead of preserving a fallback.
+    /// source-backed history is a new data epoch. Obsolete Store leaves are
+    /// inert owner-managed files, never a fallback or an implicit delete target.
+    /// An existing projection is accepted without Core only when it still has
+    /// the canonical empty receipt created for a fresh root.
     pub fn open_for_data_root(data_root: impl AsRef<Path>) -> SqlCompatibilityResult<Self> {
         let data_root = data_root.as_ref();
         let projection_path = sql_compatibility_path(data_root);
@@ -71,7 +74,7 @@ impl SqlCompatibility {
             return Self::open_existing_projection(projection_path, generation_path);
         }
 
-        if generation_path.join("meta.json").try_exists()? {
+        if active_core_generation_id(&generation_path)?.is_some() {
             return Err(
                 RelationalProjectionError::MissingSourceBackedSqlProjection {
                     projection_path,
@@ -90,27 +93,34 @@ impl SqlCompatibility {
         generation_path: PathBuf,
     ) -> SqlCompatibilityResult<Self> {
         let compatibility = Self::open(projection_path)?;
-        if generation_path.join("meta.json").try_exists()? {
-            let index = VerifiedIndex::open_pinned(&generation_path).map_err(|error| {
-                RelationalProjectionError::InvalidCoreGeneration(error.to_string())
-            })?;
-            let metadata = compatibility.metadata()?;
-            if metadata.status != RelationalProjectionStatus::Ready
-                || metadata.active_core_generation_id.as_deref() != Some(index.generation_id())
-            {
-                return Err(
-                    RelationalProjectionError::SourceBackedSqlGenerationMismatch {
-                        expected_generation: index.generation_id().to_owned(),
-                        active_generation: metadata.active_core_generation_id,
-                        status: match metadata.status {
-                            RelationalProjectionStatus::Empty => "empty",
-                            RelationalProjectionStatus::Ready => "ready",
-                            RelationalProjectionStatus::Behind => "behind",
-                        }
+        let metadata = compatibility.metadata()?;
+        if active_core_generation_id(&generation_path)?.is_none() {
+            if !is_genuinely_empty_projection(&metadata) {
+                return Err(RelationalProjectionError::IncompatibleState(
+                    "Core generation is absent but the relational projection is not empty"
                         .to_owned(),
-                    },
-                );
+                ));
             }
+            return Ok(compatibility);
+        }
+
+        let index = VerifiedIndex::open_pinned(&generation_path)
+            .map_err(|error| RelationalProjectionError::InvalidCoreGeneration(error.to_string()))?;
+        if metadata.status != RelationalProjectionStatus::Ready
+            || metadata.active_core_generation_id.as_deref() != Some(index.generation_id())
+        {
+            return Err(
+                RelationalProjectionError::SourceBackedSqlGenerationMismatch {
+                    expected_generation: index.generation_id().to_owned(),
+                    active_generation: metadata.active_core_generation_id,
+                    status: match metadata.status {
+                        RelationalProjectionStatus::Empty => "empty",
+                        RelationalProjectionStatus::Ready => "ready",
+                        RelationalProjectionStatus::Behind => "behind",
+                    }
+                    .to_owned(),
+                },
+            );
         }
         Ok(compatibility)
     }
@@ -122,6 +132,31 @@ impl SqlCompatibility {
     pub fn query(&self, sql: &str, options: RawSqlOptions) -> SqlCompatibilityResult<RawSqlResult> {
         self.projection.raw_sql_query(sql, options)
     }
+}
+
+fn active_core_generation_id(path: &Path) -> SqlCompatibilityResult<Option<String>> {
+    VerifiedIndex::active_generation_id(path)
+        .map_err(|error| RelationalProjectionError::InvalidCoreGeneration(error.to_string()))
+}
+
+fn is_genuinely_empty_projection(metadata: &RelationalProjectionMetadata) -> bool {
+    metadata.build_generation == 0
+        && metadata.active_core_generation_id.is_none()
+        && metadata.active_manifest_version.is_none()
+        && metadata.active_core_record_version.is_none()
+        && metadata.active_core_record_contract_fingerprint.is_none()
+        && metadata.active_lexical_schema_version.is_none()
+        && metadata.active_policy_schema_hash.is_none()
+        && metadata.active_materializer_revision.is_none()
+        && metadata.target_core_generation_id.is_none()
+        && metadata.status == RelationalProjectionStatus::Empty
+        && metadata.source_count == 0
+        && metadata.session_count == 0
+        && metadata.event_count == 0
+        && metadata.repository_binding_count == 0
+        && metadata.file_touch_count == 0
+        && metadata.vcs_observation_count == 0
+        && metadata.last_error.is_none()
 }
 
 /// Default filename for the source-backed SQL compatibility consumer.
@@ -201,7 +236,11 @@ mod existing_only_tests {
         drop(writer);
         let generation_path = temp.path().join("search").join("lexical");
         std::fs::create_dir_all(&generation_path).unwrap();
-        std::fs::write(generation_path.join("meta.json"), b"invalid generation").unwrap();
+        std::fs::write(
+            generation_path.join("active-generation.json"),
+            b"invalid generation",
+        )
+        .unwrap();
 
         let error = SqlCompatibility::open_existing_for_data_root(temp.path())
             .err()

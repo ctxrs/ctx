@@ -46,13 +46,13 @@ pub(crate) use errors::{
 };
 
 #[path = "client_output.rs"]
-mod source_manifest;
-pub(crate) use source_manifest::sync_source_manifest_materialization;
+mod core_materialization;
+pub(crate) use core_materialization::sync_core_materialization;
 
 /// Verifies that this installation has a selectable Pro helper before callers
 /// perform expensive Core index admission work. The eventual connection still
 /// performs the complete executable verification and protocol handshake.
-pub(crate) fn preflight_source_manifest_materialization(data_root: &Path) -> Result<()> {
+pub(crate) fn preflight_core_materialization(data_root: &Path) -> Result<()> {
     helper_path(data_root).map(drop)
 }
 
@@ -60,8 +60,6 @@ pub(crate) fn preflight_source_manifest_materialization(data_root: &Path) -> Res
 mod client_status;
 #[cfg(ctx_pro_qualification)]
 pub(crate) use client_status::smoke_qualification_helper;
-#[cfg(test)]
-use client_status::status_outcome;
 #[cfg(test)]
 pub(crate) use client_status::status_with_helper_resolver;
 pub(crate) use client_status::{
@@ -98,8 +96,6 @@ pub(super) use operations::delete_graph_key;
 #[cfg(test)]
 use operations::*;
 pub(crate) use transport::ProClient;
-#[cfg(test)]
-use transport::*;
 
 #[cfg(test)]
 #[path = "client_tests.rs"]

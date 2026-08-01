@@ -31,7 +31,6 @@ use super::{NANOCLAW_CAPTURE_REVISION, NANOCLAW_POLICY_REVISION};
 
 mod helpers;
 
-pub(super) use helpers::NanoClawSelectedProject;
 use helpers::*;
 
 const NANOCLAW_INVENTORY_PAGE_ENTRIES: usize = 64;
@@ -648,10 +647,6 @@ impl NanoClawSourceBackedProject {
         })
     }
 
-    pub(super) fn root_path(&self) -> &Path {
-        self.root.named_path()
-    }
-
     pub(super) fn snapshot(&self) -> &NanoClawProjectSnapshot {
         &self.snapshot
     }
@@ -739,12 +734,6 @@ impl NanoClawProjectSnapshot {
                 u64::from(session.inbound.is_present()) + u64::from(session.outbound.is_present())
             })
             .sum()
-    }
-
-    pub(super) fn selected_component_count(&self) -> u64 {
-        u64::try_from(self.inventory.session_databases.len())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(2)
     }
 
     pub(super) fn logical_authority_fingerprint(&self) -> [u8; 32] {
@@ -931,23 +920,6 @@ struct NanoClawCompoundRevisionEvidence<'a> {
     ignored_records: u64,
     indexed_documents: u64,
     certified_bytes: u64,
-}
-
-pub(super) fn nanoclaw_project_root(path: &Path) -> Result<PathBuf> {
-    if path.is_dir() && path.join("data").join("v2.db").is_file() {
-        return Ok(path.to_path_buf());
-    }
-    if path.file_name().and_then(|name| name.to_str()) == Some("v2.db") {
-        if let Some(data_dir) = path.parent() {
-            if let Some(root) = data_dir.parent() {
-                return Ok(root.to_path_buf());
-            }
-        }
-    }
-    Err(CaptureError::InvalidProviderTranscriptPath {
-        path: path.to_path_buf(),
-        reason: "NanoClaw import path must be a project root or data/v2.db",
-    })
 }
 
 fn nanoclaw_requested_project_root(path: &Path) -> Result<PathBuf> {

@@ -1,7 +1,6 @@
 use crate::Result;
 
 use super::{
-    json::OpenCodeRetainedJson,
     model::{OpenCodeNativeOrder, OpenCodeNativeSchemaFamily},
     schema::OpenCodeNativeSchema,
 };
@@ -27,24 +26,6 @@ pub(super) fn source_backed_decode_order(
         native_identity,
         order_a,
         order_b,
-    )
-}
-
-pub(super) fn source_backed_event_digest(
-    family: OpenCodeNativeSchemaFamily,
-    native_identity: &str,
-    native_order: &OpenCodeNativeOrder,
-    time_created: i64,
-    time_updated: i64,
-    retained: &OpenCodeRetainedJson,
-) -> Result<String> {
-    sql::event_digest(
-        family,
-        native_identity,
-        native_order,
-        time_created,
-        time_updated,
-        retained,
     )
 }
 

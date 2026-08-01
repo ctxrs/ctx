@@ -4,7 +4,7 @@ use std::sync::{Arc, Barrier};
 #[test]
 fn durable_state_path_is_purpose_based() {
     assert_eq!(
-        daemon_source_backed_refresh_job_path(Path::new("ctx-data")),
+        daemon_core_refresh_job_path(Path::new("ctx-data")),
         Path::new("ctx-data/daemon/jobs/core-refresh.json")
     );
 }

@@ -17,7 +17,8 @@
 
 static _Atomic int matched_calls;
 static _Atomic int seen_manifest_rename;
-static _Atomic int seen_meta_rename;
+static _Atomic int seen_generation_meta_rename;
+static _Atomic int seen_pointer_rename;
 static _Thread_local int inside_hook;
 
 static void *required_symbol(const char *name) {
@@ -102,6 +103,51 @@ static bool root_child_path(const char *path, const char *root, const char **bas
     return true;
 }
 
+static bool generation_child_path(const char *path, const char *root, const char **basename) {
+    char generations_directory[PATH_MAX];
+    if (!join_path(
+            generations_directory,
+            sizeof(generations_directory),
+            root,
+            "index-generations"
+        )) {
+        return false;
+    }
+    size_t directory_length = strlen(generations_directory);
+    if (!starts_with(path, generations_directory) || path[directory_length] != '/') {
+        return false;
+    }
+    const char *relative = path + directory_length + 1;
+    const char *separator = strchr(relative, '/');
+    if (!starts_with(relative, "generation-") || separator == NULL) {
+        return false;
+    }
+    const char *child = separator + 1;
+    if (child[0] == '\0' || strchr(child, '/') != NULL) {
+        return false;
+    }
+    *basename = child;
+    return true;
+}
+
+static bool generation_directory_path(const char *path, const char *root) {
+    char generations_directory[PATH_MAX];
+    if (!join_path(
+            generations_directory,
+            sizeof(generations_directory),
+            root,
+            "index-generations"
+        )) {
+        return false;
+    }
+    size_t directory_length = strlen(generations_directory);
+    if (!starts_with(path, generations_directory) || path[directory_length] != '/') {
+        return false;
+    }
+    const char *relative = path + directory_length + 1;
+    return starts_with(relative, "generation-") && strchr(relative, '/') == NULL;
+}
+
 static bool target_matches(const char *path) {
     const char *root = getenv("CTX_RECOVERY_FAULT_ROOT");
     const char *target = getenv("CTX_RECOVERY_FAULT_TARGET");
@@ -118,8 +164,13 @@ static bool target_matches(const char *path) {
         )) {
         return false;
     }
-    char meta_path[PATH_MAX];
-    if (!join_path(meta_path, sizeof(meta_path), root, "meta.json")) {
+    char pointer_path[PATH_MAX];
+    if (!join_path(
+            pointer_path,
+            sizeof(pointer_path),
+            root,
+            "active-generation.json"
+        )) {
         return false;
     }
 
@@ -129,8 +180,16 @@ static bool target_matches(const char *path) {
     if (strcmp(target, "root_dir") == 0) {
         return strcmp(path, root) == 0;
     }
-    if (strcmp(target, "meta_final") == 0) {
-        return strcmp(path, meta_path) == 0;
+    if (strcmp(target, "generation_dir") == 0) {
+        return generation_directory_path(path, root);
+    }
+    if (strcmp(target, "generation_meta_final") == 0) {
+        const char *basename = NULL;
+        return generation_child_path(path, root, &basename)
+            && strcmp(basename, "meta.json") == 0;
+    }
+    if (strcmp(target, "pointer_final") == 0) {
+        return strcmp(path, pointer_path) == 0;
     }
     if (strcmp(target, "manifest_final") == 0) {
         size_t directory_length = strlen(manifest_directory);
@@ -151,14 +210,19 @@ static bool target_matches(const char *path) {
         }
         return starts_with(path, prefix);
     }
-    if (strcmp(target, "root_atomic_temp") == 0) {
+    if (strcmp(target, "generation_temp") == 0) {
+        const char *basename = NULL;
+        return generation_child_path(path, root, &basename)
+            && starts_with(basename, ".ctx-tantivy-atomic-");
+    }
+    if (strcmp(target, "pointer_temp") == 0) {
         const char *basename = NULL;
         return root_child_path(path, root, &basename)
             && starts_with(basename, ".ctx-tantivy-atomic-");
     }
     if (strcmp(target, "index_data") == 0) {
         const char *basename = NULL;
-        if (!root_child_path(path, root, &basename)) {
+        if (!generation_child_path(path, root, &basename)) {
             return false;
         }
         static const char *extensions[] = {
@@ -181,8 +245,11 @@ static bool arm_is_ready(void) {
     if (strcmp(arm, "manifest_rename") == 0) {
         return atomic_load(&seen_manifest_rename) != 0;
     }
-    if (strcmp(arm, "meta_rename") == 0) {
-        return atomic_load(&seen_meta_rename) != 0;
+    if (strcmp(arm, "generation_meta_rename") == 0) {
+        return atomic_load(&seen_generation_meta_rename) != 0;
+    }
+    if (strcmp(arm, "pointer_rename") == 0) {
+        return atomic_load(&seen_pointer_rename) != 0;
     }
     return false;
 }
@@ -257,11 +324,21 @@ static void record_successful_rename(const char *target_path) {
     if (root == NULL || target_path == NULL) {
         return;
     }
-    char meta_path[PATH_MAX];
+    char pointer_path[PATH_MAX];
     char manifest_directory[PATH_MAX];
-    if (join_path(meta_path, sizeof(meta_path), root, "meta.json")
-        && strcmp(target_path, meta_path) == 0) {
-        atomic_store(&seen_meta_rename, 1);
+    if (join_path(
+            pointer_path,
+            sizeof(pointer_path),
+            root,
+            "active-generation.json"
+        )
+        && strcmp(target_path, pointer_path) == 0) {
+        atomic_store(&seen_pointer_rename, 1);
+    }
+    const char *generation_basename = NULL;
+    if (generation_child_path(target_path, root, &generation_basename)
+        && strcmp(generation_basename, "meta.json") == 0) {
+        atomic_store(&seen_generation_meta_rename, 1);
     }
     if (join_path(
             manifest_directory,

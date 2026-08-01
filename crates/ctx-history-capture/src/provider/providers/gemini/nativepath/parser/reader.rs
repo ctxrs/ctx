@@ -171,7 +171,11 @@ impl<'a> GeminiNativePageReader<'a> {
             )))?;
             let too_many_units = next_units > MAX_GEMINI_NATIVE_PAGE_RECORDS;
             let too_many_bytes = next_page_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES;
-            if too_many_units || too_many_bytes {
+            let too_large_for_singleton = next_page_bytes > MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES;
+            if too_many_units
+                || too_large_for_singleton
+                || (too_many_bytes && page.physical_records != 0)
+            {
                 let raw_ordinal = position.raw_ordinal;
                 let byte_start = position.offset;
                 let byte_end_exclusive = self.offset;
@@ -245,7 +249,12 @@ impl<'a> GeminiNativePageReader<'a> {
             );
             debug_assert!(page.physical_records <= MAX_GEMINI_NATIVE_PAGE_RECORDS);
             debug_assert!(page.logical_units <= MAX_GEMINI_NATIVE_PAGE_RECORDS);
-            debug_assert!(page.conservative_serialized_bytes <= MAX_GEMINI_NATIVE_PAGE_BYTES);
+            debug_assert!(
+                page.conservative_serialized_bytes <= MAX_GEMINI_NATIVE_PAGE_BYTES
+                    || (page.physical_records == 1
+                        && page.conservative_serialized_bytes
+                            <= MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES)
+            );
             Ok(Some(page))
         }
     }
@@ -469,7 +478,7 @@ impl<'a> GeminiNativePageReader<'a> {
                     });
                 } else {
                     let session =
-                        hydrate_header(payload, &self.state.source.layout).map_err(|reason| {
+                        decode_header(payload, &self.state.source.layout).map_err(|reason| {
                             GeminiScanError::UncommittedRecord {
                                 raw_ordinal: self.raw_ordinal,
                                 byte_start,
@@ -493,7 +502,7 @@ impl<'a> GeminiNativePageReader<'a> {
                     .metrics
                     .native_result_record_bytes_observed
                     .saturating_add(record.bytes_observed);
-                let Some(session) = self.state.session.as_ref() else {
+                if self.state.session.is_none() {
                     return Err(GeminiScanError::UncommittedRecord {
                         raw_ordinal: self.raw_ordinal,
                         byte_start,
@@ -501,18 +510,9 @@ impl<'a> GeminiNativePageReader<'a> {
                         reason: "Gemini result appeared before an importable session header"
                             .to_owned(),
                     });
-                };
-                let hydrated = match hydrate_result_record(
-                    payload,
-                    GeminiNativePathProfile::CoreOnly,
-                    self.source,
-                    session,
-                    self.raw_ordinal,
-                    source_record,
-                    byte_start,
-                    byte_end_exclusive,
-                ) {
-                    Ok(hydrated) => hydrated,
+                }
+                let decoded = match decode_result_record(payload, self.raw_ordinal, source_record) {
+                    Ok(decoded) => decoded,
                     Err(reason) => {
                         return Ok(Some(self.reject_completed_record(
                             byte_start,
@@ -522,36 +522,21 @@ impl<'a> GeminiNativePageReader<'a> {
                         )));
                     }
                 };
-                self.state.metrics.result_body_bytes_decoded_or_allocated = self
-                    .state
-                    .metrics
-                    .result_body_bytes_decoded_or_allocated
-                    .saturating_add(hydrated.decoded_body_bytes);
-                self.state.metrics.result_body_hashes_created = self
-                    .state
-                    .metrics
-                    .result_body_hashes_created
-                    .saturating_add(hydrated.failure_diagnostics as u64);
-                self.state.metrics.result_previews_created = self
-                    .state
-                    .metrics
-                    .result_previews_created
-                    .saturating_add(hydrated.failure_previews as u64);
-                for (event, event_bytes) in &hydrated.events {
-                    if *event_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES {
+                for (event, event_bytes) in &decoded.events {
+                    if *event_bytes > MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES {
                         return Ok(Some(self.reject_completed_record(
                             byte_start,
                             byte_end_exclusive,
                             format!(
                                 "Gemini retained output diagnostic exceeds the \
-                                 {MAX_GEMINI_NATIVE_PAGE_BYTES} byte page limit"
+                                 {MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES} byte singleton limit"
                             ),
                             record.terminated,
                         )));
                     }
                     self.state.count_retained(event);
                 }
-                events = hydrated.events;
+                events = decoded.events;
             }
             GeminiRecordClass::Message
             | GeminiRecordClass::ToolCall
@@ -566,16 +551,16 @@ impl<'a> GeminiNativePageReader<'a> {
                             .to_owned(),
                     });
                 } else {
-                    match hydrate_retained_event(payload, class, self.raw_ordinal, source_record) {
-                        Ok(Some(mut hydrated)) => {
-                            if hydrated.event.occurred_at.is_none() {
-                                hydrated.event.occurred_at = self
+                    match decode_retained_event(payload, class, self.raw_ordinal, source_record) {
+                        Ok(Some(mut decoded)) => {
+                            if decoded.event.occurred_at.is_none() {
+                                decoded.event.occurred_at = self
                                     .state
                                     .session
                                     .as_ref()
                                     .and_then(|session| session.started_at);
                             }
-                            match retained_event_bytes(&hydrated) {
+                            match retained_event_bytes(&decoded) {
                                 Err(reason) => {
                                     return Ok(Some(self.reject_completed_record(
                                         byte_start,
@@ -584,19 +569,21 @@ impl<'a> GeminiNativePageReader<'a> {
                                         record.terminated,
                                     )));
                                 }
-                                Ok(event_bytes) if event_bytes > MAX_GEMINI_NATIVE_PAGE_BYTES => {
+                                Ok(event_bytes)
+                                    if event_bytes > MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES =>
+                                {
                                     return Ok(Some(self.reject_completed_record(
                                         byte_start,
                                         byte_end_exclusive,
                                         format!(
-                                            "Gemini retained event exceeds the {MAX_GEMINI_NATIVE_PAGE_BYTES} byte page limit"
+                                            "Gemini retained event exceeds the {MAX_GEMINI_SINGLE_RECORD_PAGE_BYTES} byte singleton limit"
                                         ),
                                         record.terminated,
                                     )));
                                 }
                                 Ok(event_bytes) => {
-                                    self.state.count_retained(&hydrated.event);
-                                    events.push((hydrated.event, event_bytes));
+                                    self.state.count_retained(&decoded.event);
+                                    events.push((decoded.event, event_bytes));
                                 }
                             }
                         }
@@ -604,7 +591,7 @@ impl<'a> GeminiNativePageReader<'a> {
                             self.state.metrics.ignored_records =
                                 self.state.metrics.ignored_records.saturating_add(1);
                         }
-                        Err(GeminiHydrationError::Invalid(reason)) => {
+                        Err(GeminiDecodingError::Invalid(reason)) => {
                             return Ok(Some(self.reject_completed_record(
                                 byte_start,
                                 byte_end_exclusive,
@@ -612,7 +599,7 @@ impl<'a> GeminiNativePageReader<'a> {
                                 record.terminated,
                             )));
                         }
-                        Err(GeminiHydrationError::TouchOverflow(error)) => {
+                        Err(GeminiDecodingError::TouchOverflow(error)) => {
                             return Ok(Some(self.reject_completed_record(
                                 byte_start,
                                 byte_end_exclusive,

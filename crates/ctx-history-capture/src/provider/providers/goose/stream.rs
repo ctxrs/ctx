@@ -10,8 +10,7 @@ mod identity;
 
 pub(super) use identity::{
     goose_message_identity_counts_sql, goose_native_message_identity,
-    goose_native_message_identity_at, goose_normalized_message_id_sql,
-    goose_require_canonical_native_order,
+    goose_normalized_message_id_sql, goose_require_canonical_native_order,
 };
 
 pub(super) fn goose_retained_length_expr(expressions: &[String]) -> String {
@@ -24,7 +23,6 @@ pub(super) fn goose_retained_length_expr(expressions: &[String]) -> String {
 
 pub(super) const GOOSE_NATIVE_DEFAULT_PAGE_ROWS: usize = 64;
 pub(super) const GOOSE_NATIVE_DEFAULT_PAGE_BYTES: u64 = 8 * 1024 * 1024;
-pub(super) const GOOSE_NATIVE_MAX_RETAINED_CONTENT_BYTES: u64 = 8 * 1024 * 1024;
 const GOOSE_NATIVE_PAGE_ENVELOPE_BYTES: u64 = 2 * 1024;
 const GOOSE_NATIVE_PAGE_UNIT_OVERHEAD_BYTES: u64 = 1024;
 const GOOSE_NATIVE_MAX_SESSION_ID_BYTES: u64 = 16 * 1024;
@@ -191,37 +189,27 @@ pub(super) fn goose_fetch_native_session_page(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let page_budget = goose_projection_page_budget(limits, false)?;
-    let max_unit = i64::try_from(page_budget)
-        .map_err(|_| CaptureError::SystemInvariant("Goose session page limit exceeds i64"))?;
+    let page_budget = goose_projection_page_budget(limits)?;
     let page_budget = i64::try_from(page_budget)
         .map_err(|_| CaptureError::SystemInvariant("Goose session page limit exceeds i64"))?;
-    let (key_predicate, limit_parameter, max_unit_parameter, page_budget_parameter, parameters) =
-        match keyset {
-            GooseNativeSessionKeyset::Unstarted => (
-                "",
-                "?1",
-                "?2",
-                "?3",
-                vec![
-                    Value::Integer(row_limit),
-                    Value::Integer(max_unit),
-                    Value::Integer(page_budget),
-                ],
-            ),
-            GooseNativeSessionKeyset::After(native_identity) => (
-                "where s.id > ?1",
-                "?2",
-                "?3",
-                "?4",
-                vec![
-                    Value::Text(native_identity.clone()),
-                    Value::Integer(row_limit),
-                    Value::Integer(max_unit),
-                    Value::Integer(page_budget),
-                ],
-            ),
-        };
+    let (key_predicate, limit_parameter, page_budget_parameter, parameters) = match keyset {
+        GooseNativeSessionKeyset::Unstarted => (
+            "",
+            "?1",
+            "?2",
+            vec![Value::Integer(row_limit), Value::Integer(page_budget)],
+        ),
+        GooseNativeSessionKeyset::After(native_identity) => (
+            "where s.id > ?1",
+            "?2",
+            "?3",
+            vec![
+                Value::Text(native_identity.clone()),
+                Value::Integer(row_limit),
+                Value::Integer(page_budget),
+            ],
+        ),
+    };
     let mut statement = conn.prepare(&format!(
         "with candidates as (
              select
@@ -244,9 +232,7 @@ pub(super) fn goose_fetch_native_session_page(
          classified as (
              select *,
                  case
-                     when storage_class_supported = 1
-                          and retained_bytes <= {max_unit_parameter}
-                     then 1
+                     when storage_class_supported = 1 then 1
                      else 0
                  end as representable
              from candidates
@@ -260,13 +246,14 @@ pub(super) fn goose_fetch_native_session_page(
                      end
                  ) over (
                      order by canonical_native_identity rows unbounded preceding
-                 ) as running_bytes
+                 ) as running_bytes,
+                 row_number() over (order by canonical_native_identity) as page_ordinal
              from classified
          ),
          selected as (
              select *
              from measured
-             where running_bytes <= {page_budget_parameter}
+             where running_bytes <= {page_budget_parameter} or page_ordinal = 1
          )
          select
              selected.sqlite_rowid,
@@ -341,8 +328,8 @@ pub(super) fn goose_fetch_native_message_page(
 ) -> Result<Vec<GooseScannedMessage>> {
     let row_limit = i64::try_from(limits.rows)
         .map_err(|_| CaptureError::InvalidPayload("Goose page row limit exceeds i64".to_owned()))?;
-    let projection_budget = goose_projection_page_budget(limits, true)?;
-    let max_content = i64::try_from(GOOSE_NATIVE_MAX_RETAINED_CONTENT_BYTES.min(projection_budget))
+    let projection_budget = goose_projection_page_budget(limits)?;
+    let max_content = i64::try_from(crate::MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| CaptureError::SystemInvariant("Goose retained content limit exceeds i64"))?;
     let page_bytes = i64::try_from(projection_budget).map_err(|_| {
         CaptureError::InvalidPayload("Goose page byte limit exceeds i64".to_owned())
@@ -383,7 +370,7 @@ pub(super) fn goose_fetch_native_message_page(
         goose_message_identity_counts_sql(schema, "identity_candidate", "page_message_ids");
     let accepted_sessions = goose_accepted_sessions_sql(schema, limits)?;
     let storage_class_supported = schema.message_storage_class_predicate("m");
-    let content_disposition = goose_native_content_visitor_sql();
+    let content_disposition = goose_native_content_visitor_sql(max_content_parameter);
     let output_outcome = goose_native_output_outcome_sql();
     let sql = format!(
         "with page_keys as materialized (
@@ -475,15 +462,14 @@ pub(super) fn goose_fetch_native_message_page(
              select *,
                  sum(
                      case
-                         when classified_disposition in (0, 9)
-                              then content_bytes + auxiliary_bytes
-                         when classified_disposition in (11, 12)
+                         when classified_disposition in (0, 9, 11, 12, 13, 14)
                               and content_bytes + auxiliary_bytes <= {max_content_parameter}
                               then content_bytes + auxiliary_bytes
                          else 512 + auxiliary_bytes
                      end
                  )
-                     over (order by native_order rows unbounded preceding) as running_bytes
+                     over (order by native_order rows unbounded preceding) as running_bytes,
+                 row_number() over (order by native_order) as page_ordinal
              from classified
          )
          select
@@ -495,8 +481,7 @@ pub(super) fn goose_fetch_native_message_page(
              role,
              classified_disposition,
              case
-                 when classified_disposition in (0, 9) then content_json
-                 when classified_disposition in (11, 12)
+                 when classified_disposition in (0, 9, 11, 12, 13, 14)
                       and content_bytes + auxiliary_bytes <= {max_content_parameter}
                  then content_json
                  else null
@@ -504,17 +489,17 @@ pub(super) fn goose_fetch_native_message_page(
              content_bytes,
              created_timestamp,
              native_timestamp,
-             case when classified_disposition in (0, 9, 11, 12)
+             case when classified_disposition in (0, 9, 11, 12, 13, 14)
                   then cast(tokens_json as text) else null end,
-                 case when classified_disposition in (0, 9, 11, 12)
+                 case when classified_disposition in (0, 9, 11, 12, 13, 14)
                   then cast(metadata_json as text) else null end
              ,
              parent_rowid,
              source_message_id,
-             case when classified_disposition in (0, 9, 11, 12)
+             case when classified_disposition in (0, 9, 11, 12, 13, 14)
                   then digest_tokens_json else null end
          from measured
-         where running_bytes <= {page_bytes_parameter}
+         where running_bytes <= {page_bytes_parameter} or page_ordinal = 1
          order by native_order"
     );
 
@@ -661,10 +646,7 @@ pub(super) fn goose_fetch_native_message_page(
         .map_err(CaptureError::from)
 }
 
-fn goose_projection_page_budget(
-    limits: GooseNativePageLimits,
-    duplicated_core_projection: bool,
-) -> Result<u64> {
+fn goose_projection_page_budget(limits: GooseNativePageLimits) -> Result<u64> {
     let units = u64::try_from(limits.rows)
         .map_err(|_| CaptureError::InvalidPayload("Goose page row limit exceeds u64".to_owned()))?;
     let reserved = GOOSE_NATIVE_PAGE_ENVELOPE_BYTES
@@ -674,21 +656,18 @@ fn goose_projection_page_budget(
             "Goose page byte limit cannot contain its bounded envelope".to_owned(),
         )
     })?;
-    Ok(if duplicated_core_projection {
-        available / 2
-    } else {
-        available
-    })
+    Ok(available)
 }
 
 fn goose_accepted_sessions_sql(
     schema: &GooseNativeSchema,
-    limits: GooseNativePageLimits,
+    _limits: GooseNativePageLimits,
 ) -> Result<String> {
     let accepted_alias = "accepted_session";
     let session_expressions = schema.session_hydration_expressions(accepted_alias);
     let retained_bytes = goose_retained_length_expr(&session_expressions);
-    let max_session_bytes = goose_projection_page_budget(limits, false)?;
+    let max_session_bytes = u64::try_from(crate::MAX_PROVIDER_SQLITE_VALUE_BYTES)
+        .map_err(|_| CaptureError::SystemInvariant("Goose session byte limit exceeds u64"))?;
     Ok(format!(
         "select
              {accepted_alias}.id as session_identity,
@@ -716,14 +695,33 @@ fn goose_tagged_fallback_message_identity(native_order: i64) -> String {
     )
 }
 
-fn goose_native_content_visitor_sql() -> &'static str {
+fn goose_native_content_visitor_sql(max_content_parameter: &str) -> String {
     // This provider-owned JSON1 visitor is the sole authority for whether a
     // content cell may cross the SQLite/Rust boundary and which retained class
     // normalization receives. Direct object members are visited rather than
     // json_extract'ed so duplicate `type` keys cannot acquire different
     // SQLite/serde semantics. Any direct toolResponse value dominates the
     // entire row; other duplicate type keys fail closed as a local rejection.
-    "case
+    format!(
+        "(with recursive direct_item(value, storage_type) as (
+             select item.value, item.type
+             from json_each(
+                 case
+                     when json_valid(content_json) != 0
+                          and json_type(content_json) = 'array'
+                     then content_json
+                     else '[]'
+                 end
+             ) item
+             union all
+             select child.value, child.type
+             from direct_item
+             join json_each(
+                 case when direct_item.storage_type = 'array'
+                      then direct_item.value else '[]' end
+             ) child
+         )
+         select case
          when storage_class_supported = 0 then 8
          when parent_rowid is null then 7
          when content_storage_class != 'text' then 8
@@ -731,21 +729,23 @@ fn goose_native_content_visitor_sql() -> &'static str {
          when json_type(content_json) != 'array' then 3
          when exists (
              select 1
-             from json_each(content_json) item
-             where item.type != 'object'
+             from direct_item item
+             where item.storage_type not in ('array', 'object')
          ) then 4
          when exists (
              select 1
-             from json_each(content_json) item,
+             from direct_item item,
                   json_each(item.value) member
-             where member.key = 'type'
+             where item.storage_type = 'object'
+               and member.key = 'type'
                and member.type = 'text'
                and member.atom = 'toolResponse'
          ) then 1
          when exists (
              select 1
-             from json_each(content_json) item
-             where (
+             from direct_item item
+             where item.storage_type = 'object'
+               and (
                  select count(*)
                  from json_each(item.value) member
                  where member.key = 'type'
@@ -753,8 +753,9 @@ fn goose_native_content_visitor_sql() -> &'static str {
          ) then 10
          when exists (
              select 1
-             from json_each(content_json) item
-             where (
+             from direct_item item
+             where item.storage_type = 'object'
+               and ((
                  select count(*)
                  from json_each(item.value) member
                  where member.key = 'type'
@@ -776,24 +777,27 @@ fn goose_native_content_visitor_sql() -> &'static str {
                               'actionRequired'
                           )
                       )
-                )
+                ))
          ) then 5
-         when content_bytes + auxiliary_bytes > ?3 then 6
+         when content_bytes + auxiliary_bytes > {max_content_parameter} then 6
          when exists (
              select 1
-             from json_each(content_json) item,
+             from direct_item item,
                   json_each(item.value) member
-             where member.key = 'type'
+             where item.storage_type = 'object'
+               and member.key = 'type'
                and member.type = 'text'
                and member.atom in ('toolRequest', 'frontendToolRequest')
          ) then 9
          else 0
-     end"
+         end)"
+    )
 }
 
 fn goose_native_output_outcome_sql() -> &'static str {
-    // Outcome classification inspects only structural control fields. Result
-    // body values never cross the SQLite/Rust boundary for success or unknown.
+    // Outcome classification inspects only structural control fields. The
+    // canonical Rust extractor retains the selected result body for every
+    // outcome after this visitor has admitted the native toolResponse shape.
     "case
          when exists (
              select 1

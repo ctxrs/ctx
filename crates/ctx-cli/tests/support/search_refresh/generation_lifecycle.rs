@@ -57,7 +57,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     let unchanged_status =
         assert_daemon_publication(&temp, &cold_generation, 1, &["codex", "codex"]);
     assert_eq!(
-        unchanged_status["daemon"]["jobs"]["source_backed_refresh"]["generation_changed"], false,
+        unchanged_status["daemon"]["jobs"]["core_refresh"]["generation_changed"], false,
         "{unchanged_status:#}"
     );
 
@@ -258,7 +258,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     );
     let unavailable_status = assert_daemon_refresh_failure(&temp, 0, Some(&truncate_generation));
     assert_eq!(
-        unavailable_status["daemon"]["jobs"]["source_backed_refresh"]["error_code"],
+        unavailable_status["daemon"]["jobs"]["core_refresh"]["error_code"],
         "all_provider_terminal_coverage_unavailable",
         "{unavailable_status:#}"
     );
@@ -274,7 +274,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     let (retained_manifest, _) = generation_manifest(&temp, &truncate_generation);
     assert_eq!(retained_manifest.sources, truncate_manifest.sources);
     assert!(retained_manifest.removals.is_empty());
-    let unavailable_search = failure_stderr(ctx(&temp).args([
+    let unavailable_search = json_output(ctx(&temp).args([
         "search",
         truncate_query,
         "--provider",
@@ -283,15 +283,18 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         "off",
         "--format=json",
     ]));
-    assert!(
-        unavailable_search.contains("source_unreadable/temporarily_unavailable")
-            || unavailable_search.contains("source_changed/stale_source_evidence"),
-        "{unavailable_search}"
+    assert_source_backed_search_show_oracle(
+        &temp,
+        &unavailable_search,
+        "codex",
+        truncate_query,
+        1,
+        "message",
     );
-    ctx(&temp)
-        .args(["show", "event", &unavailable_event_id, "--format", "json"])
-        .assert()
-        .failure();
+    assert_eq!(
+        assert_published_generation(&unavailable_search, "off"),
+        truncate_generation
+    );
 
     fs::rename(&unavailable_sessions, &sessions).unwrap();
     let restored = json_output(ctx(&temp).args([
@@ -314,6 +317,74 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     let restored_generation = generation_id(&restored);
 
     fs::remove_file(&session).unwrap();
+    let deferred = json_output(ctx(&temp).args([
+        "search",
+        truncate_query,
+        "--provider",
+        "codex",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]));
+    let deferred_generation = assert_published_generation(&deferred, "wait");
+    assert_ne!(deferred_generation, restored_generation);
+    assert_eq!(
+        deferred["retrieval"]["indexed_documents"], 2,
+        "{deferred:#}"
+    );
+    assert!(deferred["results"].as_array().is_some_and(|results| {
+        results.iter().any(|result| {
+            result["snippet"]
+                .as_str()
+                .is_some_and(|snippet| snippet.contains(truncate_query))
+        })
+    }));
+    let (deferred_manifest, _) = generation_manifest(&temp, &deferred_generation);
+    assert!(deferred_manifest.removals.is_empty());
+    assert_eq!(
+        deferred_manifest
+            .source_catalog()
+            .missing_source(truncate_source.observation().source())
+            .expect("first unavailable lifecycle observation")
+            .consecutive_missing()
+            .get(),
+        1
+    );
+
+    let deferred_again = json_output(ctx(&temp).args([
+        "search",
+        truncate_query,
+        "--provider",
+        "codex",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]));
+    let second_deferred_generation = assert_published_generation(&deferred_again, "wait");
+    assert_ne!(second_deferred_generation, deferred_generation);
+    assert_eq!(
+        deferred_again["retrieval"]["indexed_documents"], 2,
+        "{deferred_again:#}"
+    );
+    assert!(deferred_again["results"].as_array().is_some_and(|results| {
+        results.iter().any(|result| {
+            result["snippet"]
+                .as_str()
+                .is_some_and(|snippet| snippet.contains(truncate_query))
+        })
+    }));
+    let (second_deferred_manifest, _) = generation_manifest(&temp, &second_deferred_generation);
+    assert!(second_deferred_manifest.removals.is_empty());
+    assert_eq!(
+        second_deferred_manifest
+            .source_catalog()
+            .missing_source(truncate_source.observation().source())
+            .expect("second unavailable lifecycle observation")
+            .consecutive_missing()
+            .get(),
+        2
+    );
+
     let deleted = json_output(ctx(&temp).args([
         "search",
         truncate_query,
@@ -324,7 +395,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         "--format=json",
     ]));
     let deletion_generation = assert_published_generation(&deleted, "wait");
-    assert_ne!(deletion_generation, restored_generation);
+    assert_ne!(deletion_generation, second_deferred_generation);
     assert_eq!(deleted["retrieval"]["indexed_documents"], 1, "{deleted:#}");
     assert!(
         deleted["results"].as_array().unwrap().iter().all(|result| {
@@ -354,7 +425,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         "json",
     ]));
     assert!(
-        deleted_show.contains("was not found in the source-backed Core generation"),
+        deleted_show.contains("was not found in the Core generation"),
         "{deleted_show}"
     );
 }
@@ -418,7 +489,7 @@ fn two_provider_mutation_fails_closed_when_retained_provider_is_temporarily_omit
         "{failure}"
     );
     let failed = assert_daemon_refresh_failure(&temp, 0, Some(&retained_generation));
-    let job = &failed["daemon"]["jobs"]["source_backed_refresh"];
+    let job = &failed["daemon"]["jobs"]["core_refresh"];
     assert_eq!(
         job["error_code"], "all_provider_terminal_coverage_unavailable",
         "{failed:#}"
@@ -437,7 +508,7 @@ fn two_provider_mutation_fails_closed_when_retained_provider_is_temporarily_omit
     let (still_retained, _) = generation_manifest(&temp, &retained_generation);
     assert_eq!(still_retained.sources, retained_manifest.sources);
 
-    let codex = failure_stderr(ctx(&temp).args([
+    let codex = json_output(ctx(&temp).args([
         "search",
         "terminal coverage codex retained",
         "--provider",
@@ -446,14 +517,16 @@ fn two_provider_mutation_fails_closed_when_retained_provider_is_temporarily_omit
         "off",
         "--format=json",
     ]));
-    assert!(
-        (codex.contains("content_verification_failed/stale_record_evidence")
-            || codex.contains("source_changed/stale_source_evidence"))
-            && !codex.contains("no registered provider route owns")
-            && !codex.contains("resolver_generation_unavailable"),
-        "{codex}"
+    assert_source_backed_search_show_oracle(
+        &temp,
+        &codex,
+        "codex",
+        "terminal coverage codex retained",
+        1,
+        "message",
     );
-    let claude = failure_stderr(ctx(&temp).args([
+    assert_eq!(generation_id(&codex), retained_generation);
+    let claude = json_output(ctx(&temp).args([
         "search",
         claude_query,
         "--provider",
@@ -462,14 +535,8 @@ fn two_provider_mutation_fails_closed_when_retained_provider_is_temporarily_omit
         "off",
         "--format=json",
     ]));
-    assert!(
-        (claude.contains("source_unreadable/temporarily_unavailable")
-            || claude.contains("content_verification_failed/stale_record_evidence")
-            || claude.contains("source_changed/stale_source_evidence"))
-            && !claude.contains("no registered provider route owns")
-            && !claude.contains("resolver_generation_unavailable"),
-        "{claude}"
-    );
+    assert_source_backed_search_show_oracle(&temp, &claude, "claude", claude_query, 1, "message");
+    assert_eq!(generation_id(&claude), retained_generation);
 }
 
 #[test]
@@ -542,8 +609,7 @@ fn search_refresh_publishes_discovered_top_provider_sources() {
         assert_eq!(generation_id(&unchanged), generation, "{unchanged:#}");
         let unchanged_status = assert_daemon_publication(&temp, &generation, 1, &[stored_provider]);
         assert_eq!(
-            unchanged_status["daemon"]["jobs"]["source_backed_refresh"]["generation_changed"],
-            false,
+            unchanged_status["daemon"]["jobs"]["core_refresh"]["generation_changed"], false,
             "{cli_provider} republished an unchanged source: {unchanged_status:#}"
         );
     }
@@ -591,7 +657,7 @@ fn search_refresh_hermes_generation_detects_wal_only_append() {
     assert_eq!(generation_id(&unchanged), first_generation, "{unchanged:#}");
     let unchanged_status = assert_daemon_publication(&temp, &first_generation, 1, &["hermes"]);
     assert_eq!(
-        unchanged_status["daemon"]["jobs"]["source_backed_refresh"]["generation_changed"], false,
+        unchanged_status["daemon"]["jobs"]["core_refresh"]["generation_changed"], false,
         "{unchanged_status:#}"
     );
 
@@ -663,7 +729,7 @@ fn search_refresh_wait_json_keeps_stderr_clean_and_reports_daemon_progress() {
     assert_source_backed_search_show_oracle(&temp, &stdout, "codex", "onboarding", 1, "message");
     let generation = assert_published_generation(&stdout, "wait");
     let status = assert_daemon_publication(&temp, &generation, 1, &["codex", "codex"]);
-    let job = &status["daemon"]["jobs"]["source_backed_refresh"];
+    let job = &status["daemon"]["jobs"]["core_refresh"];
     assert_eq!(job["progress"]["phase"], "published", "{status:#}");
     assert_eq!(job["progress"]["completed_sources"], 1, "{status:#}");
     assert_eq!(job["progress"]["total_sources"], 1, "{status:#}");
@@ -677,7 +743,7 @@ fn search_refresh_wait_publishes_verified_empty_source_generation() {
         json_output(ctx(&temp).args(["search", "anything", "--refresh", "wait", "--format=json"]));
     assert_eq!(search["freshness"]["status"], "completed", "{search:#}");
     assert_eq!(search["freshness"]["source_count"], 0, "{search:#}");
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     assert_eq!(search["retrieval"]["indexed_documents"], 0, "{search:#}");
     assert!(
         search["results"].as_array().is_some_and(Vec::is_empty),
@@ -691,7 +757,7 @@ fn search_refresh_wait_publishes_verified_empty_source_generation() {
     assert_eq!(status["refresh"]["source_count"], 0, "{status:#}");
     assert!(status.get("prior_epoch").is_none(), "{status:#}");
     assert!(search_refresh_data_root(&temp)
-        .join("search/lexical/meta.json")
+        .join("search/lexical/active-generation.json")
         .is_file());
     assert_eq!(generation_manifest_paths(&temp).len(), 1);
 }

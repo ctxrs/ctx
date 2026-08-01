@@ -18,8 +18,9 @@ ctx docs man --out ~/.local/share/man/man1
 ```
 
 `ctx docs list`, `ctx docs search`, and `ctx docs show` read embedded text and
-do not touch provider history or the local SQLite index. `ctx docs show --out
-PATH` writes one embedded topic to that explicit path.
+do not read provider history, Core generations, or the relational metadata
+projection. `ctx docs show --out PATH` writes one embedded topic to that
+explicit path.
 
 `ctx docs man --print PAGE` prints one generated man page to stdout. `ctx docs
 man --out DIR` writes generated section-1 man pages for `ctx` and its public

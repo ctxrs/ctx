@@ -223,7 +223,7 @@ fn setup_wait_indexes_committed_provider_sqlite_wal_content() {
         "off",
         "--format=json",
     ]));
-    assert_eq!(search["retrieval"]["index"], "source_backed", "{search:#}");
+    assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     assert_eq!(search["retrieval"]["generation_id"], generation);
     assert_eq!(search["results"].as_array().unwrap().len(), 1, "{search:#}");
     drop(writer);
@@ -320,7 +320,10 @@ fn status_missing_source_epoch_is_read_only_and_does_not_initialize_files() {
         .clone();
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("History status: failed"), "{output}");
-    assert!(output.contains("generation not published"), "{output}");
+    assert!(
+        output.contains("history has not been indexed yet"),
+        "{output}"
+    );
     assert!(output.contains("ctx setup"), "{output}");
 
     assert!(
@@ -416,7 +419,7 @@ fn status_does_not_repair_missing_tantivy_publication_pointer() {
         generation
     };
     let lexical_root = data_root(&temp).join("search/lexical");
-    let publication_pointer = lexical_root.join("meta.json");
+    let publication_pointer = lexical_root.join("active-generation.json");
     assert!(publication_pointer.is_file());
     let manifest_path = lexical_root
         .join("ctx-generations")
@@ -958,7 +961,7 @@ fn foreground_import_rejections_complete_and_preserve_diagnostics() {
     );
     assert_eq!(source["status"], "published", "{import:#}");
 
-    let status = json_output(ctx_from_binary(&temp, &binary).args(["status", "--format=json"]));
+    let status = wait_for_relational_projection(&temp, generation);
     assert_eq!(status["lexical"]["generation_id"], generation, "{status:#}");
     assert_eq!(status["relational"]["status"], "ready", "{status:#}");
     assert_eq!(
@@ -1040,7 +1043,7 @@ fn foreground_import_rejection_diagnostics_survive_a_noop_source_cycle() {
             assert_eq!(Some(published), generation.as_deref(), "{report:#}");
             assert_eq!(refresh["generation_changed"], false, "{report:#}");
         }
-        let status = json_output(ctx_from_binary(&temp, &binary).args(["status", "--format=json"]));
+        let status = wait_for_relational_projection(&temp, published);
         assert_eq!(status["relational"]["status"], "ready", "{status:#}");
         assert_eq!(
             status["relational"]["active_core_generation_id"], published,
@@ -1050,15 +1053,14 @@ fn foreground_import_rejection_diagnostics_survive_a_noop_source_cycle() {
 
     let doctor = json_output(ctx_from_binary(&temp, &binary).args(["doctor", "--format=json"]));
     assert_eq!(
-        doctor["daemon"]["jobs"]["source_backed_refresh"]["receipt"]["current"]
-            ["current_rejected_records"],
+        doctor["daemon"]["jobs"]["core_refresh"]["receipt"]["current"]["current_rejected_records"],
         1,
         "{doctor:#}"
     );
 }
 
 #[test]
-fn foreground_import_publishes_core_and_required_relational_projection() {
+fn foreground_import_returns_at_core_then_full_daemon_catches_up_relational() {
     let temp = tempdir();
     let binary = copied_ctx_binary(&temp);
     let history = temp.path().join(".codex/history.jsonl");
@@ -1082,7 +1084,7 @@ fn foreground_import_publishes_core_and_required_relational_projection() {
         .assert()
         .success();
 
-    let _daemon = start_full_source_refresh_daemon(&temp);
+    let core_daemon = start_core_only_source_refresh_daemon(&temp);
     let import = json_output(
         ctx_from_binary(&temp, &binary)
             .args([
@@ -1093,6 +1095,7 @@ fn foreground_import_publishes_core_and_required_relational_projection() {
                 "--progress",
                 "none",
             ])
+            .timeout(Duration::from_secs(10))
             .env("CTX_UPGRADE_AUTO", "off"),
     );
     assert_eq!(import["outcome"], "success", "{import:#}");
@@ -1107,9 +1110,15 @@ fn foreground_import_publishes_core_and_required_relational_projection() {
 
     let status = json_output(ctx_from_binary(&temp, &binary).args(["status", "--format=json"]));
     assert_eq!(status["lexical"]["generation_id"], generation, "{status:#}");
-    assert_eq!(status["relational"]["status"], "ready", "{status:#}");
+    assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
+    assert_eq!(status["refresh"]["status"], "ready", "{status:#}");
     assert_eq!(
-        status["relational"]["active_core_generation_id"], generation,
+        status["refresh"]["published_generation"], generation,
+        "{status:#}"
+    );
+    assert_eq!(status["relational"]["status"], "pending", "{status:#}");
+    assert!(
+        status["relational"]["active_core_generation_id"].is_null(),
         "{status:#}"
     );
 
@@ -1129,6 +1138,12 @@ fn foreground_import_publishes_core_and_required_relational_projection() {
         1,
         "message",
     );
+
+    drop(core_daemon);
+    let _full_daemon = start_full_source_refresh_daemon(&temp);
+    let caught_up = wait_for_relational_projection(&temp, generation);
+    assert_eq!(caught_up["lexical"]["generation_id"], generation);
+    assert_eq!(caught_up["relational"]["event_count"], 1, "{caught_up:#}");
 }
 
 #[test]
@@ -1292,22 +1307,16 @@ fn clean_multisource_setup_bounds_relational_wal_and_preserves_projection_identi
     assert!(
         sqlite_count(
             &conn,
-            "SELECT COUNT(*) FROM source_backed_events
-             WHERE source_id IN (
-                 SELECT source_id FROM source_backed_sources WHERE provider = 'codex'
-             )"
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex'"
         ) > 0
     );
     assert!(
         sqlite_count(
             &conn,
-            "SELECT COUNT(*) FROM source_backed_events
-             WHERE source_id IN (
-                 SELECT source_id FROM source_backed_sources WHERE provider = 'hermes'
-             )"
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'hermes'"
         ) > 0
     );
-    let event_count = sqlite_count(&conn, "SELECT COUNT(*) FROM source_backed_events");
+    let event_count = sqlite_count(&conn, "SELECT COUNT(*) FROM ctx_events");
     drop(conn);
 
     let codex_search = json_output(ctx(&temp).args([
@@ -1338,7 +1347,7 @@ fn clean_multisource_setup_bounds_relational_wal_and_preserves_projection_identi
     wait_for_relational_projection(&temp, &generation);
     let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     assert_eq!(
-        sqlite_count(&conn, "SELECT COUNT(*) FROM source_backed_events"),
+        sqlite_count(&conn, "SELECT COUNT(*) FROM ctx_events"),
         event_count
     );
 }

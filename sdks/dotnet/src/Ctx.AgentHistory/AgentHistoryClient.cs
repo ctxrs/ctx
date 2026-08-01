@@ -158,35 +158,6 @@ public sealed class AgentHistoryClient
         return new ShowSessionResponse(envelope);
     }
 
-    public async Task<LocateEventResponse> LocateEventAsync(string eventId, CancellationToken cancellationToken = default)
-    {
-        RequireValue(eventId, "event id");
-        var raw = await InvokeAsync(
-            "locateEvent",
-            ["locate", "event", eventId, "--format", "json"],
-            cancellationToken).ConfigureAwait(false);
-        var envelope = AgentHistoryContract.Envelope("locateEvent", _transport.Backend(raw), "location", AgentHistoryContract.NormalizeLocation(raw));
-        return new LocateEventResponse(envelope);
-    }
-
-    public async Task<LocateSessionResponse> LocateSessionAsync(string sessionId, CancellationToken cancellationToken = default)
-    {
-        return await LocateSessionAsync(new SessionLookupOptions { Id = sessionId }, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<LocateSessionResponse> LocateSessionAsync(
-        SessionLookupOptions options,
-        CancellationToken cancellationToken = default)
-    {
-        var args = BuildSessionLookupArgs("locate", "session", options);
-        args.Add("--format");
-        args.Add("json");
-
-        var raw = await InvokeAsync("locateSession", args, cancellationToken).ConfigureAwait(false);
-        var envelope = AgentHistoryContract.Envelope("locateSession", _transport.Backend(raw), "location", AgentHistoryContract.NormalizeLocation(raw));
-        return new LocateSessionResponse(envelope);
-    }
-
     public async Task<VersionInfo> VersionAsync(CancellationToken cancellationToken = default)
     {
         var ctxVersion = await _transport.GetCtxVersionAsync(cancellationToken).ConfigureAwait(false);

@@ -14,7 +14,7 @@ fn assert_result_count(value: &Value, expected: usize) {
         Some(expected),
         "{value:#}"
     );
-    assert_eq!(value["retrieval"]["index"], "source_backed", "{value:#}");
+    assert_eq!(value["retrieval"]["index"], "core", "{value:#}");
 }
 
 #[test]

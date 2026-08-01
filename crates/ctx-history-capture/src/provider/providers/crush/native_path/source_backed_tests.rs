@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
-use ctx_history_core::{BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest};
-use ctx_history_index::{VerifiedIndex, WriterOptions};
+use ctx_history_core::{EventRole, EventType};
+use ctx_history_index::{IndexError, VerifiedIndex, WriterOptions};
 use rusqlite::{config::DbConfig, Connection};
 use serde_json::json;
 
@@ -125,6 +125,30 @@ fn inventory_route_projects_each_logical_leaf_and_deletes_safely() {
             && work.copied_snapshot_opens == 0
             && work.source_bytes_copied == 0
             && work.max_active_snapshots == 1));
+    let source = crush_source_key(TypedKey::utf8("route-project-a").unwrap()).unwrap();
+    let deleted_source = crush_source_key(TypedKey::utf8("route-project-b").unwrap()).unwrap();
+    let pinned = VerifiedIndex::open(&index_root).unwrap();
+    let cold_page = pinned.core_source_event_page(&source, None, 8).unwrap();
+    assert_eq!(cold_page.items.len(), 1);
+    let cold_event_id = cold_page.items[0].event_id;
+    let cold_session_id = cold_page.items[0].session_id;
+    assert_eq!(
+        cold_page.items[0].core_record.content.meaningful_text(),
+        "alpha"
+    );
+
+    let moved = temp.path().join("route-first-moved.db");
+    std::fs::rename(&first, &moved).unwrap();
+    assert_eq!(
+        pinned
+            .core_record_by_id(cold_event_id.as_uuid())
+            .unwrap()
+            .unwrap()
+            .content
+            .meaningful_text(),
+        "alpha"
+    );
+    std::fs::rename(&moved, &first).unwrap();
 
     Connection::open(&first)
         .unwrap()
@@ -133,8 +157,29 @@ fn inventory_route_projects_each_logical_leaf_and_deletes_safely() {
             [json!([{"type": "text", "data": {"text": "alpha changed"}}]).to_string()],
         )
         .unwrap();
+    assert_eq!(
+        pinned
+            .core_record_by_id(cold_event_id.as_uuid())
+            .unwrap()
+            .unwrap()
+            .content
+            .meaningful_text(),
+        "alpha"
+    );
     refresh_source_backed_generation(&index_root, &registry, options.clone()).unwrap();
     assert_eq!(route_inventory.work().0, 6);
+    let rewritten = VerifiedIndex::open(&index_root).unwrap();
+    let rewritten_page = rewritten.core_source_event_page(&source, None, 8).unwrap();
+    assert_eq!(rewritten_page.items.len(), 1);
+    assert_eq!(rewritten_page.items[0].event_id, cold_event_id);
+    assert_eq!(rewritten_page.items[0].session_id, cold_session_id);
+    assert_eq!(
+        rewritten_page.items[0]
+            .core_record
+            .content
+            .meaningful_text(),
+        "alpha changed"
+    );
 
     route_inventory.replace(inventory(
         b"route-inventory-2",
@@ -144,24 +189,35 @@ fn inventory_route_projects_each_logical_leaf_and_deletes_safely() {
     assert_eq!(deleted.sources.len(), 1);
     assert_eq!(route_inventory.work().0, 7);
 
-    let source = crush_source_key(TypedKey::utf8("route-project-a").unwrap()).unwrap();
-    let events = VerifiedIndex::open(&index_root)
-        .unwrap()
-        .source_event_page(&source, None, 8)
+    let latest = VerifiedIndex::open(&index_root).unwrap();
+    let events = latest
+        .core_source_event_page(&source, None, 8)
         .unwrap()
         .items;
     assert_eq!(events.len(), 1);
-    let request =
-        EventHydrationRequest::new(events[0].event_id, events[0].locator.clone()).unwrap();
-    let hydrated = registry
-        .resolver_registry()
-        .hydrate_batch(&BatchHydrationRequest::new(vec![request]).unwrap())
+    assert_eq!(
+        events[0].core_record.content.meaningful_text(),
+        "alpha changed"
+    );
+    assert!(matches!(
+        latest.core_source_event_page(&deleted_source, None, 8),
+        Err(IndexError::SourceEventSourceNotRetained(_))
+    ));
+    let pinned_deleted = pinned
+        .core_source_event_page(&deleted_source, None, 8)
         .unwrap();
-    assert_eq!(hydrated.records()[0].provider_bytes, b"alpha changed");
+    assert_eq!(pinned_deleted.items.len(), 1);
+    assert_eq!(
+        pinned_deleted.items[0]
+            .core_record
+            .content
+            .meaningful_text(),
+        "beta"
+    );
 }
 
 #[test]
-fn source_backed_multi_db_root_guards_and_exact_hydration() {
+fn source_backed_multi_db_root_guards_and_complete_core() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let first = temp.path().join("first.db");
     let second = temp.path().join("second.db");
@@ -190,7 +246,7 @@ fn source_backed_multi_db_root_guards_and_exact_hydration() {
         .unwrap()
         .clone();
     let first_source = open_source(first_database).unwrap();
-    let alpha_event = document_for_only_message(&first_source);
+    let alpha_event = record_for_only_message(&first_source);
     assert_eq!(
         alpha_event.provider_session_id.as_deref(),
         Some("session-a")
@@ -202,9 +258,16 @@ fn source_backed_multi_db_root_guards_and_exact_hydration() {
     );
     assert_ne!(alpha_event.root_session_id, alpha_event.session_id);
     assert_eq!(alpha_event.branch, None);
-    assert_eq!(alpha_event.source_path.as_deref(), first_path.to_str());
     assert_eq!(alpha_event.agent_type, AgentType::Subagent.as_str());
     assert!(!alpha_event.is_primary);
+    assert_eq!(alpha_event.content.meaningful_text(), "alpha exact body");
+    assert_eq!(
+        alpha_event.native_event_id,
+        Some(TypedKey::utf8("message-a").unwrap())
+    );
+    let encoded = String::from_utf8(alpha_event.encode_stored().unwrap()).unwrap();
+    assert!(!encoded.contains("\"locator\""));
+    assert!(!encoded.contains("\"source_path\""));
     assert!(finish_opened_source(first_source).unwrap());
 
     let second_path = std::fs::canonicalize(&second).unwrap();
@@ -215,32 +278,17 @@ fn source_backed_multi_db_root_guards_and_exact_hydration() {
         .unwrap()
         .clone();
     let second_source = open_source(second_database).unwrap();
-    let beta_event = document_for_only_message(&second_source);
+    let beta_event = record_for_only_message(&second_source);
     assert_eq!(beta_event.parent_session_id, None);
     assert_eq!(beta_event.root_session_id, beta_event.session_id);
     assert_eq!(beta_event.agent_type, AgentType::Primary.as_str());
     assert!(beta_event.is_primary);
+    assert_eq!(beta_event.content.meaningful_text(), "beta exact body");
     assert!(finish_opened_source(second_source).unwrap());
-
-    let locator = alpha_event.locator.clone();
-    let hydrated =
-        CrushLocatorResolverV0::discover(crate::test_provider_sqlite_data_root(), &inventory)
-            .unwrap()
-            .hydrate_locators(&[&locator])
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
-    assert_eq!(hydrated.provider_session_id, "session-a");
-    assert_eq!(hydrated.native_record_id, "message-a");
-    assert_eq!(
-        hydrated.decoded_display_text.as_deref(),
-        Some("alpha exact body")
-    );
 }
 
 #[test]
-fn source_backed_replacement_keeps_ids_and_rejects_stale_locator() {
+fn source_backed_replacement_keeps_ids_and_replaces_complete_core() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("project.db");
     write_database(&path, "session", "message", "before replacement");
@@ -254,11 +302,15 @@ fn source_backed_replacement_keeps_ids_and_rejects_stale_locator() {
     )
     .unwrap();
     let source = open_source(opening.databases.into_iter().next().unwrap()).unwrap();
-    let before = document_for_only_message(&source);
+    let before = record_for_only_message(&source);
     assert!(finish_opened_source(source).unwrap());
 
     let replacement = temp.path().join("replacement.db");
     write_database(&replacement, "session", "message", "after replacement");
+    Connection::open(&replacement)
+        .unwrap()
+        .execute("update messages set rowid = 99 where id = 'message'", [])
+        .unwrap();
     std::fs::remove_file(&path).unwrap();
     std::fs::rename(&replacement, &path).unwrap();
 
@@ -268,36 +320,18 @@ fn source_backed_replacement_keeps_ids_and_rejects_stale_locator() {
     )
     .unwrap();
     let source = open_source(replacement.databases.into_iter().next().unwrap()).unwrap();
-    let after = document_for_only_message(&source);
+    let after = record_for_only_message(&source);
     assert!(finish_opened_source(source).unwrap());
     assert_eq!(after.event_id, before.event_id);
-    assert_ne!(after.locator, before.locator);
-    assert!(matches!(
-        CrushLocatorResolverV0::discover(crate::test_provider_sqlite_data_root(), &inventory)
-            .unwrap()
-            .hydrate_locators(&[&before.locator]),
-        Err(CrushSourceBackedErrorV0::StaleRecordEvidence)
-    ));
-    let hydrated =
-        CrushLocatorResolverV0::discover(crate::test_provider_sqlite_data_root(), &inventory)
-            .unwrap()
-            .hydrate_locators(&[&after.locator])
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
-    assert_eq!(
-        hydrated.decoded_display_text.as_deref(),
-        Some("after replacement")
-    );
+    assert_eq!(after.session_id, before.session_id);
+    assert_eq!(after.native_event_id, before.native_event_id);
+    assert_eq!(after.event_sequence, before.event_sequence);
+    assert_eq!(before.content.meaningful_text(), "before replacement");
+    assert_eq!(after.content.meaningful_text(), "after replacement");
 }
 
-fn document_for_only_message(source: &OpenedSource) -> LexicalDocument {
-    let frontier = CrushNativeFrontier {
-        phase: CrushNativePhase::Messages,
-        after_rowid: None,
-        next_ordinal: 0,
-    };
+fn record_for_only_message(source: &OpenedSource) -> CoreRecord {
+    let frontier = CrushNativeFrontier { after_rowid: None };
     let candidate = super::super::query::next_candidate(
         source.connection().unwrap(),
         &source.schema,
@@ -305,82 +339,193 @@ fn document_for_only_message(source: &OpenedSource) -> LexicalDocument {
     )
     .unwrap()
     .unwrap();
-    let CrushHydratedRow::Message {
+    let CrushLoadedRow {
         row,
         session: Some(session),
-        digest_values,
         ..
-    } = super::super::query::hydrate_row_from_connection(
+    } = super::super::query::load_message_batch(
         source.connection().unwrap(),
         &source.schema,
-        CrushNativePhase::Messages,
-        candidate.rowid,
-        candidate.observed_bytes,
+        &[candidate],
     )
+    .unwrap()
+    .remove(&candidate.rowid)
+    .unwrap()
     .unwrap()
     else {
         panic!("expected one parented Crush message row");
     };
-    let projection = match project_message(
-        &row,
-        Some(&session),
-        &deterministic_context(&source.database.canonical_path),
-    )
-    .unwrap()
-    {
+    let projection = match project_message(&row, Some(&session)).unwrap() {
         CrushRecordProjection::Message(projection) => projection,
-        CrushRecordProjection::Rejection { .. } => {
+        CrushRecordProjection::Rejection => {
             panic!("expected the test message to project")
         }
     };
-    lexical_document(
+    core_record(
         source,
         &load_session_parents(source.connection().unwrap(), &source.schema.session_columns)
             .unwrap(),
         &row,
         &session,
-        &digest_values,
-        message_record_digest_bytes(&digest_values),
         &projection,
     )
     .unwrap()
 }
 
 #[test]
-fn source_backed_message_indexes_the_full_policy_body_and_hydrates_it() {
+fn source_backed_message_round_trips_full_policy_body_and_structured_content() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("full-body.db");
-    let text = format!("crush-head-{}-crush-tail", "x".repeat(3_000));
+    let text = format!("crush-head-{}-crush-tail", "x".repeat(20_000));
+    let tool_arguments = json!({
+        "command": format!("{}crush-structured-tail", "a".repeat(20_000)),
+        "path": "src/main.rs",
+    });
     write_database(&path, "session", "message", &text);
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "update messages set parts = ?1 where id = 'message'",
+            [json!([
+                {"type": "text", "data": {"text": text}},
+                {"type": "tool_call", "data": {"name": "shell", "input": tool_arguments}}
+            ])
+            .to_string()],
+        )
+        .unwrap();
     let inventory = TestInventory::new(inventory(
         b"full-body-inventory",
         vec![database("full-body-project", &path)],
     ));
-    let frozen = bind_inventory(
-        crate::test_provider_sqlite_data_root(),
-        inventory.observe().unwrap(),
-    )
-    .unwrap();
-    let source = open_source(frozen.databases.into_iter().next().unwrap()).unwrap();
-    let document = document_for_only_message(&source);
-    assert_eq!(document.body, text);
-    assert!(document.body.ends_with("crush-tail"));
-    assert!(finish_opened_source(source).unwrap());
-
-    let resolver =
-        CrushLocatorResolverV0::discover(crate::test_provider_sqlite_data_root(), &inventory)
-            .unwrap();
-    let hydrated = resolver
-        .hydrate_locators(&[&document.locator])
+    let registry = crush_registry(temp.path(), Arc::new(inventory.clone()));
+    let index_root = temp.path().join("full-body-index");
+    refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    let source = crush_source_key(TypedKey::utf8("full-body-project").unwrap()).unwrap();
+    let page = VerifiedIndex::open(&index_root)
         .unwrap()
-        .into_iter()
-        .next()
+        .core_source_event_page(&source, None, 8)
         .unwrap();
-    assert_eq!(resolver.hydration_counters(), (1, 1));
+    assert_eq!(page.items.len(), 1);
+    let record = &page.items[0].core_record;
+    assert_eq!(record.provider_session_id.as_deref(), Some("session"));
     assert_eq!(
-        hydrated.decoded_display_text.as_deref(),
-        Some(text.as_str())
+        record.native_event_id,
+        Some(TypedKey::utf8("message").unwrap())
     );
+    assert_eq!(record.occurred_at_unix_ms, Some(1001));
+    assert_eq!(record.event_type, EventType::ToolCall.as_str());
+    assert_eq!(record.role.as_deref(), Some(EventRole::Assistant.as_str()));
+    assert!(record.content.meaningful_text().starts_with(&text));
+    assert!(record
+        .content
+        .meaningful_text()
+        .contains("crush-tail\ntool call: shell"));
+    let encoded_arguments = record
+        .content
+        .meaningful_text()
+        .lines()
+        .find_map(|line| line.strip_prefix("tool input: "))
+        .expect("complete structured Crush tool arguments");
+    let decoded_arguments: serde_json::Value = serde_json::from_str(encoded_arguments).unwrap();
+    assert_eq!(decoded_arguments, tool_arguments);
+    assert!(encoded_arguments.contains("crush-structured-tail"));
+    assert_eq!(
+        record
+            .content
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/native_message/parts/1/data/input/path"))
+            .and_then(serde_json::Value::as_str),
+        Some("src/main.rs")
+    );
+    let structured = record.content.structured_content.as_ref().unwrap();
+    assert_eq!(
+        structured
+            .pointer("/native_session/title")
+            .and_then(serde_json::Value::as_str),
+        Some("test")
+    );
+    assert_eq!(
+        structured
+            .pointer("/native_session/prompt_tokens")
+            .and_then(serde_json::Value::as_i64),
+        Some(1)
+    );
+    assert_eq!(
+        structured
+            .pointer("/native_session/created_at_unix_ms")
+            .and_then(serde_json::Value::as_i64),
+        Some(1000)
+    );
+    let encoded = String::from_utf8(record.encode_stored().unwrap()).unwrap();
+    assert!(!encoded.contains("\"locator\""));
+    assert!(!encoded.contains("\"source_path\""));
+}
+
+#[test]
+fn source_backed_indivisible_result_larger_than_page_target_is_complete_once() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("large-result.db");
+    let body = format!(
+        "crush-large-head-{}-crush-large-tail",
+        "x".repeat(8 * 1024 * 1024)
+    );
+    write_database(&path, "session", "message", "placeholder");
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "update messages set role = 'tool', parts = ?1 where id = 'message'",
+            [json!([{
+                "type": "tool_result",
+                "data": {
+                    "content": body,
+                    "status": "success",
+                    "tool_call_id": "call-large",
+                    "name": "shell"
+                }
+            }])
+            .to_string()],
+        )
+        .unwrap();
+    let inventory = TestInventory::new(inventory(
+        b"large-result-inventory",
+        vec![database("large-result-project", &path)],
+    ));
+    let registry = crush_registry(temp.path(), Arc::new(inventory));
+    let index_root = temp.path().join("large-result-index");
+    refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    let source = crush_source_key(TypedKey::utf8("large-result-project").unwrap()).unwrap();
+    let page = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .core_source_event_page(&source, None, 8)
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    let record = &page.items[0].core_record;
+    assert_eq!(record.event_type, EventType::ToolOutput.as_str());
+    assert!(record
+        .content
+        .meaningful_text()
+        .starts_with("crush-large-head-"));
+    assert!(record
+        .content
+        .meaningful_text()
+        .ends_with("-crush-large-tail"));
+    assert!(record.content.meaningful_text().len() > 8 * 1024 * 1024);
+    let structured = record.content.structured_content.as_ref().unwrap();
+    assert_eq!(
+        structured
+            .pointer("/provider_native_result/result_outcome")
+            .and_then(serde_json::Value::as_str),
+        Some("success")
+    );
+    assert_eq!(
+        structured
+            .pointer("/provider_native_result/call_id")
+            .and_then(serde_json::Value::as_str),
+        Some("call-large")
+    );
+    assert!(!structured.to_string().contains("crush-large-head-"));
+    assert!(!structured.to_string().contains("crush-large-tail"));
 }
 
 #[test]
@@ -416,8 +561,8 @@ fn stock_sqlite_snapshot_scan_sees_committed_content_retained_in_active_wal() {
     )
     .unwrap();
     let source = open_source(frozen.databases.into_iter().next().unwrap()).unwrap();
-    let document = document_for_only_message(&source);
-    assert_eq!(document.body, "committed Crush WAL body");
+    let record = record_for_only_message(&source);
+    assert_eq!(record.content.meaningful_text(), "committed Crush WAL body");
     assert!(finish_opened_source(source).unwrap());
 }
 
@@ -458,6 +603,29 @@ fn inventory(
         databases,
     )
     .unwrap()
+}
+
+fn crush_registry(root: &Path, inventory: Arc<TestInventory>) -> SourceBackedProviderRegistry {
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_crush_source_backed_route(
+        &mut registry,
+        ProviderSource {
+            provider: CaptureProvider::Crush,
+            path: root.to_path_buf(),
+            exists: true,
+            source_format: CRUSH_SQLITE_SOURCE_FORMAT,
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Explicit,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Available,
+            unsupported_reason: None,
+        },
+        SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
+        inventory,
+    )
+    .unwrap();
+    registry
 }
 
 fn database(project: &str, path: &Path) -> CrushProjectDatabaseV0 {

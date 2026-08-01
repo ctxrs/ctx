@@ -120,7 +120,6 @@ struct ColdSourcePlanV0 {
     base: Option<CertifiedSource>,
 }
 
-#[derive(Debug)]
 struct ColdSourceJobV0 {
     source_index: usize,
     source: CodexCatalogSource,
@@ -128,6 +127,7 @@ struct ColdSourceJobV0 {
     native_session_id: String,
     session_id: StableEntityId,
     proof: Option<CodexAppendProof>,
+    base_event_lookup: BaseEventIdentityLookup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,7 +146,7 @@ struct ChangedSourceStartV0 {
 struct ColdPreparedPageV0 {
     source_index: usize,
     page_index: u64,
-    documents: Vec<LexicalDocument>,
+    records: Vec<CoreRecord>,
 }
 
 #[derive(Debug)]
@@ -156,6 +156,7 @@ struct ColdSourceCompleteV0 {
     staged_documents: u64,
     scan: super::CodexSourceScan,
     worker_busy: Duration,
+    full_git_certification_probes: u64,
 }
 
 // Completion is emitted once per source. Boxing its 1,032-byte owned scan solely
@@ -229,15 +230,26 @@ pub(super) fn cold_scanner_worker_count_for_parallelism(
         .min(source_count.max(1))
 }
 
+pub(super) struct ColdIngestionTargetV0<'target> {
+    pub(super) writer: &'target mut GenerationWriter,
+    pub(super) revalidation: &'target mut HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
+    pub(super) timings: &'target mut CodexSourceBackedPhaseTimingsV0,
+    pub(super) counters: &'target mut CodexSourceBackedCountersV0,
+}
+
 pub(super) fn ingest_codex_cold_parallel_v0(
     sources: Vec<ChangedSourceV0>,
-    writer: &mut GenerationWriter,
-    revalidation: &mut HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
-    timings: &mut CodexSourceBackedPhaseTimingsV0,
-    counters: &mut CodexSourceBackedCountersV0,
+    base_event_lookup: BaseEventIdentityLookup,
+    target: ColdIngestionTargetV0<'_>,
     worker_count: usize,
     cold_options: ColdParallelOptionsV0,
 ) -> CodexSourceBackedResultV0<()> {
+    let ColdIngestionTargetV0 {
+        writer,
+        revalidation,
+        timings,
+        counters,
+    } = target;
     let mut plans = Vec::with_capacity(sources.len());
     let mut lane_jobs = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
     let mut lane_source_indices = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
@@ -266,6 +278,7 @@ pub(super) fn ingest_codex_cold_parallel_v0(
             native_session_id,
             session_id,
             proof,
+            base_event_lookup: base_event_lookup.clone(),
         });
     }
 
@@ -407,7 +420,9 @@ fn run_cold_scan_lane_v0(
     cold_options: ColdParallelOptionsV0,
     #[cfg(test)] scanner_rendezvous: Option<&std::sync::Barrier>,
 ) -> CodexSourceBackedResultV0<()> {
+    let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     for job in jobs {
+        let probes_before = repository_attributor.full_certification_probe_count();
         if cancellation.load(AtomicOrdering::Acquire) {
             return Ok(());
         }
@@ -442,7 +457,12 @@ fn run_cold_scan_lane_v0(
         }
         let mut page_index = 0_u64;
         let mut staged_documents = 0_u64;
-
+        let mut event_identity_state = match mode {
+            ChangedSourceModeV0::FullGeneration => CodexEventIdentityStateV0::default(),
+            ChangedSourceModeV0::AppendDelta => {
+                CodexEventIdentityStateV0::for_append(job.base_event_lookup.clone())
+            }
+        };
         loop {
             if cancellation.load(AtomicOrdering::Acquire) {
                 return Ok(());
@@ -458,7 +478,7 @@ fn run_cold_scan_lane_v0(
             if !page.core_rows.is_empty() {
                 return Err(CodexSourceBackedErrorV0::UnexpectedLegacyRow);
             }
-            let mut documents = Vec::with_capacity(page.source_backed_rows.len());
+            let mut records = Vec::with_capacity(page.source_backed_rows.len());
             if !page.source_backed_rows.is_empty() {
                 let owner = page
                     .owner
@@ -466,12 +486,13 @@ fn run_cold_scan_lane_v0(
                     .ok_or(CodexSourceBackedErrorV0::MissingPageOwner)?;
                 validate_owner(owner, &job.native_session_id)?;
                 for row in page.source_backed_rows {
-                    documents.push(codex_lexical_document(
-                        &job.source,
+                    records.push(codex_core_record(
                         &job.source_key,
                         job.session_id,
                         owner,
                         row,
+                        &mut event_identity_state,
+                        &mut repository_attributor,
                     )?);
                     staged_documents = staged_documents
                         .checked_add(1)
@@ -485,7 +506,7 @@ fn run_cold_scan_lane_v0(
                 ColdLaneMessageV0::Page(ColdPreparedPageV0 {
                     source_index: job.source_index,
                     page_index,
-                    documents,
+                    records,
                 }),
                 cancellation,
                 lane_index,
@@ -511,6 +532,12 @@ fn run_cold_scan_lane_v0(
                 staged_documents,
                 scan,
                 worker_busy,
+                full_git_certification_probes: u64::try_from(
+                    repository_attributor
+                        .full_certification_probe_count()
+                        .saturating_sub(probes_before),
+                )
+                .unwrap_or(u64::MAX),
             }),
             cancellation,
             lane_index,
@@ -656,29 +683,29 @@ fn consume_cold_lanes_v0(
                         "page references an unknown source",
                     ),
                 )?;
-                for document in page.documents {
-                    if !document.source.exact_descriptor_eq(&plan.source_key)
-                        || document.session_id != plan.session_id
-                        || document.provider_session_id.as_deref()
+                for record in page.records {
+                    if !record.source.exact_descriptor_eq(&plan.source_key)
+                        || record.session_id != plan.session_id
+                        || record.provider_session_id.as_deref()
                             != Some(plan.native_session_id.as_str())
                     {
                         return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
                             "document identity does not match its assigned source",
                         ));
                     }
-                    let (_, _, _, physical_ordinal) = validate_codex_locator(&document.locator)?;
-                    if physical_ordinal != document.event_sequence
+                    if record.native_event_id.is_none()
                         || lane_state
                             .last_event_sequence
-                            .is_some_and(|last| document.event_sequence <= last)
+                            .is_some_and(|last| record.event_sequence <= last)
                     {
                         return Err(CodexSourceBackedErrorV0::ColdProtocolMismatch(
                             "document event sequence is not strictly increasing",
                         ));
                     }
-                    let event_sequence = document.event_sequence;
+                    record.validate_contract()?;
+                    let event_sequence = record.event_sequence;
                     let add_started = Instant::now();
-                    let add_result = writer.add_document(document);
+                    let add_result = writer.add_core_record(record);
                     timings.writer_add_document += add_started.elapsed();
                     add_result?;
                     lane_state.last_event_sequence = Some(event_sequence);
@@ -693,6 +720,9 @@ fn consume_cold_lanes_v0(
                     .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
             }
             ColdLaneMessageV0::Complete(complete) => {
+                counters.repository_full_git_certification_probes = counters
+                    .repository_full_git_certification_probes
+                    .saturating_add(complete.full_git_certification_probes);
                 let mode =
                     lane_state
                         .mode

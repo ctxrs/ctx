@@ -1,14 +1,8 @@
 use chrono::{DateTime, Utc};
 use ctx_history_core::{EventRole, EventType};
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use crate::{
-    provider::normalization::{
-        provider_policy_event_text, provider_result_identifier_evidence,
-        provider_result_outcome_evidence, provider_role, provider_value_text,
-    },
-    OPENCLAW_SOURCE_FORMAT,
-};
+use crate::provider::normalization::{provider_role, provider_value_text};
 
 pub(crate) struct OpenClawEventFact {
     pub(crate) provider_event_index: u64,
@@ -17,17 +11,6 @@ pub(crate) struct OpenClawEventFact {
     pub(crate) role: Option<EventRole>,
     pub(crate) occurred_at: DateTime<Utc>,
     pub(crate) lexical_text: String,
-    pub(crate) payload: Value,
-}
-
-pub(crate) fn event(
-    _provider_session_id: &str,
-    event_index: u64,
-    line_number: usize,
-    row: &Value,
-    occurred_at: DateTime<Utc>,
-) -> OpenClawEventFact {
-    event_fact(event_index, line_number, row, occurred_at)
 }
 
 pub(super) fn event_fact(
@@ -57,20 +40,12 @@ pub(super) fn event_fact(
         .or_else(|| message.get("output"))
         .and_then(provider_value_text)
         .unwrap_or_default();
-    let retained_text = provider_policy_event_text(event_type, &text, row);
     OpenClawEventFact {
         provider_event_index: event_index,
         provider_event_hash: row.get("id").and_then(Value::as_str).map(str::to_owned),
         event_type,
         role,
         occurred_at,
-        lexical_text: text.clone(),
-        payload: json!({
-            "text": retained_text.text,
-            "text_retention": retained_text.retention.as_json(),
-            "result_evidence": provider_result_identifier_evidence(event_type, &text, row),
-            "result_outcome": provider_result_outcome_evidence(event_type, row),
-            "source_format": OPENCLAW_SOURCE_FORMAT,
-        }),
+        lexical_text: text,
     }
 }

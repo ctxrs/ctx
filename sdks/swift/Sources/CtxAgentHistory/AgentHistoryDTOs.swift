@@ -185,11 +185,9 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
     public var resultType: String?
     public var resultScope: String
     public var provider: String?
+    public var sourceFormat: String?
     public var timestamp: String?
     public var cwd: String?
-    public var sourcePath: String?
-    public var sourceExists: Bool?
-    public var cursor: String?
     public var whyMatched: [String]
     public var citations: [AgentHistoryCitation]
     public var suggestedNextCommands: [String]
@@ -207,11 +205,9 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
         resultType: String? = nil,
         resultScope: String,
         provider: String? = nil,
+        sourceFormat: String? = nil,
         timestamp: String? = nil,
         cwd: String? = nil,
-        sourcePath: String? = nil,
-        sourceExists: Bool? = nil,
-        cursor: String? = nil,
         whyMatched: [String] = [],
         citations: [AgentHistoryCitation] = [],
         suggestedNextCommands: [String] = [],
@@ -228,11 +224,9 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
         self.resultType = resultType
         self.resultScope = resultScope
         self.provider = provider
+        self.sourceFormat = sourceFormat
         self.timestamp = timestamp
         self.cwd = cwd
-        self.sourcePath = sourcePath
-        self.sourceExists = sourceExists
-        self.cursor = cursor
         self.whyMatched = whyMatched
         self.citations = citations
         self.suggestedNextCommands = suggestedNextCommands
@@ -251,11 +245,9 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
         case resultType
         case resultScope
         case provider
+        case sourceFormat
         case timestamp
         case cwd
-        case sourcePath
-        case sourceExists
-        case cursor
         case whyMatched
         case citations
         case suggestedNextCommands
@@ -275,11 +267,9 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
         resultType = try container.decodeIfPresent(String.self, forKey: .resultType)
         resultScope = try container.decodeIfPresent(String.self, forKey: .resultScope) ?? "unknown"
         provider = try container.decodeIfPresent(String.self, forKey: .provider)
+        sourceFormat = try container.decodeIfPresent(String.self, forKey: .sourceFormat)
         timestamp = try container.decodeIfPresent(String.self, forKey: .timestamp)
         cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
-        sourcePath = try container.decodeIfPresent(String.self, forKey: .sourcePath)
-        sourceExists = try container.decodeIfPresent(Bool.self, forKey: .sourceExists)
-        cursor = try container.decodeIfPresent(String.self, forKey: .cursor)
         whyMatched = try container.decodeIfPresent([String].self, forKey: .whyMatched) ?? []
         citations = try container.decodeIfPresent([AgentHistoryCitation].self, forKey: .citations) ?? []
         suggestedNextCommands = try container.decodeIfPresent([String].self, forKey: .suggestedNextCommands) ?? []
@@ -290,45 +280,38 @@ public struct AgentHistorySearchHit: Codable, Equatable, Sendable {
 public struct AgentHistoryEventResult: Codable, Equatable, Sendable {
     public var event: AgentHistoryEventRecord?
     public var events: [AgentHistoryEventRecord]
-    public var source: AgentHistorySourceLocation?
 
-    public init(event: AgentHistoryEventRecord? = nil, events: [AgentHistoryEventRecord] = [], source: AgentHistorySourceLocation? = nil) {
+    public init(event: AgentHistoryEventRecord? = nil, events: [AgentHistoryEventRecord] = []) {
         self.event = event
         self.events = events
-        self.source = source
     }
 
     enum CodingKeys: String, CodingKey {
         case event
         case events
-        case source
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         event = try container.decodeIfPresent(AgentHistoryEventRecord.self, forKey: .event)
         events = try container.decodeIfPresent([AgentHistoryEventRecord].self, forKey: .events) ?? []
-        source = try container.decodeIfPresent(AgentHistorySourceLocation.self, forKey: .source)
     }
 }
 
 public struct AgentHistorySessionResult: Codable, Equatable, Sendable {
     public var session: AgentHistorySessionSummary?
     public var events: [AgentHistoryEventRecord]
-    public var source: AgentHistorySourceLocation?
     public var mode: String?
     public var format: String?
 
     public init(
         session: AgentHistorySessionSummary? = nil,
         events: [AgentHistoryEventRecord] = [],
-        source: AgentHistorySourceLocation? = nil,
         mode: String? = nil,
         format: String? = nil
     ) {
         self.session = session
         self.events = events
-        self.source = source
         self.mode = mode
         self.format = format
     }
@@ -336,7 +319,6 @@ public struct AgentHistorySessionResult: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case session
         case events
-        case source
         case mode
         case format
     }
@@ -345,74 +327,76 @@ public struct AgentHistorySessionResult: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         session = try container.decodeIfPresent(AgentHistorySessionSummary.self, forKey: .session)
         events = try container.decodeIfPresent([AgentHistoryEventRecord].self, forKey: .events) ?? []
-        source = try container.decodeIfPresent(AgentHistorySourceLocation.self, forKey: .source)
         mode = try container.decodeIfPresent(String.self, forKey: .mode)
         format = try container.decodeIfPresent(String.self, forKey: .format)
-    }
-}
-
-public struct AgentHistoryLocationResult: Codable, Equatable, Sendable {
-    public var ctxSessionId: String
-    public var ctxEventId: String?
-    public var provider: String
-    public var providerSessionId: String?
-    public var source: AgentHistorySourceLocation
-    public var resume: AgentHistoryResumeLocation?
-
-    public init(
-        ctxSessionId: String,
-        ctxEventId: String? = nil,
-        provider: String,
-        providerSessionId: String? = nil,
-        source: AgentHistorySourceLocation,
-        resume: AgentHistoryResumeLocation? = nil
-    ) {
-        self.ctxSessionId = ctxSessionId
-        self.ctxEventId = ctxEventId
-        self.provider = provider
-        self.providerSessionId = providerSessionId
-        self.source = source
-        self.resume = resume
     }
 }
 
 public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
     public var ctxEventId: String?
     public var ctxSessionId: String?
+    public var provider: String?
+    public var providerSessionId: String?
+    public var sourceFormat: String?
     public var sequence: Int?
     public var eventType: String?
     public var role: String?
     public var occurredAt: String?
-    public var source: String?
-    public var cursor: String?
     public var text: String?
-    public var preview: String?
+    public var structuredContent: JSONValue?
+    public var content: CoreContentMetadata?
     public var citations: [AgentHistoryCitation]?
 
     public init(
         ctxEventId: String? = nil,
         ctxSessionId: String? = nil,
+        provider: String? = nil,
+        providerSessionId: String? = nil,
+        sourceFormat: String? = nil,
         sequence: Int? = nil,
         eventType: String? = nil,
         role: String? = nil,
         occurredAt: String? = nil,
-        source: String? = nil,
-        cursor: String? = nil,
         text: String? = nil,
-        preview: String? = nil,
+        structuredContent: JSONValue? = nil,
+        content: CoreContentMetadata? = nil,
         citations: [AgentHistoryCitation]? = nil
     ) {
         self.ctxEventId = ctxEventId
         self.ctxSessionId = ctxSessionId
+        self.provider = provider
+        self.providerSessionId = providerSessionId
+        self.sourceFormat = sourceFormat
         self.sequence = sequence
         self.eventType = eventType
         self.role = role
         self.occurredAt = occurredAt
-        self.source = source
-        self.cursor = cursor
         self.text = text
-        self.preview = preview
+        self.structuredContent = structuredContent
+        self.content = content
         self.citations = citations
+    }
+}
+
+public enum CoreContentPolicyStatus: String, Codable, Equatable, Sendable {
+    case selected
+    case redacted
+    case omitted
+}
+
+public struct CoreContentMetadata: Codable, Equatable, Sendable {
+    public var complete: Bool
+    public var policyStatus: CoreContentPolicyStatus
+    public var policyReason: String?
+
+    public init(
+        complete: Bool,
+        policyStatus: CoreContentPolicyStatus,
+        policyReason: String? = nil
+    ) {
+        self.complete = complete
+        self.policyStatus = policyStatus
+        self.policyReason = policyReason
     }
 }
 
@@ -420,37 +404,21 @@ public struct AgentHistorySessionSummary: Codable, Equatable, Sendable {
     public var ctxSessionId: String?
     public var provider: String?
     public var providerSessionId: String?
+    public var sourceFormat: String?
     public var title: String?
 
-    public init(ctxSessionId: String? = nil, provider: String? = nil, providerSessionId: String? = nil, title: String? = nil) {
+    public init(
+        ctxSessionId: String? = nil,
+        provider: String? = nil,
+        providerSessionId: String? = nil,
+        sourceFormat: String? = nil,
+        title: String? = nil
+    ) {
         self.ctxSessionId = ctxSessionId
         self.provider = provider
         self.providerSessionId = providerSessionId
-        self.title = title
-    }
-}
-
-public struct AgentHistorySourceLocation: Codable, Equatable, Sendable {
-    public var path: String?
-    public var cursor: String?
-    public var exists: Bool?
-    public var sourceId: String?
-    public var sourceFormat: String?
-
-    public init(path: String? = nil, cursor: String? = nil, exists: Bool? = nil, sourceId: String? = nil, sourceFormat: String? = nil) {
-        self.path = path
-        self.cursor = cursor
-        self.exists = exists
-        self.sourceId = sourceId
         self.sourceFormat = sourceFormat
-    }
-}
-
-public struct AgentHistoryResumeLocation: Codable, Equatable, Sendable {
-    public var cursor: String?
-
-    public init(cursor: String? = nil) {
-        self.cursor = cursor
+        self.title = title
     }
 }
 
@@ -495,9 +463,6 @@ public struct AgentHistoryCitation: Codable, Equatable, Sendable {
     public var provider: String?
     public var sessionId: String?
     public var eventSeq: Int?
-    public var sourcePath: String?
-    public var sourceExists: Bool?
-    public var cursor: String?
 
     public init(
         itemId: String? = nil,
@@ -508,10 +473,7 @@ public struct AgentHistoryCitation: Codable, Equatable, Sendable {
         time: String? = nil,
         provider: String? = nil,
         sessionId: String? = nil,
-        eventSeq: Int? = nil,
-        sourcePath: String? = nil,
-        sourceExists: Bool? = nil,
-        cursor: String? = nil
+        eventSeq: Int? = nil
     ) {
         self.itemId = itemId
         self.targetType = targetType
@@ -522,9 +484,6 @@ public struct AgentHistoryCitation: Codable, Equatable, Sendable {
         self.provider = provider
         self.sessionId = sessionId
         self.eventSeq = eventSeq
-        self.sourcePath = sourcePath
-        self.sourceExists = sourceExists
-        self.cursor = cursor
     }
 }
 

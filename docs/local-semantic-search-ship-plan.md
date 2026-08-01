@@ -104,10 +104,10 @@ and private relevance evals justify flipping the default.
   socket query service for query embeddings. CLI search no longer initializes or
   downloads the embedding model in the foreground; semantic/hybrid search asks
   the daemon query service for the query vector, then performs local vector
-  scan/hydration/ranking.
+  scan/result-assembly/ranking.
 - The query service is intentionally narrow for v1: it embeds query text only.
   Full vector search can move into the daemon later if command startup,
-  flat-F32 scan, or hydration becomes the dominant latency.
+  flat-F32 scan, or result assembly becomes the dominant latency.
 - Search with semantic enabled and default background refresh attempts to
   autostart the daemon before hybrid/semantic retrieval. Explicit
   `--refresh off` does not autostart daemon work; strict semantic fails with an
@@ -172,7 +172,7 @@ and private relevance evals justify flipping the default.
 - Foreground search RSS remains under 150 MiB on the dogfood corpus when the
   daemon query service is available.
 - Warm hybrid/semantic p95 stays under 10s on the power-user dogfood corpus,
-  with a tracked path to return below 2.5s through vector/hydration
+  with a tracked path to return below 2.5s through vector/result-assembly
   optimization.
 - No-op background refresh cost is documented and acceptable for prerelease, or
   reduced with source-level no-op avoidance.
@@ -190,7 +190,7 @@ and private relevance evals justify flipping the default.
 - Hybrid fallback rate for normal unfiltered queries is low enough that default
   hybrid is not mostly lexical in practice.
 - Warm hybrid p95 is at or below the product target on the dogfood corpus; if
-  the target is subsecond, vector scan/hydration should move into a daemon
+  the target is subsecond, vector scan/result assembly should move into a daemon
   query service or equivalent optimized path before the flip.
 - Non-Unix support is either implemented or semantic remains gated by platform.
 
@@ -266,7 +266,7 @@ and private relevance evals justify flipping the default.
   labels.
 - Tool calls, command output, reasoning, and lifecycle notices should not create
   standalone semantic documents. They may remain discoverable lexically.
-- Hydrated semantic snippets should come from the lite-turn text range so result
+- Semantic snippets should come from the lite-turn text range so result
   previews explain why the vector matched.
 - Maintain a normal `event_search_lookup` projection for semantic document
   assembly. FTS remains the lexical index; semantic by-id/recency work must not
@@ -366,7 +366,7 @@ and private relevance evals justify flipping the default.
     existing cache, but does not download independently;
   - explicit semantic search fails when the daemon query service is unavailable.
 - Remaining after v1:
-  - consider moving vector scan/hydration/ranking into the daemon if process
+  - consider moving vector scan/result-assembly/ranking into the daemon if process
     startup or per-command sqlite opening becomes the bottleneck;
   - add a refill loop for post-vector filters so candidate count can drop below
     the conservative 1,000 soft-filter window without under-filling results.

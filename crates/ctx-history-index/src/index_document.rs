@@ -5,13 +5,202 @@ use tantivy::schema::{
     Document, Field, Value,
 };
 
-use crate::{Fields, IndexError, LexicalDocument, Result};
+use ctx_history_core::{
+    CoreContent, CoreRecord, SourceKey, StableEntityId, StableEntityKind, TypedKey,
+    MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
+};
 
-const BASE_FIELD_VALUES: usize = 31;
+use crate::{Fields, IndexError, Result};
+
+const BASE_FIELD_VALUES: usize = 28;
+pub(crate) const SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN: usize = 64;
+pub(crate) const SOURCE_EVENT_ORDER_KEY_LEN: usize = 104;
+const SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET: usize = SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN;
+const SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET: usize = SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET + 32;
+const SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET: usize = SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET + 4;
+const SOURCE_EVENT_ORDER_SIZE_SUFFIX_LEN: usize = 8;
+const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
+
+pub(crate) const SESSION_EVENT_ORDER_SESSION_PREFIX_LEN: usize = StableEntityId::CANONICAL_LEN;
+pub(crate) const SESSION_EVENT_ORDER_KEY_LEN: usize =
+    SESSION_EVENT_ORDER_SESSION_PREFIX_LEN + 8 + 9 + 16;
+const SESSION_EVENT_ORDER_SEQUENCE_OFFSET: usize = SESSION_EVENT_ORDER_SESSION_PREFIX_LEN;
+const SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET: usize = SESSION_EVENT_ORDER_SEQUENCE_OFFSET + 8;
+const SESSION_EVENT_ORDER_EVENT_ID_OFFSET: usize = SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 9;
+const SESSION_EVENT_ORDER_FIELD: &str = "session_event_order";
+
+pub(crate) const SEMANTIC_EVENT_ORDER_KEY_LEN: usize = 32;
+const SEMANTIC_EVENT_ORDER_FIELD: &str = "semantic_event_order";
+
+/// Eligible-only global semantic order term.
+///
+/// Every key is one full event-identity digest. All event identities have the
+/// same kind and identity-version prefix, so digest byte order is exactly the
+/// existing canonical `StableEntityId` order used by semantic cursors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SemanticEventOrderKey([u8; SEMANTIC_EVENT_ORDER_KEY_LEN]);
+
+impl SemanticEventOrderKey {
+    pub(crate) fn for_event(event_id: StableEntityId) -> Result<Self> {
+        if event_id.entity_kind() != StableEntityKind::Event {
+            return Err(IndexError::WriterInvariant(
+                "semantic event order requires an event identity",
+            ));
+        }
+        Ok(Self(event_id.digest()))
+    }
+
+    pub(crate) fn decode(encoded: &[u8]) -> Result<Self> {
+        let key = encoded
+            .try_into()
+            .map_err(|_| IndexError::InvalidStoredDocumentField(SEMANTIC_EVENT_ORDER_FIELD))?;
+        Ok(Self(key))
+    }
+
+    pub(crate) fn event_digest(self) -> [u8; SEMANTIC_EVENT_ORDER_KEY_LEN] {
+        self.0
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; SEMANTIC_EVENT_ORDER_KEY_LEN] {
+        &self.0
+    }
+
+    pub(crate) fn into_bytes(self) -> [u8; SEMANTIC_EVENT_ORDER_KEY_LEN] {
+        self.0
+    }
+}
+
+/// Exact session-coordinate term used for bounded forward traversal.
+///
+/// Big-endian encoding preserves the existing deterministic session order:
+/// sequence, `None` before `Some(timestamp)`, signed timestamp, then compact
+/// event UUID. The full canonical session identity is the range prefix, so a
+/// compact UUID collision can never mix session ranges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SessionEventOrderKey([u8; SESSION_EVENT_ORDER_KEY_LEN]);
+
+impl SessionEventOrderKey {
+    pub(crate) fn for_core_record(record: &CoreRecord) -> Result<Self> {
+        Self::from_parts(
+            record.session_id,
+            record.event_sequence,
+            record.occurred_at_unix_ms,
+            record.event_id.as_uuid(),
+        )
+    }
+
+    fn from_parts(
+        session_id: StableEntityId,
+        event_sequence: u64,
+        occurred_at_unix_ms: Option<i64>,
+        event_id: uuid::Uuid,
+    ) -> Result<Self> {
+        if session_id.entity_kind() != StableEntityKind::Session {
+            return Err(IndexError::WriterInvariant(
+                "session event order requires a session identity",
+            ));
+        }
+        let mut key = [0_u8; SESSION_EVENT_ORDER_KEY_LEN];
+        key[..SESSION_EVENT_ORDER_SESSION_PREFIX_LEN]
+            .copy_from_slice(&session_id.encode_canonical()?);
+        key[SESSION_EVENT_ORDER_SEQUENCE_OFFSET..SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET]
+            .copy_from_slice(&event_sequence.to_be_bytes());
+        if let Some(occurred_at_unix_ms) = occurred_at_unix_ms {
+            key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET] = 1;
+            let sortable = (occurred_at_unix_ms as u64) ^ (1_u64 << 63);
+            key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 1..SESSION_EVENT_ORDER_EVENT_ID_OFFSET]
+                .copy_from_slice(&sortable.to_be_bytes());
+        }
+        key[SESSION_EVENT_ORDER_EVENT_ID_OFFSET..].copy_from_slice(event_id.as_bytes());
+        Ok(Self(key))
+    }
+
+    pub(crate) fn decode_for_session(session_id: StableEntityId, encoded: &[u8]) -> Result<Self> {
+        let key: [u8; SESSION_EVENT_ORDER_KEY_LEN] = encoded
+            .try_into()
+            .map_err(|_| IndexError::InvalidStoredDocumentField(SESSION_EVENT_ORDER_FIELD))?;
+        let expected_prefix = Self::session_prefix(session_id)?;
+        if key[..SESSION_EVENT_ORDER_SESSION_PREFIX_LEN] != expected_prefix {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_EVENT_ORDER_FIELD,
+            ));
+        }
+        if key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET] > 1
+            || (key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET] == 0
+                && key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 1
+                    ..SESSION_EVENT_ORDER_EVENT_ID_OFFSET]
+                    .iter()
+                    .any(|byte| *byte != 0))
+        {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_EVENT_ORDER_FIELD,
+            ));
+        }
+        Ok(Self(key))
+    }
+
+    pub(crate) fn session_prefix(
+        session_id: StableEntityId,
+    ) -> Result<[u8; SESSION_EVENT_ORDER_SESSION_PREFIX_LEN]> {
+        if session_id.entity_kind() != StableEntityKind::Session {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_EVENT_ORDER_FIELD,
+            ));
+        }
+        Ok(session_id.encode_canonical()?)
+    }
+
+    pub(crate) fn session_range_end(session_id: StableEntityId) -> Result<Vec<u8>> {
+        let mut bound = Vec::with_capacity(SESSION_EVENT_ORDER_KEY_LEN + 1);
+        bound.extend_from_slice(&Self::session_prefix(session_id)?);
+        bound.extend(std::iter::repeat_n(
+            u8::MAX,
+            SESSION_EVENT_ORDER_KEY_LEN - SESSION_EVENT_ORDER_SESSION_PREFIX_LEN + 1,
+        ));
+        Ok(bound)
+    }
+
+    pub(crate) fn event_sequence(self) -> u64 {
+        u64::from_be_bytes(
+            self.0[SESSION_EVENT_ORDER_SEQUENCE_OFFSET..SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET]
+                .try_into()
+                .expect("fixed session event order sequence layout"),
+        )
+    }
+
+    pub(crate) fn occurred_at_unix_ms(self) -> Option<i64> {
+        (self.0[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET] == 1).then(|| {
+            let sortable = u64::from_be_bytes(
+                self.0[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 1
+                    ..SESSION_EVENT_ORDER_EVENT_ID_OFFSET]
+                    .try_into()
+                    .expect("fixed session event order timestamp layout"),
+            );
+            (sortable ^ (1_u64 << 63)) as i64
+        })
+    }
+
+    pub(crate) fn event_id(self) -> uuid::Uuid {
+        uuid::Uuid::from_bytes(
+            self.0[SESSION_EVENT_ORDER_EVENT_ID_OFFSET..]
+                .try_into()
+                .expect("fixed session event order UUID layout"),
+        )
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; SESSION_EVENT_ORDER_KEY_LEN] {
+        &self.0
+    }
+
+    pub(crate) fn into_bytes(self) -> [u8; SESSION_EVENT_ORDER_KEY_LEN] {
+        self.0
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct IndexSourceFields {
     token: Arc<str>,
+    identity_digest: [u8; 32],
     descriptor_digest: [u8; 32],
     provider: Arc<str>,
     source_format: Arc<str>,
@@ -21,38 +210,181 @@ impl IndexSourceFields {
     pub(super) fn new(document_source: &ctx_history_core::SourceKey, token: &str) -> Self {
         Self {
             token: Arc::from(token),
+            identity_digest: document_source.identity().digest(),
             descriptor_digest: document_source.exact_descriptor_digest(),
             provider: Arc::from(document_source.provider()),
             source_format: Arc::from(document_source.source_format()),
         }
     }
+}
 
-    pub(super) fn descriptor_digest(&self) -> [u8; 32] {
-        self.descriptor_digest
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SourceEventOrderKey([u8; SOURCE_EVENT_ORDER_KEY_LEN]);
+
+impl SourceEventOrderKey {
+    fn for_document(
+        source: &IndexSourceFields,
+        event_digest: [u8; 32],
+        encoded_core_bytes: usize,
+        content_bytes: usize,
+    ) -> Result<Self> {
+        Self::from_parts(
+            source.identity_digest,
+            source.descriptor_digest,
+            event_digest,
+            encoded_core_bytes,
+            content_bytes,
+        )
+    }
+
+    fn from_parts(
+        source_digest: [u8; 32],
+        source_descriptor_digest: [u8; 32],
+        event_digest: [u8; 32],
+        encoded_core_bytes: usize,
+        content_bytes: usize,
+    ) -> Result<Self> {
+        if encoded_core_bytes == 0 || encoded_core_bytes > MAX_ENCODED_CORE_RECORD_BYTES {
+            return Err(IndexError::DocumentFieldTooLarge {
+                field: "core_record",
+                actual: encoded_core_bytes,
+                maximum: MAX_ENCODED_CORE_RECORD_BYTES,
+            });
+        }
+        if content_bytes > MAX_CORE_CONTENT_BYTES {
+            return Err(IndexError::DocumentFieldTooLarge {
+                field: "core_content",
+                actual: content_bytes,
+                maximum: MAX_CORE_CONTENT_BYTES,
+            });
+        }
+        let encoded_core_bytes = u32::try_from(encoded_core_bytes).map_err(|_| {
+            IndexError::WriterInvariant("encoded Core size does not fit the source order key")
+        })?;
+        let content_bytes = u32::try_from(content_bytes).map_err(|_| {
+            IndexError::WriterInvariant("Core content size does not fit the source order key")
+        })?;
+
+        let mut key = [0_u8; SOURCE_EVENT_ORDER_KEY_LEN];
+        key[..32].copy_from_slice(&source_digest);
+        key[32..SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN].copy_from_slice(&source_descriptor_digest);
+        key[SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET..SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET]
+            .copy_from_slice(&event_digest);
+        key[SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET..SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET]
+            .copy_from_slice(&encoded_core_bytes.to_be_bytes());
+        key[SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET..]
+            .copy_from_slice(&content_bytes.to_be_bytes());
+        Ok(Self(key))
+    }
+
+    pub(crate) fn for_core_record(record: &CoreRecord, encoded_core_bytes: usize) -> Result<Self> {
+        Self::from_parts(
+            record.source.identity().digest(),
+            record.source.exact_descriptor_digest(),
+            record.event_id.digest(),
+            encoded_core_bytes,
+            core_content_bytes(&record.content)?,
+        )
+    }
+
+    pub(crate) fn decode_for_source(source: &SourceKey, encoded: &[u8]) -> Result<Self> {
+        let key: [u8; SOURCE_EVENT_ORDER_KEY_LEN] = encoded
+            .try_into()
+            .map_err(|_| IndexError::InvalidStoredDocumentField(SOURCE_EVENT_ORDER_FIELD))?;
+        if key[..SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN] != Self::source_prefix(source) {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SOURCE_EVENT_ORDER_FIELD,
+            ));
+        }
+        let key = Self(key);
+        if key.encoded_core_bytes() == 0
+            || key.encoded_core_bytes() > MAX_ENCODED_CORE_RECORD_BYTES
+            || key.content_bytes() > MAX_CORE_CONTENT_BYTES
+        {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SOURCE_EVENT_ORDER_FIELD,
+            ));
+        }
+        Ok(key)
+    }
+
+    pub(crate) fn source_prefix(source: &SourceKey) -> [u8; SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN] {
+        let mut prefix = [0_u8; SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN];
+        prefix[..32].copy_from_slice(&source.identity().digest());
+        prefix[32..].copy_from_slice(&source.exact_descriptor_digest());
+        prefix
+    }
+
+    pub(crate) fn source_range_end(source: &SourceKey) -> Vec<u8> {
+        let mut bound = Vec::with_capacity(SOURCE_EVENT_ORDER_KEY_LEN + 1);
+        bound.extend_from_slice(&Self::source_prefix(source));
+        bound.extend(std::iter::repeat_n(
+            u8::MAX,
+            SOURCE_EVENT_ORDER_KEY_LEN - SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN + 1,
+        ));
+        bound
+    }
+
+    pub(crate) fn source_after_bound(source: &SourceKey, event_digest: [u8; 32]) -> Vec<u8> {
+        let mut bound = Vec::with_capacity(SOURCE_EVENT_ORDER_KEY_LEN + 1);
+        bound.extend_from_slice(&Self::source_prefix(source));
+        bound.extend_from_slice(&event_digest);
+        bound.extend(std::iter::repeat_n(
+            u8::MAX,
+            SOURCE_EVENT_ORDER_SIZE_SUFFIX_LEN + 1,
+        ));
+        bound
+    }
+
+    pub(crate) fn event_digest(self) -> [u8; 32] {
+        let mut digest = [0_u8; 32];
+        digest.copy_from_slice(
+            &self.0
+                [SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET..SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET],
+        );
+        digest
+    }
+
+    pub(crate) fn encoded_core_bytes(self) -> usize {
+        let mut encoded = [0_u8; 4];
+        encoded.copy_from_slice(
+            &self.0
+                [SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET..SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET],
+        );
+        u32::from_be_bytes(encoded) as usize
+    }
+
+    pub(crate) fn content_bytes(self) -> usize {
+        let mut encoded = [0_u8; 4];
+        encoded.copy_from_slice(&self.0[SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET..]);
+        u32::from_be_bytes(encoded) as usize
+    }
+
+    pub(crate) fn into_bytes(self) -> [u8; SOURCE_EVENT_ORDER_KEY_LEN] {
+        self.0
     }
 }
 
-pub(super) struct EncodedDocumentIdentities {
-    event: [u8; ctx_history_core::StableEntityId::CANONICAL_LEN],
-    session: [u8; ctx_history_core::StableEntityId::CANONICAL_LEN],
-    parent: Option<[u8; ctx_history_core::StableEntityId::CANONICAL_LEN]>,
-    root: [u8; ctx_history_core::StableEntityId::CANONICAL_LEN],
-}
-
-impl EncodedDocumentIdentities {
-    pub(super) fn new(document: &LexicalDocument) -> Result<Self> {
-        Ok(Self {
-            event: document.event_id.encode_canonical()?,
-            session: document.session_id.encode_canonical()?,
-            parent: document
-                .parent_session_id
-                .map(ctx_history_core::StableEntityId::encode_canonical)
-                .transpose()?,
-            root: document.root_session_id.encode_canonical()?,
-        })
+pub(crate) fn core_content_bytes(content: &CoreContent) -> Result<usize> {
+    let normalized_body_bytes = content.normalized_body.as_ref().map_or(0, String::len);
+    let structured_content_bytes = content
+        .structured_content
+        .as_ref()
+        .map(serde_json::to_vec)
+        .transpose()?
+        .map_or(0, |encoded| encoded.len());
+    let content_bytes = normalized_body_bytes
+        .checked_add(structured_content_bytes)
+        .ok_or(IndexError::CountOverflow)?;
+    if content_bytes > MAX_CORE_CONTENT_BYTES {
+        return Err(IndexError::DocumentFieldTooLarge {
+            field: "core_content",
+            actual: content_bytes,
+            maximum: MAX_CORE_CONTENT_BYTES,
+        });
     }
+    Ok(content_bytes)
 }
-
 pub(super) struct SourceToken([u8; 64]);
 
 impl SourceToken {
@@ -130,75 +462,126 @@ impl IndexDocument {
         self.fields.push((field, IndexValue::I64(value)));
     }
 
-    pub(super) fn from_lexical(
+    #[cfg(test)]
+    pub(super) fn into_tantivy_document(self) -> tantivy::TantivyDocument {
+        let mut document = tantivy::TantivyDocument::default();
+        for (field, value) in self.fields {
+            match value {
+                IndexValue::Text(value) => document.add_text(field, value),
+                IndexValue::SharedText(value) => document.add_text(field, value),
+                IndexValue::Bytes(value) => document.add_bytes(field, &value),
+                IndexValue::U64(value) => document.add_u64(field, value),
+                IndexValue::I64(value) => document.add_i64(field, value),
+            }
+        }
+        document
+    }
+
+    pub(super) fn from_core(
         fields: Fields,
-        document: LexicalDocument,
-        locator_bytes: Vec<u8>,
-        identities: EncodedDocumentIdentities,
+        record: CoreRecord,
+        core_record_bytes: Vec<u8>,
+        core_content_bytes: usize,
         source: IndexSourceFields,
-    ) -> Self {
-        let mut target = Self::with_capacity(BASE_FIELD_VALUES + document.touched_files.len() * 2);
-        target.add_text(fields.event_id, document.event_id.to_string());
+    ) -> Result<Self> {
+        let semantic_event_order =
+            crate::policy::is_semantic_candidate(&record.event_type, record.role.as_deref())
+                .then(|| SemanticEventOrderKey::for_event(record.event_id))
+                .transpose()?;
+        let source_event_order = SourceEventOrderKey::for_document(
+            &source,
+            record.event_id.digest(),
+            core_record_bytes.len(),
+            core_content_bytes,
+        )?;
+        let session_event_order = SessionEventOrderKey::for_core_record(&record)?;
+        let repository_path_values = record
+            .repository_file_observations
+            .iter()
+            .map(|observation| 1 + usize::from(observation.prior_relative_path.is_some()))
+            .sum::<usize>();
+        let mut target = Self::with_capacity(BASE_FIELD_VALUES + repository_path_values);
+        target.add_text(fields.event_id, record.event_id.to_string());
         target.add_text(
             fields.event_identity_digest,
-            crate::hex(&document.event_id.digest()),
+            crate::hex(&record.event_id.digest()),
         );
-        target.add_bytes(fields.event_identity, identities.event);
-        let event_uuid = document.event_id.as_uuid().as_u128();
+        let event_uuid = record.event_id.as_uuid().as_u128();
         target.add_u64(fields.event_id_high, (event_uuid >> 64) as u64);
         target.add_u64(fields.event_id_low, event_uuid as u64);
-        target.add_text(fields.session_id, document.session_id.to_string());
-        target.add_text(
-            fields.session_identity_digest,
-            crate::hex(&document.session_id.digest()),
-        );
-        target.add_bytes(fields.session_identity, identities.session);
-        if let (Some(parent_session_id), Some(parent_identity)) =
-            (document.parent_session_id, identities.parent)
-        {
+        target.add_text(fields.session_id, record.session_id.to_string());
+        let session_uuid = record.session_id.as_uuid().as_u128();
+        target.add_u64(fields.session_id_high, (session_uuid >> 64) as u64);
+        target.add_u64(fields.session_id_low, session_uuid as u64);
+        if let Some(parent_session_id) = record.parent_session_id {
             target.add_text(fields.parent_session_id, parent_session_id.to_string());
-            target.add_bytes(fields.parent_session_identity, parent_identity);
         }
-        target.add_text(fields.root_session_id, document.root_session_id.to_string());
-        target.add_bytes(fields.root_session_identity, identities.root);
+        target.add_text(fields.root_session_id, record.root_session_id.to_string());
         target.add_shared_text(fields.source_key, source.token);
-        target.add_bytes(fields.native_locator, locator_bytes);
         target.add_shared_text(fields.provider, source.provider);
         target.add_shared_text(fields.source_format, source.source_format);
-        if let Some(provider_session_id) = document.provider_session_id {
+        if record.source.provider() == "custom" {
+            if let Some(TypedKey::Composite(values)) = record.native_event_id.as_ref() {
+                if let [TypedKey::Utf8(provider_key), TypedKey::Utf8(source_id), TypedKey::Utf8(_)] =
+                    values.as_slice()
+                {
+                    target.add_text(fields.custom_provider_key, provider_key.clone());
+                    target.add_text(fields.custom_source_id, source_id.clone());
+                }
+            }
+        }
+        if let Some(provider_session_id) = record.provider_session_id {
             target.add_text(fields.provider_session_id, provider_session_id);
         }
-        if let Some(branch) = document.branch {
+        if let Some(branch) = record.branch {
             target.add_text(fields.branch, branch);
         }
-        if let Some(source_path) = document.source_path {
-            target.add_text(fields.workspace_filter, source_path.to_lowercase());
-            target.add_text(fields.source_path, source_path);
-        }
-        target.add_text(fields.agent_type, document.agent_type);
-        target.add_u64(fields.is_primary, u64::from(document.is_primary));
-        target.add_u64(fields.event_sequence, document.event_sequence);
-        if let Some(occurred_at_unix_ms) = document.occurred_at_unix_ms {
+        target.add_text(fields.agent_type, record.agent_type);
+        target.add_u64(fields.is_primary, u64::from(record.is_primary));
+        target.add_u64(fields.event_sequence, record.event_sequence);
+        if let Some(occurred_at_unix_ms) = record.occurred_at_unix_ms {
             target.add_i64(fields.occurred_at_unix_ms, occurred_at_unix_ms);
         }
-        target.add_text(fields.event_type, document.event_type);
-        if let Some(role) = document.role {
+        target.add_text(fields.event_type, record.event_type);
+        if let Some(role) = record.role {
             target.add_text(fields.role, role);
         }
-        target.add_text(fields.body_search, document.body);
-        if let Some(workspace) = document.workspace {
+        if let Some(body) = record.content.normalized_body {
+            target.add_text(fields.body_search, body);
+        }
+        if let Some(workspace) = record.workspace {
             target.add_text(fields.workspace_filter, workspace.to_lowercase());
-            target.add_text(fields.workspace, workspace);
         }
-        if let Some(cwd) = document.cwd {
+        if let Some(cwd) = record.cwd {
             target.add_text(fields.workspace_filter, cwd.to_lowercase());
-            target.add_text(fields.cwd, cwd);
         }
-        for touched_file in document.touched_files {
-            target.add_text(fields.touched_file_filter, touched_file.to_lowercase());
-            target.add_text(fields.touched_file, touched_file);
+        for observation in record.repository_file_observations {
+            target.add_text(
+                fields.touched_file_filter,
+                observation.relative_path.to_lowercase(),
+            );
+            if let Some(prior_relative_path) = observation.prior_relative_path {
+                target.add_text(
+                    fields.touched_file_filter,
+                    prior_relative_path.to_lowercase(),
+                );
+            }
         }
-        target
+        target.add_u64(
+            fields.core_content_bytes,
+            u64::try_from(core_content_bytes)
+                .map_err(|_| IndexError::WriterInvariant("Core content size does not fit u64"))?,
+        );
+        target.add_bytes(fields.core_record, core_record_bytes);
+        target.add_bytes(fields.source_event_order, source_event_order.into_bytes());
+        target.add_bytes(fields.session_event_order, session_event_order.into_bytes());
+        if let Some(semantic_event_order) = semantic_event_order {
+            target.add_bytes(
+                fields.semantic_event_order,
+                semantic_event_order.into_bytes(),
+            );
+        }
+        Ok(target)
     }
 }
 
@@ -225,9 +608,8 @@ impl Document for IndexDocument {
 #[cfg(test)]
 mod tests {
     use ctx_history_core::{
-        derive_event_id, derive_session_id, EventIdentityInput, LocatorRevisionPolicy,
-        NativeItemKey, NativeRecordCoordinate, NativeSessionKey, SessionIdentityInput,
-        SourceAnchor, SourceKey, SourceRecordLocator, TypedKey,
+        derive_event_id, derive_session_id, CoreRecord, EventIdentityInput, NativeItemKey,
+        NativeSessionKey, SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
     };
     use tantivy::schema::{Document, TantivyDocument};
     use tempfile::tempdir;
@@ -250,10 +632,9 @@ mod tests {
         .unwrap()
     }
 
-    fn lexical_document(source: &SourceKey) -> LexicalDocument {
-        let native_session_coordinate = TypedKey::utf8("session").unwrap();
+    fn core_record(source: &SourceKey) -> CoreRecord {
         let session_key =
-            NativeSessionKey::native_id("session", native_session_coordinate.clone()).unwrap();
+            NativeSessionKey::native_id("session", TypedKey::utf8("session").unwrap()).unwrap();
         let session_id = derive_session_id(SessionIdentityInput {
             source,
             logical_session_kind: "thread",
@@ -269,40 +650,21 @@ mod tests {
             subrecord_selector: None,
         })
         .unwrap();
-        LexicalDocument {
+        let mut record = CoreRecord::new_selected(
             event_id,
             session_id,
-            parent_session_id: None,
-            root_session_id: session_id,
-            source: source.clone(),
-            locator: SourceRecordLocator::new(
-                source.clone(),
-                NativeRecordCoordinate::Jsonl {
-                    byte_offset: 0,
-                    byte_length: 100,
-                    physical_ordinal: 1,
-                    native_session_key: Some(native_session_coordinate),
-                    native_event_key: Some(TypedKey::U64(1)),
-                },
-                LocatorRevisionPolicy::StableRecordEvidence,
-                None,
-                [1; 32],
-            )
-            .unwrap(),
-            provider_session_id: None,
-            branch: None,
-            source_path: None,
-            agent_type: "primary".to_owned(),
-            is_primary: true,
-            event_sequence: 1,
-            occurred_at_unix_ms: None,
-            event_type: "message".to_owned(),
-            role: None,
-            body: "body".to_owned(),
-            workspace: None,
-            cwd: None,
-            touched_files: Vec::new(),
-        }
+            session_id,
+            source.clone(),
+            1,
+            "message",
+            "primary",
+            true,
+            "index-document-test-v1",
+            "body",
+        )
+        .unwrap();
+        record.native_event_id = Some(TypedKey::U64(1));
+        record
     }
 
     #[test]
@@ -319,11 +681,11 @@ mod tests {
         let mut actual = IndexDocument::with_capacity(7);
         actual.add_text(fields.body_search, body);
         actual.add_shared_text(fields.source_key, Arc::clone(&source));
-        actual.add_bytes(fields.native_locator, bytes);
+        actual.add_bytes(fields.core_record, bytes);
         actual.add_u64(fields.event_sequence, 42);
         actual.add_i64(fields.occurred_at_unix_ms, -9);
-        actual.add_text(fields.touched_file, "first.rs".to_owned());
-        actual.add_text(fields.touched_file, "second.rs".to_owned());
+        actual.add_text(fields.touched_file_filter, "first.rs".to_owned());
+        actual.add_text(fields.touched_file_filter, "second.rs".to_owned());
 
         assert!(actual.fields.iter().any(|(field, value)| {
             *field == fields.body_search
@@ -334,18 +696,18 @@ mod tests {
                 && matches!(value, IndexValue::SharedText(value) if value.as_ptr() == source_pointer)
         }));
         assert!(actual.fields.iter().any(|(field, value)| {
-            *field == fields.native_locator
+            *field == fields.core_record
                 && matches!(value, IndexValue::Bytes(value) if value.as_ptr() == bytes_pointer)
         }));
 
         let mut expected = TantivyDocument::default();
         expected.add_text(fields.body_search, "move-backed body".repeat(512));
         expected.add_text(fields.source_key, source.as_ref());
-        expected.add_bytes(fields.native_locator, &[7_u8; 113]);
+        expected.add_bytes(fields.core_record, &[7_u8; 113]);
         expected.add_u64(fields.event_sequence, 42);
         expected.add_i64(fields.occurred_at_unix_ms, -9);
-        expected.add_text(fields.touched_file, "first.rs");
-        expected.add_text(fields.touched_file, "second.rs");
+        expected.add_text(fields.touched_file_filter, "first.rs");
+        expected.add_text(fields.touched_file_filter, "second.rs");
 
         assert_eq!(
             serde_json::to_value(actual.to_named_doc(&schema)).unwrap(),
@@ -361,7 +723,74 @@ mod tests {
     }
 
     #[test]
-    fn cached_source_descriptor_preserves_document_faults() {
+    fn source_event_order_key_has_exact_source_order_and_size_layout() {
+        let source = source("codex_session_jsonl");
+        let record = core_record(&source);
+        let core_record_bytes = record.encode_stored().unwrap();
+        let content_bytes = core_content_bytes(&record.content).unwrap();
+        let index_source = IndexSourceFields::new(&source, &crate::source_token(&source));
+        let key = SourceEventOrderKey::for_document(
+            &index_source,
+            record.event_id.digest(),
+            core_record_bytes.len(),
+            content_bytes,
+        )
+        .unwrap()
+        .into_bytes();
+
+        assert_eq!(&key[..32], &source.identity().digest());
+        assert_eq!(
+            &key[32..SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN],
+            &source.exact_descriptor_digest()
+        );
+        assert_eq!(
+            &key[SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET..SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET],
+            &record.event_id.digest()
+        );
+        assert_eq!(
+            u32::from_be_bytes(
+                key[SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET
+                    ..SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET]
+                    .try_into()
+                    .unwrap()
+            ) as usize,
+            core_record_bytes.len()
+        );
+        assert_eq!(
+            u32::from_be_bytes(
+                key[SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET..]
+                    .try_into()
+                    .unwrap()
+            ) as usize,
+            content_bytes
+        );
+    }
+
+    #[test]
+    fn session_event_order_key_matches_deterministic_session_coordinates() {
+        let source = source("codex_session_jsonl");
+        let mut record = core_record(&source);
+        record.event_sequence = 42;
+        record.occurred_at_unix_ms = Some(-9);
+        let key = SessionEventOrderKey::for_core_record(&record).unwrap();
+
+        assert_eq!(
+            &key.as_bytes()[..SESSION_EVENT_ORDER_SESSION_PREFIX_LEN],
+            &record.session_id.encode_canonical().unwrap()
+        );
+        assert_eq!(key.event_sequence(), 42);
+        assert_eq!(key.occurred_at_unix_ms(), Some(-9));
+        assert_eq!(key.event_id(), record.event_id.as_uuid());
+        assert!(
+            SessionEventOrderKey::session_range_end(record.session_id)
+                .unwrap()
+                .as_slice()
+                > key.as_bytes()
+        );
+    }
+
+    #[test]
+    fn cached_source_descriptor_preserves_core_record_and_active_source_faults() {
         let active = source("codex_session_jsonl");
         let descriptor_alias = source("codex_prompt_history_jsonl");
         assert_eq!(active, descriptor_alias);
@@ -372,15 +801,14 @@ mod tests {
             GenerationWriter::open(directory.path(), WriterOptions::default()).unwrap();
         writer.begin_source(active.clone()).unwrap();
 
-        let mut mismatched_identity = lexical_document(&active);
-        mismatched_identity.source = descriptor_alias.clone();
-        mismatched_identity.locator = lexical_document(&descriptor_alias).locator;
+        let mut mismatched_identity = core_record(&active);
+        mismatched_identity.event_id = mismatched_identity.session_id;
         assert!(matches!(
-            writer.add_document(mismatched_identity),
-            Err(IndexError::IdentitySourceMismatch(_))
+            writer.add_core_record(mismatched_identity),
+            Err(IndexError::CoreRecord(_))
         ));
         assert!(matches!(
-            writer.add_document(lexical_document(&descriptor_alias)),
+            writer.add_core_record(core_record(&descriptor_alias)),
             Err(IndexError::DocumentSourceNotActive)
         ));
     }

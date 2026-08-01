@@ -14,7 +14,7 @@ service. Hosted operations currently throw a structured `not_supported` error.
 - `tests/Ctx.AgentHistory.Tests/Ctx.AgentHistory.Tests.csproj` - dependency-free console
   smoke tests.
 - `examples/LocalAgentHistorySmoke/LocalAgentHistorySmoke.csproj` - offline dogfood toy app
-  that exercises status/search/show/locate with a fake transport by default.
+  that exercises status/search/show with a fake transport by default.
 
 ## Usage
 
@@ -59,19 +59,23 @@ Console.WriteLine(results.ToJsonObject().ToJsonString());
 - `ShowEventAsync(string, ShowEventOptions?)`
 - `ShowSessionAsync(string, ShowSessionOptions?)`
 - `ShowSessionAsync(ShowSessionOptions)`
-- `LocateEventAsync(string)`
-- `LocateSessionAsync(string)`
-- `LocateSessionAsync(SessionLookupOptions)`
 - `VersionAsync()`
 - `VersioningAsync()`
 
 Agent history operations return hand-written response records/classes such as
 `StatusResponse`, `SearchResponse`, `ShowEventResponse`, and
-`LocateSessionResponse`. Each response exposes typed properties for stable
+`ShowSessionResponse`. Each response exposes typed properties for stable
 agent-history-v1 fields and `ToJsonObject()` for the canonical envelope, so unknown
 future fields remain additive and accessible. SDK failures derive from
 `CtxAgentHistoryException` and expose `Code`, `Retryable`, `Details`, and
 `ToAgentHistoryError()`.
+
+`SearchHit`, `AgentHistoryEvent`, and `SessionRecord` expose provider identity,
+including `ProviderSessionId` and `SourceFormat`; for Codex,
+`ProviderSessionId` is the resume UUID. Event `Content` carries typed Core
+completeness and selected/redacted/omitted policy metadata. `Text` is the sole
+body, and per-event source paths, cursors, source locations, and previews are
+not exposed.
 
 ## Local CLI Adapter
 
@@ -84,8 +88,6 @@ future fields remain additive and accessible. SDK failures derive from
 - `ctx search <query>|--term <term>|--file <path> --format json`
 - `ctx show event ... --format json`
 - `ctx show session ... --format json`
-- `ctx locate event ... --format json`
-- `ctx locate session ... --format json`
 
 Set `LocalAgentHistoryConfig.CtxBinary`, `DataRoot`, `WorkingDirectory`,
 `Environment`, or `Timeout` to control command execution.

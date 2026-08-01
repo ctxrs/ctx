@@ -29,7 +29,7 @@ fn analytics_sends_coarse_cli_metadata_by_default() {
     assert_eq!(event["events"][0]["properties"]["output"], "human");
     assert_eq!(
         event["events"][0]["properties"]["finding_count_bucket"],
-        "6-20"
+        "2-5"
     );
     assert_capability_snapshot_is_coarse(analytics_event_properties(&event));
     assert_analytics_properties_are_allowlisted(analytics_event_properties(&event));

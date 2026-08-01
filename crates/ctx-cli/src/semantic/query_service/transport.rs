@@ -321,24 +321,6 @@ pub(in crate::semantic) fn daemon_source_refresh_request(
     )
 }
 
-/// Sends a bounded generation-bound hydration batch to the daemon-owned
-/// source service. The caller supplies only typed locator evidence; provider
-/// discovery and resolver state never cross into the CLI process.
-pub(in crate::semantic) fn daemon_source_hydration_request(
-    data_root: &Path,
-    request: Value,
-    timeout: StdDuration,
-    max_response_bytes: u64,
-) -> Result<Option<Value>> {
-    daemon_service_request(
-        data_root,
-        DaemonIpcService::SourceRefresh,
-        request,
-        timeout,
-        max_response_bytes,
-    )
-}
-
 pub(in crate::semantic) fn daemon_service_request(
     data_root: &Path,
     service: DaemonIpcService,

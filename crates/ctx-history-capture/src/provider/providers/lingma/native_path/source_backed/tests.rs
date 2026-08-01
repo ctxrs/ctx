@@ -1,19 +1,25 @@
 use std::path::Path;
 
-use ctx_history_core::{
-    BatchHydrationRequest, ContentSourceResolver, EventHydrationRequest, HydrationFailureKind,
-    LocatorRevisionPolicy, NativeRecordCoordinate, SourceRecordLocator, TypedKey,
-};
-use rusqlite::{config::DbConfig, Connection};
+use ctx_history_core::{AgentType, CaptureProvider, CoreRecord, TypedKey};
+use ctx_history_index::{VerifiedIndex, WriterOptions};
+use rusqlite::{config::DbConfig, params, Connection};
+use serde_json::json;
 
-use super::super::{lingma_query_counters, reset_lingma_query_counters, LingmaQueryCounters};
+use crate::{
+    provider::source_backed::{
+        refresh_source_backed_generation, register_lingma_source_backed_route,
+        SourceBackedProviderRegistry, SourceBackedRouteSelection,
+    },
+    provider_sources::provider_source_for_path,
+};
+
 use super::{
     discovery::LingmaRootAuthorizedSource,
-    hydration::LingmaSourceBackedResolverV0,
-    parsing::{
-        scan_lingma_source_backed_v0, set_before_database_certification, LingmaSourceBackedScanV0,
-    },
+    parsing::{set_before_database_certification, LingmaSourceBackedScanV0},
     *,
+};
+use crate::provider::providers::lingma::native_path::{
+    lingma_query_counters, reset_lingma_query_counters, LingmaQueryCounters,
 };
 
 fn create_database(path: &Path) -> Connection {
@@ -21,14 +27,14 @@ fn create_database(path: &Path) -> Connection {
     connection
         .execute_batch(
             "create table chat_record (
-                    session_id text not null,
-                    request_id text,
-                    chat_prompt text,
-                    summary text,
-                    error_result text,
-                    gmt_create integer,
-                    extra text
-                 );",
+                 session_id text not null,
+                 request_id text,
+                 chat_prompt text not null,
+                 summary text,
+                 error_result text,
+                 gmt_create integer,
+                 extra text
+             );",
         )
         .unwrap();
     connection
@@ -36,17 +42,17 @@ fn create_database(path: &Path) -> Connection {
 
 fn insert_row(
     connection: &Connection,
-    session_id: &str,
-    request_id: &str,
+    session: &str,
+    request: &str,
     prompt: &str,
     summary: Option<&str>,
 ) {
     connection
         .execute(
             "insert into chat_record (
-                    session_id, request_id, chat_prompt, summary, error_result, gmt_create, extra
-                 ) values (?1, ?2, ?3, ?4, null, 1700000000, null)",
-            rusqlite::params![session_id, request_id, prompt, summary],
+                 session_id, request_id, chat_prompt, summary, error_result, gmt_create, extra
+             ) values (?1, ?2, ?3, ?4, null, 1780000000, '{\"client\":\"lingma\"}')",
+            params![session, request, prompt, summary],
         )
         .unwrap();
 }
@@ -55,58 +61,89 @@ fn database(path: &Path, lineage: &str) -> LingmaDatabaseSourceV0 {
     LingmaDatabaseSourceV0::new(path, TypedKey::utf8(lineage).unwrap()).unwrap()
 }
 
+fn inventory(databases: Vec<LingmaDatabaseSourceV0>) -> LingmaSourceInventoryV0 {
+    LingmaSourceInventoryV0::new(TypedKey::utf8("installed-clients").unwrap(), databases).unwrap()
+}
+
+fn all_records(scan: &LingmaSourceBackedScanV0) -> Vec<&CoreRecord> {
+    scan.databases()
+        .iter()
+        .flat_map(|database| database.records())
+        .collect()
+}
+
+fn scan_records(source_inventory: LingmaSourceInventoryV0) -> Vec<CoreRecord> {
+    let closing = source_inventory.clone();
+    let scan = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        source_inventory,
+        || Ok(closing),
+    )
+    .unwrap();
+    all_records(&scan)
+        .into_iter()
+        .map(|record| {
+            record.validate_contract().unwrap();
+            record.clone()
+        })
+        .collect()
+}
+
+fn writer_options() -> WriterOptions {
+    WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    }
+}
+
+fn register_route(
+    path: &Path,
+    data_root: &Path,
+    databases: Vec<(std::path::PathBuf, TypedKey)>,
+) -> SourceBackedProviderRegistry {
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_lingma_source_backed_route(
+        &mut registry,
+        provider_source_for_path(CaptureProvider::Lingma, path.to_path_buf()),
+        SourceBackedRouteSelection::Automatic,
+        data_root,
+        TypedKey::utf8("installed-clients").unwrap(),
+        databases,
+    )
+    .unwrap();
+    registry
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn stock_sqlite_snapshot_finish_rejects_leaf_swap_after_open() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("local.db");
-    let attacker = temp.path().join("attacker.db");
+    let replacement = temp.path().join("replacement.db");
     let original = temp.path().join("original.db");
-    drop(create_database(&path));
-    drop(create_database(&attacker));
+    let connection = create_database(&path);
+    insert_row(&connection, "expected", "expected", "expected", None);
+    drop(connection);
+    let replacement_connection = create_database(&replacement);
+    insert_row(
+        &replacement_connection,
+        "attacker",
+        "attacker",
+        "attacker",
+        None,
+    );
+    drop(replacement_connection);
 
     let authority =
         LingmaRootAuthorizedSource::retain(crate::test_provider_sqlite_data_root(), &path).unwrap();
     let snapshot = authority.open_snapshot().unwrap();
     std::fs::rename(&path, &original).unwrap();
-    std::fs::rename(&attacker, &path).unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
     assert!(snapshot.finish().is_err());
 }
 
-fn inventory(databases: Vec<LingmaDatabaseSourceV0>) -> LingmaSourceInventoryV0 {
-    LingmaSourceInventoryV0::new(TypedKey::utf8("test-installed-clients").unwrap(), databases)
-        .unwrap()
-}
-
-fn all_records(scan: &LingmaSourceBackedScanV0) -> Vec<&LingmaSourceBackedRecordV0> {
-    scan.databases
-        .iter()
-        .flat_map(|database| database.records.iter())
-        .collect()
-}
-
-fn event_request(record: &LingmaSourceBackedRecordV0) -> EventHydrationRequest {
-    EventHydrationRequest::new(record.document.event_id, record.document.locator.clone()).unwrap()
-}
-
-fn request_with_locator_evidence(
-    record: &LingmaSourceBackedRecordV0,
-    coordinate: NativeRecordCoordinate,
-    record_digest: [u8; 32],
-) -> EventHydrationRequest {
-    let locator = SourceRecordLocator::new(
-        record.document.source.clone(),
-        coordinate,
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        record_digest,
-    )
-    .unwrap();
-    EventHydrationRequest::new(record.document.event_id, locator).unwrap()
-}
-
 #[test]
-fn source_backed_scan_and_hydration_queries_are_bounded_by_row_sets() {
+fn cold_scan_is_bounded_deterministic_and_emits_valid_stable_core() {
     const ROW_COUNT: i64 = 257;
 
     let temp = crate::test_support_paths::tempdir().unwrap();
@@ -125,38 +162,31 @@ fn source_backed_scan_and_hydration_queries_are_bounded_by_row_sets() {
     let source_inventory = inventory(vec![database(&path, "vscode:stable:bounded-sets")]);
 
     reset_lingma_query_counters();
-    let scan = scan_lingma_source_backed_v0(
-        crate::test_provider_sqlite_data_root(),
-        source_inventory.clone(),
-        || Ok(source_inventory.clone()),
-    )
-    .unwrap();
-    let records = all_records(&scan);
-    assert_eq!(records.len(), usize::try_from(ROW_COUNT).unwrap());
+    let first = scan_records(source_inventory.clone());
+    assert_eq!(first.len(), usize::try_from(ROW_COUNT).unwrap());
     assert_eq!(
-        records
+        first
             .iter()
-            .map(|record| record.document.body.as_str())
+            .map(|record| record.content.meaningful_text())
             .collect::<Vec<_>>(),
         (1..=ROW_COUNT)
             .map(|rowid| format!("prompt-{rowid}"))
             .collect::<Vec<_>>()
     );
-    for (index, record) in records.iter().enumerate() {
-        let expected_rowid = i64::try_from(index).unwrap() + 1;
-        assert!(matches!(
-            record.document.locator.coordinate(),
-            NativeRecordCoordinate::ProviderSqlite {
-                logical_relation,
-                primary_key: TypedKey::Composite(parts),
-                ..
-            } if logical_relation == LOGICAL_RELATION
-                && matches!(
-                    parts.as_slice(),
-                    [TypedKey::I64(rowid), TypedKey::Utf8(kind), TypedKey::Composite(_)]
-                        if *rowid == expected_rowid && kind == USER_PROMPT_COORDINATE
-                )
-        ));
+    for (index, record) in first.iter().enumerate() {
+        let rowid = i64::try_from(index).unwrap() + 1;
+        assert_eq!(record.event_sequence, u64::try_from(index).unwrap() * 2);
+        assert_eq!(
+            record.native_event_id,
+            Some(TypedKey::Composite(vec![
+                TypedKey::Composite(vec![
+                    TypedKey::Utf8("request".to_owned()),
+                    TypedKey::Utf8(format!("session-{rowid}")),
+                    TypedKey::Utf8(format!("request-{rowid}")),
+                ]),
+                TypedKey::Utf8(USER_PROMPT_COORDINATE.to_owned()),
+            ]))
+        );
     }
     assert_eq!(
         lingma_query_counters(),
@@ -164,97 +194,28 @@ fn source_backed_scan_and_hydration_queries_are_bounded_by_row_sets() {
             candidate_set_reads: 5,
             raw_row_set_reads: 4,
             raw_rows_read: 257,
-            identity_set_reads: 0,
         }
     );
 
     reset_lingma_query_counters();
-    let replay = scan_lingma_source_backed_v0(
-        crate::test_provider_sqlite_data_root(),
-        source_inventory.clone(),
-        || Ok(source_inventory.clone()),
-    )
-    .unwrap();
-    assert_eq!(
-        all_records(&replay)
-            .iter()
-            .map(|record| (
-                record.document.event_id,
-                record.document.locator.coordinate().clone(),
-                record.document.body.clone(),
-            ))
-            .collect::<Vec<_>>(),
-        records
-            .iter()
-            .map(|record| (
-                record.document.event_id,
-                record.document.locator.coordinate().clone(),
-                record.document.body.clone(),
-            ))
-            .collect::<Vec<_>>()
-    );
+    let replay = scan_records(source_inventory);
+    assert_eq!(replay, first);
     assert_eq!(
         lingma_query_counters(),
         LingmaQueryCounters {
             candidate_set_reads: 5,
             raw_row_set_reads: 4,
             raw_rows_read: 257,
-            identity_set_reads: 0,
-        }
-    );
-
-    let requested = records
-        .iter()
-        .rev()
-        .map(|record| event_request(record))
-        .collect::<Vec<_>>();
-    reset_lingma_query_counters();
-    let hydrated = LingmaSourceBackedResolverV0::new(
-        crate::test_provider_sqlite_data_root(),
-        &source_inventory,
-    )
-    .unwrap()
-    .hydrate_batch_request(&BatchHydrationRequest::new(requested.clone()).unwrap())
-    .unwrap();
-    assert_eq!(
-        hydrated
-            .records()
-            .iter()
-            .map(|record| record.event_id)
-            .collect::<Vec<_>>(),
-        requested
-            .iter()
-            .map(EventHydrationRequest::event_id)
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        hydrated
-            .records()
-            .iter()
-            .map(|record| String::from_utf8(record.provider_bytes.clone()).unwrap())
-            .collect::<Vec<_>>(),
-        (1..=ROW_COUNT)
-            .rev()
-            .map(|rowid| format!("prompt-{rowid}"))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        lingma_query_counters(),
-        LingmaQueryCounters {
-            candidate_set_reads: 0,
-            raw_row_set_reads: 2,
-            raw_rows_read: 257,
-            identity_set_reads: 2,
         }
     );
 }
 
 #[test]
-fn source_backed_cold_scan_certifies_stable_full_meaningful_bodies() {
+fn finite_inventory_certifies_complete_bodies_and_order_independent_ids() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let first_path = temp.path().join("vscode-local.db");
     let second_path = temp.path().join("jetbrains-local.db");
-    let long_prompt = format!("vscode prompt {} lingma-full-body-tail", "v".repeat(4_096));
+    let long_prompt = format!("vscode prompt {} lingma-full-body-tail", "v".repeat(20_000));
     let first = create_database(&first_path);
     insert_row(
         &first,
@@ -281,30 +242,33 @@ fn source_backed_cold_scan_certifies_stable_full_meaningful_bodies() {
     let closing = opening.clone();
     let scan =
         scan_lingma_source_backed_v0(crate::test_provider_sqlite_data_root(), opening, || {
-            Ok(closing.clone())
+            Ok(closing)
         })
         .unwrap();
-    assert_eq!(scan.databases.len(), 2);
+    assert_eq!(scan.databases().len(), 2);
     assert_eq!(all_records(&scan).len(), 4);
     let long_user = all_records(&scan)
         .into_iter()
         .find(|record| {
-            record.document.provider_session_id.as_deref() == Some("vscode-session")
-                && record.document.role.as_deref() == Some("user")
+            record.provider_session_id.as_deref() == Some("vscode-session")
+                && record.role.as_deref() == Some("user")
         })
         .unwrap();
-    assert_eq!(long_user.document.body, long_prompt);
-    assert!(long_user.document.body.ends_with("lingma-full-body-tail"));
+    assert_eq!(
+        long_user.content.normalized_body.as_deref(),
+        Some(long_prompt.as_str())
+    );
     assert!(all_records(&scan).iter().all(|record| {
-        record.document.parent_session_id.is_none()
-            && record.document.root_session_id == record.document.session_id
-            && record.document.provider_session_id.is_some()
-            && record.document.branch.is_none()
-            && record.document.source_path.is_some()
-            && record.document.agent_type == "primary"
-            && record.document.is_primary
+        record.parent_session_id.is_none()
+            && record.root_session_id == record.session_id
+            && record.provider_session_id.is_some()
+            && record.branch.is_none()
+            && record.agent_type == AgentType::Primary.as_str()
+            && record.is_primary
+            && record.native_event_id.is_some()
+            && record.repository_bindings.is_empty()
     }));
-    assert!(scan.databases.iter().all(|database| {
+    assert!(scan.databases().iter().all(|database| {
         database.certificate.counts().indexed_documents == 2
             && database.certificate.counts().certified_bytes != 0
     }));
@@ -313,19 +277,14 @@ fn source_backed_cold_scan_certifies_stable_full_meaningful_bodies() {
         database(&second_path, "jetbrains:idea:2026.2"),
         database(&first_path, "vscode:stable:default"),
     ]);
-    let replay = scan_lingma_source_backed_v0(
-        crate::test_provider_sqlite_data_root(),
-        reversed.clone(),
-        || Ok(reversed),
-    )
-    .unwrap();
+    let replay = scan_records(reversed);
     let mut first_ids = all_records(&scan)
         .into_iter()
-        .map(|record| record.document.event_id.digest())
+        .map(|record| record.event_id.digest())
         .collect::<Vec<_>>();
-    let mut replay_ids = all_records(&replay)
-        .into_iter()
-        .map(|record| record.document.event_id.digest())
+    let mut replay_ids = replay
+        .iter()
+        .map(|record| record.event_id.digest())
         .collect::<Vec<_>>();
     first_ids.sort();
     replay_ids.sort();
@@ -333,7 +292,7 @@ fn source_backed_cold_scan_certifies_stable_full_meaningful_bodies() {
 }
 
 #[test]
-fn stock_sqlite_snapshot_scan_sees_committed_content_retained_in_active_wal() {
+fn stock_sqlite_snapshot_scan_sees_complete_content_retained_in_active_wal() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("local.db");
     let writer = create_database(&path);
@@ -366,25 +325,15 @@ fn stock_sqlite_snapshot_scan_sees_committed_content_retained_in_active_wal() {
     assert!(path.with_file_name("local.db-wal").exists());
     assert!(path.with_file_name("local.db-shm").exists());
 
-    let opening = inventory(vec![database(&path, "vscode:stable:wal")]);
-    let admitted = opening.clone();
-    let closing = opening.clone();
-    let scan =
-        scan_lingma_source_backed_v0(crate::test_provider_sqlite_data_root(), opening, || {
-            Ok(closing)
-        })
+    let records = scan_records(inventory(vec![database(&path, "vscode:stable:wal")]));
+    let user = records
+        .iter()
+        .find(|record| record.role.as_deref() == Some("user"))
         .unwrap();
-    let user = all_records(&scan)
-        .into_iter()
-        .find(|record| record.document.role.as_deref() == Some("user"))
-        .unwrap();
-    assert_eq!(user.document.body, "committed Lingma WAL prompt");
-    let hydrated =
-        LingmaSourceBackedResolverV0::new(crate::test_provider_sqlite_data_root(), &admitted)
-            .unwrap()
-            .hydrate_record(user)
-            .unwrap();
-    assert_eq!(hydrated.provider_bytes, b"committed Lingma WAL prompt");
+    assert_eq!(
+        user.content.normalized_body.as_deref(),
+        Some("committed Lingma WAL prompt")
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -405,552 +354,238 @@ fn stock_sqlite_snapshot_finish_precedes_source_certification() {
         None,
     );
     drop(replacement_connection);
-    let inventory = inventory(vec![database(&path, "vscode:stable:finish-order")]);
-    let closing = inventory.clone();
+    let source_inventory = inventory(vec![database(&path, "vscode:stable:finish-order")]);
+    let closing = source_inventory.clone();
     let replaced_path = path.clone();
     set_before_database_certification(Some(Box::new(move || {
         std::fs::rename(&replacement, &replaced_path).unwrap();
     })));
 
-    let result =
-        scan_lingma_source_backed_v0(crate::test_provider_sqlite_data_root(), inventory, || {
-            Ok(closing)
-        });
+    let result = scan_lingma_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        source_inventory,
+        || Ok(closing),
+    );
     assert!(result.is_err());
 }
 
 #[test]
-fn source_backed_exact_hydration_and_native_batch_preserve_order_and_full_text() {
+fn tantivy_round_trip_is_complete_locator_free_and_replacement_lifecycle_is_exact() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let path = temp.path().join("local.db");
-    let prompt = format!(
-        "exact row-local Lingma prompt {} lingma-user-tail",
-        "x".repeat(4_096)
-    );
-    let summary = format!(
-        "exact Lingma assistant summary {} lingma-summary-tail",
-        "s".repeat(4_096)
-    );
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let original_text = format!("lingma-core-{}-original-tail", "x".repeat(20_000));
+    let original_prompt = json!({
+        "message": original_text,
+        "native": {"format": "structured"},
+    })
+    .to_string();
+    let summary = format!("lingma-summary-{}-summary-tail", "s".repeat(20_000));
     let connection = create_database(&path);
     insert_row(
         &connection,
-        "exact-session",
-        "exact-request",
-        &prompt,
+        "core-session",
+        "core-request",
+        &original_prompt,
         Some(&summary),
     );
-    insert_row(
-        &connection,
-        "error-session",
-        "error-request",
-        "error prompt",
-        None,
+    drop(connection);
+    let lineage = TypedKey::utf8("vscode:stable:core").unwrap();
+    let expected = scan_records(inventory(vec![LingmaDatabaseSourceV0::new(
+        &path,
+        lineage.clone(),
+    )
+    .unwrap()]))
+    .into_iter()
+    .find(|record| record.role.as_deref() == Some("user"))
+    .unwrap();
+    let registry = register_route(&path, &data_root, vec![(path.clone(), lineage.clone())]);
+
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    let stored = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .core_record_by_id(expected.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored, expected);
+    assert_eq!(
+        stored.content.normalized_body.as_deref(),
+        Some(original_prompt.as_str())
     );
-    connection
+    assert_eq!(
+        stored.content.structured_content.as_ref().unwrap()["message"],
+        original_text
+    );
+    assert_eq!(
+        stored.native_event_id,
+        Some(TypedKey::Composite(vec![
+            TypedKey::Composite(vec![
+                TypedKey::Utf8("request".to_owned()),
+                TypedKey::Utf8("core-session".to_owned()),
+                TypedKey::Utf8("core-request".to_owned()),
+            ]),
+            TypedKey::Utf8(USER_PROMPT_COORDINATE.to_owned()),
+        ]))
+    );
+    assert!(stored.repository_bindings.is_empty());
+    assert!(stored.repository_abstentions.is_empty());
+    assert!(stored.repository_file_observations.is_empty());
+    assert!(stored.repository_vcs_observations.is_empty());
+    let encoded = serde_json::to_string(&stored).unwrap();
+    assert!(!encoded.contains("locator"));
+    assert!(!encoded.contains("source_path"));
+    assert!(!encoded.contains(path.to_string_lossy().as_ref()));
+
+    let noop = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_eq!(noop.commit.generation_id, cold.commit.generation_id);
+
+    let rewritten_text = format!("lingma-core-{}-rewritten-tail", "r".repeat(20_000));
+    let rewritten_prompt = json!({
+        "message": rewritten_text,
+        "native": {"format": "structured"},
+    })
+    .to_string();
+    Connection::open(&path)
+        .unwrap()
         .execute(
-            "update chat_record
-                    set error_result = ?1
-                  where request_id = 'error-request'",
-            [format!(
-                "provider failure {} lingma-error-tail",
-                "e".repeat(4_096)
-            )],
+            "update chat_record set chat_prompt = ?1 where request_id = 'core-request'",
+            [&rewritten_prompt],
         )
         .unwrap();
-    drop(connection);
-    let inventory = inventory(vec![database(&path, "vscode:profile:exact")]);
-    let closing = inventory.clone();
-    let scan = scan_lingma_source_backed_v0(
-        crate::test_provider_sqlite_data_root(),
-        inventory.clone(),
-        || Ok(closing),
-    )
-    .unwrap();
-    let records = all_records(&scan);
-    let user = records
-        .iter()
-        .copied()
-        .find(|record| record.document.body.ends_with("lingma-user-tail"))
-        .unwrap();
-    let assistant = records
-        .iter()
-        .copied()
-        .find(|record| record.document.body.ends_with("lingma-summary-tail"))
-        .unwrap();
-    let error = records
-        .iter()
-        .copied()
-        .find(|record| record.document.body.ends_with("lingma-error-tail"))
-        .unwrap();
-    assert_eq!(user.document.body, prompt);
-    assert_eq!(assistant.document.body, summary);
-    assert!(error.document.body.starts_with("Lingma error result: "));
-    assert!(matches!(
-        user.document.locator.coordinate(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation,
-            primary_key: TypedKey::Composite(parts),
-            row_version: Some(TypedKey::Bytes(version)),
-        } if logical_relation == LOGICAL_RELATION
-            && matches!(
-                parts.as_slice(),
-                [
-                    TypedKey::I64(1),
-                    TypedKey::Utf8(kind),
-                    TypedKey::Composite(_)
-                ]
-                    if kind == USER_PROMPT_COORDINATE
-            )
-            && version.len() == 32
-    ));
+    // The published Core record remains immutable until a new generation is committed.
     assert_eq!(
-        user.document.locator.revision_policy(),
-        LocatorRevisionPolicy::StableRecordEvidence
+        VerifiedIndex::open(&index_root)
+            .unwrap()
+            .core_record_by_id(expected.event_id.as_uuid())
+            .unwrap()
+            .unwrap()
+            .content
+            .normalized_body
+            .as_deref(),
+        Some(original_prompt.as_str())
     );
-    assert!(user
-        .document
-        .locator
-        .certified_source_revision_digest()
+
+    let rewritten =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_ne!(rewritten.commit.generation_id, cold.commit.generation_id);
+    let rewritten_record = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .core_record_by_id(expected.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(rewritten_record.event_id, expected.event_id);
+    assert_eq!(
+        rewritten_record.content.normalized_body.as_deref(),
+        Some(rewritten_prompt.as_str())
+    );
+
+    let connection = Connection::open(&path).unwrap();
+    insert_row(
+        &connection,
+        "appended-session",
+        "appended-request",
+        "appended prompt",
+        None,
+    );
+    drop(connection);
+    let appended = scan_records(inventory(vec![LingmaDatabaseSourceV0::new(
+        &path,
+        lineage.clone(),
+    )
+    .unwrap()]))
+    .into_iter()
+    .find(|record| record.provider_session_id.as_deref() == Some("appended-session"))
+    .unwrap();
+    let appended_generation =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_ne!(
+        appended_generation.commit.generation_id,
+        rewritten.commit.generation_id
+    );
+    assert!(VerifiedIndex::open(&index_root)
+        .unwrap()
+        .core_record_by_id(appended.event_id.as_uuid())
+        .unwrap()
+        .is_some());
+
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "delete from chat_record where request_id = 'appended-request'",
+            [],
+        )
+        .unwrap();
+    let deleted =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_ne!(
+        deleted.commit.generation_id,
+        appended_generation.commit.generation_id
+    );
+    assert!(VerifiedIndex::open(&index_root)
+        .unwrap()
+        .core_record_by_id(appended.event_id.as_uuid())
+        .unwrap()
         .is_none());
 
-    let resolver =
-        LingmaSourceBackedResolverV0::new(crate::test_provider_sqlite_data_root(), &inventory)
-            .unwrap();
-    assert_eq!(
-        resolver.hydrate_record(user).unwrap().provider_bytes,
-        prompt.as_bytes()
+    let empty_registry = register_route(&path, &data_root, Vec::new());
+    std::fs::remove_file(&path).unwrap();
+    let first_missing =
+        refresh_source_backed_generation(&index_root, &empty_registry, writer_options()).unwrap();
+    assert_ne!(
+        first_missing.commit.generation_id,
+        deleted.commit.generation_id
     );
-    assert_eq!(
-        resolver.hydrate_record(assistant).unwrap().provider_bytes,
-        summary.as_bytes()
-    );
-    assert!(resolver
-        .hydrate_record(error)
+    assert!(VerifiedIndex::open(&index_root)
         .unwrap()
-        .provider_bytes
-        .ends_with(b"lingma-error-tail"));
-
-    let requested = vec![
-        event_request(error),
-        event_request(user),
-        event_request(assistant),
-    ];
-    let batch = BatchHydrationRequest::new(requested.clone()).unwrap();
-    let hydrated = resolver.hydrate_batch_request(&batch).unwrap();
-    assert_eq!(
-        hydrated
-            .records()
-            .iter()
-            .map(|record| record.event_id)
-            .collect::<Vec<_>>(),
-        requested
-            .iter()
-            .map(EventHydrationRequest::event_id)
-            .collect::<Vec<_>>()
-    );
-    assert!(hydrated.records()[0]
-        .provider_bytes
-        .ends_with(b"lingma-error-tail"));
-    assert_eq!(hydrated.records()[1].provider_bytes, prompt.as_bytes());
-    assert_eq!(hydrated.records()[2].provider_bytes, summary.as_bytes());
-}
-
-#[test]
-fn source_backed_hydration_types_stale_row_and_record_digest() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let stale_path = temp.path().join("stale.db");
-    let connection = create_database(&stale_path);
-    insert_row(
-        &connection,
-        "stale-session",
-        "stale-request",
-        "original prompt",
-        None,
-    );
-    drop(connection);
-    let stale_inventory = inventory(vec![database(&stale_path, "jetbrains:idea:stale-source")]);
-    let scan = scan_lingma_source_backed_v0(
-        crate::test_provider_sqlite_data_root(),
-        stale_inventory.clone(),
-        || Ok(stale_inventory.clone()),
-    )
-    .unwrap();
-    let stale_record = all_records(&scan)
-        .into_iter()
-        .find(|record| record.document.role.as_deref() == Some("user"))
-        .unwrap();
-    Connection::open(&stale_path)
+        .core_record_by_id(expected.event_id.as_uuid())
         .unwrap()
-        .execute(
-            "update chat_record set chat_prompt = 'rewritten prompt'",
-            [],
-        )
-        .unwrap();
-    let failure = LingmaSourceBackedResolverV0::new(
-        crate::test_provider_sqlite_data_root(),
-        &stale_inventory,
-    )
-    .unwrap()
-    .hydrate_record(stale_record)
-    .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
-
-    let digest_path = temp.path().join("digest.db");
-    let connection = create_database(&digest_path);
-    insert_row(
-        &connection,
-        "digest-session",
-        "digest-request",
-        "digest prompt",
-        None,
+        .is_some());
+    let second_missing =
+        refresh_source_backed_generation(&index_root, &empty_registry, writer_options()).unwrap();
+    assert_ne!(
+        second_missing.commit.generation_id,
+        first_missing.commit.generation_id
     );
-    drop(connection);
-    let digest_inventory = inventory(vec![database(&digest_path, "vscode:stable:bad-digest")]);
-    let scan = scan_lingma_source_backed_v0(
-        crate::test_provider_sqlite_data_root(),
-        digest_inventory.clone(),
-        || Ok(digest_inventory.clone()),
-    )
-    .unwrap();
-    let digest_record = all_records(&scan)
-        .into_iter()
-        .find(|record| record.document.role.as_deref() == Some("user"))
-        .unwrap();
-    let NativeRecordCoordinate::ProviderSqlite {
-        logical_relation,
-        primary_key,
-        ..
-    } = digest_record.document.locator.coordinate()
-    else {
-        panic!("expected provider SQLite locator");
-    };
-    let coordinate = NativeRecordCoordinate::ProviderSqlite {
-        logical_relation: logical_relation.clone(),
-        primary_key: primary_key.clone(),
-        row_version: Some(TypedKey::bytes(vec![0x5a; 32]).unwrap()),
-    };
-    let request = request_with_locator_evidence(
-        digest_record,
-        coordinate,
-        *digest_record.document.locator.record_digest(),
-    );
-    let failure = LingmaSourceBackedResolverV0::new(
-        crate::test_provider_sqlite_data_root(),
-        &digest_inventory,
-    )
-    .unwrap()
-    .hydrate_event(&request)
-    .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
-    let request = request_with_locator_evidence(
-        digest_record,
-        digest_record.document.locator.coordinate().clone(),
-        [0xa5; 32],
-    );
-    let failure = LingmaSourceBackedResolverV0::new(
-        crate::test_provider_sqlite_data_root(),
-        &digest_inventory,
-    )
-    .unwrap()
-    .hydrate_event(&request)
-    .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
-
-    let native_path = temp.path().join("native-key.db");
-    let connection = create_database(&native_path);
-    insert_row(
-        &connection,
-        "native-session",
-        "native-request",
-        "native prompt",
-        None,
-    );
-    drop(connection);
-    let native_inventory = inventory(vec![database(&native_path, "vscode:stable:native-key")]);
-    let scan = scan_lingma_source_backed_v0(
-        crate::test_provider_sqlite_data_root(),
-        native_inventory.clone(),
-        || Ok(native_inventory.clone()),
-    )
-    .unwrap();
-    let native_record = all_records(&scan)[0];
-    let connection = Connection::open(&native_path).unwrap();
-    insert_row(
-        &connection,
-        "native-session",
-        "native-request",
-        "duplicate native prompt",
-        None,
-    );
-    drop(connection);
-    let request = request_with_locator_evidence(
-        native_record,
-        native_record.document.locator.coordinate().clone(),
-        *native_record.document.locator.record_digest(),
-    );
-    let failure = LingmaSourceBackedResolverV0::new(
-        crate::test_provider_sqlite_data_root(),
-        &native_inventory,
-    )
-    .unwrap()
-    .hydrate_event(&request)
-    .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
-}
-
-#[test]
-fn source_backed_hydration_distinguishes_missing_row_deletion_and_unavailable_root() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let missing_path = temp.path().join("missing-row.db");
-    let connection = create_database(&missing_path);
-    insert_row(
-        &connection,
-        "missing-session",
-        "missing-request",
-        "missing prompt",
-        None,
-    );
-    drop(connection);
-    let missing_inventory = inventory(vec![database(&missing_path, "vscode:stable:missing-row")]);
-    let scan = scan_lingma_source_backed_v0(
-        crate::test_provider_sqlite_data_root(),
-        missing_inventory.clone(),
-        || Ok(missing_inventory.clone()),
-    )
-    .unwrap();
-    let record = all_records(&scan)
-        .into_iter()
-        .find(|record| record.document.role.as_deref() == Some("user"))
-        .unwrap();
-    Connection::open(&missing_path)
+    assert!(VerifiedIndex::open(&index_root)
         .unwrap()
-        .execute("delete from chat_record", [])
-        .unwrap();
-    let request = request_with_locator_evidence(
-        record,
-        record.document.locator.coordinate().clone(),
-        *record.document.locator.record_digest(),
-    );
-    let failure = LingmaSourceBackedResolverV0::new(
-        crate::test_provider_sqlite_data_root(),
-        &missing_inventory,
-    )
-    .unwrap()
-    .hydrate_event(&request)
-    .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::MissingRecord);
-
-    let deleted_path = temp.path().join("deleted.db");
-    let connection = create_database(&deleted_path);
-    insert_row(
-        &connection,
-        "deleted-session",
-        "deleted-request",
-        "deleted prompt",
-        None,
-    );
-    drop(connection);
-    let deleted_inventory = inventory(vec![database(&deleted_path, "vscode:stable:deleted")]);
-    let scan = scan_lingma_source_backed_v0(
-        crate::test_provider_sqlite_data_root(),
-        deleted_inventory.clone(),
-        || Ok(deleted_inventory.clone()),
-    )
-    .unwrap();
-    let request = event_request(all_records(&scan)[0]);
-    std::fs::remove_file(&deleted_path).unwrap();
-    let failure = LingmaSourceBackedResolverV0::new(
-        crate::test_provider_sqlite_data_root(),
-        &deleted_inventory,
-    )
-    .unwrap()
-    .hydrate_event(&request)
-    .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::ConfirmedDeleted);
-
-    let available_root = temp.path().join("available-root");
-    std::fs::create_dir(&available_root).unwrap();
-    let unavailable_path = available_root.join("local.db");
-    let connection = create_database(&unavailable_path);
-    insert_row(
-        &connection,
-        "offline-session",
-        "offline-request",
-        "offline prompt",
-        None,
-    );
-    drop(connection);
-    let unavailable_inventory = inventory(vec![database(
-        &unavailable_path,
-        "jetbrains:idea:unavailable-root",
-    )]);
-    let scan = scan_lingma_source_backed_v0(
-        crate::test_provider_sqlite_data_root(),
-        unavailable_inventory.clone(),
-        || Ok(unavailable_inventory.clone()),
-    )
-    .unwrap();
-    let request = event_request(all_records(&scan)[0]);
-    std::fs::rename(&available_root, temp.path().join("offline-root")).unwrap();
-    let failure = LingmaSourceBackedResolverV0::new(
-        crate::test_provider_sqlite_data_root(),
-        &unavailable_inventory,
-    )
-    .unwrap()
-    .hydrate_event(&request)
-    .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::TemporarilyUnavailable);
-}
-
-#[test]
-fn source_backed_hydration_types_malformed_row_and_unsupported_schema() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let malformed_path = temp.path().join("malformed.db");
-    let connection = create_database(&malformed_path);
-    insert_row(
-        &connection,
-        "malformed-session",
-        "malformed-request",
-        "valid prompt",
-        None,
-    );
-    drop(connection);
-    let malformed_inventory = inventory(vec![database(&malformed_path, "vscode:stable:malformed")]);
-    let scan = scan_lingma_source_backed_v0(
-        crate::test_provider_sqlite_data_root(),
-        malformed_inventory.clone(),
-        || Ok(malformed_inventory.clone()),
-    )
-    .unwrap();
-    let record = all_records(&scan)[0];
-    Connection::open(&malformed_path)
+        .core_record_by_id(expected.event_id.as_uuid())
         .unwrap()
-        .execute(
-            "update chat_record set chat_prompt = cast(x'80' as text)",
-            [],
-        )
-        .unwrap();
-    let request = request_with_locator_evidence(
-        record,
-        record.document.locator.coordinate().clone(),
-        *record.document.locator.record_digest(),
+        .is_some());
+    let source_deleted =
+        refresh_source_backed_generation(&index_root, &empty_registry, writer_options()).unwrap();
+    assert_ne!(
+        source_deleted.commit.generation_id,
+        second_missing.commit.generation_id
     );
-    let failure = LingmaSourceBackedResolverV0::new(
-        crate::test_provider_sqlite_data_root(),
-        &malformed_inventory,
-    )
-    .unwrap()
-    .hydrate_event(&request)
-    .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::StaleRecordEvidence);
-
-    let unsupported_path = temp.path().join("unsupported.db");
-    let connection = create_database(&unsupported_path);
-    insert_row(
-        &connection,
-        "unsupported-session",
-        "unsupported-request",
-        "valid prompt",
-        None,
-    );
-    drop(connection);
-    let unsupported_inventory = inventory(vec![database(
-        &unsupported_path,
-        "jetbrains:idea:unsupported",
-    )]);
-    let scan = scan_lingma_source_backed_v0(
-        crate::test_provider_sqlite_data_root(),
-        unsupported_inventory.clone(),
-        || Ok(unsupported_inventory.clone()),
-    )
-    .unwrap();
-    let request = event_request(all_records(&scan)[0]);
-    Connection::open(&unsupported_path)
+    assert!(VerifiedIndex::open(&index_root)
         .unwrap()
-        .execute_batch("drop table chat_record;")
-        .unwrap();
-    let failure = LingmaSourceBackedResolverV0::new(
-        crate::test_provider_sqlite_data_root(),
-        &unsupported_inventory,
-    )
-    .unwrap()
-    .hydrate_event(&request)
-    .unwrap_err();
-    assert_eq!(
-        failure.kind,
-        HydrationFailureKind::UnsupportedParserRevision
-    );
-}
-
-#[test]
-fn source_backed_hydration_rejects_malformed_coordinate_and_forbidden_fallbacks() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let path = temp.path().join("local.db");
-    let connection = create_database(&path);
-    insert_row(
-        &connection,
-        "invalid-session",
-        "invalid-request",
-        "invalid prompt",
-        None,
-    );
-    drop(connection);
-    let inventory = inventory(vec![database(&path, "vscode:stable:invalid")]);
-    let scan = scan_lingma_source_backed_v0(
-        crate::test_provider_sqlite_data_root(),
-        inventory.clone(),
-        || Ok(inventory.clone()),
-    )
-    .unwrap();
-    let record = all_records(&scan)[0];
-    let malformed_coordinate = NativeRecordCoordinate::ProviderSqlite {
-        logical_relation: LOGICAL_RELATION.to_owned(),
-        primary_key: TypedKey::I64(1),
-        row_version: Some(TypedKey::bytes(vec![0; 32]).unwrap()),
-    };
-    let request = request_with_locator_evidence(
-        record,
-        malformed_coordinate,
-        *record.document.locator.record_digest(),
-    );
-    let failure =
-        LingmaSourceBackedResolverV0::new(crate::test_provider_sqlite_data_root(), &inventory)
-            .unwrap()
-            .hydrate_event(&request)
-            .unwrap_err();
-    assert_eq!(failure.kind, HydrationFailureKind::InvalidLocator);
+        .core_record_by_id(expected.event_id.as_uuid())
+        .unwrap()
+        .is_none());
 
     let provider_source = concat!(
         include_str!("../source_backed.rs"),
-        include_str!("discovery.rs"),
-        include_str!("hydration.rs"),
         include_str!("identity.rs"),
         include_str!("parsing.rs"),
+        include_str!("discovery.rs"),
+        include_str!("../records.rs"),
+        include_str!("../../native_path.rs"),
+        include_str!("../../../lingma.rs"),
     );
     for forbidden in [
-        ["work", ".sqlite"].concat(),
-        ["ctx_history_", "store"].concat(),
-        ["MAX_BODY_", "PREVIEW_CHARS"].concat(),
-        ["provider_local_", "preview"].concat(),
+        "LexicalDocument",
+        "SourceRecordLocator",
+        "source_path",
+        "hydrate",
+        "hydration",
+        "resolver",
+        "provider_local_preview",
+        "MAX_BODY_PREVIEW_CHARS",
     ] {
         assert!(
-            !provider_source.contains(&forbidden),
-            "Lingma source-backed path contains forbidden fallback {forbidden}"
+            !provider_source.contains(forbidden),
+            "Lingma direct-Core path contains forbidden token {forbidden}"
         );
     }
-    let route_source =
-        include_str!("../../../../source_backed/registration/families/sqlite/inventory.rs");
-    let route = route_source
-        .split_once("pub fn register_lingma_source_backed_route")
-        .unwrap()
-        .1
-        .split_once("fn discovered_lingma_inventory_source")
-        .unwrap()
-        .0;
-    assert!(route.contains("register_replacement_document_tree_route"));
-    assert!(route.contains("SqliteInventoryDocumentAdapter"));
-    assert!(!route.contains("captured_route_driver"));
-    assert!(route.contains("LingmaSourceBackedResolverV0"));
-    assert!(!route.contains(&["work", ".sqlite"].concat()));
-    assert!(!route.contains(&["ctx_history_", "store"].concat()));
 }

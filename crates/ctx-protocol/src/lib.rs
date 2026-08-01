@@ -65,8 +65,6 @@ pub enum AgentHistoryOperation {
     Search,
     ShowEvent,
     ShowSession,
-    LocateEvent,
-    LocateSession,
     Error,
 }
 
@@ -319,15 +317,11 @@ pub struct SearchHit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_exists: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub why_matched: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -361,12 +355,25 @@ pub struct Citation {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_seq: Option<u64>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: JsonObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreContentPolicyStatus {
+    Selected,
+    Redacted,
+    Omitted,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreContentMetadata {
+    pub complete: bool,
+    pub policy_status: CoreContentPolicyStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_exists: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
+    pub policy_reason: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: JsonObject,
 }
@@ -379,6 +386,12 @@ pub struct AgentHistoryEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_type: Option<String>,
@@ -387,32 +400,13 @@ pub struct AgentHistoryEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub occurred_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preview: Option<String>,
+    pub structured_content: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<CoreContentMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub citations: Vec<Citation>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: JsonObject,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceLocation {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exists: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_format: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: JsonObject,
 }
@@ -424,8 +418,21 @@ pub struct EventResult {
     pub event: Option<AgentHistoryEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<AgentHistoryEvent>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: JsonObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<SourceLocation>,
+    pub ctx_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_format: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: JsonObject,
 }
@@ -434,31 +441,13 @@ pub struct EventResult {
 #[serde(rename_all = "camelCase")]
 pub struct SessionResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<JsonObject>,
+    pub session: Option<SessionSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<AgentHistoryEvent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<SourceLocation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: JsonObject,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocationResult {
-    pub ctx_session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ctx_event_id: Option<String>,
-    pub provider: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_session_id: Option<String>,
-    pub source: SourceLocation,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resume: Option<JsonObject>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: JsonObject,
 }
@@ -484,8 +473,6 @@ pub struct AgentHistoryEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub location: Option<LocationResult>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<AgentHistoryErrorBody>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: JsonObject,
@@ -504,7 +491,6 @@ impl AgentHistoryEnvelope {
             search: None,
             event: None,
             session: None,
-            location: None,
             error: None,
             extra: JsonObject::new(),
         }
@@ -615,15 +601,66 @@ mod tests {
                         .expect("search fixture resultWindow");
                     assert_eq!(result_window.returned, search.results.len() as u64);
                     assert!(search.pagination.is_some(), "{:?}", entry.path());
+                    if let Some(hit) = search.results.first() {
+                        assert_eq!(hit.provider.as_deref(), Some("codex"));
+                        assert_eq!(
+                            hit.provider_session_id.as_deref(),
+                            Some("codex-fixture-session")
+                        );
+                        assert_eq!(hit.source_format.as_deref(), Some("codex_session_jsonl"));
+                    }
                 }
                 AgentHistoryOperation::ShowEvent => {
-                    assert!(envelope.event.is_some(), "{:?}", entry.path())
+                    let event = envelope
+                        .event
+                        .as_ref()
+                        .and_then(|result| result.event.as_ref())
+                        .expect("show-event fixture selected event");
+                    assert_eq!(event.provider.as_deref(), Some("codex"));
+                    assert_eq!(
+                        event.provider_session_id.as_deref(),
+                        Some("codex-fixture-session")
+                    );
+                    assert_eq!(event.source_format.as_deref(), Some("codex_session_jsonl"));
+                    assert_eq!(
+                        event.structured_content.as_ref().unwrap()["kind"],
+                        "toolResult"
+                    );
+                    assert_eq!(
+                        event.structured_content.as_ref().unwrap()["payload"]["items"][2]["nested"]
+                            [1],
+                        false
+                    );
+                    assert_eq!(
+                        event
+                            .content
+                            .as_ref()
+                            .map(|content| (&content.policy_status, content.complete)),
+                        Some((&CoreContentPolicyStatus::Selected, true))
+                    );
                 }
                 AgentHistoryOperation::ShowSession => {
-                    assert!(envelope.session.is_some(), "{:?}", entry.path());
-                }
-                AgentHistoryOperation::LocateEvent | AgentHistoryOperation::LocateSession => {
-                    assert!(envelope.location.is_some(), "{:?}", entry.path());
+                    let summary = envelope
+                        .session
+                        .as_ref()
+                        .and_then(|result| result.session.as_ref())
+                        .expect("show-session fixture summary");
+                    assert_eq!(summary.provider.as_deref(), Some("codex"));
+                    assert_eq!(
+                        summary.provider_session_id.as_deref(),
+                        Some("codex-fixture-session")
+                    );
+                    assert_eq!(
+                        summary.source_format.as_deref(),
+                        Some("codex_session_jsonl")
+                    );
+                    assert_eq!(
+                        envelope.session.as_ref().unwrap().events[0]
+                            .structured_content
+                            .as_ref()
+                            .unwrap()[1]["complete"],
+                        true
+                    );
                 }
                 AgentHistoryOperation::Error => {
                     assert!(envelope.error.is_some(), "{:?}", entry.path())
@@ -664,7 +701,10 @@ mod tests {
                 "ctx_event_id": "event",
                 "result_type": "event",
                 "result_scope": "event",
-                "citations": [{"target_type": "event", "source_path": "/tmp/session.jsonl"}]
+                "source_format": "codex_session_jsonl",
+                "citations": [{
+                    "target_type": "event"
+                }]
             }]
         });
         let camel = camelize_object_keys(&raw);
@@ -675,9 +715,6 @@ mod tests {
         assert_eq!(camel["results"][0]["ctxEventId"], "event");
         assert_eq!(camel["results"][0]["resultType"], "event");
         assert_eq!(camel["results"][0]["citations"][0]["targetType"], "event");
-        assert_eq!(
-            camel["results"][0]["citations"][0]["sourcePath"],
-            "/tmp/session.jsonl"
-        );
+        assert_eq!(camel["results"][0]["sourceFormat"], "codex_session_jsonl");
     }
 }

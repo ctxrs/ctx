@@ -39,8 +39,6 @@ pub(super) fn scan_tasks(
     ))?;
     let _guard = SqliteLengthPreflightGuard::new(conn);
     let mut rows = candidates.query([])?;
-    #[cfg(test)]
-    super::super::super::source_backed::record_warp_projection_query();
     while let Some(row) = rows.next()? {
         let candidate = task_candidate_from_row(row)?;
         counters.task_rows = counters.task_rows.saturating_add(1);
@@ -202,8 +200,7 @@ fn hydrate_task_candidate(
     let task_value = ValueRef::Blob(task_blob);
     let modified_value = ValueRef::Text(last_modified_at.as_bytes());
 
-    // This digest is control-plane evidence only. Output result bytes never
-    // enter retained event bodies, hashes, previews, or downstream records.
+    // This digest is control-plane evidence for the complete native task row.
     let source_values = [
         conversation_value,
         task_id_value,
@@ -211,7 +208,7 @@ fn hydrate_task_candidate(
         modified_value,
     ];
     let evidence_digest = source_row_digest(b"task\0", &source_values)?;
-    let complete_content_record_digest = complete_content_record_digest(&source_values)?;
+    let record_digest = record_evidence_digest(&source_values)?;
     builder.record_source(b"task\0", evidence_digest)?;
 
     let task_id = task_id.to_owned();
@@ -302,7 +299,7 @@ fn hydrate_task_candidate(
                     call_id: None,
                     occurred_at: occurred_at.or(task_modified),
                     body: message.body,
-                    source_record_digest: complete_content_record_digest.clone(),
+                    source_record_digest: record_digest.clone(),
                 })?;
                 record_retained_event_counters(counters, &event);
                 if message.tool_call {
@@ -314,30 +311,27 @@ fn hydrate_task_candidate(
                 let outcome = output.outcome;
                 let call_id = output.call_id;
                 let tool_name = output.tool_name;
-                if matches!(outcome, OutputOutcome::Failure | OutputOutcome::Timeout) {
-                    let event = WarpNativeEvent::from_draft(WarpNativeEventDraft {
-                        provider_event_index: builder.retained_events(),
-                        legacy_provider_event_index,
-                        task_rowid: candidate.rowid,
-                        conversation_id: conversation_id.clone(),
-                        task_id: task_id.clone(),
-                        message_id: message_id.clone(),
-                        message_ordinal,
-                        event_type: ctx_history_core::EventType::ToolOutput,
-                        role: Some(ctx_history_core::EventRole::Tool),
-                        kind: "tool_call_result",
-                        request_id: request_id.clone(),
-                        result_outcome: Some(outcome),
-                        call_id: call_id.clone(),
-                        occurred_at: occurred_at.or(task_modified),
-                        body: format!("tool result: {tool_name}"),
-                        source_record_digest: complete_content_record_digest.clone(),
-                    })?;
-                    record_retained_event_counters(counters, &event);
-                    counters.result_events_created =
-                        counters.result_events_created.saturating_add(1);
-                    unit.push_event(event)?;
-                }
+                let event = WarpNativeEvent::from_draft(WarpNativeEventDraft {
+                    provider_event_index: builder.retained_events(),
+                    legacy_provider_event_index,
+                    task_rowid: candidate.rowid,
+                    conversation_id: conversation_id.clone(),
+                    task_id: task_id.clone(),
+                    message_id,
+                    message_ordinal,
+                    event_type: ctx_history_core::EventType::ToolOutput,
+                    role: Some(ctx_history_core::EventRole::Tool),
+                    kind: tool_name,
+                    request_id,
+                    result_outcome: Some(outcome),
+                    call_id,
+                    occurred_at: occurred_at.or(task_modified),
+                    body: output.body,
+                    source_record_digest: record_digest.clone(),
+                })?;
+                record_retained_event_counters(counters, &event);
+                counters.result_events_created = counters.result_events_created.saturating_add(1);
+                unit.push_event(event)?;
             }
             WarpDecodedMessagePayload::Excluded => {}
         }

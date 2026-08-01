@@ -7,10 +7,12 @@ import java.util.Map;
 public final class Event {
     private final Map<String, Object> fields;
     private final List<Citation> citations;
+    private final CoreContentMetadata content;
 
     Event(Map<String, Object> fields) {
         this.fields = AgentHistoryValue.copyObject(fields);
         this.citations = AgentHistoryValue.objectList(fields.get("citations"), Citation::new);
+        this.content = CoreContentMetadata.from(fields.get("content"));
     }
 
     public String getCtxEventId() {
@@ -27,6 +29,30 @@ public final class Event {
 
     public String ctxSessionId() {
         return getCtxSessionId();
+    }
+
+    public String getProvider() {
+        return AgentHistoryValue.string(fields.get("provider"));
+    }
+
+    public String provider() {
+        return getProvider();
+    }
+
+    public String getProviderSessionId() {
+        return AgentHistoryValue.string(fields.get("providerSessionId"));
+    }
+
+    public String providerSessionId() {
+        return getProviderSessionId();
+    }
+
+    public String getSourceFormat() {
+        return AgentHistoryValue.string(fields.get("sourceFormat"));
+    }
+
+    public String sourceFormat() {
+        return getSourceFormat();
     }
 
     public Integer getSequence() {
@@ -61,22 +87,6 @@ public final class Event {
         return getOccurredAt();
     }
 
-    public String getSource() {
-        return AgentHistoryValue.string(fields.get("source"));
-    }
-
-    public String source() {
-        return getSource();
-    }
-
-    public String getCursor() {
-        return AgentHistoryValue.string(fields.get("cursor"));
-    }
-
-    public String cursor() {
-        return getCursor();
-    }
-
     public String getText() {
         return AgentHistoryValue.string(fields.get("text"));
     }
@@ -85,12 +95,12 @@ public final class Event {
         return getText();
     }
 
-    public String getPreview() {
-        return AgentHistoryValue.string(fields.get("preview"));
+    public CoreContentMetadata getContent() {
+        return content;
     }
 
-    public String preview() {
-        return getPreview();
+    public CoreContentMetadata content() {
+        return content;
     }
 
     public List<Citation> getCitations() {

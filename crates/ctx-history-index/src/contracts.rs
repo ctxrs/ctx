@@ -1,20 +1,21 @@
 use ctx_history_core::{
-    CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory, ProjectionContractError,
-    SourceKey, SourceRecordLocator, SourceResolverContractError, StableEntityId, IDENTITY_VERSION,
+    core_record_contract_fingerprint, CertifiedSource, CertifiedSourceDeletion,
+    CertifiedSourceInventory, CoreRecordError, ProjectionContractError, SourceKey,
+    CORE_RECORD_VERSION, IDENTITY_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    identity::is_generation_id,
     policy::{
-        current_source_generation_policy_hash, LexicalIndexedBodyLimit, LEXICAL_INDEXED_BODY_LIMIT,
-        LEXICAL_SCHEMA_REVISION, LEXICAL_TOKENIZER_REVISION,
+        current_source_generation_policy_hash, LEXICAL_SCHEMA_REVISION, LEXICAL_TOKENIZER_REVISION,
     },
     sha256_hex, source_sort_key,
 };
 
-pub const GENERATION_MANIFEST_VERSION: u32 = 3;
+pub const GENERATION_MANIFEST_VERSION: u32 = 6;
 pub const LEXICAL_SCHEMA_VERSION: u32 = LEXICAL_SCHEMA_REVISION;
 pub const LEXICAL_ANALYZER_VERSION: u32 = LEXICAL_TOKENIZER_REVISION;
 
@@ -22,7 +23,6 @@ pub(crate) const MANIFEST_DIRECTORY: &str = "ctx-generations";
 pub(crate) const COMMIT_PAYLOAD_VERSION: u32 = 1;
 pub(crate) const INDEX_MEMORY_MIN_PER_THREAD: usize = 15_000_000;
 pub(crate) const MAX_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
-pub(crate) const MAX_TOUCHED_FILES: usize = 4_096;
 
 /// Comparable lexical segments are coalesced after this many accumulate.
 ///
@@ -42,22 +42,42 @@ pub enum IndexError {
     #[error(transparent)]
     ProjectionContract(#[from] ProjectionContractError),
     #[error(transparent)]
-    SourceResolverContract(#[from] SourceResolverContractError),
+    CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Tantivy(#[from] tantivy::TantivyError),
     #[error("the lexical index has no ctx generation payload")]
     MissingCommitPayload,
+    #[error("the lexical index has no active generation pointer")]
+    MissingActiveGenerationPointer,
+    #[error("unsupported active generation pointer version {0}")]
+    UnsupportedActiveGenerationPointer(u32),
+    #[error("the active generation pointer is malformed or non-canonical")]
+    InvalidActiveGenerationPointer,
     #[error("unsupported commit payload version {0}")]
     UnsupportedCommitPayload(u32),
     #[error("unsupported generation manifest version {0}")]
     UnsupportedManifest(u32),
     #[error(
-        "generation contract mismatch: identity {identity}, schema {schema}, analyzer {analyzer}"
+        "generation contract mismatch: identity {identity}, schema {schema}, analyzer {analyzer}, Core record {core_record}"
     )]
     GenerationContractMismatch {
         identity: u16,
         schema: u32,
         analyzer: u32,
+        core_record: u32,
+    },
+    #[error(
+        "Core record contract fingerprint mismatch: expected {expected}, generation carries {actual}"
+    )]
+    CoreRecordContractMismatch { expected: String, actual: String },
+    #[error(
+        "Core record revisions do not match the active generation policy: normalization {normalization}/{expected_normalization}, content {content}/{expected_content}"
+    )]
+    CoreRecordPolicyRevisionMismatch {
+        normalization: u32,
+        expected_normalization: u32,
+        content: u32,
+        expected_content: u32,
     },
     #[error(
         "source generation policy mismatch: expected {expected}, generation carries {actual}; \
@@ -66,6 +86,8 @@ pub enum IndexError {
     GenerationPolicyMismatch { expected: String, actual: String },
     #[error("lexical index schema does not match ctx schema version {0}")]
     SchemaMismatch(u32),
+    #[error("lexical index settings do not match ctx schema version {0}")]
+    IndexSettingsMismatch(u32),
     #[error("a nonempty lexical index has no ctx generation payload")]
     UnboundIndexState,
     #[error("the lexical generation changed while a verified reader was opening")]
@@ -82,8 +104,14 @@ pub enum IndexError {
     NonCanonicalManifestSources,
     #[error("generation manifest removals are not strictly sorted and unique")]
     NonCanonicalManifestRemovals,
+    #[error("generation source catalog missing states are not strictly sorted and unique")]
+    NonCanonicalSourceCatalogMissingStates,
     #[error("generation manifest retains and removes source {0}")]
     ManifestSourceRemovalOverlap(String),
+    #[error("generation source catalog has invalid missing state for source {0}")]
+    InvalidSourceCatalogMissingState(String),
+    #[error("generation source catalog marks unretained source {0} as missing")]
+    SourceCatalogMissingSourceNotRetained(String),
     #[error("certified removal for source {0} does not match its complete inventory")]
     InvalidGenerationRemoval(String),
     #[error(
@@ -102,6 +130,12 @@ pub enum IndexError {
     IndexMemoryTooSmall { actual: usize, minimum: usize },
     #[error("source replacement has already started for {0}")]
     DuplicateSource(String),
+    #[error("source {0} was observed missing more than once in one refresh")]
+    DuplicateSourceMissingObservation(String),
+    #[error("source {0} cannot enter deletion grace because it is not retained")]
+    SourceMissingObservationNotRetained(String),
+    #[error("automatic source deletion grace must require at least two complete inventories")]
+    InvalidSourceDeletionGraceThreshold,
     #[error("source replacement has not started for {0}")]
     SourceNotStarted(String),
     #[error("source {0} has no certified append frontier in the committed generation")]
@@ -130,6 +164,8 @@ pub enum IndexError {
     },
     #[error("stored lexical document field {0} is missing, malformed, or inconsistent")]
     InvalidStoredDocumentField(&'static str),
+    #[error("lexical index checksum verification failed for one or more active files")]
+    ChecksumMismatch,
     #[error("ID prefix must contain 1 to 32 hexadecimal digits, with optional hyphens")]
     InvalidIdPrefix,
     #[error("query filter {field} is empty")]
@@ -140,12 +176,34 @@ pub enum IndexError {
         actual: usize,
         maximum: usize,
     },
+    #[error("lexical query text is too large: {actual} aggregate bytes, maximum {maximum}")]
+    LexicalQueryBytesTooLarge { actual: usize, maximum: usize },
+    #[error("lexical query has too many alternatives: observed {observed}, maximum {maximum}")]
+    LexicalQueryAlternativesTooMany { observed: usize, maximum: usize },
+    #[error(
+        "lexical query has too many unique analyzed tokens: observed {observed}, maximum {maximum}"
+    )]
+    LexicalQueryTokensTooMany { observed: usize, maximum: usize },
+    #[error("lexical result limit must not exceed {maximum} items, requested {requested}")]
+    InvalidLexicalResultLimit { requested: usize, maximum: usize },
     #[error(
         "semantic event page size must be between 1 and {maximum} items, requested {requested}"
     )]
     InvalidSemanticEventPageSize { requested: usize, maximum: usize },
     #[error("source event page size must be between 1 and {maximum} items, requested {requested}")]
     InvalidSourceEventPageSize { requested: usize, maximum: usize },
+    #[error(
+        "session event coordinate selection must be between 1 and {maximum} items, requested {requested}"
+    )]
+    InvalidSessionEventCoordinateLimit { requested: usize, maximum: usize },
+    #[error(
+        "Core event page {field} byte limit must be between 1 and {maximum}, requested {requested}"
+    )]
+    InvalidCoreEventPageByteLimit {
+        field: &'static str,
+        requested: usize,
+        maximum: usize,
+    },
     #[error("source {0} is not retained by the pinned generation")]
     SourceEventSourceNotRetained(String),
     #[error("source {0} has a different descriptor in the pinned generation")]
@@ -178,12 +236,6 @@ pub enum IndexError {
     MissingAnalyzer(&'static str),
     #[error("document source does not have an active replacement")]
     DocumentSourceNotActive,
-    #[error("document {0} does not carry an event identity")]
-    InvalidEventIdentityKind(String),
-    #[error("document {0} does not carry a session identity")]
-    InvalidSessionIdentityKind(String),
-    #[error("document identities do not belong to source {0}")]
-    IdentitySourceMismatch(String),
     #[error("duplicate event identity {0} in one candidate generation")]
     DuplicateEventIdentity(String),
     #[error("session identity {0} is already owned by another source")]
@@ -207,6 +259,14 @@ pub enum IndexError {
     },
     #[error("generation count overflow")]
     CountOverflow,
+    #[error(
+        "semantic-eligible document count {eligible} exceeds indexed document count {indexed}"
+    )]
+    InvalidSemanticEligibleDocumentCount { eligible: u64, indexed: u64 },
+    #[error(
+        "semantic-eligible document count mismatch: manifest {manifest}, source aggregates {aggregates}"
+    )]
+    SemanticEligibleDocumentCountMismatch { manifest: u64, aggregates: u64 },
     #[error(
         "exact replay inventory coverage is incomplete: prior source {source_id} was neither \
          replayed nor terminally removed"
@@ -238,12 +298,36 @@ pub enum IndexError {
     },
     #[error("generation writer invariant violated: {0}")]
     WriterInvariant(&'static str),
+    #[error("the active-generation rebuild marker is malformed")]
+    InvalidActiveGenerationRebuildMarker,
+    #[error(
+        "physical integrity receipt for generation {generation_id} is missing or invalid: {detail}"
+    )]
+    GenerationPhysicalIntegrityMismatch {
+        generation_id: String,
+        detail: String,
+    },
+    #[error(
+        "active lexical generation {generation_id} failed its physical integrity check and requires a source-authoritative rebuild: {detail}"
+    )]
+    ActiveGenerationNeedsRebuild {
+        generation_id: String,
+        detail: String,
+    },
     #[error("generation {generation_id} committed but failed {stage} verification: {detail}")]
     CommittedGenerationNeedsRecovery {
         generation_id: String,
         stage: &'static str,
         detail: String,
     },
+    #[error("source {source_id} Core-record aggregate count mismatch: manifest {manifest}, index {index}")]
+    CoreRecordAggregateCountMismatch {
+        source_id: String,
+        manifest: u64,
+        index: u64,
+    },
+    #[error("manifest Core-record aggregate is invalid for source {0}")]
+    CoreRecordAggregateMismatch(String),
 }
 
 #[derive(Debug, Clone)]
@@ -264,101 +348,225 @@ impl Default for WriterOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LexicalDocument {
-    pub event_id: StableEntityId,
-    pub session_id: StableEntityId,
-    pub parent_session_id: Option<StableEntityId>,
-    pub root_session_id: StableEntityId,
-    pub source: SourceKey,
-    pub locator: SourceRecordLocator,
-    pub provider_session_id: Option<String>,
-    pub branch: Option<String>,
-    pub source_path: Option<String>,
-    pub agent_type: String,
-    pub is_primary: bool,
-    pub event_sequence: u64,
-    pub occurred_at_unix_ms: Option<i64>,
-    pub event_type: String,
-    pub role: Option<String>,
-    /// Full policy-selected meaningful text. It is indexed but never stored.
-    pub body: String,
-    pub workspace: Option<String>,
-    pub cwd: Option<String>,
-    pub touched_files: Vec<String>,
-}
-
-impl LexicalDocument {
-    /// Validates all provider-neutral lexical document bounds and identity
-    /// relationships before a document enters temporary or Tantivy staging.
-    pub fn validate_contract(&self) -> Result<()> {
-        self.validate().map(|_| ())
-    }
-
-    pub(crate) fn validate(&self) -> Result<Vec<u8>> {
-        self.locator.validate_contract()?;
-        if self.locator.source() != &self.source {
-            return Err(IndexError::DocumentSourceNotActive);
-        }
-        let locator_bytes = serde_json::to_vec(&self.locator)?;
-        if locator_bytes.len() > MAX_DOCUMENT_METADATA_BYTES {
-            return Err(IndexError::DocumentFieldTooLarge {
-                field: "native_locator",
-                actual: locator_bytes.len(),
-                maximum: MAX_DOCUMENT_METADATA_BYTES,
-            });
-        }
-        validate_document_text("event_type", &self.event_type, MAX_DOCUMENT_METADATA_BYTES)?;
-        if self.body.is_empty() {
-            return Err(IndexError::EmptyDocumentField { field: "body" });
-        }
-        match LEXICAL_INDEXED_BODY_LIMIT {
-            LexicalIndexedBodyLimit::ProviderValidatedFullText => {}
-        }
-        validate_optional_document_text(
-            "provider_session_id",
-            self.provider_session_id.as_deref(),
-            MAX_DOCUMENT_METADATA_BYTES,
-        )?;
-        validate_optional_document_text(
-            "branch",
-            self.branch.as_deref(),
-            MAX_DOCUMENT_METADATA_BYTES,
-        )?;
-        validate_optional_document_text(
-            "source_path",
-            self.source_path.as_deref(),
-            MAX_DOCUMENT_METADATA_BYTES,
-        )?;
-        validate_document_text("agent_type", &self.agent_type, MAX_DOCUMENT_METADATA_BYTES)?;
-        validate_optional_document_text("role", self.role.as_deref(), MAX_DOCUMENT_METADATA_BYTES)?;
-        validate_optional_document_text(
-            "workspace",
-            self.workspace.as_deref(),
-            MAX_DOCUMENT_METADATA_BYTES,
-        )?;
-        validate_optional_document_text("cwd", self.cwd.as_deref(), MAX_DOCUMENT_METADATA_BYTES)?;
-        if self.touched_files.len() > MAX_TOUCHED_FILES {
-            return Err(IndexError::DocumentFieldTooLarge {
-                field: "touched_files",
-                actual: self.touched_files.len(),
-                maximum: MAX_TOUCHED_FILES,
-            });
-        }
-        for path in &self.touched_files {
-            validate_document_text("touched_file", path, MAX_DOCUMENT_METADATA_BYTES)?;
-        }
-        Ok(locator_bytes)
-    }
-}
-
 /// Metadata-only proof that one source lineage was authoritatively absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationRemoval {
     deletion: CertifiedSourceDeletion,
     inventory: CertifiedSourceInventory,
+}
+
+/// Non-zero number of consecutive complete inventories that omitted a source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ConsecutiveSourceMissingCount(u32);
+
+impl ConsecutiveSourceMissingCount {
+    fn first() -> Self {
+        Self(1)
+    }
+
+    fn incremented(self) -> Result<Self> {
+        self.0
+            .checked_add(1)
+            .map(Self)
+            .ok_or(IndexError::CountOverflow)
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+
+    fn validate(self) -> Result<()> {
+        if self.0 == 0 {
+            return Err(IndexError::InvalidSourceCatalogMissingState(
+                "zero-count".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One committed refresh point at which a complete inventory omitted a source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceMissingObservationPoint {
+    generation_id: String,
+    observed_at_unix_ms: u64,
+}
+
+impl SourceMissingObservationPoint {
+    pub(crate) fn new(generation_id: String, observed_at_unix_ms: u64) -> Result<Self> {
+        let point = Self {
+            generation_id,
+            observed_at_unix_ms,
+        };
+        point.validate_contract()?;
+        Ok(point)
+    }
+
+    pub fn generation_id(&self) -> &str {
+        &self.generation_id
+    }
+
+    pub fn observed_at_unix_ms(&self) -> u64 {
+        self.observed_at_unix_ms
+    }
+
+    fn validate_contract(&self) -> Result<()> {
+        if !is_generation_id(&self.generation_id) {
+            return Err(IndexError::InvalidGenerationId);
+        }
+        Ok(())
+    }
+}
+
+/// Durable cross-refresh state for one retained source absent from a complete inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCatalogMissingState {
+    latest_deletion_candidate: CertifiedSourceDeletion,
+    consecutive_missing: ConsecutiveSourceMissingCount,
+    first_observation: SourceMissingObservationPoint,
+    last_observation: SourceMissingObservationPoint,
+}
+
+impl SourceCatalogMissingState {
+    pub(crate) fn first(
+        latest_deletion_candidate: CertifiedSourceDeletion,
+        observation: SourceMissingObservationPoint,
+    ) -> Self {
+        Self {
+            latest_deletion_candidate,
+            consecutive_missing: ConsecutiveSourceMissingCount::first(),
+            first_observation: observation.clone(),
+            last_observation: observation,
+        }
+    }
+
+    pub(crate) fn advance(
+        &self,
+        latest_deletion_candidate: CertifiedSourceDeletion,
+        observation: SourceMissingObservationPoint,
+    ) -> Result<Self> {
+        if !self
+            .source()
+            .exact_descriptor_eq(latest_deletion_candidate.source())
+            || !same_inventory_authority(
+                self.latest_deletion_candidate.inventory(),
+                latest_deletion_candidate.inventory(),
+            )
+        {
+            return Ok(Self::first(latest_deletion_candidate, observation));
+        }
+        Ok(Self {
+            latest_deletion_candidate,
+            consecutive_missing: self.consecutive_missing.incremented()?,
+            first_observation: self.first_observation.clone(),
+            last_observation: observation,
+        })
+    }
+
+    pub fn source(&self) -> &SourceKey {
+        self.latest_deletion_candidate.source()
+    }
+
+    pub fn latest_deletion_candidate(&self) -> &CertifiedSourceDeletion {
+        &self.latest_deletion_candidate
+    }
+
+    pub fn consecutive_missing(&self) -> ConsecutiveSourceMissingCount {
+        self.consecutive_missing
+    }
+
+    pub fn first_observation(&self) -> &SourceMissingObservationPoint {
+        &self.first_observation
+    }
+
+    pub fn last_observation(&self) -> &SourceMissingObservationPoint {
+        &self.last_observation
+    }
+
+    fn validate_contract(&self) -> Result<()> {
+        let source_id = self.source().identity().to_string();
+        self.latest_deletion_candidate
+            .validate_contract()
+            .map_err(|_| IndexError::InvalidSourceCatalogMissingState(source_id.clone()))?;
+        self.consecutive_missing
+            .validate()
+            .map_err(|_| IndexError::InvalidSourceCatalogMissingState(source_id.clone()))?;
+        self.first_observation
+            .validate_contract()
+            .map_err(|_| IndexError::InvalidSourceCatalogMissingState(source_id.clone()))?;
+        self.last_observation
+            .validate_contract()
+            .map_err(|_| IndexError::InvalidSourceCatalogMissingState(source_id.clone()))?;
+        if self.consecutive_missing.get() == 1 && self.first_observation != self.last_observation {
+            return Err(IndexError::InvalidSourceCatalogMissingState(source_id));
+        }
+        Ok(())
+    }
+}
+
+fn same_inventory_authority(
+    left: &ctx_history_core::SourceInventoryObservation,
+    right: &ctx_history_core::SourceInventoryObservation,
+) -> bool {
+    left.provider() == right.provider()
+        && left.authority_namespace() == right.authority_namespace()
+        && left.authority_key() == right.authority_key()
+}
+
+/// Generation-bound ctx source catalog state that is not provider content.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCatalogCheckpoint {
+    missing_sources: Vec<SourceCatalogMissingState>,
+}
+
+impl SourceCatalogCheckpoint {
+    pub(crate) fn from_missing_sources(
+        mut missing_sources: Vec<SourceCatalogMissingState>,
+    ) -> Result<Self> {
+        missing_sources.sort_by(|left, right| {
+            source_sort_key(left.source()).cmp(&source_sort_key(right.source()))
+        });
+        let checkpoint = Self { missing_sources };
+        checkpoint.validate_contract()?;
+        Ok(checkpoint)
+    }
+
+    pub fn missing_sources(&self) -> &[SourceCatalogMissingState] {
+        &self.missing_sources
+    }
+
+    pub fn missing_source(&self, source: &SourceKey) -> Option<&SourceCatalogMissingState> {
+        self.missing_sources
+            .binary_search_by(|candidate| {
+                source_sort_key(candidate.source()).cmp(&source_sort_key(source))
+            })
+            .ok()
+            .and_then(|index| self.missing_sources.get(index))
+            .filter(|candidate| candidate.source().exact_descriptor_eq(source))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.missing_sources.is_empty()
+    }
+
+    fn validate_contract(&self) -> Result<()> {
+        if self
+            .missing_sources
+            .windows(2)
+            .any(|pair| source_sort_key(pair[0].source()) >= source_sort_key(pair[1].source()))
+        {
+            return Err(IndexError::NonCanonicalSourceCatalogMissingStates);
+        }
+        for state in &self.missing_sources {
+            state.validate_contract()?;
+        }
+        Ok(())
+    }
 }
 
 impl GenerationRemoval {
@@ -402,13 +610,82 @@ impl GenerationRemoval {
 pub struct GenerationManifest {
     pub manifest_version: u32,
     pub identity_version: u16,
+    pub core_record_version: u32,
+    pub core_record_contract_fingerprint: String,
     pub lexical_schema_version: u32,
     pub lexical_analyzer_version: u32,
     pub policy_schema_hash: String,
     pub indexed_documents: u64,
+    pub semantic_eligible_documents: u64,
     pub certified_source_bytes: u64,
     pub sources: Vec<CertifiedSource>,
+    pub core_record_aggregates: Vec<SourceCoreRecordAggregate>,
     pub removals: Vec<GenerationRemoval>,
+    source_catalog: SourceCatalogCheckpoint,
+}
+
+/// Incrementally composable commitment to one source's exact stored Core
+/// records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCoreRecordAggregate {
+    source_identity_digest: String,
+    indexed_documents: u64,
+    semantic_eligible_documents: u64,
+    core_record_accumulator: String,
+}
+
+impl SourceCoreRecordAggregate {
+    pub(crate) fn new(
+        source_identity_digest: String,
+        indexed_documents: u64,
+        semantic_eligible_documents: u64,
+        core_record_accumulator: String,
+    ) -> Result<Self> {
+        let aggregate = Self {
+            source_identity_digest,
+            indexed_documents,
+            semantic_eligible_documents,
+            core_record_accumulator,
+        };
+        aggregate.validate_contract()?;
+        Ok(aggregate)
+    }
+
+    pub fn source_identity_digest(&self) -> &str {
+        &self.source_identity_digest
+    }
+
+    pub fn indexed_documents(&self) -> u64 {
+        self.indexed_documents
+    }
+
+    pub fn semantic_eligible_documents(&self) -> u64 {
+        self.semantic_eligible_documents
+    }
+
+    pub fn core_record_accumulator(&self) -> &str {
+        &self.core_record_accumulator
+    }
+
+    pub(crate) fn accumulator_bytes(&self) -> Result<[u8; 32]> {
+        decode_sha256_hex(&self.core_record_accumulator)
+    }
+
+    fn validate_contract(&self) -> Result<()> {
+        if !is_sha256_hex(&self.source_identity_digest)
+            || !is_sha256_hex(&self.core_record_accumulator)
+        {
+            return Err(IndexError::InvalidGenerationId);
+        }
+        if self.semantic_eligible_documents > self.indexed_documents {
+            return Err(IndexError::InvalidSemanticEligibleDocumentCount {
+                eligible: self.semantic_eligible_documents,
+                indexed: self.indexed_documents,
+            });
+        }
+        Ok(())
+    }
 }
 
 impl GenerationManifest {
@@ -417,9 +694,35 @@ impl GenerationManifest {
         Self::from_parts(sources, Vec::new())
     }
 
+    #[cfg(test)]
     pub(crate) fn from_parts(
+        sources: Vec<CertifiedSource>,
+        removals: Vec<GenerationRemoval>,
+    ) -> Result<Self> {
+        let aggregates = sources
+            .iter()
+            .map(|source| {
+                SourceCoreRecordAggregate::new(
+                    crate::source_token(source.observation().source()),
+                    source.counts().indexed_documents,
+                    0,
+                    "00".repeat(32),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Self::from_catalog_parts_with_record_aggregates(
+            sources,
+            aggregates,
+            removals,
+            SourceCatalogCheckpoint::default(),
+        )
+    }
+
+    pub(crate) fn from_catalog_parts_with_record_aggregates(
         mut sources: Vec<CertifiedSource>,
+        mut core_record_aggregates: Vec<SourceCoreRecordAggregate>,
         mut removals: Vec<GenerationRemoval>,
+        source_catalog: SourceCatalogCheckpoint,
     ) -> Result<Self> {
         sources.sort_by(|left, right| {
             source_sort_key(left.observation().source())
@@ -440,11 +743,19 @@ impl GenerationManifest {
         {
             return Err(IndexError::NonCanonicalManifestRemovals);
         }
+        core_record_aggregates.sort_by(|left, right| {
+            left.source_identity_digest
+                .cmp(&right.source_identity_digest)
+        });
         let mut indexed_documents = 0_u64;
+        let mut semantic_eligible_documents = 0_u64;
         let mut certified_source_bytes = 0_u64;
-        for source in &sources {
+        for (source, aggregate) in sources.iter().zip(&core_record_aggregates) {
             indexed_documents = indexed_documents
                 .checked_add(source.counts().indexed_documents)
+                .ok_or(IndexError::CountOverflow)?;
+            semantic_eligible_documents = semantic_eligible_documents
+                .checked_add(aggregate.semantic_eligible_documents)
                 .ok_or(IndexError::CountOverflow)?;
             certified_source_bytes = certified_source_bytes
                 .checked_add(source.counts().certified_bytes)
@@ -453,13 +764,18 @@ impl GenerationManifest {
         let manifest = Self {
             manifest_version: GENERATION_MANIFEST_VERSION,
             identity_version: IDENTITY_VERSION,
+            core_record_version: CORE_RECORD_VERSION,
+            core_record_contract_fingerprint: core_record_contract_fingerprint(),
             lexical_schema_version: LEXICAL_SCHEMA_VERSION,
             lexical_analyzer_version: LEXICAL_ANALYZER_VERSION,
             policy_schema_hash: current_source_generation_policy_hash()?,
             indexed_documents,
+            semantic_eligible_documents,
             certified_source_bytes,
             sources,
+            core_record_aggregates,
             removals,
+            source_catalog,
         };
         manifest.validate_contract()?;
         Ok(manifest)
@@ -467,6 +783,10 @@ impl GenerationManifest {
 
     pub fn generation_id(&self) -> Result<String> {
         Ok(sha256_hex(&serde_json::to_vec(self)?))
+    }
+
+    pub fn source_catalog(&self) -> &SourceCatalogCheckpoint {
+        &self.source_catalog
     }
 
     pub(crate) fn validate_contract(&self) -> Result<()> {
@@ -483,6 +803,16 @@ impl GenerationManifest {
         {
             return Err(IndexError::NonCanonicalManifestRemovals);
         }
+        if self
+            .core_record_aggregates
+            .windows(2)
+            .any(|pair| pair[0].source_identity_digest >= pair[1].source_identity_digest)
+        {
+            return Err(IndexError::CoreRecordAggregateMismatch(
+                "non-canonical aggregate ordering".to_owned(),
+            ));
+        }
+        self.source_catalog.validate_contract()?;
         let mut source_index = 0;
         for removal in &self.removals {
             removal.validate_contract()?;
@@ -505,15 +835,66 @@ impl GenerationManifest {
             }
         }
         let mut expected_documents = 0_u64;
+        let mut expected_semantic_eligible_documents = 0_u64;
         let mut expected_bytes = 0_u64;
-        for source in &self.sources {
+        for (source_index, source) in self.sources.iter().enumerate() {
             source.validate_contract()?;
+            let source_id = crate::source_token(source.observation().source());
+            let aggregate = self
+                .core_record_aggregates
+                .get(source_index)
+                .ok_or_else(|| IndexError::CoreRecordAggregateMismatch(source_id.clone()))?;
+            aggregate.validate_contract()?;
+            if aggregate.source_identity_digest != source_id {
+                return Err(IndexError::CoreRecordAggregateMismatch(source_id));
+            }
+            if aggregate.indexed_documents != source.counts().indexed_documents {
+                return Err(IndexError::CoreRecordAggregateCountMismatch {
+                    source_id: aggregate.source_identity_digest.clone(),
+                    manifest: source.counts().indexed_documents,
+                    index: aggregate.indexed_documents,
+                });
+            }
             expected_documents = expected_documents
                 .checked_add(source.counts().indexed_documents)
+                .ok_or(IndexError::CountOverflow)?;
+            expected_semantic_eligible_documents = expected_semantic_eligible_documents
+                .checked_add(aggregate.semantic_eligible_documents)
                 .ok_or(IndexError::CountOverflow)?;
             expected_bytes = expected_bytes
                 .checked_add(source.counts().certified_bytes)
                 .ok_or(IndexError::CountOverflow)?;
+        }
+        if self.core_record_aggregates.len() != self.sources.len() {
+            return Err(IndexError::CoreRecordAggregateMismatch(
+                "manifest aggregate cardinality".to_owned(),
+            ));
+        }
+        for missing in self.source_catalog.missing_sources() {
+            let retained = self.sources.binary_search_by(|candidate| {
+                source_sort_key(candidate.observation().source())
+                    .cmp(&source_sort_key(missing.source()))
+            });
+            let is_exactly_retained = retained
+                .ok()
+                .and_then(|index| self.sources.get(index))
+                .is_some_and(|source| {
+                    source
+                        .observation()
+                        .source()
+                        .exact_descriptor_eq(missing.source())
+                });
+            if !is_exactly_retained {
+                return Err(IndexError::SourceCatalogMissingSourceNotRetained(
+                    missing.source().identity().to_string(),
+                ));
+            }
+        }
+        if self.semantic_eligible_documents != expected_semantic_eligible_documents {
+            return Err(IndexError::SemanticEligibleDocumentCountMismatch {
+                manifest: self.semantic_eligible_documents,
+                aggregates: expected_semantic_eligible_documents,
+            });
         }
         if self.indexed_documents != expected_documents
             || self.certified_source_bytes != expected_bytes
@@ -529,6 +910,34 @@ impl GenerationManifest {
     }
 }
 
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn decode_sha256_hex(value: &str) -> Result<[u8; 32]> {
+    if !is_sha256_hex(value) {
+        return Err(IndexError::InvalidGenerationId);
+    }
+    let mut decoded = [0_u8; 32];
+    for (output, pair) in decoded.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+        let high = hex_nibble(pair[0]).ok_or(IndexError::InvalidGenerationId)?;
+        let low = hex_nibble(pair[1]).ok_or(IndexError::InvalidGenerationId)?;
+        *output = (high << 4) | low;
+    }
+    Ok(decoded)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CommitPayload {
     pub(crate) version: u32,
@@ -540,6 +949,7 @@ pub struct CommitReceipt {
     pub generation_id: String,
     pub opstamp: u64,
     pub indexed_documents: u64,
+    pub semantic_eligible_documents: u64,
     pub certified_sources: usize,
     pub certified_source_bytes: u64,
     manifest: GenerationManifest,
@@ -551,6 +961,7 @@ impl CommitReceipt {
             generation_id: manifest.generation_id()?,
             opstamp,
             indexed_documents: manifest.indexed_documents,
+            semantic_eligible_documents: manifest.semantic_eligible_documents,
             certified_sources: manifest.sources.len(),
             certified_source_bytes: manifest.certified_source_bytes,
             manifest,
@@ -567,29 +978,4 @@ impl CommitReceipt {
 pub enum RevalidationTarget<'a> {
     Source(&'a CertifiedSource),
     Deletion(&'a CertifiedSourceDeletion),
-}
-
-fn validate_document_text(field: &'static str, value: &str, maximum: usize) -> Result<()> {
-    if value.is_empty() {
-        return Err(IndexError::EmptyDocumentField { field });
-    }
-    if value.len() > maximum {
-        return Err(IndexError::DocumentFieldTooLarge {
-            field,
-            actual: value.len(),
-            maximum,
-        });
-    }
-    Ok(())
-}
-
-fn validate_optional_document_text(
-    field: &'static str,
-    value: Option<&str>,
-    maximum: usize,
-) -> Result<()> {
-    if let Some(value) = value {
-        validate_document_text(field, value, maximum)?;
-    }
-    Ok(())
 }

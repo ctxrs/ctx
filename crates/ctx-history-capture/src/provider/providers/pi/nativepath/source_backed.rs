@@ -9,32 +9,26 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, EventHydrationRequest,
-    EventIdentityInput, EventType, HydratedProviderRecord, HydrationFailure, HydrationFailureKind,
-    LocatorRevisionPolicy, NativeItemKey, NativeRecordCoordinate, NativeSessionKey,
-    PositionStability, SessionIdentityInput, SourceAnchor, SourceKey, SourceRecordLocator,
-    StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, EventIdentityInput,
+    EventType, NativeItemKey, NativeSessionKey, PositionStability, SessionIdentityInput,
+    SourceAnchor, SourceKey, StableEntityId, TypedKey,
 };
-use ctx_history_index::LexicalDocument;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-#[cfg(test)]
-use std::cell::Cell;
 
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::{
         file_touches::visit_provider_file_touch_drafts_with_limit,
-        provider_path_identity,
         providers::native_jsonl::visit_native_jsonl_files,
         source_backed::family::jsonl::{
             observe_opened_file, probe_records_until, JsonlFamilyAdapter, JsonlFamilyAppendMode,
-            JsonlFamilyHydrator, JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector,
-            JsonlFileObservation, JsonlRecordRef,
+            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation,
+            JsonlRecordRef,
         },
     },
-    CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
+    CaptureError, Result,
 };
 
 use super::super::{
@@ -53,21 +47,6 @@ const SOURCE_SCHEMA_VARIANT: &str = "pi-nativepath-jsonl-v1";
 const PARSER_REVISION: &str = "pi-shared-jsonl-v2";
 const MAX_TOUCHES_PER_RECORD: usize = 63;
 const MAX_HEADER_PROBE_RECORDS: usize = 64;
-
-#[cfg(test)]
-thread_local! {
-    static HEADER_PROBES: Cell<usize> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(super) fn reset_pi_header_probes() {
-    HEADER_PROBES.set(0);
-}
-
-#[cfg(test)]
-pub(super) fn pi_header_probes() -> usize {
-    HEADER_PROBES.get()
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PiSourceBackedRoot {
@@ -273,7 +252,6 @@ impl JsonlFamilyAdapter for PiJsonlAdapter {
             .transpose()?;
         Ok(Box::new(PiProjector {
             source: leaf.source().clone(),
-            source_path: provider_path_identity(leaf.source_path())?,
             root_session_id: parent_session_id.unwrap_or(session_id),
             parent_session_id,
             session_id,
@@ -281,23 +259,10 @@ impl JsonlFamilyAdapter for PiJsonlAdapter {
             rejected_records: 0,
         }))
     }
-
-    fn hydrator(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        source_file: Arc<OpenedProviderSourceFile>,
-    ) -> std::result::Result<Box<dyn JsonlFamilyHydrator>, HydrationFailure> {
-        Ok(Box::new(PiHydrator {
-            source: leaf.source().clone(),
-            binding: decode_binding(leaf).map_err(unavailable)?,
-            source_file,
-        }))
-    }
 }
 
 struct PiProjector {
     source: SourceKey,
-    source_path: String,
     binding: Binding,
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
@@ -309,7 +274,7 @@ impl JsonlFamilyProjector for PiProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
-        emit: &mut dyn FnMut(LexicalDocument) -> Result<()>,
+        emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         let evidence = record.evidence();
         let bytes = record.bytes();
@@ -373,64 +338,63 @@ impl JsonlFamilyProjector for PiProjector {
             subrecord_selector: None,
         })
         .map_err(contract)?;
-        let locator = SourceRecordLocator::new(
+        let native_event_id = native_id
+            .map(TypedKey::utf8)
+            .transpose()
+            .map_err(contract)?
+            .unwrap_or(TypedKey::U64(ordinal));
+        let is_primary = self.binding.parent_session_id.is_none();
+        let message = value.get("message").unwrap_or(&value);
+        let tool_name = message
+            .get("toolName")
+            .or_else(|| message.get("tool_name"))
+            .or_else(|| message.get("name"))
+            .cloned();
+        let call_id = message
+            .get("toolCallId")
+            .or_else(|| message.get("tool_call_id"))
+            .or_else(|| message.get("callId"))
+            .cloned();
+        let structured_content =
+            (!touched_files.is_empty() || tool_name.is_some() || call_id.is_some()).then(|| {
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "call_id": call_id,
+                    "file_touches": touched_files,
+                })
+            });
+        let agent_type = if is_primary {
+            AgentType::Primary
+        } else {
+            AgentType::Subagent
+        };
+        let mut core = CoreRecord::new_selected(
+            event_id,
+            self.session_id,
+            self.root_session_id,
             self.source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset: evidence.byte_start(),
-                byte_length: evidence
-                    .byte_end_exclusive()
-                    .checked_sub(evidence.byte_start())
-                    .ok_or(CaptureError::SystemInvariant("Pi record range underflowed"))?,
-                physical_ordinal: ordinal,
-                native_session_key: Some(
-                    TypedKey::utf8(&self.binding.native_session_id).map_err(contract)?,
-                ),
-                native_event_key: Some(
-                    native_id
-                        .map(TypedKey::utf8)
-                        .transpose()
-                        .map_err(contract)?
-                        .unwrap_or(TypedKey::U64(ordinal)),
-                ),
-            },
-            LocatorRevisionPolicy::StableRecordEvidence,
-            None,
-            Sha256::digest(bytes).into(),
+            ordinal,
+            event_type.as_str(),
+            agent_type.as_str(),
+            is_primary,
+            PARSER_REVISION,
+            body,
         )
         .map_err(contract)?;
-        let is_primary = self.binding.parent_session_id.is_none();
-        emit(LexicalDocument {
-            event_id,
-            session_id: self.session_id,
-            parent_session_id: self.parent_session_id,
-            root_session_id: self.root_session_id,
-            source: self.source.clone(),
-            locator,
-            provider_session_id: Some(self.binding.native_session_id.clone()),
-            branch: None,
-            source_path: Some(self.source_path.clone()),
-            agent_type: if is_primary {
-                AgentType::Primary
-            } else {
-                AgentType::Subagent
-            }
-            .as_str()
-            .to_owned(),
-            is_primary,
-            event_sequence: ordinal,
-            occurred_at_unix_ms: Some(occurred_at.timestamp_millis()),
-            event_type: event_type.as_str().to_owned(),
-            role: value
-                .get("message")
-                .and_then(|message| message.get("role"))
-                .and_then(Value::as_str)
-                .map(pi_event_role)
-                .map(|role| role.as_str().to_owned()),
-            body,
-            workspace: None,
-            cwd: self.binding.cwd.clone(),
-            touched_files,
-        })
+        core.parent_session_id = self.parent_session_id;
+        core.provider_session_id = Some(self.binding.native_session_id.clone());
+        core.native_event_id = Some(native_event_id);
+        core.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());
+        core.role = value
+            .get("message")
+            .and_then(|message| message.get("role"))
+            .and_then(Value::as_str)
+            .map(pi_event_role)
+            .map(|role| role.as_str().to_owned());
+        core.cwd = self.binding.cwd.clone();
+        core.content.structured_content = structured_content;
+        core.validate_contract().map_err(contract)?;
+        emit(core)
     }
 
     fn rejected_records(&self) -> u64 {
@@ -438,71 +402,7 @@ impl JsonlFamilyProjector for PiProjector {
     }
 }
 
-struct PiHydrator {
-    source: SourceKey,
-    binding: Binding,
-    source_file: Arc<OpenedProviderSourceFile>,
-}
-
-impl JsonlFamilyHydrator for PiHydrator {
-    fn hydrate(
-        &mut self,
-        request: &EventHydrationRequest,
-    ) -> std::result::Result<HydratedProviderRecord, HydrationFailure> {
-        let (byte_offset, byte_length, ordinal, native_event_key) =
-            validate_locator(request.locator(), &self.source, &self.binding)?;
-        let length = usize::try_from(byte_length)
-            .map_err(|_| invalid("Pi locator range exceeds platform limits"))?;
-        if length == 0 || length > MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2) {
-            return Err(invalid("Pi locator range is invalid"));
-        }
-        if byte_offset > 0
-            && self
-                .source_file
-                .read_exact_range(byte_offset - 1, 1, 1)
-                .map_err(stale)?
-                != b"\n"
-        {
-            return Err(stale("Pi record boundary changed"));
-        }
-        let wire = self
-            .source_file
-            .read_exact_range(
-                byte_offset,
-                length,
-                MAX_PROVIDER_JSONL_LINE_BYTES.saturating_add(2),
-            )
-            .map_err(stale)?;
-        let bytes = strip_jsonl_terminator(&wire);
-        if Sha256::digest(bytes).as_slice() != request.locator().record_digest() {
-            return Err(stale("Pi record digest changed"));
-        }
-        let value: Value =
-            serde_json::from_slice(bytes).map_err(|_| stale("Pi record JSON changed"))?;
-        match (&native_event_key, value.get("id").and_then(Value::as_str)) {
-            (TypedKey::Utf8(expected), Some(observed)) if expected == observed => {}
-            (TypedKey::U64(expected), _) if *expected == ordinal => {}
-            _ => return Err(stale("Pi record identity changed")),
-        }
-        let event_type = pi_event_type(
-            value
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown"),
-            value.get("message"),
-        );
-        let body = projected_body(&value, event_type)
-            .ok_or_else(|| stale("Pi record is no longer projected"))?;
-        Ok(HydratedProviderRecord {
-            event_id: request.event_id(),
-            provider_bytes: body.into_bytes(),
-        })
-    }
-}
-
 fn parse_header_binding(record: JsonlRecordRef<'_>) -> Result<Option<Binding>> {
-    #[cfg(test)]
-    HEADER_PROBES.with(|count| count.set(count.get().saturating_add(1)));
     let Ok(value) = serde_json::from_slice::<Value>(record.bytes()) else {
         return Ok(None);
     };
@@ -658,44 +558,6 @@ fn session_identity_for_native(native_session_id: &str) -> Result<StableEntityId
     session_identity(&source, native_session_id)
 }
 
-fn validate_locator(
-    locator: &SourceRecordLocator,
-    source: &SourceKey,
-    binding: &Binding,
-) -> std::result::Result<(u64, u64, u64, TypedKey), HydrationFailure> {
-    locator.validate_contract().map_err(invalid)?;
-    source
-        .validate_exact_descriptor(locator.source())
-        .map_err(invalid)?;
-    if locator.revision_policy() != LocatorRevisionPolicy::StableRecordEvidence
-        || locator.certified_source_revision_digest().is_some()
-    {
-        return Err(invalid("Pi locator revision policy is invalid"));
-    }
-    let NativeRecordCoordinate::Jsonl {
-        byte_offset,
-        byte_length,
-        physical_ordinal,
-        native_session_key,
-        native_event_key,
-    } = locator.coordinate()
-    else {
-        return Err(invalid("Pi locator is not a JSONL range"));
-    };
-    if native_session_key.as_ref() != Some(&TypedKey::Utf8(binding.native_session_id.clone())) {
-        return Err(invalid("Pi locator session key is invalid"));
-    }
-    let native_event_key = native_event_key
-        .clone()
-        .ok_or_else(|| invalid("Pi locator event key is absent"))?;
-    Ok((
-        *byte_offset,
-        *byte_length,
-        *physical_ordinal,
-        native_event_key,
-    ))
-}
-
 fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<Binding> {
     let TypedKey::Bytes(bytes) = leaf.binding() else {
         return Err(CaptureError::InvalidPayload(
@@ -714,11 +576,6 @@ fn relative_to_authority(authority: &ProviderSourceRoot, path: &Path) -> Result<
         })
 }
 
-fn strip_jsonl_terminator(record: &[u8]) -> &[u8] {
-    let record = record.strip_suffix(b"\n").unwrap_or(record);
-    record.strip_suffix(b"\r").unwrap_or(record)
-}
-
 fn is_historical_omp_root(path: &Path) -> bool {
     let components = path
         .components()
@@ -735,25 +592,4 @@ fn is_historical_omp_root(path: &Path) -> bool {
 
 fn contract(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::InvalidPayload(error.to_string())
-}
-
-fn invalid(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::InvalidLocator,
-        detail: error.to_string(),
-    }
-}
-
-fn stale(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::StaleRecordEvidence,
-        detail: error.to_string(),
-    }
-}
-
-fn unavailable(error: impl std::fmt::Display) -> HydrationFailure {
-    HydrationFailure {
-        kind: HydrationFailureKind::TemporarilyUnavailable,
-        detail: error.to_string(),
-    }
 }

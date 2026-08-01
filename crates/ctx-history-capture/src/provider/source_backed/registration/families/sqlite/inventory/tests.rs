@@ -7,17 +7,17 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, EventIdentityInput, LocatorRevisionPolicy, NativeItemKey,
-    NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceObservation, SourceRecordLocator,
+    derive_event_id, derive_session_id, CoreRecord, EventIdentityInput, NativeItemKey,
+    NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceObservation,
 };
-use ctx_history_index::{LexicalDocument, VerifiedIndex, WriterOptions};
+use ctx_history_index::{VerifiedIndex, WriterOptions};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::{
     provider::source_backed::{
         family::document::DocumentLeafExecutionPolicy, source_backed_leaf_worker_budget,
+        AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES,
     },
     provider_sources::ProviderCatalogSupport,
 };
@@ -231,7 +231,7 @@ impl SqliteInventoryProvider for TestProvider {
                         "test certified byte count overflowed",
                     )
                 })?;
-            sink.emit_document(test_document(&leaf.source, *id, body))?;
+            sink.emit_core_record(test_document(&leaf.source, *id, body))?;
         }
         let content_digest: [u8; 32] = content.finalize().into();
         let mutate_before_finish = {
@@ -264,16 +264,6 @@ impl SqliteInventoryProvider for TestProvider {
             },
         )
         .map_err(route_error)
-    }
-
-    fn hydrate(
-        &self,
-        _request: &BatchHydrationRequest,
-    ) -> Result<BatchHydrationResult, HydrationFailure> {
-        Err(hydration_failure(
-            HydrationFailureKind::UnsupportedParserRevision,
-            "test adapter does not hydrate",
-        ))
     }
 
     fn after_snapshots_sealed(&self) {
@@ -488,6 +478,38 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     let deleted_source = catalog.lock().unwrap().pop().unwrap().source;
     serial_provider.reset_scan_activity();
     parallel_provider.reset_scan_activity();
+    for expected_missing in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
+        let serial_grace = publish(&serial_index_root, &serial_registry);
+        let parallel_grace = publish(&parallel_index_root, &parallel_registry);
+        assert!(serial_grace.removals.is_empty());
+        assert!(parallel_grace.removals.is_empty());
+        assert_eq!(serial_grace.sources.len(), DATABASES);
+        assert_eq!(parallel_grace.sources.len(), DATABASES);
+        assert_eq!(
+            serial_grace
+                .commit
+                .manifest()
+                .source_catalog()
+                .missing_source(&deleted_source)
+                .unwrap()
+                .consecutive_missing()
+                .get(),
+            expected_missing
+        );
+        assert_eq!(
+            parallel_grace
+                .commit
+                .manifest()
+                .source_catalog()
+                .missing_source(&deleted_source)
+                .unwrap()
+                .consecutive_missing()
+                .get(),
+            expected_missing
+        );
+    }
+    serial_provider.reset_scan_activity();
+    parallel_provider.reset_scan_activity();
     let serial_deleted = publish(&serial_index_root, &serial_registry);
     let parallel_deleted = publish(&parallel_index_root, &parallel_registry);
     assert_eq!(
@@ -502,20 +524,20 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
         .exact_descriptor_eq(&deleted_source)));
     assert_inventory_work(
         &serial_provider,
-        DATABASES * 3 + DATABASES - 1,
+        DATABASES * 3 + (DATABASES - 1) * 3,
         1,
-        8,
-        4,
-        DATABASES * 3 + DATABASES - 1,
+        12,
+        6,
+        DATABASES * 3 + (DATABASES - 1) * 3,
         DATABASES + 1,
     );
     assert_inventory_work(
         &parallel_provider,
-        DATABASES * 3 + DATABASES - 1,
+        DATABASES * 3 + (DATABASES - 1) * 3,
         parallel_worker_count,
-        8,
-        4,
-        DATABASES * 3 + DATABASES - 1,
+        12,
+        6,
+        DATABASES * 3 + (DATABASES - 1) * 3,
         DATABASES + 1,
     );
 
@@ -922,7 +944,7 @@ fn sqlite_component_path(database: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(component)
 }
 
-fn test_document(source: &SourceKey, id: i64, body: &str) -> LexicalDocument {
+fn test_document(source: &SourceKey, id: i64, body: &str) -> CoreRecord {
     let native_session_key =
         NativeSessionKey::native_id("sqlite-inventory-family-test.session", TypedKey::I64(id))
             .unwrap();
@@ -943,40 +965,24 @@ fn test_document(source: &SourceKey, id: i64, body: &str) -> LexicalDocument {
         subrecord_selector: None,
     })
     .unwrap();
-    let digest: [u8; 32] = Sha256::digest(body.as_bytes()).into();
-    let locator = SourceRecordLocator::new(
-        source.clone(),
-        NativeRecordCoordinate::ProviderSqlite {
-            logical_relation: "messages".to_owned(),
-            primary_key: TypedKey::I64(id),
-            row_version: None,
-        },
-        LocatorRevisionPolicy::StableRecordEvidence,
-        None,
-        digest,
-    )
-    .unwrap();
-    LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator,
-        provider_session_id: Some(id.to_string()),
-        branch: None,
-        source_path: None,
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: 1,
-        occurred_at_unix_ms: Some(1),
-        event_type: "message".to_owned(),
-        role: Some("user".to_owned()),
-        body: body.to_owned(),
-        workspace: None,
-        cwd: None,
-        touched_files: Vec::new(),
-    }
+        session_id,
+        source.clone(),
+        1,
+        "message",
+        "primary",
+        true,
+        TEST_PARSER_REVISION,
+        body,
+    )
+    .unwrap();
+    record.provider_session_id = Some(id.to_string());
+    record.native_event_id = Some(TypedKey::I64(id));
+    record.occurred_at_unix_ms = Some(1);
+    record.role = Some("user".to_owned());
+    record
 }
 
 fn directory_file_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {

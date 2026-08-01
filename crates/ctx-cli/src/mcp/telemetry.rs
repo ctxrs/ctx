@@ -29,10 +29,7 @@ pub(super) enum RequestDescriptor {
     Initialize,
     Ping,
     ToolsList,
-    ToolCall {
-        tool: McpToolV1,
-        complete_content: bool,
-    },
+    ToolCall { tool: McpToolV1 },
     UnknownRequest,
     MissingRequest,
     InitializedNotification,
@@ -62,13 +59,6 @@ impl RequestDescriptor {
             Some("tools/list") => Self::ToolsList,
             Some("tools/call") => Self::ToolCall {
                 tool: McpToolV1::from_name(message.pointer("/params/name").and_then(Value::as_str)),
-                complete_content: matches!(
-                    message.pointer("/params/name").and_then(Value::as_str),
-                    Some("show_session" | "show_event")
-                ) && message
-                    .pointer("/params/arguments/content")
-                    .and_then(Value::as_str)
-                    == Some("complete"),
             },
             Some(_) => Self::UnknownRequest,
             None => Self::MissingRequest,
@@ -299,10 +289,7 @@ impl McpLifecycle {
             RequestDescriptor::Ping
             | RequestDescriptor::ToolsList
             | RequestDescriptor::Initialize => None,
-            RequestDescriptor::ToolCall {
-                tool,
-                complete_content,
-            } => {
+            RequestDescriptor::ToolCall { tool } => {
                 let response = response?;
                 let tool_error =
                     response.pointer("/result/isError").and_then(Value::as_bool) == Some(true);
@@ -310,12 +297,14 @@ impl McpLifecycle {
                     self.counts.tool_failures = self.counts.tool_failures.saturating_add(1);
                 }
                 let mut result = result_metadata(tool, response);
-                if complete_content && response.get("result").is_some() {
+                if matches!(tool, McpToolV1::ShowSession | McpToolV1::ShowEvent)
+                    && response.get("result").is_some()
+                {
                     result.response_bound = Some(
                         if response
                             .pointer("/result/structuredContent/error_code")
                             .and_then(Value::as_str)
-                            == Some("content_too_large")
+                            == Some("output_limit_exceeded")
                         {
                             McpResponseBoundV1::Replaced
                         } else {

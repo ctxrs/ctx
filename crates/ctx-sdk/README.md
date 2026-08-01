@@ -30,7 +30,14 @@ let results = client.search(SearchOptions {
 ## Public Operations
 
 `status`, `init`, `sources`, `import_history`, `sync`, `search`, `show_event`,
-`show_session`, `locate_event`, and `locate_session`.
+and `show_session`.
 
 The SDK returns `AgentHistoryEnvelope` values from `ctx-protocol` with stable
 `agent-history-v1` fields. CLI JSON remains an adapter detail.
+
+Search hits, shown events, and typed session summaries expose Core `provider`,
+`provider_session_id`, and `source_format` identity where applicable. For
+Codex, `provider_session_id` is the directly usable resume UUID. Shown events
+carry typed completeness and selected/redacted/omitted policy metadata; `text`
+is the sole body and no path, cursor, source-location, or preview body is
+published.
