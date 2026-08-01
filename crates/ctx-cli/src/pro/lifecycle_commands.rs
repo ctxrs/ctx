@@ -11,7 +11,10 @@ use clap::{Args, Subcommand};
 use ctx_history_core::platform_security::{restrict_private_file, verify_private_file};
 use ctx_pro_host_protocol::ProFilesystemLayout;
 #[cfg(test)]
-use ctx_pro_host_protocol::{Capability, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION};
+use ctx_pro_host_protocol::{
+    Capability, CoreProjectionCurrentness, MaterializedCoverage, ProOperation, RepositoryCoverage,
+    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+};
 use serde_json::json;
 
 #[path = "lifecycle_commands/render.rs"]
@@ -395,6 +398,7 @@ pub(super) fn lifecycle_status_value(helper: ProStatus, preserved_data: bool) ->
             Some("key_store_unavailable" | "key_store_locked" | "corrupt_graph") => {
                 ("repair_required", Some("ctx pro"), "local_pro_unavailable")
             }
+            None if materialized => ("not_blame_ready", None, "no_available_blame_operations"),
             Some(_) | None => ("unavailable", Some("ctx pro"), "helper_unavailable"),
         }
     };
@@ -409,6 +413,11 @@ pub(super) fn lifecycle_status_value(helper: ProStatus, preserved_data: bool) ->
         "protocol_version": helper.protocol_version,
         "capabilities": helper.capabilities,
         "error_code": helper.error_code,
+        "projection_currentness": helper.projection_currentness,
+        "materialized_coverage": helper.materialized_coverage,
+        "repository_coverage": helper.repository_coverage,
+        "supported_operations": helper.supported_operations,
+        "available_operations": helper.available_operations,
         "access_state": helper.access_state,
         "refresh_after_unix": helper.refresh_after_unix,
         "access_deadline_unix": helper.access_deadline_unix,

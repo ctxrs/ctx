@@ -93,21 +93,32 @@ fn blame_request_is_bound_to_the_exact_core_receipt() {
 }
 
 #[test]
-fn terminal_empty_status_is_quiet_and_not_blame_ready() {
-    let status = status(MaterializedCoverage::Empty);
-    status.validate().unwrap();
-    let error = support::current_blame_request(
-        BlameTarget::Commit {
-            oid: "0123456789abcdef".to_owned(),
-            repository: None,
-        },
-        10,
-        None,
-        &status,
-        &"a".repeat(64),
-    )
-    .unwrap_err();
-    assert_eq!(stable_error_code(&error), Some("not_materialized"));
+fn terminal_quiet_status_is_current_materialized_and_not_blame_ready() {
+    for coverage in [MaterializedCoverage::Empty, MaterializedCoverage::Abstained] {
+        let status = status(coverage);
+        status.validate().unwrap();
+        assert_eq!(
+            super::client_status::status_outcome(&status, None),
+            (false, true, None),
+            "{coverage:?}"
+        );
+        let error = support::current_blame_request(
+            BlameTarget::Commit {
+                oid: "0123456789abcdef".to_owned(),
+                repository: None,
+            },
+            10,
+            None,
+            &status,
+            &"a".repeat(64),
+        )
+        .unwrap_err();
+        assert_eq!(
+            stable_error_code(&error),
+            Some("not_materialized"),
+            "{coverage:?}"
+        );
+    }
 }
 
 #[test]

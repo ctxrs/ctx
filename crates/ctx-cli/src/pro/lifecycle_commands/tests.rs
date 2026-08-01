@@ -573,6 +573,11 @@ fn failed_key_deletion_preserves_helper_graph_and_credentials() {
 
 fn pro_status(access_state: &str) -> ProStatus {
     let locked = access_state == "locked";
+    let operations = std::collections::BTreeSet::from([
+        ProOperation::FileBlame,
+        ProOperation::CommitBlame,
+        ProOperation::PullRequestBlame,
+    ]);
     ProStatus {
         schema_version: 1,
         installed: true,
@@ -583,6 +588,18 @@ fn pro_status(access_state: &str) -> ProStatus {
         protocol_version: PROTOCOL_VERSION,
         capabilities: vec!["status".to_owned()],
         error_code: locked.then(|| "entitlement_expired".to_owned()),
+        projection_currentness: Some(CoreProjectionCurrentness::Current),
+        materialized_coverage: Some(MaterializedCoverage::Complete),
+        repository_coverage: Some(RepositoryCoverage {
+            repository_candidate_events: 6,
+            logical_binding_events: 5,
+            certified_live_root_access_events: 4,
+            file_evidence_events: 3,
+            exact_commit_evidence_events: 2,
+            exact_pull_request_evidence_events: 1,
+        }),
+        supported_operations: Some(operations.clone()),
+        available_operations: Some(operations),
         access_state: Some(access_state.to_owned()),
         refresh_after_unix: Some(100),
         access_deadline_unix: Some(200),
@@ -626,6 +643,80 @@ fn lifecycle_status_fails_closed_for_invalid_helper_response_axes() {
         assert_eq!(value["ready"], false, "{error_code}");
         assert_eq!(value["materialized"], false, "{error_code}");
     }
+}
+
+#[test]
+fn lifecycle_status_preserves_terminal_quiet_coverage_without_fallback() {
+    for coverage in [MaterializedCoverage::Empty, MaterializedCoverage::Abstained] {
+        let mut helper = pro_status("active");
+        helper.ready = false;
+        helper.materialized_coverage = Some(coverage);
+        helper.repository_coverage = Some(RepositoryCoverage::default());
+        helper.available_operations = Some(std::collections::BTreeSet::new());
+
+        let value = lifecycle_status_value(helper, false);
+        assert_eq!(value["state"], "not_blame_ready", "{coverage:?}");
+        assert_eq!(value["ready"], false, "{coverage:?}");
+        assert_eq!(value["materialized"], true, "{coverage:?}");
+        assert_eq!(value["error_code"], serde_json::Value::Null, "{coverage:?}");
+        assert_eq!(value["projection_currentness"], "current", "{coverage:?}");
+        assert_eq!(
+            value["materialized_coverage"],
+            if coverage == MaterializedCoverage::Empty {
+                "empty"
+            } else {
+                "abstained"
+            },
+            "{coverage:?}"
+        );
+        assert_eq!(
+            value["repository_coverage"],
+            serde_json::json!({
+                "repository_candidate_events": 0,
+                "logical_binding_events": 0,
+                "certified_live_root_access_events": 0,
+                "file_evidence_events": 0,
+                "exact_commit_evidence_events": 0,
+                "exact_pull_request_evidence_events": 0,
+            }),
+            "{coverage:?}"
+        );
+        assert_eq!(
+            value["supported_operations"],
+            serde_json::json!(["file_blame", "commit_blame", "pull_request_blame"]),
+            "{coverage:?}"
+        );
+        assert_eq!(value["available_operations"], serde_json::json!([]));
+        assert_eq!(value["next_action"]["command"], serde_json::Value::Null);
+        assert_eq!(
+            value["next_action"]["reason"],
+            "no_available_blame_operations"
+        );
+    }
+}
+
+#[test]
+fn lifecycle_status_renders_repository_readiness_axes_independently() {
+    let value = lifecycle_status_value(pro_status("active"), false);
+
+    assert_eq!(
+        value["repository_coverage"]["repository_candidate_events"],
+        6
+    );
+    assert_eq!(value["repository_coverage"]["logical_binding_events"], 5);
+    assert_eq!(
+        value["repository_coverage"]["certified_live_root_access_events"],
+        4
+    );
+    assert_eq!(value["repository_coverage"]["file_evidence_events"], 3);
+    assert_eq!(
+        value["repository_coverage"]["exact_commit_evidence_events"],
+        2
+    );
+    assert_eq!(
+        value["repository_coverage"]["exact_pull_request_evidence_events"],
+        1
+    );
 }
 
 #[test]
