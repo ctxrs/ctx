@@ -48,15 +48,9 @@ pub(super) struct SourceBackedSemanticGeneration {
 }
 
 impl SourceBackedSemanticGeneration {
-    /// Binds semantic catch-up to one verified schema-v13 Core manifest.
-    ///
-    /// `semantic_documents` is supplied by the stable semantic-record feed
-    /// because a Core manifest counts all indexed event records, including
-    /// records that are not semantic document anchors.
-    pub(super) fn from_verified_index(
-        index: &VerifiedIndex,
-        semantic_documents: u64,
-    ) -> Result<Self> {
+    /// Binds semantic catch-up to one verified schema-v14 Core manifest and
+    /// mirrors its persisted exact semantic candidate count.
+    pub(super) fn from_verified_index(index: &VerifiedIndex) -> Result<Self> {
         let manifest = index.manifest();
         if LEXICAL_SCHEMA_VERSION != SOURCE_INPUT_LEXICAL_SCHEMA_VERSION
             || manifest.lexical_schema_version != SOURCE_INPUT_LEXICAL_SCHEMA_VERSION
@@ -71,7 +65,7 @@ impl SourceBackedSemanticGeneration {
                 "source-backed semantic manifest count does not match its verified index"
             ));
         }
-        if semantic_documents > manifest.indexed_documents {
+        if manifest.semantic_eligible_documents > manifest.indexed_documents {
             return Err(anyhow!(
                 "source-backed semantic document count exceeds its Core manifest"
             ));
@@ -85,7 +79,7 @@ impl SourceBackedSemanticGeneration {
         let generation = Self {
             core_generation_id: manifest_generation_id,
             semantic_policy_fingerprint: semantic_policy_fingerprint()?,
-            semantic_documents,
+            semantic_documents: manifest.semantic_eligible_documents,
         };
         validate_generation(&generation)?;
         Ok(generation)
@@ -141,9 +135,7 @@ impl SemanticVectorStore {
         E: SourceBackedSemanticEmbedder,
     {
         semantic_owned_sidecar_result((|| {
-            let semantic_documents = index.semantic_eligible_event_count()?;
-            let generation =
-                SourceBackedSemanticGeneration::from_verified_index(index, semantic_documents)?;
+            let generation = SourceBackedSemanticGeneration::from_verified_index(index)?;
             if self
                 .acknowledged_source_projection(
                     &generation.core_generation_id,

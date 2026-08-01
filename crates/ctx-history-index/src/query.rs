@@ -48,7 +48,9 @@ use super::{
     fields_from_schema, hex, source_token, Fields, IndexError, Result, VerifiedIndex,
     MAX_DOCUMENT_METADATA_BYTES,
 };
-use crate::index_document::{core_content_bytes, SessionEventOrderKey, SourceEventOrderKey};
+use crate::index_document::{
+    core_content_bytes, SemanticEventOrderKey, SessionEventOrderKey, SourceEventOrderKey,
+};
 
 const ID_PREFIX_MATCH_LIMIT: usize = 2;
 use crate::analyzer::BODY_ANALYZER;
@@ -63,6 +65,7 @@ const SOURCE_KEY_FIELD: &str = "source_key";
 const CORE_CONTENT_BYTES_FIELD: &str = "core_content_bytes";
 const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
 const SESSION_EVENT_ORDER_FIELD: &str = "session_event_order";
+const SEMANTIC_EVENT_ORDER_FIELD: &str = "semantic_event_order";
 
 #[cfg(test)]
 thread_local! {
@@ -70,6 +73,7 @@ thread_local! {
     static STORED_CORE_EVENT_RECORD_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SOURCE_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
     static SESSION_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
+    static SEMANTIC_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
     static SESSION_EVENT_ORDER_VISITED_SEQUENCES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     static LEXICAL_QUERY_CONSTRUCTIONS: Cell<usize> = const { Cell::new(0) };
     static LEXICAL_QUERY_EXECUTIONS: Cell<usize> = const { Cell::new(0) };
@@ -119,6 +123,16 @@ pub(crate) fn session_event_order_term_visits() -> usize {
 #[cfg(test)]
 pub(crate) fn session_event_order_visited_sequences() -> Vec<u64> {
     SESSION_EVENT_ORDER_VISITED_SEQUENCES.with(|sequences| sequences.borrow().clone())
+}
+
+#[cfg(test)]
+pub(crate) fn reset_semantic_event_order_term_visits() {
+    SEMANTIC_EVENT_ORDER_TERM_VISITS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn semantic_event_order_term_visits() -> usize {
+    SEMANTIC_EVENT_ORDER_TERM_VISITS.get()
 }
 
 #[cfg(test)]

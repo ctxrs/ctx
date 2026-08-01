@@ -216,6 +216,23 @@ fn stable_identity_order(records: &mut [CoreEventRecord]) {
 }
 
 #[test]
+fn semantic_generation_mirrors_the_persisted_core_eligible_count() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let eligible = fixture.core_record(1, "eligible user message")?;
+    let mut ineligible = fixture.core_record(2, "ineligible assistant message")?;
+    ineligible.role = Some("assistant".to_owned());
+    let index = fixture.publish(vec![eligible, ineligible])?;
+
+    let generation = SourceBackedSemanticGeneration::from_verified_index(&index)?;
+    assert_eq!(SOURCE_CONTRACT_VERSION, 5);
+    assert_eq!(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION, 14);
+    assert_eq!(index.manifest().semantic_eligible_documents, 1);
+    assert_eq!(generation.semantic_documents, 1);
+    assert_eq!(generation.core_generation_id, index.generation_id());
+    Ok(())
+}
+
+#[test]
 fn catch_up_resumes_after_restart_from_core_identity_frontier() -> Result<()> {
     let fixture = Fixture::new()?;
     let mut records = vec![fixture.record(1, "first")?, fixture.record(2, "second")?];

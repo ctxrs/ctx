@@ -15,7 +15,7 @@ use crate::{
     sha256_hex, source_sort_key,
 };
 
-pub const GENERATION_MANIFEST_VERSION: u32 = 5;
+pub const GENERATION_MANIFEST_VERSION: u32 = 6;
 pub const LEXICAL_SCHEMA_VERSION: u32 = LEXICAL_SCHEMA_REVISION;
 pub const LEXICAL_ANALYZER_VERSION: u32 = LEXICAL_TOKENIZER_REVISION;
 
@@ -259,6 +259,14 @@ pub enum IndexError {
     },
     #[error("generation count overflow")]
     CountOverflow,
+    #[error(
+        "semantic-eligible document count {eligible} exceeds indexed document count {indexed}"
+    )]
+    InvalidSemanticEligibleDocumentCount { eligible: u64, indexed: u64 },
+    #[error(
+        "semantic-eligible document count mismatch: manifest {manifest}, source aggregates {aggregates}"
+    )]
+    SemanticEligibleDocumentCountMismatch { manifest: u64, aggregates: u64 },
     #[error(
         "exact replay inventory coverage is incomplete: prior source {source_id} was neither \
          replayed nor terminally removed"
@@ -608,6 +616,7 @@ pub struct GenerationManifest {
     pub lexical_analyzer_version: u32,
     pub policy_schema_hash: String,
     pub indexed_documents: u64,
+    pub semantic_eligible_documents: u64,
     pub certified_source_bytes: u64,
     pub sources: Vec<CertifiedSource>,
     pub core_record_aggregates: Vec<SourceCoreRecordAggregate>,
@@ -622,6 +631,7 @@ pub struct GenerationManifest {
 pub struct SourceCoreRecordAggregate {
     source_identity_digest: String,
     indexed_documents: u64,
+    semantic_eligible_documents: u64,
     core_record_accumulator: String,
 }
 
@@ -629,11 +639,13 @@ impl SourceCoreRecordAggregate {
     pub(crate) fn new(
         source_identity_digest: String,
         indexed_documents: u64,
+        semantic_eligible_documents: u64,
         core_record_accumulator: String,
     ) -> Result<Self> {
         let aggregate = Self {
             source_identity_digest,
             indexed_documents,
+            semantic_eligible_documents,
             core_record_accumulator,
         };
         aggregate.validate_contract()?;
@@ -646,6 +658,10 @@ impl SourceCoreRecordAggregate {
 
     pub fn indexed_documents(&self) -> u64 {
         self.indexed_documents
+    }
+
+    pub fn semantic_eligible_documents(&self) -> u64 {
+        self.semantic_eligible_documents
     }
 
     pub fn core_record_accumulator(&self) -> &str {
@@ -661,6 +677,12 @@ impl SourceCoreRecordAggregate {
             || !is_sha256_hex(&self.core_record_accumulator)
         {
             return Err(IndexError::InvalidGenerationId);
+        }
+        if self.semantic_eligible_documents > self.indexed_documents {
+            return Err(IndexError::InvalidSemanticEligibleDocumentCount {
+                eligible: self.semantic_eligible_documents,
+                indexed: self.indexed_documents,
+            });
         }
         Ok(())
     }
@@ -683,6 +705,7 @@ impl GenerationManifest {
                 SourceCoreRecordAggregate::new(
                     crate::source_token(source.observation().source()),
                     source.counts().indexed_documents,
+                    0,
                     "00".repeat(32),
                 )
             })
@@ -725,10 +748,14 @@ impl GenerationManifest {
                 .cmp(&right.source_identity_digest)
         });
         let mut indexed_documents = 0_u64;
+        let mut semantic_eligible_documents = 0_u64;
         let mut certified_source_bytes = 0_u64;
-        for source in &sources {
+        for (source, aggregate) in sources.iter().zip(&core_record_aggregates) {
             indexed_documents = indexed_documents
                 .checked_add(source.counts().indexed_documents)
+                .ok_or(IndexError::CountOverflow)?;
+            semantic_eligible_documents = semantic_eligible_documents
+                .checked_add(aggregate.semantic_eligible_documents)
                 .ok_or(IndexError::CountOverflow)?;
             certified_source_bytes = certified_source_bytes
                 .checked_add(source.counts().certified_bytes)
@@ -743,6 +770,7 @@ impl GenerationManifest {
             lexical_analyzer_version: LEXICAL_ANALYZER_VERSION,
             policy_schema_hash: current_source_generation_policy_hash()?,
             indexed_documents,
+            semantic_eligible_documents,
             certified_source_bytes,
             sources,
             core_record_aggregates,
@@ -807,6 +835,7 @@ impl GenerationManifest {
             }
         }
         let mut expected_documents = 0_u64;
+        let mut expected_semantic_eligible_documents = 0_u64;
         let mut expected_bytes = 0_u64;
         for (source_index, source) in self.sources.iter().enumerate() {
             source.validate_contract()?;
@@ -828,6 +857,9 @@ impl GenerationManifest {
             }
             expected_documents = expected_documents
                 .checked_add(source.counts().indexed_documents)
+                .ok_or(IndexError::CountOverflow)?;
+            expected_semantic_eligible_documents = expected_semantic_eligible_documents
+                .checked_add(aggregate.semantic_eligible_documents)
                 .ok_or(IndexError::CountOverflow)?;
             expected_bytes = expected_bytes
                 .checked_add(source.counts().certified_bytes)
@@ -857,6 +889,12 @@ impl GenerationManifest {
                     missing.source().identity().to_string(),
                 ));
             }
+        }
+        if self.semantic_eligible_documents != expected_semantic_eligible_documents {
+            return Err(IndexError::SemanticEligibleDocumentCountMismatch {
+                manifest: self.semantic_eligible_documents,
+                aggregates: expected_semantic_eligible_documents,
+            });
         }
         if self.indexed_documents != expected_documents
             || self.certified_source_bytes != expected_bytes
@@ -911,6 +949,7 @@ pub struct CommitReceipt {
     pub generation_id: String,
     pub opstamp: u64,
     pub indexed_documents: u64,
+    pub semantic_eligible_documents: u64,
     pub certified_sources: usize,
     pub certified_source_bytes: u64,
     manifest: GenerationManifest,
@@ -922,6 +961,7 @@ impl CommitReceipt {
             generation_id: manifest.generation_id()?,
             opstamp,
             indexed_documents: manifest.indexed_documents,
+            semantic_eligible_documents: manifest.semantic_eligible_documents,
             certified_sources: manifest.sources.len(),
             certified_source_bytes: manifest.certified_source_bytes,
             manifest,

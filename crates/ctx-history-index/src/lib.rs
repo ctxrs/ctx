@@ -440,6 +440,7 @@ impl GenerationWriter {
                     source,
                     mode: PendingSourceMode::Replace,
                     staged_documents: 0,
+                    staged_semantic_eligible_documents: 0,
                     certificate: None,
                     core_record_accumulator: [0; 32],
                 },
@@ -488,6 +489,7 @@ impl GenerationWriter {
                     source,
                     mode: PendingSourceMode::Append { base },
                     staged_documents: 0,
+                    staged_semantic_eligible_documents: 0,
                     certificate: None,
                     core_record_accumulator: [0; 32],
                 },
@@ -520,6 +522,8 @@ impl GenerationWriter {
                 expected_content: CORE_CONTENT_POLICY_REVISION,
             });
         }
+        let semantic_eligible =
+            policy::is_semantic_candidate(&record.event_type, record.role.as_deref());
         let source_digest = record.source.identity().digest();
         let token = SourceToken::new(&source_digest);
         let token = token.as_str()?;
@@ -566,6 +570,12 @@ impl GenerationWriter {
             .staged_documents
             .checked_add(1)
             .ok_or(IndexError::CountOverflow)?;
+        if semantic_eligible {
+            pending.staged_semantic_eligible_documents = pending
+                .staged_semantic_eligible_documents
+                .checked_add(1)
+                .ok_or(IndexError::CountOverflow)?;
+        }
         Ok(())
     }
 

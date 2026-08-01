@@ -12,7 +12,7 @@ use ctx_history_core::{
 
 use crate::{Fields, IndexError, Result};
 
-const BASE_FIELD_VALUES: usize = 27;
+const BASE_FIELD_VALUES: usize = 28;
 pub(crate) const SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN: usize = 64;
 pub(crate) const SOURCE_EVENT_ORDER_KEY_LEN: usize = 104;
 const SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET: usize = SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN;
@@ -28,6 +28,47 @@ const SESSION_EVENT_ORDER_SEQUENCE_OFFSET: usize = SESSION_EVENT_ORDER_SESSION_P
 const SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET: usize = SESSION_EVENT_ORDER_SEQUENCE_OFFSET + 8;
 const SESSION_EVENT_ORDER_EVENT_ID_OFFSET: usize = SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 9;
 const SESSION_EVENT_ORDER_FIELD: &str = "session_event_order";
+
+pub(crate) const SEMANTIC_EVENT_ORDER_KEY_LEN: usize = 32;
+const SEMANTIC_EVENT_ORDER_FIELD: &str = "semantic_event_order";
+
+/// Eligible-only global semantic order term.
+///
+/// Every key is one full event-identity digest. All event identities have the
+/// same kind and identity-version prefix, so digest byte order is exactly the
+/// existing canonical `StableEntityId` order used by semantic cursors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SemanticEventOrderKey([u8; SEMANTIC_EVENT_ORDER_KEY_LEN]);
+
+impl SemanticEventOrderKey {
+    pub(crate) fn for_event(event_id: StableEntityId) -> Result<Self> {
+        if event_id.entity_kind() != StableEntityKind::Event {
+            return Err(IndexError::WriterInvariant(
+                "semantic event order requires an event identity",
+            ));
+        }
+        Ok(Self(event_id.digest()))
+    }
+
+    pub(crate) fn decode(encoded: &[u8]) -> Result<Self> {
+        let key = encoded
+            .try_into()
+            .map_err(|_| IndexError::InvalidStoredDocumentField(SEMANTIC_EVENT_ORDER_FIELD))?;
+        Ok(Self(key))
+    }
+
+    pub(crate) fn event_digest(self) -> [u8; SEMANTIC_EVENT_ORDER_KEY_LEN] {
+        self.0
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; SEMANTIC_EVENT_ORDER_KEY_LEN] {
+        &self.0
+    }
+
+    pub(crate) fn into_bytes(self) -> [u8; SEMANTIC_EVENT_ORDER_KEY_LEN] {
+        self.0
+    }
+}
 
 /// Exact session-coordinate term used for bounded forward traversal.
 ///
@@ -443,6 +484,10 @@ impl IndexDocument {
         core_content_bytes: usize,
         source: IndexSourceFields,
     ) -> Result<Self> {
+        let semantic_event_order =
+            crate::policy::is_semantic_candidate(&record.event_type, record.role.as_deref())
+                .then(|| SemanticEventOrderKey::for_event(record.event_id))
+                .transpose()?;
         let source_event_order = SourceEventOrderKey::for_document(
             &source,
             record.event_id.digest(),
@@ -530,6 +575,12 @@ impl IndexDocument {
         target.add_bytes(fields.core_record, core_record_bytes);
         target.add_bytes(fields.source_event_order, source_event_order.into_bytes());
         target.add_bytes(fields.session_event_order, session_event_order.into_bytes());
+        if let Some(semantic_event_order) = semantic_event_order {
+            target.add_bytes(
+                fields.semantic_event_order,
+                semantic_event_order.into_bytes(),
+            );
+        }
         Ok(target)
     }
 }

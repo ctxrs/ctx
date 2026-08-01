@@ -187,8 +187,7 @@ impl VerifiedIndex {
             .transpose()?;
         let eligibility = SemanticEligibility::CURRENT;
         let eligible_total = self.semantic_eligible_event_count()?;
-        let candidates =
-            self.semantic_event_addresses_after(after, eligibility, limit.saturating_add(1))?;
+        let candidates = self.semantic_event_addresses_after(after, limit.saturating_add(1))?;
         let candidate_count = candidates.len();
         let fields = fields_from_schema(self.searcher.schema())?;
         let mut items = Vec::with_capacity(limit.min(candidate_count));
@@ -253,8 +252,7 @@ impl VerifiedIndex {
             .transpose()?;
         let eligibility = SemanticEligibility::CURRENT;
         let eligible_total = self.semantic_eligible_event_count()?;
-        let candidates =
-            self.semantic_event_addresses_after(after, eligibility, limit.saturating_add(1))?;
+        let candidates = self.semantic_event_addresses_after(after, limit.saturating_add(1))?;
         let candidate_count = candidates.len();
         let fields = fields_from_schema(self.searcher.schema())?;
         let mut items = Vec::with_capacity(limit.min(candidate_count));
@@ -317,17 +315,11 @@ impl VerifiedIndex {
 
     /// Returns the exact total for the current metadata candidate contract.
     ///
-    /// The count is computed lazily from this immutable searcher and cached for
-    /// the lifetime of the pin.
+    /// The count is authenticated by this pin's immutable generation manifest;
+    /// no postings or stored Core records are visited.
     pub fn semantic_eligible_event_count(&self) -> Result<u64> {
-        if let Some(count) = self.semantic_eligible_event_count.get() {
-            return Ok(*count);
-        }
-        let fields = fields_from_schema(self.searcher.schema())?;
-        let count = self.count_semantic_eligible_events(fields, SemanticEligibility::CURRENT)?;
-        if self.semantic_eligible_event_count.set(count).is_err() {
-            return Ok(*self.semantic_eligible_event_count.get().unwrap_or(&count));
-        }
-        Ok(count)
+        let count = self.manifest.semantic_eligible_documents;
+        let _ = self.semantic_eligible_event_count.set(count);
+        Ok(*self.semantic_eligible_event_count.get().unwrap_or(&count))
     }
 }
