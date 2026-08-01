@@ -5,7 +5,9 @@ use std::{
     io::{BufReader, Read, Seek, SeekFrom, Write},
 };
 
-use ctx_history_core::{derive_event_id, CoreRecord, EventIdentityInput, NativeItemKey, SourceKey};
+use ctx_history_core::{
+    derive_event_id, CoreRecord, EventIdentityInput, NativeItemKey, SourceKey, TypedKey,
+};
 
 #[cfg(test)]
 use super::source_backed::record_custom_history_work;
@@ -224,6 +226,15 @@ fn core_record(
     };
     let event_key = custom_event_typed_key_parts(event.event_id.as_deref(), event.event_index)?;
     let native_item_key = NativeItemKey::native_id(CUSTOM_EVENT_KEY_NAMESPACE, event_key.clone())?;
+    let event_selector = event.event_id.as_ref().map_or_else(
+        || format!("event_index:{}", event.event_index),
+        |id| format!("event_id:{id}"),
+    );
+    let native_event_id = TypedKey::composite(vec![
+        TypedKey::utf8(source_record.provider_key.clone())?,
+        TypedKey::utf8(event.source_id.clone())?,
+        TypedKey::utf8(event_selector)?,
+    ])?;
     let event_id = derive_event_id(EventIdentityInput {
         source,
         session_id,
@@ -250,7 +261,7 @@ fn core_record(
         &event.source_id,
         &session.session_id,
     ));
-    record.native_event_id = Some(event_key);
+    record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = Some(event.occurred_at_unix_ms);
     record.role = event.role.clone();
     record.cwd = session.cwd.clone();

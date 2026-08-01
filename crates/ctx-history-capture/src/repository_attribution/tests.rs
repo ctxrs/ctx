@@ -1018,7 +1018,6 @@ fn certification_cache_is_constant_probe_for_repeated_events_and_invalidates_saf
     assert_eq!(attributor.full_certification_probe_count(), 3);
 
     let later_repo = temp.path().join("later-repo");
-    fs::create_dir(&later_repo).unwrap();
     for _ in 0..2 {
         let negative = attributor.attribute(AttributionInput {
             declared_tool_workdir: Some(later_repo.to_string_lossy().into_owned()),
@@ -1027,6 +1026,7 @@ fn certification_cache_is_constant_probe_for_repeated_events_and_invalidates_saf
         assert!(negative.repository_bindings.is_empty());
     }
     assert_eq!(attributor.full_certification_probe_count(), 4);
+    fs::create_dir(&later_repo).unwrap();
     run_git(&later_repo, &["init", "-q"]);
     run_git(&later_repo, &["config", "user.name", "ctx test"]);
     run_git(
