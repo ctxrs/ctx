@@ -36,9 +36,10 @@ pub(super) fn bound_tool_context(mut context: CodexToolCallContext) -> CodexTool
     if context
         .exact_command
         .as_ref()
-        .is_some_and(|value| value.len() > 1024 * 1024)
+        .is_some_and(|value| value.len() > crate::repository_attribution::MAX_COMMAND_BYTES)
     {
         context.exact_command = None;
+        context.command_too_large = true;
     }
     if context
         .session_cwd

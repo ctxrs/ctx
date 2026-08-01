@@ -61,6 +61,8 @@ pub(crate) struct ToolCallRequest {
     pub(crate) tool_name: Option<String>,
     pub(crate) input: Value,
     pub(crate) command: Option<String>,
+    #[serde(default)]
+    pub(crate) command_too_large: bool,
     pub(crate) declared_workdir: Option<String>,
     pub(crate) file_touches: Vec<ClaudeFileTouch>,
 }

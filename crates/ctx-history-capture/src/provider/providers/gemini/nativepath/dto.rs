@@ -108,6 +108,7 @@ pub(crate) enum GeminiEventBody {
         call_id: Option<String>,
         tool_name: Option<String>,
         command: Option<String>,
+        command_too_large: bool,
         declared_workdir: Option<String>,
         file_paths: Vec<String>,
         ambiguous_native_fields: bool,

@@ -26,8 +26,8 @@ use super::{
     source::{classify_claude_path, claude_projects_root, ClaudeSessionKey, SessionLayout},
 };
 use crate::repository_attribution::{
-    apply_annotation, linked_outcome_evidence, AttributionInput, LinkedOutcomeInput,
-    RepositoryAttributor, UnscopedFileObservation,
+    apply_annotation, linked_outcome_evidence, AttributionInput, CommandEvidenceDisposition,
+    LinkedOutcomeInput, RepositoryAttributor, UnscopedFileObservation,
 };
 use crate::OutputOutcome;
 use crate::{
@@ -233,6 +233,8 @@ struct ClaudeProjector {
 #[serde(deny_unknown_fields)]
 struct PendingCall {
     command: Option<String>,
+    #[serde(default)]
+    command_too_large: bool,
     declared_workdir: Option<String>,
     event_sequence: u64,
 }
@@ -350,6 +352,11 @@ impl JsonlFamilyProjector for ClaudeProjector {
             };
             if let Some(call) = &row.tool_call {
                 input.command = call.command.clone();
+                input.command_disposition = if call.command_too_large {
+                    CommandEvidenceDisposition::CommandTooLarge
+                } else {
+                    CommandEvidenceDisposition::Analyze
+                };
                 input.declared_tool_workdir = call.declared_workdir.clone();
                 input.file_observations = call
                     .file_touches
@@ -365,6 +372,7 @@ impl JsonlFamilyProjector for ClaudeProjector {
                         call_id,
                         PendingCallState::Exact(PendingCall {
                             command: call.command.clone(),
+                            command_too_large: call.command_too_large,
                             declared_workdir: call.declared_workdir.clone(),
                             event_sequence,
                         }),
@@ -381,6 +389,11 @@ impl JsonlFamilyProjector for ClaudeProjector {
                 if let (Some(context), Some(result_call_id)) = (context, result.call_id.as_deref())
                 {
                     input.command = context.command.clone();
+                    input.command_disposition = if context.command_too_large {
+                        CommandEvidenceDisposition::CommandTooLarge
+                    } else {
+                        CommandEvidenceDisposition::Analyze
+                    };
                     input.declared_tool_workdir = context.declared_workdir.clone();
                     if let Some(command) = context.command.as_deref() {
                         let output = result.tool_use_result.as_ref().unwrap_or(&result.content);
@@ -767,6 +780,7 @@ fn resolve_pending_call(
     match take_pending_call(pending_calls, call_id) {
         PendingCallLookup::Exact(context) => (Some(context), false),
         PendingCallLookup::Ambiguous => {
+            input.provider_native_context_ambiguous = true;
             input.outcome_abstentions.push((
                 RepositoryAbstentionReason::ProviderOutputUnjoined,
                 "claude_tool_result_call_id_is_ambiguous",

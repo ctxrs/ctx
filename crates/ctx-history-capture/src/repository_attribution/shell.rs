@@ -12,7 +12,7 @@ pub(crate) use outcome_plan::{
 
 use ctx_history_core::{RepositoryAbstentionReason, RepositoryEvidenceKind};
 
-pub(super) const MAX_COMMAND_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 const MAX_TOKENS: usize = 16_384;
 const MAX_SEGMENTS: usize = 4_096;
 const MAX_PATH_BYTES: usize = 16 * 1024;
@@ -203,6 +203,13 @@ pub(super) fn analyze(command: Option<&str>, base: Option<&Path>) -> CommandAnal
     });
     analysis.repository_paths = command_candidates;
     analysis
+}
+
+pub(super) fn command_too_large() -> CommandAnalysis {
+    abstain(
+        RepositoryAbstentionReason::CommandTooLarge,
+        "command_byte_limit_exceeded",
+    )
 }
 
 fn abstain(reason: RepositoryAbstentionReason, detail: &'static str) -> CommandAnalysis {

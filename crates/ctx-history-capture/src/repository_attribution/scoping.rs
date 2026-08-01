@@ -98,16 +98,10 @@ pub(super) fn scope_outcomes(
     if outcomes.is_empty() {
         return;
     }
-    let Some(operation_path) = operation_path else {
-        push_abstention(
-            annotation,
-            RepositoryEvidenceKind::ProviderNativeResult,
-            RepositoryAbstentionReason::OutcomeRepositoryUnbound,
-            "repository_outcome_has_no_operation_route",
-        );
-        return;
-    };
-    if output_path.is_some_and(|output_path| output_path != operation_path) {
+    if operation_path
+        .zip(output_path)
+        .is_some_and(|(operation_path, output_path)| output_path != operation_path)
+    {
         push_abstention(
             annotation,
             RepositoryEvidenceKind::ProviderNativeResult,
@@ -117,14 +111,23 @@ pub(super) fn scope_outcomes(
         return;
     }
 
-    let selected_binding_id = most_specific_certificate(certified, operation_path)
-        .map(|certificate| certificate.binding.binding_id.clone());
+    let selected_binding_id = exact_provider_outcome_binding(annotation, &outcomes).or_else(|| {
+        operation_path.and_then(|operation_path| {
+            most_specific_certificate(certified, operation_path)
+                .map(|certificate| certificate.binding.binding_id.clone())
+        })
+    });
     let Some(selected_binding_id) = selected_binding_id else {
+        let detail = if operation_path.is_some() {
+            "repository_outcome_route_has_no_single_certified_binding"
+        } else {
+            "repository_outcome_has_no_operation_route"
+        };
         push_abstention(
             annotation,
             RepositoryEvidenceKind::ProviderNativeResult,
             RepositoryAbstentionReason::OutcomeRepositoryUnbound,
-            "repository_outcome_route_has_no_single_certified_binding",
+            detail,
         );
         return;
     };
@@ -193,6 +196,38 @@ pub(super) fn scope_outcomes(
                     relative_path: None,
                 }),
         );
+}
+
+fn exact_provider_outcome_binding(
+    annotation: &CoreRecordAnnotation,
+    outcomes: &[RepositoryOutcomeObservation],
+) -> Option<String> {
+    let forge_repository = outcomes
+        .first()?
+        .pull_request
+        .as_ref()?
+        .forge_repository
+        .clone();
+    if !outcomes.iter().all(|outcome| {
+        outcome
+            .pull_request
+            .as_ref()
+            .is_some_and(|pull_request| pull_request.forge_repository == forge_repository)
+    }) {
+        return None;
+    }
+    let mut matching = annotation.repository_bindings.iter().filter(|binding| {
+        binding.aliases.contains(&forge_repository)
+            && binding.evidence.iter().any(|evidence| {
+                evidence.kind == RepositoryEvidenceKind::ProviderNativeProject
+                    && evidence.confidence == RepositoryEvidenceConfidence::Explicit
+            })
+    });
+    let selected = matching.next()?;
+    matching
+        .next()
+        .is_none()
+        .then(|| selected.binding_id.clone())
 }
 
 fn most_specific_certificate<'a>(

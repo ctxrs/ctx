@@ -487,6 +487,7 @@ impl CodexNativeScanner {
             authority.record_continuation_call(digest);
         }
         context.exact_command.clone_from(&origin.exact_command);
+        context.command_too_large = origin.command_too_large;
         context.session_cwd.clone_from(&origin.session_cwd);
         context
             .declared_workdir

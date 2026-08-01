@@ -660,6 +660,50 @@ fn gemini_exact_native_result_args_id_and_content_are_retained() {
 }
 
 #[test]
+fn gemini_oversized_command_abstains_without_session_cwd_fallback() {
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let repo = native_repository(&temp);
+    let path = write_transcript(
+        &root,
+        &[
+            json!({
+                "sessionId": "gemini-oversized-command",
+                "startTime": "2026-08-01T12:00:00Z",
+                "kind": "main",
+                "directories": [repo]
+            }),
+            json!({
+                "id": "oversized-command-record",
+                "timestamp": "2026-08-01T12:00:01Z",
+                "type": "gemini",
+                "toolCalls": [{
+                    "id": "oversized-command",
+                    "name": "run_shell_command",
+                    "args": {
+                        "command": "x".repeat(
+                            crate::repository_attribution::MAX_COMMAND_BYTES + 1
+                        )
+                    }
+                }]
+            }),
+        ],
+    );
+    let source = rediscover(&root, &path);
+    let (_, rows) = scan_collect(&source, None);
+    let records = project_gemini_test_events(&source, rows).unwrap();
+
+    let [record] = records.as_slice() else {
+        panic!("expected exactly one Gemini tool-call record");
+    };
+    assert!(record.repository_bindings.is_empty());
+    assert!(record_has_reason(
+        record,
+        RepositoryAbstentionReason::CommandTooLarge
+    ));
+}
+
+#[test]
 fn gemini_commit_rewrite_and_pr_results_require_exact_structured_outcomes() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);

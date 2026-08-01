@@ -71,6 +71,7 @@ fn decode_output_diagnostic(
         call_id: output.call_id.clone(),
         tool_name: output.tool_name.clone(),
         command: output.command.clone(),
+        command_too_large: output.command_too_large,
         declared_workdir: output.declared_workdir.clone(),
         file_paths: output.file_paths.clone(),
         ambiguous_native_fields: output.ambiguous_native_fields,

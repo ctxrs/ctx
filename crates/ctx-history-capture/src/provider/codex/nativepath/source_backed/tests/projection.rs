@@ -246,9 +246,7 @@ fn codex_success_without_binding_and_failed_or_mismatched_results_fail_closed() 
 }
 
 #[test]
-fn codex_structured_pr_create_keeps_exact_identity_and_fails_closed_without_local_route() {
-    use ctx_history_core::RepositoryAbstentionReason;
-
+fn codex_structured_pr_create_scopes_exact_identity_without_local_route() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let index = temp.path().join("global-index");
@@ -284,9 +282,13 @@ fn codex_structured_pr_create_keeps_exact_identity_and_fails_closed_without_loca
     assert!(core.repository_bindings[0]
         .local_root_authorization
         .is_none());
-    assert!(core.repository_vcs_observations.is_empty());
-    assert!(core.repository_abstentions.iter().any(|abstention| {
-        abstention.reason == RepositoryAbstentionReason::OutcomeRepositoryUnbound
+    assert_eq!(core.repository_vcs_observations.len(), 1);
+    assert_eq!(
+        core.repository_vcs_observations[0].repository_binding_id,
+        core.repository_bindings[0].binding_id
+    );
+    assert!(!core.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == ctx_history_core::RepositoryAbstentionReason::OutcomeRepositoryUnbound
     }));
 }
 
@@ -472,16 +474,23 @@ fn codex_provider_identity_stays_complete_while_conflicting_route_abstains() {
             ["provider_native_tool_result"]["result_content_location"],
         "normalized_body"
     );
-    assert_eq!(core.repository_bindings.len(), 1);
+    assert_eq!(core.repository_bindings.len(), 2);
+    let provider_binding = core
+        .repository_bindings
+        .iter()
+        .find(|binding| binding.logical_repository_id == "forge:github.com/other/repository")
+        .unwrap();
+    assert!(provider_binding.local_root_authorization.is_none());
+    assert!(core.repository_bindings.iter().any(|binding| {
+        binding.logical_repository_id == "forge:github.com/acme/codex-fixture"
+            && binding.local_root_authorization.is_some()
+    }));
+    assert_eq!(core.repository_vcs_observations.len(), 1);
     assert_eq!(
-        core.repository_bindings[0].logical_repository_id,
-        "forge:github.com/other/repository"
+        core.repository_vcs_observations[0].repository_binding_id,
+        provider_binding.binding_id
     );
-    assert!(core.repository_bindings[0]
-        .local_root_authorization
-        .is_none());
-    assert!(core.repository_vcs_observations.is_empty());
-    assert!(core.repository_abstentions.iter().any(|abstention| {
+    assert!(!core.repository_abstentions.iter().any(|abstention| {
         abstention.reason == RepositoryAbstentionReason::OutcomeRepositoryUnbound
     }));
     assert!(core.repository_abstentions.iter().any(|abstention| {

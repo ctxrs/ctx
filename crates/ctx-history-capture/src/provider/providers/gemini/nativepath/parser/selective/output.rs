@@ -573,6 +573,7 @@ pub(super) fn finish_probed_output(
         call_id,
         tool_name,
         command: repository_args.command,
+        command_too_large: repository_args.command_too_large,
         declared_workdir: repository_args.declared_workdir,
         file_paths: repository_args.file_paths,
         ambiguous_native_fields: repository_args.ambiguous_native_fields,
@@ -692,8 +693,10 @@ impl GeminiRawJson<'_> {
             self.whitespace();
             match key.as_deref() {
                 Some("command") => {
-                    let value = self.repository_string(depth)?;
-                    args.ambiguous_native_fields |= command_seen || value.is_none();
+                    let (value, command_too_large) = self.repository_command(depth)?;
+                    args.ambiguous_native_fields |=
+                        command_seen || (value.is_none() && !command_too_large);
+                    args.command_too_large |= command_too_large;
                     if command_seen {
                         args.command = None;
                     } else {
@@ -753,6 +756,20 @@ impl GeminiRawJson<'_> {
         }
         self.skip_value(depth)?;
         Ok(None)
+    }
+
+    fn repository_command(
+        &mut self,
+        depth: usize,
+    ) -> std::result::Result<(Option<String>, bool), String> {
+        self.whitespace();
+        if self.peek() == Some(b'"') {
+            return Ok(self
+                .string(crate::repository_attribution::MAX_COMMAND_BYTES)?
+                .bounded_command());
+        }
+        self.skip_value(depth)?;
+        Ok((None, false))
     }
 
     fn result_calls(

@@ -15,6 +15,7 @@ pub(crate) struct CodexToolCallContext {
     pub(crate) command_preview: Option<String>,
     pub(crate) arguments_preview: Option<String>,
     pub(crate) exact_command: Option<String>,
+    pub(crate) command_too_large: bool,
     pub(crate) session_cwd: Option<String>,
     pub(crate) declared_workdir: Option<String>,
     pub(crate) continuation_cell_id: Option<String>,

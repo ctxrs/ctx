@@ -35,6 +35,51 @@ fn claude_body_above_the_page_target_is_retained_whole() {
         .is_some_and(|value| value.ends_with("claude-full-body-tail")));
 }
 
+#[test]
+fn claude_oversized_command_abstains_without_session_cwd_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    assert!(std::process::Command::new("/usr/bin/git")
+        .args(["init", "-q"])
+        .current_dir(temp.path())
+        .status()
+        .unwrap()
+        .success());
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "assistant",
+        "uuid": "oversized-command-record",
+        "sessionId": "test-session",
+        "timestamp": "2026-08-01T12:00:00Z",
+        "cwd": temp.path(),
+        "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "oversized-command",
+                "name": "Bash",
+                "input": {"command": "x".repeat(1024 * 1024 + 1)}
+            }]
+        }
+    }))
+    .unwrap();
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    let [record] = emitted.as_slice() else {
+        panic!("expected exactly one Claude tool-call record");
+    };
+    assert!(record.repository_bindings.is_empty());
+    assert!(record
+        .repository_abstentions
+        .iter()
+        .any(|abstention| { abstention.reason == RepositoryAbstentionReason::CommandTooLarge }));
+}
+
 fn fallback_row(body: &str, ordinal: u64) -> ClaudeRetainedRow {
     let bytes = serde_json::json!({
         "type": "user",
@@ -183,6 +228,7 @@ fn duplicate_call_ids_are_ambiguous_and_result_linkage_abstains() {
             "duplicate-call",
             PendingCallState::Exact(PendingCall {
                 command: Some(command.to_owned()),
+                command_too_large: false,
                 declared_workdir: Some("/tmp/repository".to_owned()),
                 event_sequence: 1,
             }),
@@ -502,6 +548,7 @@ fn checkpoint_byte_overflow_degrades_to_typed_linkage_capacity() {
         "oversized-call",
         PendingCallState::Exact(PendingCall {
             command: Some("x".repeat(MAX_PROJECTOR_CHECKPOINT_BYTES)),
+            command_too_large: false,
             declared_workdir: Some("/tmp/project".to_owned()),
             event_sequence: 1,
         }),
@@ -577,6 +624,7 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
         "cross-append-call",
         PendingCallState::Exact(PendingCall {
             command: Some("git commit -m prefix".to_owned()),
+            command_too_large: false,
             declared_workdir: Some("/tmp/project".to_owned()),
             event_sequence: 0,
         }),
@@ -626,6 +674,7 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
         "cross-append-call",
         PendingCallState::Exact(PendingCall {
             command: Some("git commit -m suffix".to_owned()),
+            command_too_large: false,
             declared_workdir: Some("/tmp/project".to_owned()),
             event_sequence: 1_u64 << 16,
         }),

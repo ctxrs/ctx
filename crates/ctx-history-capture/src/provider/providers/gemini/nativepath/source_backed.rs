@@ -304,6 +304,7 @@ struct GeminiToolContext {
     origin_call_id: Option<String>,
     origin_event_sequence: Option<u64>,
     command: Option<String>,
+    command_too_large: bool,
     declared_workdir: Option<String>,
     file_paths: Vec<String>,
     ambiguous_native_fields: bool,
@@ -406,6 +407,7 @@ fn gemini_attribution_for_event(
     };
     let mut adapter_abstentions = Vec::new();
     if session.cwd_ambiguous {
+        input.provider_native_context_ambiguous = true;
         adapter_abstentions.push((
             RepositoryEvidenceKind::SessionCwd,
             RepositoryAbstentionReason::Ambiguous,
@@ -421,6 +423,7 @@ fn gemini_attribution_for_event(
             let combined = combine_gemini_tool_contexts(&contexts, &event.safe_file_touches);
             apply_gemini_context(&mut input, &combined);
             if combined.ambiguous_native_fields {
+                input.provider_native_context_ambiguous = true;
                 adapter_abstentions.push((
                     RepositoryEvidenceKind::DeclaredToolWorkdir,
                     RepositoryAbstentionReason::Ambiguous,
@@ -456,6 +459,7 @@ fn gemini_attribution_for_event(
             result,
             call_id,
             command,
+            command_too_large,
             declared_workdir,
             file_paths,
             ambiguous_native_fields,
@@ -464,6 +468,7 @@ fn gemini_attribution_for_event(
         } => {
             let direct = GeminiToolContext {
                 command: command.clone(),
+                command_too_large: *command_too_large,
                 declared_workdir: declared_workdir.clone(),
                 file_paths: file_paths.clone(),
                 ambiguous_native_fields: *ambiguous_native_fields,
@@ -481,6 +486,7 @@ fn gemini_attribution_for_event(
             };
             apply_gemini_context(&mut input, &context);
             if context.ambiguous_native_fields {
+                input.provider_native_context_ambiguous = true;
                 adapter_abstentions.push((
                     RepositoryEvidenceKind::DeclaredToolWorkdir,
                     RepositoryAbstentionReason::Ambiguous,
@@ -587,6 +593,7 @@ fn gemini_structured_content(event: &super::GeminiRetainedEvent) -> Option<serde
             call_id,
             tool_name,
             command,
+            command_too_large,
             declared_workdir,
             file_paths,
             ambiguous_native_fields,
@@ -606,6 +613,7 @@ fn gemini_structured_content(event: &super::GeminiRetainedEvent) -> Option<serde
             "declared_workdir": declared_workdir,
             "file_paths": file_paths,
             "ambiguous_native_fields": ambiguous_native_fields,
+            "command_too_large": command_too_large,
             "outcome": outcome,
             "exit_code": exit_code,
             "duration_ms": duration_ms,
@@ -653,7 +661,11 @@ fn gemini_tool_call_context(call: &super::dto::GeminiToolCall) -> GeminiToolCont
         context.ambiguous_native_fields = true;
         return context;
     };
-    context.command = exact_json_string(args.get("command"), &mut context.ambiguous_native_fields);
+    context.command = exact_json_command(
+        args.get("command"),
+        &mut context.command_too_large,
+        &mut context.ambiguous_native_fields,
+    );
     context.declared_workdir =
         exact_json_string(args.get("dir_path"), &mut context.ambiguous_native_fields);
     for key in ["path", "file_path", "filePath"] {
@@ -662,6 +674,27 @@ fn gemini_tool_call_context(call: &super::dto::GeminiToolCall) -> GeminiToolCont
         }
     }
     context
+}
+
+fn exact_json_command(
+    value: Option<&serde_json::Value>,
+    too_large: &mut bool,
+    invalid: &mut bool,
+) -> Option<String> {
+    match value {
+        Some(serde_json::Value::String(value))
+            if value.len() > crate::repository_attribution::MAX_COMMAND_BYTES =>
+        {
+            *too_large = true;
+            None
+        }
+        Some(serde_json::Value::String(value)) => Some(value.clone()),
+        Some(_) => {
+            *invalid = true;
+            None
+        }
+        None => None,
+    }
 }
 
 fn exact_json_string(value: Option<&serde_json::Value>, invalid: &mut bool) -> Option<String> {
@@ -687,12 +720,18 @@ fn combine_gemini_tool_contexts(
     contexts: &[GeminiToolContext],
     file_paths: &[String],
 ) -> GeminiToolContext {
-    let (command, command_ambiguous) =
+    let (mut command, mut command_ambiguous) =
         common_gemini_field(contexts, |context| context.command.as_deref());
+    let command_too_large = contexts.iter().any(|context| context.command_too_large);
+    if command_too_large {
+        command_ambiguous |= contexts.iter().any(|context| context.command.is_some());
+        command = None;
+    }
     let (declared_workdir, workdir_ambiguous) =
         common_gemini_field(contexts, |context| context.declared_workdir.as_deref());
     GeminiToolContext {
         command,
+        command_too_large,
         declared_workdir,
         file_paths: file_paths.to_vec(),
         ambiguous_native_fields: command_ambiguous
@@ -734,15 +773,32 @@ fn merge_gemini_result_context(
     let mut exact = !direct.ambiguous_native_fields && !linked.ambiguous_native_fields;
     direct.origin_call_id = linked.origin_call_id;
     direct.origin_event_sequence = linked.origin_event_sequence;
-    for (direct_field, linked_field) in [
-        (&mut direct.command, linked.command),
-        (&mut direct.declared_workdir, linked.declared_workdir),
-    ] {
-        match (direct_field.as_ref(), linked_field) {
-            (None, Some(linked)) => *direct_field = Some(linked),
-            (Some(direct), Some(linked)) if direct != &linked => exact = false,
-            _ => {}
+    let direct_command = direct.command.take();
+    match (
+        direct.command_too_large,
+        linked.command_too_large,
+        direct_command,
+        linked.command,
+    ) {
+        (true, true, _, _) | (true, false, _, None) | (false, true, None, _) => {
+            direct.command_too_large = true;
         }
+        (true, false, _, Some(_)) | (false, true, Some(_), _) => {
+            direct.command_too_large = true;
+            exact = false;
+        }
+        (false, false, None, Some(linked)) => direct.command = Some(linked),
+        (false, false, Some(direct_command), Some(linked)) => {
+            exact &= direct_command == linked;
+            direct.command = Some(direct_command);
+        }
+        (false, false, Some(direct_command), None) => direct.command = Some(direct_command),
+        (false, false, None, None) => {}
+    }
+    match (&direct.declared_workdir, linked.declared_workdir) {
+        (None, Some(linked)) => direct.declared_workdir = Some(linked),
+        (Some(direct_workdir), Some(linked)) if direct_workdir != &linked => exact = false,
+        _ => {}
     }
     for path in linked.file_paths {
         if !direct.file_paths.contains(&path) {
@@ -758,6 +814,11 @@ fn apply_gemini_context(
     context: &GeminiToolContext,
 ) {
     input.command = context.command.clone();
+    input.command_disposition = if context.command_too_large {
+        crate::repository_attribution::CommandEvidenceDisposition::CommandTooLarge
+    } else {
+        crate::repository_attribution::CommandEvidenceDisposition::Analyze
+    };
     input.declared_tool_workdir = context.declared_workdir.clone();
     input
         .file_observations
