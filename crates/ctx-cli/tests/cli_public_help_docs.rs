@@ -942,20 +942,19 @@ fn provider_session_rejects_whitespace_only_value() {
         .assert()
         .success();
 
-    for args in [vec![
+    let args = vec![
         "show",
         "session",
         "--provider",
         "codex",
         "--provider-session",
         " ",
-    ]] {
-        let stderr = failure_stderr(ctx(&temp).args(&args));
-        assert_eq!(
-            stderr, "✗ provider session ID must not be empty\n",
-            "unexpected typed diagnostic for {args:?}"
-        );
-    }
+    ];
+    let stderr = failure_stderr(ctx(&temp).args(&args));
+    assert_eq!(
+        stderr, "✗ provider session ID must not be empty\n",
+        "unexpected typed diagnostic for {args:?}"
+    );
 }
 
 #[test]

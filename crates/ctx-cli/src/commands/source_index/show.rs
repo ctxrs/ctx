@@ -575,12 +575,10 @@ pub(super) fn core_events_by_ids_with_presentation_limits(
     while let Some(ids) = pending.pop_front() {
         let remaining_content_bytes = output_limit_bytes
             .saturating_sub(retained_content_bytes)
-            .max(1)
-            .min(MAX_CORE_CONTENT_BYTES);
+            .clamp(1, MAX_CORE_CONTENT_BYTES);
         let remaining_encoded_core_bytes = encoded_core_limit_bytes
             .saturating_sub(retained_encoded_core_bytes)
-            .max(1)
-            .min(MAX_ENCODED_CORE_RECORD_BYTES);
+            .clamp(1, MAX_ENCODED_CORE_RECORD_BYTES);
         let budget =
             CoreEventPageBudget::new(remaining_encoded_core_bytes, remaining_content_bytes);
         #[cfg(test)]
