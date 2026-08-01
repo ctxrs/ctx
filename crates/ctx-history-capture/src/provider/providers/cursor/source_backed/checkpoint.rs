@@ -4,8 +4,8 @@ use crate::provider::source_backed::family::jsonl::{
 };
 
 pub(super) const MAX_CURSOR_CHECKPOINT_BYTES: usize = 40 * 1024;
-const CURSOR_CHECKPOINT_VERSION: u32 = 1;
-const CURSOR_CHECKPOINT_PREFIX: &str = "cursor.projector-checkpoint.v1:";
+const CURSOR_CHECKPOINT_VERSION: u32 = 2;
+const CURSOR_CHECKPOINT_PREFIX: &str = "cursor.projector-checkpoint.v2:";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

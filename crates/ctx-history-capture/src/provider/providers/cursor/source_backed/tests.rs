@@ -6,8 +6,8 @@ mod repository_tests {
 
     use super::super::*;
 
-    fn repository(temp: &TempDir) -> PathBuf {
-        let path = temp.path().join("repo");
+    fn repository_named(temp: &TempDir, name: &str) -> PathBuf {
+        let path = temp.path().join(name);
         fs::create_dir(&path).unwrap();
         assert!(Command::new("git")
             .args(["init", "-q"])
@@ -18,6 +18,26 @@ mod repository_tests {
         fs::create_dir(path.join("src")).unwrap();
         fs::write(path.join("src/lib.rs"), "pub fn native() {}\n").unwrap();
         path
+    }
+
+    fn repository(temp: &TempDir) -> PathBuf {
+        repository_named(temp, "repo")
+    }
+
+    fn repository_files(repository: &Path, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| {
+                let path = repository.join("src").join(format!("path-{index:02}.rs"));
+                fs::write(&path, format!("pub const PATH_{index}: usize = {index};\n")).unwrap();
+                path.to_string_lossy().into_owned()
+            })
+            .collect()
+    }
+
+    fn raw_tool_call(call_id: &str, input: &str) -> String {
+        format!(
+            r#"{{"role":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"{call_id}","name":"write_file","input":{input}}}]}}}}"#
+        )
     }
 
     fn event(value: &str, ordinal: u64) -> CursorNativeEvent {
@@ -52,6 +72,29 @@ mod repository_tests {
             .repository_abstentions
             .iter()
             .any(|abstention| abstention.reason == reason)
+    }
+
+    fn core_from_event(
+        projector: &mut CursorProjector,
+        event: CursorNativeEvent,
+        annotation: ctx_history_core::CoreRecordAnnotation,
+    ) -> CoreRecord {
+        let source = projector.source.clone();
+        let session_id = projector.session_id;
+        let native_session_id = projector.native_session_id.clone();
+        let occurrence =
+            next_event_occurrence(&event, &source, session_id, &mut projector.event_identities)
+                .unwrap();
+        core_record(
+            &source,
+            session_id,
+            &native_session_id,
+            event,
+            occurrence,
+            annotation,
+        )
+        .unwrap()
+        .unwrap()
     }
 
     #[test]
@@ -188,6 +231,180 @@ mod repository_tests {
     }
 
     #[test]
+    fn cursor_path_limit_is_exact_at_32_and_abstains_for_array_or_scalar_overflow() {
+        let temp = TempDir::new().unwrap();
+        let first_repo = repository_named(&temp, "first-repo");
+        let second_repo = repository_named(&temp, "second-repo");
+        let exact_paths = repository_files(&first_repo, MAX_CURSOR_INPUT_PATHS);
+        let second_repo_path = repository_files(&second_repo, 1).remove(0);
+        let exact_paths_json = serde_json::to_string(&exact_paths).unwrap();
+
+        let exact_call = raw_tool_call(
+            "exact-boundary",
+            &format!(r#"{{"paths":{exact_paths_json}}}"#),
+        );
+        let mut exact_projector = projector();
+        let exact_annotation = exact_projector.attribution_for_event(&event(&exact_call, 1));
+        assert_eq!(exact_annotation.repository_bindings.len(), 1);
+        assert_eq!(
+            exact_annotation.repository_file_observations.len(),
+            MAX_CURSOR_INPUT_PATHS
+        );
+        assert!(!has_reason(
+            &exact_annotation,
+            RepositoryAbstentionReason::CandidateLimitExceeded
+        ));
+        assert!(!has_reason(
+            &exact_annotation,
+            RepositoryAbstentionReason::Ambiguous
+        ));
+
+        let mut array_overflow_paths = exact_paths.clone();
+        array_overflow_paths.push(second_repo_path.clone());
+        let array_overflow_input = serde_json::json!({"paths": array_overflow_paths}).to_string();
+        let scalar_overflow_input = format!(
+            r#"{{"paths":{exact_paths_json},"path":{}}}"#,
+            serde_json::to_string(&second_repo_path).unwrap()
+        );
+
+        for (ordinal, (call_id, input)) in [
+            ("array-overflow", array_overflow_input),
+            ("scalar-overflow", scalar_overflow_input),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call = raw_tool_call(call_id, &input);
+            let mut overflow_projector = projector();
+            let call_event = event(&call, ordinal as u64 + 2);
+            let native_content = match &call_event.body {
+                CursorEventBody::ToolCall { native_content, .. } => native_content.clone(),
+                body => panic!("expected tool call, got {body:?}"),
+            };
+            assert_eq!(
+                native_content
+                    .pointer("/input/paths")
+                    .and_then(serde_json::Value::as_array)
+                    .unwrap()
+                    .len(),
+                MAX_CURSOR_INPUT_PATHS + usize::from(call_id == "array-overflow")
+            );
+            if call_id == "scalar-overflow" {
+                assert_eq!(
+                    native_content
+                        .pointer("/input/path")
+                        .and_then(serde_json::Value::as_str),
+                    Some(second_repo_path.as_str())
+                );
+            }
+
+            let annotation = overflow_projector.attribution_for_event(&call_event);
+            assert!(annotation.repository_bindings.is_empty());
+            assert!(annotation.repository_file_observations.is_empty());
+            assert!(has_reason(
+                &annotation,
+                RepositoryAbstentionReason::CandidateLimitExceeded
+            ));
+            assert!(!has_reason(
+                &annotation,
+                RepositoryAbstentionReason::Ambiguous
+            ));
+
+            let core = core_from_event(&mut overflow_projector, call_event, annotation);
+            let complete_body: serde_json::Value =
+                serde_json::from_str(core.content.normalized_body.as_deref().unwrap()).unwrap();
+            assert_eq!(
+                complete_body.pointer("/input"),
+                native_content.pointer("/input")
+            );
+            assert_eq!(core.parser_revision, PARSER_REVISION);
+
+            let checkpoint = overflow_projector.provider_checkpoint().unwrap().unwrap();
+            let restored = decode_cursor_checkpoint(
+                &checkpoint,
+                overflow_projector.native_session_id.as_str(),
+            )
+            .unwrap();
+            overflow_projector.tool_contexts = restored.tool_contexts;
+            overflow_projector.linkage_capacity_exceeded = restored.linkage_capacity_exceeded;
+
+            let result = format!(
+                r#"{{"role":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{call_id}","content":"complete result"}}]}}}}"#
+            );
+            let result_annotation =
+                overflow_projector.attribution_for_event(&event(&result, ordinal as u64 + 10));
+            assert!(result_annotation.repository_bindings.is_empty());
+            assert!(result_annotation.repository_file_observations.is_empty());
+            assert!(has_reason(
+                &result_annotation,
+                RepositoryAbstentionReason::CandidateLimitExceeded
+            ));
+            assert!(!has_reason(
+                &result_annotation,
+                RepositoryAbstentionReason::ProviderOutputUnjoined
+            ));
+        }
+    }
+
+    #[test]
+    fn cursor_invalid_path_shape_preserves_body_and_independent_workdir_evidence() {
+        let temp = TempDir::new().unwrap();
+        let repo = repository(&temp);
+        let call = serde_json::json!({
+            "role": "assistant",
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "id": "invalid-path-shape",
+                "name": "write_file",
+                "input": {
+                    "workdir": repo,
+                    "paths": ["src/lib.rs", {"unexpected": "shape"}]
+                }
+            }]}
+        })
+        .to_string();
+        let mut projector = projector();
+        let call_event = event(&call, 1);
+        let native_content = match &call_event.body {
+            CursorEventBody::ToolCall { native_content, .. } => native_content.clone(),
+            body => panic!("expected tool call, got {body:?}"),
+        };
+        assert!(native_content
+            .pointer("/input/paths/1/unexpected")
+            .is_some());
+
+        let annotation = projector.attribution_for_event(&call_event);
+        assert_eq!(annotation.repository_bindings.len(), 1);
+        assert!(annotation.repository_file_observations.is_empty());
+        assert!(has_reason(
+            &annotation,
+            RepositoryAbstentionReason::Ambiguous
+        ));
+        assert!(!has_reason(
+            &annotation,
+            RepositoryAbstentionReason::CandidateLimitExceeded
+        ));
+
+        let core = core_from_event(&mut projector, call_event, annotation);
+        let complete_body: serde_json::Value =
+            serde_json::from_str(core.content.normalized_body.as_deref().unwrap()).unwrap();
+        assert_eq!(complete_body, native_content);
+
+        let result = r#"{"role":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"invalid-path-shape","content":"complete result"}]}}"#;
+        let result_annotation = projector.attribution_for_event(&event(result, 2));
+        assert_eq!(result_annotation.repository_bindings.len(), 1);
+        assert!(result_annotation.repository_file_observations.is_empty());
+        assert!(has_reason(
+            &result_annotation,
+            RepositoryAbstentionReason::Ambiguous
+        ));
+        assert!(!has_reason(
+            &result_annotation,
+            RepositoryAbstentionReason::ProviderOutputUnjoined
+        ));
+    }
+
+    #[test]
     fn cursor_checkpoint_byte_overflow_is_a_typed_capacity_abstention() {
         let mut projector = projector();
         projector.remember_tool_context(
@@ -195,7 +412,7 @@ mod repository_tests {
             CursorToolContextState::Exact(CursorToolContext {
                 command: Some("x".repeat(MAX_CURSOR_CHECKPOINT_BYTES)),
                 declared_workdir: Some("/tmp/project".to_owned()),
-                input_paths: Vec::new(),
+                input_paths: CursorInputPathEvidence::Exact(Vec::new()),
             }),
         );
         assert!(projector.tool_contexts.is_empty());
