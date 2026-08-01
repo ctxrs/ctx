@@ -61,47 +61,6 @@ mod replacement;
 
 pub(crate) use contracts::*;
 
-#[derive(Debug)]
-#[cfg(test)]
-pub(crate) struct HermesSourceBackedScan {
-    pub(crate) certificate: CertifiedSource,
-    pub(crate) row_decode_passes: u64,
-    pub(crate) decoded_rows: u64,
-    pub(crate) emitted_pages: u64,
-    pub(crate) peak_buffered_records: u64,
-    pub(crate) native_candidate_query_batches: u64,
-    pub(crate) native_hydration_query_batches: u64,
-    pub(crate) max_native_rows_per_set: u64,
-}
-
-/// Streams bounded provider-local pages from one pinned SQLite snapshot.
-#[cfg(test)]
-pub(crate) fn scan_hermes_source_backed(
-    candidate: &HermesSourceCandidate,
-    mut emit: impl FnMut(HermesSourceBackedPage) -> HermesSourceBackedResult<()>,
-) -> HermesSourceBackedResult<HermesSourceBackedScan> {
-    candidate.source.validate_contract()?;
-    let (_, sqlite_snapshot) =
-        open_root_authorized_snapshot(&candidate.data_root, &candidate.path)?;
-    let opening_evidence = sqlite_snapshot.evidence().clone();
-    let projection = project_hermes_snapshot(candidate, sqlite_snapshot.connection()?, &mut emit)?;
-    let finish = sqlite_snapshot.finish();
-    let closing_evidence = finish?;
-    if closing_evidence != opening_evidence {
-        return Err(HermesSourceBackedError::SourceChanged);
-    }
-    Ok(HermesSourceBackedScan {
-        certificate: projection.certificate,
-        row_decode_passes: 1,
-        decoded_rows: projection.decoded_rows,
-        emitted_pages: projection.emitted_pages,
-        peak_buffered_records: projection.peak_buffered_records,
-        native_candidate_query_batches: projection.native_candidate_query_batches,
-        native_hydration_query_batches: projection.native_hydration_query_batches,
-        max_native_rows_per_set: projection.max_native_rows_per_set,
-    })
-}
-
 struct HermesSnapshotProjection {
     certificate: CertifiedSource,
     decoded_rows: u64,

@@ -81,79 +81,18 @@ pub(crate) enum DeepAgentsSourceBackedErrorV0 {
 
 pub(crate) type DeepAgentsSourceBackedResultV0<T> = Result<T, DeepAgentsSourceBackedErrorV0>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeepAgentsDatabaseRouteV0 {
-    // Current/legacy remain explicit to preserve the no-fallback selection
-    // contract exercised by platform-independent route checks.
-    #[allow(dead_code)]
-    Current,
-    #[allow(dead_code)]
-    Legacy,
-    Explicit,
-}
-
-impl DeepAgentsDatabaseRouteV0 {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Current => "current",
-            Self::Legacy => "legacy",
-            Self::Explicit => "explicit",
-        }
-    }
-}
-
-/// The one database selected by Deep Agents' current-over-legacy rule.
-///
-/// An existing but unsafe current path remains selected and is rejected when
-/// opened. It never causes a silent fallback to stale legacy history.
+/// The database selected by the shared source-backed coordinator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeepAgentsDatabaseSelectionV0 {
     path: PathBuf,
     data_root: PathBuf,
-    route: DeepAgentsDatabaseRouteV0,
 }
 
 impl DeepAgentsDatabaseSelectionV0 {
-    // Home selection is retained as the authoritative current-over-legacy,
-    // fail-closed route policy even when release capture supplies an explicit path.
-    #[cfg(test)]
-    pub(crate) fn from_home(data_root: &Path, home: &Path) -> Self {
-        let current = home.join(".deepagents/.state/sessions.db");
-        let legacy = home.join(".deepagents/sessions.db");
-        match fs::symlink_metadata(&current) {
-            Ok(_) => Self {
-                path: current,
-                data_root: data_root.to_path_buf(),
-                route: DeepAgentsDatabaseRouteV0::Current,
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if fs::symlink_metadata(&legacy).is_ok() {
-                    Self {
-                        path: legacy,
-                        data_root: data_root.to_path_buf(),
-                        route: DeepAgentsDatabaseRouteV0::Legacy,
-                    }
-                } else {
-                    Self {
-                        path: current,
-                        data_root: data_root.to_path_buf(),
-                        route: DeepAgentsDatabaseRouteV0::Current,
-                    }
-                }
-            }
-            Err(_) => Self {
-                path: current,
-                data_root: data_root.to_path_buf(),
-                route: DeepAgentsDatabaseRouteV0::Current,
-            },
-        }
-    }
-
     pub(crate) fn explicit(data_root: &Path, path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
             data_root: data_root.to_path_buf(),
-            route: DeepAgentsDatabaseRouteV0::Explicit,
         }
     }
 
@@ -224,7 +163,7 @@ impl DeepAgentsSourceBackedScannerV0 {
         deepagents_validate_schema(conn, selection.path())?;
         let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
         let source = deepagents_source_key()?;
-        let schema_evidence = deepagents_schema_evidence(&selection, &schema_fingerprint)?;
+        let schema_evidence = deepagents_schema_evidence(&schema_fingerprint)?;
         let logical_fingerprint = deepagents_logical_fingerprint(conn, &schema_evidence)?;
         let mut content_digest = Sha256::new();
         content_digest.update(DEEPAGENTS_SOURCE_DIGEST_DOMAIN);
@@ -599,12 +538,9 @@ fn deepagents_source_key() -> DeepAgentsSourceBackedResultV0<SourceKey> {
     )?)
 }
 
-fn deepagents_schema_evidence(
-    selection: &DeepAgentsDatabaseSelectionV0,
-    schema_fingerprint: &str,
-) -> DeepAgentsSourceBackedResultV0<Vec<u8>> {
+fn deepagents_schema_evidence(schema_fingerprint: &str) -> DeepAgentsSourceBackedResultV0<Vec<u8>> {
     Ok(serde_json::to_vec(&serde_json::json!({
-        "route": selection.route.as_str(),
+        "route": "explicit",
         "schema_fingerprint": schema_fingerprint,
     }))?)
 }

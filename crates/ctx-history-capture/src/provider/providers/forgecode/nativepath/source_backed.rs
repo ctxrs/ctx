@@ -29,7 +29,7 @@ use crate::{
         route_error, SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
     },
     provider_sources::{SqliteLogicalSnapshot, SqliteSourceAccessError},
-    CaptureError, ProviderAdapterContext, ProviderImportFailure, FORGECODE_SQLITE_SOURCE_FORMAT,
+    CaptureError, ProviderAdapterContext, FORGECODE_SQLITE_SOURCE_FORMAT,
 };
 
 use super::source::{
@@ -127,145 +127,14 @@ impl ForgeCodeSourceSelectionV0 {
     }
 }
 
-// Discovery transfers the live 984-byte scan directly into the source-backed
-// route; boxing it to match the 24-byte missing path adds an avoidable allocation.
-#[cfg(test)]
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum ForgeCodeSourceBackedDiscoveryV0 {
-    Missing {
-        // Preserve the selected missing path for fail-closed route diagnostics.
-        #[allow(dead_code)]
-        preferred_path: PathBuf,
-    },
-    Live(ForgeCodeSourceBackedScanV0),
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct ForgeCodeSourceBackedSourceV0 {
     source: SourceKey,
     canonical_path: PathBuf,
 }
 
-impl ForgeCodeSourceBackedSourceV0 {
-    #[cfg(test)]
-    pub(crate) fn source(&self) -> &SourceKey {
-        &self.source
-    }
-
-    #[cfg(test)]
-    pub(crate) fn canonical_path(&self) -> &Path {
-        &self.canonical_path
-    }
-}
-
 pub(crate) struct ForgeCodeSourceBackedPageV0 {
     pub(crate) documents: Vec<CoreRecord>,
-    // Rejection and page-bound accounting remain attached to emitted pages as
-    // release evidence even when Core consumes only selected event content.
-    #[allow(dead_code)]
-    pub(crate) failures: Vec<ProviderImportFailure>,
-    #[allow(dead_code)]
-    pub(crate) retained_bytes: usize,
-    #[allow(dead_code)]
-    pub(crate) ignored_records: u64,
-    #[allow(dead_code)]
-    pub(crate) terminal: bool,
-}
-
-#[cfg(test)]
-pub(crate) struct ForgeCodeSourceBackedScanV0 {
-    source: ForgeCodeSourceBackedSourceV0,
-    schema_evidence: Vec<u8>,
-    scanner: ForgeCodeScanner,
-    content_digest: Sha256,
-    counts: ScannedSourceCounts,
-    last_observed_rowid: Option<i64>,
-    terminal: bool,
-}
-
-#[cfg(test)]
-pub(crate) fn open_forgecode_source_backed_v0(
-    selection: ForgeCodeSourceSelectionV0,
-) -> ForgeCodeSourceBackedResultV0<ForgeCodeSourceBackedDiscoveryV0> {
-    let source = selection.source_key()?;
-    let native_source = match discover_forgecode_source(&selection.data_root, &selection.path)? {
-        ForgeCodeDiscovery::Missing => {
-            return Ok(ForgeCodeSourceBackedDiscoveryV0::Missing {
-                preferred_path: selection.path,
-            });
-        }
-        ForgeCodeDiscovery::Live(source) => source,
-    };
-    let schema_evidence = forgecode_schema_evidence(&native_source);
-    let canonical_path = native_source.canonical_path.clone();
-    let context = ProviderAdapterContext {
-        machine_id: "source-backed".to_owned(),
-        source_path: Some(canonical_path.clone()),
-        source_root: canonical_path.parent().map(Path::to_path_buf),
-        imported_at: DateTime::<Utc>::UNIX_EPOCH,
-    };
-    let scanner = ForgeCodeScanner::new(
-        native_source.clone(),
-        ForgeCodeFrontier::initial(),
-        context,
-        true,
-    )?;
-    let mut content_digest = Sha256::new();
-    content_digest.update(FORGECODE_RECORD_DIGEST_DOMAIN);
-    Ok(ForgeCodeSourceBackedDiscoveryV0::Live(
-        ForgeCodeSourceBackedScanV0 {
-            source: ForgeCodeSourceBackedSourceV0 {
-                source,
-                canonical_path,
-            },
-            schema_evidence,
-            scanner,
-            content_digest,
-            counts: ScannedSourceCounts::default(),
-            last_observed_rowid: None,
-            terminal: false,
-        },
-    ))
-}
-
-#[cfg(test)]
-impl ForgeCodeSourceBackedScanV0 {
-    pub(crate) fn source(&self) -> &ForgeCodeSourceBackedSourceV0 {
-        &self.source
-    }
-
-    #[cfg(test)]
-    pub(crate) fn next_page(
-        &mut self,
-    ) -> ForgeCodeSourceBackedResultV0<Option<ForgeCodeSourceBackedPageV0>> {
-        let Some(page) = self.scanner.next_page()? else {
-            return Ok(None);
-        };
-        project_source_backed_page(
-            &self.source,
-            &mut self.content_digest,
-            &mut self.counts,
-            &mut self.last_observed_rowid,
-            &mut self.terminal,
-            page,
-        )
-        .map(Some)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn finish(self) -> ForgeCodeSourceBackedResultV0<CertifiedSource> {
-        if !self.terminal {
-            return Err(ForgeCodeSourceBackedErrorV0::IncompleteScan);
-        }
-        self.scanner.source_database().revalidate()?;
-        Ok(SqliteLogicalSnapshot::new(
-            FORGECODE_SOURCE_BACKED_PARSER_REVISION,
-            &self.schema_evidence,
-            self.content_digest.finalize().into(),
-            self.counts,
-        )
-        .certify(self.source.source)?)
-    }
 }
 
 fn project_source_backed_page(
@@ -289,9 +158,8 @@ fn project_source_backed_page(
     let direct_touches = direct_touches(&page);
     let row = page.row.as_ref();
     let mut documents = Vec::with_capacity(page.events.len());
-    let mut failures = page.rejections;
-    let provider_rejections =
-        u64::try_from(failures.len()).map_err(|_| ForgeCodeSourceBackedErrorV0::CountOverflow)?;
+    let provider_rejections = u64::try_from(page.rejections.len())
+        .map_err(|_| ForgeCodeSourceBackedErrorV0::CountOverflow)?;
     let mut projection_rejections = 0_u64;
     for retained in page.events {
         let Some(row) = row else {
@@ -299,12 +167,8 @@ fn project_source_backed_page(
         };
         match core_record(source, row, retained, &direct_touches) {
             Ok(document) => documents.push(document),
-            Err(error) => {
+            Err(_) => {
                 projection_rejections = checked_add(projection_rejections, 1)?;
-                failures.push(ProviderImportFailure {
-                    line: usize::try_from(row.rowid.max(0)).unwrap_or(usize::MAX),
-                    error: format!("ForgeCode source-backed projection rejected event: {error}"),
-                });
             }
         }
     }
@@ -321,13 +185,7 @@ fn project_source_backed_page(
     counts.ignored_records = checked_add(counts.ignored_records, ignored_records)?;
     counts.indexed_documents = checked_add(counts.indexed_documents, retained_records)?;
     *terminal_scan = terminal;
-    Ok(ForgeCodeSourceBackedPageV0 {
-        documents,
-        failures,
-        retained_bytes,
-        ignored_records,
-        terminal,
-    })
+    Ok(ForgeCodeSourceBackedPageV0 { documents })
 }
 
 fn observe_source_record(
