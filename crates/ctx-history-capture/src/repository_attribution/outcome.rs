@@ -9,6 +9,7 @@ use ctx_history_core::{
 use serde_json::{Map, Value};
 use url::Url;
 
+use super::shell::BoundedCommitProducer;
 use super::{
     bounded_outcome_plan, lexical_absolute, BoundedOutcomeOperation, BoundedOutcomePlan,
     BoundedOutcomePlanDisposition,
@@ -193,13 +194,19 @@ fn parse_operation_result(
 ) -> OperationResult {
     match plan.operation {
         BoundedOutcomeOperation::Commit {
+            producer,
             rewrites_history,
             exact_oid_output,
         } => {
             let parsed = if let Some(value) = structured_commit_oid {
                 object_id(value).map(|object_id| (vec![object_id], Vec::new()))
             } else {
-                exact_commit_result(output, exact_oid_output)
+                exact_commit_result(
+                    output,
+                    producer,
+                    exact_oid_output,
+                    plan.machine_output_isolated,
+                )
             };
             if rewrites_history
                 && !matches!(parsed, Some((_, ref replacements)) if !replacements.is_empty())
@@ -272,10 +279,13 @@ fn parse_operation_result(
 
 fn exact_commit_result(
     output: &Value,
+    producer: BoundedCommitProducer,
     exact_oid_output: bool,
+    machine_output_isolated: bool,
 ) -> Option<(Vec<GitObjectId>, Vec<RepositoryObjectReplacement>)> {
     if exact_oid_output {
-        if let Some(object_id) = exact_machine_oid_output(output) {
+        if let Some(object_id) = exact_machine_oid_output(output, producer, machine_output_isolated)
+        {
             return Some((vec![object_id], Vec::new()));
         }
     }
@@ -413,20 +423,34 @@ fn keys_are_subset(object: &Map<String, Value>, keys: &[&str]) -> bool {
     object.keys().all(|key| keys.contains(&key.as_str()))
 }
 
-fn exact_machine_oid_output(output: &Value) -> Option<GitObjectId> {
+fn exact_machine_oid_output(
+    output: &Value,
+    producer: BoundedCommitProducer,
+    machine_output_isolated: bool,
+) -> Option<GitObjectId> {
+    let output = output.as_str()?;
     let lines = output
-        .as_str()?
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
     let requested = object_id(lines.last().copied()?)?;
-    (lines
+    let exactly_one_full_oid = lines
         .iter()
         .filter(|line| object_id(line).is_some())
         .count()
-        == 1)
-        .then_some(requested)
+        == 1;
+    let operation_demonstrated = match producer {
+        BoundedCommitProducer::Commit => true,
+        BoundedCommitProducer::Merge => {
+            machine_output_isolated
+                && lines[..lines.len().saturating_sub(1)].iter().any(|line| {
+                    line.starts_with("Merge made by the ") && line.ends_with(" strategy.")
+                })
+        }
+        BoundedCommitProducer::Rebase => false,
+    };
+    (exactly_one_full_oid && operation_demonstrated).then_some(requested)
 }
 
 fn object_id(value: &str) -> Option<GitObjectId> {
@@ -560,13 +584,94 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_and_intervening_head_changes_never_produce_exact_outcomes() {
+        let oid = "0123456789abcdef0123456789abcdef01234567";
+        let output = Value::String(oid.to_owned());
+        for command in [
+            "git commit --dry-run && git rev-parse HEAD",
+            "git commit -m exact && git reset --hard HEAD^ && git rev-parse HEAD",
+            "git commit -m exact && git checkout other && git rev-parse HEAD",
+            "git commit -m exact && custom-command && git rev-parse HEAD",
+        ] {
+            let evidence = linked_outcome_evidence(input(command, &output)).unwrap();
+            assert!(evidence.outcomes.is_empty(), "{command}");
+            assert!(!evidence.abstentions.is_empty(), "{command}");
+        }
+
+        let stable = linked_outcome_evidence(input(
+            "git commit -m exact && git status --short && git rev-parse HEAD",
+            &output,
+        ))
+        .unwrap();
+        assert_eq!(stable.outcomes.len(), 1);
+        assert_eq!(stable.outcomes[0].produced_object_ids[0].hex, oid);
+    }
+
+    #[test]
+    fn merge_head_is_exact_only_when_the_output_demonstrates_merge_creation() {
+        let oid = "0123456789abcdef0123456789abcdef01234567";
+        let command = "git merge --no-ff feature && git rev-parse --verify HEAD";
+        let no_op = Value::String(format!("Already up to date.\n{oid}\n"));
+        let no_op = linked_outcome_evidence(input(command, &no_op)).unwrap();
+        assert!(no_op.outcomes.is_empty());
+        assert_eq!(
+            no_op.abstentions[0].0,
+            RepositoryAbstentionReason::OutcomeResultInadmissible
+        );
+
+        let created_output = Value::String(format!("Merge made by the 'ort' strategy.\n{oid}\n"));
+        let created = linked_outcome_evidence(input(command, &created_output)).unwrap();
+        assert_eq!(created.outcomes.len(), 1);
+        assert_eq!(created.outcomes[0].produced_object_ids[0].hex, oid);
+
+        let polluted = linked_outcome_evidence(input(
+            "git log -1 && git merge --no-ff feature && git rev-parse HEAD",
+            &created_output,
+        ))
+        .unwrap();
+        assert!(polluted.outcomes.is_empty());
+
+        let intervening = linked_outcome_evidence(input(
+            "git merge --no-ff feature && git status --short && git rev-parse HEAD",
+            &created_output,
+        ))
+        .unwrap();
+        assert!(intervening.outcomes.is_empty());
+
+        for non_producing in [
+            "git merge --no-ff --no-commit feature && git rev-parse HEAD",
+            "git merge --no-ff --squash feature && git rev-parse HEAD",
+        ] {
+            let evidence = linked_outcome_evidence(input(non_producing, &created_output)).unwrap();
+            assert!(evidence.outcomes.is_empty(), "{non_producing}");
+        }
+    }
+
+    #[test]
     fn exact_rewrite_and_pull_request_schemas_are_supported() {
         let old = "1111111111111111111111111111111111111111";
         let new = "2222222222222222222222222222222222222222";
-        let rewrite = serde_json::json!({"old_oid": old, "new_oid": new});
+        let rewrite_output = serde_json::json!({"old_oid": old, "new_oid": new});
         let rewrite =
-            linked_outcome_evidence(input("git commit --amend --no-edit", &rewrite)).unwrap();
+            linked_outcome_evidence(input("git commit --amend --no-edit", &rewrite_output))
+                .unwrap();
         assert_eq!(rewrite.outcomes[0].replacement_lineage.len(), 1);
+
+        let rebase = linked_outcome_evidence(input("git rebase main", &rewrite_output)).unwrap();
+        assert_eq!(rebase.outcomes[0].replacement_lineage.len(), 1);
+        assert_eq!(rebase.outcomes[0].produced_object_ids[0].hex, new);
+
+        let raw_rebase_oid = Value::String(new.to_owned());
+        let raw_rebase = linked_outcome_evidence(input(
+            "git rebase main && git rev-parse --verify HEAD",
+            &raw_rebase_oid,
+        ))
+        .unwrap();
+        assert!(raw_rebase.outcomes.is_empty());
+        assert_eq!(
+            raw_rebase.abstentions[0].0,
+            RepositoryAbstentionReason::HistoryRewriteUnlinked
+        );
 
         let create = Value::String("https://github.com/acme/repo/pull/42".to_owned());
         let created =
