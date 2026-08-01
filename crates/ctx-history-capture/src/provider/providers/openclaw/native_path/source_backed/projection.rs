@@ -65,10 +65,17 @@ impl OpenClawProjector {
         } else {
             event.event_type
         };
-        let body = tool_call
-            .and_then(|call| serde_json::to_string(call.block).ok())
-            .or_else(|| tool_result.and_then(|result| serde_json::to_string(result.message).ok()))
-            .unwrap_or_else(|| event.lexical_text.clone());
+        let (body, structured_content) = if let Some(call) = tool_call {
+            (
+                serde_json::to_string(call.block).unwrap_or_else(|_| event.lexical_text.clone()),
+                Some(call.block.clone()),
+            )
+        } else if let Some(result) = tool_result {
+            let projected = project_tool_result(result, output);
+            (projected.body, Some(projected.structured_content))
+        } else {
+            (event.lexical_text.clone(), None)
+        };
         if body.trim().is_empty() {
             return Ok(());
         }
@@ -103,9 +110,6 @@ impl OpenClawProjector {
             .ok_or(CaptureError::SystemInvariant(
                 "OpenClaw event sequence overflowed",
             ))?;
-        let structured_content = tool_call
-            .map(|call| call.block.clone())
-            .or_else(|| tool_result.map(|result| result.message.clone()));
         let mut record = CoreRecord::new_selected(
             event_id,
             self.session_id,
@@ -245,6 +249,113 @@ impl OpenClawProjector {
             }
         }
         None
+    }
+}
+
+struct ProjectedToolResult {
+    body: String,
+    structured_content: Value,
+}
+
+fn project_tool_result(
+    result: &NativeToolResult<'_>,
+    output: Option<&OpenClawOutputMetadata>,
+) -> ProjectedToolResult {
+    let message_body = ["content", "text", "output"]
+        .into_iter()
+        .find_map(|key| result.message.get(key).and_then(explicit_result_text));
+    let details_body = openclaw_details_explicit_text(result.message.get("details"));
+    let selected_explicit_body = message_body.is_some() || details_body.is_some();
+    let body = message_body
+        .or(details_body)
+        .or_else(|| {
+            result
+                .message
+                .get("details")
+                .and_then(provider_explicit_result_value_text)
+                .filter(|text| !text.trim().is_empty())
+        })
+        .unwrap_or_else(|| "tool output".to_owned());
+    let call_id = result
+        .call_id
+        .filter(|value| !value.trim().is_empty() && value.len() <= MAX_SELECTOR_CALL_ID_BYTES);
+    let tool_name = ["toolName", "name", "tool_name", "tool"]
+        .into_iter()
+        .find_map(|key| result.message.get(key).and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty() && value.len() <= MAX_SELECTOR_CALL_ID_BYTES);
+    let mut structured_content = serde_json::json!({
+        "type": "tool_result",
+        "tool_call_id": call_id,
+        "tool_name": tool_name,
+        "result_content_location": "normalized_body",
+        "result_content_complete": true,
+        "outcome": output.map(|output| output_outcome_label(output.outcome.outcome)),
+        "exit_code": output.and_then(|output| output.outcome.exit_code),
+        "duration_ms": output.and_then(|output| output.outcome.duration_ms),
+    });
+    if let Some(is_error) = result.message.get("isError").and_then(Value::as_bool) {
+        if let Some(object) = structured_content.as_object_mut() {
+            object.insert("is_error".to_owned(), Value::Bool(is_error));
+        }
+    }
+    if selected_explicit_body {
+        if let (Some(object), Some(metadata)) = (
+            structured_content.as_object_mut(),
+            openclaw_result_metadata(result.message.get("details")),
+        ) {
+            object.insert("result_metadata".to_owned(), metadata);
+        }
+    }
+    ProjectedToolResult {
+        body,
+        structured_content,
+    }
+}
+
+fn explicit_result_text(value: &Value) -> Option<String> {
+    provider_explicit_result_value_text(value).filter(|text| !text.trim().is_empty())
+}
+
+fn openclaw_details_explicit_text(details: Option<&Value>) -> Option<String> {
+    let details = details?.as_object()?;
+    let streams = ["stdout", "stderr"]
+        .into_iter()
+        .filter_map(|key| details.get(key).and_then(explicit_result_text))
+        .collect::<Vec<_>>();
+    if !streams.is_empty() {
+        return Some(streams.join("\n"));
+    }
+    ["output", "content", "result", "text"]
+        .into_iter()
+        .find_map(|key| details.get(key).and_then(explicit_result_text))
+}
+
+fn openclaw_result_metadata(details: Option<&Value>) -> Option<Value> {
+    let Value::Object(details) = details? else {
+        return None;
+    };
+    let mut metadata = details.clone();
+    metadata.retain(|key, _| {
+        ![
+            "stdout", "stderr", "output", "outputs", "content", "result", "results", "text",
+        ]
+        .iter()
+        .any(|body_key| key.eq_ignore_ascii_case(body_key))
+    });
+    if metadata.is_empty() {
+        return None;
+    }
+    let metadata = Value::Object(metadata);
+    let encoded_len = serde_json::to_vec(&metadata).ok()?.len();
+    (encoded_len <= MAX_RESULT_METADATA_BYTES).then_some(metadata)
+}
+
+fn output_outcome_label(outcome: crate::OutputOutcome) -> &'static str {
+    match outcome {
+        crate::OutputOutcome::Success => "success",
+        crate::OutputOutcome::Failure => "failure",
+        crate::OutputOutcome::Timeout => "timeout",
+        crate::OutputOutcome::Unknown => "unknown",
     }
 }
 

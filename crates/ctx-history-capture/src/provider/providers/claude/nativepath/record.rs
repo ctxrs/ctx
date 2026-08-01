@@ -471,6 +471,7 @@ pub(super) struct ClaudeOutputDescriptor {
     pub(super) subrecord_index: u32,
     pub(super) call_id: Option<String>,
     pub(super) outcome: OutputOutcomeMetadata,
+    pub(super) content: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -568,6 +569,7 @@ fn output_descriptors(
                 } else {
                     exact
                 },
+                content: descriptor.decode_value(bytes)?,
             })
         })
         .collect::<Result<Vec<_>, serde_json::Error>>()?;
@@ -576,6 +578,7 @@ fn output_descriptors(
             subrecord_index: 0,
             call_id: None,
             outcome: record_outcome.clone(),
+            content: None,
         });
     }
     Ok(outputs)
@@ -686,5 +689,20 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn top_level_result_content_is_retained_as_the_direct_output() {
+        let bytes = br#"{"type":"tool_result","uuid":"top-level-result","sessionId":"claude-session","tool_use_id":"direct-call","content":"complete direct result","toolUseResult":{"exitCode":0}}"#;
+        let record = parse_native_record(bytes, 3, &locator()).unwrap();
+        let result = record
+            .rows
+            .iter()
+            .find_map(|row| row.tool_result.as_ref())
+            .unwrap();
+
+        assert_eq!(result.content.as_str(), Some("complete direct result"));
+        assert_eq!(result.call_id.as_deref(), Some("direct-call"));
+        assert_eq!(result.outcome, ClaudeOutputOutcome::Success);
     }
 }

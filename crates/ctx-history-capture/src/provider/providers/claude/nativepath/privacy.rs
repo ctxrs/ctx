@@ -77,6 +77,15 @@ impl RawOutputDescriptor {
             scan_direct_output_range(bytes, self.value.map(|range| range.start..range.end))?;
         Ok(combine_outcome_evidence(evidence, Default::default()))
     }
+
+    pub(super) fn decode_value(
+        self,
+        bytes: &[u8],
+    ) -> Result<Option<serde_json::Value>, serde_json::Error> {
+        self.value
+            .map(|range| serde_json::from_slice(&bytes[range.start..range.end]))
+            .transpose()
+    }
 }
 
 pub(super) fn preflight_record(bytes: &[u8]) -> Result<RawRecordPreflight, serde_json::Error> {

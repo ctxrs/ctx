@@ -18,22 +18,45 @@ pub(super) fn complete_output_rows(
         .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
         .collect::<Vec<_>>();
     let mut consumed_result_blocks = vec![false; result_blocks.len()];
+    let message = value.get("message").unwrap_or(value);
+    let direct_content = message
+        .get("content")
+        .filter(|_| result_blocks.is_empty() && outputs.len() == 1);
+    let direct_call_id = ["tool_use_id", "toolUseId", "toolCallId"]
+        .into_iter()
+        .find_map(|key| message.get(key).and_then(Value::as_str))
+        .filter(|call_id| !call_id.is_empty() && call_id.len() <= 256);
+    let tool_use_result = value
+        .get("toolUseResult")
+        .or_else(|| message.get("toolUseResult"));
     outputs
         .iter()
         .map(|output| {
-            let block = output.call_id.as_deref().and_then(|call_id| {
-                result_blocks
-                    .iter()
-                    .enumerate()
-                    .find(|(index, block)| {
+            let block = output
+                .call_id
+                .as_deref()
+                .and_then(|call_id| {
+                    result_blocks.iter().enumerate().find(|(index, block)| {
                         !consumed_result_blocks[*index]
                             && block.get("tool_use_id").and_then(Value::as_str) == Some(call_id)
                     })
-                    .map(|(index, block)| {
-                        consumed_result_blocks[index] = true;
-                        *block
-                    })
-            });
+                })
+                .or_else(|| {
+                    output
+                        .call_id
+                        .is_none()
+                        .then(|| {
+                            result_blocks
+                                .iter()
+                                .enumerate()
+                                .find(|(index, _)| !consumed_result_blocks[*index])
+                        })
+                        .flatten()
+                })
+                .map(|(index, block)| {
+                    consumed_result_blocks[index] = true;
+                    *block
+                });
             let outcome = match output.outcome.outcome {
                 OutputOutcome::Success => ClaudeOutputOutcome::Success,
                 OutputOutcome::Failure => ClaudeOutputOutcome::Failure,
@@ -54,15 +77,20 @@ pub(super) fn complete_output_rows(
                 body_text_retention: None,
                 tool_call: None,
                 tool_result: Some(ClaudeToolResult {
-                    call_id: output.call_id.clone(),
+                    call_id: output
+                        .call_id
+                        .clone()
+                        .or_else(|| direct_call_id.map(str::to_owned)),
                     outcome,
                     exit_code: output.outcome.exit_code,
                     duration_ms: output.outcome.duration_ms,
                     content: block
                         .and_then(|block| block.get("content"))
                         .cloned()
+                        .or_else(|| output.content.clone())
+                        .or_else(|| direct_content.cloned())
                         .unwrap_or(Value::Null),
-                    tool_use_result: value.get("toolUseResult").cloned(),
+                    tool_use_result: tool_use_result.cloned(),
                 }),
                 locator: locator.clone(),
             }

@@ -27,7 +27,7 @@ use crate::OutputOutcome;
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::{
-        normalization::provider_timestamp_value,
+        normalization::{provider_explicit_result_value_text, provider_timestamp_value},
         source_backed::family::jsonl::{
             JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
             JsonlFamilyProjector, JsonlRecordRef,
@@ -53,9 +53,10 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-openclaw-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "openclaw-legacy-session";
 const LOGICAL_EVENT_KIND: &str = "openclaw-legacy-event";
 const SOURCE_SCHEMA_VARIANT: &str = "openclaw-legacy-jsonl-v2";
-const PARSER_REVISION: &str = "openclaw-source-backed-v3-block-projection";
+const PARSER_REVISION: &str = "openclaw-source-backed-v4-result-content";
 const MAX_PENDING_CALLS: usize = 4096;
 const MAX_RUNNING_PROCESSES: usize = 256;
+const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct OpenClawJsonlAdapter;
