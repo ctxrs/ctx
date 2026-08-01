@@ -320,7 +320,10 @@ fn status_missing_source_epoch_is_read_only_and_does_not_initialize_files() {
         .clone();
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("History status: failed"), "{output}");
-    assert!(output.contains("generation not published"), "{output}");
+    assert!(
+        output.contains("history has not been indexed yet"),
+        "{output}"
+    );
     assert!(output.contains("ctx setup"), "{output}");
 
     assert!(
@@ -1304,22 +1307,16 @@ fn clean_multisource_setup_bounds_relational_wal_and_preserves_projection_identi
     assert!(
         sqlite_count(
             &conn,
-            "SELECT COUNT(*) FROM source_backed_events
-             WHERE source_id IN (
-                 SELECT source_id FROM source_backed_sources WHERE provider = 'codex'
-             )"
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex'"
         ) > 0
     );
     assert!(
         sqlite_count(
             &conn,
-            "SELECT COUNT(*) FROM source_backed_events
-             WHERE source_id IN (
-                 SELECT source_id FROM source_backed_sources WHERE provider = 'hermes'
-             )"
+            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'hermes'"
         ) > 0
     );
-    let event_count = sqlite_count(&conn, "SELECT COUNT(*) FROM source_backed_events");
+    let event_count = sqlite_count(&conn, "SELECT COUNT(*) FROM ctx_events");
     drop(conn);
 
     let codex_search = json_output(ctx(&temp).args([
@@ -1350,7 +1347,7 @@ fn clean_multisource_setup_bounds_relational_wal_and_preserves_projection_identi
     wait_for_relational_projection(&temp, &generation);
     let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     assert_eq!(
-        sqlite_count(&conn, "SELECT COUNT(*) FROM source_backed_events"),
+        sqlite_count(&conn, "SELECT COUNT(*) FROM ctx_events"),
         event_count
     );
 }

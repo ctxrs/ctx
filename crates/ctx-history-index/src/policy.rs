@@ -229,7 +229,7 @@ mod tests {
             .contains_key("core_repository_association_policy_revision"));
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "ce728829e779b51e960d2661ec6dc86e1c81d9c5f6e8b4b940fe4a6148eab3b1"
+            "6f01c55783c6708a6e7b37b99c5731db55e16fe1e5288b28e1a56906f84e12f1"
         );
     }
 

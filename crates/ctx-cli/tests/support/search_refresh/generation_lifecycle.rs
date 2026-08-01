@@ -328,7 +328,10 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     ]));
     let deferred_generation = assert_published_generation(&deferred, "wait");
     assert_ne!(deferred_generation, restored_generation);
-    assert_eq!(deferred["retrieval"]["indexed_documents"], 2, "{deferred:#}");
+    assert_eq!(
+        deferred["retrieval"]["indexed_documents"], 2,
+        "{deferred:#}"
+    );
     assert!(deferred["results"].as_array().is_some_and(|results| {
         results.iter().any(|result| {
             result["snippet"]
@@ -336,6 +339,52 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
                 .is_some_and(|snippet| snippet.contains(truncate_query))
         })
     }));
+    let (deferred_manifest, _) = generation_manifest(&temp, &deferred_generation);
+    assert!(deferred_manifest.removals.is_empty());
+    assert_eq!(
+        deferred_manifest
+            .source_catalog()
+            .missing_source(truncate_source.observation().source())
+            .expect("first unavailable lifecycle observation")
+            .consecutive_missing()
+            .get(),
+        1
+    );
+
+    let deferred_again = json_output(ctx(&temp).args([
+        "search",
+        truncate_query,
+        "--provider",
+        "codex",
+        "--refresh",
+        "wait",
+        "--format=json",
+    ]));
+    let second_deferred_generation = assert_published_generation(&deferred_again, "wait");
+    assert_ne!(second_deferred_generation, deferred_generation);
+    assert_eq!(
+        deferred_again["retrieval"]["indexed_documents"], 2,
+        "{deferred_again:#}"
+    );
+    assert!(deferred_again["results"].as_array().is_some_and(|results| {
+        results.iter().any(|result| {
+            result["snippet"]
+                .as_str()
+                .is_some_and(|snippet| snippet.contains(truncate_query))
+        })
+    }));
+    let (second_deferred_manifest, _) = generation_manifest(&temp, &second_deferred_generation);
+    assert!(second_deferred_manifest.removals.is_empty());
+    assert_eq!(
+        second_deferred_manifest
+            .source_catalog()
+            .missing_source(truncate_source.observation().source())
+            .expect("second unavailable lifecycle observation")
+            .consecutive_missing()
+            .get(),
+        2
+    );
+
     let deleted = json_output(ctx(&temp).args([
         "search",
         truncate_query,
@@ -346,7 +395,7 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
         "--format=json",
     ]));
     let deletion_generation = assert_published_generation(&deleted, "wait");
-    assert_ne!(deletion_generation, deferred_generation);
+    assert_ne!(deletion_generation, second_deferred_generation);
     assert_eq!(deleted["retrieval"]["indexed_documents"], 1, "{deleted:#}");
     assert!(
         deleted["results"].as_array().unwrap().iter().all(|result| {
@@ -486,14 +535,7 @@ fn two_provider_mutation_fails_closed_when_retained_provider_is_temporarily_omit
         "off",
         "--format=json",
     ]));
-    assert_source_backed_search_show_oracle(
-        &temp,
-        &claude,
-        "claude",
-        claude_query,
-        1,
-        "message",
-    );
+    assert_source_backed_search_show_oracle(&temp, &claude, "claude", claude_query, 1, "message");
     assert_eq!(generation_id(&claude), retained_generation);
 }
 
@@ -567,8 +609,7 @@ fn search_refresh_publishes_discovered_top_provider_sources() {
         assert_eq!(generation_id(&unchanged), generation, "{unchanged:#}");
         let unchanged_status = assert_daemon_publication(&temp, &generation, 1, &[stored_provider]);
         assert_eq!(
-            unchanged_status["daemon"]["jobs"]["core_refresh"]["generation_changed"],
-            false,
+            unchanged_status["daemon"]["jobs"]["core_refresh"]["generation_changed"], false,
             "{cli_provider} republished an unchanged source: {unchanged_status:#}"
         );
     }

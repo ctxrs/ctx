@@ -571,7 +571,12 @@ pub(crate) fn write_native_qoder_fixture(temp: &TempDir, query: &str) -> String 
                         "is_error": false
                     }]
                 },
-                "toolUseResult": "qoderleakproofxylophonium"
+                "toolUseResult": {
+                    "content": "qoderleakproofxylophonium",
+                    "callId": "call-qoder-cli-read",
+                    "toolName": "read_file",
+                    "exitCode": 0
+                }
             })
         ),
     )

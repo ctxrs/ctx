@@ -7,19 +7,16 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use ctx_history_core::CertifiedSource;
 #[cfg(test)]
 use ctx_history_core::SourceKey;
 use ctx_history_index::{durable_atomic_replace_file, VerifiedIndex, MAX_SOURCE_EVENT_PAGE_ITEMS};
 use ctx_history_relational::{
     CommittedCoreGeneration, RelationalProjectionError, RelationalProjectionMetadata,
     RelationalProjectionPlan, RelationalProjectionReceipt, RelationalProjectionRecord,
-    RelationalProjectionStatus, RelationalSourceHealth, RelationalSourceMetadata,
-    SourceBackedRelationalProjection, RELATIONAL_MATERIALIZER_REVISION,
+    RelationalProjectionStatus, SourceBackedRelationalProjection, RELATIONAL_MATERIALIZER_REVISION,
     RELATIONAL_PROJECTION_SCHEMA_VERSION,
 };
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::source_sql::sql_compatibility_path;
@@ -38,9 +35,11 @@ use super::{
 const SOURCE_BACKED_RELATIONAL_STATUS_FILE: &str = "relational-catch-up.json";
 const SOURCE_BACKED_RELATIONAL_LOCK_FILE: &str = "relational-catch-up.lock";
 
+mod core_metadata;
 mod record_stream;
 mod status;
 
+use core_metadata::{committed_generation, relational_source_metadata};
 use record_stream::{RelationalRecordStream, RelationalSourceSelection};
 use status::SourceBackedRelationalCatchUpStatus;
 
@@ -479,56 +478,6 @@ fn validate_projection_receipt(
             mismatches.join("; "),
         ))
     }
-}
-
-fn committed_generation(
-    index: &VerifiedIndex,
-) -> std::result::Result<CommittedCoreGeneration, SourceBackedRelationalCatchUpError> {
-    let manifest = index.manifest();
-    let sources = manifest
-        .sources
-        .iter()
-        .zip(&manifest.core_record_aggregates)
-        .map(|(certificate, aggregate)| {
-            // Certification alone does not change when a Core projector rewrites
-            // an equal-count source. Bind the exact stored-record aggregate too.
-            relational_source_metadata_for_revision(certificate, &(certificate, aggregate))
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(CommittedCoreGeneration {
-        generation_id: index.generation_id().to_owned(),
-        manifest_version: manifest.manifest_version,
-        core_record_version: manifest.core_record_version,
-        core_record_contract_fingerprint: manifest.core_record_contract_fingerprint.clone(),
-        lexical_schema_version: manifest.lexical_schema_version,
-        policy_schema_hash: manifest.policy_schema_hash.clone(),
-        indexed_documents: manifest.indexed_documents,
-        sources,
-    })
-}
-
-fn relational_source_metadata(
-    certificate: &CertifiedSource,
-) -> std::result::Result<RelationalSourceMetadata, SourceBackedRelationalCatchUpError> {
-    relational_source_metadata_for_revision(certificate, certificate)
-}
-
-fn relational_source_metadata_for_revision(
-    certificate: &CertifiedSource,
-    revision: &impl serde::Serialize,
-) -> std::result::Result<RelationalSourceMetadata, SourceBackedRelationalCatchUpError> {
-    let encoded = serde_json::to_vec(revision).map_err(|error| {
-        SourceBackedRelationalCatchUpError::InvalidMetadata(format!(
-            "serialize Core source revision: {error}"
-        ))
-    })?;
-    Ok(RelationalSourceMetadata {
-        source: certificate.observation().source().clone(),
-        parser_revision: certificate.parser_revision().to_owned(),
-        revision_digest: Sha256::digest(encoded).into(),
-        indexed_event_count: certificate.counts().indexed_documents,
-        health: RelationalSourceHealth::Ready,
-    })
 }
 
 fn relational_record_stream<'a>(

@@ -594,7 +594,7 @@ fn human_wait_semantic_disabled_renders_a_truthful_blocked_snapshot() {
 }
 
 #[test]
-fn human_wait_timeout_renders_unchanged_active_snapshot_once() {
+fn human_wait_timeout_does_not_duplicate_an_unchanged_active_snapshot() {
     let temp = daemon_test_root();
     import_ready_history(&temp);
     fs::write(
@@ -623,11 +623,14 @@ fn human_wait_timeout_renders_unchanged_active_snapshot_once() {
     let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert_eq!(stdout.matches("Semantic search").count(), 1, "{stdout}");
-    assert_eq!(
-        stdout.matches("Your history is searchable").count(),
-        1,
-        "{stdout}"
-    );
+    let searchable_frames = stdout.matches("Your history is searchable").count();
+    assert!((1..=2).contains(&searchable_frames), "{stdout}");
+    if searchable_frames == 2 {
+        assert!(
+            stdout.contains("Background indexing stopped"),
+            "a second frame is valid only when the terminal status changed: {stdout}"
+        );
+    }
     assert!(stdout.contains("Your history is searchable"), "{stdout}");
     assert!(stdout.contains("Embedded"));
     assert!(stdout.contains("Throughput"));
