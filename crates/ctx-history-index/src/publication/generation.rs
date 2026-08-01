@@ -207,7 +207,7 @@ pub(crate) fn reclaim_inactive_generation_directories(
     fs::create_dir_all(&generations)?;
     let retained = pointer
         .into_iter()
-        .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous().into_iter()))
+        .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
         .map(|slot| slot.directory().to_owned())
         .collect::<HashSet<_>>();
     let mut removed = false;

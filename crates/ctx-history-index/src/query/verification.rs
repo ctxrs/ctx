@@ -87,10 +87,7 @@ pub(crate) fn stored_identity_record(
     })
 }
 
-fn unique_stored_core<'a>(
-    document: &'a TantivyDocument,
-    field: tantivy::schema::Field,
-) -> Result<&'a [u8]> {
+fn unique_stored_core(document: &TantivyDocument, field: tantivy::schema::Field) -> Result<&[u8]> {
     let mut values = document.get_all(field);
     let encoded = values
         .next()

@@ -126,6 +126,9 @@ pub fn generation_incompatibility_requires_rebuild(error: &IndexError) -> bool {
     )
 }
 
+#[cfg(test)]
+type GenerationPathHook = Box<dyn FnOnce(&Path) + Send>;
+
 pub struct GenerationWriter {
     root: PathBuf,
     index: Index,
@@ -148,11 +151,11 @@ pub struct GenerationWriter {
     #[cfg(test)]
     before_writer_handoff: Option<Box<dyn FnOnce() + Send>>,
     #[cfg(test)]
-    after_candidate_commit: Option<Box<dyn FnOnce(&Path) + Send>>,
+    after_candidate_commit: Option<GenerationPathHook>,
     #[cfg(test)]
-    before_pointer_switch: Option<Box<dyn FnOnce(&Path) + Send>>,
+    before_pointer_switch: Option<GenerationPathHook>,
     #[cfg(test)]
-    after_pointer_switch: Option<Box<dyn FnOnce(&Path) + Send>>,
+    after_pointer_switch: Option<GenerationPathHook>,
 }
 
 impl GenerationWriter {
@@ -192,16 +195,12 @@ impl GenerationWriter {
         reclaim_inactive_generation_directories(&root, active_pointer.as_ref())?;
         let retained_generation_ids = active_pointer
             .iter()
-            .flat_map(|pointer| {
-                std::iter::once(pointer.active()).chain(pointer.previous().into_iter())
-            })
+            .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
             .map(|slot| slot.generation_id().to_owned())
             .collect::<Vec<_>>();
         let retained_generation_directories = active_pointer
             .iter()
-            .flat_map(|pointer| {
-                std::iter::once(pointer.active()).chain(pointer.previous().into_iter())
-            })
+            .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
             .map(|slot| slot.directory().to_owned())
             .collect::<Vec<_>>();
         reclaim_unreferenced_manifests(&root, &retained_generation_ids)?;
