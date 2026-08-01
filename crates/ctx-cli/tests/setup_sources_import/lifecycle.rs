@@ -958,7 +958,7 @@ fn foreground_import_rejections_complete_and_preserve_diagnostics() {
     );
     assert_eq!(source["status"], "published", "{import:#}");
 
-    let status = json_output(ctx_from_binary(&temp, &binary).args(["status", "--format=json"]));
+    let status = wait_for_relational_projection(&temp, generation);
     assert_eq!(status["lexical"]["generation_id"], generation, "{status:#}");
     assert_eq!(status["relational"]["status"], "ready", "{status:#}");
     assert_eq!(
@@ -1040,7 +1040,7 @@ fn foreground_import_rejection_diagnostics_survive_a_noop_source_cycle() {
             assert_eq!(Some(published), generation.as_deref(), "{report:#}");
             assert_eq!(refresh["generation_changed"], false, "{report:#}");
         }
-        let status = json_output(ctx_from_binary(&temp, &binary).args(["status", "--format=json"]));
+        let status = wait_for_relational_projection(&temp, published);
         assert_eq!(status["relational"]["status"], "ready", "{status:#}");
         assert_eq!(
             status["relational"]["active_core_generation_id"], published,
@@ -1050,15 +1050,14 @@ fn foreground_import_rejection_diagnostics_survive_a_noop_source_cycle() {
 
     let doctor = json_output(ctx_from_binary(&temp, &binary).args(["doctor", "--format=json"]));
     assert_eq!(
-        doctor["daemon"]["jobs"]["source_backed_refresh"]["receipt"]["current"]
-            ["current_rejected_records"],
+        doctor["daemon"]["jobs"]["core_refresh"]["receipt"]["current"]["current_rejected_records"],
         1,
         "{doctor:#}"
     );
 }
 
 #[test]
-fn foreground_import_publishes_core_and_required_relational_projection() {
+fn foreground_import_returns_at_core_then_full_daemon_catches_up_relational() {
     let temp = tempdir();
     let binary = copied_ctx_binary(&temp);
     let history = temp.path().join(".codex/history.jsonl");
@@ -1082,7 +1081,7 @@ fn foreground_import_publishes_core_and_required_relational_projection() {
         .assert()
         .success();
 
-    let _daemon = start_full_source_refresh_daemon(&temp);
+    let core_daemon = start_core_only_source_refresh_daemon(&temp);
     let import = json_output(
         ctx_from_binary(&temp, &binary)
             .args([
@@ -1093,6 +1092,7 @@ fn foreground_import_publishes_core_and_required_relational_projection() {
                 "--progress",
                 "none",
             ])
+            .timeout(Duration::from_secs(10))
             .env("CTX_UPGRADE_AUTO", "off"),
     );
     assert_eq!(import["outcome"], "success", "{import:#}");
@@ -1107,9 +1107,15 @@ fn foreground_import_publishes_core_and_required_relational_projection() {
 
     let status = json_output(ctx_from_binary(&temp, &binary).args(["status", "--format=json"]));
     assert_eq!(status["lexical"]["generation_id"], generation, "{status:#}");
-    assert_eq!(status["relational"]["status"], "ready", "{status:#}");
+    assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
+    assert_eq!(status["refresh"]["status"], "ready", "{status:#}");
     assert_eq!(
-        status["relational"]["active_core_generation_id"], generation,
+        status["refresh"]["published_generation"], generation,
+        "{status:#}"
+    );
+    assert_eq!(status["relational"]["status"], "pending", "{status:#}");
+    assert!(
+        status["relational"]["active_core_generation_id"].is_null(),
         "{status:#}"
     );
 
@@ -1129,6 +1135,12 @@ fn foreground_import_publishes_core_and_required_relational_projection() {
         1,
         "message",
     );
+
+    drop(core_daemon);
+    let _full_daemon = start_full_source_refresh_daemon(&temp);
+    let caught_up = wait_for_relational_projection(&temp, generation);
+    assert_eq!(caught_up["lexical"]["generation_id"], generation);
+    assert_eq!(caught_up["relational"]["event_count"], 1, "{caught_up:#}");
 }
 
 #[test]
