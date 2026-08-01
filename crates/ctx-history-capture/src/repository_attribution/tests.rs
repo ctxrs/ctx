@@ -227,6 +227,60 @@ fn relative_absolute_cd_and_repeated_git_c_are_literal_and_multi_repo() {
 }
 
 #[test]
+fn structured_workdir_and_git_c_bind_independently_supported_repositories() {
+    let temp = TempDir::new().unwrap();
+    let workdir = repository(
+        temp.path(),
+        "workdir",
+        Some("https://github.com/acme/workdir.git"),
+    );
+    let command_repo = repository(
+        temp.path(),
+        "command",
+        Some("https://github.com/acme/command.git"),
+    );
+
+    let annotation = attribute(AttributionInput {
+        declared_tool_workdir: Some(workdir.to_string_lossy().into_owned()),
+        command: Some(format!("git -C {} status", command_repo.display())),
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_bindings.len(), 2);
+    let workdir_binding = annotation
+        .repository_bindings
+        .iter()
+        .find(|binding| binding.logical_repository_id == "forge:github.com/acme/workdir")
+        .unwrap();
+    assert!(workdir_binding
+        .evidence
+        .iter()
+        .any(|evidence| evidence.kind == RepositoryEvidenceKind::DeclaredToolWorkdir));
+    let command_binding = annotation
+        .repository_bindings
+        .iter()
+        .find(|binding| binding.logical_repository_id == "forge:github.com/acme/command")
+        .unwrap();
+    assert!(command_binding.evidence.iter().any(|evidence| {
+        evidence.kind == RepositoryEvidenceKind::CommandSpecificRepositoryPath
+    }));
+    assert_eq!(
+        annotation
+            .repository_candidate_evidence
+            .declared_tool_workdir
+            .as_deref(),
+        Some(workdir.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        annotation
+            .repository_candidate_evidence
+            .command_specific_repository_path
+            .as_deref(),
+        Some(command_repo.to_string_lossy().as_ref())
+    );
+}
+
+#[test]
 fn exact_wrappers_are_accepted_and_unknown_shapes_abstain() {
     let temp = TempDir::new().unwrap();
     let repo = repository(temp.path(), "repo", None);
@@ -319,49 +373,81 @@ fn literal_cd_is_preserved_as_candidate_evidence_but_not_opaque_operation_author
 }
 
 #[test]
-fn class_f_does_not_destroy_independent_workdir_or_file_evidence() {
+fn opaque_command_suppresses_only_command_and_session_guesses() {
     let temp = TempDir::new().unwrap();
-    let control = temp.path().join("control");
-    fs::create_dir(&control).unwrap();
-    let repo = repository(temp.path(), "repo", None);
-
-    let workdir = attribute(AttributionInput {
-        session_cwd: Some(control.to_string_lossy().into_owned()),
-        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
-        command: Some("project_alias".to_owned()),
-        ..AttributionInput::default()
-    });
-    assert!(workdir.repository_bindings.is_empty());
-    assert_eq!(
-        workdir
-            .repository_candidate_evidence
-            .declared_tool_workdir
-            .as_deref(),
-        Some(repo.to_string_lossy().as_ref())
+    let session = repository(
+        temp.path(),
+        "session",
+        Some("https://github.com/acme/session.git"),
     );
-    assert!(has_reason(
-        &workdir,
-        RepositoryAbstentionReason::UnknownWrapper
-    ));
-
-    let file = attribute(AttributionInput {
-        session_cwd: Some(control.to_string_lossy().into_owned()),
-        command: Some("project_function".to_owned()),
+    let workdir = repository(
+        temp.path(),
+        "workdir",
+        Some("https://github.com/acme/workdir.git"),
+    );
+    let activity = repository(
+        temp.path(),
+        "activity",
+        Some("https://github.com/acme/activity.git"),
+    );
+    let annotation = attribute(AttributionInput {
+        session_cwd: Some(session.to_string_lossy().into_owned()),
+        declared_tool_workdir: Some(workdir.to_string_lossy().into_owned()),
+        command: Some("project_alias".to_owned()),
         file_observations: vec![UnscopedFileObservation {
-            path: repo.join("tracked.txt").to_string_lossy().into_owned(),
+            path: activity.join("tracked.txt").to_string_lossy().into_owned(),
             prior_path: None,
             kind: RepositoryFileObservationKind::Modified,
         }],
+        vcs_observations: vec![UnscopedVcsObservation {
+            path: Some(activity.to_string_lossy().into_owned()),
+            kind: RepositoryVcsObservationKind::Commit,
+            object_id: None,
+            parent_object_ids: Vec::new(),
+            reference: Some("refs/heads/main".to_owned()),
+        }],
         ..AttributionInput::default()
     });
-    assert_eq!(file.repository_bindings.len(), 1);
-    assert_eq!(file.repository_file_observations.len(), 1);
-    assert!(file.repository_bindings[0]
+
+    assert_eq!(annotation.repository_bindings.len(), 2);
+    assert!(annotation
+        .repository_bindings
+        .iter()
+        .all(|binding| binding.logical_repository_id != "forge:github.com/acme/session"));
+    let workdir_binding = annotation
+        .repository_bindings
+        .iter()
+        .find(|binding| binding.logical_repository_id == "forge:github.com/acme/workdir")
+        .unwrap();
+    assert!(workdir_binding
+        .evidence
+        .iter()
+        .any(|evidence| evidence.kind == RepositoryEvidenceKind::DeclaredToolWorkdir));
+    let activity_binding = annotation
+        .repository_bindings
+        .iter()
+        .find(|binding| binding.logical_repository_id == "forge:github.com/acme/activity")
+        .unwrap();
+    assert!(activity_binding
         .evidence
         .iter()
         .any(|evidence| evidence.kind == RepositoryEvidenceKind::FileActivity));
+    assert!(activity_binding
+        .evidence
+        .iter()
+        .any(|evidence| evidence.kind == RepositoryEvidenceKind::VcsActivity));
+    assert_eq!(annotation.repository_file_observations.len(), 1);
+    assert_eq!(annotation.repository_vcs_observations.len(), 1);
+    assert_eq!(
+        annotation.repository_file_observations[0].repository_binding_id,
+        activity_binding.binding_id
+    );
+    assert_eq!(
+        annotation.repository_vcs_observations[0].repository_binding_id,
+        activity_binding.binding_id
+    );
     assert!(has_reason(
-        &file,
+        &annotation,
         RepositoryAbstentionReason::UnknownWrapper
     ));
 }
@@ -389,7 +475,7 @@ fn exact_commit_outcome() -> RepositoryOutcomeObservation {
 }
 
 #[test]
-fn opaque_command_routes_block_base_certification_and_outcome_association() {
+fn opaque_command_routes_block_outcomes_but_retain_structured_workdir() {
     let temp = TempDir::new().unwrap();
     let repo = repository(temp.path(), "repo", None);
     for (command, reason) in [
@@ -410,9 +496,8 @@ fn opaque_command_routes_block_base_certification_and_outcome_association() {
             RepositoryAbstentionReason::UnknownWrapper,
         ),
     ] {
-        let mut attributor = RepositoryAttributor::default();
         let path = repo.to_string_lossy().into_owned();
-        let annotation = attributor.attribute(AttributionInput {
+        let annotation = attribute(AttributionInput {
             declared_tool_workdir: Some(path.clone()),
             command: Some(command.to_owned()),
             outcome_operation_repository_path: Some(path.clone()),
@@ -420,7 +505,11 @@ fn opaque_command_routes_block_base_certification_and_outcome_association() {
             outcome_observations: vec![exact_commit_outcome()],
             ..AttributionInput::default()
         });
-        assert!(annotation.repository_bindings.is_empty(), "{command}");
+        assert_eq!(annotation.repository_bindings.len(), 1, "{command}");
+        assert!(annotation.repository_bindings[0]
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == RepositoryEvidenceKind::DeclaredToolWorkdir));
         assert!(
             annotation.repository_vcs_observations.is_empty(),
             "{command}"
@@ -437,7 +526,6 @@ fn opaque_command_routes_block_base_certification_and_outcome_association() {
                 .as_deref(),
             Some(path.as_str())
         );
-        assert_eq!(attributor.git_subprocess_count(), 0, "{command}");
     }
 }
 
@@ -716,6 +804,45 @@ fn candidate_products_abstain_before_any_git_probe() {
     ));
     assert!(!has_reason(
         &commands,
+        RepositoryAbstentionReason::CandidateMissingBeforeCertification
+    ));
+}
+
+#[test]
+fn command_candidate_limit_preserves_independent_evidence() {
+    let temp = TempDir::new().unwrap();
+    let workdir = repository(
+        temp.path(),
+        "bounded-workdir",
+        Some("https://github.com/acme/bounded-workdir.git"),
+    );
+    let activity = repository(
+        temp.path(),
+        "bounded-activity",
+        Some("https://github.com/acme/bounded-activity.git"),
+    );
+    let command = (0..33)
+        .map(|index| format!("git -C /definitely-missing/ctx-command-{index} status"))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let independent = attribute(AttributionInput {
+        declared_tool_workdir: Some(workdir.to_string_lossy().into_owned()),
+        command: Some(command),
+        file_observations: vec![UnscopedFileObservation {
+            path: activity.join("tracked.txt").to_string_lossy().into_owned(),
+            prior_path: None,
+            kind: RepositoryFileObservationKind::Modified,
+        }],
+        ..AttributionInput::default()
+    });
+    assert_eq!(independent.repository_bindings.len(), 2);
+    assert_eq!(independent.repository_file_observations.len(), 1);
+    assert!(has_reason(
+        &independent,
+        RepositoryAbstentionReason::CandidateLimitExceeded
+    ));
+    assert!(!has_reason(
+        &independent,
         RepositoryAbstentionReason::CandidateMissingBeforeCertification
     ));
 }

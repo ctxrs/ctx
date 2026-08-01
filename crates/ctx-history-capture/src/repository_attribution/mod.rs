@@ -390,25 +390,17 @@ fn attribute_with_attributor(
         outcome_observations.clear();
     }
 
-    if command_analysis
+    let command_candidate_limit_exceeded = command_analysis
         .abstentions
         .iter()
-        .any(|abstention| abstention.reason == RepositoryAbstentionReason::CandidateLimitExceeded)
-    {
-        if !outcome_observations.is_empty() {
-            push_abstention(
-                &mut annotation,
-                RepositoryEvidenceKind::ProviderNativeResult,
-                RepositoryAbstentionReason::OutcomeRepositoryUnbound,
-                "repository_outcome_blocked_by_command_candidate_limit",
-            );
-        }
-        return annotation;
-    }
+        .any(|abstention| abstention.reason == RepositoryAbstentionReason::CandidateLimitExceeded);
+    let admitted_command_candidate_count = if command_candidate_limit_exceeded {
+        0
+    } else {
+        command_analysis.repository_paths.len()
+    };
 
-    let requested_candidate_count = command_analysis
-        .repository_paths
-        .len()
+    let requested_candidate_count = admitted_command_candidate_count
         .saturating_add(input.file_observations.len())
         .saturating_add(input.vcs_observations.len())
         .saturating_add(usize::from(input.declared_tool_workdir.is_some()))
@@ -432,7 +424,8 @@ fn attribute_with_attributor(
     }
 
     let mut candidates = Vec::new();
-    let more_specific_command = !command_analysis.repository_paths.is_empty();
+    let more_specific_command =
+        !command_candidate_limit_exceeded && !command_analysis.repository_paths.is_empty();
     if more_specific_command {
         candidates.extend(
             command_analysis
@@ -444,14 +437,13 @@ fn attribute_with_attributor(
                     evidence_kind: candidate.evidence_kind,
                 }),
         );
-    } else if !command_analysis.blocks_session_fallback {
-        if let Some(workdir) = &declared_workdir {
-            candidates.push(Candidate {
-                path: workdir.clone(),
-                kind: CandidateKind::Directory,
-                evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
-            });
-        }
+    }
+    if let Some(workdir) = &declared_workdir {
+        candidates.push(Candidate {
+            path: workdir.clone(),
+            kind: CandidateKind::Directory,
+            evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
+        });
     }
     if !command_analysis.blocks_session_fallback {
         if let Some(path) = &outcome_operation_path {
