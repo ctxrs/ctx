@@ -4,8 +4,6 @@ use crate::{CaptureError, OutputOutcome, OutputOutcomeMetadata, Result};
 use ctx_history_core::{EventRole, EventType};
 use rmpv::{decode::read_value as read_msgpack_value, Value as MsgpackValue};
 
-const MAX_RETAINED_MESSAGE_REJECTIONS: usize = 64;
-
 #[derive(Debug, Clone)]
 pub(super) struct DeepAgentsMessage {
     pub(super) role: EventRole,
@@ -82,22 +80,11 @@ fn deepagents_output_outcome(message: &DeepAgentsMessage) -> OutputOutcomeMetada
     }
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct DeepAgentsMessageRejection {
-    // Exact rejected-entry location and text are retained for provider
-    // diagnostics even though the release summary consumes only counts.
-    #[allow(dead_code)]
-    pub(super) entry_offset: usize,
-    #[allow(dead_code)]
-    pub(super) error: String,
-}
-
 #[derive(Debug, Clone, Default)]
 pub(super) struct DeepAgentsDecodedMessages {
     pub(super) messages: Vec<DeepAgentsMessage>,
     pub(super) rejected_entries: u64,
     pub(super) ignored_entries: u64,
-    pub(super) rejections: Vec<DeepAgentsMessageRejection>,
 }
 
 pub(super) fn deepagents_messages_from_blob(
@@ -138,30 +125,24 @@ pub(super) fn deepagents_messages_from_msgpack_value(
     let mut decoded = DeepAgentsDecodedMessages::default();
     match value {
         MsgpackValue::Array(items) => {
-            for (entry_offset, item) in items.iter().enumerate() {
-                decoded.record(entry_offset, deepagents_message_from_msgpack_value(item));
+            for item in items {
+                decoded.record(deepagents_message_from_msgpack_value(item));
             }
         }
-        _ => decoded.record(0, deepagents_message_from_msgpack_value(value)),
+        _ => decoded.record(deepagents_message_from_msgpack_value(value)),
     }
     decoded
 }
 
 impl DeepAgentsDecodedMessages {
-    fn record(&mut self, entry_offset: usize, outcome: DeepAgentsMessageOutcome) {
+    fn record(&mut self, outcome: DeepAgentsMessageOutcome) {
         match outcome {
             DeepAgentsMessageOutcome::Message(message) => self.messages.push(message),
             DeepAgentsMessageOutcome::System => {
                 self.ignored_entries = self.ignored_entries.saturating_add(1);
             }
-            DeepAgentsMessageOutcome::Rejected(error) => {
+            DeepAgentsMessageOutcome::Rejected => {
                 self.rejected_entries = self.rejected_entries.saturating_add(1);
-                if self.rejections.len() < MAX_RETAINED_MESSAGE_REJECTIONS {
-                    self.rejections.push(DeepAgentsMessageRejection {
-                        entry_offset,
-                        error,
-                    });
-                }
             }
         }
     }
@@ -170,7 +151,7 @@ impl DeepAgentsDecodedMessages {
 enum DeepAgentsMessageOutcome {
     Message(DeepAgentsMessage),
     System,
-    Rejected(String),
+    Rejected,
 }
 
 fn deepagents_message_from_msgpack_value(value: &MsgpackValue) -> DeepAgentsMessageOutcome {
@@ -179,39 +160,24 @@ fn deepagents_message_from_msgpack_value(value: &MsgpackValue) -> DeepAgentsMess
         MsgpackValue::Ext(5, payload) => {
             let decoded = match deepagents_decode_msgpack(payload) {
                 Ok(decoded) => decoded,
-                Err(error) => {
-                    return DeepAgentsMessageOutcome::Rejected(format!(
-                        "Deep Agents message extension payload is invalid: {error}"
-                    ));
-                }
+                Err(_) => return DeepAgentsMessageOutcome::Rejected,
             };
             let MsgpackValue::Array(items) = decoded else {
-                return DeepAgentsMessageOutcome::Rejected(
-                    "Deep Agents message extension payload is not an array".to_owned(),
-                );
+                return DeepAgentsMessageOutcome::Rejected;
             };
             let class_name = items.get(1).and_then(msgpack_string);
             let fields = match items.get(2) {
                 Some(MsgpackValue::Map(fields)) => fields,
                 Some(_) => {
-                    return DeepAgentsMessageOutcome::Rejected(
-                        "Deep Agents message extension fields are not a map".to_owned(),
-                    );
+                    return DeepAgentsMessageOutcome::Rejected;
                 }
                 None => {
-                    return DeepAgentsMessageOutcome::Rejected(
-                        "Deep Agents message extension is missing fields".to_owned(),
-                    );
+                    return DeepAgentsMessageOutcome::Rejected;
                 }
             };
             deepagents_message_from_fields(fields, class_name)
         }
-        MsgpackValue::Ext(_, _) => DeepAgentsMessageOutcome::Rejected(
-            "Deep Agents message uses an unsupported extension type".to_owned(),
-        ),
-        _ => DeepAgentsMessageOutcome::Rejected(
-            "Deep Agents message entry has an unsupported non-system shape".to_owned(),
-        ),
+        _ => DeepAgentsMessageOutcome::Rejected,
     }
 }
 
@@ -224,30 +190,22 @@ fn deepagents_message_from_fields(
         .or_else(|| class_name.clone())
         .unwrap_or_else(|| "unknown".to_owned());
     let Some(role) = deepagents_message_role(&message_type, class_name.as_deref()) else {
-        return DeepAgentsMessageOutcome::Rejected(
-            "Deep Agents message has an unsupported non-system type".to_owned(),
-        );
+        return DeepAgentsMessageOutcome::Rejected;
     };
     if role == EventRole::System {
         return DeepAgentsMessageOutcome::System;
     }
     let Some(content) = msgpack_map_get(fields, "content") else {
-        return DeepAgentsMessageOutcome::Rejected(
-            "Deep Agents non-system message is missing content".to_owned(),
-        );
+        return DeepAgentsMessageOutcome::Rejected;
     };
     let Some(text) = deepagents_content_text(content) else {
-        return DeepAgentsMessageOutcome::Rejected(
-            "Deep Agents non-system message content has an unsupported shape".to_owned(),
-        );
+        return DeepAgentsMessageOutcome::Rejected;
     };
     if text.starts_with("[SYSTEM]") {
         return DeepAgentsMessageOutcome::System;
     }
     if text.trim().is_empty() {
-        return DeepAgentsMessageOutcome::Rejected(
-            "Deep Agents non-system message content is empty".to_owned(),
-        );
+        return DeepAgentsMessageOutcome::Rejected;
     }
     DeepAgentsMessageOutcome::Message(DeepAgentsMessage {
         role,

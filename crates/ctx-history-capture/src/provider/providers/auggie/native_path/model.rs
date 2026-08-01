@@ -18,7 +18,6 @@ pub(super) struct ParsedAuggieSession {
     pub(super) parent_provider_session_id: Option<String>,
     pub(super) root_provider_session_id: Option<String>,
     pub(super) cwd: Option<String>,
-    pub(super) raw_source_path: String,
 }
 
 pub(super) struct ParsedAuggieEvent {
@@ -31,7 +30,6 @@ pub(super) struct ParsedAuggieEvent {
     pub(super) chat_index: usize,
     pub(super) message_kind: &'static str,
     pub(super) native_event_id: Option<String>,
-    pub(super) json_pointer: String,
 }
 
 pub(super) fn saturating_i64(value: usize) -> i64 {

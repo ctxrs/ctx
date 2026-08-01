@@ -143,16 +143,11 @@ pub fn register_shelley_source_backed_route(
         data_root,
         CaptureProvider::Shelley,
         "shelley_sqlite",
-        ShelleyInventoryProvider {
-            data_root: data_root.to_path_buf(),
-            exact_cwd,
-            adapter,
-        },
+        ShelleyInventoryProvider { exact_cwd, adapter },
     )
 }
 
 struct ShelleyInventoryProvider {
-    data_root: PathBuf,
     exact_cwd: PathBuf,
     adapter: ShelleySourceBackedAdapter,
 }

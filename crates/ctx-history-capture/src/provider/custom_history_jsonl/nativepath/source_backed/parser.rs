@@ -4,11 +4,9 @@ use crate::provider::custom_history_jsonl::CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES;
 #[derive(Debug)]
 struct TouchCandidate {
     line_number: usize,
-    byte_offset: u64,
     source_id: String,
     session_id: String,
     event_index: Option<u64>,
-    path: Option<TouchSpoolRef>,
 }
 
 #[derive(Debug)]
@@ -33,7 +31,6 @@ struct ProjectionCatalog {
     edge_keys: BTreeSet<(String, String, String, String)>,
     edges: Vec<EdgeCandidate>,
     oversized_lines: BTreeSet<usize>,
-    touch_spool_bytes: u64,
     budget: CatalogBudget,
 }
 
@@ -51,7 +48,6 @@ impl ProjectionCatalog {
             edge_keys: BTreeSet::new(),
             edges: Vec::new(),
             oversized_lines: BTreeSet::new(),
-            touch_spool_bytes: 0,
             budget: CatalogBudget::new(limits),
         }
     }
@@ -84,7 +80,6 @@ pub(super) fn parse_projection_with_limits(
     file.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(file);
     let mut event_spool = tempfile::tempfile()?;
-    let mut touch_spool = tempfile::tempfile()?;
     let mut catalog = ProjectionCatalog::new(limits);
     let mut source_hasher = new_prefix_hasher();
     let mut committed_source_hasher = source_hasher.clone();
@@ -98,7 +93,6 @@ pub(super) fn parse_projection_with_limits(
 
     {
         let mut event_writer = BufWriter::new(&mut event_spool);
-        let mut touch_writer = BufWriter::new(&mut touch_spool);
         while byte_offset < frozen_length {
             let available = reader.fill_buf()?;
             if available.is_empty() {
@@ -158,13 +152,7 @@ pub(super) fn parse_projection_with_limits(
                 catalog.summary.skipped_events = catalog.summary.skipped_events.saturating_add(1);
                 catalog.oversized_lines.insert(line_number);
             } else {
-                visit_record(
-                    &line,
-                    evidence,
-                    &mut catalog,
-                    &mut event_writer,
-                    &mut touch_writer,
-                )?;
+                visit_record(&line, evidence, &mut catalog, &mut event_writer)?;
             }
             committed_source_hasher = source_hasher.clone();
             line.clear();
@@ -172,11 +160,9 @@ pub(super) fn parse_projection_with_limits(
             line_start = byte_offset;
         }
         event_writer.flush()?;
-        touch_writer.flush()?;
     }
 
     event_spool.seek(SeekFrom::Start(0))?;
-    touch_spool.seek(SeekFrom::Start(0))?;
     let terminal = line_start == frozen_length;
     let certified_prefix_bytes = line_start;
     let content_digest = finish_prefix_digest(&committed_source_hasher, certified_prefix_bytes);
@@ -189,7 +175,6 @@ pub(super) fn parse_projection_with_limits(
     finish_projection(
         catalog,
         event_spool,
-        touch_spool,
         certified_prefix_bytes,
         line_number,
         terminal,
@@ -204,7 +189,6 @@ fn visit_record(
     line: CompleteLine,
     catalog: &mut ProjectionCatalog,
     event_writer: &mut impl Write,
-    touch_writer: &mut impl Write,
 ) -> CustomHistorySourceBackedResult<()> {
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return Ok(());
@@ -423,30 +407,12 @@ fn visit_record(
                     touch.source_id.len().saturating_mul(2),
                     touch.session_id.len().saturating_mul(2),
                 ]))?;
-                let path = if touch.event_index.is_some()
-                    && touch.path.len() <= CUSTOM_DOCUMENT_METADATA_MAX_BYTES
-                {
-                    let byte_offset = catalog.touch_spool_bytes;
-                    touch_writer.write_all(touch.path.as_bytes())?;
-                    catalog.touch_spool_bytes = catalog
-                        .touch_spool_bytes
-                        .checked_add(touch.path.len() as u64)
-                        .ok_or(CustomHistorySourceBackedError::CountMismatch)?;
-                    Some(TouchSpoolRef {
-                        byte_offset,
-                        byte_length: touch.path.len(),
-                    })
-                } else {
-                    None
-                };
                 catalog.touch_keys.insert(key);
                 catalog.touches.push(TouchCandidate {
                     line_number: line.line_number,
-                    byte_offset: line.byte_offset,
                     source_id: touch.source_id,
                     session_id: touch.session_id,
                     event_index: touch.event_index,
-                    path,
                 });
             }
         }
@@ -544,7 +510,6 @@ fn ensure_retained_key_bound(
 fn finish_projection(
     mut catalog: ProjectionCatalog,
     event_spool: File,
-    touch_spool: File,
     certified_prefix_bytes: u64,
     complete_records: usize,
     terminal: bool,
@@ -565,8 +530,6 @@ fn finish_projection(
     catalog.edge_keys.clear();
 
     let mut session_roots;
-    let mut event_touches = BTreeMap::new();
-    let mut appended_touch_changes_prior_document = false;
     {
         let resolution =
             session_catalog(&catalog.sources, &catalog.sessions, &mut catalog.summary)?;
@@ -692,40 +655,6 @@ fn finish_projection(
         }
         catalog.sessions.retain(|key, _| required.contains(key));
         session_roots.retain(|key, _| required.contains(key));
-
-        let mut touch_bytes = BTreeMap::<CustomEventKey, usize>::new();
-        for touch in valid_touches {
-            let Some(event_index) = touch.event_index else {
-                continue;
-            };
-            let key = (
-                touch.source_id.clone(),
-                touch.session_id.clone(),
-                event_index,
-            );
-            if let (Some(prior_prefix_bytes), Some(event)) =
-                (prior_prefix_bytes, catalog.events.get(&key))
-            {
-                if touch.byte_offset >= prior_prefix_bytes
-                    && event.line.byte_offset < prior_prefix_bytes
-                {
-                    appended_touch_changes_prior_document = true;
-                }
-            }
-            let Some(path) = touch.path else {
-                continue;
-            };
-            let paths = event_touches.entry(key.clone()).or_insert_with(Vec::new);
-            let retained_bytes = touch_bytes.entry(key).or_default();
-            if paths.len() == CUSTOM_DOCUMENT_MAX_TOUCHED_FILES
-                || retained_bytes.saturating_add(path.byte_length)
-                    > CUSTOM_DOCUMENT_METADATA_MAX_BYTES
-            {
-                continue;
-            }
-            *retained_bytes = retained_bytes.saturating_add(path.byte_length);
-            paths.push(path);
-        }
     }
 
     let mut rejected_lines = catalog
@@ -786,12 +715,9 @@ fn finish_projection(
         sessions: catalog.sessions,
         session_roots,
         events: catalog.events,
-        event_touches,
         event_spool,
-        touch_spool,
         observed_prior_prefix_digest,
         retained_records_before_prior_prefix,
-        appended_touch_changes_prior_document,
         counts,
         checkpoint: CustomHistoryCheckpoint {
             version: CUSTOM_CHECKPOINT_VERSION,

@@ -482,7 +482,6 @@ fn scan_rows(
     include_deleted_filter: bool,
     emit: &mut dyn FnMut(Vec<CoreRecord>) -> FirebenderSourceBackedResult<()>,
 ) -> FirebenderSourceBackedResult<WorkingScan> {
-    let source_path = database_path.display().to_string();
     let workspace = firebender_workspace(database_path);
     let mut after = None;
     let mut hasher = Sha256::new();
@@ -517,7 +516,6 @@ fn scan_rows(
                         continue;
                     }
                     let session_id = firebender_session_id(&source, &row.id)?;
-                    let row_digest = firebender_raw_row_digest(&row.logical_values());
                     for (message_index, message) in row.messages.iter().enumerate() {
                         increment(&mut counts.complete_records, 1)?;
                         let Some(document) = firebender_core_record(
