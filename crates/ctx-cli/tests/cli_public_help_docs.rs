@@ -3,6 +3,37 @@ mod support;
 use support::*;
 
 #[test]
+fn release_cli_does_not_expose_or_invoke_the_index_dashboard_fixture() {
+    const FIXTURE_COMMAND: &str = "_index-dashboard-renderer-fixture";
+
+    let temp = tempdir();
+    ctx(&temp)
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(FIXTURE_COMMAND).not());
+
+    ctx(&temp)
+        .args([
+            FIXTURE_COMMAND,
+            "--case",
+            "ready",
+            "--columns",
+            "80",
+            "--rows",
+            "24",
+            "--clock",
+            "2026-06-23T12:00:00Z",
+            "--random-seed",
+            "ctx-cli-ux-core-v1",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"))
+        .stderr(predicate::str::contains("requires stdout to be a terminal").not());
+}
+
+#[test]
 fn help_exposes_session_retrieval_commands() {
     let temp = tempdir();
     let output = ctx(&temp)
@@ -608,8 +639,11 @@ fn daemon_help_exposes_readable_status_and_run_controls() {
             vec![
                 "Usage: ctx daemon run",
                 "--idle-exit-seconds <IDLE_EXIT_SECONDS>",
+                "Exit after this many seconds without maintenance work",
                 "--loop-interval-seconds <LOOP_INTERVAL_SECONDS>",
+                "Wait this many seconds between maintenance passes",
                 "--max-chunks <MAX_CHUNKS>",
+                "Process at most this many semantic chunks per pass",
                 "--force",
                 "--format <FORMAT>",
             ],
@@ -652,11 +686,16 @@ fn daemon_help_exposes_readable_status_and_run_controls() {
         assert!(!help.contains("--once"), "{args:?} help:\n{help}");
     }
 
-    ctx(&temp)
-        .args(["daemon", "run", "--once"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("unexpected argument '--once'"));
+    let stderr = failure_stderr(ctx(&temp).args(["daemon", "run", "--once"]));
+    assert!(
+        stderr.contains("The --once option has been retired"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("ctx daemon run --idle-exit-seconds <SECONDS>"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("--force"), "{stderr}");
 }
 
 #[test]

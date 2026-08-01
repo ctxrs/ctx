@@ -72,6 +72,11 @@ pub(crate) fn default_helper_path(data_root: &Path) -> PathBuf {
 }
 
 pub(super) fn helper_path(data_root: &Path) -> Result<PathBuf> {
+    #[cfg(ctx_pro_test_helper)]
+    if let Some(path) = crate::pro::test_control::helper_path()? {
+        return Ok(path);
+    }
+
     #[cfg(ctx_pro_qualification)]
     if let Some(bundle) =
         crate::pro::qualification_helper::QualificationHelperBundle::from_process_environment(
@@ -94,6 +99,11 @@ pub(super) fn helper_path(data_root: &Path) -> Result<PathBuf> {
 }
 
 pub(super) fn helper_executable(data_root: &Path) -> Result<VerifiedHelperExecutable> {
+    #[cfg(ctx_pro_test_helper)]
+    if let Some(path) = crate::pro::test_control::helper_path()? {
+        return VerifiedHelperExecutable::open_developer(&path);
+    }
+
     #[cfg(ctx_pro_qualification)]
     if let Some(bundle) =
         crate::pro::qualification_helper::QualificationHelperBundle::from_process_environment(

@@ -473,7 +473,93 @@ fn fresh_sql_is_read_only_and_initializes_no_legacy_store() {
     assert!(!temp.path().join("work.sqlite").exists());
 
     let stderr = failure_stderr(ctx(&temp).args(["sql", "SELECT 1; SELECT 2"]));
-    assert!(stderr.contains("Multiple statements provided"));
+    assert_eq!(
+        stderr,
+        concat!(
+            "✗ One read-only SQL statement required\n",
+            "ctx sql accepts one read-only statement per command. Run each statement separately.\n",
+            "\n",
+            "Hint: Resolve the issue and retry\n",
+            "\n",
+            "Next\n",
+            "  ctx sql 'SELECT 1'\n",
+        )
+    );
+
+    let ansi = failure_stderr(ctx(&temp).args(["--color=always", "sql", "SELECT 1; SELECT 2"]));
+    assert!(ansi.as_bytes().contains(&0x1b));
+    let mut stripped = anstream::StripStream::new(Vec::new());
+    stripped.write_all(ansi.as_bytes()).unwrap();
+    assert_eq!(String::from_utf8(stripped.into_inner()).unwrap(), stderr);
+
+    for format in ["raw", "csv", "json"] {
+        let machine_stderr = failure_stderr(ctx(&temp).args([
+            "--color=always",
+            "sql",
+            "SELECT 1; SELECT 2",
+            "--format",
+            format,
+        ]));
+        assert_eq!(machine_stderr, "Error: Multiple statements provided\n");
+    }
+}
+
+#[test]
+fn bounded_sql_preview_has_copyable_human_recovery_and_unchanged_raw_controls() {
+    let temp = tempdir();
+    let sql = "SELECT 'abcdefgh' AS value UNION ALL SELECT 'ijklmnop'";
+    let args = ["sql", sql, "--max-rows", "1", "--max-value-bytes", "4"];
+
+    let plain = ctx(&temp)
+        .args(args)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert_eq!(
+        String::from_utf8(plain.stdout).unwrap(),
+        "✓ 1 row returned\n\nResults\nvalue\nabcd...\n"
+    );
+    let plain_stderr = String::from_utf8(plain.stderr).unwrap();
+    let recovery =
+        "  ctx sql 'SELECT '\\''abcdefgh'\\'' AS value UNION ALL SELECT '\\''ijklmnop'\\'''";
+    assert!(plain_stderr.contains(&format!("Next\n{recovery}\n")));
+    assert_eq!(unicode_width::UnicodeWidthStr::width(recovery), 78);
+    assert!(!plain_stderr.contains("--max-rows 2"));
+    assert!(!plain_stderr.contains("--max-value-bytes 8"));
+
+    let ansi = ctx(&temp)
+        .arg("--color=always")
+        .args(args)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert!(ansi.stderr.contains(&0x1b));
+    let mut stripped = anstream::StripStream::new(Vec::new());
+    stripped.write_all(&ansi.stderr).unwrap();
+    assert_eq!(
+        String::from_utf8(stripped.into_inner()).unwrap(),
+        plain_stderr
+    );
+
+    let raw = ctx(&temp)
+        .arg("--color=always")
+        .args(args)
+        .args(["--format", "raw"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert_eq!(raw.stdout, b"abcd\n");
+    assert_eq!(
+        raw.stderr,
+        concat!(
+            "warning: rows truncated at 1; rerun with --max-rows for more\n",
+            "warning: values truncated at 4 bytes; rerun with --max-value-bytes for more\n",
+        )
+        .as_bytes()
+    );
 }
 
 #[test]

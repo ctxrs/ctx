@@ -1,12 +1,6 @@
-use std::{
-    env,
-    io::{self, Write},
-    process::ExitCode,
-    time::{Duration, Instant},
-};
+use std::{env, io, process::ExitCode, time::Instant};
 
 use anyhow::{Context, Result};
-use clap::Parser;
 use ctx_history_core::default_data_root;
 
 use crate::{
@@ -34,14 +28,25 @@ use crate::{
     output::{OutputFormat, OutputMeasurement, SqlFormat},
     presentation_limit, pro, semantic,
     ui::{
-        outcome, scan_color_mode, scan_machine_output_hint, ColorMode, Outcome, OutcomeState, Ui,
+        diagnostic, outcome, scan_color_mode, scan_machine_output_hint, ColorMode, Diagnostic,
+        DiagnosticLevel, Outcome, OutcomeState, Ui,
     },
     upgrade,
 };
 
+mod finalization;
+mod parse;
+
+use finalization::{complete_local_usage, flush_cli_output_then};
+use parse::parse_cli_from;
+
 #[derive(Debug, thiserror::Error)]
 #[error("JSON error was already rendered")]
 struct RenderedJsonError;
+
+#[derive(Debug, thiserror::Error)]
+#[error("CLI parser output was already rendered")]
+struct RenderedClapError(u8);
 
 #[derive(Debug, thiserror::Error)]
 #[error("CLI error was already rendered")]
@@ -51,37 +56,20 @@ pub(crate) fn rendered_cli_error() -> anyhow::Error {
     RenderedCliError.into()
 }
 
-#[derive(Debug, thiserror::Error)]
-enum FinalOutputFlushError {
-    #[error("flush CLI stdout: {0}")]
-    Stdout(io::Error),
-    #[error("flush CLI stderr: {0}")]
-    Stderr(io::Error),
-    #[error("flush CLI stdout: {stdout}; flush CLI stderr: {stderr}")]
-    Both {
-        stdout: io::Error,
-        stderr: io::Error,
-    },
-}
-
-fn flush_cli_output_then<T>(
-    stdout: &mut impl Write,
-    stderr: &mut impl Write,
-    after_delivery: impl FnOnce() -> T,
-) -> std::result::Result<T, FinalOutputFlushError> {
-    let stdout_result = stdout.flush();
-    let stderr_result = stderr.flush();
-    match (stdout_result, stderr_result) {
-        (Ok(()), Ok(())) => Ok(after_delivery()),
-        (Err(stdout), Ok(())) => Err(FinalOutputFlushError::Stdout(stdout)),
-        (Ok(()), Err(stderr)) => Err(FinalOutputFlushError::Stderr(stderr)),
-        (Err(stdout), Err(stderr)) => Err(FinalOutputFlushError::Both { stdout, stderr }),
-    }
-}
-
 pub(crate) fn run() -> ExitCode {
+    #[cfg(any(test, ctx_pro_test_helper))]
+    if let Some(exit_code) = run_index_dashboard_fixture_if_requested() {
+        return exit_code;
+    }
+
     match run_cli() {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if error.is::<RenderedClapError>() => {
+            let exit_code = error
+                .downcast_ref::<RenderedClapError>()
+                .map_or(2, |rendered| rendered.0);
+            ExitCode::from(exit_code)
+        }
         Err(error) if error.is::<RenderedJsonError>() || error.is::<RenderedCliError>() => {
             ExitCode::FAILURE
         }
@@ -92,6 +80,62 @@ pub(crate) fn run() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+#[cfg(any(test, ctx_pro_test_helper))]
+fn run_index_dashboard_fixture_if_requested() -> Option<ExitCode> {
+    use std::ffi::{OsStr, OsString};
+
+    use clap::Parser as _;
+
+    let mut process_args = env::args_os();
+    let _program = process_args.next();
+    if process_args.next().as_deref()
+        != Some(OsStr::new(
+            crate::commands::index::dashboard_fixture::COMMAND_NAME,
+        ))
+    {
+        return None;
+    }
+
+    let fixture_args = std::iter::once(OsString::from(
+        crate::commands::index::dashboard_fixture::COMMAND_NAME,
+    ))
+    .chain(process_args);
+    let args = match crate::cli::IndexDashboardFixtureArgs::try_parse_from(fixture_args) {
+        Ok(args) => args,
+        Err(error) => {
+            let exit_code = u8::try_from(error.exit_code()).unwrap_or(2);
+            let _ = error.print();
+            return Some(ExitCode::from(exit_code));
+        }
+    };
+    let mut ui = Ui::stdio(args.color);
+    let result =
+        crate::commands::index::dashboard_fixture::run(args, &mut ui).and_then(|exit_code| {
+            ui.flush()
+                .context("flush index dashboard fixture output")
+                .map(|()| exit_code)
+        });
+    Some(match result {
+        Ok(exit_code) => exit_code,
+        Err(error) => {
+            let summary = format!("{error:#}");
+            let document = crate::ui::diagnostic(
+                ui.stderr_context(),
+                crate::ui::Diagnostic {
+                    level: crate::ui::DiagnosticLevel::Error,
+                    summary: &summary,
+                    detail: None,
+                    fields: &[],
+                    action: None,
+                },
+            );
+            let _ = ui.write_stderr(&document);
+            let _ = ui.flush();
+            ExitCode::FAILURE
+        }
+    })
 }
 
 fn render_unhandled_command_error(error: &anyhow::Error) -> Result<()> {
@@ -113,12 +157,23 @@ pub(crate) fn run_cli() -> Result<()> {
     }
     let started = Instant::now();
     let output_measurement = OutputMeasurement::start();
-    let cli = Cli::parse();
+    let cli = parse_cli_from(env::args_os())?;
     let mut ui = Ui::stdio(cli.color);
+    let json_output = command_json_output(&cli.command);
+    let machine_output = command_machine_readable_output(&cli.command, json_output);
+    let pro_referral_json_output = command_uses_stable_pro_error_json(&cli.command, json_output);
     if let CommandRoot::Referral(args) = &cli.command {
+        let validation = args.validate_invocation();
+        if pro_referral_json_output {
+            if let Err(error) = &validation {
+                if render_stable_pro_error_json(error)? {
+                    return Err(RenderedJsonError.into());
+                }
+            }
+        }
         pro::human_result(
-            args.validate_invocation(),
-            !args.json_output(),
+            validation,
+            !json_output,
             "ctx referral create <codename>",
             &mut ui,
         )?;
@@ -126,11 +181,22 @@ pub(crate) fn run_cli() -> Result<()> {
     let deprecated_controls = DeprecatedControls::detect();
     if command_deprecation_warning_eligible(&cli.command) {
         if let Some(warning) = deprecated_controls.warning() {
-            eprintln!("{warning}");
+            let detail = warning
+                .strip_prefix("warning: ")
+                .unwrap_or(warning.as_str());
+            let document = diagnostic(
+                ui.stderr_context(),
+                Diagnostic {
+                    level: DiagnosticLevel::Warning,
+                    summary: "Deprecated environment variables detected",
+                    detail: Some(detail),
+                    fields: &[],
+                    action: None,
+                },
+            );
+            ui.write_stderr(&document)?;
         }
     }
-    let json_output = command_json_output(&cli.command);
-    let machine_output = command_machine_readable_output(&cli.command, json_output);
     let usage_control_action = matches!(
         &cli.command,
         CommandRoot::Status(args) if args.usage.is_some()
@@ -334,7 +400,9 @@ pub(crate) fn run_cli() -> Result<()> {
         if error.is::<RenderedJsonError>() || error.is::<RenderedCliError>() {
             Some(RenderedCliError.into())
         } else if json_output {
-            if let Some(error) =
+            if pro_referral_json_output && render_stable_pro_error_json(error)? {
+                Some(RenderedJsonError.into())
+            } else if let Some(error) =
                 error.downcast_ref::<presentation_limit::PresentationOutputLimitError>()
             {
                 eprintln!(
@@ -427,6 +495,52 @@ fn render_generic_command_error(
     Ok(())
 }
 
+fn render_stable_pro_error_json(error: &anyhow::Error) -> Result<bool> {
+    pro::write_stable_error_json(&mut io::stderr().lock(), error)
+}
+
+fn write_clap_output(error: &clap::Error, ui: &mut Ui) -> Result<()> {
+    write_clap_output_with_line_ends(error, ui, false)
+}
+
+fn write_human_clap_output(error: &clap::Error, ui: &mut Ui) -> Result<()> {
+    write_clap_output_with_line_ends(error, ui, true)
+}
+
+fn write_clap_output_with_line_ends(
+    error: &clap::Error,
+    ui: &mut Ui,
+    trim_line_ends: bool,
+) -> Result<()> {
+    let rendered = error.render();
+    if error.use_stderr() {
+        let rendered = if ui.stderr_context().color_enabled() {
+            rendered.ansi().to_string()
+        } else {
+            rendered.to_string()
+        };
+        let rendered = if trim_line_ends {
+            crate::ui::trim_terminal_line_ends(&rendered)
+        } else {
+            rendered
+        };
+        write!(ui.stderr_writer(), "{rendered}")?;
+    } else {
+        let rendered = if ui.stdout_context().color_enabled() {
+            rendered.ansi().to_string()
+        } else {
+            rendered.to_string()
+        };
+        let rendered = if trim_line_ends {
+            crate::ui::trim_terminal_line_ends(&rendered)
+        } else {
+            rendered
+        };
+        write!(ui.stdout_writer(), "{rendered}")?;
+    }
+    Ok(())
+}
+
 fn command_json_output(command: &CommandRoot) -> bool {
     match command {
         CommandRoot::Setup(args) => args.format.is_json(),
@@ -452,6 +566,10 @@ fn command_json_output(command: &CommandRoot) -> bool {
         CommandRoot::Upgrade(args) => args.json_output(),
         CommandRoot::Doctor(args) => args.format.is_json(),
     }
+}
+
+fn command_uses_stable_pro_error_json(command: &CommandRoot, json_output: bool) -> bool {
+    json_output && matches!(command, CommandRoot::Pro(_) | CommandRoot::Referral(_))
 }
 
 fn show_json_output(args: &ShowArgs) -> bool {
@@ -520,20 +638,6 @@ fn command_local_usage_draft(command: &CommandRoot) -> local_usage::CliUsage {
     }
 }
 
-fn complete_local_usage(
-    mut draft: local_usage::CliUsage,
-    success: bool,
-    duration: Duration,
-    delivered_output_bytes: u64,
-) -> Option<local_usage::CompletedOperation> {
-    // Runtime accounting is authoritative over command-local canonical
-    // estimates: this is the final adapted stdout + stderr byte count after
-    // error rendering and successful delivery flushes.
-    let output_bytes = usize::try_from(delivered_output_bytes).unwrap_or(usize::MAX);
-    draft.set_measured_output_bytes(output_bytes);
-    draft.completed(success, duration)
-}
-
 fn command_is_status_report(command: &CommandRoot) -> bool {
     matches!(command, CommandRoot::Status(_))
 }
@@ -562,12 +666,14 @@ fn env_truthy(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::{
-        cell::Cell,
-        rc::Rc,
+        io::Write,
         sync::{Arc, Mutex},
     };
 
+    use clap::Parser as _;
+
     use super::*;
+    use crate::cli::Cli;
     use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext};
 
     fn daemon_autostart_trigger(args: &[&str]) -> Option<DaemonTriggerCommandArg> {
@@ -620,6 +726,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stable_pro_error_json_is_scoped_to_pro_and_referral_json_modes() {
+        for args in [
+            &["pro", "--format=json"][..],
+            &["pro", "manage", "--format=json"][..],
+            &["referral", "create", "agent-smith", "--format=json"][..],
+            &["referral", "status", "--format=json"][..],
+            &["referral", "payout", "--format=json"][..],
+        ] {
+            let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+            let json_output = command_json_output(&cli.command);
+            assert!(
+                command_uses_stable_pro_error_json(&cli.command, json_output),
+                "{args:?}"
+            );
+        }
+
+        for args in [
+            &["pro"][..],
+            &["referral", "status"][..],
+            &["blame", "file", "src/main.rs", "--format=json"][..],
+            &["status", "--format=json"][..],
+        ] {
+            let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+            let json_output = command_json_output(&cli.command);
+            assert!(
+                !command_uses_stable_pro_error_json(&cli.command, json_output),
+                "{args:?}"
+            );
+        }
+    }
+
     #[derive(Clone, Default)]
     struct SharedBytes(Arc<Mutex<Vec<u8>>>);
 
@@ -650,6 +790,31 @@ mod tests {
             stderr,
             RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Always)),
         )
+    }
+
+    #[test]
+    fn clap_value_errors_use_the_selected_stderr_stream_with_contextual_usage() {
+        let arguments = ["ctx", "sources", "--provider", "unknown"];
+        let mut error = Cli::try_parse_from(arguments).unwrap_err();
+        let os_arguments = arguments
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>();
+        parse::attach_value_validation_usage(&mut error, &os_arguments);
+
+        let stderr = SharedBytes::default();
+        let stderr_copy = stderr.clone();
+        let mut ui = forced_color_test_ui(stderr);
+        write_clap_output(&error, &mut ui).unwrap();
+        ui.flush().unwrap();
+
+        let rendered = String::from_utf8(stderr_copy.bytes()).unwrap();
+        assert!(rendered.contains('\u{1b}'));
+        let mut stripped = anstream::StripStream::new(Vec::new());
+        stripped.write_all(rendered.as_bytes()).unwrap();
+        let plain = String::from_utf8(stripped.into_inner()).unwrap();
+        assert!(plain.contains("unknown provider"));
+        assert!(plain.contains("Usage: ctx sources [OPTIONS]"));
     }
 
     #[test]
@@ -723,160 +888,5 @@ mod tests {
         assert!(rendered.contains("approve explicit source path /tmp/missing.jsonl"));
         assert!(rendered.contains("No such file or directory"));
         assert!(!rendered.contains("Stack backtrace"));
-    }
-
-    #[test]
-    fn final_accounting_replaces_estimates_with_both_delivered_streams() {
-        for success in [true, false] {
-            let measurement = OutputMeasurement::start();
-            let stdout = SharedBytes::default();
-            let stdout_copy = stdout.clone();
-            let stderr = SharedBytes::default();
-            let stderr_copy = stderr.clone();
-            let mut ui = Ui::with_writers(
-                stdout,
-                RenderContext::for_test(
-                    TestContext::tty(StreamKind::Stdout, 32).color(ColorMode::Always),
-                ),
-                stderr,
-                RenderContext::for_test(
-                    TestContext::tty(StreamKind::Stderr, 48).color(ColorMode::Always),
-                ),
-            );
-            let document = crate::ui::Document::from_line(crate::ui::Line::text(
-                "stdout result with enough words to wrap",
-            ));
-            ui.write_stdout(&document).unwrap();
-            if success {
-                let document =
-                    crate::ui::Document::from_line(crate::ui::Line::text("stderr delivery note"));
-                ui.write_stderr(&document).unwrap();
-            } else {
-                render_generic_command_error(
-                    &anyhow::anyhow!("final command failure"),
-                    false,
-                    &mut ui,
-                )
-                .unwrap();
-            }
-            ui.flush().unwrap();
-
-            let cli = Cli::try_parse_from(["ctx", "docs", "list"]).unwrap();
-            let mut draft = command_local_usage_draft(&cli.command);
-            draft.set_measured_output_bytes(1);
-            let delivered = measurement.total_bytes();
-            let completed =
-                complete_local_usage(draft, success, Duration::from_millis(25), delivered).unwrap();
-
-            let expected = stdout_copy.bytes().len() + stderr_copy.bytes().len();
-            assert_eq!(usize::try_from(delivered).unwrap(), expected);
-            assert_eq!(
-                completed.delivered_output_bytes_for_test(),
-                u64::try_from(expected).unwrap()
-            );
-            assert_eq!(completed.duration_bucket_for_test(), "10_to_49_ms");
-        }
-    }
-
-    struct FlushWriter {
-        failure: Option<&'static str>,
-        flushes: Rc<Cell<usize>>,
-    }
-
-    impl Write for FlushWriter {
-        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            Ok(buffer.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            self.flushes.set(self.flushes.get() + 1);
-            match self.failure {
-                Some(message) => Err(io::Error::new(io::ErrorKind::BrokenPipe, message)),
-                None => Ok(()),
-            }
-        }
-    }
-
-    #[test]
-    fn local_usage_hook_runs_only_after_both_final_output_flushes_succeed() {
-        for (stdout_failure, stderr_failure, expected_delivery, expected_error) in [
-            (None, None, 1, None),
-            (Some("stdout"), None, 0, Some("flush CLI stdout: stdout")),
-            (None, Some("stderr"), 0, Some("flush CLI stderr: stderr")),
-            (
-                Some("stdout"),
-                Some("stderr"),
-                0,
-                Some("flush CLI stdout: stdout; flush CLI stderr: stderr"),
-            ),
-        ] {
-            let stdout_flushes = Rc::new(Cell::new(0));
-            let stderr_flushes = Rc::new(Cell::new(0));
-            let mut stdout = FlushWriter {
-                failure: stdout_failure,
-                flushes: stdout_flushes.clone(),
-            };
-            let mut stderr = FlushWriter {
-                failure: stderr_failure,
-                flushes: stderr_flushes.clone(),
-            };
-            let mut deliveries = 0;
-
-            let result = flush_cli_output_then(&mut stdout, &mut stderr, || {
-                deliveries += 1;
-                (stdout_flushes.get(), stderr_flushes.get())
-            });
-
-            assert_eq!(deliveries, expected_delivery);
-            assert_eq!(stdout_flushes.get(), 1);
-            assert_eq!(stderr_flushes.get(), 1);
-            match expected_error {
-                Some(expected) => {
-                    assert!(result.is_err());
-                    assert!(result.unwrap_err().to_string().contains(expected));
-                }
-                None => assert_eq!(result.unwrap(), (1, 1)),
-            }
-        }
-    }
-
-    #[test]
-    fn duration_is_closed_after_both_final_stream_flushes() {
-        struct TimedFlushWriter {
-            clock_ms: Rc<Cell<u64>>,
-            finish_at_ms: u64,
-        }
-
-        impl Write for TimedFlushWriter {
-            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-                Ok(buffer.len())
-            }
-
-            fn flush(&mut self) -> io::Result<()> {
-                self.clock_ms.set(self.finish_at_ms);
-                Ok(())
-            }
-        }
-
-        let clock_ms = Rc::new(Cell::new(0));
-        let mut stdout = TimedFlushWriter {
-            clock_ms: clock_ms.clone(),
-            finish_at_ms: 11,
-        };
-        let mut stderr = TimedFlushWriter {
-            clock_ms: clock_ms.clone(),
-            finish_at_ms: 57,
-        };
-        let duration = flush_cli_output_then(&mut stdout, &mut stderr, || {
-            Duration::from_millis(clock_ms.get())
-        })
-        .unwrap();
-
-        assert_eq!(duration, Duration::from_millis(57));
-        let cli = Cli::try_parse_from(["ctx", "doctor"]).unwrap();
-        let completed =
-            complete_local_usage(command_local_usage_draft(&cli.command), true, duration, 0)
-                .unwrap();
-        assert_eq!(completed.duration_bucket_for_test(), "50_to_249_ms");
     }
 }

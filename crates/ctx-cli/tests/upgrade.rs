@@ -6,6 +6,9 @@ use support::*;
 #[path = "support/upgrade/runtime_publication.rs"]
 mod runtime_publication;
 
+#[path = "upgrade/release_validation.rs"]
+mod release_validation;
+
 #[cfg(unix)]
 use std::{
     net::TcpListener,
@@ -413,6 +416,74 @@ fn sidecar_hash_failure_leaves_cli_and_runtime_unmodified() {
         !runtime.target.exists(),
         "failed sidecar verification must not publish a runtime"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_integrity_failure_has_safe_human_receipt_and_unchanged_machine_error() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let before = fs::read(&release.target).unwrap();
+    rewrite_fake_release_metadata(&release, |metadata| {
+        metadata.replace(
+            &format!(
+                "CTX_RELEASE_SHA256_{}={}\n",
+                test_platform_key(),
+                release.artifact_sha
+            ),
+            &format!(
+                "CTX_RELEASE_SHA256_{}={}\n",
+                test_platform_key(),
+                "f".repeat(64)
+            ),
+        )
+    });
+
+    let human_output = fake_release_env(ctx(&temp).args(["upgrade"]), &release)
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert_eq!(human_output.status.code(), Some(1));
+    let human_stderr = String::from_utf8(human_output.stderr).unwrap();
+    assert!(
+        human_stderr.contains("Upgrade integrity check failed"),
+        "{human_stderr}"
+    );
+    assert!(
+        human_stderr.contains("did not match signed release metadata"),
+        "{human_stderr}"
+    );
+    assert!(
+        human_stderr.contains("installed ctx version was not changed"),
+        "{human_stderr}"
+    );
+    assert!(human_stderr.contains("ctx upgrade"), "{human_stderr}");
+    assert!(!human_stderr.contains("file://"), "{human_stderr}");
+    assert!(!human_stderr.contains(&"f".repeat(64)), "{human_stderr}");
+    assert!(
+        !human_stderr.contains(&release.artifact_sha),
+        "{human_stderr}"
+    );
+    assert_eq!(fs::read(&release.target).unwrap(), before);
+
+    let machine_output = fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert_eq!(machine_output.status.code(), Some(1));
+    let machine_stderr = String::from_utf8(machine_output.stderr).unwrap();
+    assert!(
+        machine_stderr.contains("artifact checksum mismatch"),
+        "{machine_stderr}"
+    );
+    assert!(machine_stderr.contains("expected"), "{machine_stderr}");
+    assert!(
+        !machine_stderr.contains("Upgrade integrity check failed"),
+        "{machine_stderr}"
+    );
+    assert_eq!(fs::read(&release.target).unwrap(), before);
 }
 
 #[cfg(unix)]
@@ -992,20 +1063,83 @@ fn upgrade_status_reports_path_shadowing() {
     let mut command = ctx(&temp);
     command
         .args(["upgrade", "status", "--format=json"])
-        .env("PATH", path);
+        .env("PATH", &path);
     let status = json_output(fake_release_env(&mut command, &release));
 
+    assert_eq!(status["schema_version"], 1);
     assert_eq!(status["current_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         status["path"]["entries"][0]["path"],
         shadow_ctx.display().to_string()
     );
     assert!(status["path"]["entries"][0]["version"].is_null());
+    assert_eq!(status["path"]["resolver_status"], "shadowed");
+    assert_eq!(status["path"]["background_apply"]["allowed"], false);
+    assert_eq!(
+        status["path"]["background_apply"]["reason"],
+        "path_shadowed"
+    );
+    assert_eq!(status["warnings"], status["path"]["warnings"]);
+    assert_eq!(status["warnings"].as_array().unwrap().len(), 2);
     assert!(status["warnings"]
         .as_array()
         .unwrap()
         .iter()
         .any(|warning| { warning.as_str().unwrap().contains("PATH resolves ctx to") }));
+
+    let managed_ctx = status["path"]["current_exe"].as_str().unwrap();
+    let mut command = ctx(&temp);
+    command.args(["upgrade", "status"]).env("PATH", &path);
+    let human_output = fake_release_env(&mut command, &release)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(human_output.stdout).unwrap();
+    let stderr = String::from_utf8(human_output.stderr).unwrap();
+    assert!(
+        stdout.contains("A different ctx takes precedence on PATH"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&shadow_ctx.display().to_string()),
+        "{stdout}"
+    );
+    assert!(stdout.contains(managed_ctx), "{stdout}");
+    assert!(
+        stdout.contains("Automatic upgrades are blocked"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("shell will keep running the shadowing ctx"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("ctx upgrade enable"), "{stdout}");
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(!stdout.contains("PATH resolves ctx to"), "{stdout}");
+    assert!(
+        !stdout.contains("multiple ctx binaries are on PATH"),
+        "{stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_status_preserves_non_shadow_path_warning() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let empty_path = temp.path().join("empty-path");
+    fs::create_dir_all(&empty_path).unwrap();
+
+    let mut command = ctx(&temp);
+    command.args(["upgrade", "status"]).env("PATH", &empty_path);
+    let output = fake_release_env(&mut command, &release)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("not discoverable on PATH"), "{stderr}");
 }
 
 #[cfg(unix)]
@@ -1225,184 +1359,4 @@ fn ordinary_hosted_install_marker_keeps_production_upgrade_behavior() {
         probe.finish() > 0,
         "ordinary hosted install did not request stable metadata"
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn upgrade_verifies_signed_metadata_and_fails_closed() {
-    let tampered = tempdir();
-    let release = fake_release(&tampered, "9.9.9");
-    fs::write(
-        &release.metadata,
-        format!(
-            "{}# tampered after signing\n",
-            fs::read_to_string(&release.metadata).unwrap()
-        ),
-    )
-    .unwrap();
-    let stderr = failure_stderr(fake_release_env(
-        ctx(&tampered).args(["upgrade", "check"]),
-        &release,
-    ));
-    assert!(
-        stderr.contains("metadata signature verification failed"),
-        "{stderr}"
-    );
-
-    let wrong_key = tempdir();
-    let release = fake_release(&wrong_key, "9.9.9");
-    let stderr = failure_stderr(
-        ctx(&wrong_key)
-            .args(["upgrade", "check"])
-            .env("CTX_UPGRADE_TEST_TARGET", &release.target)
-            .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
-            .env(
-                "CTX_RELEASE_METADATA_SIGNATURE_URL",
-                file_url(&release.signature),
-            ),
-    );
-    assert!(
-        stderr.contains("metadata signature verification failed"),
-        "{stderr}"
-    );
-
-    let bad_signature = tempdir();
-    let release = fake_release(&bad_signature, "9.9.9");
-    fs::write(&release.signature, "not-base64").unwrap();
-    let stderr = failure_stderr(fake_release_env(
-        ctx(&bad_signature).args(["upgrade", "check"]),
-        &release,
-    ));
-    assert!(
-        stderr.contains("metadata signature is not base64"),
-        "{stderr}"
-    );
-
-    let missing_signature = tempdir();
-    let release = fake_release(&missing_signature, "9.9.9");
-    fs::remove_file(&release.signature).unwrap();
-    let stderr = failure_stderr(fake_release_env(
-        ctx(&missing_signature).args(["upgrade", "check"]),
-        &release,
-    ));
-    assert!(
-        stderr.contains("download release metadata signature"),
-        "{stderr}"
-    );
-
-    let default_signature_path = tempdir();
-    let release = fake_release(&default_signature_path, "9.9.9");
-    let check = json_output(
-        ctx(&default_signature_path)
-            .args(["upgrade", "check", "--format=json"])
-            .env("CTX_UPGRADE_TEST_TARGET", &release.target)
-            .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
-            .env(
-                "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
-                TEST_RELEASE_PUBLIC_KEY_PEM,
-            ),
-    );
-    assert_eq!(check["status"], "available");
-}
-
-#[cfg(unix)]
-#[test]
-fn upgrade_rejects_unsafe_metadata_and_bad_artifacts() {
-    let duplicate_key = tempdir();
-    let release = fake_release(&duplicate_key, "9.9.9");
-    rewrite_fake_release_metadata(&release, |metadata| {
-        format!("{metadata}CTX_RELEASE_VERSION=8.8.8\n")
-    });
-    let stderr = failure_stderr(fake_release_env(
-        ctx(&duplicate_key).args(["upgrade", "check"]),
-        &release,
-    ));
-    assert!(
-        stderr.contains("metadata contains duplicate key CTX_RELEASE_VERSION"),
-        "{stderr}"
-    );
-
-    let malformed_bool = tempdir();
-    let release = fake_release(&malformed_bool, "9.9.9");
-    rewrite_fake_release_metadata(&release, |metadata| {
-        metadata.replace(
-            "CTX_RELEASE_SELF_UPGRADE_ALLOWED=true\n",
-            "CTX_RELEASE_SELF_UPGRADE_ALLOWED=definitely\n",
-        )
-    });
-    let stderr = failure_stderr(fake_release_env(
-        ctx(&malformed_bool).args(["upgrade", "check"]),
-        &release,
-    ));
-    assert!(
-        stderr.contains("metadata CTX_RELEASE_SELF_UPGRADE_ALLOWED must be a boolean"),
-        "{stderr}"
-    );
-
-    let missing_policy = tempdir();
-    let release = fake_release(&missing_policy, "9.9.9");
-    rewrite_fake_release_metadata(&release, |metadata| {
-        metadata
-            .replace("CTX_RELEASE_SELF_UPGRADE_ALLOWED=true\n", "")
-            .replace("CTX_RELEASE_AUTO_UPGRADE_ALLOWED=true\n", "")
-    });
-    let stderr = failure_stderr(fake_release_env(
-        ctx(&missing_policy).args(["upgrade", "--dry-run"]),
-        &release,
-    ));
-    assert!(stderr.contains("does not allow self-upgrade"), "{stderr}");
-
-    let unsafe_artifact = tempdir();
-    let release = fake_release(&unsafe_artifact, "9.9.9");
-    rewrite_fake_release_metadata(&release, |metadata| {
-        metadata.replace(
-            &format!("CTX_RELEASE_ARTIFACT_{}=ctx\n", test_platform_key()),
-            &format!("CTX_RELEASE_ARTIFACT_{}=../ctx\n", test_platform_key()),
-        )
-    });
-    let stderr = failure_stderr(fake_release_env(
-        ctx(&unsafe_artifact).args(["upgrade", "check"]),
-        &release,
-    ));
-    assert!(stderr.contains("unsafe artifact name"), "{stderr}");
-
-    let unsafe_base = tempdir();
-    let release = fake_release(&unsafe_base, "9.9.9");
-    rewrite_fake_release_metadata(&release, |metadata| {
-        metadata.replace(
-            "CTX_RELEASE_BASE_URL=file://",
-            "CTX_RELEASE_BASE_URL=http://",
-        )
-    });
-    let stderr = failure_stderr(fake_release_env(
-        ctx(&unsafe_base).args(["upgrade", "check"]),
-        &release,
-    ));
-    assert!(
-        stderr.contains("metadata base URL must be HTTPS"),
-        "{stderr}"
-    );
-
-    let bad_checksum = tempdir();
-    let release = fake_release(&bad_checksum, "9.9.9");
-    let _runtime = add_fake_release_runtime(&bad_checksum, &release);
-    rewrite_fake_release_metadata(&release, |metadata| {
-        metadata.replace(
-            &format!(
-                "CTX_RELEASE_SHA256_{}={}\n",
-                test_platform_key(),
-                release.artifact_sha
-            ),
-            &format!(
-                "CTX_RELEASE_SHA256_{}={}\n",
-                test_platform_key(),
-                "f".repeat(64)
-            ),
-        )
-    });
-    let stderr = failure_stderr(fake_release_env(
-        ctx(&bad_checksum).args(["upgrade", "--format=json"]),
-        &release,
-    ));
-    assert!(stderr.contains("artifact checksum mismatch"), "{stderr}");
 }

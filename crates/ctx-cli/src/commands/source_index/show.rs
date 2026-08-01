@@ -32,7 +32,8 @@ use crate::{
 use super::{
     render::{enforce_json_output_limit, render_show_document, timestamp_json, write_show_value},
     shared::{
-        open_index, resolve_core_event, resolve_session, validate_ctx_id, validate_session_selector,
+        open_index, resolve_core_event, resolve_lookup_for_output, resolve_session,
+        validate_ctx_id, validate_session_selector,
     },
 };
 
@@ -100,7 +101,12 @@ pub(crate) fn run_show(
     let index = open_index(&data_root)?;
     match args.target {
         ShowTarget::Event(args) => {
-            let selected = resolve_core_event(&index, &args.id)?;
+            let selected = resolve_lookup_for_output(
+                resolve_core_event(&index, &args.id),
+                args.format == OutputFormat::Text,
+                r#"ctx search "<query>" --verbose"#,
+                ui,
+            )?;
             let events = event_window(
                 &index,
                 &selected,
@@ -134,11 +140,17 @@ pub(crate) fn run_show(
             Ok(())
         }
         ShowTarget::Session(args) => {
-            let session = resolve_show_session(
-                &index,
-                args.id.as_deref(),
-                args.provider_session.as_deref(),
-                args.provider.map(ProviderArg::capture_provider),
+            let human_output = args.format == OutputFormat::Text && args.out.is_none();
+            let session = resolve_lookup_for_output(
+                resolve_show_session(
+                    &index,
+                    args.id.as_deref(),
+                    args.provider_session.as_deref(),
+                    args.provider.map(ProviderArg::capture_provider),
+                ),
+                human_output,
+                r#"ctx search "<query>" --verbose"#,
+                ui,
             )?;
             let value = session_json(
                 &index,

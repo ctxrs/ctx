@@ -182,7 +182,7 @@ fn local_usage(context: &RenderContext, report: &UsageReport) -> Document {
         "error" => "Unavailable",
         state => state,
     };
-    let retention = format!("{} UTC days", report.retention_days);
+    let retention = format!("{} days", report.retention_days);
     let mut values = vec![
         Field::new("Status", state),
         Field::new("Retention", &retention),
@@ -520,6 +520,9 @@ mod tests {
         assert!(!rendered.contains('\u{1b}'));
         assert!(rendered.contains("Preserved locally; access is locked"));
         assert!(rendered.contains("Local usage"));
+        assert!(rendered.contains("Retention"));
+        assert!(rendered.contains("400 days"));
+        assert!(!rendered.contains("UTC days"));
         assert!(rendered.contains("local_usage_config_unavailable"));
         assert!(rendered.contains("Restore ctx Pro access; the local graph is preserved."));
         assert!(rendered.contains("ctx pro manage"));

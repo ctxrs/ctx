@@ -136,31 +136,104 @@ fn render_doctor_human(
         return document;
     }
 
-    let references = (1..=findings.len())
+    let human_findings = findings
+        .iter()
+        .map(|finding| humanize_doctor_finding(finding))
+        .collect::<Vec<_>>();
+    let references = (1..=human_findings.len())
         .map(|index| index.to_string())
         .collect::<Vec<_>>();
     let evidence = references
         .iter()
-        .zip(findings)
+        .zip(&human_findings)
         .map(|(reference, finding)| Evidence {
             reference,
-            summary: finding,
-            detail: None,
+            summary: &finding.summary,
+            detail: finding.detail.as_deref(),
         })
         .collect::<Vec<_>>();
     document.push_blank();
     document.append(section("Issues", evidence_list(context, &evidence)));
     document.push_blank();
+    let refresh_failed = findings.iter().any(|finding| {
+        finding.contains("(source_refresh_failed)")
+            || finding.starts_with("resolver is unavailable ")
+    });
     document.append(hint(
         context,
         Hint {
-            text: "Resolve the issues above, then check again.",
+            text: if refresh_failed {
+                "Check the history refresh service."
+            } else {
+                "Resolve the issues above, then check again."
+            },
         },
         Some(Action {
-            command: "ctx doctor",
+            command: if refresh_failed {
+                "ctx daemon status"
+            } else {
+                "ctx doctor"
+            },
         }),
     ));
     document
+}
+
+struct HumanDoctorFinding {
+    summary: String,
+    detail: Option<String>,
+}
+
+fn humanize_doctor_finding(finding: &str) -> HumanDoctorFinding {
+    let Some((component, state_and_reason)) = finding.split_once(" is ") else {
+        return HumanDoctorFinding {
+            summary: finding.to_owned(),
+            detail: None,
+        };
+    };
+    let Some((state, reason)) = state_and_reason
+        .strip_suffix(')')
+        .and_then(|value| value.rsplit_once(" ("))
+    else {
+        return HumanDoctorFinding {
+            summary: finding.to_owned(),
+            detail: None,
+        };
+    };
+    let label = match component {
+        "history_epoch" => "History",
+        "lexical" => "Search index",
+        "catalog" => "History source catalog",
+        "resolver" => "History refresh service",
+        "relational" => "Session view",
+        "semantic" => "Semantic search",
+        "pro_projection" => "ctx Pro index",
+        _ => {
+            return HumanDoctorFinding {
+                summary: finding.to_owned(),
+                detail: None,
+            }
+        }
+    };
+    let summary = match state {
+        "pending" => format!("{label} is still preparing"),
+        "unavailable" => format!("{label} is unavailable"),
+        other => format!("{label} is {}", other.replace('_', " ")),
+    };
+    let detail = match reason {
+        "catalog_publication_pending" => "Required local data is still being prepared.",
+        "daemon_unavailable" | "resolver_unavailable" => {
+            "The background history refresh service is not available."
+        }
+        "source_refresh_failed" | "lexical_generation_unavailable" => {
+            "Required local data is not available."
+        }
+        _ => "The component is not ready.",
+    };
+    HumanDoctorFinding {
+        summary,
+        detail: Some(detail.to_owned()),
+    }
 }
 
 #[cfg(test)]
@@ -201,6 +274,54 @@ mod ui_tests {
             assert!(rendered.starts_with("! ctx found 1 issue\n"));
             assert!(rendered.contains("Issues\n[1]"));
             assert!(rendered.contains("ctx doctor\n"));
+            assert_fits(&document, &context);
+        }
+    }
+
+    #[test]
+    fn failed_source_findings_are_human_and_recover_through_daemon_status() {
+        let findings = [
+            "history_epoch is unavailable (source_refresh_failed)",
+            "lexical is unavailable (source_refresh_failed)",
+            "catalog is pending (catalog_publication_pending)",
+            "resolver is unavailable (daemon_unavailable)",
+            "relational is unavailable (lexical_generation_unavailable)",
+        ]
+        .map(str::to_owned);
+
+        for width in [32, 48, 80, 120] {
+            let context = context(width);
+            let document = render_doctor_human(&context, "apply", &findings);
+            let rendered = document.render_plain();
+            let flattened = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(rendered.starts_with("! ctx found 5 issues\n"));
+            for expected in [
+                "History is unavailable",
+                "Search index is unavailable",
+                "History source catalog is still preparing",
+                "History refresh service is unavailable",
+                "Session view is unavailable",
+                "Check the history refresh service.",
+                "ctx daemon status",
+            ] {
+                assert!(
+                    flattened.contains(expected),
+                    "missing {expected:?}: {rendered}"
+                );
+            }
+            for internal in [
+                "history_epoch",
+                "source_refresh_failed",
+                "catalog_publication_pending",
+                "daemon_unavailable",
+                "lexical_generation_unavailable",
+            ] {
+                assert!(
+                    !rendered.contains(internal),
+                    "leaked {internal:?}: {rendered}"
+                );
+            }
+            assert!(!rendered.contains("ctx doctor\n"), "{rendered}");
             assert_fits(&document, &context);
         }
     }

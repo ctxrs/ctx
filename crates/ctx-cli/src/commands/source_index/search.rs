@@ -22,14 +22,23 @@ use crate::{
     output::{print_json, JsonOutputFormat},
     semantic::{
         coordinate_source_backed_refresh, semantic_query_service_supported,
-        PinnedSourceBackedGeneration, SourceBackedRefreshMode, SourceBackedRefreshObservation,
-        SourceBackedSemanticNotReady,
+        PinnedSourceBackedGeneration, SourceBackedRefreshDaemonUnavailable,
+        SourceBackedRefreshMode, SourceBackedRefreshObservation, SourceBackedSemanticNotReady,
     },
-    ui::{canonical_human_output_bytes, Ui},
+    ui::{
+        canonical_human_output_bytes, diagnostic, Action, Diagnostic, DiagnosticLevel, Document,
+        RenderContext, Ui,
+    },
     RefreshArg, SearchArgs, SearchBackendArg,
 };
 
-use super::render::{pretty_json_stdout_bytes, render_search_document, search_json};
+use super::{
+    render::{
+        pretty_json_stdout_bytes, render_search_document, render_search_not_ready_document,
+        search_json,
+    },
+    shared::index_root,
+};
 
 pub(crate) use query::SourceSearchRequest;
 pub(super) use query::{index_search_filters, NormalizedSearchQuery};
@@ -40,6 +49,10 @@ const MIN_CANDIDATE_BATCH: usize = 256;
 const CANDIDATE_OVERSAMPLE: usize = 8;
 const SOURCE_FUSION_CANDIDATES: usize = 1_600;
 const MAX_USAGE_CONTEXT_EVENTS_PER_SESSION: usize = 256;
+pub(super) const MISSING_INDEX_ERROR: &str =
+    "the source-backed index does not exist; retry with daemon refresh enabled";
+const QUEUED_WITHOUT_GENERATION_ERROR: &str =
+    "daemon source refresh was queued but no published generation exists; retry with --refresh wait";
 
 #[derive(Debug)]
 pub(super) struct SearchCollection {
@@ -87,6 +100,18 @@ pub(crate) fn run_search(
     local_usage: &mut CliUsage,
     ui: &mut Ui,
 ) -> Result<()> {
+    let human_output = args.format != JsonOutputFormat::Json;
+    let result = run_search_inner(args, data_root.clone(), telemetry, local_usage, ui);
+    render_search_error(result, human_output, &data_root, ui)
+}
+
+fn run_search_inner(
+    args: SearchArgs,
+    data_root: PathBuf,
+    telemetry: &mut SearchTelemetry,
+    local_usage: &mut CliUsage,
+    ui: &mut Ui,
+) -> Result<()> {
     let config = config::AppConfig::load(&data_root)?;
     let mut request = SourceSearchRequest::from(&args);
     normalize_search_request(&mut request)?;
@@ -116,10 +141,8 @@ pub(crate) fn run_search(
         search_pinned_generation(&request, &data_root, semantic_weight, refresh)?;
     if !json_output {
         if let Some(fallback) = collection.semantic_fallback.as_ref() {
-            eprintln!(
-                "warning: semantic retrieval is unavailable ({}); falling back to lexical search",
-                fallback.code
-            );
+            let warning = render_semantic_fallback_warning(ui.stderr_context(), fallback);
+            ui.write_stderr(&warning)?;
         }
     }
     let query_duration = query_started.elapsed();
@@ -170,6 +193,63 @@ pub(crate) fn run_search(
     local_usage.set_search_context_observation(search_context);
     local_usage.set_measured_output_bytes(output_bytes);
     Ok(())
+}
+
+pub(super) fn render_search_error<T>(
+    result: Result<T>,
+    human_output: bool,
+    data_root: &Path,
+    ui: &mut Ui,
+) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if human_output && search_index_is_not_ready(data_root, &error) => {
+            let document = render_search_not_ready_document(ui.stderr_context());
+            ui.write_stderr(&document)?;
+            Err(crate::dispatch::rendered_cli_error())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn search_index_is_not_ready(data_root: &Path, error: &anyhow::Error) -> bool {
+    let missing_generation = error.chain().any(|cause| {
+        matches!(
+            cause.to_string().as_str(),
+            MISSING_INDEX_ERROR | QUEUED_WITHOUT_GENERATION_ERROR
+        )
+    });
+    missing_generation
+        || (!index_root(data_root).join("meta.json").is_file()
+            && error
+                .downcast_ref::<SourceBackedRefreshDaemonUnavailable>()
+                .is_some())
+}
+
+pub(super) fn render_semantic_fallback_warning(
+    context: &RenderContext,
+    fallback: &SemanticFallbackDiagnostics,
+) -> Document {
+    let (detail, action) = match fallback.code {
+        "semantic_disabled" => (
+            "Keyword search was used because semantic search is disabled.",
+            "ctx setup --semantic",
+        ),
+        _ => (
+            "Keyword search was used because semantic retrieval did not complete.",
+            "ctx doctor",
+        ),
+    };
+    diagnostic(
+        context,
+        Diagnostic {
+            level: DiagnosticLevel::Warning,
+            summary: "Semantic search is unavailable",
+            detail: Some(detail),
+            fields: &[],
+            action: Some(Action { command: action }),
+        },
+    )
 }
 
 pub(crate) fn mcp_search(

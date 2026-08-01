@@ -1,6 +1,15 @@
 #![cfg(unix)]
 
-use std::{fs, os::unix::fs::PermissionsExt};
+use std::{
+    fs,
+    io::{self, Read as _},
+    os::{
+        fd::{FromRawFd as _, OwnedFd},
+        raw::{c_char, c_int, c_void},
+        unix::fs::PermissionsExt,
+    },
+    process::{ExitStatus, Stdio},
+};
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -8,6 +17,131 @@ use tempfile::tempdir;
 
 mod support;
 use support::{initialize_current_query_store, write_blame_helper};
+
+#[repr(C)]
+struct TestWinsize {
+    row: u16,
+    column: u16,
+    xpixel: u16,
+    ypixel: u16,
+}
+
+#[link(name = "util")]
+unsafe extern "C" {
+    fn openpty(
+        master: *mut c_int,
+        slave: *mut c_int,
+        name: *mut c_char,
+        termios: *const c_void,
+        winsize: *const TestWinsize,
+    ) -> c_int;
+}
+
+fn index_dashboard_fixture_args(case: &str, columns: u16) -> Vec<String> {
+    vec![
+        "_index-dashboard-renderer-fixture".to_owned(),
+        "--case".to_owned(),
+        case.to_owned(),
+        "--columns".to_owned(),
+        columns.to_string(),
+        "--rows".to_owned(),
+        "24".to_owned(),
+        "--clock".to_owned(),
+        "2026-06-23T12:00:00Z".to_owned(),
+        "--random-seed".to_owned(),
+        "ctx-cli-ux-core-v1".to_owned(),
+        "--color=always".to_owned(),
+    ]
+}
+
+fn run_with_stdout_pty(args: &[String], columns: u16) -> (ExitStatus, Vec<u8>, Vec<u8>) {
+    let mut master = -1;
+    let mut slave = -1;
+    let size = TestWinsize {
+        row: 24,
+        column: columns,
+        xpixel: 0,
+        ypixel: 0,
+    };
+    // SAFETY: openpty initializes both descriptors on success. Each descriptor
+    // is immediately transferred to one owning File/OwnedFd.
+    let result = unsafe {
+        openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &size,
+        )
+    };
+    assert_eq!(result, 0, "openpty failed: {}", io::Error::last_os_error());
+
+    // SAFETY: successful openpty returned distinct, live descriptors.
+    let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+    let prepared = Command::cargo_bin("ctx").unwrap();
+    let mut command = std::process::Command::new(prepared.get_program());
+    for (name, value) in prepared.get_envs() {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    let mut child = command
+        .args(args)
+        .env("TERM", "xterm-256color")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(slave))
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(command);
+    let mut stderr = child.stderr.take().unwrap();
+    let status = child.wait().unwrap();
+    let mut stderr_bytes = Vec::new();
+    stderr.read_to_end(&mut stderr_bytes).unwrap();
+
+    // SAFETY: successful openpty returned a live master descriptor not owned
+    // by any other value.
+    let mut master = unsafe { fs::File::from_raw_fd(master) };
+    let mut stdout_bytes = Vec::new();
+    match master.read_to_end(&mut stdout_bytes) {
+        Ok(_) => {}
+        Err(error) if error.raw_os_error() == Some(5) => {}
+        Err(error) => panic!("read stdout PTY: {error}"),
+    }
+    (status, stdout_bytes, stderr_bytes)
+}
+
+#[test]
+fn stamped_test_host_runs_the_index_dashboard_fixture_through_a_real_pty() {
+    let args = index_dashboard_fixture_args("semantic-failure", 32);
+    let (status, stdout, stderr) = run_with_stdout_pty(&args, 32);
+    assert_eq!(status.code(), Some(1));
+    assert!(stderr.is_empty(), "{:?}", String::from_utf8_lossy(&stderr));
+
+    let stdout = String::from_utf8(stdout).unwrap();
+    assert!(stdout.contains("\u{1b}["), "{stdout:?}");
+    assert!(stdout.contains("\r\u{1b}[2K"), "{stdout:?}");
+    assert!(stdout.contains("Semantic search needs"), "{stdout:?}");
+    assert!(stdout.contains("ctx doctor"), "{stdout:?}");
+}
+
+#[test]
+fn stamped_test_host_fixture_is_unavailable_without_a_terminal() {
+    Command::cargo_bin("ctx")
+        .unwrap()
+        .args(index_dashboard_fixture_args("ready", 80))
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "index dashboard fixture requires stdout to be a terminal",
+        ));
+}
 
 #[test]
 fn ctx_status_reports_when_pro_helper_is_missing() {

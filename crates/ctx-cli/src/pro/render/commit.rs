@@ -5,7 +5,7 @@ use ctx_pro_host_protocol::{
 use crate::ui::{Document, RenderContext, Token};
 
 use super::layout::{
-    confidence_token, enum_text, push_authored, push_enum_field, push_field, push_heading,
+    confidence_token, enum_heading, push_authored, push_enum_field, push_field, push_heading,
     push_notice, push_references, push_resource_primary, push_role_resource, same_resource,
     state_token, timestamp_text, METADATA_LABEL_WIDTH,
 };
@@ -92,7 +92,7 @@ fn render_match(
 ) {
     let metadata_indent;
     if show_predicate {
-        push_heading(document, 2, &enum_text(value.predicate));
+        push_heading(document, 2, &enum_heading(value.predicate));
         push_role_resource(document, context, 4, "subject", &value.subject);
         render_object(document, context, value);
         metadata_indent = 4;

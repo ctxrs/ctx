@@ -26,7 +26,7 @@ mod human;
 mod search;
 mod show;
 
-pub(super) use search::render_search_document;
+pub(super) use search::{render_search_document, render_search_not_ready_document};
 pub(super) use show::render_show_document;
 
 const SEARCH_SNIPPET_MAX_CHARS: usize = 2_048;

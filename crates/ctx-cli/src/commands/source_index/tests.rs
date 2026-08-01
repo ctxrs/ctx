@@ -1,6 +1,12 @@
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, collections::HashMap, fs};
+    mod semantic_fallback;
+
+    use std::{
+        cell::{Cell, RefCell},
+        collections::HashMap,
+        fs,
+    };
 
     use ctx_history_capture::ingest_codex_source_backed_v0;
     use ctx_history_core::{
@@ -34,6 +40,8 @@ mod tests {
             EncodedCorePresentationLimitError, SessionJsonOptions,
         },
     };
+
+    mod recovery;
 
     const TEST_SESSION_ID: &str = "019fa000-0000-7000-8000-0000000000d1";
     const TEST_QUERY: &str = "pinnedgenerationrouting";

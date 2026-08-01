@@ -312,4 +312,35 @@ mod tests {
         );
         assert!(!rendered.contains('\u{1b}'));
     }
+
+    #[test]
+    fn plain_and_json_progress_keep_explicit_stream_contracts() {
+        let line = ProgressLine {
+            phase: "indexing",
+            message: "Indexed 2 sources".to_owned(),
+            completed_bytes: 2,
+            total_bytes: 4,
+            completed_files: Some(2),
+            total_files: Some(4),
+            imported_events: None,
+            done: false,
+        };
+
+        let plain = match ProgressRenderMode::Plain {
+            ProgressRenderMode::Plain => line.message.as_str(),
+            _ => unreachable!(),
+        };
+        let json = match ProgressRenderMode::Json {
+            ProgressRenderMode::Json => progress_json("import", &line, StdDuration::from_secs(1)),
+            _ => unreachable!(),
+        };
+
+        assert_eq!(plain, "Indexed 2 sources");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()["type"],
+            "ctx_progress"
+        );
+        assert!(!plain.contains('\u{1b}'));
+        assert!(!json.contains('\u{1b}'));
+    }
 }

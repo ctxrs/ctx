@@ -14,7 +14,7 @@ Possible producers
     evidence      [2]
 
 Also recorded
-  referenced_by
+  Referenced by
     subject       commit abcdef
     object        session observer
     confidence    explicit
