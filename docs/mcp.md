@@ -25,16 +25,16 @@ fixed documented count. Core tools include:
 - `sources`, discovered local agent history sources;
 - `search`, search the existing index;
 - `sql`, run one read-only SQL statement against the existing index;
-- `show_session`, return an indexed session transcript by ctx session ID;
-- `show_event`, return an indexed event and optional surrounding window by ctx
+- `show_session`, return a Core-backed session transcript by ctx session ID;
+- `show_event`, return a Core-backed event and optional surrounding window by ctx
   event ID.
 
-`show_session` and `show_event` accept `content: "indexed" | "complete"` and
-default to `indexed`. Both policies read normalized content from the active
-verified Core generation; `indexed` controls item selection. Both apply the MCP
-aggregate response limit. MCP hosts may log or forward the returned transcript.
-Typed failures are returned in `structuredContent` with the same stable error
-codes as the CLI JSON contract.
+`show_session` accepts an optional transcript mode; `show_event` accepts bounded
+before, after, or symmetric window sizes. Both read policy-selected normalized
+content from the active verified Core generation and apply the MCP aggregate
+response limit. MCP hosts may log or forward the returned transcript. Typed
+failures are returned in `structuredContent` with the same stable error codes as
+the CLI JSON contract.
 
 The `status` tool returns the CLI JSON status read model unchanged in
 `structuredContent`: the source-backed history report plus `upgrade`, `pro`,

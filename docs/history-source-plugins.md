@@ -105,8 +105,8 @@ An accepted import has one authority path:
 Cold imports, appends, rewrites, replacements, and no-ops all use the shared
 custom JSONL source-family path. There is no fallback to the old Store database,
 synthetic `NativePath` body, command-output snapshot, or local content pack.
-`ctx show ... --content complete` reads normalized imported event content from
-Core and does not depend on the provider-owned file remaining available.
+`ctx show` reads normalized imported event content from the active Core
+generation and does not depend on the provider-owned file remaining available.
 
 After import, `--history-source` uses the canonical
 `provider_key/source_id` route identity:

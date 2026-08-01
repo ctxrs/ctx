@@ -141,8 +141,8 @@ for signed self-upgrades, and shadowed by another `ctx` binary on `PATH`.
   `failed` count.
 - Search returns no results: confirm `ctx status` shows indexed items, then
   widen the query or remove filters.
-- Citation source missing: ctx can still return indexed text, but the raw
-  provider file is unavailable at the stored path.
+- A saved citation no longer resolves: rerun the search against the active Core
+  generation and use the current ctx-owned IDs.
 - Upgrade says unmanaged install: reinstall with the official installer if you
   want signed self-upgrades, or keep managing the binary with your package
   manager/source checkout.

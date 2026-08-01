@@ -108,7 +108,7 @@ ctx import --history-source-manifest ./ctx-history-plugin.json
 
 Selection must resolve to one source. Search filters use the canonical
 `provider_key/source_id` identity from the provider file. Once imported,
-`ctx show ... --content complete` reads normalized content from Core.
+`ctx show` reads the normalized imported content from the active Core generation.
 
 ## Failure And Trust Model
 

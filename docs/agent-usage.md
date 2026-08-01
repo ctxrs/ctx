@@ -86,7 +86,7 @@ guarantee that every provider has native cursor resume.
 
 ## JSON For Harnesses
 
-Agents should prefer default text for reading search, show, and locate output.
+Agents should prefer default text for reading search and show output.
 JSON is for scripts, harnesses, `jq`, or exact field extraction; it is usually
 much larger and consumes more context.
 
@@ -98,6 +98,10 @@ ctx search "release blocker" --format json | jq '.results[0].ctx_event_id'
 ctx show event <ctx-event-id> --window 5 --format json
 ctx show session <ctx-session-id> --format json
 ```
+
+Show's positional IDs are ctx-owned. `provider_session_id` is provider-owned
+metadata; for Codex it is the resume UUID. To open a Codex session by that UUID,
+use `ctx show session --provider codex --provider-session <uuid>`.
 
 Use cited search snippets and `show` output as retrieved material when the next
 step is to brief another agent.

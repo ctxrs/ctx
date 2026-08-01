@@ -189,8 +189,8 @@ research agent.
 
 `ctx pro manage` handles cancellation, payment recovery, and resubscription.
 Pro is $20 USD per month.
-Core OSS setup, search, indexed show/locate, and SQL remain available in every
-state. Pro uninstall and explicit Pro data deletion also remain available.
+Core OSS setup, search, show, and SQL remain available in every state. Pro
+uninstall and explicit Pro data deletion also remain available.
 Explicit status, MCP `pro_status`, and Pro management may show the
 `$20/month` continuation action for trial access or a neutral
 unpriced `pro_restore_access` action for locked access that confirms the local

@@ -60,7 +60,7 @@ Native imports should store:
   touched paths;
 - compact typed outcome/evidence for tool/command results, without result body
   text or body previews;
-- citations back to the provider-owned source when available.
+- stable ctx citations plus provider and session identity when available.
 
 Native imports should not store or index by default:
 
@@ -105,7 +105,7 @@ content.
 
 Tool output is metadata-only when the shared content policy excludes it.
 Parsers retain compact typed outcome/evidence, including exact linked commit
-or pull-request identities when available. Query-time surfaces read committed
+or forge-review identities when available. Query-time surfaces read committed
 Core records and never reconstruct excluded result bodies from provider files.
 
 ## Native Retention Metadata
@@ -270,8 +270,8 @@ oversized blobs, decoded-message extraction, metadata-only rows, tool-only
 payloads, and sensitive-token non-copying.
 
 File event-log adapters should test event ordering, truncated/corrupt files,
-metadata-only runs, raw diff/output non-indexing, and citations back to source
-files.
+metadata-only runs, raw diff/output non-indexing, and stable ctx citations with
+provider/session identity.
 
 Custom history importers and history-source plugins use the public
 `ctx-history-jsonl-v1` contract instead of a native provider storage family, but

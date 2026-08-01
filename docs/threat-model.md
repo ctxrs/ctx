@@ -23,10 +23,8 @@ entitlement authorization may advance nonsecret anti-clock-rollback security
 metadata. `ctx show session --out` writes only the explicit output path
 requested by the user.
 
-Both the default `--content indexed` and explicit `--content complete` show
-policies read policy-selected normalized content from the active Core
-generation. `indexed` controls selection/versioning. Neither policy scans for
-replacement transcripts or uses a network fallback.
+Show reads policy-selected normalized content from the active Core generation.
+It does not scan for replacement transcripts or use a network fallback.
 
 Source repositories and provider homes remain outside ctx ownership. Provider
 files are read as import sources, not modified.
