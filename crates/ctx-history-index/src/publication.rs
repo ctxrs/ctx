@@ -14,7 +14,7 @@ pub(crate) use manifest::{
     reclaim_unreferenced_manifests, reconcile_commit_error, searcher_generation, sync_directory,
     write_manifest,
 };
-pub(crate) use verification::{verify_searcher, verify_searcher_structure};
+pub(crate) use verification::{verify_event_id_terms, verify_searcher, verify_searcher_structure};
 
 #[cfg(test)]
 pub(crate) use verification::{

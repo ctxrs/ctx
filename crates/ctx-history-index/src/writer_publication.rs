@@ -202,8 +202,12 @@ impl GenerationWriter {
         if let Some(hook) = self.after_candidate_commit.take() {
             hook(&candidate_path);
         }
-        self.verify_candidate(&manifest, &generation_id)?;
         sync_generation(&candidate_path)?;
+        #[cfg(test)]
+        if let Some(hook) = self.before_pointer_switch.take() {
+            hook(&candidate_path);
+        }
+        self.verify_candidate(&candidate_path, &manifest, &generation_id)?;
         writer_support::write_generation_integrity_receipt(&root, &generation_id, &candidate_path)?;
 
         let directory_name =
@@ -219,10 +223,6 @@ impl GenerationWriter {
                 .as_ref()
                 .map(|pointer| pointer.active().clone()),
         )?;
-        #[cfg(test)]
-        if let Some(hook) = self.before_pointer_switch.take() {
-            hook(&candidate_path);
-        }
         if let Err(error) = publish_active_generation_pointer(&root, &next_pointer) {
             return Err(self.classify_pointer_failure(&generation_id, &next_pointer, error));
         }
@@ -258,8 +258,22 @@ impl GenerationWriter {
         CommitReceipt::from_manifest(opstamp, manifest)
     }
 
-    fn verify_candidate(&self, manifest: &GenerationManifest, generation_id: &str) -> Result<()> {
-        let metas = self.index.load_metas()?;
+    fn verify_candidate(
+        &self,
+        candidate_path: &Path,
+        manifest: &GenerationManifest,
+        generation_id: &str,
+    ) -> Result<()> {
+        let directory =
+            DurableMmapDirectory::open(candidate_path).map_err(tantivy::TantivyError::from)?;
+        let index = Index::open(directory)?;
+        validate_schema(&index.schema())?;
+        if index.settings() != &tantivy::IndexSettings::default() {
+            return Err(IndexError::WriterInvariant(
+                "candidate index settings do not match ctx defaults",
+            ));
+        }
+        let metas = index.load_metas()?;
         if payload_generation_id(&metas)?.as_deref() != Some(generation_id) {
             return Err(IndexError::ConcurrentGenerationChange);
         }
@@ -267,8 +281,7 @@ impl GenerationWriter {
         if loaded_manifest.generation_id()? != generation_id {
             return Err(IndexError::ConcurrentGenerationChange);
         }
-        let reader = self
-            .index
+        let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
             .try_into()?;
@@ -276,10 +289,8 @@ impl GenerationWriter {
         if searcher_generation(&searcher) != meta_generation(&metas) {
             return Err(IndexError::ConcurrentGenerationChange);
         }
-        if !self.index.validate_checksum()?.is_empty() {
-            return Err(IndexError::ChecksumMismatch);
-        }
-        verify_searcher(&searcher, manifest)
+        verify_searcher_structure(&searcher, manifest)?;
+        publication::verify_event_id_terms(&searcher, manifest)
     }
 
     fn validate_base_integrity_for_reuse(&self) -> Result<()> {
