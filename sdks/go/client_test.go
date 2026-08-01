@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -123,6 +124,9 @@ func TestSearchCamelizesRetrievalJSON(t *testing.T) {
 		},
 		"results": [{
 			"result_scope": "event",
+			"provider": "codex",
+			"provider_session_id": "codex-resume-uuid",
+			"source_format": "codex_session_jsonl",
 			"rank": 1,
 			"retrieval_score": 0.98
 		}]
@@ -150,6 +154,9 @@ func TestSearchCamelizesRetrievalJSON(t *testing.T) {
 	if hit.Rank != 1 || hit.RetrievalScore == nil || *hit.RetrievalScore != 0.98 {
 		t.Fatalf("search hit rank fields were not decoded: %#v", hit)
 	}
+	if hit.Provider != "codex" || hit.ProviderSessionID != "codex-resume-uuid" || hit.SourceFormat != "codex_session_jsonl" {
+		t.Fatalf("search hit Core identity fields were not decoded: %#v", hit)
+	}
 	diagnostics, ok := retrieval["diagnostics"].(map[string]any)
 	if !ok || diagnostics["queryEmbedMs"] != float64(2) {
 		t.Fatalf("retrieval diagnostics were not camelized: %#v", retrieval)
@@ -174,6 +181,51 @@ func TestSearchRequiresQueryTermOrFileBeforeTransport(t *testing.T) {
 	}
 	if transport.op.Args != nil {
 		t.Fatalf("Search invoked transport despite invalid input: %#v", transport.op.Args)
+	}
+}
+
+func TestSourcesAndImportPreserveLegitimateNestedSourceSemantics(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		operation string
+		raw       string
+		path      []string
+	}{
+		{
+			name:      "sources acquisition",
+			operation: "sources",
+			raw:       `{"sources":[{"provider":"codex","path":"/configured/root","status":"available","importable":true,"acquisition":{"source":"local_scan","cursor":"opaque-checkpoint"}}]}`,
+			path:      []string{"sources", "0", "acquisition"},
+		},
+		{
+			name:      "import source",
+			operation: "import",
+			raw:       `{"resume":false,"totals":{},"sources":[{"source":{"source":"provider","cursor":"provider-checkpoint"}}]}`,
+			path:      []string{"import", "sources", "0", "source"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload, err := normalizePayload(Operation{Name: test.operation}, []byte(test.raw))
+			if err != nil {
+				t.Fatalf("normalize payload: %v", err)
+			}
+			var envelope map[string]any
+			if err := json.Unmarshal(payload, &envelope); err != nil {
+				t.Fatalf("decode normalized payload: %v", err)
+			}
+			var current any = envelope
+			for _, part := range test.path {
+				if index, err := strconv.Atoi(part); err == nil {
+					current = current.([]any)[index]
+				} else {
+					current = current.(map[string]any)[part]
+				}
+			}
+			semantic := current.(map[string]any)
+			if semantic["source"] == nil || semantic["cursor"] == nil {
+				t.Fatalf("legitimate source semantics were erased: %#v", semantic)
+			}
+		})
 	}
 }
 
@@ -336,6 +388,9 @@ func TestCanonicalFixturesExposeTypedFields(t *testing.T) {
 	if search.Search.Results[0].ResultType != "event" || search.Search.Results[0].Citations[0].TargetType != "event" {
 		t.Fatalf("unexpected typed result/citation type: %+v", search.Search.Results[0])
 	}
+	if search.Search.Results[0].ProviderSessionID != "codex-fixture-session" || search.Search.Results[0].SourceFormat != "codex_session_jsonl" {
+		t.Fatalf("unexpected typed search identity: %+v", search.Search.Results[0])
+	}
 	if search.Search.Pagination == nil || search.Search.Pagination.Limit != 20 || search.Search.Pagination.HasMore {
 		t.Fatalf("unexpected pagination: %+v", search.Search.Pagination)
 	}
@@ -350,8 +405,21 @@ func TestCanonicalFixturesExposeTypedFields(t *testing.T) {
 	}
 
 	session := readFixture[ShowSessionResponse](t, "show-session.transcript.json")
-	if session.Session.Session == nil || session.Session.Session.ProviderSessionID != "codex-fixture-session" {
+	if session.Session.Session == nil ||
+		session.Session.Session.ProviderSessionID != "codex-fixture-session" ||
+		session.Session.Session.SourceFormat != "codex_session_jsonl" {
 		t.Fatalf("unexpected typed session: %+v", session.Session.Session)
+	}
+
+	event := readFixture[ShowEventResponse](t, "show-event.window.json")
+	if event.Event.Event == nil ||
+		event.Event.Event.Provider != "codex" ||
+		event.Event.Event.ProviderSessionID != "codex-fixture-session" ||
+		event.Event.Event.SourceFormat != "codex_session_jsonl" ||
+		event.Event.Event.Content == nil ||
+		!event.Event.Event.Content.Complete ||
+		event.Event.Event.Content.PolicyStatus != CoreContentPolicyStatusSelected {
+		t.Fatalf("unexpected typed event: %+v", event.Event.Event)
 	}
 
 	errorEnvelope := readFixture[ErrorResponse](t, "error.not-supported.json")

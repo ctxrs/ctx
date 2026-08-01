@@ -389,6 +389,7 @@ public sealed record SearchHit
         ResultType = JsonHelpers.GetString(json, "resultType");
         ResultScope = JsonHelpers.GetString(json, "resultScope");
         Provider = JsonHelpers.GetString(json, "provider");
+        SourceFormat = JsonHelpers.GetString(json, "sourceFormat");
         Timestamp = JsonHelpers.GetString(json, "timestamp");
         Cwd = JsonHelpers.GetString(json, "cwd");
         WhyMatched = JsonHelpers.GetStringArray(json, "whyMatched");
@@ -408,6 +409,7 @@ public sealed record SearchHit
     public string? ResultType { get; }
     public string? ResultScope { get; }
     public string? Provider { get; }
+    public string? SourceFormat { get; }
     public string? Timestamp { get; }
     public string? Cwd { get; }
     public IReadOnlyList<string> WhyMatched { get; }
@@ -505,6 +507,7 @@ public sealed record SessionRecord
         CtxSessionId = JsonHelpers.GetString(json, "ctxSessionId");
         Provider = JsonHelpers.GetString(json, "provider");
         ProviderSessionId = JsonHelpers.GetString(json, "providerSessionId");
+        SourceFormat = JsonHelpers.GetString(json, "sourceFormat");
         Title = JsonHelpers.GetString(json, "title");
         StartedAt = JsonHelpers.GetString(json, "startedAt");
         UpdatedAt = JsonHelpers.GetString(json, "updatedAt");
@@ -515,6 +518,7 @@ public sealed record SessionRecord
     public string? CtxSessionId { get; }
     public string? Provider { get; }
     public string? ProviderSessionId { get; }
+    public string? SourceFormat { get; }
     public string? Title { get; }
     public string? StartedAt { get; }
     public string? UpdatedAt { get; }
@@ -524,6 +528,41 @@ public sealed record SessionRecord
     public JsonObject ToJsonObject() => JsonHelpers.CloneObject(_json);
 
     internal static SessionRecord? FromJson(JsonObject? json) => json is null ? null : new SessionRecord(json);
+}
+
+public enum CoreContentPolicyStatus
+{
+    Selected,
+    Redacted,
+    Omitted,
+}
+
+public sealed record CoreContentMetadata
+{
+    private readonly JsonObject _json;
+
+    private CoreContentMetadata(JsonObject json)
+    {
+        _json = JsonHelpers.CloneObject(json);
+        Complete = JsonHelpers.GetBool(json, "complete") ?? false;
+        PolicyStatus = JsonHelpers.GetString(json, "policyStatus") switch
+        {
+            "selected" => CoreContentPolicyStatus.Selected,
+            "redacted" => CoreContentPolicyStatus.Redacted,
+            "omitted" => CoreContentPolicyStatus.Omitted,
+            _ => null,
+        };
+        PolicyReason = JsonHelpers.GetString(json, "policyReason");
+    }
+
+    public bool Complete { get; }
+    public CoreContentPolicyStatus? PolicyStatus { get; }
+    public string? PolicyReason { get; }
+
+    public JsonObject ToJsonObject() => JsonHelpers.CloneObject(_json);
+
+    internal static CoreContentMetadata? FromJson(JsonObject? json) =>
+        json is null ? null : new CoreContentMetadata(json);
 }
 
 public sealed record AgentHistoryEvent
@@ -543,7 +582,7 @@ public sealed record AgentHistoryEvent
         Role = JsonHelpers.GetString(json, "role");
         OccurredAt = JsonHelpers.GetString(json, "occurredAt");
         Text = JsonHelpers.GetString(json, "text");
-        Preview = JsonHelpers.GetString(json, "preview");
+        Content = CoreContentMetadata.FromJson(json["content"] as JsonObject);
         Citations = JsonHelpers.GetObjectArray(json, "citations", Citation.FromJson);
     }
 
@@ -557,7 +596,7 @@ public sealed record AgentHistoryEvent
     public string? Role { get; }
     public string? OccurredAt { get; }
     public string? Text { get; }
-    public string? Preview { get; }
+    public CoreContentMetadata? Content { get; }
     public IReadOnlyList<Citation> Citations { get; }
 
     public JsonObject ToJsonObject() => JsonHelpers.CloneObject(_json);

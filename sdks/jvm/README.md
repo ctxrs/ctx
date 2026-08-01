@@ -19,6 +19,12 @@ large dependency footprint.
 - `showSession(String, ShowSessionOptions)` -> `ShowSessionResponse`
 - `version()` -> `VersionInfo`
 
+`SearchHit`, `Event`, and `SessionSummary` expose provider identity, including
+`providerSessionId` and `sourceFormat`; Codex uses `providerSessionId` as its
+resume UUID. `Event.content()` returns typed Core completeness and
+selected/redacted/omitted policy metadata. Event source paths, cursors,
+source-location objects, and preview bodies are not exposed.
+
 All data responses extend `AgentHistoryEnvelope`, with `contractVersion`,
 `schemaVersion`, `operation`, backend metadata, `asMap()`, and operation payload
 access. Local mode shells out to the `ctx` CLI and performs no network calls or

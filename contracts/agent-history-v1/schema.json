@@ -129,6 +129,9 @@
     "searchHit": {
       "type": "object",
       "required": ["resultScope"],
+      "propertyNames": {
+        "not": { "enum": ["source", "sourcePath", "sourceExists", "cursor", "preview"] }
+      },
       "properties": {
         "ctxEventId": { "type": ["string", "null"] },
         "ctxSessionId": { "type": ["string", "null"] },
@@ -148,6 +151,7 @@
         "resultType": { "type": ["string", "null"] },
         "resultScope": { "type": "string" },
         "provider": { "type": ["string", "null"] },
+        "sourceFormat": { "type": ["string", "null"] },
         "timestamp": { "type": ["string", "null"] },
         "cwd": { "type": ["string", "null"] },
         "whyMatched": {
@@ -201,6 +205,9 @@
     "eventResult": {
       "type": "object",
       "required": ["events"],
+      "propertyNames": {
+        "not": { "enum": ["source", "sourcePath", "sourceExists", "cursor", "preview"] }
+      },
       "properties": {
         "event": { "$ref": "#/$defs/event" },
         "events": {
@@ -212,8 +219,11 @@
     },
     "sessionResult": {
       "type": "object",
+      "propertyNames": {
+        "not": { "enum": ["source", "sourcePath", "sourceExists", "cursor", "preview"] }
+      },
       "properties": {
-        "session": { "type": "object", "additionalProperties": true },
+        "session": { "$ref": "#/$defs/sessionSummary" },
         "events": {
           "type": "array",
           "items": { "$ref": "#/$defs/event" }
@@ -223,8 +233,21 @@
       },
       "additionalProperties": true
     },
+    "sessionSummary": {
+      "type": "object",
+      "properties": {
+        "ctxSessionId": { "type": ["string", "null"] },
+        "provider": { "type": ["string", "null"] },
+        "providerSessionId": { "type": ["string", "null"] },
+        "sourceFormat": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
     "event": {
       "type": "object",
+      "propertyNames": {
+        "not": { "enum": ["source", "sourcePath", "sourceExists", "cursor", "preview"] }
+      },
       "properties": {
         "ctxEventId": { "type": ["string", "null"] },
         "ctxSessionId": { "type": ["string", "null"] },
@@ -236,11 +259,21 @@
         "role": { "type": ["string", "null"] },
         "occurredAt": { "type": ["string", "null"] },
         "text": { "type": ["string", "null"] },
-        "preview": { "type": ["string", "null"] },
+        "content": { "$ref": "#/$defs/coreContentMetadata" },
         "citations": {
           "type": "array",
           "items": { "$ref": "#/$defs/citation" }
         }
+      },
+      "additionalProperties": true
+    },
+    "coreContentMetadata": {
+      "type": "object",
+      "required": ["complete", "policyStatus"],
+      "properties": {
+        "complete": { "type": "boolean" },
+        "policyStatus": { "enum": ["selected", "redacted", "omitted"] },
+        "policyReason": { "type": ["string", "null"] }
       },
       "additionalProperties": true
     },
@@ -263,6 +296,9 @@
     },
     "citation": {
       "type": "object",
+      "propertyNames": {
+        "not": { "enum": ["source", "sourcePath", "sourceExists", "cursor", "preview"] }
+      },
       "properties": {
         "itemId": { "type": ["string", "null"] },
         "targetType": { "type": ["string", "null"] },

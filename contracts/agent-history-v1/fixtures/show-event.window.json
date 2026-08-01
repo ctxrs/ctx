@@ -17,7 +17,11 @@
       "eventType": "message",
       "role": "assistant",
       "occurredAt": "2026-07-01T12:00:00Z",
-      "text": "local agent history search result"
+      "text": "local agent history search result",
+      "content": {
+        "complete": true,
+        "policyStatus": "selected"
+      }
     },
     "events": [
       {
@@ -30,7 +34,11 @@
         "eventType": "message",
         "role": "assistant",
         "occurredAt": "2026-07-01T12:00:00Z",
-        "text": "local agent history search result"
+        "text": "local agent history search result",
+        "content": {
+          "complete": true,
+          "policyStatus": "selected"
+        }
       }
     ]
   }

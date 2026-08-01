@@ -78,6 +78,15 @@ const shown = await client.showEvent("11111111-1111-4111-8111-111111111111");
 expectType<ShowEventEnvelope>(shown);
 expectType<string | null | undefined>(shown.event.events[0]!.ctxSessionId);
 expectType<string | null | undefined>(shown.event.events[0]!.providerSessionId);
+expectType<string | null | undefined>(shown.event.events[0]!.sourceFormat);
+expectType<boolean | undefined>(shown.event.events[0]!.content?.complete);
+expectType<"selected" | "redacted" | "omitted" | undefined>(
+  shown.event.events[0]!.content?.policyStatus,
+);
+
+const shownSession = await client.showSession("22222222-2222-4222-8222-222222222222");
+expectType<string | null | undefined>(shownSession.session.session?.providerSessionId);
+expectType<string | null | undefined>(shownSession.session.session?.sourceFormat);
 
 const envelope = toAgentHistoryEnvelope("search", { query: "x", results: [] });
 expectType<SearchEnvelope>(envelope);

@@ -18,6 +18,7 @@ Operation = Literal[
 ]
 BackendKind = Literal["local", "hosted"]
 SearchBackendMode = Literal["hybrid", "semantic", "lexical"]
+CoreContentPolicyStatus = Literal["selected", "redacted", "omitted"]
 
 
 class _BackendRequired(TypedDict):
@@ -123,6 +124,7 @@ class SearchHit(_SearchHitRequired, total=False):
     retrievalScore: Optional[float]
     resultType: Optional[str]
     provider: Optional[str]
+    sourceFormat: Optional[str]
     timestamp: Optional[str]
     cwd: Optional[str]
     whyMatched: list[str]
@@ -173,6 +175,15 @@ class SearchResult(_SearchResultRequired, total=False):
     truncation: JsonObject
 
 
+class _CoreContentMetadataRequired(TypedDict):
+    complete: bool
+    policyStatus: CoreContentPolicyStatus
+
+
+class CoreContentMetadata(_CoreContentMetadataRequired, total=False):
+    policyReason: Optional[str]
+
+
 class Event(TypedDict, total=False):
     ctxEventId: Optional[str]
     ctxSessionId: Optional[str]
@@ -184,7 +195,7 @@ class Event(TypedDict, total=False):
     role: Optional[str]
     occurredAt: Optional[str]
     text: Optional[str]
-    preview: Optional[str]
+    content: CoreContentMetadata
     citations: list[Citation]
 
 
@@ -200,6 +211,7 @@ class SessionSummary(TypedDict, total=False):
     ctxSessionId: Optional[str]
     provider: Optional[str]
     providerSessionId: Optional[str]
+    sourceFormat: Optional[str]
     title: Optional[str]
 
 

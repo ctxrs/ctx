@@ -33,6 +33,13 @@ All data methods return a `agent-history-v1` envelope with `contractVersion`,
 `search`, `event`, or `session`. TypeScript consumers get operation-specific return
 types discriminated by `operation`; CLI JSON remains an adapter detail.
 
+`SearchHit`, `AgentHistoryEvent`, and `SessionSummary` expose provider identity,
+including `providerSessionId` and `sourceFormat`; for Codex,
+`providerSessionId` is the resume UUID. Event `content` carries typed Core
+completeness and selected/redacted/omitted policy metadata. `text` is the sole
+body, and per-event source paths, cursors, source locations, and previews are
+not exposed.
+
 ## Dogfood Example
 
 ```bash

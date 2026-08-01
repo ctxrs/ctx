@@ -39,6 +39,14 @@ public final class SessionSummary {
         return getProviderSessionId();
     }
 
+    public String getSourceFormat() {
+        return AgentHistoryValue.string(fields.get("sourceFormat"));
+    }
+
+    public String sourceFormat() {
+        return getSourceFormat();
+    }
+
     public String getTitle() {
         return AgentHistoryValue.string(fields.get("title"));
     }

@@ -50,6 +50,13 @@ PAYLOAD_BY_OPERATION = {
 }
 
 KNOWN_PAYLOAD_KEYS = set(PAYLOAD_BY_OPERATION.values())
+FORBIDDEN_EVENT_LOCATOR_FIELDS = {
+    "source",
+    "sourcePath",
+    "sourceExists",
+    "cursor",
+    "preview",
+}
 
 
 def require(condition: bool, message: str) -> None:
@@ -75,6 +82,12 @@ def validate_schema(value, schema, root, path: str) -> None:
         require(any(json_type_matches(value, item) for item in expected), f"{path}: bad type")
 
     if isinstance(value, dict):
+        forbidden_property_names = schema.get("propertyNames", {}).get("not", {}).get("enum", [])
+        for key in value:
+            require(
+                key not in forbidden_property_names,
+                f"{path}: forbidden property name {key!r}",
+            )
         for key in schema.get("required", []):
             require(key in value, f"{path}: missing required key {key!r}")
         properties = schema.get("properties", {})
@@ -142,6 +155,16 @@ def validate_fixture(path: Path, schema: dict) -> None:
         require(isinstance(search.get("results"), list), f"{path}: missing search.results[]")
         for result in search["results"]:
             require("resultScope" in result, f"{path}: result missing resultScope")
+            for key in ("provider", "providerSessionId", "sourceFormat"):
+                require(isinstance(result.get(key), str), f"{path}: bad search result {key}")
+            for forbidden in FORBIDDEN_EVENT_LOCATOR_FIELDS:
+                require(forbidden not in result, f"{path}: forbidden search field {forbidden}")
+            for citation in result.get("citations", []):
+                for forbidden in FORBIDDEN_EVENT_LOCATOR_FIELDS:
+                    require(
+                        forbidden not in citation,
+                        f"{path}: forbidden citation field {forbidden}",
+                    )
         result_window = search.get("resultWindow")
         require(isinstance(result_window, dict), f"{path}: missing search.resultWindow")
         limit = result_window.get("limit")
@@ -189,14 +212,55 @@ def validate_fixture(path: Path, schema: dict) -> None:
         )
 
     if operation == "showEvent":
-        require(isinstance(data.get("event"), dict), f"{path}: missing event envelope")
+        event_result = data.get("event")
+        require(isinstance(event_result, dict), f"{path}: missing event envelope")
+        validate_show_events(event_result, path)
 
     if operation == "showSession":
-        require(isinstance(data.get("session"), dict), f"{path}: missing session envelope")
+        session_result = data.get("session")
+        require(isinstance(session_result, dict), f"{path}: missing session envelope")
+        summary = session_result.get("session")
+        require(isinstance(summary, dict), f"{path}: missing typed session summary")
+        for key in ("ctxSessionId", "provider", "providerSessionId", "sourceFormat"):
+            require(isinstance(summary.get(key), str), f"{path}: bad session.{key}")
+        validate_show_events(session_result, path)
+
+
+def validate_show_events(result: dict, path: Path) -> None:
+    events = result.get("events")
+    require(isinstance(events, list) and events, f"{path}: missing events[]")
+    selected = result.get("event")
+    if selected is not None:
+        require(isinstance(selected, dict), f"{path}: bad selected event")
+    for event in events + ([selected] if selected is not None else []):
+        for key in ("provider", "providerSessionId", "sourceFormat"):
+            require(isinstance(event.get(key), str), f"{path}: bad event.{key}")
+        content = event.get("content")
+        require(isinstance(content, dict), f"{path}: missing event.content")
+        require(isinstance(content.get("complete"), bool), f"{path}: bad content.complete")
+        require(
+            content.get("policyStatus") in {"selected", "redacted", "omitted"},
+            f"{path}: bad content.policyStatus",
+        )
+        for forbidden in FORBIDDEN_EVENT_LOCATOR_FIELDS:
+            require(forbidden not in event, f"{path}: forbidden event field {forbidden}")
+        for citation in event.get("citations", []):
+            for forbidden in FORBIDDEN_EVENT_LOCATOR_FIELDS:
+                require(
+                    forbidden not in citation,
+                    f"{path}: forbidden citation field {forbidden}",
+                )
+
 
 def main() -> int:
     schema = json.loads((CONTRACT / "schema.json").read_text())
     require(schema.get("$id"), "schema missing $id")
+    for definition in ("searchHit", "eventResult", "sessionResult", "event", "citation"):
+        forbidden = set(schema["$defs"][definition]["propertyNames"]["not"]["enum"])
+        require(
+            forbidden == FORBIDDEN_EVENT_LOCATOR_FIELDS,
+            f"schema {definition} does not forbid exactly the retired event locators",
+        )
     fixture_paths = sorted(FIXTURES.glob("*.json"))
     require(fixture_paths, "no fixtures found")
     for path in fixture_paths:

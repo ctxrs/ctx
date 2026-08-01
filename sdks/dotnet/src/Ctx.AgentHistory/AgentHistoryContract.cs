@@ -137,7 +137,7 @@ internal static class AgentHistoryContract
 
     public static JsonObject NormalizeEvent(JsonObject raw)
     {
-        var result = (JsonObject)CamelizePublic(raw)!;
+        var result = new JsonObject();
         var eventObject = CamelizePublic(raw["event"]);
         var events = new JsonArray();
         if (raw["events"] is JsonArray rawEvents)
@@ -155,7 +155,7 @@ internal static class AgentHistoryContract
 
     public static JsonObject NormalizeSession(JsonObject raw)
     {
-        var result = (JsonObject)CamelizePublic(raw)!;
+        var result = new JsonObject();
         var session = CamelizePublic(raw["session"] ?? new JsonObject());
         if (session is JsonObject sessionObj)
         {

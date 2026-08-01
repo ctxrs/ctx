@@ -55,6 +55,7 @@
         "resultType": "event",
         "resultScope": "event",
         "provider": "codex",
+        "sourceFormat": "codex_session_jsonl",
         "timestamp": "2026-07-01T12:00:00Z",
         "cwd": "/workspace/ctx",
         "whyMatched": ["text"],

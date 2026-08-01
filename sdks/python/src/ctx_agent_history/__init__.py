@@ -12,6 +12,8 @@ from .errors import (
 )
 from .types import (
     Backend,
+    CoreContentMetadata,
+    CoreContentPolicyStatus,
     ErrorResponse,
     ImportResponse,
     InitResponse,
@@ -22,6 +24,7 @@ from .types import (
     SearchResponse,
     SearchResultWindow,
     SearchRetrieval,
+    SessionSummary,
     ShowEventResponse,
     ShowSessionResponse,
     SourcesResponse,
@@ -34,6 +37,8 @@ __all__ = [
     "API_VERSION",
     "SDK_VERSION",
     "Backend",
+    "CoreContentMetadata",
+    "CoreContentPolicyStatus",
     "CtxAgentHistoryCliError",
     "CtxAgentHistoryError",
     "CtxAgentHistoryProtocolError",
@@ -53,6 +58,7 @@ __all__ = [
     "SearchResponse",
     "SearchResultWindow",
     "SearchRetrieval",
+    "SessionSummary",
     "ShowEventResponse",
     "ShowSessionResponse",
     "SourcesResponse",

@@ -14,10 +14,10 @@ use std::{
 use ctx_protocol::{camel_alias_object, camelize_object_keys, JsonObject};
 pub use ctx_protocol::{
     AgentHistoryEnvelope, AgentHistoryErrorBody, AgentHistoryErrorCode, AgentHistoryEvent,
-    AgentHistoryOperation, AgentHistoryStatus, BackendInfo, BackendKind, EventResult, Freshness,
-    ImportResult, ProviderSource, SearchHit, SearchResult, SearchResultWindow, SearchRetrieval,
-    SearchRetrievalCoverage, SessionResult, SourceLocation, Totals, CONTRACT_VERSION,
-    SCHEMA_VERSION,
+    AgentHistoryOperation, AgentHistoryStatus, BackendInfo, BackendKind, CoreContentMetadata,
+    CoreContentPolicyStatus, EventResult, Freshness, ImportResult, ProviderSource, SearchHit,
+    SearchResult, SearchResultWindow, SearchRetrieval, SearchRetrievalCoverage, SessionResult,
+    SessionSummary, Totals, CONTRACT_VERSION, SCHEMA_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -587,8 +587,7 @@ fn bridge_search_pagination(value: &mut Value) {
 fn normalize_event(raw: &Value) -> Result<EventResult, AgentHistoryError> {
     let value = json!({
         "event": raw.get("event").cloned(),
-        "events": raw.get("events").cloned().unwrap_or_else(|| json!([])),
-        "source": raw.get("source").cloned()
+        "events": raw.get("events").cloned().unwrap_or_else(|| json!([]))
     });
     decode_payload(camelize_object_keys(&value), "event")
 }
@@ -597,7 +596,6 @@ fn normalize_session(raw: &Value) -> Result<SessionResult, AgentHistoryError> {
     let value = json!({
         "session": raw.get("session").cloned(),
         "events": raw.get("events").cloned().unwrap_or_else(|| json!([])),
-        "source": raw.get("source").cloned(),
         "mode": raw.get("mode").cloned(),
         "format": raw.get("format").cloned()
     });

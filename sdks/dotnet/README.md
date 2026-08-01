@@ -70,6 +70,13 @@ future fields remain additive and accessible. SDK failures derive from
 `CtxAgentHistoryException` and expose `Code`, `Retryable`, `Details`, and
 `ToAgentHistoryError()`.
 
+`SearchHit`, `AgentHistoryEvent`, and `SessionRecord` expose provider identity,
+including `ProviderSessionId` and `SourceFormat`; for Codex,
+`ProviderSessionId` is the resume UUID. Event `Content` carries typed Core
+completeness and selected/redacted/omitted policy metadata. `Text` is the sole
+body, and per-event source paths, cursors, source locations, and previews are
+not exposed.
+
 ## Local CLI Adapter
 
 `LocalCliAdapter` maps public operations to the local CLI:

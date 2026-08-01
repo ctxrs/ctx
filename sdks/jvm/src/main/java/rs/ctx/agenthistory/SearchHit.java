@@ -105,6 +105,14 @@ public final class SearchHit {
         return getProvider();
     }
 
+    public String getSourceFormat() {
+        return AgentHistoryValue.string(fields.get("sourceFormat"));
+    }
+
+    public String sourceFormat() {
+        return getSourceFormat();
+    }
+
     public String getTimestamp() {
         return AgentHistoryValue.string(fields.get("timestamp"));
     }

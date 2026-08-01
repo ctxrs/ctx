@@ -106,6 +106,7 @@ function mockResponse(args) {
         ctx_session_id: SESSION_ID,
         provider: "codex",
         provider_session_id: PROVIDER_SESSION_ID,
+        source_format: "codex_session_jsonl",
       },
       events: [mockEvent()],
       mode: "lite",
@@ -127,6 +128,7 @@ function mockEvent() {
     role: "assistant",
     occurred_at: "2026-07-01T12:00:00Z",
     text: "local agent history search result",
+    content: { complete: true, policy_status: "selected" },
   };
 }
 

@@ -60,6 +60,12 @@ The adapter runs JSON-producing CLI commands such as `ctx status --format json`,
 `ctx show event --format json`, then normalizes CLI JSON into
 `agent-history-v1` wrappers with `contractVersion` and `schemaVersion`.
 
+Search hits, shown events, and `SessionRecord` expose provider identity,
+including `ProviderSessionID` and `SourceFormat`; for Codex,
+`ProviderSessionID` is the resume UUID. Shown event `Content` reports Core
+completeness and selected/redacted/omitted policy. `Text` is the sole body, and
+per-event source paths, cursors, source locations, and previews are omitted.
+
 ## Errors
 
 SDK calls return `*ctxagenthistory.Error` for structured failures. Use
