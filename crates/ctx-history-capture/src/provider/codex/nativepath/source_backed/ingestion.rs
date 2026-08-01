@@ -216,10 +216,12 @@ fn ingest_codex_sources_with_options_v0(
     ingest_codex_cold_parallel_v0(
         changed_sources,
         base_event_lookup,
-        writer,
-        revalidation,
-        timings,
-        counters,
+        ColdIngestionTargetV0 {
+            writer,
+            revalidation,
+            timings,
+            counters,
+        },
         worker_count,
         cold_options,
     )

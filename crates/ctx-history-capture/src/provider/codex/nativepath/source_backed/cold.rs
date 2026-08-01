@@ -230,16 +230,26 @@ pub(super) fn cold_scanner_worker_count_for_parallelism(
         .min(source_count.max(1))
 }
 
+pub(super) struct ColdIngestionTargetV0<'target> {
+    pub(super) writer: &'target mut GenerationWriter,
+    pub(super) revalidation: &'target mut HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
+    pub(super) timings: &'target mut CodexSourceBackedPhaseTimingsV0,
+    pub(super) counters: &'target mut CodexSourceBackedCountersV0,
+}
+
 pub(super) fn ingest_codex_cold_parallel_v0(
     sources: Vec<ChangedSourceV0>,
     base_event_lookup: BaseEventIdentityLookup,
-    writer: &mut GenerationWriter,
-    revalidation: &mut HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
-    timings: &mut CodexSourceBackedPhaseTimingsV0,
-    counters: &mut CodexSourceBackedCountersV0,
+    target: ColdIngestionTargetV0<'_>,
     worker_count: usize,
     cold_options: ColdParallelOptionsV0,
 ) -> CodexSourceBackedResultV0<()> {
+    let ColdIngestionTargetV0 {
+        writer,
+        revalidation,
+        timings,
+        counters,
+    } = target;
     let mut plans = Vec::with_capacity(sources.len());
     let mut lane_jobs = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
     let mut lane_source_indices = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();

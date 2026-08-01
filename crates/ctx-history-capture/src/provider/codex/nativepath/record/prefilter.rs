@@ -75,6 +75,7 @@ pub(in super::super) fn prefilter_codex_record(record: &[u8]) -> CodexRecordAdmi
 ///
 /// * [`CodexRecordClass::Ignored`] increments one counter and returns an empty
 ///   projection.
+///
 /// Every other class reaches parsed state, so it stays on the probe path.
 pub(in super::super) fn codex_skip_projection(
     class: CodexRecordClass,

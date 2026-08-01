@@ -306,7 +306,10 @@ pub(crate) use catalog::{
     writer_base_sources, CodexCatalogWorkV0, CodexExplicitSessionSourceBackedInputV0,
     CodexSessionTreeInventoryV0,
 };
-use cold::{cold_scanner_worker_count, ingest_codex_cold_parallel_v0, ColdParallelOptionsV0};
+use cold::{
+    cold_scanner_worker_count, ingest_codex_cold_parallel_v0, ColdIngestionTargetV0,
+    ColdParallelOptionsV0,
+};
 #[cfg(test)]
 use cold::{cold_scanner_worker_count_for_parallelism, take_cold_scanner_activity_v0};
 pub(crate) use identity::source_observation;
