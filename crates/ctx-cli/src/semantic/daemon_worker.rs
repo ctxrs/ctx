@@ -373,11 +373,11 @@ impl CoreSemanticDocumentBuilder<'_> {
     }
 
     fn paired_assistant(&self, anchor: &CoreEventRecord) -> Result<Option<(String, i64)>> {
-        self.index.semantic_lite_turn_assistant(
+        Ok(self.index.semantic_lite_turn_assistant(
             anchor,
             self.pairing_page_records,
             self.pairing_budget,
-        )
+        )?)
     }
 }
 
