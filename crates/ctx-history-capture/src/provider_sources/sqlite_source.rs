@@ -44,7 +44,9 @@ use crate::{
 };
 
 const EVIDENCE_DOMAIN: &[u8] = b"ctx-stock-sqlite-snapshot-v2\0";
-const SQLITE_SNAPSHOT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+// Admit an approximately 1 GiB provider database together with an active WAL
+// of comparable size while retaining one finite cumulative copy bound.
+const SQLITE_SNAPSHOT_MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const SQLITE_COPY_BUFFER_BYTES: usize = 64 * 1024;
 const SQLITE_WAL_TOKEN_BYTES: usize = 64;
 const SQLITE_SHM_MAX_BYTES: u64 = 8 * 1024 * 1024;

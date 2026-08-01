@@ -56,6 +56,11 @@ const SEARCH_SQL: TestOwner = TestOwner::behavioral(
     &["src/commands/sql.rs"],
     &["csv_escape", "sql_csv_cell", "sql_raw_cell"],
 );
+const SOURCE_INDEX_MACHINE_ERROR: TestOwner = TestOwner::behavioral(
+    "src/commands/source_index/tests/recovery.rs::show_and_search_generation_races_use_the_stable_retryable_json_envelope",
+    &["src/commands/source_index/shared.rs"],
+    &["render_show_error", "render_search_error", "from_str"],
+);
 const STATS: TestOwner = TestOwner::behavioral(
     "src/commands/stats.rs::stats_plain_output_matches_ansi_stripped_output",
     &["src/commands/stats.rs"],
@@ -166,6 +171,7 @@ const ANALYTICS_SENDER: &str = "src/analytics/sender.rs";
 const BLAME: &str = "src/commands/blame.rs";
 const INDEX_COMMAND: &str = "src/commands/index.rs";
 const SQL: &str = "src/commands/sql.rs";
+const SOURCE_INDEX_SHARED: &str = "src/commands/source_index/shared.rs";
 const STATS_COMMAND: &str = "src/commands/stats.rs";
 const STATUS_USAGE: &str = "src/commands/status/usage.rs";
 const DISPATCH: &str = "src/dispatch.rs";
@@ -409,6 +415,22 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         MachineProtocol,
         MACHINE_BODY,
         SEARCH_SQL
+    ),
+    allow!(
+        SOURCE_INDEX_SHARED,
+        "render_active_generation_race#1@4f414268237841ec",
+        UiRawWriter,
+        Infrastructure,
+        RAW_INFRASTRUCTURE,
+        SOURCE_INDEX_MACHINE_ERROR
+    ),
+    allow!(
+        SOURCE_INDEX_SHARED,
+        "render_active_generation_race#1@0caa61c845c0cfcb",
+        DirectWrite,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        SOURCE_INDEX_MACHINE_ERROR
     ),
     allow!(
         SQL,

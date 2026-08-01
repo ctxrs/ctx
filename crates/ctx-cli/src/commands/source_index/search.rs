@@ -38,7 +38,7 @@ use super::{
         pretty_json_stdout_bytes, render_search_document, render_search_not_ready_document,
         search_json,
     },
-    shared::index_root,
+    shared::{index_root, render_active_generation_race, ActiveGenerationRaceCommand},
 };
 
 use hydration::core_records_for_search_hits;
@@ -210,6 +210,12 @@ pub(super) fn render_search_error<T>(
     data_root: &Path,
     ui: &mut Ui,
 ) -> Result<T> {
+    let result = render_active_generation_race(
+        result,
+        !human_output,
+        ActiveGenerationRaceCommand::Search,
+        ui,
+    );
     match result {
         Ok(value) => Ok(value),
         Err(error) if human_output && search_index_is_not_ready(data_root, &error) => {

@@ -10,6 +10,12 @@ use super::model::OpenCodeNativeSchemaFamily;
 use crate::provider::providers::opencode::OpenCodeSqliteDialect;
 
 const MAX_NATIVE_IDENTITY_BYTES: i64 = 4 * 1024;
+const CONVERSATION_ROLES: &str =
+    "'user','assistant','system','developer','tool','toolresult','bashexecution'";
+const CONVERSATION_TYPES: &str =
+    "'user','assistant','system','developer','message','text','reasoning','summary','patch',\
+     'stepstart','stepfinish','snapshot','toolcall','tooluse','tool','shell','synthetic',\
+     'compaction'";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct OpenCodeNativeSchema {
@@ -27,6 +33,13 @@ struct ColumnCapability {
     declared_type: String,
     not_null: bool,
     primary_key_ordinal: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CurrentTableRows {
+    Empty,
+    MetadataOnly,
+    ConversationBearing,
 }
 
 impl OpenCodeNativeSchema {
@@ -47,6 +60,7 @@ impl OpenCodeNativeSchema {
         let session_message = if tables.contains("session_message") {
             let columns = table_capabilities(conn, "session_message")?;
             require_message_columns(&columns, "session_message")?;
+            let has_type = columns.contains_key("type");
             let family = if columns.contains_key("seq") {
                 require_integer_column(&columns, "session_message", "seq")?;
                 OpenCodeNativeSchemaFamily::SessionMessageSeq
@@ -55,8 +69,8 @@ impl OpenCodeNativeSchema {
             };
             Some((
                 family,
-                columns.contains_key("type"),
-                table_has_rows(conn, "session_message")?,
+                has_type,
+                current_table_rows(conn, "session_message", has_type)?,
             ))
         } else {
             None
@@ -64,10 +78,11 @@ impl OpenCodeNativeSchema {
         let session_entry = if tables.contains("session_entry") {
             let columns = table_capabilities(conn, "session_entry")?;
             require_message_columns(&columns, "session_entry")?;
+            let has_type = columns.contains_key("type");
             Some((
                 OpenCodeNativeSchemaFamily::SessionEntry,
-                columns.contains_key("type"),
-                table_has_rows(conn, "session_entry")?,
+                has_type,
+                current_table_rows(conn, "session_entry", has_type)?,
             ))
         } else {
             None
@@ -108,15 +123,22 @@ impl OpenCodeNativeSchema {
             false
         };
 
-        // Match the established importer precedence. Populated current families win first,
-        // then an explicitly present empty current table remains authoritative over legacy
-        // tables. A message+part route is authoritative only when its join is populated;
-        // otherwise populated legacy messages must remain visible.
-        let (family, event_has_type) = if let Some((family, has_type, true)) = session_message {
+        // Conversation-bearing current families win first. Metadata-only projection rows must
+        // not hide durable message+part history, while an explicitly present empty current table
+        // retains its established migration authority. A message+part route is authoritative
+        // only when its join is populated; otherwise populated legacy messages remain visible.
+        let (family, event_has_type) = if let Some((
+            family,
+            has_type,
+            CurrentTableRows::ConversationBearing,
+        )) = session_message
+        {
             (family, has_type)
-        } else if let Some((family, has_type, true)) = session_entry {
+        } else if let Some((family, has_type, CurrentTableRows::ConversationBearing)) =
+            session_entry
+        {
             (family, has_type)
-        } else if let Some((family, has_type, _)) = session_message {
+        } else if let Some((family, has_type, CurrentTableRows::Empty)) = session_message {
             (family, has_type)
         } else if message_part_join {
             (
@@ -125,6 +147,8 @@ impl OpenCodeNativeSchema {
             )
         } else if let Some((has_type, true)) = message {
             (OpenCodeNativeSchemaFamily::LegacyMessage, has_type)
+        } else if let Some((family, has_type, CurrentTableRows::MetadataOnly)) = session_message {
+            (family, has_type)
         } else if let Some((family, has_type, _)) = session_entry {
             (family, has_type)
         } else if message.is_some() && part.is_some() {
@@ -170,6 +194,54 @@ fn sqlite_tables(conn: &Connection) -> Result<BTreeSet<String>> {
 fn table_has_rows(conn: &Connection, table: &str) -> Result<bool> {
     let sql = format!("select exists(select 1 from {table} limit 1)");
     Ok(conn.query_row(&sql, [], |row| row.get::<_, i64>(0))? != 0)
+}
+
+fn current_table_rows(
+    conn: &Connection,
+    table: &str,
+    has_type_column: bool,
+) -> Result<CurrentTableRows> {
+    let column_type_marker = if has_type_column {
+        format!(
+            "typeof(type) = 'text' and {} in ({CONVERSATION_TYPES})",
+            normalized_token_sql("type")
+        )
+    } else {
+        "0".to_owned()
+    };
+    let role = normalized_token_sql("json_extract(data, '$.role')");
+    let data_type = normalized_token_sql("json_extract(data, '$.type')");
+    let sql = format!(
+        "select case
+             when not exists(select 1 from {table} limit 1) then 0
+             when exists(
+                 select 1 from {table}
+                 where ({column_type_marker})
+                    or case
+                           when typeof(data) = 'text' and json_valid(data) then
+                               ({role} in ({CONVERSATION_ROLES})
+                                or {data_type} in ({CONVERSATION_TYPES}))
+                           else 0
+                       end
+                 limit 1
+             ) then 2
+             else 1
+         end"
+    );
+    match conn.query_row(&sql, [], |row| row.get::<_, i64>(0))? {
+        0 => Ok(CurrentTableRows::Empty),
+        1 => Ok(CurrentTableRows::MetadataOnly),
+        2 => Ok(CurrentTableRows::ConversationBearing),
+        _ => Err(CaptureError::SystemInvariant(
+            "OpenCode current-table conversation probe returned an invalid state",
+        )),
+    }
+}
+
+fn normalized_token_sql(value: &str) -> String {
+    format!(
+        "lower(replace(replace(replace(trim(cast({value} as text)), '_', ''), '-', ''), ' ', ''))"
+    )
 }
 
 fn table_capabilities(
@@ -458,4 +530,191 @@ fn capability_digest(
 
 pub(super) fn hex_digest(digest: [u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{params, Connection};
+    use serde_json::json;
+
+    use super::*;
+    use crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+
+    #[derive(Clone, Copy)]
+    enum CurrentTable {
+        SessionMessage,
+        SessionEntry,
+    }
+
+    impl CurrentTable {
+        fn name(self) -> &'static str {
+            match self {
+                Self::SessionMessage => "session_message",
+                Self::SessionEntry => "session_entry",
+            }
+        }
+
+        fn create(self, conn: &Connection) {
+            let schema = match self {
+                Self::SessionMessage => {
+                    "create table session_message (
+                         id text primary key,
+                         session_id text not null,
+                         type text not null,
+                         seq integer not null,
+                         time_created integer not null,
+                         time_updated integer not null,
+                         data text not null
+                     );"
+                }
+                Self::SessionEntry => {
+                    "create table session_entry (
+                         id text primary key,
+                         session_id text not null,
+                         type text not null,
+                         time_created integer not null,
+                         time_updated integer not null,
+                         data text not null
+                     );"
+                }
+            };
+            conn.execute_batch(schema).unwrap();
+        }
+
+        fn insert(self, conn: &Connection, index: i64, entry_type: &str, data: &str) {
+            match self {
+                Self::SessionMessage => {
+                    conn.execute(
+                        "insert into session_message
+                         (id, session_id, type, seq, time_created, time_updated, data)
+                         values (?1, 'session-1', ?2, ?3, ?4, ?4, ?5)",
+                        params![
+                            format!("current-{index}"),
+                            entry_type,
+                            index + 1,
+                            index,
+                            data
+                        ],
+                    )
+                    .unwrap();
+                }
+                Self::SessionEntry => {
+                    conn.execute(
+                        "insert into session_entry
+                         (id, session_id, type, time_created, time_updated, data)
+                         values (?1, 'session-1', ?2, ?3, ?3, ?4)",
+                        params![format!("current-{index}"), entry_type, index, data],
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    fn mixed_schema(current: CurrentTable) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table session (
+                 id text primary key,
+                 time_created integer not null,
+                 time_updated integer not null
+             );
+             create table message (
+                 id text primary key,
+                 session_id text not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create table part (
+                 id text primary key,
+                 message_id text not null,
+                 session_id text not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             insert into session values ('session-1', 1, 1);",
+        )
+        .unwrap();
+        current.create(&conn);
+        conn.execute(
+            "insert into message values ('message-1', 'session-1', 2, 2, ?1)",
+            [json!({"role": "user", "time": {"created": 2}}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into part values ('part-1', 'message-1', 'session-1', 3, 3, ?1)",
+            [json!({"type": "text", "text": "durable conversation"}).to_string()],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn metadata_only_current_rows_do_not_hide_message_part_history() {
+        for current in [CurrentTable::SessionMessage, CurrentTable::SessionEntry] {
+            let conn = mixed_schema(current);
+            for index in 0..29 {
+                let (entry_type, data) = if index % 2 == 0 {
+                    (
+                        "agent-switched",
+                        json!({"agent": "build", "time": {"created": index}}),
+                    )
+                } else {
+                    (
+                        "model-switched",
+                        json!({
+                            "model": {"id": "gpt-5", "providerID": "openai"},
+                            "time": {"created": index}
+                        }),
+                    )
+                };
+                current.insert(&conn, index, entry_type, &data.to_string());
+            }
+
+            let current_rows: i64 = conn
+                .query_row(
+                    &format!("select count(*) from {}", current.name()),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(current_rows, 29);
+            let schema = OpenCodeNativeSchema::probe(&conn, &OPENCODE_SQLITE_DIALECT).unwrap();
+            assert_eq!(schema.family, OpenCodeNativeSchemaFamily::MessagePart);
+        }
+    }
+
+    #[test]
+    fn conversation_markers_keep_populated_current_tables_authoritative() {
+        let session_message = mixed_schema(CurrentTable::SessionMessage);
+        CurrentTable::SessionMessage.insert(
+            &session_message,
+            0,
+            "assistant",
+            &json!({"agent": "build", "model": {"id": "gpt-5"}, "time": {"created": 0}})
+                .to_string(),
+        );
+        let schema =
+            OpenCodeNativeSchema::probe(&session_message, &OPENCODE_SQLITE_DIALECT).unwrap();
+        assert_eq!(schema.family, OpenCodeNativeSchemaFamily::SessionMessageSeq);
+
+        let session_entry = mixed_schema(CurrentTable::SessionEntry);
+        CurrentTable::SessionEntry.insert(
+            &session_entry,
+            0,
+            "label",
+            &json!({"role": "user", "time": {"created": 0}}).to_string(),
+        );
+        let schema = OpenCodeNativeSchema::probe(&session_entry, &OPENCODE_SQLITE_DIALECT).unwrap();
+        assert_eq!(schema.family, OpenCodeNativeSchemaFamily::SessionEntry);
+    }
+
+    #[test]
+    fn explicitly_empty_current_table_remains_authoritative() {
+        let conn = mixed_schema(CurrentTable::SessionMessage);
+        let schema = OpenCodeNativeSchema::probe(&conn, &OPENCODE_SQLITE_DIALECT).unwrap();
+        assert_eq!(schema.family, OpenCodeNativeSchemaFamily::SessionMessageSeq);
+    }
 }

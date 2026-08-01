@@ -542,9 +542,20 @@ fn mcp_sql_tool_returns_structured_json_and_rejects_writes() {
     );
 
     let sql = &responses[1]["result"]["structuredContent"];
+    assert_eq!(sql["schema_version"], 2);
     assert_eq!(sql["payload_type"], "sql_result");
     assert_eq!(sql["read_only"], true);
     assert_eq!(sql["share_safe"], false);
+    assert_eq!(
+        sql["snapshot"],
+        json!({
+            "observed_core_generation_id": generation_id.clone(),
+            "projection_status": "ready",
+            "relational_build_generation": 1,
+            "relational_core_generation_id": generation_id.clone(),
+            "stale": false,
+        })
+    );
     assert_eq!(
         sql["columns"],
         json!(["core_generation_id", "status", "sessions"])

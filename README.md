@@ -23,6 +23,21 @@ Windows PowerShell:
 irm https://ctx.rs/install.ps1 | iex
 ```
 
+Official macOS binaries are signed as
+`Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)` with
+Apple Team ID `SJSNARH4TG`. Legacy Publisher LLC is the legacy legal
+name on ctx engineering, inc.'s Apple Developer account. Verify the installed
+binary's integrity and Apple trust, then inspect its signing identity:
+
+```bash
+codesign --verify --strict --verbose=4 "$(command -v ctx)"
+spctl --assess --verbose=4 --type install "$(command -v ctx)"
+codesign -d --verbose=4 "$(command -v ctx)" 2>&1 | grep -E '^(Authority|TeamIdentifier)='
+```
+
+See the [security policy](SECURITY.md#macos-release-signing-identity) for the
+expected output and why macOS may display the legacy name.
+
 or prompt your agent:
 ```
 Please install and set up ctx CLI (see github.com/ctxrs/ctx)

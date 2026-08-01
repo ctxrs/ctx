@@ -4,6 +4,7 @@ mod shared;
 mod show;
 
 pub(crate) use search::{mcp_search, run_search, SourceSearchRequest};
+pub(crate) use shared::{active_generation_race_error_json, is_active_generation_race};
 pub(crate) use show::{mcp_show_event, mcp_show_session, run_show};
 
 #[cfg(test)]

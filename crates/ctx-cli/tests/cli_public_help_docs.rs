@@ -178,6 +178,30 @@ fn show_help_has_no_noop_content_selector() {
 }
 
 #[test]
+fn show_event_help_states_the_event_window_bounds() {
+    let temp = tempdir();
+    let output = ctx(&temp)
+        .args(["show", "event", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(output).unwrap();
+
+    for expected in [
+        "Number of preceding events to include (0..50)",
+        "Number of following events to include (0..50)",
+        "Use this many events on both sides of the selected event (0..50)",
+    ] {
+        assert!(
+            help.contains(expected),
+            "show event help omitted {expected:?}:\n{help}"
+        );
+    }
+}
+
+#[test]
 fn pro_help_advertises_the_fixed_monthly_price() {
     let temp = tempdir();
     let output = ctx(&temp)
@@ -795,6 +819,18 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     assert!(upgrade_body.contains("ctx upgrade disable"));
     assert!(upgrade_body.contains("Foreground commands and MCP"));
     assert!(upgrade_body.contains("never schedule an upgrade"));
+
+    let unmanaged =
+        json_output(ctx(&temp).args(["docs", "show", "unmanaged-installs", "--format", "json"]));
+    let unmanaged_body = unmanaged["body"].as_str().unwrap();
+    assert!(unmanaged_body
+        .contains("Developer ID Application: Legacy Publisher LLC (SJSNARH4TG)"));
+    assert!(unmanaged_body.contains("codesign --verify --strict --verbose=4 \"$(command -v ctx)\""));
+    assert!(
+        unmanaged_body.contains("spctl --assess --verbose=4 --type install \"$(command -v ctx)\"")
+    );
+    assert!(unmanaged_body.contains("codesign -d --verbose=4 \"$(command -v ctx)\""));
+    assert!(unmanaged_body.contains("Apple Team ID `SJSNARH4TG`"));
 
     let missing_topic = failure_stderr(ctx(&temp).args(["--color=always", "docs", "show", "cli"]));
     assert!(missing_topic.contains("Unknown ctx docs topic: cli"));

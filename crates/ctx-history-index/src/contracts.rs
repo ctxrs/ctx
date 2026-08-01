@@ -28,8 +28,18 @@ pub(crate) const MAX_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
 ///
 /// A merge therefore retires at least `LEXICAL_SEGMENT_MERGE_FAN_IN - 1`
 /// active segments, bounding merge publications amortized over tiny appends
-/// while avoiding a full-index rewrite for each append.
+/// while avoiding a full-index rewrite for each append. Delete-heavy segments
+/// use the independent reclamation threshold in the lexical merge policy.
 pub const LEXICAL_SEGMENT_MERGE_FAN_IN: usize = 8;
+
+/// Published active segments may contain at most 1/4 deleted documents.
+///
+/// The merge policy compares this ratio with integer arithmetic and expunges
+/// any segment above it independently of Tantivy's append-merge size ceiling.
+/// Exact no-ops never construct a writer, so they intentionally do not perform
+/// storage maintenance.
+pub(crate) const LEXICAL_DELETED_DOCUMENT_RECLAIM_NUMERATOR: u64 = 1;
+pub(crate) const LEXICAL_DELETED_DOCUMENT_RECLAIM_DENOMINATOR: u64 = 4;
 
 pub type Result<T> = std::result::Result<T, IndexError>;
 
@@ -251,6 +261,14 @@ pub enum IndexError {
     },
     #[error("document count mismatch: manifest {manifest}, index {index}")]
     DocumentCountMismatch { manifest: u64, index: u64 },
+    #[error(
+        "candidate lexical segment retains {deleted_documents} deleted documents out of \
+         {max_documents}, exceeding the 25% publication bound"
+    )]
+    CandidateDeletionDensityExceeded {
+        deleted_documents: u64,
+        max_documents: u64,
+    },
     #[error("source {source_id} count mismatch: manifest {manifest}, index {index}")]
     SourceCountMismatch {
         source_id: String,

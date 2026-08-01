@@ -206,6 +206,9 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
             && status["lexical"]["request_state"] == "published"
             && status["refresh"]["status"] == "ready"
             && status["refresh"]["published_generation"] == expected_generation
+            && status["daemon"]["jobs"]["core_refresh"]["request_state"] == "published"
+            && status["daemon"]["jobs"]["core_refresh"]["published_generation"]
+                == expected_generation
     });
     assert_eq!(status["history_epoch"]["status"], "ready", "{status:#}");
     assert_eq!(status["lexical"]["status"], "ready", "{status:#}");

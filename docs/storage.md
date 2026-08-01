@@ -170,6 +170,30 @@ They do not reopen provider transcript files at query time. Provider-file
 changes become visible after import or daemon refresh publishes a new Core
 generation.
 
+Lexical publication keeps the active generation and one previous generation
+for recovery and pinned readers; their manifests and integrity receipts use the
+same two-generation bound. Append-only segments merge after eight comparable
+segments accumulate. A mutating refresh also expunges any individual segment
+with more than 25% deleted documents, regardless of segment size, and waits for
+that merge before publication completes. Thus every published active segment
+has at most 25% deletions (at most 4/3 as many physical document slots as live
+documents), while exact no-op refreshes perform no writer or merge work.
+
+Generation candidates hard-link unchanged base segments when the filesystem
+supports it. On such filesystems, during a comparable large replacement the
+retained previous generation, active generation, newly staged replacement, and
+merge output can coexist for a typical roughly 4x live-generation peak. These
+amplification figures are estimates, not hard byte bounds: at the 25% deletion
+limit, steady physical document slots across the retained active and previous
+generations can approach 8/3 of one live generation. Compression and changed
+content can move byte ratios, and the candidate-cloning fallback copies files
+when hard links are unavailable, so physical byte amplification can be higher.
+Merge latency and I/O are charged only to a mutating refresh that crosses the
+deletion or fan-in bound. Delete reclamation rewrites only the affected segment
+unless it is already part of scheduled fan-in work, so same-size cold segments
+are not pulled into the rewrite. There are no unbounded background generations
+or manifests.
+
 Pre-v0.26 history is never opened, migrated, used as fallback, or deleted by
 the new architecture. Old Store files are inert and may be removed explicitly
 by their owner.

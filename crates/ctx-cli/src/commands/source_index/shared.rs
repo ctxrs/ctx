@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use ctx_history_index::{CoreEventRecord, SessionRecord, VerifiedIndex};
+use ctx_history_index::{CoreEventRecord, IndexError, SessionRecord, VerifiedIndex};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
@@ -11,6 +12,36 @@ use crate::{
 
 const SEARCH_DIRECTORY: &str = "search";
 const LEXICAL_DIRECTORY: &str = "lexical";
+const ACTIVE_GENERATION_RACE_ERROR_CODE: &str = "generation_changed";
+const ACTIVE_GENERATION_RACE_FAILURE_KIND: &str = "active_generation_race";
+const ACTIVE_GENERATION_RACE_DETAIL: &str =
+    "the active searchable generation changed while the command was opening it";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ActiveGenerationRaceCommand {
+    Search,
+    Show,
+}
+
+impl ActiveGenerationRaceCommand {
+    const fn summary(self) -> &'static str {
+        match self {
+            Self::Search => "History changed during search",
+            Self::Show => "History changed while opening this item",
+        }
+    }
+
+    const fn retry_detail(self) -> &'static str {
+        match self {
+            Self::Search => {
+                "A refresh published a new searchable generation while ctx was opening the previous one. Retry the same search command."
+            }
+            Self::Show => {
+                "A refresh published a new searchable generation while ctx was opening the previous one. Retry the same show command."
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MissingLookupKind {
@@ -124,6 +155,58 @@ pub(super) fn resolve_lookup_for_output<T>(
         }
         Err(error) => Err(error),
     }
+}
+
+pub(super) fn render_active_generation_race<T>(
+    result: Result<T>,
+    json_output: bool,
+    command: ActiveGenerationRaceCommand,
+    ui: &mut Ui,
+) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if is_active_generation_race(&error) => {
+            if json_output {
+                let encoded = serde_json::to_string(&active_generation_race_error_json())?;
+                writeln!(ui.stderr_writer(), "{encoded}")?;
+            } else {
+                let document = diagnostic(
+                    ui.stderr_context(),
+                    Diagnostic {
+                        level: DiagnosticLevel::Error,
+                        summary: command.summary(),
+                        detail: Some(command.retry_detail()),
+                        fields: &[],
+                        action: None,
+                    },
+                );
+                ui.write_stderr(&document)?;
+            }
+            Err(crate::dispatch::rendered_cli_error())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn is_active_generation_race(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<IndexError>(),
+            Some(IndexError::ConcurrentGenerationChange)
+        )
+    })
+}
+
+pub(crate) fn active_generation_race_error_json() -> Value {
+    json!({
+        "error": format!(
+            "{ACTIVE_GENERATION_RACE_ERROR_CODE}/{ACTIVE_GENERATION_RACE_FAILURE_KIND}"
+        ),
+        "error_code": ACTIVE_GENERATION_RACE_ERROR_CODE,
+        "failure_kind": ACTIVE_GENERATION_RACE_FAILURE_KIND,
+        "detail": ACTIVE_GENERATION_RACE_DETAIL,
+        "retryable": true,
+    })
 }
 
 pub(super) fn render_missing_lookup(

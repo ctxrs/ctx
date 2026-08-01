@@ -85,6 +85,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "none",
         ]));
         assert_authoritative_provider_publication(&first);
+        wait_for_imported_projections(&temp, &first);
         assert_eq!(first["totals"]["current_rejected_records"], 1, "{first:#}");
         assert!(
             source_backed_count(
@@ -546,6 +547,7 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             "--format=json",
         ]));
         assert_explicit_source_publication(&first, stored_provider, expected_format);
+        wait_for_imported_projections(&temp, &first);
         let expected_rejected_records = u64::from(stored_provider == "qwen_code");
         assert_eq!(
             first["totals"]["current_rejected_records"], expected_rejected_records,
@@ -675,6 +677,7 @@ fn native_provider_cli_preserves_complete_tool_outputs_without_legacy_payloads()
             "none",
         ]));
         assert_explicit_source_publication(&imported, provider, source_format);
+        wait_for_imported_projections(&temp, &imported);
         assert_eq!(
             imported["totals"]["current_rejected_records"], 0,
             "{imported:#}"
@@ -807,6 +810,7 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             assert_explicit_source_publication(&first, stored_provider, source_format);
             assert_eq!(first["totals"]["current_rejected_records"], 0);
         }
+        wait_for_imported_projections(&temp, &first);
         let initial_event_count = source_backed_count(
             &temp,
             &format!("SELECT COUNT(*) FROM ctx_events WHERE provider = '{stored_provider}'"),
@@ -848,6 +852,7 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             assert_explicit_source_publication(&third, stored_provider, source_format);
             assert_eq!(third["totals"]["current_rejected_records"], 0);
         }
+        wait_for_imported_projections(&temp, &third);
         assert!(
             source_backed_count(
                 &temp,
@@ -1074,6 +1079,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "cline", "cline_task_directory_json");
+    wait_for_imported_projections(&temp, &imported);
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
     assert_eq!(
         source_backed_count(
@@ -1124,6 +1130,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "roo_code", "roo_task_directory_json");
+    wait_for_imported_projections(&temp, &imported);
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
     assert_eq!(
         source_backed_count(
@@ -1182,6 +1189,7 @@ fn antigravity_cli_imports_native_transcript_tree() {
         "antigravity",
         "antigravity_cli_transcript_jsonl_tree",
     );
+    wait_for_imported_projections(&temp, &imported);
     assert_eq!(
         source_backed_count(
             &temp,
@@ -1263,6 +1271,7 @@ fn antigravity_cli_inventory_prefers_full_transcript_over_live_partial() {
         "antigravity",
         "antigravity_cli_transcript_jsonl_tree",
     );
+    wait_for_imported_projections(&temp, &imported);
     assert_eq!(
         imported["sources"][0]["source_files"],
         2,
@@ -1296,6 +1305,7 @@ fn codex_cli_catalogs_valid_content_from_mixed_fixture() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl");
+    wait_for_imported_projections(&temp, &imported);
     assert_eq!(
         imported["totals"]["current_rejected_records"], 1,
         "{imported:#}"
@@ -1333,6 +1343,7 @@ fn pi_cli_catalogs_valid_content_from_mixed_fixture() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "pi", "pi_session_jsonl");
+    wait_for_imported_projections(&temp, &imported);
     assert_eq!(
         imported["totals"]["current_rejected_records"], 2,
         "{imported:#}"
