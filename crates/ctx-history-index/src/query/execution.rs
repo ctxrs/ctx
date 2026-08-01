@@ -842,12 +842,11 @@ impl VerifiedIndex {
             let Some(next_content_bytes) = content_bytes.checked_add(record_content_bytes) else {
                 return Ok(None);
             };
-            if next_stored_core_bytes > maximum_stored_core_bytes
-                || next_content_bytes > maximum_content_bytes
+            if (next_stored_core_bytes > maximum_stored_core_bytes
+                || next_content_bytes > maximum_content_bytes)
+                && !(admit_oversized_singleton && event_ids.len() == 1)
             {
-                if !(admit_oversized_singleton && event_ids.len() == 1) {
-                    return Ok(None);
-                }
+                return Ok(None);
             }
             stored_core_bytes = next_stored_core_bytes;
             content_bytes = next_content_bytes;
@@ -1189,9 +1188,8 @@ impl VerifiedIndex {
             let hits: Vec<PrecedingHit> = self.searcher.search(&session_term(), &collector)?;
             let mut coordinates = hits
                 .into_iter()
-                .filter_map(|((is_preceding, sort_key), _)| {
-                    is_preceding.then(|| SessionEventCoordinate::from_sort_key(sort_key))
-                })
+                .filter(|((is_preceding, _), _)| *is_preceding)
+                .map(|((_, sort_key), _)| SessionEventCoordinate::from_sort_key(sort_key))
                 .collect::<Vec<_>>();
             coordinates.reverse();
             coordinates
@@ -1209,9 +1207,8 @@ impl VerifiedIndex {
             type FollowingHit = ((bool, Reverse<SessionEventCoordinateSortKey>), DocAddress);
             let hits: Vec<FollowingHit> = self.searcher.search(&session_term(), &collector)?;
             hits.into_iter()
-                .filter_map(|((is_following, Reverse(sort_key)), _)| {
-                    is_following.then(|| SessionEventCoordinate::from_sort_key(sort_key))
-                })
+                .filter(|((is_following, _), _)| *is_following)
+                .map(|((_, Reverse(sort_key)), _)| SessionEventCoordinate::from_sort_key(sort_key))
                 .collect::<Vec<_>>()
         };
         preceding.push(selected);
