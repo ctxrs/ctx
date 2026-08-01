@@ -598,6 +598,22 @@ fn has_nested_repository_boundary(candidate: &Path, root: &Path) -> Result<bool,
     Ok(false)
 }
 
+fn metadata_is_link_like(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
 /// Cheap, non-authoritative state used only to decide whether a prior negative
 /// probe may be reused. Any route or Git-geometry change invalidates the hit.
 pub(super) fn negative_route_geometry_state(path: &Path, kind: CandidateKind) -> Option<[u8; 32]> {
@@ -626,7 +642,7 @@ pub(super) fn negative_route_geometry_state(path: &Path, kind: CandidateKind) ->
             }
             Err(_) => return None,
         };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        if metadata_is_link_like(&metadata) || !metadata.is_dir() {
             return None;
         }
         update_negative_route_component(&mut digest, component)?;
@@ -667,7 +683,7 @@ fn update_negative_optional_entry(digest: &mut Sha256, path: &Path) -> Option<()
 
 fn update_negative_route_component(digest: &mut Sha256, path: &Path) -> Option<()> {
     let metadata = fs::symlink_metadata(path).ok()?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if metadata_is_link_like(&metadata) || !metadata.is_dir() {
         return None;
     }
     digest.update([1]);
@@ -678,7 +694,14 @@ fn update_negative_route_component(digest: &mut Sha256, path: &Path) -> Option<(
         digest.update(metadata.ino().to_be_bytes());
         digest.update(metadata.mode().to_be_bytes());
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let state = windows_path_state(path).ok()?;
+        digest.update(state.volume_serial_number.to_be_bytes());
+        digest.update(state.file_id);
+        digest.update(state.file_attributes.to_be_bytes());
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         return None;
     }
@@ -687,7 +710,7 @@ fn update_negative_route_component(digest: &mut Sha256, path: &Path) -> Option<(
 
 fn update_negative_entry(digest: &mut Sha256, path: &Path) -> Option<()> {
     let metadata = fs::symlink_metadata(path).ok()?;
-    if metadata.file_type().is_symlink() {
+    if metadata_is_link_like(&metadata) {
         return None;
     }
     digest.update([1]);
@@ -703,7 +726,17 @@ fn update_negative_entry(digest: &mut Sha256, path: &Path) -> Option<()> {
         digest.update(metadata.ctime().to_be_bytes());
         digest.update(metadata.ctime_nsec().to_be_bytes());
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let state = windows_path_state(path).ok()?;
+        digest.update(state.volume_serial_number.to_be_bytes());
+        digest.update(state.file_id);
+        digest.update(state.file_attributes.to_be_bytes());
+        digest.update(state.length.to_be_bytes());
+        digest.update(state.last_write_time.to_be_bytes());
+        digest.update(state.change_time.to_be_bytes());
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         return None;
     }
@@ -718,7 +751,7 @@ fn validate_candidate_route(path: &Path, kind: CandidateKind) -> Result<PathBuf,
         CandidateKind::Directory => path.to_path_buf(),
         CandidateKind::File => {
             match fs::symlink_metadata(path) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
+                Ok(metadata) if metadata_is_link_like(&metadata) => {
                     return Err(ProbeFailure::Unsafe("file_candidate_is_symlink"));
                 }
                 Ok(metadata) if !metadata.is_file() => {
@@ -735,7 +768,7 @@ fn validate_candidate_route(path: &Path, kind: CandidateKind) -> Result<PathBuf,
                 .ok_or(ProbeFailure::Unsafe("file_candidate_has_no_parent"))?;
             loop {
                 match fs::symlink_metadata(parent) {
-                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                    Ok(metadata) if metadata_is_link_like(&metadata) => {
                         return Err(ProbeFailure::Unsafe("candidate_contains_symlink"));
                     }
                     Ok(metadata) if metadata.is_dir() => break parent.to_path_buf(),
@@ -764,7 +797,7 @@ fn validate_candidate_route(path: &Path, kind: CandidateKind) -> Result<PathBuf,
                 ProbeFailure::Unsafe("candidate_metadata_failed")
             }
         })?;
-        if metadata.file_type().is_symlink() {
+        if metadata_is_link_like(&metadata) {
             return Err(ProbeFailure::Unsafe("candidate_contains_symlink"));
         }
     }
@@ -805,12 +838,12 @@ struct RepositoryGeometryState {
 /// Marker identity/content and linked-worktree indirection are retained only as
 /// a local cache fence; they do not become logical repository identity.
 fn repository_geometry_state(root: &Path) -> Result<RepositoryGeometryState, ProbeFailure> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = root;
         Err(ProbeFailure::PlatformUnsupported)
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let marker = root.join(".git");
         let mut digest = Sha256::new();
@@ -892,7 +925,7 @@ fn repository_geometry_state(root: &Path) -> Result<RepositoryGeometryState, Pro
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 enum RepositoryGeometryEntry {
     Missing,
     File(Vec<u8>),
@@ -919,7 +952,7 @@ fn update_repository_geometry_entry(
             return Err(ProbeFailure::Failed("repository_geometry_metadata_failed"));
         }
     };
-    if opening.file_type().is_symlink() {
+    if metadata_is_link_like(&opening) {
         return Err(ProbeFailure::Unsafe(
             "repository_geometry_marker_is_symlink",
         ));
@@ -946,7 +979,7 @@ fn update_repository_geometry_entry(
         .map_err(|_| ProbeFailure::Failed("repository_geometry_marker_read_failed"))?;
     let closing = fs::symlink_metadata(path).map_err(|_| ProbeFailure::ConcurrentDrift)?;
     if !closing.is_file()
-        || closing.file_type().is_symlink()
+        || metadata_is_link_like(&closing)
         || opening.dev() != closing.dev()
         || opening.ino() != closing.ino()
         || opening.mode() != closing.mode()
@@ -967,7 +1000,87 @@ fn update_repository_geometry_entry(
     Ok(RepositoryGeometryEntry::File(value))
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+fn update_repository_geometry_entry(
+    digest: &mut Sha256,
+    label: &[u8],
+    path: &Path,
+) -> Result<RepositoryGeometryEntry, ProbeFailure> {
+    digest.update(u64::try_from(label.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(label);
+    let named_metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            digest.update([0]);
+            return Ok(RepositoryGeometryEntry::Missing);
+        }
+        Err(_) => {
+            return Err(ProbeFailure::Failed("repository_geometry_metadata_failed"));
+        }
+    };
+    if metadata_is_link_like(&named_metadata) {
+        return Err(ProbeFailure::Unsafe(
+            "repository_geometry_marker_is_symlink",
+        ));
+    }
+
+    let mut file = open_windows_identity_path(path)
+        .map_err(|_| ProbeFailure::Failed("repository_geometry_metadata_failed"))?;
+    let opening = windows_file_state(&file)
+        .map_err(|_| ProbeFailure::Failed("repository_geometry_metadata_failed"))?;
+    if opening.is_reparse_point() {
+        return Err(ProbeFailure::Unsafe(
+            "repository_geometry_marker_is_symlink",
+        ));
+    }
+    if opening.is_directory() {
+        if !named_metadata.is_dir() {
+            return Err(ProbeFailure::ConcurrentDrift);
+        }
+        let closing = windows_file_state(&file).map_err(|_| ProbeFailure::ConcurrentDrift)?;
+        let named = windows_path_state(path).map_err(|_| ProbeFailure::ConcurrentDrift)?;
+        if closing != opening || named != opening {
+            return Err(ProbeFailure::ConcurrentDrift);
+        }
+        digest.update([1]);
+        opening.update_stable_identity(digest);
+        digest.update(opening.file_attributes.to_be_bytes());
+        return Ok(RepositoryGeometryEntry::Directory);
+    }
+    if !named_metadata.is_file() {
+        return Err(ProbeFailure::Unsafe(
+            "repository_geometry_marker_is_not_file_or_directory",
+        ));
+    }
+    if opening.length > MAX_GIT_OUTPUT_BYTES as u64 {
+        return Err(ProbeFailure::Failed(
+            "repository_geometry_marker_limit_exceeded",
+        ));
+    }
+    let mut value = Vec::with_capacity(opening.length as usize);
+    file.by_ref()
+        .take(MAX_GIT_OUTPUT_BYTES as u64 + 1)
+        .read_to_end(&mut value)
+        .map_err(|_| ProbeFailure::Failed("repository_geometry_marker_read_failed"))?;
+    if value.len() > MAX_GIT_OUTPUT_BYTES {
+        return Err(ProbeFailure::Failed(
+            "repository_geometry_marker_limit_exceeded",
+        ));
+    }
+    let closing = windows_file_state(&file).map_err(|_| ProbeFailure::ConcurrentDrift)?;
+    let named = windows_path_state(path).map_err(|_| ProbeFailure::ConcurrentDrift)?;
+    if closing != opening || named != opening {
+        return Err(ProbeFailure::ConcurrentDrift);
+    }
+    digest.update([2]);
+    opening.update_stable_identity(digest);
+    digest.update(opening.file_attributes.to_be_bytes());
+    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(&value);
+    Ok(RepositoryGeometryEntry::File(value))
+}
+
+#[cfg(any(unix, windows))]
 fn update_repository_geometry_path(digest: &mut Sha256, label: &[u8], path: &Path) {
     digest.update(u64::try_from(label.len()).unwrap_or(u64::MAX).to_be_bytes());
     digest.update(label);
@@ -976,7 +1089,7 @@ fn update_repository_geometry_path(digest: &mut Sha256, label: &[u8], path: &Pat
     digest.update(value);
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn parse_required_geometry_line<'a>(
     value: &'a [u8],
     failure: &'static str,
@@ -986,6 +1099,99 @@ fn parse_required_geometry_line<'a>(
         [line] if !line.is_empty() => Ok(line),
         _ => Err(ProbeFailure::Unsafe(failure)),
     }
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowsFileState {
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+    creation_time: i64,
+    last_write_time: i64,
+    change_time: i64,
+    file_attributes: u32,
+    length: u64,
+}
+
+#[cfg(windows)]
+impl WindowsFileState {
+    fn is_directory(self) -> bool {
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+
+        self.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+    }
+
+    fn is_reparse_point(self) -> bool {
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        self.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+
+    fn update_stable_identity(self, digest: &mut Sha256) {
+        digest.update(self.volume_serial_number.to_be_bytes());
+        digest.update(self.file_id);
+    }
+}
+
+#[cfg(windows)]
+fn open_windows_identity_path(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn windows_path_state(path: &Path) -> std::io::Result<WindowsFileState> {
+    windows_file_state(&open_windows_identity_path(path)?)
+}
+
+#[cfg(windows)]
+fn windows_file_state(file: &fs::File) -> std::io::Result<WindowsFileState> {
+    use std::{mem::size_of, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO, FILE_ID_INFO,
+    };
+
+    let handle = file.as_raw_handle();
+    let mut basic = FILE_BASIC_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            (&mut basic as *mut FILE_BASIC_INFO).cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut id = FILE_ID_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&mut id as *mut FILE_ID_INFO).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(WindowsFileState {
+        volume_serial_number: id.VolumeSerialNumber,
+        file_id: id.FileId.Identifier,
+        creation_time: basic.CreationTime,
+        last_write_time: basic.LastWriteTime,
+        change_time: basic.ChangeTime,
+        file_attributes: basic.FileAttributes,
+        length: file.metadata()?.len(),
+    })
 }
 
 fn repository_mutable_evidence_state(
@@ -1022,7 +1228,7 @@ fn update_mutable_evidence_entry(
     digest.update(u64::try_from(label.len()).unwrap_or(u64::MAX).to_be_bytes());
     digest.update(label);
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
+        Ok(metadata) if metadata_is_link_like(&metadata) => {
             Err(ProbeFailure::Unsafe("mutable_git_evidence_is_symlink"))
         }
         Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_GIT_OUTPUT_BYTES as u64 => {
@@ -1053,25 +1259,24 @@ fn update_mutable_evidence_entry(
 /// Revision 1 local-root authorization fingerprint.
 ///
 /// SHA-256 input is `CORE_REPOSITORY_LOCATOR_FINGERPRINT_DOMAIN`, big-endian
-/// u16 version 1, then `certified_root`, `git_dir`, and `common_dir` encoded as
-/// `[tag=1][u64 label length][label][u64 dev][u64 ino]`, followed by object
-/// format encoded as `[tag=4][u64 value length][sha1|sha256]`. Paths and
-/// mutable Git state are excluded.
+/// u16 version 1, then `certified_root`, `git_dir`, and `common_dir`. Unix
+/// identities are `[tag=1][u64 label length][label][u64 dev][u64 ino]`;
+/// Windows identities are `[tag=2][u64 label length][label][u64 volume]
+/// [16-byte file id]`. Object format is `[tag=4][u64 value length]
+/// [sha1|sha256]`. Paths and mutable Git state are excluded.
 fn repository_locator_fingerprint(
     root: &Path,
     git_dir: &Path,
     common_dir: &Path,
     object_format: GitObjectFormat,
 ) -> Result<[u8; 32], ProbeFailure> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (root, git_dir, common_dir, object_format);
-        Err(ProbeFailure::PlatformUnsupported)
+        return Err(ProbeFailure::PlatformUnsupported);
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
-        use std::os::unix::fs::MetadataExt;
-
         let mut digest = Sha256::new();
         digest.update(CORE_REPOSITORY_LOCATOR_FINGERPRINT_DOMAIN);
         digest.update(1_u16.to_be_bytes());
@@ -1080,16 +1285,7 @@ fn repository_locator_fingerprint(
             (b"git_dir".as_slice(), git_dir),
             (b"common_dir".as_slice(), common_dir),
         ] {
-            let metadata = fs::symlink_metadata(path)
-                .map_err(|_| ProbeFailure::Unsafe("repository_identity_metadata_failed"))?;
-            if metadata.file_type().is_symlink() {
-                return Err(ProbeFailure::Unsafe("repository_identity_path_is_symlink"));
-            }
-            digest.update([1]);
-            digest.update(u64::try_from(label.len()).unwrap_or(u64::MAX).to_be_bytes());
-            digest.update(label);
-            digest.update(metadata.dev().to_be_bytes());
-            digest.update(metadata.ino().to_be_bytes());
+            update_repository_locator_entry(&mut digest, label, path)?;
         }
         let object_format = object_format_name(object_format);
         digest.update([4]);
@@ -1103,10 +1299,54 @@ fn repository_locator_fingerprint(
     }
 }
 
+#[cfg(unix)]
+fn update_repository_locator_entry(
+    digest: &mut Sha256,
+    label: &[u8],
+    path: &Path,
+) -> Result<(), ProbeFailure> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| ProbeFailure::Unsafe("repository_identity_metadata_failed"))?;
+    if metadata_is_link_like(&metadata) {
+        return Err(ProbeFailure::Unsafe("repository_identity_path_is_symlink"));
+    }
+    digest.update([1]);
+    digest.update(u64::try_from(label.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(label);
+    digest.update(metadata.dev().to_be_bytes());
+    digest.update(metadata.ino().to_be_bytes());
+    Ok(())
+}
+
+#[cfg(windows)]
+fn update_repository_locator_entry(
+    digest: &mut Sha256,
+    label: &[u8],
+    path: &Path,
+) -> Result<(), ProbeFailure> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| ProbeFailure::Unsafe("repository_identity_metadata_failed"))?;
+    if metadata_is_link_like(&metadata) {
+        return Err(ProbeFailure::Unsafe("repository_identity_path_is_symlink"));
+    }
+    let state = windows_path_state(path)
+        .map_err(|_| ProbeFailure::Unsafe("repository_identity_metadata_failed"))?;
+    if state.is_reparse_point() {
+        return Err(ProbeFailure::Unsafe("repository_identity_path_is_symlink"));
+    }
+    digest.update([2]);
+    digest.update(u64::try_from(label.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(label);
+    state.update_stable_identity(digest);
+    Ok(())
+}
+
 fn path_identity_fingerprint(path: &Path) -> Result<[u8; 32], ProbeFailure> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|_| ProbeFailure::Unsafe("repository_identity_metadata_failed"))?;
-    if metadata.file_type().is_symlink() {
+    if metadata_is_link_like(&metadata) {
         return Err(ProbeFailure::Unsafe("repository_identity_path_is_symlink"));
     }
     let mut digest = Sha256::new();
@@ -1116,10 +1356,19 @@ fn path_identity_fingerprint(path: &Path) -> Result<[u8; 32], ProbeFailure> {
         digest.update(metadata.dev().to_be_bytes());
         digest.update(metadata.ino().to_be_bytes());
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        digest.update(path.as_os_str().as_encoded_bytes());
-        digest.update(metadata.len().to_be_bytes());
+        let state = windows_path_state(path)
+            .map_err(|_| ProbeFailure::Unsafe("repository_identity_metadata_failed"))?;
+        if state.is_reparse_point() {
+            return Err(ProbeFailure::Unsafe("repository_identity_path_is_symlink"));
+        }
+        state.update_stable_identity(&mut digest);
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, metadata, digest);
+        return Err(ProbeFailure::PlatformUnsupported);
     }
     Ok(digest.finalize().into())
 }
@@ -1182,7 +1431,7 @@ fn repository_head_branch(
     let head_path = git_dir.join("HEAD");
     let metadata = fs::symlink_metadata(&head_path)
         .map_err(|_| ProbeFailure::Failed("git_head_metadata_failed"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if metadata_is_link_like(&metadata) || !metadata.is_file() {
         return Err(ProbeFailure::Unsafe("git_head_is_not_regular_file"));
     }
     if metadata.len() > MAX_GIT_OUTPUT_BYTES as u64 {
