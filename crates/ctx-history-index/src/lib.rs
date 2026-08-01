@@ -57,12 +57,13 @@ pub(crate) use publication::{
 };
 pub use query::{
     AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRecord, CoreSemanticEventPage,
-    CoreSourceEventPage, EventRecord, EventSearchCandidate, EventSearchFilters,
-    ExcludedSessionTree, LexicalQueryLimits, SemanticEligibility, SemanticEventCursor,
-    SemanticEventPage, SessionEventCoordinate, SessionRecord, SourceEventCursor, SourceEventPage,
-    DEFAULT_CORE_EVENT_PAGE_BUDGET, LEXICAL_QUERY_LIMITS, MAX_LEXICAL_QUERY_RESULTS,
-    MAX_SEMANTIC_EVENT_PAGE_ITEMS, MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS,
-    MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
+    CoreSessionEventPage, CoreSourceEventPage, EventRecord, EventSearchCandidate,
+    EventSearchFilters, ExcludedSessionTree, LexicalQueryLimits, SemanticEligibility,
+    SemanticEventCursor, SemanticEventPage, SessionEventCoordinate, SessionEventCursor,
+    SessionRecord, SourceEventCursor, SourceEventPage, DEFAULT_CORE_EVENT_PAGE_BUDGET,
+    LEXICAL_QUERY_LIMITS, MAX_LEXICAL_QUERY_RESULTS, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+    MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS, MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
+    MAX_SESSION_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
 pub use reader::VerifiedIndex;
 #[cfg(test)]

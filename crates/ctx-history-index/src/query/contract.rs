@@ -81,6 +81,9 @@ pub const MAX_SEMANTIC_PAIRING_PAGE_ITEMS: usize = 64;
 /// Maximum number of complete records retained for one exact source page.
 pub const MAX_SOURCE_EVENT_PAGE_ITEMS: usize = 4_096;
 
+/// Maximum number of complete records retained for one exact session page.
+pub const MAX_SESSION_EVENT_PAGE_ITEMS: usize = 4_096;
+
 /// Maximum retained coordinate prefix, including one truncation lookahead.
 pub const MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS: usize = 4_097;
 
@@ -183,6 +186,52 @@ impl From<CoreSourceEventPage> for SourceEventPage {
             terminal: page.terminal,
         }
     }
+}
+
+/// Exclusive deterministic position for one exact session in one generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEventCursor {
+    pub(super) generation_id: String,
+    pub(super) session_id: StableEntityId,
+    pub(super) after: SessionEventCoordinate,
+}
+
+impl SessionEventCursor {
+    pub fn new(
+        generation_id: impl Into<String>,
+        session_id: StableEntityId,
+        after: SessionEventCoordinate,
+    ) -> Self {
+        Self {
+            generation_id: generation_id.into(),
+            session_id,
+            after,
+        }
+    }
+
+    pub fn generation_id(&self) -> &str {
+        &self.generation_id
+    }
+
+    pub fn session_id(&self) -> StableEntityId {
+        self.session_id
+    }
+
+    pub fn after(&self) -> SessionEventCoordinate {
+        self.after
+    }
+}
+
+/// One deterministic bounded page of complete Core records for one session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreSessionEventPage {
+    pub generation_id: String,
+    pub session_id: StableEntityId,
+    pub items: Vec<CoreEventRecord>,
+    pub encoded_core_bytes: usize,
+    pub content_bytes: usize,
+    pub next_cursor: Option<SessionEventCursor>,
+    pub terminal: bool,
 }
 
 /// Stable metadata-only candidate policy for semantic projection from Core.
@@ -418,7 +467,7 @@ pub struct SessionRecord {
 }
 
 /// Small body-free session coordinate used to select bounded Core batches.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEventCoordinate {
     pub event_id: Uuid,
     pub event_sequence: u64,
