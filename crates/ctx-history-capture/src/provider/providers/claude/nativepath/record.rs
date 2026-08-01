@@ -195,16 +195,7 @@ fn retain_safe_record(
     mut record: SafeRecord,
     raw_ordinal: u64,
     locator: &ClaudePhysicalLocator,
-    output_policy: bool,
-    include_source_displays: bool,
-) -> (Vec<ClaudeRetainedRow>, Option<Vec<Option<String>>>) {
-    let mut source_displays = include_source_displays.then(Vec::new);
-    if output_policy {
-        // Result-shaped records are output units, even when they contain
-        // message-like siblings. Their only Core projection is the sparse
-        // failure/timeout diagnostic built separately from shared preflight.
-        return (Vec::new(), source_displays);
-    }
+) -> Vec<ClaudeRetainedRow> {
     let entry_type = record
         .entry_type
         .take()
@@ -237,9 +228,6 @@ fn retain_safe_record(
                 .then(|| format!("Claude event: {entry_type}"))
         });
     if let Some(body) = body {
-        if let Some(displays) = &mut source_displays {
-            displays.push(Some(body.clone()));
-        }
         push_body_row(
             &mut rows,
             raw_ordinal,
@@ -271,12 +259,9 @@ fn retain_safe_record(
             tool_result: None,
             locator: locator.clone(),
         });
-        if let Some(displays) = &mut source_displays {
-            displays.push(None);
-        }
     }
 
-    (rows, source_displays)
+    rows
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -479,7 +464,6 @@ pub(super) struct ParsedClaudeRecord {
     pub(super) version: Option<String>,
     pub(super) git_branch: Option<String>,
     pub(super) rows: Vec<ClaudeRetainedRow>,
-    pub(super) source_displays: Option<Vec<Option<String>>>,
 }
 
 #[derive(Debug)]
@@ -513,22 +497,13 @@ pub(super) fn parse_native_record(
     raw_ordinal: u64,
     locator: &ClaudePhysicalLocator,
 ) -> Result<ParsedClaudeRecord, serde_json::Error> {
-    parse_native_record_inner(bytes, raw_ordinal, locator, false)
-}
-
-pub(super) fn parse_native_record_for_decoding(
-    bytes: &[u8],
-    raw_ordinal: u64,
-    locator: &ClaudePhysicalLocator,
-) -> Result<ParsedClaudeRecord, serde_json::Error> {
-    parse_native_record_inner(bytes, raw_ordinal, locator, true)
+    parse_native_record_inner(bytes, raw_ordinal, locator)
 }
 
 fn parse_native_record_inner(
     bytes: &[u8],
     raw_ordinal: u64,
     locator: &ClaudePhysicalLocator,
-    include_source_displays: bool,
 ) -> Result<ParsedClaudeRecord, serde_json::Error> {
     let preflight = preflight_record(bytes)?;
     let result = ResultClassification::from(preflight.result);
@@ -546,7 +521,6 @@ fn parse_native_record_inner(
             &outputs,
             &value,
         );
-        let source_displays = include_source_displays.then(|| vec![None; rows.len()]);
         return Ok(ParsedClaudeRecord {
             session_id: metadata.session_id,
             timestamp: metadata.timestamp,
@@ -554,7 +528,6 @@ fn parse_native_record_inner(
             version: metadata.version,
             git_branch: metadata.git_branch,
             rows,
-            source_displays,
         });
     }
 
@@ -564,13 +537,7 @@ fn parse_native_record_inner(
     let cwd = record.cwd.clone();
     let version = record.version.clone();
     let git_branch = record.git_branch.clone();
-    let (rows, source_displays) = retain_safe_record(
-        record,
-        raw_ordinal,
-        locator,
-        result.is_result(),
-        include_source_displays,
-    );
+    let rows = retain_safe_record(record, raw_ordinal, locator);
     Ok(ParsedClaudeRecord {
         session_id,
         timestamp,
@@ -578,7 +545,6 @@ fn parse_native_record_inner(
         version,
         git_branch,
         rows,
-        source_displays,
     })
 }
 
