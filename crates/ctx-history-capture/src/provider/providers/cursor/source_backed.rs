@@ -15,6 +15,7 @@ use ctx_history_core::{
     RepositoryEvidenceKind, RepositoryFileObservationKind, SessionIdentityInput, SourceAnchor,
     SourceKey, StableEntityId, TypedKey, MAX_CORE_CONTENT_BYTES,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 #[cfg(test)]
@@ -39,11 +40,11 @@ use crate::{
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "cursor.session";
 const NATIVE_SESSION_NAMESPACE: &str = "cursor.session";
-const NATIVE_EVENT_LOGICAL_KIND: &str = "cursor.logical-event-v2";
+const NATIVE_EVENT_LOGICAL_KIND: &str = "cursor.logical-event-v3";
 const LOGICAL_SESSION_KIND: &str = "cursor-session";
 const LOGICAL_EVENT_KIND: &str = "cursor-event";
 const SOURCE_SCHEMA_VARIANT: &str = "cursor-agent-transcript-jsonl-v1";
-const PARSER_REVISION: &str = "cursor-shared-jsonl-v4-complete-logical-identity";
+const PARSER_REVISION: &str = "cursor-shared-jsonl-v5-complete-logical-occurrence";
 const EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
 const MAX_CURSOR_TOOL_CONTEXTS: usize = 256;
 
@@ -53,6 +54,7 @@ static CURSOR_PROJECTED_RECORDS: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 thread_local! {
     static CURSOR_SIGNATURE_RECORDS: Cell<u64> = const { Cell::new(0) };
+    static CURSOR_BASE_IDENTITY_PROBES: Cell<u64> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -73,6 +75,16 @@ fn reset_cursor_signature_records() {
 #[cfg(test)]
 fn cursor_signature_records() -> u64 {
     CURSOR_SIGNATURE_RECORDS.get()
+}
+
+#[cfg(test)]
+fn reset_cursor_base_identity_probes() {
+    CURSOR_BASE_IDENTITY_PROBES.set(0);
+}
+
+#[cfg(test)]
+fn cursor_base_identity_probes() -> u64 {
+    CURSOR_BASE_IDENTITY_PROBES.get()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,8 +203,20 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
         &self,
         leaf: &JsonlFamilyLeaf,
         source_file: Arc<OpenedProviderSourceFile>,
-        _imported_at: DateTime<Utc>,
+        imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        self.projector_with_provider_checkpoint(leaf, source_file, imported_at, None, None)
+    }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        validate_cursor_provider_checkpoint(checkpoint)?;
         let binding = decode_binding(leaf)?;
         validate_binding(leaf, &binding, source_file.as_ref())?;
         let session_id = session_id(leaf.source(), &binding.native_session_id)?;
@@ -203,8 +227,18 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
             repository_attributor: crate::repository_attribution::RepositoryAttributor::default(),
             tool_contexts: BTreeMap::new(),
             linkage_capacity_exceeded: false,
+            event_identities: CursorEventIdentityState::new(base_event_lookup),
         }))
     }
+}
+
+fn validate_cursor_provider_checkpoint(checkpoint: Option<&TypedKey>) -> Result<()> {
+    if checkpoint.is_some() {
+        return Err(CaptureError::InvalidPayload(
+            "Cursor received unexpected provider checkpoint state".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 struct CursorProjector {
@@ -214,6 +248,43 @@ struct CursorProjector {
     repository_attributor: crate::repository_attribution::RepositoryAttributor,
     tool_contexts: BTreeMap<String, CursorToolContextState>,
     linkage_capacity_exceeded: bool,
+    event_identities: CursorEventIdentityState,
+}
+
+#[derive(Default)]
+struct CursorEventIdentityState {
+    base_lookup: Option<BaseEventIdentityLookup>,
+    next_occurrences: BTreeMap<CursorLogicalEventIdentity, u64>,
+}
+
+impl CursorEventIdentityState {
+    fn new(base_lookup: Option<BaseEventIdentityLookup>) -> Self {
+        Self {
+            base_lookup,
+            next_occurrences: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CursorLogicalEventIdentity {
+    event_type: &'static str,
+    role: &'static str,
+    occurred_at_unix_ms: Option<i64>,
+    content_sha256: [u8; 32],
+}
+
+impl CursorLogicalEventIdentity {
+    fn from_event(event: &CursorNativeEvent) -> Self {
+        Self {
+            event_type: event.event_type.as_str(),
+            role: event.role.as_str(),
+            occurred_at_unix_ms: event
+                .occurred_at
+                .map(|occurred_at| occurred_at.timestamp_millis()),
+            content_sha256: event.provider_event_hash,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -249,12 +320,19 @@ impl JsonlFamilyProjector for CursorProjector {
             return Ok(());
         };
         for event in events {
+            let duplicate_occurrence = next_event_occurrence(
+                &event,
+                &self.source,
+                self.session_id,
+                &mut self.event_identities,
+            )?;
             let attribution = self.attribution_for_event(&event);
             if let Some(document) = core_record(
                 &self.source,
                 self.session_id,
                 &self.native_session_id,
                 event,
+                duplicate_occurrence,
                 attribution,
             )? {
                 emit(document)?;
@@ -481,7 +559,7 @@ fn cursor_transcript_signature(transcript: &CursorTranscriptPath) -> Result<[u8;
         #[cfg(test)]
         CURSOR_SIGNATURE_RECORDS.set(CURSOR_SIGNATURE_RECORDS.get().saturating_add(1));
         digest.update(event_count.to_be_bytes());
-        digest.update(event.provider_event_hash.as_bytes());
+        digest.update(event.provider_event_hash);
         event_count = event_count
             .checked_add(1)
             .ok_or(CaptureError::SystemInvariant(
@@ -580,6 +658,7 @@ fn core_record(
     session_id: StableEntityId,
     native_session_id: &str,
     event: CursorNativeEvent,
+    duplicate_occurrence: u64,
     annotation: ctx_history_core::CoreRecordAnnotation,
 ) -> Result<Option<CoreRecord>> {
     let text = match &event.body {
@@ -599,7 +678,7 @@ fn core_record(
             "Cursor record exceeds the stable event-sequence part bound".to_owned(),
         ));
     }
-    let native_event_key = event_identity_key(&event)?;
+    let native_event_key = event_identity_key(&event, duplicate_occurrence)?;
     let event_id = event_id(source, session_id, &native_event_key)?;
     let event_sequence = event
         .native_order
@@ -699,10 +778,88 @@ fn event_id(
     .map_err(contract)
 }
 
-fn event_identity_key(event: &CursorNativeEvent) -> Result<TypedKey> {
-    // Cursor exposes no stable native ID for these blocks. Logical content and
-    // fields therefore form the key. An exact duplicate deliberately collides
-    // and makes publication fail closed instead of smuggling position into ID.
+fn next_event_occurrence(
+    event: &CursorNativeEvent,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    state: &mut CursorEventIdentityState,
+) -> Result<u64> {
+    let logical_identity = CursorLogicalEventIdentity::from_event(event);
+    let occurrence = match state.next_occurrences.get(&logical_identity).copied() {
+        Some(occurrence) => occurrence,
+        None => {
+            first_unused_base_occurrence(state.base_lookup.as_ref(), source, session_id, event)?
+        }
+    };
+    let next = occurrence
+        .checked_add(1)
+        .ok_or(CaptureError::SystemInvariant(
+            "Cursor duplicate event occurrence overflowed",
+        ))?;
+    state.next_occurrences.insert(logical_identity, next);
+    Ok(occurrence)
+}
+
+fn first_unused_base_occurrence(
+    base_lookup: Option<&BaseEventIdentityLookup>,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    event: &CursorNativeEvent,
+) -> Result<u64> {
+    let Some(base_lookup) = base_lookup else {
+        return Ok(0);
+    };
+    if !base_occurrence_exists(base_lookup, source, session_id, event, 0)? {
+        return Ok(0);
+    }
+
+    let mut present = 0_u64;
+    let mut missing = 1_u64;
+    while base_occurrence_exists(base_lookup, source, session_id, event, missing)? {
+        present = missing;
+        missing = match missing.checked_mul(2) {
+            Some(next) => next,
+            None if missing != u64::MAX => u64::MAX,
+            None => {
+                return Err(CaptureError::SystemInvariant(
+                    "Cursor duplicate event occurrence overflowed",
+                ));
+            }
+        };
+    }
+    while present.saturating_add(1) < missing {
+        let candidate = present + (missing - present) / 2;
+        if base_occurrence_exists(base_lookup, source, session_id, event, candidate)? {
+            present = candidate;
+        } else {
+            missing = candidate;
+        }
+    }
+    Ok(missing)
+}
+
+fn base_occurrence_exists(
+    base_lookup: &BaseEventIdentityLookup,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    event: &CursorNativeEvent,
+    duplicate_occurrence: u64,
+) -> Result<bool> {
+    #[cfg(test)]
+    CURSOR_BASE_IDENTITY_PROBES.set(CURSOR_BASE_IDENTITY_PROBES.get().saturating_add(1));
+    let native_event_key = event_identity_key(event, duplicate_occurrence)?;
+    let candidate = event_id(source, session_id, &native_event_key)?;
+    // The pinned lookup also rejects duplicate base identities. Propagate that
+    // error so an ambiguous/corrupt base can never select a new occurrence.
+    base_lookup
+        .contains(candidate.as_uuid())
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
+}
+
+fn event_identity_key(event: &CursorNativeEvent, duplicate_occurrence: u64) -> Result<TypedKey> {
+    // Cursor exposes no stable native ID for these blocks. Logical fields and
+    // normalized native content form the key; occurrence distinguishes exact
+    // repeats without making unrelated physical positions part of identity.
     TypedKey::composite(vec![
         TypedKey::utf8(NATIVE_EVENT_LOGICAL_KIND).map_err(contract)?,
         TypedKey::utf8(event.event_type.as_str()).map_err(contract)?,
@@ -710,7 +867,8 @@ fn event_identity_key(event: &CursorNativeEvent) -> Result<TypedKey> {
         event.occurred_at.map_or(TypedKey::Null, |occurred_at| {
             TypedKey::I64(occurred_at.timestamp_millis())
         }),
-        TypedKey::utf8(&event.provider_event_hash).map_err(contract)?,
+        TypedKey::bytes(event.provider_event_hash.to_vec()).map_err(contract)?,
+        TypedKey::U64(duplicate_occurrence),
     ])
     .map_err(contract)
 }
@@ -781,6 +939,7 @@ mod repository_tests {
             repository_attributor: crate::repository_attribution::RepositoryAttributor::default(),
             tool_contexts: BTreeMap::new(),
             linkage_capacity_exceeded: false,
+            event_identities: CursorEventIdentityState::default(),
         }
     }
 
@@ -938,7 +1097,7 @@ mod fidelity_identity_tests {
     };
 
     use ctx_history_core::{CoreRecord, StableEntityId};
-    use ctx_history_index::WriterOptions;
+    use ctx_history_index::{VerifiedIndex, WriterOptions};
     use serde_json::{json, Value};
     use tempfile::TempDir;
 
@@ -1005,6 +1164,30 @@ mod fidelity_identity_tests {
         }
     }
 
+    fn indexed_event_ids(index: &Path, native_session_id: &str) -> Vec<StableEntityId> {
+        let source = source_key(native_session_id).unwrap();
+        VerifiedIndex::open(index)
+            .unwrap()
+            .core_source_event_page(&source, None, 64)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|item| item.event_id)
+            .collect()
+    }
+
+    fn assert_ids_preserved(previous: &[StableEntityId], current: &[StableEntityId]) {
+        for event_id in previous {
+            assert!(current.contains(event_id), "prior event identity changed");
+        }
+    }
+
+    fn assert_all_ids_distinct(event_ids: &[StableEntityId]) {
+        for (index, event_id) in event_ids.iter().enumerate() {
+            assert!(!event_ids[index + 1..].contains(event_id));
+        }
+    }
+
     fn event(row: &Value, ordinal: u64) -> CursorNativeEvent {
         let encoded = serde_json::to_vec(row).unwrap();
         project_cursor_jsonl_record(&encoded, ordinal, ordinal, 0, encoded.len() as u64)
@@ -1026,6 +1209,7 @@ mod fidelity_identity_tests {
             repository_attributor: crate::repository_attribution::RepositoryAttributor::default(),
             tool_contexts: BTreeMap::new(),
             linkage_capacity_exceeded: false,
+            event_identities: CursorEventIdentityState::default(),
         }
     }
 
@@ -1033,11 +1217,19 @@ mod fidelity_identity_tests {
         let mut projector = projector();
         let event = event(row, 0);
         let annotation = projector.attribution_for_event(&event);
+        let duplicate_occurrence = next_event_occurrence(
+            &event,
+            &projector.source,
+            projector.session_id,
+            &mut projector.event_identities,
+        )
+        .unwrap();
         core_record(
             &projector.source,
             projector.session_id,
             &projector.native_session_id,
             event,
+            duplicate_occurrence,
             annotation,
         )
         .unwrap()
@@ -1059,6 +1251,7 @@ mod fidelity_identity_tests {
         let native_session_id = "cursor-identity-test";
         let source = source_key(native_session_id).unwrap();
         let session_id = session_id(&source, native_session_id).unwrap();
+        let mut identity_state = CursorEventIdentityState::default();
         let mut ids = Vec::new();
         for (ordinal, row) in rows.iter().enumerate() {
             let encoded = serde_json::to_vec(row).unwrap();
@@ -1072,7 +1265,10 @@ mod fidelity_identity_tests {
             .unwrap()
             .unwrap();
             for event in events {
-                let key = event_identity_key(&event).unwrap();
+                let occurrence =
+                    next_event_occurrence(&event, &source, session_id, &mut identity_state)
+                        .unwrap();
+                let key = event_identity_key(&event, occurrence).unwrap();
                 ids.push(event_id(&source, session_id, &key).unwrap());
             }
         }
@@ -1172,7 +1368,7 @@ mod fidelity_identity_tests {
     }
 
     #[test]
-    fn cursor_logical_event_ids_survive_insert_before_and_collide_fail_closed_for_duplicates() {
+    fn cursor_logical_event_ids_survive_unrelated_insert_and_distinguish_duplicates() {
         let first = message("user", "2026-07-31T12:00:00Z", "first");
         let second = message("assistant", "2026-07-31T12:00:01Z", "second");
         let inserted = message("user", "2026-07-31T11:59:59Z", "inserted");
@@ -1181,12 +1377,53 @@ mod fidelity_identity_tests {
         let with_insert = event_ids(&[inserted, first.clone(), second]);
         assert_eq!(original, with_insert[1..]);
 
-        let duplicates = event_ids(&[first.clone(), first]);
-        assert_eq!(duplicates[0], duplicates[1]);
+        let duplicates = event_ids(&[first.clone(), first.clone()]);
+        assert_ne!(duplicates[0], duplicates[1]);
+        assert_eq!(duplicates, event_ids(&[first.clone(), first.clone()]));
+
+        let prefixed = event_ids(&[
+            message("user", "2026-07-31T11:59:58Z", "unrelated prefix"),
+            first.clone(),
+            first.clone(),
+        ]);
+        assert_eq!(duplicates, prefixed[1..]);
+
+        let separated = event_ids(&[
+            first.clone(),
+            message("user", "2026-07-31T12:00:02Z", "unrelated"),
+            first,
+        ]);
+        assert_eq!(duplicates[0], separated[0]);
+        assert_eq!(duplicates[1], separated[2]);
     }
 
     #[test]
-    fn cursor_append_projects_only_suffix_and_exact_duplicate_fails_closed() {
+    fn cursor_unknown_checkpoint_and_occurrence_overflow_fail_closed() {
+        assert_eq!(projector().provider_checkpoint().unwrap(), None);
+        let unknown_checkpoint = TypedKey::utf8("cursor.unknown-checkpoint").unwrap();
+        let checkpoint_error =
+            validate_cursor_provider_checkpoint(Some(&unknown_checkpoint)).unwrap_err();
+        assert!(checkpoint_error
+            .to_string()
+            .contains("unexpected provider checkpoint state"));
+
+        let native_session_id = "cursor-overflow-test";
+        let source = source_key(native_session_id).unwrap();
+        let session_id = session_id(&source, native_session_id).unwrap();
+        let event = event(&message("user", "2026-07-31T12:00:00Z", "duplicate"), 0);
+        let mut state = CursorEventIdentityState::default();
+        state
+            .next_occurrences
+            .insert(CursorLogicalEventIdentity::from_event(&event), u64::MAX);
+        let occurrence_error =
+            next_event_occurrence(&event, &source, session_id, &mut state).unwrap_err();
+        assert!(occurrence_error
+            .to_string()
+            .contains("duplicate event occurrence overflowed"));
+    }
+
+    #[test]
+    fn cursor_append_projects_only_suffix_and_probes_pinned_base_for_duplicate_occurrences() {
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("cursor-data");
         let transcript = transcript_path(&root, "project", "native-session");
@@ -1198,18 +1435,22 @@ mod fidelity_identity_tests {
 
         reset_cursor_projected_records();
         reset_cursor_signature_records();
+        reset_cursor_base_identity_probes();
         let cold = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
         assert_eq!(cold.commit.indexed_documents, 1);
         assert_eq!(cursor_projected_records(), 1);
+        assert_eq!(cursor_base_identity_probes(), 0);
         assert_eq!(
             cursor_signature_records(),
             0,
             "a singleton native session must not be pre-parsed for route comparison"
         );
+        let cold_ids = indexed_event_ids(&index, "native-session");
 
         append_transcript(&transcript, &second);
         reset_cursor_projected_records();
         reset_cursor_signature_records();
+        reset_cursor_base_identity_probes();
         let appended =
             refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
         assert_eq!(appended.commit.indexed_documents, 2);
@@ -1223,12 +1464,37 @@ mod fidelity_identity_tests {
             0,
             "singleton append discovery must not rescan transcript content"
         );
+        assert_eq!(cursor_base_identity_probes(), 1);
+        let appended_ids = indexed_event_ids(&index, "native-session");
+        assert_ids_preserved(&cold_ids, &appended_ids);
 
         append_transcript(&transcript, &second);
-        assert!(
-            refresh_source_backed_generation(&index, &registry, writer_options()).is_err(),
-            "an indistinguishable logical duplicate must fail closed instead of using position as identity"
-        );
+        reset_cursor_projected_records();
+        reset_cursor_signature_records();
+        reset_cursor_base_identity_probes();
+        let first_duplicate =
+            refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+        assert_eq!(first_duplicate.commit.indexed_documents, 3);
+        assert_eq!(cursor_projected_records(), 1);
+        assert_eq!(cursor_signature_records(), 0);
+        assert_eq!(cursor_base_identity_probes(), 2);
+        let first_duplicate_ids = indexed_event_ids(&index, "native-session");
+        assert_ids_preserved(&appended_ids, &first_duplicate_ids);
+        assert_all_ids_distinct(&first_duplicate_ids);
+
+        append_transcript(&transcript, &second);
+        reset_cursor_projected_records();
+        reset_cursor_signature_records();
+        reset_cursor_base_identity_probes();
+        let second_duplicate =
+            refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+        assert_eq!(second_duplicate.commit.indexed_documents, 4);
+        assert_eq!(cursor_projected_records(), 1);
+        assert_eq!(cursor_signature_records(), 0);
+        assert_eq!(cursor_base_identity_probes(), 3);
+        let second_duplicate_ids = indexed_event_ids(&index, "native-session");
+        assert_ids_preserved(&first_duplicate_ids, &second_duplicate_ids);
+        assert_all_ids_distinct(&second_duplicate_ids);
     }
 
     #[test]

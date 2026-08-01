@@ -47,7 +47,7 @@ pub(crate) struct CursorNativeEvent {
     pub(crate) record_byte_start: u64,
     pub(crate) record_byte_end_exclusive: u64,
     pub(crate) record_sha256: [u8; 32],
-    pub(crate) provider_event_hash: String,
+    pub(crate) provider_event_hash: [u8; 32],
 }
 
 pub(super) fn project_cursor_record(
@@ -136,7 +136,7 @@ fn cursor_logical_event_hash(
     role: EventRole,
     occurred_at_unix_ms: Option<i64>,
     body: &CursorEventBody,
-) -> serde_json::Result<String> {
+) -> serde_json::Result<[u8; 32]> {
     let encoded = match body {
         CursorEventBody::None => serde_json::to_vec(&(
             "cursor-logical-event-v2",
@@ -171,5 +171,5 @@ fn cursor_logical_event_hash(
             native_content,
         )),
     }?;
-    Ok(format!("{:x}", Sha256::digest(encoded)))
+    Ok(Sha256::digest(encoded).into())
 }
