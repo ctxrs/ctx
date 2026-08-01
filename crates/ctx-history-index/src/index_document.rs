@@ -6,13 +6,13 @@ use tantivy::schema::{
 };
 
 use ctx_history_core::{
-    CoreContent, CoreRecord, SourceKey, StableEntityId, TypedKey, MAX_CORE_CONTENT_BYTES,
-    MAX_ENCODED_CORE_RECORD_BYTES,
+    CoreContent, CoreRecord, SourceKey, StableEntityId, StableEntityKind, TypedKey,
+    MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
 };
 
 use crate::{Fields, IndexError, Result};
 
-const BASE_FIELD_VALUES: usize = 33;
+const BASE_FIELD_VALUES: usize = 34;
 pub(crate) const SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN: usize = 64;
 pub(crate) const SOURCE_EVENT_ORDER_KEY_LEN: usize = 104;
 const SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET: usize = SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN;
@@ -20,10 +20,23 @@ const SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET: usize = SOURCE_EVENT_ORDER_EVENT_
 const SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET: usize = SOURCE_EVENT_ORDER_ENCODED_BYTES_OFFSET + 4;
 const SOURCE_EVENT_ORDER_SIZE_SUFFIX_LEN: usize = 8;
 const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
-/// The complete body-free query envelope is bounded independently from Core.
-/// One MiB covers every contract-bounded identity and metadata field without
-/// imposing a new limit on otherwise valid Core records.
-pub(crate) const MAX_QUERY_METADATA_BYTES: usize = 1024 * 1024;
+/// Query metadata is a structural subset of the stored Core record encoded by
+/// the same serializer. Its only independent read-time ceiling is therefore
+/// the Core record ceiling, not a narrower escape-sensitive JSON limit.
+pub(crate) const MAX_QUERY_METADATA_BYTES: usize = MAX_ENCODED_CORE_RECORD_BYTES;
+pub(crate) const QUERY_METADATA_CHUNK_BYTES: usize = 60 * 1024;
+pub(crate) const QUERY_METADATA_CHUNK_HEADER_BYTES: usize = 12;
+pub(crate) const QUERY_METADATA_CHUNK_PAYLOAD_BYTES: usize =
+    QUERY_METADATA_CHUNK_BYTES - QUERY_METADATA_CHUNK_HEADER_BYTES;
+pub(crate) const QUERY_METADATA_CHUNK_MAGIC: [u8; 4] = *b"QMD1";
+
+pub(crate) const SESSION_EVENT_ORDER_SESSION_PREFIX_LEN: usize = StableEntityId::CANONICAL_LEN;
+pub(crate) const SESSION_EVENT_ORDER_KEY_LEN: usize =
+    SESSION_EVENT_ORDER_SESSION_PREFIX_LEN + 8 + 9 + 16;
+const SESSION_EVENT_ORDER_SEQUENCE_OFFSET: usize = SESSION_EVENT_ORDER_SESSION_PREFIX_LEN;
+const SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET: usize = SESSION_EVENT_ORDER_SEQUENCE_OFFSET + 8;
+const SESSION_EVENT_ORDER_EVENT_ID_OFFSET: usize = SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 9;
+const SESSION_EVENT_ORDER_FIELD: &str = "session_event_order";
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,7 +60,7 @@ pub(crate) struct StoredQueryMetadata {
 }
 
 impl StoredQueryMetadata {
-    fn encode(record: &CoreRecord) -> Result<Vec<u8>> {
+    pub(crate) fn encode(record: &CoreRecord, encoded_core_record_bytes: usize) -> Result<Vec<u8>> {
         let encoded = serde_json::to_vec(&Self {
             event_id: record.event_id,
             session_id: record.session_id,
@@ -73,7 +86,170 @@ impl StoredQueryMetadata {
                 maximum: MAX_QUERY_METADATA_BYTES,
             });
         }
+        if encoded.len() > encoded_core_record_bytes {
+            return Err(IndexError::WriterInvariant(
+                "query metadata exceeded its accepted encoded Core record",
+            ));
+        }
         Ok(encoded)
+    }
+}
+
+fn encode_query_metadata_chunks(encoded: &[u8]) -> Result<Vec<Vec<u8>>> {
+    if encoded.is_empty() || encoded.len() > MAX_QUERY_METADATA_BYTES {
+        return Err(IndexError::DocumentFieldTooLarge {
+            field: "query_metadata",
+            actual: encoded.len(),
+            maximum: MAX_QUERY_METADATA_BYTES,
+        });
+    }
+    let chunk_count = encoded.len().div_ceil(QUERY_METADATA_CHUNK_PAYLOAD_BYTES);
+    let chunk_count = u16::try_from(chunk_count)
+        .map_err(|_| IndexError::WriterInvariant("query metadata chunk count overflowed"))?;
+    let encoded_len = u32::try_from(encoded.len())
+        .map_err(|_| IndexError::WriterInvariant("query metadata size did not fit u32"))?;
+    let mut chunks = Vec::with_capacity(usize::from(chunk_count));
+    for (index, payload) in encoded
+        .chunks(QUERY_METADATA_CHUNK_PAYLOAD_BYTES)
+        .enumerate()
+    {
+        let index = u16::try_from(index)
+            .map_err(|_| IndexError::WriterInvariant("query metadata chunk index overflowed"))?;
+        let mut chunk = Vec::with_capacity(QUERY_METADATA_CHUNK_HEADER_BYTES + payload.len());
+        chunk.extend_from_slice(&QUERY_METADATA_CHUNK_MAGIC);
+        chunk.extend_from_slice(&index.to_be_bytes());
+        chunk.extend_from_slice(&chunk_count.to_be_bytes());
+        chunk.extend_from_slice(&encoded_len.to_be_bytes());
+        chunk.extend_from_slice(payload);
+        chunks.push(chunk);
+    }
+    Ok(chunks)
+}
+
+/// Exact session-coordinate term used for bounded forward traversal.
+///
+/// Big-endian encoding preserves the existing deterministic session order:
+/// sequence, `None` before `Some(timestamp)`, signed timestamp, then compact
+/// event UUID. The full canonical session identity is the range prefix, so a
+/// compact UUID collision can never mix session ranges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SessionEventOrderKey([u8; SESSION_EVENT_ORDER_KEY_LEN]);
+
+impl SessionEventOrderKey {
+    pub(crate) fn for_core_record(record: &CoreRecord) -> Result<Self> {
+        Self::from_parts(
+            record.session_id,
+            record.event_sequence,
+            record.occurred_at_unix_ms,
+            record.event_id.as_uuid(),
+        )
+    }
+
+    fn from_parts(
+        session_id: StableEntityId,
+        event_sequence: u64,
+        occurred_at_unix_ms: Option<i64>,
+        event_id: uuid::Uuid,
+    ) -> Result<Self> {
+        if session_id.entity_kind() != StableEntityKind::Session {
+            return Err(IndexError::WriterInvariant(
+                "session event order requires a session identity",
+            ));
+        }
+        let mut key = [0_u8; SESSION_EVENT_ORDER_KEY_LEN];
+        key[..SESSION_EVENT_ORDER_SESSION_PREFIX_LEN]
+            .copy_from_slice(&session_id.encode_canonical()?);
+        key[SESSION_EVENT_ORDER_SEQUENCE_OFFSET..SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET]
+            .copy_from_slice(&event_sequence.to_be_bytes());
+        if let Some(occurred_at_unix_ms) = occurred_at_unix_ms {
+            key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET] = 1;
+            let sortable = (occurred_at_unix_ms as u64) ^ (1_u64 << 63);
+            key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 1..SESSION_EVENT_ORDER_EVENT_ID_OFFSET]
+                .copy_from_slice(&sortable.to_be_bytes());
+        }
+        key[SESSION_EVENT_ORDER_EVENT_ID_OFFSET..].copy_from_slice(event_id.as_bytes());
+        Ok(Self(key))
+    }
+
+    pub(crate) fn decode_for_session(session_id: StableEntityId, encoded: &[u8]) -> Result<Self> {
+        let key: [u8; SESSION_EVENT_ORDER_KEY_LEN] = encoded
+            .try_into()
+            .map_err(|_| IndexError::InvalidStoredDocumentField(SESSION_EVENT_ORDER_FIELD))?;
+        let expected_prefix = Self::session_prefix(session_id)?;
+        if key[..SESSION_EVENT_ORDER_SESSION_PREFIX_LEN] != expected_prefix {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_EVENT_ORDER_FIELD,
+            ));
+        }
+        if key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET] > 1
+            || (key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET] == 0
+                && key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 1
+                    ..SESSION_EVENT_ORDER_EVENT_ID_OFFSET]
+                    .iter()
+                    .any(|byte| *byte != 0))
+        {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_EVENT_ORDER_FIELD,
+            ));
+        }
+        Ok(Self(key))
+    }
+
+    pub(crate) fn session_prefix(
+        session_id: StableEntityId,
+    ) -> Result<[u8; SESSION_EVENT_ORDER_SESSION_PREFIX_LEN]> {
+        if session_id.entity_kind() != StableEntityKind::Session {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_EVENT_ORDER_FIELD,
+            ));
+        }
+        Ok(session_id.encode_canonical()?)
+    }
+
+    pub(crate) fn session_range_end(session_id: StableEntityId) -> Result<Vec<u8>> {
+        let mut bound = Vec::with_capacity(SESSION_EVENT_ORDER_KEY_LEN + 1);
+        bound.extend_from_slice(&Self::session_prefix(session_id)?);
+        bound.extend(std::iter::repeat_n(
+            u8::MAX,
+            SESSION_EVENT_ORDER_KEY_LEN - SESSION_EVENT_ORDER_SESSION_PREFIX_LEN + 1,
+        ));
+        Ok(bound)
+    }
+
+    pub(crate) fn event_sequence(self) -> u64 {
+        u64::from_be_bytes(
+            self.0[SESSION_EVENT_ORDER_SEQUENCE_OFFSET..SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET]
+                .try_into()
+                .expect("fixed session event order sequence layout"),
+        )
+    }
+
+    pub(crate) fn occurred_at_unix_ms(self) -> Option<i64> {
+        (self.0[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET] == 1).then(|| {
+            let sortable = u64::from_be_bytes(
+                self.0[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 1
+                    ..SESSION_EVENT_ORDER_EVENT_ID_OFFSET]
+                    .try_into()
+                    .expect("fixed session event order timestamp layout"),
+            );
+            (sortable ^ (1_u64 << 63)) as i64
+        })
+    }
+
+    pub(crate) fn event_id(self) -> uuid::Uuid {
+        uuid::Uuid::from_bytes(
+            self.0[SESSION_EVENT_ORDER_EVENT_ID_OFFSET..]
+                .try_into()
+                .expect("fixed session event order UUID layout"),
+        )
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; SESSION_EVENT_ORDER_KEY_LEN] {
+        &self.0
+    }
+
+    pub(crate) fn into_bytes(self) -> [u8; SESSION_EVENT_ORDER_KEY_LEN] {
+        self.0
     }
 }
 
@@ -355,7 +531,8 @@ impl IndexDocument {
             core_record_bytes.len(),
             core_content_bytes,
         )?;
-        let query_metadata = StoredQueryMetadata::encode(&record)?;
+        let session_event_order = SessionEventOrderKey::for_core_record(&record)?;
+        let query_metadata = StoredQueryMetadata::encode(&record, core_record_bytes.len())?;
         let event_identity = record.event_id.encode_canonical()?;
         let session_identity = record.session_id.encode_canonical()?;
         let parent_session_identity = record
@@ -398,7 +575,9 @@ impl IndexDocument {
         target.add_shared_text(fields.source_key, source.token);
         target.add_shared_text(fields.provider, source.provider);
         target.add_shared_text(fields.source_format, source.source_format);
-        target.add_bytes(fields.query_metadata, query_metadata);
+        for chunk in encode_query_metadata_chunks(&query_metadata)? {
+            target.add_bytes(fields.query_metadata, chunk);
+        }
         if record.source.provider() == "custom" {
             if let Some(TypedKey::Composite(values)) = record.native_event_id.as_ref() {
                 if let [TypedKey::Utf8(provider_key), TypedKey::Utf8(source_id), TypedKey::Utf8(_)] =
@@ -455,6 +634,7 @@ impl IndexDocument {
         );
         target.add_bytes(fields.core_record, core_record_bytes);
         target.add_bytes(fields.source_event_order, source_event_order.into_bytes());
+        target.add_bytes(fields.session_event_order, session_event_order.into_bytes());
         Ok(target)
     }
 }
@@ -637,6 +817,29 @@ mod tests {
                     .unwrap()
             ) as usize,
             content_bytes
+        );
+    }
+
+    #[test]
+    fn session_event_order_key_matches_deterministic_session_coordinates() {
+        let source = source("codex_session_jsonl");
+        let mut record = core_record(&source);
+        record.event_sequence = 42;
+        record.occurred_at_unix_ms = Some(-9);
+        let key = SessionEventOrderKey::for_core_record(&record).unwrap();
+
+        assert_eq!(
+            &key.as_bytes()[..SESSION_EVENT_ORDER_SESSION_PREFIX_LEN],
+            &record.session_id.encode_canonical().unwrap()
+        );
+        assert_eq!(key.event_sequence(), 42);
+        assert_eq!(key.occurred_at_unix_ms(), Some(-9));
+        assert_eq!(key.event_id(), record.event_id.as_uuid());
+        assert!(
+            SessionEventOrderKey::session_range_end(record.session_id)
+                .unwrap()
+                .as_slice()
+                > key.as_bytes()
         );
     }
 

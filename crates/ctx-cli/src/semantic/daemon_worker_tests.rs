@@ -44,6 +44,12 @@ impl CoreFixture {
         self.document_in_session("gemini-session", sequence, role, body)
     }
 
+    fn tool_document(&self, sequence: u64) -> LexicalDocument {
+        let mut document = self.document(sequence, EventRole::Tool, "tool payload");
+        document.event_type = EventType::ToolOutput.as_str().to_owned();
+        document
+    }
+
     fn document_in_session(
         &self,
         native_session_id: &str,
@@ -228,7 +234,7 @@ fn core_builder_pairs_multiple_lite_turns_with_bounded_forward_queries() {
 }
 
 #[test]
-fn core_builder_returns_user_only_when_forward_record_budget_is_exhausted() {
+fn core_builder_streams_multiple_pairing_pages_to_the_final_assistant() {
     let fixture = CoreFixture::new();
     let index = fixture.index(vec![
         fixture.document(1, EventRole::User, "bounded question"),
@@ -243,14 +249,17 @@ fn core_builder_returns_user_only_when_forward_record_budget_is_exhausted() {
         .unwrap();
     let mut builder = CoreSemanticDocumentBuilder {
         index: &index,
-        maximum_pairing_records: 1,
+        pairing_page_records: 1,
         pairing_budget: LITE_TURN_PAIRING_BUDGET,
     };
 
     let document = builder.build_document(&anchor).unwrap().unwrap();
 
-    assert_eq!(document.text, "user:\nbounded question");
-    assert_eq!(document.occurred_at_ms, 1);
+    assert_eq!(
+        document.text,
+        "user:\nbounded question\n\nassistant:\nlate bounded answer"
+    );
+    assert_eq!(document.occurred_at_ms, 3);
 }
 
 #[test]
@@ -302,7 +311,7 @@ fn core_builder_returns_user_only_when_pairing_byte_budget_is_exhausted() {
         .remove(0);
     let mut builder = CoreSemanticDocumentBuilder {
         index: &index,
-        maximum_pairing_records: MAX_LITE_TURN_PAIRING_RECORDS,
+        pairing_page_records: MAX_LITE_TURN_PAIRING_PAGE_RECORDS,
         pairing_budget: CoreEventPageBudget::new(
             ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES,
             1,
@@ -316,15 +325,21 @@ fn core_builder_returns_user_only_when_pairing_byte_budget_is_exhausted() {
 }
 
 #[test]
-fn core_builder_large_session_over_4096_events_falls_back_user_only() {
-    const FOLLOWING_EVENTS: u64 = 4_097;
+fn core_builder_preserves_assistant_after_more_than_sixty_four_tool_events() {
+    const TOOL_EVENTS: u64 = 96;
 
     let fixture = CoreFixture::new();
-    let mut documents = Vec::with_capacity(FOLLOWING_EVENTS as usize + 1);
-    documents.push(fixture.document(1, EventRole::User, "large session question"));
-    for sequence in 2..=FOLLOWING_EVENTS + 1 {
-        documents.push(fixture.document(sequence, EventRole::Assistant, "bounded answer"));
+    let mut documents = Vec::with_capacity(TOOL_EVENTS as usize + 3);
+    documents.push(fixture.document(1, EventRole::User, "tool-heavy question"));
+    for sequence in 2..=TOOL_EVENTS + 1 {
+        documents.push(fixture.tool_document(sequence));
     }
+    documents.push(fixture.document(
+        TOOL_EVENTS + 2,
+        EventRole::Assistant,
+        "answer beyond the old window",
+    ));
+    documents.push(fixture.document(TOOL_EVENTS + 3, EventRole::User, "next question"));
     let index = fixture.index(documents);
     let anchor = index
         .core_semantic_event_page(None, 1)
@@ -335,6 +350,9 @@ fn core_builder_large_session_over_4096_events_falls_back_user_only() {
 
     let document = builder.build_document(&anchor).unwrap().unwrap();
 
-    assert_eq!(document.text, "user:\nlarge session question");
-    assert_eq!(document.occurred_at_ms, 1);
+    assert_eq!(
+        document.text,
+        "user:\ntool-heavy question\n\nassistant:\nanswer beyond the old window"
+    );
+    assert_eq!(document.occurred_at_ms, (TOOL_EVENTS + 2) as i64);
 }

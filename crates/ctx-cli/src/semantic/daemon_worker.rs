@@ -39,7 +39,7 @@ use super::daemon::daemon_test_job;
 
 use crate::output::compact_json;
 
-const MAX_LITE_TURN_PAIRING_RECORDS: usize = 64;
+const MAX_LITE_TURN_PAIRING_PAGE_RECORDS: usize = 64;
 const LITE_TURN_PAIRING_BUDGET: CoreEventPageBudget =
     CoreEventPageBudget::new(64 * 1024 * 1024, 16 * 1024 * 1024);
 
@@ -314,7 +314,7 @@ fn reconcile_source_backed_semantic_page(
 
 struct CoreSemanticDocumentBuilder<'a> {
     index: &'a VerifiedIndex,
-    maximum_pairing_records: usize,
+    pairing_page_records: usize,
     pairing_budget: CoreEventPageBudget,
 }
 
@@ -367,93 +367,17 @@ impl CoreSemanticDocumentBuilder<'_> {
     fn new(index: &VerifiedIndex) -> CoreSemanticDocumentBuilder<'_> {
         CoreSemanticDocumentBuilder {
             index,
-            maximum_pairing_records: MAX_LITE_TURN_PAIRING_RECORDS,
+            pairing_page_records: MAX_LITE_TURN_PAIRING_PAGE_RECORDS,
             pairing_budget: LITE_TURN_PAIRING_BUDGET,
         }
     }
 
     fn paired_assistant(&self, anchor: &CoreEventRecord) -> Result<Option<(String, i64)>> {
-        let session_id = anchor.session_id.as_uuid();
-        let coordinates = self
-            .index
-            .session_event_coordinate_window(
-                session_id,
-                anchor.event_id.as_uuid(),
-                0,
-                self.maximum_pairing_records.saturating_add(1),
-            )?
-            .ok_or_else(|| {
-                anyhow!(
-                    "Core semantic anchor {} is absent from its pinned session",
-                    anchor.event_id
-                )
-            })?;
-        if coordinates.first().map(|coordinate| coordinate.event_id)
-            != Some(anchor.event_id.as_uuid())
-        {
-            return Err(anyhow!(
-                "Core semantic anchor {} did not lead its forward pairing window",
-                anchor.event_id
-            ));
-        }
-        let following = &coordinates[1..];
-        let event_ids = following
-            .iter()
-            .map(|coordinate| coordinate.event_id)
-            .collect::<Vec<_>>();
-        let metadata = self
-            .index
-            .events_by_ids_if_bounded(&event_ids, self.maximum_pairing_records.saturating_add(1))?
-            .ok_or_else(|| anyhow!("Core semantic pairing metadata is incomplete"))?;
-        let next_user = metadata.iter().position(|record| {
-            record.event_type == EventType::Message.as_str()
-                && record.role.as_deref() == Some(EventRole::User.as_str())
-        });
-        if following.len() > self.maximum_pairing_records && next_user.is_none() {
-            return Ok(None);
-        }
-        let assistant_ids = metadata
-            .iter()
-            .take(
-                next_user
-                    .unwrap_or(metadata.len())
-                    .min(self.maximum_pairing_records),
-            )
-            .filter(|record| {
-                record.event_type == EventType::Message.as_str()
-                    && record.role.as_deref() == Some(EventRole::Assistant.as_str())
-            })
-            .map(|record| record.event_id.as_uuid())
-            .collect::<Vec<_>>();
-        let Some(assistants) = self.index.core_events_by_ids_with_strict_budget(
-            &assistant_ids,
-            self.maximum_pairing_records,
+        self.index.semantic_lite_turn_assistant(
+            anchor,
+            self.pairing_page_records,
             self.pairing_budget,
-        )?
-        else {
-            return Ok(None);
-        };
-        let assistant = assistants
-            .items
-            .iter()
-            .filter(|record| {
-                record.session_id == anchor.session_id
-                    && record.event_type == EventType::Message.as_str()
-                    && record.role.as_deref() == Some(EventRole::Assistant.as_str())
-                    && !record
-                        .core_record
-                        .content
-                        .meaningful_text()
-                        .trim()
-                        .is_empty()
-            })
-            .last();
-        Ok(assistant.map(|record| {
-            (
-                record.core_record.content.meaningful_text().to_owned(),
-                record.occurred_at_unix_ms.unwrap_or_default(),
-            )
-        }))
+        )
     }
 }
 
