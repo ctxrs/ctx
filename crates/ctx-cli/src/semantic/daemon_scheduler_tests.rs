@@ -1,12 +1,11 @@
 use std::{path::Path, sync::mpsc, thread, time::Duration};
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, EventIdentityInput, LocatorRevisionPolicy,
-    NativeItemKey, NativeRecordCoordinate, NativeSessionKey, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceObservation, SourceRecordLocator,
-    TypedKey,
+    derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
+    NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceFrontier, SourceObservation, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, LexicalDocument, WriterOptions};
+use ctx_history_index::{GenerationWriter, WriterOptions};
 use serde_json::{json, Value};
 
 use crate::{
@@ -98,7 +97,7 @@ fn readiness_source() -> ctx_history_core::SourceKey {
     .unwrap()
 }
 
-fn readiness_document(source: &ctx_history_core::SourceKey) -> LexicalDocument {
+fn readiness_record(source: &ctx_history_core::SourceKey) -> CoreRecord {
     let native_session = TypedKey::utf8("readiness-session").unwrap();
     let session_key = NativeSessionKey::native_id("session", native_session.clone()).unwrap();
     let session_id = derive_session_id(SessionIdentityInput {
@@ -117,40 +116,28 @@ fn readiness_document(source: &ctx_history_core::SourceKey) -> LexicalDocument {
         subrecord_selector: None,
     })
     .unwrap();
-    LexicalDocument {
+    let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        parent_session_id: None,
-        root_session_id: session_id,
-        source: source.clone(),
-        locator: SourceRecordLocator::new(
-            source.clone(),
-            NativeRecordCoordinate::Jsonl {
-                byte_offset: 0,
-                byte_length: 128,
-                physical_ordinal: 0,
-                native_session_key: Some(native_session),
-                native_event_key: Some(TypedKey::U64(0)),
-            },
-            LocatorRevisionPolicy::StableRecordEvidence,
-            None,
-            [9; 32],
-        )
-        .unwrap(),
-        provider_session_id: Some("readiness-session".to_owned()),
-        branch: Some("main".to_owned()),
-        source_path: Some("/provider/codex/readiness-boundary.jsonl".to_owned()),
-        agent_type: "primary".to_owned(),
-        is_primary: true,
-        event_sequence: 0,
-        occurred_at_unix_ms: Some(1_700_000_000_000),
-        event_type: "message".to_owned(),
-        role: Some("assistant".to_owned()),
-        body: format!("exact lexical hit for {READINESS_QUERY}"),
-        workspace: Some("ctx".to_owned()),
-        cwd: Some("/work/ctx".to_owned()),
-        touched_files: vec!["src/lib.rs".to_owned()],
-    }
+        session_id,
+        source.clone(),
+        0,
+        "message",
+        "primary",
+        true,
+        "daemon-scheduler-test-v1",
+        format!("exact lexical hit for {READINESS_QUERY}"),
+    )
+    .unwrap();
+    record.provider_session_id = Some("readiness-session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(0));
+    record.branch = Some("main".to_owned());
+    record.occurred_at_unix_ms = Some(1_700_000_000_000);
+    record.role = Some("assistant".to_owned());
+    record.workspace = Some("ctx".to_owned());
+    record.cwd = Some("/work/ctx".to_owned());
+    record.validate_contract().unwrap();
+    record
 }
 
 fn readiness_certificate(source: &ctx_history_core::SourceKey) -> CertifiedSource {
@@ -183,7 +170,7 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
     )
     .unwrap();
     writer.begin_source(source.clone()).unwrap();
-    writer.add_document(readiness_document(&source)).unwrap();
+    writer.add_core_record(readiness_record(&source)).unwrap();
     writer
         .certify_source(readiness_certificate(&source))
         .unwrap();

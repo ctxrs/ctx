@@ -18,15 +18,14 @@ use ctx_history_capture::{
     source_backed_route_constructor, source_backed_route_inventory,
     validate_provider_source_roots_outside_data_root, DiscoveryReport, ProviderCatalogSupport,
     ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceStatus,
-    SourceBackedAutomaticRegistryBuild, SourceBackedHydrationSupport, SourceBackedProviderRegistry,
-    SourceBackedRoute, SourceBackedRouteConstructor, SourceBackedRouteDriver,
-    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
-    SourceBackedSelectorAuthority,
+    SourceBackedAutomaticRegistryBuild, SourceBackedProviderRegistry, SourceBackedRoute,
+    SourceBackedRouteConstructor, SourceBackedRouteDriver, SourceBackedRouteError,
+    SourceBackedRouteErrorKind, SourceBackedRouteSelection, SourceBackedSelectorAuthority,
 };
 use ctx_history_core::{
     platform_security::establish_private_data_root, CaptureProvider, CertifiedSource,
-    CertifiedSourceDeletion, CertifiedSourceInventory, HydrationFailure, HydrationFailureKind,
-    SourceAnchor, SourceInventoryObservation, SourceKey, TypedKey,
+    CertifiedSourceDeletion, CertifiedSourceInventory, SourceAnchor, SourceInventoryObservation,
+    SourceKey, TypedKey,
 };
 use ctx_history_index::VerifiedIndex;
 use fs2::FileExt;
@@ -744,12 +743,6 @@ fn register_disabled_catalog_route(
             catalog_disabled_inventory(&current.authority, entry)
                 .is_ok_and(|inventory| deletion.verifies(&inventory))
         },
-        move |_| {
-            Err(HydrationFailure {
-                kind: HydrationFailureKind::ConfirmedDeleted,
-                detail: "the explicit source was disabled by complete catalog authority".to_owned(),
-            })
-        },
     )
     .with_complete_inventory_revalidation(move |expected| {
         let Ok(current) =
@@ -813,13 +806,6 @@ fn validate_catalog_registration_support(source: &ProviderSource) -> Result<()> 
     if let Some(reason) = metadata.unsupported_reason {
         bail!(
             "{} source format `{}` is not source-backed: {reason}; no legacy import fallback was used",
-            source.provider.as_str(),
-            source.source_format
-        );
-    }
-    if metadata.exact_hydration == SourceBackedHydrationSupport::Unsupported {
-        bail!(
-            "{} source format `{}` has no exact source-backed resolver; no legacy import fallback was used",
             source.provider.as_str(),
             source.source_format
         );
