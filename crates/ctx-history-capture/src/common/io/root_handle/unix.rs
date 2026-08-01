@@ -272,9 +272,31 @@ fn open_component(
             Some(libc::ELOOP) => Err(AuthorityOpenError::Rejected(
                 "symlinked provider source path components are rejected",
             )),
-            Some(libc::ENXIO | libc::ENODEV) => Err(AuthorityOpenError::Rejected(
-                "provider source paths must be regular files or directories",
-            )),
+            // `open(2)`'s ENXIO/ENODEV cover most non-regular special files
+            // (FIFOs, device nodes) portably, but a bound Unix-domain socket
+            // is rejected with EOPNOTSUPP on macOS/BSD kernels instead.
+            Some(libc::ENXIO | libc::ENODEV | libc::EOPNOTSUPP) => {
+                Err(AuthorityOpenError::Rejected(
+                    "provider source paths must be regular files or directories",
+                ))
+            }
+            // BSD-derived kernels (observed on macOS) report ENOTDIR rather
+            // than ELOOP for `openat(..., O_NOFOLLOW | O_DIRECTORY)` against a
+            // symlink component. Without this arm, a symlinked ancestor
+            // silently degraded to a bare `std::io::Error` on macOS instead
+            // of the intended rejection that every other platform already
+            // gets via ELOOP. A non-symlink component still legitimately
+            // returns ENOTDIR here too (e.g. a plain regular file standing
+            // in for a directory ancestor), so only reclassify when an
+            // `lstat` confirms the component is actually a symlink.
+            Some(libc::ENOTDIR)
+                if expected == Some(ExpectedType::Directory)
+                    && component_is_symlink(parent, &name) =>
+            {
+                Err(AuthorityOpenError::Rejected(
+                    "symlinked provider source path components are rejected",
+                ))
+            }
             _ => Err(cause.into()),
         };
     }
@@ -286,6 +308,27 @@ fn open_component(
         ));
     }
     Ok(file)
+}
+
+/// Best-effort, TOCTOU-tolerant check for whether `name` under `parent` is
+/// currently a symlink. Used only to select the diagnostic reason on an
+/// `ENOTDIR` failure that already aborted the open; it never grants access
+/// and a failed/ambiguous `lstat` here simply keeps the raw IO error.
+fn component_is_symlink(parent: libc::c_int, name: &CStr) -> bool {
+    let mut stat_buffer: MaybeUninit<libc::stat> = MaybeUninit::uninit();
+    let result = unsafe {
+        libc::fstatat(
+            parent,
+            name.as_ptr(),
+            stat_buffer.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        return false;
+    }
+    let stat = unsafe { stat_buffer.assume_init() };
+    stat.st_mode & libc::S_IFMT == libc::S_IFLNK
 }
 
 fn classify_opened(file: File) -> Result<OpenedPath, AuthorityOpenError> {
