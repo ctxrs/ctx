@@ -2,7 +2,7 @@
 //!
 //! Kimi's authority is compound: one `wire.jsonl` leaf is interpreted together
 //! with its session `state.json` and the root `session_index.jsonl`. This module
-//! certifies that compound observation while leaving generation lifecycle and
+//! validates that compound input while leaving generation lifecycle and
 //! publication to the shared coordinator.
 
 use std::{
@@ -16,12 +16,11 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
     EventIdentityInput, EventType, NativeItemKey, NativeSessionKey, PositionStability,
-    ProjectionContractError, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
-    StableEntityId, TypedKey,
+    ProjectionContractError, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId,
+    TypedKey,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
@@ -47,8 +46,8 @@ use super::super::{
         kimi_output_content, kimi_record_timestamp,
     },
     layout::{
-        canonical_source_root_for_wire, complete_content_auxiliary_paths, KimiFrozenFileMetadata,
-        KimiWireRoute, KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES,
+        auxiliary_paths, canonical_source_root_for_wire, KimiWireRoute,
+        KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES,
     },
     source::KimiWireObservation,
 };
@@ -59,10 +58,7 @@ const KIMI_NATIVE_SESSION_NAMESPACE: &str = "kimi-code-cli-session-v1";
 const KIMI_NATIVE_EVENT_POSITION_KIND: &str = "kimi-code-cli-wire-ordinal-v1";
 const KIMI_LOGICAL_SESSION_KIND: &str = "agent-session";
 const KIMI_LOGICAL_EVENT_KIND: &str = "wire-event";
-const KIMI_SOURCE_REVISION_KIND: &str = "kimi-code-cli-compound-leaf-sha256-v1";
 const KIMI_SOURCE_PARSER_REVISION: &str = "kimi-code-cli-source-backed-v2";
-const KIMI_REVISION_DOMAIN: &[u8] = b"ctx.kimi.source-backed.revision.v1\0";
-const KIMI_ABSENT_AUXILIARY_DIGEST: [u8; 32] = [0; 32];
 const KIMI_DISCOVERY_MAX_DEPTH: usize = 16;
 const KIMI_DISCOVERY_MAX_ENTRIES: usize = 65_536;
 
@@ -99,52 +95,10 @@ mod records;
 use records::core_record;
 
 #[derive(Clone, Debug)]
-struct AuxiliarySnapshot {
-    length: u64,
-    digest: [u8; 32],
-    revision: Option<String>,
-}
-
-impl AuxiliarySnapshot {
-    fn absent() -> Self {
-        Self {
-            length: 0,
-            digest: KIMI_ABSENT_AUXILIARY_DIGEST,
-            revision: None,
-        }
-    }
-
-    fn feed_revision(&self, digest: &mut Sha256, label: &[u8]) {
-        digest.update((label.len() as u64).to_be_bytes());
-        digest.update(label);
-        digest.update(self.length.to_be_bytes());
-        digest.update(self.digest);
-        match &self.revision {
-            Some(revision) => {
-                digest.update(1_u8.to_be_bytes());
-                digest.update((revision.len() as u64).to_be_bytes());
-                digest.update(revision.as_bytes());
-            }
-            None => digest.update(0_u8.to_be_bytes()),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
 struct KimiCompoundObservation {
     native: KimiWireObservation,
     source: SourceKey,
-    observation: SourceObservation,
     relative_file_key: Vec<u8>,
-}
-
-impl KimiCompoundObservation {
-    fn source_revision_digest(&self) -> KimiSourceBackedResult<[u8; 32]> {
-        self.observation
-            .revision()
-            .try_into()
-            .map_err(|_| KimiSourceBackedError::SourceChanged)
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -495,7 +449,7 @@ fn admit_compound_leaf_from_opened(
     wire: &OpenedProviderSourceFile,
 ) -> KimiSourceBackedResult<AdmittedKimiCompound> {
     let display_path = authority.named_path().join(relative_path);
-    let (state_path, index_path) = complete_content_auxiliary_paths(&display_path)?;
+    let (state_path, index_path) = auxiliary_paths(&display_path)?;
     let state_relative = state_path
         .strip_prefix(authority.named_path())
         .map_err(|_| KimiSourceBackedError::SourceChanged)?;
@@ -524,28 +478,10 @@ fn admit_compound_leaf_from_opened(
         return Err(KimiSourceBackedError::SourceChanged);
     }
     let source = source_key(&native.session.provider_session_id)?;
-    let state_snapshot = auxiliary_snapshot(state.as_ref(), state_bytes.as_deref())?;
-    let index_snapshot = auxiliary_snapshot(index.as_ref(), index_bytes.as_deref())?;
-    let mut revision = Sha256::new();
-    revision.update(KIMI_REVISION_DOMAIN);
-    revision.update(source.exact_descriptor_digest());
-    revision.update((relative_file_key.len() as u64).to_be_bytes());
-    revision.update(&relative_file_key);
-    let wire_revision = native.wire().revision_component();
-    revision.update((wire_revision.len() as u64).to_be_bytes());
-    revision.update(wire_revision.as_bytes());
-    state_snapshot.feed_revision(&mut revision, b"state.json");
-    index_snapshot.feed_revision(&mut revision, b"session_index.jsonl");
-    let observation = SourceObservation::new(
-        source.clone(),
-        KIMI_SOURCE_REVISION_KIND,
-        revision.finalize().to_vec(),
-    )?;
     Ok(AdmittedKimiCompound {
         compound: KimiCompoundObservation {
             native,
             source,
-            observation,
             relative_file_key,
         },
         state,
@@ -579,22 +515,6 @@ fn read_auxiliary_bytes(
     Ok(Some(
         file.read_all_bounded(KIMI_WIRE_LAYOUT_MAX_AGGREGATE_BYTES)?,
     ))
-}
-
-fn auxiliary_snapshot(
-    file: Option<&OpenedProviderSourceFile>,
-    bytes: Option<&[u8]>,
-) -> KimiSourceBackedResult<AuxiliarySnapshot> {
-    let (Some(file), Some(bytes)) = (file, bytes) else {
-        return Ok(AuxiliarySnapshot::absent());
-    };
-    Ok(AuxiliarySnapshot {
-        length: file.len(),
-        digest: Sha256::digest(bytes).into(),
-        revision: Some(
-            KimiFrozenFileMetadata::from_metadata(file.metadata())?.revision_component(),
-        ),
-    })
 }
 
 fn source_key(provider_session_id: &str) -> KimiSourceBackedResult<SourceKey> {

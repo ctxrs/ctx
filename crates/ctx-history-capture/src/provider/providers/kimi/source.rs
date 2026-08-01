@@ -36,14 +36,13 @@ pub(super) struct KimiWireSessionState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct KimiWireObservation {
+    #[cfg(test)]
     layout: KimiWireLayout,
     pub(super) session: KimiWireSessionState,
 }
 
 impl KimiWireObservation {
-    // Direct-path observation remains the parity oracle for admitted-handle
-    // complete-content decoding and platform metadata checks.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn read(path: &Path) -> Result<Self> {
         Self::from_layout(KimiWireLayout::read(path)?)
     }
@@ -135,25 +134,14 @@ impl KimiWireObservation {
             archived: state.get("archived").and_then(Value::as_bool),
             auxiliary_revision,
         };
-        Ok(Self { layout, session })
+        Ok(Self {
+            #[cfg(test)]
+            layout,
+            session,
+        })
     }
 
-    pub(super) fn canonical_path(&self) -> &Path {
-        self.layout.canonical_wire_path()
-    }
-
-    pub(super) fn wire(&self) -> &super::layout::KimiFrozenFileMetadata {
-        self.layout.wire()
-    }
-
-    pub(super) fn complete_content_revision(&self, admission_scope_revision: &str) -> String {
-        format!(
-            "kimi-wire-jsonl-content-v1:aux={:016x};scope={admission_scope_revision}",
-            self.session.auxiliary_revision,
-        )
-    }
-
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn revalidate(&self, path: &Path) -> Result<bool> {
         self.layout.revalidate(path)
     }

@@ -2,7 +2,6 @@ use std::{ops::Range, path::PathBuf};
 
 use serde::Serialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::{
     provider::file_touches::visit_provider_file_touch_drafts_with_limit,
@@ -11,8 +10,8 @@ use crate::{
 
 use super::{
     decode::{
-        decode_bool, decode_f64, decode_i64, decode_string, decode_unbounded_string,
-        validate_and_root, JsonArrayCursor, JsonKind, JsonSpan,
+        decode_f64, decode_string, decode_unbounded_string, validate_and_root, JsonArrayCursor,
+        JsonKind, JsonSpan,
     },
     normalize::{
         normalize_continue_document, normalize_event, ContinueEventRow, ContinueFileTouch,
@@ -188,10 +187,6 @@ pub(super) struct RawContinueMessage {
 #[derive(Debug)]
 pub(super) struct RawContinueMessageCall {
     pub(super) id: Option<String>,
-    // Preserve provider call classification in the decoded release shape even
-    // while Core normalization uses the call name and file-touch evidence.
-    #[allow(dead_code)]
-    pub(super) kind: Option<String>,
     pub(super) name: Option<String>,
     pub(super) file_touches: Vec<ContinueFileTouch>,
 }
@@ -209,21 +204,11 @@ pub(super) struct RawContinueToolCallState {
     pub(super) tool_call_id: Option<String>,
     pub(super) tool_call: Option<RawContinueToolCall>,
     pub(super) status: Option<String>,
-    // Exit accounting remains exact provider evidence for Pro/cross-target
-    // consumers; Core currently derives outcome from status.
-    #[allow(dead_code)]
-    pub(super) exit_code: Option<i64>,
-    #[allow(dead_code)]
-    pub(super) duration_ms: Option<i64>,
-    #[allow(dead_code)]
-    pub(super) timed_out: Option<bool>,
 }
 
 #[derive(Debug)]
 pub(super) struct RawContinueToolCall {
     pub(super) id: Option<String>,
-    #[allow(dead_code)]
-    pub(super) kind: Option<String>,
     pub(super) name: Option<String>,
     pub(super) function_name: Option<String>,
     pub(super) file_touches: Vec<ContinueFileTouch>,
@@ -418,7 +403,6 @@ impl ContinueSourcePageStream {
                     "Continue observed history count exceeds usize".to_owned(),
                 ));
             }
-            let source_record_digest = Sha256::digest(item.raw()).into();
             let Some(item) =
                 parse_history_item(item, &mut self.output_exclusion).map_err(|message| {
                     ContinueSourceFailure::from_snapshot(
@@ -441,9 +425,8 @@ impl ContinueSourcePageStream {
                     })?;
                 continue;
             };
-            let event =
-                normalize_event(&self.session_identity, ordinal, &item, source_record_digest)
-                    .map_err(|error| normalization_failure(&self.snapshot, ordinal, error))?;
+            let event = normalize_event(&self.session_identity, ordinal, &item)
+                .map_err(|error| normalization_failure(&self.snapshot, ordinal, error))?;
             self.authority.retained_events = self
                 .authority
                 .retained_events
@@ -458,67 +441,6 @@ impl ContinueSourcePageStream {
             return Ok(Some(ContinueRetainedEvent { event }));
         }
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum ContinueExactHistoryLookup<'a> {
-    DifferentSession,
-    MissingItem,
-    Items(Vec<&'a [u8]>),
-}
-
-/// Resolves one exact physical `history` element with the same bounded
-/// structural parser used by ingestion.
-///
-/// The returned bytes borrow the already-certified whole-document snapshot;
-/// no second JSON representation or normalized record is created.
-pub(super) fn locate_continue_exact_history_items<'a>(
-    bytes: &'a [u8],
-    expected_session_id: &str,
-    history_ordinals: &[u64],
-) -> Result<ContinueExactHistoryLookup<'a>, String> {
-    let root = validate_and_root(bytes)
-        .map_err(|error| format!("invalid Continue session JSON: {error}"))?;
-    let (mut document, history) = parse_document(root)?;
-    if document.session_id_conflict {
-        return Err(
-            "Continue document asserts conflicting duplicate top-level sessionId values".to_owned(),
-        );
-    }
-    let session_id = document
-        .session_id
-        .take()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "Continue document has no nonempty top-level sessionId".to_owned())?;
-    if session_id.len() > MAX_CONTINUE_SESSION_ID_BYTES || session_id.chars().any(char::is_control)
-    {
-        return Err(
-            "Continue sessionId exceeds identity bounds or contains control characters".to_owned(),
-        );
-    }
-    if session_id != expected_session_id {
-        return Ok(ContinueExactHistoryLookup::DifferentSession);
-    }
-    let Some(history) = history else {
-        return Ok(ContinueExactHistoryLookup::MissingItem);
-    };
-    let mut resolved = vec![None; history_ordinals.len()];
-    let mut cursor = JsonArrayCursor::new(history.raw()).map_err(scan_error)?;
-    let mut ordinal = 0_u64;
-    while let Some(item) = cursor.next(history.raw()).map_err(scan_error)? {
-        for (index, expected) in history_ordinals.iter().enumerate() {
-            if ordinal == *expected {
-                resolved[index] = Some(item.raw());
-            }
-        }
-        ordinal = ordinal
-            .checked_add(1)
-            .ok_or_else(|| "Continue history ordinal exceeds u64".to_owned())?;
-    }
-    Ok(match resolved.into_iter().collect::<Option<Vec<_>>>() {
-        Some(items) => ContinueExactHistoryLookup::Items(items),
-        None => ContinueExactHistoryLookup::MissingItem,
-    })
 }
 
 fn normalization_failure(

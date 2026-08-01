@@ -98,11 +98,6 @@ pub(crate) struct ContinueSessionRow {
 pub(crate) struct ContinueEventRow {
     pub(crate) identity: ContinueEventIdentity,
     pub(crate) native_item_id: Option<String>,
-    /// SHA-256 of the exact provider-owned `history` array element.
-    ///
-    /// This is locator integrity evidence only. It is not part of event
-    /// identity and must never be used as a Core output-content hash.
-    pub(crate) source_record_digest: [u8; 32],
     pub(crate) kind: ContinueEventKind,
     pub(crate) role: ContinueEventRole,
     pub(crate) occurred_at: Option<DateTime<Utc>>,
@@ -302,7 +297,6 @@ pub(super) fn normalize_event(
     session: &ContinueSessionIdentity,
     history_ordinal: u64,
     item: &RawContinueHistoryItem,
-    source_record_digest: [u8; 32],
 ) -> Result<ContinueEventRow, NormalizeEventError> {
     let search_text = continue_retained_text(item);
     if search_text.len() > CONTINUE_NATIVE_MAX_RETAINED_ITEM_BYTES {
@@ -317,7 +311,6 @@ pub(super) fn normalize_event(
             history_ordinal,
         },
         native_item_id: item.id.clone(),
-        source_record_digest,
         kind: if item.tool_call_states.is_empty()
             && item
                 .message

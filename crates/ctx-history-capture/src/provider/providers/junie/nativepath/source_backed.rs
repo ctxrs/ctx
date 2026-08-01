@@ -12,7 +12,6 @@ use ctx_history_core::{
     SourceAnchor, SourceKey, StableEntityId, TypedKey,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
@@ -30,7 +29,7 @@ use super::super::session_tree::{
     bounded_junie_index_meta, junie_provider_session_id, visit_junie_session_event_paths,
     JunieIndexMeta,
 };
-use super::projection::{EventDraft, JunieProjection, SourceBackedTarget};
+use super::projection::{EventDraft, JunieProjection};
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "junie.session-events";
 const NATIVE_SESSION_NAMESPACE: &str = "junie.session";
@@ -39,7 +38,6 @@ const LOGICAL_SESSION_KIND: &str = "junie-session";
 const LOGICAL_EVENT_KIND: &str = "junie-event";
 const SOURCE_SCHEMA_VARIANT: &str = "junie-session-events-v2";
 const PARSER_REVISION: &str = "junie-source-backed-v3";
-const RELATIVE_EVENTS_FILE: &str = "events.jsonl";
 const METADATA_TEXT_MAX_CHARS: usize = 2_048;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,7 +260,7 @@ fn core_record(
         subrecord_selector: None,
     })
     .map_err(contract)?;
-    let body = lexical_body(&row);
+    let body = row.text.clone();
     if body.is_empty() {
         return Err(CaptureError::InvalidPayload(
             "Junie source-backed event has no exact lexical text".to_owned(),
@@ -305,17 +303,6 @@ fn core_record(
     record.content.structured_content = structured_content;
     record.validate_contract().map_err(contract)?;
     Ok(record)
-}
-
-fn lexical_body(row: &EventDraft) -> String {
-    match &row.source_backed_binding.target {
-        SourceBackedTarget::StepOutput { .. } => row
-            .body
-            .get("details")
-            .and_then(Value::as_str)
-            .map_or_else(|| row.text.clone(), str::to_owned),
-        _ => row.text.clone(),
-    }
 }
 
 fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<JunieBinding> {

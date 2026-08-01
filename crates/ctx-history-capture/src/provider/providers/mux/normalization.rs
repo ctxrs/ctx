@@ -273,8 +273,7 @@ pub(crate) fn mux_result_content(value: &Value) -> Option<String> {
     }
 }
 
-/// Cheap aggregate output classification performed before event identity, result hashing, or
-/// verified-content locator construction.
+/// Cheap aggregate output classification performed before event identity and Core projection.
 ///
 /// Mux stores several dynamic-tool parts in one message. Keep that message cardinality and retain
 /// every native call association in source order; the transient output contract must not force the

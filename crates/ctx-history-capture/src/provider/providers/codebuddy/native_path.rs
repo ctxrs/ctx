@@ -7,7 +7,6 @@
 
 use std::{
     collections::BTreeMap,
-    fs::Metadata,
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Arc,
@@ -26,7 +25,6 @@ use crate::{
     provider::{
         normalization::{provider_role, provider_value_text},
         provider_safe_path_segment,
-        providers::task_json::task_json_time_field,
     },
     CaptureError, ProviderAdapterContext, Result, CODEBUDDY_SOURCE_FORMAT,
     MAX_PROVIDER_JSONL_LINE_BYTES,
@@ -74,21 +72,11 @@ struct CodeBuddySessionState {
     native_session_id: String,
     project_hash: String,
     cwd: Option<String>,
-    started_at: Option<String>,
-    ended_at: Option<String>,
     generated_title: Option<String>,
     row_count: u64,
 }
 
 impl CodeBuddySessionState {
-    fn started_at(&self) -> Result<Option<DateTime<Utc>>> {
-        scan_time(self.started_at.as_deref(), "start time")
-    }
-
-    fn ended_at(&self) -> Result<Option<DateTime<Utc>>> {
-        scan_time(self.ended_at.as_deref(), "end time")
-    }
-
     fn provider_session_id(&self) -> String {
         format!("{}/{}", self.project_hash, self.native_session_id)
     }
@@ -98,8 +86,6 @@ impl CodeBuddySessionState {
             .saturating_add(self.native_session_id.len())
             .saturating_add(self.project_hash.len())
             .saturating_add(self.cwd.as_ref().map_or(0, String::len))
-            .saturating_add(self.started_at.as_ref().map_or(0, String::len))
-            .saturating_add(self.ended_at.as_ref().map_or(0, String::len))
             .saturating_add(self.generated_title.as_ref().map_or(0, String::len))
     }
 }
@@ -186,12 +172,6 @@ struct CodeBuddyObservedFile {
 #[derive(Debug)]
 struct CodeBuddyRecord {
     native_ordinal: u64,
-    // Physical line remains parser evidence for cross-target diagnostics even
-    // though release projection keys records by native ordinal.
-    #[allow(dead_code)]
-    physical_line: usize,
-    byte_start: Option<u64>,
-    byte_end_exclusive: Option<u64>,
     native_bytes: Vec<u8>,
     classification: CodeBuddyRecordClassification,
 }
@@ -227,6 +207,3 @@ use discovery::*;
 use parsing::*;
 use projection::*;
 pub(crate) use source_backed::registration::register as register_source_backed_route;
-pub(crate) use source_backed::{
-    codebuddy_cli_complete_content_record, codebuddy_cli_complete_content_source_from_admitted,
-};
