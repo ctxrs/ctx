@@ -697,7 +697,7 @@ fn event_bodies_live_in_the_spool_or_one_bounded_emission_page() {
 
     let temp = tempdir().unwrap();
     let path = temp.path().join("bounded-spool.jsonl");
-    let body = "b".repeat(BODY_BYTES);
+    let expected_body = "b".repeat(BODY_BYTES);
     let mut records = Vec::with_capacity(3 + EVENTS);
     records.extend([manifest(), source(), session("root", None, true)]);
     for index in 0..EVENTS {
@@ -705,7 +705,7 @@ fn event_bodies_live_in_the_spool_or_one_bounded_emission_page() {
             u64::try_from(index).unwrap(),
             &format!("event-{index:03}"),
             "root",
-            &body,
+            &expected_body,
         ));
     }
     write_records(&path, &records);
@@ -716,7 +716,9 @@ fn event_bodies_live_in_the_spool_or_one_bounded_emission_page() {
     let work = custom_history_source_backed_work();
 
     assert_eq!(documents.len(), EVENTS);
-    assert!(documents.iter().all(|document| body(document) == body));
+    assert!(documents
+        .iter()
+        .all(|document| body(document) == expected_body));
     assert!(pages.len() > 1);
     assert_eq!(work.projection_parses, 1);
     assert_eq!(work.source_read_passes, 1);

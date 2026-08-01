@@ -92,8 +92,6 @@ pub(super) fn firebender_core_record(
     let message_index_u64 =
         u64::try_from(message_index).map_err(|_| FirebenderSourceBackedError::CountOverflow)?;
     let event = firebender_event_parts(
-        &row.id,
-        message_index_u64,
         message,
         firebender_message_occurred_at(row, message_index, message),
     );

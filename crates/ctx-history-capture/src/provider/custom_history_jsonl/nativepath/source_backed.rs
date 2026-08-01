@@ -63,7 +63,6 @@ const CUSTOM_CHECKPOINT_VERSION: u32 = 2;
 pub(super) const CUSTOM_PAGE_MAX_DOCUMENTS: usize = 64;
 pub(super) const CUSTOM_PAGE_MAX_RETAINED_BYTES: usize = 1024 * 1024;
 pub(super) const CUSTOM_DOCUMENT_METADATA_MAX_BYTES: usize = 64 * 1024;
-pub(super) const CUSTOM_DOCUMENT_MAX_TOUCHED_FILES: usize = 256;
 pub(super) const CUSTOM_HISTORY_CATALOG_MAX_RECORDS: usize = 1_000_000;
 pub(super) const CUSTOM_HISTORY_CATALOG_MAX_METADATA_BYTES: usize = 256 * 1024 * 1024;
 
@@ -467,24 +466,15 @@ impl SpooledCustomEvent {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct TouchSpoolRef {
-    pub(super) byte_offset: u64,
-    pub(super) byte_length: usize,
-}
-
 #[derive(Debug)]
 pub(super) struct ParsedProjection {
     pub(super) sources: BTreeMap<String, CustomSourceCatalogEntry>,
     pub(super) sessions: BTreeMap<CustomSessionKey, CustomSessionCatalogEntry>,
     pub(super) session_roots: BTreeMap<CustomSessionKey, String>,
     pub(super) events: BTreeMap<CustomEventKey, CustomEventCatalogEntry>,
-    pub(super) event_touches: BTreeMap<CustomEventKey, Vec<TouchSpoolRef>>,
     pub(super) event_spool: File,
-    pub(super) touch_spool: File,
     observed_prior_prefix_digest: Option<[u8; 32]>,
     retained_records_before_prior_prefix: Option<u64>,
-    appended_touch_changes_prior_document: bool,
     counts: ScannedSourceCounts,
     checkpoint: CustomHistoryCheckpoint,
     content_digest: [u8; 32],
@@ -776,9 +766,6 @@ fn classify_projection(
     if projection.retained_records_before_prior_prefix != Some(prior.counts().indexed_documents) {
         return Ok(replacement());
     }
-    if projection.appended_touch_changes_prior_document {
-        return Ok(replacement());
-    }
     match CertifiedSourceAppend::certify(
         prior,
         certificate.clone(),
@@ -793,18 +780,6 @@ fn classify_projection(
         Err(ProjectionContractError::AppendCountRegression) => Ok(replacement()),
         Err(error) => Err(error.into()),
     }
-}
-
-pub(super) fn custom_session_typed_key(
-    provider_key: &str,
-    source_id: &str,
-    session_id: &str,
-) -> CustomHistorySourceBackedResult<TypedKey> {
-    Ok(TypedKey::composite(vec![
-        TypedKey::utf8(provider_key)?,
-        TypedKey::utf8(source_id)?,
-        TypedKey::utf8(session_id)?,
-    ])?)
 }
 
 pub(super) fn custom_session_identity(
@@ -826,12 +801,6 @@ pub(super) fn custom_session_identity(
         logical_session_kind: CUSTOM_LOGICAL_SESSION_KIND,
         native_session_key: &native_session_key,
     })?)
-}
-
-fn custom_event_typed_key(
-    event: &CtxHistoryJsonlEventRecord,
-) -> CustomHistorySourceBackedResult<TypedKey> {
-    custom_event_typed_key_parts(event.event_id.as_deref(), event.event_index)
 }
 
 pub(super) fn custom_event_typed_key_parts(

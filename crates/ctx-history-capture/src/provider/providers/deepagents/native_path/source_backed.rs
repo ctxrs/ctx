@@ -160,18 +160,11 @@ impl DeepAgentsDatabaseSelectionV0 {
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
-
-    // Route identity is retained with the selected path as provenance evidence.
-    #[allow(dead_code)]
-    pub(crate) fn route(&self) -> DeepAgentsDatabaseRouteV0 {
-        self.route
-    }
 }
 
 #[derive(Debug)]
 struct PendingWriteV0 {
     key: DeepAgentsWriteKey,
-    record_digest: [u8; 32],
     session_id: StableEntityId,
     occurred_at: DateTime<Utc>,
     cwd: Option<String>,
@@ -185,10 +178,6 @@ struct PendingWriteV0 {
 pub(crate) struct DeepAgentsSourceBackedScanV0 {
     pub(crate) source: SourceKey,
     pub(crate) certificate: CertifiedSource,
-    #[cfg(test)]
-    pub(crate) selected_path: PathBuf,
-    #[cfg(test)]
-    pub(crate) selected_route: DeepAgentsDatabaseRouteV0,
     pub(crate) terminal_fence: DeepAgentsSourceTerminalFence,
     pub(crate) row_decode_passes: u64,
     pub(crate) decoded_rows: u64,
@@ -202,8 +191,6 @@ pub(crate) struct DeepAgentsSourceTerminalFence {
 
 /// Bounded scanner for one immutable observation of the selected sessions DB.
 pub(crate) struct DeepAgentsSourceBackedScannerV0 {
-    #[cfg(test)]
-    selection: DeepAgentsDatabaseSelectionV0,
     evidence: SqliteSourceEvidence,
     source_root: Option<ProviderSourceRoot>,
     sqlite_snapshot: Option<SqliteSourceReadSnapshot>,
@@ -211,7 +198,6 @@ pub(crate) struct DeepAgentsSourceBackedScannerV0 {
     schema_evidence: Vec<u8>,
     logical_fingerprint: [u8; 32],
     context: ProviderAdapterContext,
-    source_path: String,
     after_rowid: Option<i64>,
     pending_candidates: VecDeque<DeepAgentsWriteCandidate>,
     checkpoint_times: BTreeMap<(String, String), DateTime<Utc>>,
@@ -251,10 +237,7 @@ impl DeepAgentsSourceBackedScannerV0 {
             source_root: None,
             imported_at,
         };
-        let source_path = selection.path().display().to_string();
         Ok(Self {
-            #[cfg(test)]
-            selection,
             evidence,
             source_root: Some(source_root),
             sqlite_snapshot: Some(sqlite_snapshot),
@@ -262,7 +245,6 @@ impl DeepAgentsSourceBackedScannerV0 {
             schema_evidence,
             logical_fingerprint,
             context,
-            source_path,
             after_rowid: None,
             pending_candidates: VecDeque::new(),
             checkpoint_times: BTreeMap::new(),
@@ -381,10 +363,6 @@ impl DeepAgentsSourceBackedScannerV0 {
         Ok(DeepAgentsSourceBackedScanV0 {
             source: self.source,
             certificate,
-            #[cfg(test)]
-            selected_path: self.selection.path,
-            #[cfg(test)]
-            selected_route: self.selection.route,
             terminal_fence: DeepAgentsSourceTerminalFence {
                 evidence: closing_evidence,
             },
@@ -500,7 +478,6 @@ impl DeepAgentsSourceBackedScannerV0 {
                 .ok_or(DeepAgentsSourceBackedErrorV0::CountOverflow)?;
             self.pending = Some(PendingWriteV0 {
                 key,
-                record_digest,
                 session_id,
                 occurred_at,
                 cwd: self

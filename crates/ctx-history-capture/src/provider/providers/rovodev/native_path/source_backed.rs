@@ -364,7 +364,6 @@ fn bounded_failure(error: impl Into<String>) -> String {
 #[derive(Debug)]
 struct RovoDevSnapshot {
     frozen: RovoDevSessionObservation,
-    context_sha256: [u8; 32],
     source_sha256: [u8; 32],
     certified_bytes: u64,
     document: std::result::Result<PreparedDocument, String>,
@@ -423,7 +422,6 @@ impl RovoDevSnapshot {
         files.revalidate()?;
         Ok(Self {
             frozen: source.opening.clone(),
-            context_sha256: context_file.sha256,
             source_sha256,
             certified_bytes,
             document,

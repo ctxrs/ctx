@@ -98,10 +98,6 @@ impl OpenCodeSourceBackedRegistration {
         self.dialect.provider
     }
 
-    pub(crate) const fn source_format(self) -> &'static str {
-        self.dialect.source_format
-    }
-
     #[cfg(test)]
     pub(crate) fn scan(
         self,
@@ -556,14 +552,6 @@ fn schema_family_for_source(
     })
 }
 
-fn open_root_authorized_snapshot(
-    data_root: &Path,
-    path: &Path,
-) -> OpenCodeSourceBackedResult<(ProviderSourceRoot, SqliteSourceReadSnapshot)> {
-    let authorized = open_root_authorized_snapshot_retained(data_root, path)?;
-    Ok((authorized.source_root, authorized.sqlite_snapshot))
-}
-
 fn open_root_authorized_snapshot_retained(
     data_root: &Path,
     path: &Path,
@@ -710,13 +698,6 @@ fn hash_source_event(hasher: &mut Sha256, event: &SourceEventRow) {
     }]);
     hash_bytes(hasher, &event.projection_bytes);
     event.source_data.hash_into(hasher);
-}
-
-fn source_event_row_digest(event: &SourceEventRow) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"ctx-opencode-family-logical-row-v1\0");
-    hash_source_event(&mut hasher, event);
-    hasher.finalize().into()
 }
 
 fn hash_native_order(hasher: &mut Sha256, order: &super::model::OpenCodeNativeOrder) {

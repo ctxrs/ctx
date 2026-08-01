@@ -169,7 +169,7 @@ where
 
     fn discover_with_base(
         &self,
-        base_sources: &[CertifiedSource],
+        _base_sources: &[CertifiedSource],
     ) -> SourceBackedRouteResult<
         CompleteDocumentTree<SqliteInventoryDocumentLeaf<A::Leaf>, SqliteInventoryTreeAuthority>,
     > {
@@ -184,8 +184,10 @@ where
             // authority, bounding descriptors by worker count.
             let retained = RetainedSqliteInventoryLeaf::retain(&self.data_root, &leaf.path)?;
             drop(retained);
+            #[cfg(test)]
             let base_certificate =
-                exact_base_certificate(base_sources, &leaf.source, self.parser_revision()).cloned();
+                exact_base_certificate(_base_sources, &leaf.source, self.parser_revision())
+                    .cloned();
             catalog_leaves.push(catalog_leaf);
             fingerprints.push(catalog_leaf);
             observed.push(ObservedDocumentLeaf::with_durable_replay(
@@ -195,6 +197,7 @@ where
                     source: leaf.source,
                     path: leaf.path,
                     catalog_fingerprint: catalog_leaf,
+                    #[cfg(test)]
                     base_certificate,
                     provider_leaf: leaf.provider_leaf,
                     terminal_revalidate: Mutex::new(None),
@@ -222,6 +225,7 @@ pub(super) struct SqliteInventoryDocumentLeaf<L> {
     source: SourceKey,
     path: PathBuf,
     catalog_fingerprint: [u8; 32],
+    #[cfg(test)]
     base_certificate: Option<CertifiedSource>,
     provider_leaf: L,
     terminal_revalidate: Mutex<Option<Box<dyn Fn() -> bool + Send + Sync>>>,
@@ -356,6 +360,7 @@ where
                 "logical scan returned an unexpected source certificate",
             ));
         }
+        #[cfg(test)]
         retained
             .authority
             .record_logical_projection(
@@ -488,6 +493,7 @@ fn sqlite_catalog_leaf_fingerprint(source: &SourceKey, path: &Path) -> [u8; 32] 
     digest.finalize().into()
 }
 
+#[cfg(test)]
 fn exact_base_certificate<'a>(
     base_sources: &'a [CertifiedSource],
     source: &SourceKey,

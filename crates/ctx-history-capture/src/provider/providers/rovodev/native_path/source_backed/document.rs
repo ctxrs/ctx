@@ -202,32 +202,6 @@ impl RovoDevTreeAuthority {
         })
     }
 
-    fn candidate_source_indices(
-        &self,
-        expected: &SourceKey,
-    ) -> RovoDevSourceBackedResult<Vec<usize>> {
-        let mut candidates = Vec::new();
-        for (index, source) in self.sources.iter().enumerate() {
-            let directory_source = rovodev_source_key(&source.source.provider_session_id)?;
-            if directory_source.exact_descriptor_eq(expected) {
-                candidates.push(index);
-            }
-        }
-
-        let mut lineage = self
-            .lineage
-            .lock()
-            .map_err(|_| RovoDevSourceBackedError::LineageCacheUnavailable)?;
-        for index in 0..self.sources.len() {
-            let header =
-                ensure_document_header(&mut lineage, &self.sources, &self.counters, index)?;
-            if header.source_key.exact_descriptor_eq(expected) && !candidates.contains(&index) {
-                candidates.push(index);
-            }
-        }
-        Ok(candidates)
-    }
-
     pub(super) fn revalidate_opening(&self) -> RovoDevSourceBackedResult<()> {
         self.authority.revalidate()?;
         Ok(())
@@ -636,16 +610,8 @@ pub(super) fn scan_rovodev_document(
                                 .map_err(rovodev_route_error)?;
                         }
                         sink.emit_core_record(
-                            core_record(
-                                source,
-                                &bound,
-                                &snapshot,
-                                document,
-                                raw_message,
-                                index,
-                                event,
-                            )
-                            .map_err(rovodev_route_error)?,
+                            core_record(&bound, &snapshot, document, raw_message, index, event)
+                                .map_err(rovodev_route_error)?,
                         )?;
                         counts.retained_records =
                             checked_add(counts.retained_records, 1).map_err(rovodev_route_error)?;
@@ -695,7 +661,6 @@ fn checked_add(left: u64, right: u64) -> RovoDevSourceBackedResult<u64> {
 }
 
 fn core_record(
-    source: &RovoDevOpenedSource,
     bound: &RovoDevBoundDocument,
     snapshot: &RovoDevSnapshot,
     document: &PreparedDocument,

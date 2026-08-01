@@ -52,7 +52,9 @@ fn open_root_handle_sqlite_source_snapshot_inner(
         native_evidence,
         sqlite_evidence,
         evidence,
+        #[cfg(test)]
         strategy: acquired.strategy,
+        #[cfg(test)]
         copied_bytes: acquired.copied_bytes,
         _snapshot_directory: acquired.snapshot_directory,
         snapshot_activity: Some(acquired.snapshot_activity),
@@ -63,7 +65,9 @@ fn open_root_handle_sqlite_source_snapshot_inner(
 
 struct AcquiredSqliteConnection {
     connection: Connection,
+    #[cfg(test)]
     strategy: SqliteSourceSnapshotStrategy,
+    #[cfg(test)]
     copied_bytes: u64,
     snapshot_directory: Option<TempDir>,
     snapshot_activity: SqliteSourceSnapshotActivity,
@@ -81,7 +85,9 @@ fn acquire_sqlite_connection(
         if immutable_procfd_available(family.database.file()) {
             return Ok(AcquiredSqliteConnection {
                 connection: open_immutable_main(&family.database)?,
+                #[cfg(test)]
                 strategy: SqliteSourceSnapshotStrategy::ImmutableMain,
+                #[cfg(test)]
                 copied_bytes: 0,
                 snapshot_directory: None,
                 snapshot_activity: snapshot_context
@@ -104,7 +110,9 @@ fn acquire_sqlite_connection(
     .map_err(|source| sqlite_error("opening the ctx-owned provider snapshot", source))?;
     Ok(AcquiredSqliteConnection {
         connection,
+        #[cfg(test)]
         strategy: SqliteSourceSnapshotStrategy::CopiedFamily,
+        #[cfg(test)]
         copied_bytes,
         snapshot_directory: Some(snapshot_directory),
         snapshot_activity: snapshot_context
