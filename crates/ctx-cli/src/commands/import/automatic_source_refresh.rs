@@ -95,7 +95,7 @@ pub(super) fn run_automatic_source_refresh_import(
 
     let completion = if context.options.progress == crate::progress::ProgressArg::Json {
         format!(
-            "Published source-backed generation {}.",
+            "Published Core generation {}.",
             receipt.published_generation
         )
     } else {

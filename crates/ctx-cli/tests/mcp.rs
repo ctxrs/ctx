@@ -1005,12 +1005,12 @@ fn mcp_search_validates_inputs_and_reports_uninitialized_source_index() {
     assert!(alias_result["structuredContent"]["error"]
         .as_str()
         .unwrap()
-        .contains("the source-backed index does not exist; retry with daemon refresh enabled"));
+        .contains("the Core index does not exist; retry with daemon refresh enabled"));
     assert!(mcp_content_text(alias_result)
-        .contains("the source-backed index does not exist; retry with daemon refresh enabled"));
+        .contains("the Core index does not exist; retry with daemon refresh enabled"));
     assert!(
         !temp.path().join("search/lexical").exists(),
-        "MCP search must not create an uninitialized source-backed index"
+        "MCP search must not create an uninitialized Core index"
     );
     assert!(!temp.path().join("relational.sqlite").exists());
 }
@@ -1055,7 +1055,7 @@ fn mcp_invalid_search_session_is_typed_before_source_index_open() {
         .contains("session id prefix must be at least 8 hex characters"));
     assert!(
         !temp.path().join("search/lexical").exists(),
-        "invalid session syntax must fail before opening the source-backed index"
+        "invalid session syntax must fail before opening the Core index"
     );
     assert!(!temp.path().join("relational.sqlite").exists());
 }

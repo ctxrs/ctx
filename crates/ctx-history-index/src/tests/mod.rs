@@ -212,6 +212,34 @@ fn sorted_uuids(mut ids: Vec<Uuid>) -> Vec<Uuid> {
     ids
 }
 
+fn query_metadata_fast_values(searcher: &Searcher, address: tantivy::DocAddress) -> Vec<Vec<u8>> {
+    let segment = &searcher.segment_readers()[address.segment_ord as usize];
+    let column = segment
+        .fast_fields()
+        .bytes("query_metadata")
+        .unwrap()
+        .unwrap();
+    column
+        .term_ords(address.doc_id)
+        .map(|term_ord| {
+            let mut value = Vec::new();
+            assert!(column.ord_to_bytes(term_ord, &mut value).unwrap());
+            value
+        })
+        .collect()
+}
+
+fn add_query_metadata_fast_values(
+    searcher: &Searcher,
+    address: tantivy::DocAddress,
+    document: &mut TantivyDocument,
+) {
+    let field = searcher.schema().get_field("query_metadata").unwrap();
+    for value in query_metadata_fast_values(searcher, address) {
+        document.add_bytes(field, &value);
+    }
+}
+
 fn collect_source_pages(
     index: &VerifiedIndex,
     source: &SourceKey,

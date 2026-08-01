@@ -283,10 +283,7 @@ fn query_metadata_rejects_valid_json_after_equal_sized_chunk_payloads_are_swappe
         .next()
         .unwrap();
     let original: TantivyDocument = searcher.doc(address).unwrap();
-    let mut chunks = original
-        .get_all(fields.query_metadata)
-        .map(|value| value.as_bytes().unwrap().to_vec())
-        .collect::<Vec<_>>();
+    let mut chunks = query_metadata_fast_values(&searcher, address);
     let branch_chunk = branch_offset / payload_bytes;
     let workspace_chunk = workspace_offset / payload_bytes;
     assert_ne!(branch_chunk, workspace_chunk);
@@ -857,6 +854,7 @@ fn exhaustive_open_rejects_an_unreadable_stored_core_body() {
         }
     }
     malformed.add_bytes(fields.core_record, b"{");
+    add_query_metadata_fast_values(&searcher, address, &mut malformed);
     drop(searcher);
 
     let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();

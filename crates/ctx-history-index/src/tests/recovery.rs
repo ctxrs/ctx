@@ -695,10 +695,9 @@ fn verified_generation_rejects_a_forged_duplicate_event_identity() {
 
     let pinned = VerifiedIndex::open(temp.path()).unwrap();
     let addresses = pinned.searcher.search(&AllQuery, &DocSetCollector).unwrap();
-    let duplicate = pinned
-        .searcher
-        .doc(addresses.into_iter().next().unwrap())
-        .unwrap();
+    let address = addresses.into_iter().next().unwrap();
+    let mut duplicate = pinned.searcher.doc(address).unwrap();
+    add_query_metadata_fast_values(&pinned.searcher, address, &mut duplicate);
     let index = pinned.searcher.index().clone();
     publish_unchecked_generation(
         temp.path(),
@@ -751,6 +750,7 @@ fn verified_generation_rejects_forged_source_ownership() {
         }
     }
     forged.add_text(fields.source_key, source_token(&second));
+    add_query_metadata_fast_values(&pinned.searcher, address, &mut forged);
     let index = pinned.searcher.index().clone();
     publish_unchecked_generation(
         temp.path(),
@@ -806,6 +806,7 @@ fn verified_generation_rejects_malformed_stored_core_during_exhaustive_audit() {
         }
     }
     forged.add_bytes(fields.core_record, b"{");
+    add_query_metadata_fast_values(&pinned.searcher, address, &mut forged);
     let index = pinned.searcher.index().clone();
     publish_unchecked_generation(
         temp.path(),
@@ -939,6 +940,7 @@ fn one_pass_verifier_matches_reference_for_identity_digest_corruption() {
         }
     }
     forged.add_text(fields.event_identity_digest, "00");
+    add_query_metadata_fast_values(&pinned.searcher, address, &mut forged);
     let index = pinned.searcher.index().clone();
     publish_unchecked_generation(
         temp.path(),

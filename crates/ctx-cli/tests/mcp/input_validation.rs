@@ -147,7 +147,7 @@ fn mcp_tool_input_validation_returns_stable_invalid_request_and_server_recovers(
         "params": {
             "name": "search",
             "arguments": {
-                "query": "valid input reaches the source-backed index",
+                "query": "valid input reaches the Core index",
                 "provider": "roo_code"
             }
         }
@@ -185,7 +185,7 @@ fn mcp_tool_input_validation_returns_stable_invalid_request_and_server_recovers(
     assert!(index_failure["structuredContent"]["error"]
         .as_str()
         .unwrap()
-        .contains("the source-backed index does not exist; retry with daemon refresh enabled"));
+        .contains("the Core index does not exist; retry with daemon refresh enabled"));
 
     let recovered = &responses[cases.len() + 2]["result"];
     assert!(recovered["isError"].is_null());

@@ -1,4 +1,3 @@
-use ctx_history_core::database_path;
 use ctx_history_relational::{
     RawSqlOptions, RawSqlValue, RelationalProjectionStatus, SourceBackedRelationalProjection,
 };
@@ -43,7 +42,7 @@ fn fresh_sql_compatibility_initializes_only_the_relational_projection() {
     let reader = SqlCompatibility::open_for_data_root(temp.path()).unwrap();
 
     assert!(sql_compatibility_path(temp.path()).is_file());
-    assert!(!database_path(temp.path().to_path_buf()).exists());
+    assert!(!temp.path().join("work.sqlite").exists());
     assert_eq!(
         reader
             .query("SELECT 1 AS one", RawSqlOptions::default())
@@ -69,6 +68,6 @@ fn committed_core_generation_without_relational_projection_fails_closed() {
         .err()
         .expect("missing relational projection should fail");
     assert!(error.to_string().contains("Core SQL projection is missing"));
-    assert!(!database_path(temp.path().to_path_buf()).exists());
+    assert!(!temp.path().join("work.sqlite").exists());
     assert!(!sql_compatibility_path(temp.path()).exists());
 }

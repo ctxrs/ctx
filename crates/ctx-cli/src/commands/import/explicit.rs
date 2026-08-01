@@ -120,7 +120,7 @@ pub(crate) fn run_explicit_source_catalog_import(
     context.telemetry.rejected_records = None;
 
     let completion = if context.options.progress == crate::progress::ProgressArg::Json {
-        format!("Published source-backed generation {published_generation}.")
+        format!("Published Core generation {published_generation}.")
     } else {
         "Published the source for indexing.".to_owned()
     };

@@ -978,7 +978,7 @@ fn provider_projection_snapshot(temp: &TempDir, provider: &str) -> ProviderProje
     let status = json_output(ctx(temp).args(["status", "--format=json"]));
     let generation = status["lexical"]["generation_id"]
         .as_str()
-        .expect("source-backed lexical generation")
+        .expect("published lexical Core generation")
         .to_owned();
     let status = wait_for_relational_projection(temp, &generation);
     assert_eq!(

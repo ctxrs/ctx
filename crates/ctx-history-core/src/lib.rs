@@ -154,8 +154,7 @@ pub use history_jsonl::{
     CtxHistoryJsonlSourceRecord, CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
 };
 pub use paths::{
-    blob_dir, config_path, database_path, default_data_root, device_path, history_dir, logs_dir,
-    managed_data_root, object_dir,
+    config_path, default_data_root, device_path, history_dir, logs_dir, managed_data_root,
 };
 pub use projection::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend,

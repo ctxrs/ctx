@@ -175,7 +175,7 @@ fn assert_published_generation(search: &Value, expected_mode: &str) -> String {
     assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     search["retrieval"]["generation_id"]
         .as_str()
-        .expect("search response should identify its source-backed generation")
+        .expect("search response should identify its Core generation")
         .to_owned()
 }
 
@@ -245,7 +245,7 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
     assert!(status.get("prior_epoch").is_none(), "{status:#}");
     assert!(
         !search_refresh_data_root(temp).join("work.sqlite").exists(),
-        "source-backed search/status must not create the previous-epoch Store"
+        "Core search/status must not create the previous-epoch Store"
     );
     status
 }
@@ -265,7 +265,7 @@ fn assert_source_backed_search_show_oracle(
     assert_eq!(packet["retrieval"]["index"], "core", "{packet:#}");
     let generation = packet["retrieval"]["generation_id"]
         .as_str()
-        .expect("source-backed search generation");
+        .expect("Core search generation");
     assert_eq!(generation.len(), 64, "{packet:#}");
     assert!(
         generation
@@ -274,9 +274,7 @@ fn assert_source_backed_search_show_oracle(
         "generation ID must be lowercase hexadecimal: {packet:#}"
     );
 
-    let results = packet["results"]
-        .as_array()
-        .expect("source-backed search results");
+    let results = packet["results"].as_array().expect("Core search results");
     for (offset, result) in results.iter().enumerate() {
         assert_eq!(result["rank"], offset + 1, "{result:#}");
         assert!(result["retrieval_score"].is_number(), "{result:#}");
@@ -292,7 +290,7 @@ fn assert_source_backed_search_show_oracle(
     assert_eq!(
         matching_results.len(),
         expected_results,
-        "unexpected exact-oracle source-backed result count: {packet:#}"
+        "unexpected exact-oracle Core result count: {packet:#}"
     );
     for result in matching_results {
         assert_eq!(result["provider"], provider, "{result:#}");
@@ -329,7 +327,7 @@ fn assert_source_backed_search_show_oracle(
 
         let commands = result["suggested_next_commands"]
             .as_array()
-            .expect("source-backed next commands");
+            .expect("Core search next commands");
         let event_id = result["ctx_event_id"].as_str().unwrap();
         let session_id = result["ctx_session_id"].as_str().unwrap();
         let command_prefix = format!(
@@ -361,7 +359,7 @@ fn assert_source_backed_search_show_oracle(
 
         let citations = result["citations"]
             .as_array()
-            .expect("source-backed citations");
+            .expect("Core search citations");
         assert_eq!(citations.len(), 1, "{result:#}");
         let citation = &citations[0];
         assert_eq!(citation["item_id"], result["ctx_event_id"], "{result:#}");
@@ -432,7 +430,7 @@ fn assert_source_backed_search_show_oracle(
 fn generation_id(search: &Value) -> &str {
     search["retrieval"]["generation_id"]
         .as_str()
-        .expect("search response should identify its source-backed generation")
+        .expect("search response should identify its Core generation")
 }
 
 fn generation_manifest(temp: &TempDir, generation: &str) -> (GenerationManifest, Value) {

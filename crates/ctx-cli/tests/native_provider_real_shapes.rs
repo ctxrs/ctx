@@ -234,7 +234,7 @@ fn nanoclaw_import_preserves_text_timestamp_millis_and_integer_trigger() {
 
     assert!(
         !temp.path().join("work.sqlite").exists(),
-        "NanoClaw acceptance must use its provider-owned databases and source-backed index"
+        "NanoClaw acceptance must use its provider-owned databases and Core index"
     );
 
     let search = json_output(ctx(&temp).args([

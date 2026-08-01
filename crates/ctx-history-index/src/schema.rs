@@ -71,7 +71,7 @@ pub(crate) fn lexical_schema() -> Schema {
     builder.add_text_field("source_key", STRING | STORED | FAST);
     builder.add_text_field("provider", STRING | STORED);
     builder.add_text_field("source_format", STRING | STORED);
-    builder.add_bytes_field("query_metadata", FAST | STORED);
+    builder.add_bytes_field("query_metadata", FAST);
     builder.add_text_field("custom_provider_key", STRING);
     builder.add_text_field("custom_source_id", STRING);
     builder.add_text_field("provider_session_id", STRING | STORED);
@@ -92,7 +92,6 @@ pub(crate) fn lexical_schema() -> Schema {
     builder.add_text_field("workspace", STRING | STORED);
     builder.add_text_field("workspace_filter", STRING);
     builder.add_text_field("cwd", STRING | STORED);
-    builder.add_text_field("touched_file", STRING | STORED);
     builder.add_text_field("touched_file_filter", STRING);
     builder.add_u64_field("core_content_bytes", FAST | STORED);
     builder.add_bytes_field("core_record", STORED);
@@ -147,4 +146,24 @@ pub(crate) fn required_field(schema: &Schema, name: &'static str) -> Result<Fiel
     schema
         .get_field(name)
         .map_err(|_| IndexError::MissingSchemaField(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lexical_schema_omits_retired_stored_touched_file() {
+        assert!(lexical_schema().get_field("touched_file").is_err());
+    }
+
+    #[test]
+    fn query_metadata_is_fast_without_redundant_storage() {
+        let schema = lexical_schema();
+        let field = schema.get_field("query_metadata").unwrap();
+        let entry = schema.get_field_entry(field);
+
+        assert!(entry.is_fast());
+        assert!(!entry.is_stored());
+    }
 }

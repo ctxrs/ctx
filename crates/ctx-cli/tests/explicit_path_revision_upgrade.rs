@@ -186,7 +186,7 @@ fn assert_published_codex_source(report: &Value, source: &Path) -> String {
     );
     report["sources"][0]["published_generation"]
         .as_str()
-        .expect("explicit import must publish a source-backed generation")
+        .expect("explicit import must publish a Core generation")
         .to_owned()
 }
 
