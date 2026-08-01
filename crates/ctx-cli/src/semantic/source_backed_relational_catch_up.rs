@@ -54,6 +54,8 @@ enum SourceBackedRelationalCatchUpError {
     IndexUnavailable(String),
     #[error("source_relational_metadata_invalid: {0}")]
     InvalidMetadata(String),
+    #[error("source_relational_receipt_mismatch: {0}")]
+    ReceiptMismatch(String),
     #[error("source_relational_projection_unavailable: {0}")]
     Projection(String),
     #[error("source_relational_publication_failed: {0}")]
@@ -66,6 +68,7 @@ impl SourceBackedRelationalCatchUpError {
             Self::GenerationMismatch { .. } => "source_relational_generation_mismatch",
             Self::IndexUnavailable(_) => "source_relational_index_unavailable",
             Self::InvalidMetadata(_) => "source_relational_metadata_invalid",
+            Self::ReceiptMismatch(_) => "source_relational_receipt_mismatch",
             Self::Projection(_) => "source_relational_projection_unavailable",
             Self::Publication(_) => "source_relational_publication_failed",
         }
@@ -129,6 +132,8 @@ enum RelationalPublicationError {
     CandidateVerification { path: PathBuf, detail: String },
     #[error("verify existing relational projection {} before no-op success: {detail}", path.display())]
     ExistingVerification { path: PathBuf, detail: String },
+    #[error("verify committed live relational catch-up {}: {detail}", path.display())]
+    LiveVerification { path: PathBuf, detail: String },
     #[error(
         "atomically replace relational projection {} with {}: {source}; the destination was not replaced, so any prior projection remains visible",
         destination.display(), candidate.display()
@@ -177,10 +182,11 @@ struct ProjectionOutcome {
 
 enum PreparedProjection {
     NoOp(RelationalProjectionReceipt),
-    Candidate {
+    RebuildCandidate {
         projection: SourceBackedRelationalProjection,
         path: PathBuf,
     },
+    LiveCatchUp(SourceBackedRelationalProjection),
 }
 
 struct RelationalCatchUpLock {
@@ -273,6 +279,19 @@ where
 
     match project(data_root, core_generation_id) {
         Ok(outcome) => {
+            if let Err(error) =
+                validate_receipt_core_generation(core_generation_id, &outcome.receipt)
+            {
+                let frontier = projection_metadata(data_root);
+                let failed = pending
+                    .error(error, frontier.as_ref())
+                    .with_duration(nonzero_duration_micros(attempt_started.elapsed()));
+                persist_status(data_root, &failed)?;
+                return Ok(SourceBackedRelationalCatchUpRun {
+                    status: failed.to_json()?,
+                    did_work: false,
+                });
+            }
             let completed = pending
                 .completed(&outcome.receipt)
                 .with_duration(nonzero_duration_micros(attempt_started.elapsed()));
@@ -319,64 +338,147 @@ fn project_exact_core_generation(
 
     let generation = committed_generation(&index)?;
     let projection_path = sql_compatibility_path(data_root);
-    let prepared = prepare_disposable_projection(&projection_path, &generation)?;
-    let (mut projection, candidate_path) = match prepared {
+    let prepared = prepare_projection(&projection_path, &generation)?;
+    match prepared {
         PreparedProjection::NoOp(receipt) => {
-            return Ok(ProjectionOutcome {
+            validate_projection_receipt(&generation, &receipt)?;
+            Ok(ProjectionOutcome {
                 receipt,
                 did_work: false,
-            });
+            })
         }
-        PreparedProjection::Candidate { projection, path } => (projection, path),
-    };
-    let plan = projection
-        .plan_generation(&generation)
-        .map_err(SourceBackedRelationalCatchUpError::projection)?;
-    if let RelationalProjectionPlan::NoOp(receipt) = plan {
-        return Ok(ProjectionOutcome {
-            receipt,
-            did_work: false,
-        });
+        PreparedProjection::RebuildCandidate {
+            mut projection,
+            path: candidate_path,
+        } => {
+            match projection
+                .plan_generation(&generation)
+                .map_err(SourceBackedRelationalCatchUpError::projection)?
+            {
+                RelationalProjectionPlan::Rebuild => {}
+                _ => {
+                    return Err(SourceBackedRelationalCatchUpError::Projection(
+                        "relational rebuild plan changed during one pinned run".to_owned(),
+                    ));
+                }
+            }
+            let records = relational_record_stream(
+                &index,
+                RelationalSourceSelection::All,
+                &generation,
+                MAX_SOURCE_EVENT_PAGE_ITEMS,
+            );
+            let receipt = projection
+                .rebuild_stream(&generation, records)
+                .map_err(SourceBackedRelationalCatchUpError::projection)?;
+            validate_projection_receipt(&generation, &receipt)?;
+            finish_candidate_publication(
+                projection,
+                &candidate_path,
+                &projection_path,
+                &generation,
+                &receipt,
+            )?;
+            Ok(ProjectionOutcome {
+                receipt,
+                did_work: true,
+            })
+        }
+        PreparedProjection::LiveCatchUp(mut projection) => {
+            let changed_source_ids = match projection
+                .plan_generation(&generation)
+                .map_err(SourceBackedRelationalCatchUpError::projection)?
+            {
+                RelationalProjectionPlan::CatchUp { changed_source_ids } => changed_source_ids,
+                _ => {
+                    return Err(SourceBackedRelationalCatchUpError::Projection(
+                        "relational catch-up plan changed during one pinned run".to_owned(),
+                    ));
+                }
+            };
+            let records = relational_record_stream(
+                &index,
+                RelationalSourceSelection::Changed(&changed_source_ids),
+                &generation,
+                MAX_SOURCE_EVENT_PAGE_ITEMS,
+            );
+            let receipt = projection
+                .catch_up_stream(&generation, records)
+                .map_err(SourceBackedRelationalCatchUpError::projection)?;
+            validate_projection_receipt(&generation, &receipt)?;
+            drop(projection);
+            verify_projection_identity(&projection_path, &generation, &receipt).map_err(
+                |detail| RelationalPublicationError::LiveVerification {
+                    path: projection_path,
+                    detail,
+                },
+            )?;
+            Ok(ProjectionOutcome {
+                receipt,
+                did_work: true,
+            })
+        }
     }
+}
 
-    let (rebuild, selection) = match &plan {
-        RelationalProjectionPlan::Rebuild => (true, RelationalSourceSelection::All),
-        RelationalProjectionPlan::CatchUp { changed_source_ids } => (
-            false,
-            RelationalSourceSelection::Changed(changed_source_ids),
-        ),
-        RelationalProjectionPlan::NoOp(_) => {
-            return Err(SourceBackedRelationalCatchUpError::Projection(
-                "relational work plan changed during one pinned run".to_owned(),
-            ));
-        }
-    };
-    let records =
-        relational_record_stream(&index, selection, &generation, MAX_SOURCE_EVENT_PAGE_ITEMS);
-    let receipt = if rebuild {
-        projection.rebuild_stream(&generation, records)
+fn validate_receipt_core_generation(
+    expected: &str,
+    receipt: &RelationalProjectionReceipt,
+) -> std::result::Result<(), SourceBackedRelationalCatchUpError> {
+    if receipt.core_generation_id == expected {
+        Ok(())
     } else {
-        projection.catch_up_stream(&generation, records)
+        Err(SourceBackedRelationalCatchUpError::ReceiptMismatch(
+            format!(
+                "receipt carries Core generation {}, expected {expected}",
+                receipt.core_generation_id
+            ),
+        ))
     }
-    .map_err(SourceBackedRelationalCatchUpError::projection)?;
-    if receipt.core_generation_id != core_generation_id {
-        return Err(SourceBackedRelationalCatchUpError::GenerationMismatch {
-            expected: core_generation_id.to_owned(),
-            actual: receipt.core_generation_id,
-        });
-    }
+}
 
-    finish_candidate_publication(
-        projection,
-        &candidate_path,
-        &projection_path,
-        &generation,
-        &receipt,
-    )?;
-    Ok(ProjectionOutcome {
-        receipt,
-        did_work: true,
-    })
+fn validate_projection_receipt(
+    generation: &CommittedCoreGeneration,
+    receipt: &RelationalProjectionReceipt,
+) -> std::result::Result<(), SourceBackedRelationalCatchUpError> {
+    validate_receipt_core_generation(&generation.generation_id, receipt)?;
+    let source_count = u64::try_from(generation.sources.len()).map_err(|_| {
+        SourceBackedRelationalCatchUpError::InvalidMetadata(
+            "Core source count does not fit in a relational receipt".to_owned(),
+        )
+    })?;
+    let mut mismatches = Vec::new();
+    compare_projection_field(
+        &mut mismatches,
+        "relational_schema_version",
+        &receipt.relational_schema_version,
+        &RELATIONAL_PROJECTION_SCHEMA_VERSION,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "materializer_revision",
+        &receipt.materializer_revision,
+        &RELATIONAL_MATERIALIZER_REVISION,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "source_count",
+        &receipt.source_count,
+        &source_count,
+    );
+    compare_projection_field(
+        &mut mismatches,
+        "event_count",
+        &receipt.event_count,
+        &generation.indexed_documents,
+    );
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        Err(SourceBackedRelationalCatchUpError::ReceiptMismatch(
+            mismatches.join("; "),
+        ))
+    }
 }
 
 fn committed_generation(
@@ -464,7 +566,7 @@ fn relational_record_stream<'a>(
     })
 }
 
-fn prepare_disposable_projection(
+fn prepare_projection(
     path: &Path,
     generation: &CommittedCoreGeneration,
 ) -> std::result::Result<PreparedProjection, SourceBackedRelationalCatchUpError> {
@@ -483,18 +585,32 @@ fn prepare_disposable_projection(
             let plan = projection
                 .plan_generation(generation)
                 .map_err(SourceBackedRelationalCatchUpError::projection)?;
-            if let RelationalProjectionPlan::NoOp(receipt) = plan {
-                drop(projection);
-                verify_projection_identity(path, generation, &receipt).map_err(|detail| {
-                    RelationalPublicationError::ExistingVerification {
-                        path: path.to_path_buf(),
-                        detail,
-                    }
-                })?;
-                return Ok(PreparedProjection::NoOp(receipt));
+            match plan {
+                RelationalProjectionPlan::NoOp(receipt) => {
+                    drop(projection);
+                    verify_projection_identity(path, generation, &receipt).map_err(|detail| {
+                        RelationalPublicationError::ExistingVerification {
+                            path: path.to_path_buf(),
+                            detail,
+                        }
+                    })?;
+                    Ok(PreparedProjection::NoOp(receipt))
+                }
+                RelationalProjectionPlan::Rebuild => {
+                    drop(projection);
+                    snapshot_prior_projection(path)
+                }
+                RelationalProjectionPlan::CatchUp { .. } => {
+                    drop(projection);
+                    // The relational crate publishes rows and active-generation
+                    // metadata in one immediate SQLite transaction. Keep the
+                    // live file as that atomic boundary; candidates are only
+                    // for deterministic rebuild-and-replace.
+                    let projection = SourceBackedRelationalProjection::open(path)
+                        .map_err(SourceBackedRelationalCatchUpError::projection)?;
+                    Ok(PreparedProjection::LiveCatchUp(projection))
+                }
             }
-            drop(projection);
-            snapshot_prior_projection(path)
         }
         Err(
             RelationalProjectionError::MissingSchema
@@ -513,7 +629,7 @@ fn open_empty_candidate(
     reset_candidate_projection(&candidate)?;
     let projection = SourceBackedRelationalProjection::open(&candidate)
         .map_err(SourceBackedRelationalCatchUpError::projection)?;
-    Ok(PreparedProjection::Candidate {
+    Ok(PreparedProjection::RebuildCandidate {
         projection,
         path: candidate,
     })
@@ -554,7 +670,7 @@ fn snapshot_prior_projection(
     })?;
     let projection = SourceBackedRelationalProjection::open(&candidate)
         .map_err(SourceBackedRelationalCatchUpError::projection)?;
-    Ok(PreparedProjection::Candidate {
+    Ok(PreparedProjection::RebuildCandidate {
         projection,
         path: candidate,
     })
