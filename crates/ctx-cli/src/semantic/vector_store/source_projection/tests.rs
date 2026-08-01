@@ -412,7 +412,7 @@ fn tail_beyond_sixteen_kib_is_paged_embedded_searchable_and_never_stored_plainte
 }
 
 #[test]
-fn no_op_and_policy_receipt_mismatch_are_automatic_and_bounded() -> Result<()> {
+fn no_op_and_policy_receipt_mismatch_reuse_one_page_lookup() -> Result<()> {
     let fixture = Fixture::new()?;
     let documents = (0..65)
         .map(|sequence| fixture.core_record(sequence + 1, format!("record {sequence}")))
@@ -449,10 +449,30 @@ fn no_op_and_policy_receipt_mismatch_are_automatic_and_bounded() -> Result<()> {
         ],
     )?;
     assert!(!store.source_backed_generation_ready_exact(index.generation_id(), 65)?);
-    while !store
-        .reconcile_source_backed_index(&index, &mut builder, &mut embedder)?
-        .ready
-    {}
+    let embedded_chunks = embedder.chunks;
+    store.reset_flat_active_event_snapshot_count();
+
+    let replay_first = store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
+    assert_eq!(replay_first.records_scanned, MAX_SEMANTIC_EVENT_PAGE_ITEMS);
+    assert_eq!(replay_first.records_reused, MAX_SEMANTIC_EVENT_PAGE_ITEMS);
+    assert!(replay_first.work_remaining);
+    assert_eq!(embedder.chunks, embedded_chunks);
+    assert_eq!(
+        store.flat_active_event_snapshot_count(),
+        0,
+        "reuse must not materialize and scan all active events per record"
+    );
+
+    let replay_terminal =
+        store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
+    assert!(replay_terminal.ready);
+    assert_eq!(replay_terminal.records_reused, 1);
+    assert_eq!(embedder.chunks, embedded_chunks);
+    assert_eq!(
+        store.flat_active_event_snapshot_count(),
+        1,
+        "only terminal retirement should enumerate the active generation"
+    );
     assert!(store.source_backed_generation_ready_exact(index.generation_id(), 65)?);
     assert!(builder.calls.len() > calls);
     Ok(())

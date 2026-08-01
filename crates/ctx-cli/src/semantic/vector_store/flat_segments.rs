@@ -116,6 +116,26 @@ pub(in crate::semantic) struct FlatActiveEvent {
     pub(in crate::semantic) chunk_count: u32,
 }
 
+/// Read-only event lookup bound to one exact flat generation.
+///
+/// Generation loading stores active event summaries in UUID order, so callers
+/// can probe this shared pin without cloning or linearly scanning the active
+/// corpus for every event.
+#[derive(Clone)]
+pub(in crate::semantic) struct FlatActiveEventLookup {
+    pinned: Option<PinnedFlatGeneration>,
+}
+
+impl FlatActiveEventLookup {
+    pub(in crate::semantic) fn event(&self, event_id: Uuid) -> Option<&FlatActiveEvent> {
+        let events = self.pinned.as_ref()?.active_events();
+        events
+            .binary_search_by_key(&event_id, |event| event.event_id)
+            .ok()
+            .map(|index| &events[index])
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(in crate::semantic) struct FlatActiveStats {
     pub(in crate::semantic) generation: u64,
@@ -161,6 +181,8 @@ pub(in crate::semantic) struct FlatSegmentStore {
     pinned: Mutex<Option<PinnedFlatGeneration>>,
     #[cfg(test)]
     recovery: FlatRecoveryReport,
+    #[cfg(test)]
+    active_event_snapshot_count: AtomicU64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +208,8 @@ impl FlatSegmentStore {
             pinned: Mutex::new(None),
             #[cfg(test)]
             recovery: FlatRecoveryReport::default(),
+            #[cfg(test)]
+            active_event_snapshot_count: AtomicU64::new(0),
         };
         let recovery = store.recover_internal()?;
         #[cfg(test)]
@@ -215,6 +239,8 @@ impl FlatSegmentStore {
             pinned: Mutex::new(None),
             #[cfg(test)]
             recovery: FlatRecoveryReport::default(),
+            #[cfg(test)]
+            active_event_snapshot_count: AtomicU64::new(0),
         };
         let _guard = store.lock_shared()?;
         if let Some(selected) = select_manifest(&store.root, &store.contract)? {
@@ -245,6 +271,12 @@ impl FlatSegmentStore {
             .unwrap_or_default())
     }
 
+    pub(in crate::semantic) fn active_event_lookup(&self) -> FlatResult<FlatActiveEventLookup> {
+        Ok(FlatActiveEventLookup {
+            pinned: self.pin_generation()?,
+        })
+    }
+
     #[cfg(test)]
     pub(in crate::semantic) fn active_hash(&self) -> FlatResult<Option<String>> {
         Ok(self
@@ -253,10 +285,23 @@ impl FlatSegmentStore {
     }
 
     pub(in crate::semantic) fn active_events(&self) -> FlatResult<Vec<FlatActiveEvent>> {
+        #[cfg(test)]
+        self.active_event_snapshot_count
+            .fetch_add(1, Ordering::Relaxed);
         Ok(self
             .pin_generation()?
             .map(|pinned| pinned.active_events().to_vec())
             .unwrap_or_default())
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn reset_active_event_snapshot_count(&self) {
+        self.active_event_snapshot_count.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn active_event_snapshot_count(&self) -> u64 {
+        self.active_event_snapshot_count.load(Ordering::Relaxed)
     }
 
     pub(in crate::semantic) fn publish_replacement_event_chunks(
