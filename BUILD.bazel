@@ -724,7 +724,11 @@ sh_test(
     ],
 )
 
-non_rust_gate(name = "docs_check", mode = "docs_check", data = NON_RUST_GATE_DATA)
+non_rust_gate(
+    name = "docs_check",
+    mode = "docs_check",
+    data = NON_RUST_GATE_DATA + ["//crates/ctx-history-relational:cargo_package_data"],
+)
 non_rust_gate(name = "installer_path_smoke", mode = "installer_path_smoke", data = NON_RUST_GATE_DATA)
 non_rust_gate(name = "buildkite_pipeline_check", mode = "buildkite_pipeline_check", data = NON_RUST_GATE_DATA)
 non_rust_gate(name = "release_binary_compat_tests", mode = "release_binary_compat_tests", data = NON_RUST_GATE_DATA)

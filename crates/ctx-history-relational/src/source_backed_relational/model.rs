@@ -4,9 +4,9 @@ use ctx_history_core::{CoreRecord, SourceKey};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const RELATIONAL_PROJECTION_SCHEMA_VERSION: u32 = 6;
-pub const RELATIONAL_PROJECTION_CONTRACT_VERSION: u32 = 6;
-pub const RELATIONAL_MATERIALIZER_REVISION: u32 = 1;
+pub const RELATIONAL_PROJECTION_SCHEMA_VERSION: u32 = 7;
+pub const RELATIONAL_PROJECTION_CONTRACT_VERSION: u32 = 7;
+pub const RELATIONAL_MATERIALIZER_REVISION: u32 = 2;
 
 pub type Result<T> = std::result::Result<T, RelationalProjectionError>;
 

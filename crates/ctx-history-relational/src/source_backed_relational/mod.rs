@@ -43,6 +43,10 @@ fn sqlite_i64(value: u64, field: &'static str) -> Result<i64> {
     i64::try_from(value).map_err(|_| RelationalProjectionError::CountOverflow(field))
 }
 
+fn sqlite_u64_ordered_text(value: u64) -> String {
+    format!("{value:020}")
+}
+
 fn sqlite_u64(value: i64, field: &'static str) -> Result<u64> {
     u64::try_from(value).map_err(|_| RelationalProjectionError::CountOverflow(field))
 }

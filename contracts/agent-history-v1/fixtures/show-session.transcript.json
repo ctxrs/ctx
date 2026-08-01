@@ -25,6 +25,7 @@
         "eventType": "message",
         "role": "assistant",
         "text": "local agent history search result",
+        "structuredContent": ["transcript", {"complete": true}, null],
         "content": {
           "complete": true,
           "policyStatus": "selected"

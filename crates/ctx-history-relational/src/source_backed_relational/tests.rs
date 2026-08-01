@@ -20,9 +20,13 @@ const BODY_SENTINEL: &str = "complete-transcript-body-must-never-enter-relationa
 const STRUCTURED_SENTINEL: &str = "structured-content-must-never-enter-relational";
 
 fn source(name: &str) -> SourceKey {
+    source_for("codex", "codex_session_jsonl", name)
+}
+
+fn source_for(provider: &str, source_format: &str, name: &str) -> SourceKey {
     SourceKey::derive(
-        "codex",
-        "codex_session_jsonl",
+        provider,
+        source_format,
         "session",
         1,
         SourceAnchor::provider_native("session", TypedKey::utf8(name).unwrap()).unwrap(),
@@ -390,12 +394,95 @@ fn event_replacement_and_source_deletion_are_atomic_and_deterministic() {
 
     assert_eq!(
         query_rows(&projection, "SELECT event_seq FROM ctx_events"),
-        vec![vec![RawSqlValue::Integer(2)]]
+        vec![vec![text_value("00000000000000000002")]]
     );
     assert_eq!(
         query_rows(&projection, "SELECT COUNT(*) FROM ctx_sources")[0][0],
         RawSqlValue::Integer(1)
     );
+}
+
+#[test]
+fn crush_high_bit_event_sequences_round_trip_and_keep_unsigned_order() {
+    let (_temp, mut projection) = projection();
+    let source = source_for("crush", "crush_sqlite", "high-bit-sequence");
+    let metadata = source_metadata(&source, 1, 3);
+    let generation = generation(21, vec![metadata.clone()]);
+    // Crush uses FNV-1a over the native message ID. `message-a` hashes to this
+    // valid high-bit u64 value.
+    let crush_sequence = 17_325_798_824_308_570_846_u64;
+    let mut high = record(&source, crush_sequence);
+    high.branch = Some("high-first".to_owned());
+    let mut maximum = record(&source, u64::MAX);
+    maximum.branch = Some("maximum".to_owned());
+    let mut low = record(&source, 7);
+    low.branch = Some("low-first".to_owned());
+
+    projection
+        .rebuild(&generation, records(metadata, vec![high, maximum, low]))
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &projection,
+            "SELECT event_seq FROM ctx_events ORDER BY event_seq"
+        ),
+        vec![
+            vec![text_value("00000000000000000007")],
+            vec![text_value("17325798824308570846")],
+            vec![text_value("18446744073709551615")],
+        ]
+    );
+    assert_eq!(
+        query_rows(&projection, "SELECT branch FROM ctx_sessions"),
+        vec![vec![text_value("low-first")]]
+    );
+}
+
+#[test]
+fn pre_cutover_relational_schema_is_classified_for_disposable_rebuild() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("relational.sqlite");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE source_backed_relational_state (
+             singleton INTEGER PRIMARY KEY,
+             schema_version INTEGER NOT NULL,
+             contract_version INTEGER NOT NULL
+         );
+         INSERT INTO source_backed_relational_state
+             (singleton, schema_version, contract_version) VALUES (1, 5, 5);",
+    )
+    .unwrap();
+    drop(conn);
+
+    let error = match SourceBackedRelationalProjection::open_read_only(&path) {
+        Ok(_) => panic!("pre-cutover schema must require a disposable rebuild"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        RelationalProjectionError::UnsupportedSchema {
+            schema_version: 5,
+            contract_version: 5
+        }
+    ));
+}
+
+#[test]
+fn missing_relational_state_is_classified_for_disposable_rebuild() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("relational.sqlite");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE pre_cutover_events (event_id TEXT PRIMARY KEY);")
+        .unwrap();
+    drop(conn);
+
+    let error = match SourceBackedRelationalProjection::open_read_only(&path) {
+        Ok(_) => panic!("missing relational state must require a disposable rebuild"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, RelationalProjectionError::MissingSchema));
 }
 
 #[test]
@@ -552,7 +639,7 @@ fn failed_catch_up_keeps_last_coherent_generation_and_marks_explicit_lag() {
     );
     assert_eq!(
         query_rows(&projection, "SELECT event_seq FROM ctx_events"),
-        vec![vec![RawSqlValue::Integer(1)]]
+        vec![vec![text_value("00000000000000000001")]]
     );
 }
 

@@ -421,6 +421,17 @@ func TestCanonicalFixturesExposeTypedFields(t *testing.T) {
 		event.Event.Event.Content.PolicyStatus != CoreContentPolicyStatusSelected {
 		t.Fatalf("unexpected typed event: %+v", event.Event.Event)
 	}
+	var structured Object
+	if err := json.Unmarshal(event.Event.Event.StructuredContent, &structured); err != nil {
+		t.Fatalf("decode typed structured content: %v", err)
+	}
+	payload, ok := structured["payload"].(map[string]any)
+	if !ok || payload["ok"] != true || payload["count"] != float64(2) {
+		t.Fatalf("unexpected structured content: %#v", structured)
+	}
+	if got := string(event.Event.Events[0].StructuredContent); got != "null" {
+		t.Fatalf("nullable structured content was not preserved: %q", got)
+	}
 
 	errorEnvelope := readFixture[ErrorResponse](t, "error.not-supported.json")
 	if errorEnvelope.Error.Code != ErrorKindHostedNotImplemented || errorEnvelope.Backend.Kind != BackendKindHosted {

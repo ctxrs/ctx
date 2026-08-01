@@ -18,6 +18,14 @@
       "role": "assistant",
       "occurredAt": "2026-07-01T12:00:00Z",
       "text": "local agent history search result",
+      "structuredContent": {
+        "kind": "toolResult",
+        "payload": {
+          "ok": true,
+          "count": 2,
+          "items": ["alpha", null, {"nested": [1, false]}]
+        }
+      },
       "content": {
         "complete": true,
         "policyStatus": "selected"
@@ -35,6 +43,7 @@
         "role": "assistant",
         "occurredAt": "2026-07-01T12:00:00Z",
         "text": "local agent history search result",
+        "structuredContent": null,
         "content": {
           "complete": true,
           "policyStatus": "selected"
