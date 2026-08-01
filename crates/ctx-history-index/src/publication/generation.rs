@@ -5,11 +5,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tantivy::{
-    directory::Directory,
-    store::{Compressor, ZstdCompressor},
-    Index, IndexSettings,
-};
+use tantivy::{directory::Directory, store::Compressor, Index, IndexSettings};
 use uuid::Uuid;
 
 use crate::{
@@ -24,11 +20,9 @@ const GENERATION_DIRECTORY_PREFIX: &str = "generation-";
 
 pub(crate) fn lexical_index_settings() -> IndexSettings {
     IndexSettings {
-        docstore_compression: Compressor::Zstd(ZstdCompressor {
-            compression_level: Some(1),
-        }),
+        docstore_compression: Compressor::Lz4,
         docstore_compress_dedicated_thread: true,
-        docstore_blocksize: 64 * 1024,
+        docstore_blocksize: 16 * 1024,
     }
 }
 
@@ -279,7 +273,17 @@ mod tests {
         let directory_name = "generation-00000000000000000000000000000001";
         let path = root.join(INDEX_GENERATIONS_DIRECTORY).join(directory_name);
         fs::create_dir_all(&path).unwrap();
-        Index::create_in_dir(&path, lexical_schema()).unwrap();
+        let mismatched_settings = IndexSettings {
+            docstore_compression: Compressor::Zstd(tantivy::store::ZstdCompressor {
+                compression_level: Some(1),
+            }),
+            ..lexical_index_settings()
+        };
+        Index::builder()
+            .schema(lexical_schema())
+            .settings(mismatched_settings)
+            .create_in_dir(&path)
+            .unwrap();
         GenerationSlot::new("0".repeat(64), directory_name.to_owned()).unwrap()
     }
 
@@ -287,14 +291,10 @@ mod tests {
     fn lexical_index_settings_are_exact() {
         let settings = lexical_index_settings();
 
-        assert_eq!(
-            settings.docstore_compression,
-            Compressor::Zstd(ZstdCompressor {
-                compression_level: Some(1),
-            })
-        );
-        assert_eq!(settings.docstore_blocksize, 64 * 1024);
+        assert_eq!(settings.docstore_compression, Compressor::Lz4);
+        assert_eq!(settings.docstore_blocksize, 16 * 1024);
         assert!(settings.docstore_compress_dedicated_thread);
+        assert_eq!(settings, IndexSettings::default());
     }
 
     #[test]

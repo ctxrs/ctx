@@ -106,6 +106,7 @@
         "features": {
           "const": [
             "columnar-zstd-compression",
+            "lz4-compression",
             "mmap",
             "zstd-compression"
           ]
@@ -114,6 +115,8 @@
           "const": [
             "columnar-zstd-compression",
             "fs4",
+            "lz4-compression",
+            "lz4_flex",
             "memmap2",
             "mmap",
             "tempfile",
