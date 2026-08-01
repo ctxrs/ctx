@@ -75,7 +75,7 @@ fn record(source: &SourceKey, sequence: u64, _provider_file: &Path) -> CoreRecor
         "message",
         "primary",
         true,
-        "relational-catch-up-test-v1",
+        "codex-parser-v1",
         format!("{BODY_SENTINEL}-{sequence}"),
     )
     .unwrap();
@@ -258,7 +258,7 @@ fn first_publish_seals_syncs_and_reopens_exact_generation() {
 
     let run = run_after_core_publication(temp.path(), &generation_id).unwrap();
 
-    assert!(run.did_work);
+    assert!(run.did_work, "unexpected catch-up status: {}", run.status);
     assert!(destination.is_file());
     assert!(!candidate.exists());
     assert_no_sqlite_sidecars(&destination);
