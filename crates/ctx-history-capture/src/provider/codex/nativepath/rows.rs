@@ -554,9 +554,9 @@ fn source_backed_tool_call(payload: &Value) -> SourceBackedSemanticProjection {
     }))
 }
 
-fn source_backed_tool_call_text(
-    payload: &Value,
-) -> Option<(String, Value, Option<(String, CodexToolCallContext)>)> {
+type SourceBackedToolCallProjection = (String, Value, Option<(String, CodexToolCallContext)>);
+
+fn source_backed_tool_call_text(payload: &Value) -> Option<SourceBackedToolCallProjection> {
     let item_type = payload.get("type").and_then(Value::as_str)?;
     let tool_name = codex_tool_name(payload, item_type);
     let call_id = payload.get("call_id").and_then(Value::as_str);
