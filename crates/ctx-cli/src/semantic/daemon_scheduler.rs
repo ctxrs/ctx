@@ -309,7 +309,12 @@ fn run_dirty_core_refresh(
             DaemonCycleStateV1::unknown(),
         ));
     };
-    debug_assert!(matches!(run.scope, SourceBackedRefreshScope::Exact(_)));
+    debug_assert!(
+        matches!(run.scope, SourceBackedRefreshScope::Exact(_))
+            || (run.scope == SourceBackedRefreshScope::All
+                && run.job.get("trigger").and_then(Value::as_str) == Some("import")),
+        "dirty-route work may become All only when a manual import upgrades the queued exact refresh"
+    );
     write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &run.job)?;
     let published_generation = (!run.failed
         && run.job.get("status").and_then(Value::as_str) == Some("completed")
