@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    mpsc, Arc, Barrier,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc, Barrier,
+    },
 };
 
 use crate::semantic::dirty_source_routes::EventWatermark;
@@ -148,6 +151,414 @@ fn test_catalog_authority(revision: u64, digest_byte: u8) -> ExplicitSourceCatal
         },
     }))
     .unwrap()
+}
+
+fn physically_selected_routes(
+    execution: &SourceBackedRefreshExecution<'_>,
+    current_routes: &BTreeSet<SourceRouteIdentity>,
+) -> BTreeSet<SourceRouteIdentity> {
+    match &execution.scope {
+        SourceBackedRefreshScope::All => current_routes
+            .difference(&execution.covered_route_ids)
+            .cloned()
+            .collect(),
+        SourceBackedRefreshScope::Exact(routes) => routes.clone(),
+    }
+}
+
+fn publish_selected_routes(
+    execution: &SourceBackedRefreshExecution<'_>,
+    selected: &BTreeSet<SourceRouteIdentity>,
+    failed_route: Option<(&SourceRouteIdentity, &'static str)>,
+) -> Result<SourceBackedRefreshPublication> {
+    let commit =
+        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
+            .commit(|_| true)?;
+    let mut publication = empty_test_publication(commit.generation_id);
+    publication.published_explicit_source_catalog = execution
+        .explicit_source_catalog
+        .cloned()
+        .expect("refresh catalog authority");
+    publication.scanned_routes = selected.len();
+    publication.selected_route_ids = selected
+        .iter()
+        .map(|route| route.as_str().to_owned())
+        .collect();
+    publication.successful_route_ids = publication.selected_route_ids.clone();
+    if let Some((route, class)) = failed_route {
+        publication
+            .successful_route_ids
+            .retain(|selected| selected != route.as_str());
+        publication.source_failures = vec![SourceBackedRefreshSourceFailure {
+            route_identity: route.as_str().to_owned(),
+            source_identity: "content-free-source".to_owned(),
+            provider: "fixture".to_owned(),
+            class: class.to_owned(),
+            carried_forward: true,
+        }];
+    }
+    Ok(publication)
+}
+
+fn manual_all_request(
+    coordinator: &CoreRefreshEngine,
+    data_root: &Path,
+    authority: &ExplicitSourceCatalogAuthority,
+) -> Value {
+    coordinator
+        .handle_ipc_request(
+            data_root,
+            &json!({
+                "schema_version": 1,
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "mode": "wait",
+                "explicit_source_catalog": authority.to_json(),
+            }),
+        )
+        .unwrap()
+        .expect("manual all-route refresh response")
+}
+
+#[test]
+fn queued_startup_exact_is_upgraded_to_one_manual_all_scan() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let routes = BTreeSet::from([
+        route_identity(0x11),
+        route_identity(0x12),
+        route_identity(0x13),
+    ]);
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let executor_routes = routes.clone();
+    let executor_scans = Arc::clone(&scans);
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            assert_eq!(execution.scope, SourceBackedRefreshScope::All);
+            assert!(execution.covered_route_ids.is_empty());
+            let selected = physically_selected_routes(&execution, &executor_routes);
+            for route in &selected {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            publish_selected_routes(&execution, &selected, None)
+        },
+    ));
+    coordinator.reconcile_watch_routes(
+        routes.clone(),
+        EventWatermark::new(1, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let automatic_request_id =
+        read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+            .and_then(|status| status["request_id"].as_str().map(str::to_owned))
+            .expect("queued startup exact request ID");
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+    let manual = manual_all_request(&coordinator, &data_root, &authority);
+
+    assert_eq!(request_id(&manual), automatic_request_id);
+    assert_eq!(manual["trigger"], "import");
+    let run = coordinator.run_next(&data_root).expect("upgraded all run");
+    assert!(!run.failed);
+    assert_eq!(run.scope, SourceBackedRefreshScope::All);
+    assert_eq!(
+        *scans.lock().unwrap(),
+        routes
+            .iter()
+            .cloned()
+            .map(|route| (route, 1))
+            .collect::<BTreeMap<_, _>>()
+    );
+    assert!(!coordinator.has_scheduled_route_work());
+}
+
+#[test]
+fn running_startup_exact_continues_manual_all_without_rescanning() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let routes = BTreeSet::from([
+        route_identity(0x21),
+        route_identity(0x22),
+        route_identity(0x23),
+    ]);
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_routes = routes.clone();
+    let executor_scans = Arc::clone(&scans);
+    let executor_calls = Arc::clone(&calls);
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let selected = physically_selected_routes(&execution, &executor_routes);
+            for route in &selected {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            if executor_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                assert!(matches!(
+                    execution.scope,
+                    SourceBackedRefreshScope::Exact(_)
+                ));
+                assert!(execution.covered_route_ids.is_empty());
+                executor_entered.wait();
+                executor_release.wait();
+            } else {
+                assert_eq!(execution.scope, SourceBackedRefreshScope::All);
+                assert_eq!(execution.covered_route_ids.len(), 1);
+            }
+            publish_selected_routes(&execution, &selected, None)
+        },
+    )));
+    coordinator.reconcile_watch_routes(
+        routes.clone(),
+        EventWatermark::new(2, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+
+    let manual = std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_root = data_root.clone();
+        scope.spawn(move || {
+            let run = runner
+                .run_next(&runner_root)
+                .expect("running startup exact");
+            assert!(!run.failed);
+        });
+        entered.wait();
+        let manual = manual_all_request(&coordinator, &data_root, &authority);
+        release.wait();
+        manual
+    });
+
+    let manual_request_id = request_id(&manual);
+    let successor = coordinator
+        .run_next(&data_root)
+        .expect("manual all continuation");
+    assert!(!successor.failed);
+    assert_eq!(request_id(&successor.job), manual_request_id);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *scans.lock().unwrap(),
+        routes
+            .iter()
+            .cloned()
+            .map(|route| (route, 1))
+            .collect::<BTreeMap<_, _>>()
+    );
+    let terminal = coordinator.status(&manual_request_id).unwrap();
+    assert_eq!(terminal["request_state"], "published");
+    assert_eq!(terminal["generation_changed"], true);
+    assert_eq!(terminal["scanned_routes"], routes.len());
+    assert_eq!(
+        terminal["receipt"]["successful_route_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        routes.len()
+    );
+    assert!(!coordinator.has_scheduled_route_work());
+}
+
+#[test]
+fn failed_running_exact_remains_in_manual_all_successor_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let routes = BTreeSet::from([route_identity(0x31), route_identity(0x32)]);
+    let first_route = routes.iter().next().unwrap().clone();
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_routes = routes.clone();
+    let executor_scans = Arc::clone(&scans);
+    let executor_calls = Arc::clone(&calls);
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let executor_first_route = first_route.clone();
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let selected = physically_selected_routes(&execution, &executor_routes);
+            for route in &selected {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            let first = executor_calls.fetch_add(1, Ordering::SeqCst) == 0;
+            if first {
+                executor_entered.wait();
+                executor_release.wait();
+            } else {
+                assert!(execution.covered_route_ids.is_empty());
+            }
+            publish_selected_routes(
+                &execution,
+                &selected,
+                first.then_some((&executor_first_route, "unavailable")),
+            )
+        },
+    )));
+    coordinator.reconcile_watch_routes(
+        routes.clone(),
+        EventWatermark::new(3, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+
+    std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_root = data_root.clone();
+        scope.spawn(move || {
+            assert!(!runner.run_next(&runner_root).unwrap().failed);
+        });
+        entered.wait();
+        let _manual = manual_all_request(&coordinator, &data_root, &authority);
+        release.wait();
+    });
+    assert!(!coordinator.run_next(&data_root).unwrap().failed);
+
+    let observed = scans.lock().unwrap();
+    assert_eq!(observed.get(&first_route), Some(&2));
+    for route in routes.iter().filter(|route| *route != &first_route) {
+        assert_eq!(observed.get(route), Some(&1));
+    }
+    assert!(!coordinator.has_scheduled_route_work());
+}
+
+#[test]
+fn event_during_running_exact_invalidates_manual_all_coverage() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let routes = BTreeSet::from([route_identity(0x41), route_identity(0x42)]);
+    let first_route = routes.iter().next().unwrap().clone();
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_routes = routes.clone();
+    let executor_scans = Arc::clone(&scans);
+    let executor_calls = Arc::clone(&calls);
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let selected = physically_selected_routes(&execution, &executor_routes);
+            for route in &selected {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            if executor_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                executor_entered.wait();
+                executor_release.wait();
+            } else {
+                assert!(execution.covered_route_ids.is_empty());
+            }
+            publish_selected_routes(&execution, &selected, None)
+        },
+    )));
+    let observed_at_ms = ledger_now_ms().saturating_sub(1_000);
+    coordinator.reconcile_watch_routes(routes.clone(), EventWatermark::new(4, 0), observed_at_ms);
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+
+    std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_root = data_root.clone();
+        scope.spawn(move || {
+            assert!(!runner.run_next(&runner_root).unwrap().failed);
+        });
+        entered.wait();
+        let _manual = manual_all_request(&coordinator, &data_root, &authority);
+        coordinator.record_watch_routes(
+            [(first_route.clone(), EventWatermark::new(4, 1))],
+            observed_at_ms,
+        );
+        release.wait();
+    });
+    assert!(!coordinator.run_next(&data_root).unwrap().failed);
+
+    let observed = scans.lock().unwrap();
+    assert_eq!(observed.get(&first_route), Some(&2));
+    for route in routes.iter().filter(|route| *route != &first_route) {
+        assert_eq!(observed.get(route), Some(&1));
+    }
+    assert!(!coordinator.has_scheduled_route_work());
+}
+
+#[test]
+fn ordinary_manual_all_still_scans_every_current_route() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let routes = BTreeSet::from([route_identity(0x45), route_identity(0x46)]);
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let executor_routes = routes.clone();
+    let executor_scans = Arc::clone(&scans);
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            assert_eq!(execution.scope, SourceBackedRefreshScope::All);
+            assert!(execution.covered_route_ids.is_empty());
+            let selected = physically_selected_routes(&execution, &executor_routes);
+            for route in &selected {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            publish_selected_routes(&execution, &selected, None)
+        },
+    ));
+    coordinator.reconcile_watch_routes(
+        routes.clone(),
+        EventWatermark::new(5, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+    let manual = manual_all_request(&coordinator, &data_root, &authority);
+
+    let run = coordinator
+        .run_next(&data_root)
+        .expect("ordinary manual all");
+    assert!(!run.failed);
+    assert_eq!(request_id(&run.job), request_id(&manual));
+    assert_eq!(
+        *scans.lock().unwrap(),
+        routes
+            .iter()
+            .cloned()
+            .map(|route| (route, 1))
+            .collect::<BTreeMap<_, _>>()
+    );
+    assert!(!coordinator.has_scheduled_route_work());
 }
 
 #[test]
@@ -551,6 +962,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
         request_id: "all-provider-request",
         explicit_source_catalog: None,
         scope: SourceBackedRefreshScope::All,
+        covered_route_ids: BTreeSet::new(),
         report_progress: &report_progress,
     };
     let mut provider_wide_calls = 0;
@@ -565,6 +977,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
          observed_index_root,
          observed_explicit_source_catalog,
          observed_scope,
+         observed_covered_route_ids,
          progress| {
             provider_wide_calls += 1;
             assert_eq!(observed_discovery.home(), discovery.home());
@@ -580,6 +993,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
             assert_eq!(observed_index_root, index_root);
             assert!(observed_explicit_source_catalog.is_none());
             assert_eq!(observed_scope, SourceBackedRefreshScope::All);
+            assert!(observed_covered_route_ids.is_empty());
             progress(CaptureSourceBackedRefreshProgress {
                 phase: "discovering",
                 completed_sources: 0,
@@ -678,6 +1092,7 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
         &index_root,
         None,
         SourceBackedRefreshScope::All,
+        &BTreeSet::new(),
         &mut progress,
     )
     .unwrap();
@@ -699,6 +1114,7 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
         &index_root,
         None,
         SourceBackedRefreshScope::All,
+        &BTreeSet::new(),
         &mut progress,
     )
     .unwrap();
@@ -773,6 +1189,7 @@ fn automatic_refresh_replaces_a_zstd_settings_generation() {
         &index_root,
         None,
         SourceBackedRefreshScope::All,
+        &BTreeSet::new(),
         &mut progress,
     )
     .unwrap();
@@ -809,6 +1226,7 @@ fn automatic_refresh_replaces_a_zstd_settings_generation() {
                     &index_root,
                     None,
                     SourceBackedRefreshScope::All,
+                    &BTreeSet::new(),
                     &mut progress,
                 )
             },

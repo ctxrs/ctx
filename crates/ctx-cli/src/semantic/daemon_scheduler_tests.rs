@@ -1,11 +1,21 @@
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier, Mutex,
+    },
+};
 
+use ctx_history_capture::SourceBackedRefreshScope;
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
     NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
     SourceFrontier, SourceObservation, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, WriterOptions, MAX_SEMANTIC_EVENT_PAGE_ITEMS};
+use ctx_history_index::{
+    GenerationWriter, SourceRouteIdentity, WriterOptions, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+};
 use ctx_pro_host_protocol::ProFilesystemLayout;
 use serde_json::{json, Value};
 
@@ -14,6 +24,7 @@ use crate::{
     output::JsonOutputFormat,
     semantic::{
         daemon::{install_daemon_test_job_hooks, DaemonTestJobHooks},
+        dirty_source_routes::EventWatermark,
         source_backed_refresh_coordinator::{
             coordinate_source_backed_refresh, source_backed_index_root, CoreRefreshEngine,
             SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshMode,
@@ -410,6 +421,146 @@ fn healthy_idle_scheduler_performs_zero_source_refresh_scans() {
     assert!(!idle.continue_immediately);
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(!daemon_core_refresh_job_path(temp.path()).exists());
+}
+
+#[test]
+fn startup_seeded_manual_all_continuation_scans_each_route_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route =
+        |byte: u8| SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap();
+    let routes = BTreeSet::from([route(0x81), route(0x82), route(0x83)]);
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_routes = routes.clone();
+    let executor_scans = Arc::clone(&scans);
+    let executor_calls = Arc::clone(&calls);
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let selected = match &execution.scope {
+                SourceBackedRefreshScope::All => executor_routes
+                    .difference(&execution.covered_route_ids)
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+                SourceBackedRefreshScope::Exact(routes) => routes.clone(),
+            };
+            for route in &selected {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            if executor_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                executor_entered.wait();
+                executor_release.wait();
+            }
+            let receipt = GenerationWriter::open(execution.index_root, WriterOptions::default())?
+                .commit(|_| true)?;
+            let selected_route_ids = selected
+                .iter()
+                .map(|route| route.as_str().to_owned())
+                .collect::<Vec<_>>();
+            Ok(SourceBackedRefreshPublication {
+                selected_route_ids: selected_route_ids.clone(),
+                successful_route_ids: selected_route_ids,
+                source_failures: Vec::new(),
+                generation_id: receipt.generation_id,
+                published_explicit_source_catalog: execution
+                    .explicit_source_catalog
+                    .cloned()
+                    .expect("startup refresh catalog authority"),
+                scanned_routes: selected.len(),
+                unsupported_routes: 0,
+                certified_source_count: 0,
+                certified_source_bytes: 0,
+                current: SourceBackedRefreshCurrent::default(),
+                timings: SourceBackedRefreshTimings {
+                    discovery_us: 1,
+                    scan_stage_us: 1,
+                    commit_us: 1,
+                },
+            })
+        },
+    )));
+    coordinator.reconcile_watch_routes(
+        routes.clone(),
+        EventWatermark::new(1, 0),
+        super::source_route_ledger_now_ms().saturating_sub(1_000),
+    );
+    let authority =
+        crate::commands::import::load_explicit_source_catalog_authority(&data_root).unwrap();
+
+    let (manual_request_id, mut runtime) = std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_root = data_root.clone();
+        let handle = scope.spawn(move || {
+            let mut runtime = DaemonRuntime::default();
+            let iteration = run_daemon_scheduler_cycle_with_activity(
+                &daemon_args(),
+                &runner_root,
+                &mut runtime,
+                None,
+                false,
+                None,
+                Some(&runner),
+            )
+            .unwrap();
+            (iteration, runtime)
+        });
+        entered.wait();
+        let response = coordinator
+            .handle_ipc_request(
+                &data_root,
+                &json!({
+                    "schema_version": 1,
+                    "op": "source_refresh_request",
+                    "mode": "wait",
+                    "explicit_source_catalog": authority.to_json(),
+                }),
+            )
+            .unwrap()
+            .expect("manual all continuation response");
+        let request_id = response["request_id"].as_str().unwrap().to_owned();
+        release.wait();
+        let (first, runtime) = handle.join().unwrap();
+        assert!(!first.failed);
+        assert!(first.continue_immediately);
+        (request_id, runtime)
+    });
+
+    let successor = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        &data_root,
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+
+    assert!(!successor.failed);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *scans.lock().unwrap(),
+        routes
+            .iter()
+            .cloned()
+            .map(|route| (route, 1))
+            .collect::<BTreeMap<_, _>>()
+    );
+    let terminal = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
+    assert_eq!(terminal["request_id"], manual_request_id);
+    assert_eq!(terminal["request_state"], "published");
+    assert_eq!(terminal["scanned_routes"], routes.len());
+    assert!(!coordinator.has_pending_request());
+    assert!(!coordinator.has_scheduled_route_work());
 }
 
 fn install_jobs(

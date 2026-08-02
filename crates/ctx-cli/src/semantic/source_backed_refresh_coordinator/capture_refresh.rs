@@ -7,6 +7,7 @@ pub(super) fn execute_source_backed_refresh(
     coordinator: &CoreRefreshEngine,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     scope: SourceBackedRefreshScope,
+    covered_route_ids: BTreeSet<SourceRouteIdentity>,
 ) -> Result<SourceBackedRefreshPublication> {
     let index_root = source_backed_index_root(data_root);
     let report_progress = |update: SourceBackedRefreshProgressUpdate| {
@@ -27,6 +28,7 @@ pub(super) fn execute_source_backed_refresh(
         request_id,
         explicit_source_catalog,
         scope,
+        covered_route_ids,
         report_progress: &report_progress,
     })
 }
@@ -52,6 +54,7 @@ where
         &Path,
         Option<&ExplicitSourceCatalogAuthority>,
         SourceBackedRefreshScope,
+        &BTreeSet<SourceRouteIdentity>,
         &mut dyn FnMut(CaptureSourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
     ) -> Result<SourceBackedRefreshPublication>,
 {
@@ -97,6 +100,7 @@ where
         execution.index_root,
         execution.explicit_source_catalog,
         execution.scope.clone(),
+        &execution.covered_route_ids,
         &mut report_progress,
     )
 }
@@ -109,6 +113,7 @@ pub(super) fn refresh_all_provider_sources(
     index_root: &Path,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     scope: SourceBackedRefreshScope,
+    covered_route_ids: &BTreeSet<SourceRouteIdentity>,
     report_progress: &mut dyn FnMut(
         CaptureSourceBackedRefreshProgress,
     ) -> SourceBackedRouteResult<()>,
@@ -129,9 +134,21 @@ pub(super) fn refresh_all_provider_sources(
         reject_blocking_automatic_registry_issues(&build.issues)?;
         reject_unowned_retained_source_families(&build.registry, &retained_sources)?;
     }
+    let physical_scope = if scope == SourceBackedRefreshScope::All && !covered_route_ids.is_empty()
+    {
+        let current_route_ids = build
+            .registry
+            .watch_catalog()
+            .route_ids()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        SourceBackedRefreshScope::exact(current_route_ids.difference(covered_route_ids).cloned())
+    } else {
+        scope
+    };
     let (executor, _issues) = build.into_refresh_executor(WriterOptions::default());
     let receipt = executor
-        .refresh_scope(index_root, scope, report_progress)
+        .refresh_scope(index_root, physical_scope, report_progress)
         .context("run capture-owned source-backed refresh")?;
     let current = SourceBackedRefreshCurrent::from_sources(&receipt.sources, 0)?;
     if current.source_count != receipt.certified_source_count

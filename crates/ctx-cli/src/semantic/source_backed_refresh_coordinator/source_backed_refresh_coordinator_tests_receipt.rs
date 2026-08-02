@@ -278,6 +278,7 @@ fn nonempty_explicit_catalog_publication_is_recorded_in_the_terminal_receipt() {
         &index_root,
         None,
         SourceBackedRefreshScope::All,
+        &BTreeSet::new(),
         &mut progress,
     )
     .unwrap();

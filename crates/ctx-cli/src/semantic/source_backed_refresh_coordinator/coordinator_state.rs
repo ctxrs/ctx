@@ -39,6 +39,7 @@ pub(crate) struct SourceBackedRefreshExecution<'a> {
     pub(crate) request_id: &'a str,
     pub(crate) explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
     pub(crate) scope: SourceBackedRefreshScope,
+    pub(crate) covered_route_ids: BTreeSet<SourceRouteIdentity>,
     pub(super) report_progress: &'a dyn Fn(SourceBackedRefreshProgressUpdate) -> Result<()>,
 }
 
@@ -109,7 +110,36 @@ pub(super) struct CoreRefreshEngineState {
     dirty_routes: DirtySourceRoutes,
     known_route_ids: BTreeSet<SourceRouteIdentity>,
     route_admissions: BTreeMap<String, Vec<DirtySourceRouteAdmission>>,
+    manual_all_continuations: BTreeMap<String, ManualAllContinuation>,
     watch_routes_initialized: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ManualAllContinuation {
+    predecessor_request_id: String,
+    predecessor_finished: bool,
+    covered_route_ids: BTreeSet<SourceRouteIdentity>,
+    covered_scanned_routes: usize,
+    covered_timings: SourceBackedRefreshTimings,
+}
+
+impl ManualAllContinuation {
+    fn new(predecessor_request_id: String) -> Self {
+        Self {
+            predecessor_request_id,
+            predecessor_finished: false,
+            covered_route_ids: BTreeSet::new(),
+            covered_scanned_routes: 0,
+            covered_timings: SourceBackedRefreshTimings::default(),
+        }
+    }
+
+    fn invalidate_route(&mut self, route: &SourceRouteIdentity) {
+        if self.covered_route_ids.remove(route) && self.covered_route_ids.is_empty() {
+            self.covered_scanned_routes = 0;
+            self.covered_timings = SourceBackedRefreshTimings::default();
+        }
+    }
 }
 
 pub(in crate::semantic) struct CoreRefreshEngine {
@@ -191,6 +221,7 @@ impl CoreRefreshEngine {
                 dirty_routes: DirtySourceRoutes::default(),
                 known_route_ids: BTreeSet::new(),
                 route_admissions: BTreeMap::new(),
+                manual_all_continuations: BTreeMap::new(),
                 watch_routes_initialized: false,
             }),
             executor,
@@ -221,6 +252,11 @@ impl CoreRefreshEngine {
         state
             .dirty_routes
             .seed_exact_routes(routes.iter().cloned(), watermark, observed_at_ms);
+        for continuation in state.manual_all_continuations.values_mut() {
+            for route in &routes {
+                continuation.invalidate_route(route);
+            }
+        }
         state.known_route_ids = routes;
         state.watch_routes_initialized = true;
     }
@@ -233,9 +269,15 @@ impl CoreRefreshEngine {
         let mut state = self.lock_state();
         for (route, watermark) in routes {
             if state.known_route_ids.contains(&route) {
-                state
-                    .dirty_routes
-                    .record_event(route, watermark, observed_at_ms);
+                let recorded =
+                    state
+                        .dirty_routes
+                        .record_event(route.clone(), watermark, observed_at_ms);
+                if recorded {
+                    for continuation in state.manual_all_continuations.values_mut() {
+                        continuation.invalidate_route(&route);
+                    }
+                }
             }
         }
     }
@@ -375,8 +417,9 @@ impl CoreRefreshEngine {
                 let refresh_scope = coordinator
                     .refresh_scope(request_id)
                     .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
+                let covered_route_ids =
+                    coordinator.admit_refresh_scope(request_id, &refresh_scope)?;
                 coordinator.persist_job_status(data_root, request_id)?;
-                coordinator.admit_refresh_scope(request_id, &refresh_scope)?;
                 let publication = execute_source_backed_refresh(
                     executor.as_ref(),
                     data_root,
@@ -384,6 +427,7 @@ impl CoreRefreshEngine {
                     coordinator,
                     Some(&requested_catalog),
                     refresh_scope,
+                    covered_route_ids,
                 )?;
                 let probe_started = StdInstant::now();
                 publication_probe_attempted.set(true);
@@ -505,6 +549,10 @@ impl CoreRefreshEngine {
         admission: SourceRefreshAdmissionRequirement,
     ) -> Result<Value> {
         let mut state = self.lock_state();
+        let is_manual_all = metadata.trigger == "import"
+            && requested_catalog.is_some()
+            && refresh_scope == SourceBackedRefreshScope::All;
+        let mut continuation_predecessor = None;
         if let Some(active_request_id) = state.active_request_id.clone() {
             if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
                 if active.state.is_active() && !admission.requires_successor(active.state) {
@@ -516,6 +564,21 @@ impl CoreRefreshEngine {
                             active.requested_explicit_source_catalog =
                                 Some(requested_catalog.clone());
                         }
+                    }
+                    let same_catalog = active.requested_explicit_source_catalog.as_ref()
+                        == requested_catalog.as_ref();
+                    let automatic_exact = active.trigger == "periodic"
+                        && active.trigger_provenance == "daemon_scheduler"
+                        && matches!(
+                            &active.refresh_scope,
+                            SourceBackedRefreshScope::Exact(routes) if routes.len() == 1
+                        );
+                    if is_manual_all && same_catalog && automatic_exact {
+                        if active.state == SourceBackedRefreshState::Queued {
+                            active.refresh_scope = SourceBackedRefreshScope::All;
+                            return Ok(coalesce_attempt(active, metadata));
+                        }
+                        continuation_predecessor = Some(active.request_id.clone());
                     }
                     if active.requested_explicit_source_catalog.as_ref()
                         == requested_catalog.as_ref()
@@ -564,17 +627,22 @@ impl CoreRefreshEngine {
             refresh_scope,
         );
         let response = attempt.to_json();
+        let request_id = attempt.request_id.clone();
         if state
             .active_request_id
             .as_deref()
             .and_then(|request_id| find_attempt(&state, request_id))
             .is_some_and(|attempt| attempt.state.is_active())
         {
-            state
-                .pending_request_ids
-                .push_back(attempt.request_id.clone());
+            state.pending_request_ids.push_back(request_id.clone());
         } else {
-            state.active_request_id = Some(attempt.request_id.clone());
+            state.active_request_id = Some(request_id.clone());
+        }
+        if let Some(predecessor_request_id) = continuation_predecessor {
+            state.manual_all_continuations.insert(
+                request_id,
+                ManualAllContinuation::new(predecessor_request_id),
+            );
         }
         state.attempts.push_back(attempt);
         trim_terminal_attempt_history(&mut state);
@@ -604,17 +672,57 @@ impl CoreRefreshEngine {
         &self,
         request_id: &str,
         scope: &SourceBackedRefreshScope,
-    ) -> Result<()> {
+    ) -> Result<BTreeSet<SourceRouteIdentity>> {
         let now_ms = source_route_ledger_now_ms();
         let mut state = self.lock_state();
+        let known_route_ids = state.known_route_ids.clone();
+        let mut covered_route_ids = if let Some(continuation) =
+            state.manual_all_continuations.get_mut(request_id)
+        {
+            if !continuation.predecessor_finished {
+                bail!(
+                    "manual all-route continuation `{request_id}` started before its exact predecessor finished"
+                );
+            }
+            let retained = continuation
+                .covered_route_ids
+                .intersection(&known_route_ids)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if retained != continuation.covered_route_ids {
+                continuation.covered_route_ids = retained;
+                if continuation.covered_route_ids.is_empty() {
+                    continuation.covered_scanned_routes = 0;
+                    continuation.covered_timings = SourceBackedRefreshTimings::default();
+                }
+            }
+            continuation.covered_route_ids.clone()
+        } else {
+            BTreeSet::new()
+        };
         let admissions = match scope {
             SourceBackedRefreshScope::All => {
                 let watermark = state.dirty_routes.seed_watermark();
-                let routes = state.known_route_ids.iter().cloned().collect::<Vec<_>>();
+                let routes = known_route_ids
+                    .difference(&covered_route_ids)
+                    .cloned()
+                    .collect::<Vec<_>>();
                 state
                     .dirty_routes
                     .seed_exact_routes(routes, watermark, now_ms);
-                state.dirty_routes.admit_all()
+                let admissions = state.dirty_routes.admit_all();
+                if admissions
+                    .iter()
+                    .any(|admission| covered_route_ids.contains(admission.route()))
+                {
+                    covered_route_ids.clear();
+                    if let Some(continuation) = state.manual_all_continuations.get_mut(request_id) {
+                        continuation.covered_route_ids.clear();
+                        continuation.covered_scanned_routes = 0;
+                        continuation.covered_timings = SourceBackedRefreshTimings::default();
+                    }
+                }
+                admissions
             }
             SourceBackedRefreshScope::Exact(routes) => {
                 if routes.len() != 1 {
@@ -638,7 +746,7 @@ impl CoreRefreshEngine {
         state
             .route_admissions
             .insert(request_id.to_owned(), admissions);
-        Ok(())
+        Ok(covered_route_ids)
     }
 
     fn freeze_requested_explicit_source_catalog(
@@ -720,6 +828,13 @@ impl CoreRefreshEngine {
         let (request_id, previous_generation, requested_catalog, refresh_scope) = {
             let mut state = self.lock_state();
             let request_id = state.active_request_id.clone()?;
+            if state
+                .manual_all_continuations
+                .get(&request_id)
+                .is_some_and(|continuation| !continuation.predecessor_finished)
+            {
+                return None;
+            }
             let attempt = find_attempt_mut(&mut state, &request_id)?;
             if attempt.state != SourceBackedRefreshState::Queued {
                 return None;
@@ -781,6 +896,7 @@ impl CoreRefreshEngine {
             },
         };
         let mut state = self.lock_state();
+        let continuation = state.manual_all_continuations.remove(&request_id);
         let mut newly_published_generation = None;
         let (failed_run, did_work) = {
             let attempt = find_attempt_mut(&mut state, &request_id)?;
@@ -792,7 +908,10 @@ impl CoreRefreshEngine {
             }
 
             match verified {
-                Ok((observed, publication)) => {
+                Ok((observed, mut publication)) => {
+                    if let Some(continuation) = continuation.as_ref() {
+                        aggregate_manual_all_continuation(&mut publication, continuation);
+                    }
                     let generation_changed =
                         previous_generation.as_deref() != Some(observed.as_str());
                     attempt.state = SourceBackedRefreshState::Published;
@@ -838,8 +957,11 @@ impl CoreRefreshEngine {
         if state.active_request_id.as_deref() == Some(request_id.as_str()) {
             state.active_request_id = state.pending_request_ids.pop_front();
             if let Some(next_request_id) = state.active_request_id.clone() {
+                let next_is_manual_continuation = state
+                    .manual_all_continuations
+                    .contains_key(&next_request_id);
                 if let Some(next_attempt) = find_attempt_mut(&mut state, &next_request_id) {
-                    if observed_for_status.is_some() {
+                    if observed_for_status.is_some() && !next_is_manual_continuation {
                         next_attempt.previous_generation = observed_for_status.clone();
                         next_attempt.published_generation = observed_for_status.clone();
                     }
@@ -876,9 +998,15 @@ impl CoreRefreshEngine {
         let now_ms = source_route_ledger_now_ms();
         let mut state = self.lock_state();
         let Some(admissions) = state.route_admissions.remove(request_id) else {
+            for continuation in state.manual_all_continuations.values_mut() {
+                if continuation.predecessor_request_id == request_id {
+                    continuation.predecessor_finished = true;
+                }
+            }
             return;
         };
         let attempt = find_attempt(&state, request_id).cloned();
+        let mut covered_route_ids = BTreeSet::new();
         for admission in admissions {
             let retry = !publication_ready
                 || attempt
@@ -916,10 +1044,32 @@ impl CoreRefreshEngine {
                 .iter()
                 .any(|route| route == admission.route().as_str())
             {
-                state.dirty_routes.acknowledge(&admission);
+                if state.dirty_routes.acknowledge(&admission) {
+                    covered_route_ids.insert(admission.route().clone());
+                }
             } else {
                 state.dirty_routes.retryable_failure(&admission, now_ms);
             }
+        }
+        for continuation in state.manual_all_continuations.values_mut() {
+            if continuation.predecessor_request_id != request_id {
+                continue;
+            }
+            continuation.predecessor_finished = true;
+            if covered_route_ids.is_empty() {
+                continue;
+            }
+            continuation
+                .covered_route_ids
+                .extend(covered_route_ids.iter().cloned());
+            continuation.covered_scanned_routes = attempt
+                .as_ref()
+                .and_then(|attempt| attempt.scanned_routes)
+                .unwrap_or_default();
+            continuation.covered_timings = attempt
+                .as_ref()
+                .and_then(|attempt| attempt.timings)
+                .unwrap_or_default();
         }
     }
 
@@ -987,6 +1137,40 @@ fn coalesce_attempt(
     }
     attempt.coalesced_requests = attempt.coalesced_requests.saturating_add(1);
     attempt.to_json()
+}
+
+fn aggregate_manual_all_continuation(
+    publication: &mut SourceBackedRefreshPublication,
+    continuation: &ManualAllContinuation,
+) {
+    if continuation.covered_route_ids.is_empty() {
+        return;
+    }
+    let covered = continuation
+        .covered_route_ids
+        .iter()
+        .map(|route| route.as_str().to_owned());
+    publication.selected_route_ids.extend(covered.clone());
+    publication.successful_route_ids.extend(covered);
+    publication.selected_route_ids.sort();
+    publication.selected_route_ids.dedup();
+    publication.successful_route_ids.sort();
+    publication.successful_route_ids.dedup();
+    publication.scanned_routes = publication
+        .scanned_routes
+        .saturating_add(continuation.covered_scanned_routes);
+    publication.timings.discovery_us = publication
+        .timings
+        .discovery_us
+        .saturating_add(continuation.covered_timings.discovery_us);
+    publication.timings.scan_stage_us = publication
+        .timings
+        .scan_stage_us
+        .saturating_add(continuation.covered_timings.scan_stage_us);
+    publication.timings.commit_us = publication
+        .timings
+        .commit_us
+        .saturating_add(continuation.covered_timings.commit_us);
 }
 
 fn new_refresh_attempt(
