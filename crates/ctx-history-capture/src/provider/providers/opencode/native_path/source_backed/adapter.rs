@@ -26,7 +26,8 @@ use crate::{
         SourceBackedRouteSelection,
     },
     provider_sources::{
-        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
+        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, ProviderSource,
 };
@@ -65,9 +66,13 @@ pub(super) struct OpenCodeSqliteWorkCounters {
     pub(super) snapshot_opens: u64,
     pub(super) immutable_snapshot_opens: u64,
     pub(super) copied_snapshot_opens: u64,
+    pub(super) logical_online_backup_opens: u64,
+    pub(super) logical_online_backup_steps: u64,
+    pub(super) logical_online_backup_pages: u64,
     pub(super) source_bytes_copied: u64,
-    pub(super) logical_observation_passes: u64,
-    pub(super) logical_rows_observed: u64,
+    pub(super) schema_probe_passes: u64,
+    pub(super) logical_fingerprint_passes: u64,
+    pub(super) logical_row_traversals: u64,
     pub(super) projection_passes: u64,
     pub(super) logical_rows_projected: u64,
     pub(super) documents_staged: u64,
@@ -77,6 +82,17 @@ pub(super) struct OpenCodeSqliteWorkCounters {
     pub(super) terminal_revalidations: u64,
     pub(super) active_snapshots: u64,
     pub(super) max_active_snapshots: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_WORK_COUNTERS: std::cell::RefCell<Option<OpenCodeSqliteWorkCounters>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn take_last_work_counters() -> Option<OpenCodeSqliteWorkCounters> {
+    LAST_WORK_COUNTERS.with(|slot| slot.borrow_mut().take())
 }
 
 impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
@@ -127,9 +143,7 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
             },
         )
         .map_err(route_error)?;
-        if !scan.source.exact_descriptor_eq(&leaf.observation.source)
-            || scan.certificate.counts().complete_records != leaf.observation.logical_rows
-        {
+        if !scan.source.exact_descriptor_eq(&leaf.observation.source) {
             return Err(source_changed(
                 "OpenCode-family projection did not match its logical observation",
             ));
@@ -140,6 +154,7 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
                 .lock()
                 .map_err(|_| source_internal("OpenCode-family work counter lock was poisoned"))?;
             work.projection_passes = 1;
+            work.logical_row_traversals = 1;
             work.logical_rows_projected = scan.certificate.counts().complete_records;
             work.documents_staged = scan.certificate.counts().indexed_documents;
             work.max_buffered_documents =
@@ -257,12 +272,17 @@ fn observe_present_document_tree(
     let authorized = open_root_authorized_snapshot_retained(data_root, path)?;
     let observation = observe_logical_source(authorized.sqlite_snapshot.connection()?, dialect)?;
     let terminal_revalidate = authorized.sqlite_snapshot.terminal_revalidator();
-    let leaf_fingerprint = DocumentLeafFingerprint::new(observation.fingerprint);
+    let leaf_fingerprint = DocumentLeafFingerprint::new(admitted_leaf_fingerprint(
+        &observation.source,
+        authorized.sqlite_snapshot.evidence(),
+    ));
+    let replay_from_frontier = authorized
+        .sqlite_snapshot
+        .admitted_revision_is_replay_safe();
     let tree_fingerprint = leaf_fingerprint.as_bytes();
-    let logical_rows = observation.logical_rows;
     Ok(CompleteDocumentTree::new(
         tree_fingerprint,
-        vec![ObservedDocumentLeaf::new(
+        vec![ObservedDocumentLeaf::with_durable_replay(
             leaf_fingerprint,
             OpenCodeDocumentLeaf {
                 observation,
@@ -271,14 +291,27 @@ fn observe_present_document_tree(
                 snapshot: Mutex::new(Some(authorized.sqlite_snapshot)),
                 terminal_revalidate,
                 work: Mutex::new(OpenCodeSqliteWorkCounters {
-                    logical_observation_passes: 1,
-                    logical_rows_observed: logical_rows,
+                    schema_probe_passes: 1,
                     ..OpenCodeSqliteWorkCounters::default()
                 }),
             },
+            replay_from_frontier,
         )],
         OpenCodeTreeAuthority::Present,
     ))
+}
+
+pub(super) fn admitted_leaf_fingerprint(
+    source: &SourceKey,
+    evidence: &SqliteSourceEvidence,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.opencode-family-admitted-sqlite-revision-v1\0");
+    digest.update(source.exact_descriptor_digest());
+    digest.update((PARSER_REVISION.len() as u64).to_be_bytes());
+    digest.update(PARSER_REVISION.as_bytes());
+    digest.update(evidence.revision());
+    digest.finalize().into()
 }
 
 fn observe_missing_document_tree(
@@ -339,9 +372,13 @@ fn finalize_work_counters(
         .map_err(|_| source_internal("OpenCode-family work counter lock was poisoned"))?;
     work.immutable_snapshot_opens = snapshot.immutable_snapshot_opens();
     work.copied_snapshot_opens = snapshot.copied_snapshot_opens();
+    work.logical_online_backup_opens = snapshot.logical_online_backup_opens();
+    work.logical_online_backup_steps = snapshot.logical_online_backup_steps();
+    work.logical_online_backup_pages = snapshot.logical_online_backup_pages();
     work.snapshot_opens = work
         .immutable_snapshot_opens
         .checked_add(work.copied_snapshot_opens)
+        .and_then(|opens| opens.checked_add(work.logical_online_backup_opens))
         .ok_or_else(|| source_internal("OpenCode-family snapshot open count overflowed"))?;
     work.source_bytes_copied = snapshot.source_bytes_copied();
     work.terminal_fences = snapshot.terminal_fences();
@@ -351,7 +388,11 @@ fn finalize_work_counters(
     work.exact_replays = u64::from(exact_replay);
     let counters = *work;
     if counters.snapshot_opens != 1
-        || counters.logical_observation_passes != 1
+        || counters.logical_online_backup_opens != 1
+        || counters.logical_online_backup_steps == 0
+        || counters.logical_online_backup_pages == 0
+        || counters.schema_probe_passes != 1
+        || counters.logical_fingerprint_passes != 0
         || counters.terminal_fences != 1
         || counters.terminal_revalidations < 2
         || counters.active_snapshots != 0
@@ -360,18 +401,21 @@ fn finalize_work_counters(
         || counters.max_buffered_documents > 1
         || (exact_replay
             && (counters.projection_passes != 0
+                || counters.logical_row_traversals != 0
                 || counters.logical_rows_projected != 0
                 || counters.documents_staged != 0
                 || counters.max_buffered_documents != 0))
         || (!exact_replay
             && (counters.projection_passes != 1
-                || counters.logical_rows_projected != counters.logical_rows_observed
+                || counters.logical_row_traversals != 1
                 || counters.documents_staged > counters.logical_rows_projected))
     {
         return Err(source_internal(
             "OpenCode-family lifecycle violated its one-snapshot bounded-work contract",
         ));
     }
+    #[cfg(test)]
+    LAST_WORK_COUNTERS.with(|slot| slot.replace(Some(counters)));
     Ok(counters)
 }
 

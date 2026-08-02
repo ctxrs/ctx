@@ -26,6 +26,24 @@ pub(super) fn source_backed_event_source_sql(schema: &OpenCodeNativeSchema) -> S
     }
 }
 
+pub(super) fn source_backed_event_order_sql(schema: &OpenCodeNativeSchema) -> &'static str {
+    match schema.family {
+        OpenCodeNativeSchemaFamily::SessionMessageSeq => {
+            " order by x.session_id collate binary, x.seq, x.id collate binary"
+        }
+        OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq
+        | OpenCodeNativeSchemaFamily::SessionEntry
+        | OpenCodeNativeSchemaFamily::LegacyMessage => {
+            " order by x.session_id collate binary, x.time_created, x.id collate binary"
+        }
+        OpenCodeNativeSchemaFamily::MessagePart => {
+            " order by p.session_id collate binary,
+                       coalesce(m.time_created, p.time_created),
+                       p.time_created, p.message_id collate binary, p.id collate binary"
+        }
+    }
+}
+
 fn row_event_source_sql(
     schema: &OpenCodeNativeSchema,
     table: &str,
