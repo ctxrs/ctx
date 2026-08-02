@@ -40,6 +40,9 @@ use crate::{
         OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderSourceDirectory,
         ProviderSourceRoot,
     },
+    provider::source_backed::{
+        SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
+    },
     CaptureError,
 };
 
@@ -109,6 +112,18 @@ pub(crate) enum SqliteSourceAccessError {
 }
 
 pub(crate) type SqliteSourceAccessResult<T> = Result<T, SqliteSourceAccessError>;
+
+#[derive(Debug)]
+pub(crate) enum SqliteSourceProgressError<E> {
+    Source(SqliteSourceAccessError),
+    Progress(E),
+}
+
+impl<E> From<SqliteSourceAccessError> for SqliteSourceProgressError<E> {
+    fn from(error: SqliteSourceAccessError) -> Self {
+        Self::Source(error)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SqliteSourceSnapshotStrategy {
@@ -538,6 +553,7 @@ impl SqliteSourceDirectoryAuthority {
         self.snapshot_context.snapshot()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn open_logical_online_backup_snapshot(
         &self,
         database_name: &OsStr,
@@ -546,6 +562,18 @@ impl SqliteSourceDirectoryAuthority {
             self,
             database_name,
             SqliteSourceSnapshotPolicy::LogicalOnlineBackup,
+        )
+    }
+
+    pub(crate) fn open_logical_online_backup_snapshot_with_progress<E>(
+        &self,
+        database_name: &OsStr,
+        report_progress: impl FnMut(SourceBackedCurrentSourceProgress) -> Result<(), E>,
+    ) -> Result<SqliteSourceReadSnapshot, SqliteSourceProgressError<E>> {
+        open_root_handle_sqlite_source_logical_snapshot_with_progress(
+            self,
+            database_name,
+            report_progress,
         )
     }
 
@@ -883,7 +911,6 @@ use family::{
     SqliteSchemaEvidence, SqliteSnapshotEvidence, SqliteSourceFamily,
 };
 pub(crate) use logical::SqliteLogicalSnapshot;
-use snapshot::open_root_handle_sqlite_source_snapshot_with_policy;
 #[cfg(test)]
 use snapshot::{
     certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
@@ -891,6 +918,10 @@ use snapshot::{
     open_root_handle_sqlite_source_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
     open_root_handle_sqlite_source_snapshot_for_test,
+};
+use snapshot::{
+    open_root_handle_sqlite_source_logical_snapshot_with_progress,
+    open_root_handle_sqlite_source_snapshot_with_policy,
 };
 pub(crate) use snapshot::{
     open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,

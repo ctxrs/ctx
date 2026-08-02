@@ -1,10 +1,18 @@
 use std::{fs, path::Path};
 
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{CaptureProvider, SourceAnchor};
+use ctx_history_index::WriterOptions;
 use rusqlite::Connection;
 
 use super::*;
-use crate::provider_sources::provider_source_for_path;
+use crate::{
+    provider::source_backed::{
+        refresh_source_backed_generation_with_detailed_progress,
+        register_hermes_explicit_source_backed_route, SourceBackedCurrentSourceProgressStage,
+        SourceBackedProviderRegistry,
+    },
+    provider_sources::provider_source_for_path,
+};
 
 #[test]
 fn direct_core_projection_is_complete_and_self_contained() {
@@ -145,4 +153,92 @@ fn online_backup_stays_stable_across_later_wal_commit_and_next_open_sees_it() {
         vec!["admitted message", "later message"]
     );
     snapshot.finish().unwrap();
+}
+
+#[test]
+fn detailed_progress_separates_backup_fingerprint_and_projection_scan() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let path = temp.path().join("profile/state.db");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "create table sessions (
+                 id text primary key,
+                 source text not null,
+                 parent_session_id text,
+                 started_at real not null
+             );
+             create table messages (
+                 id integer primary key autoincrement,
+                 session_id text not null,
+                 role text not null,
+                 content text,
+                 timestamp real not null
+             );
+             insert into sessions values ('session-1', 'acp', null, 1782259200.0);
+             insert into messages (session_id, role, content, timestamp)
+                 values ('session-1', 'assistant', 'progress message', 1782259201.0);",
+        )
+        .unwrap();
+    drop(connection);
+
+    let source = provider_source_for_path(CaptureProvider::Hermes, path);
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_hermes_explicit_source_backed_route(
+        &mut registry,
+        source,
+        &data_root,
+        SourceAnchor::CatalogLineage([31; 32]),
+    )
+    .unwrap();
+    let mut progress = Vec::new();
+    refresh_source_backed_generation_with_detailed_progress(
+        &index_root,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+        |update| {
+            if let Some(current) = update.current_source_progress {
+                progress.push(current);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    let stage_position = |stage| {
+        progress
+            .iter()
+            .position(|update| update.stage == stage)
+            .unwrap()
+    };
+    assert!(
+        stage_position(SourceBackedCurrentSourceProgressStage::OnlineBackup)
+            < stage_position(SourceBackedCurrentSourceProgressStage::LogicalFingerprint)
+    );
+    assert!(
+        stage_position(SourceBackedCurrentSourceProgressStage::LogicalFingerprint)
+            < stage_position(SourceBackedCurrentSourceProgressStage::LogicalScan)
+    );
+    for stage in [
+        SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
+        SourceBackedCurrentSourceProgressStage::LogicalScan,
+    ] {
+        let stage_progress = progress
+            .iter()
+            .filter(|update| update.stage == stage)
+            .collect::<Vec<_>>();
+        assert!(stage_progress.len() >= 3);
+        assert_eq!(stage_progress[0].logical_rows_scanned, Some(0));
+        assert!(stage_progress.windows(2).all(|pair| {
+            pair[0].logical_rows_scanned <= pair[1].logical_rows_scanned
+                && pair[0].logical_certified_bytes <= pair[1].logical_certified_bytes
+        }));
+        assert_eq!(stage_progress.last().unwrap().logical_rows_scanned, Some(2));
+    }
 }

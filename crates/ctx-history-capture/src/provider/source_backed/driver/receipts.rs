@@ -200,6 +200,9 @@ pub struct SourceBackedGenerationSink<'writer> {
     pub(in super::super) route_index: usize,
     pub(in super::super) leaf_worker_budget: usize,
     pub(in super::super) automatic_missing_observed_at_unix_ms: Option<u64>,
+    pub(in super::super) report_current_source_progress:
+        &'writer mut (dyn FnMut(SourceBackedCurrentSourceProgress) -> SourceBackedRouteResult<()>
+                          + 'writer),
 }
 
 #[derive(Clone)]
@@ -215,6 +218,18 @@ pub(in super::super) struct CompleteInventoryOwner {
 }
 
 impl SourceBackedGenerationSink<'_> {
+    pub fn report_current_source_progress(
+        &mut self,
+        progress: SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()> {
+        (self.report_current_source_progress)(progress).map_err(|error| {
+            SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::Internal,
+                format!("source-backed progress callback failed: {error}"),
+            )
+        })
+    }
+
     pub fn base_source(&self, source: &SourceKey) -> Option<&CertifiedSource> {
         self.writer.base_manifest().and_then(|manifest| {
             manifest

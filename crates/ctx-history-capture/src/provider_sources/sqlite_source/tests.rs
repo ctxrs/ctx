@@ -16,6 +16,8 @@ use ctx_history_core::ScannedSourceCounts;
 use rusqlite::{config::DbConfig, params, Connection};
 use sha2::{Digest, Sha256};
 
+use crate::provider::source_backed::SourceBackedCurrentSourceProgressStage;
+
 use super::{
     certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
     open_root_handle_sqlite_source_online_backup_before_identity_check_for_test,
@@ -386,7 +388,7 @@ fn active_wal_snapshot_reads_a_read_only_provider_tree() {
 }
 
 #[test]
-fn logical_online_backup_uses_bounded_page_chunks_for_large_snapshots() {
+fn logical_online_backup_progress_is_monotonic_and_uses_bounded_page_chunks() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let connection = Connection::open(&database).unwrap();
@@ -404,8 +406,15 @@ fn logical_online_backup_uses_bounded_page_chunks_for_large_snapshots() {
     drop(connection);
     let parent = retain_parent(temp.path());
 
+    let mut progress = Vec::new();
     let snapshot = parent
-        .open_logical_online_backup_snapshot(OsStr::new("provider.sqlite"))
+        .open_logical_online_backup_snapshot_with_progress(
+            OsStr::new("provider.sqlite"),
+            |update| {
+                progress.push(update);
+                Ok::<(), std::convert::Infallible>(())
+            },
+        )
         .unwrap();
     assert_eq!(
         snapshot
@@ -416,11 +425,40 @@ fn logical_online_backup_uses_bounded_page_chunks_for_large_snapshots() {
             .unwrap(),
         600
     );
+    let snapshot_bytes = snapshot.copied_bytes();
     snapshot.finish().unwrap();
+
+    let backup_progress = progress
+        .iter()
+        .filter(|update| update.stage == SourceBackedCurrentSourceProgressStage::OnlineBackup)
+        .collect::<Vec<_>>();
+    assert!(backup_progress.len() >= 3);
+    assert_eq!(backup_progress[0].snapshot_pages_completed, Some(0));
+    assert_eq!(backup_progress[0].snapshot_bytes_completed, Some(0));
+    assert!(backup_progress.windows(2).all(|pair| {
+        pair[0].snapshot_pages_completed <= pair[1].snapshot_pages_completed
+            && pair[0].snapshot_bytes_completed <= pair[1].snapshot_bytes_completed
+            && pair[0].snapshot_pages_total == pair[1].snapshot_pages_total
+            && pair[0].snapshot_bytes_total == pair[1].snapshot_bytes_total
+    }));
+    let terminal = backup_progress.last().unwrap();
+    assert_eq!(
+        terminal.snapshot_pages_completed,
+        terminal.snapshot_pages_total
+    );
+    assert_eq!(
+        terminal.snapshot_bytes_completed,
+        terminal.snapshot_bytes_total
+    );
+    assert_eq!(terminal.snapshot_bytes_total, Some(snapshot_bytes));
 
     let counters = parent.snapshot_counters();
     assert!(counters.logical_online_backup_pages() > 256);
     assert!(counters.logical_online_backup_steps() > 1);
+    assert_eq!(
+        terminal.snapshot_pages_total,
+        Some(counters.logical_online_backup_pages())
+    );
 }
 
 #[test]

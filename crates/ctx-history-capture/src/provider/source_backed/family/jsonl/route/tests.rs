@@ -319,6 +319,7 @@ fn capture_parallel_test_generation(
     let mut owners = HashMap::new();
     let mut complete_inventories = Vec::new();
     {
+        let mut report_progress = |_| Ok(());
         let mut sink = SourceBackedGenerationSink {
             writer: &mut writer,
             owners: &mut owners,
@@ -326,6 +327,7 @@ fn capture_parallel_test_generation(
             route_index: 0,
             leaf_worker_budget: workers,
             automatic_missing_observed_at_unix_ms: None,
+            report_current_source_progress: &mut report_progress,
         };
         with_family_scanner_workers(workers, || {
             capture(adapter, root, &resident, &mut sink).unwrap();
@@ -355,6 +357,7 @@ fn capture_checkpoint_test_generation(
     let mut owners = HashMap::new();
     let mut complete_inventories = Vec::new();
     {
+        let mut report_progress = |_| Ok(());
         let mut sink = SourceBackedGenerationSink {
             writer: &mut writer,
             owners: &mut owners,
@@ -362,6 +365,7 @@ fn capture_checkpoint_test_generation(
             route_index: 0,
             leaf_worker_budget: workers,
             automatic_missing_observed_at_unix_ms: None,
+            report_current_source_progress: &mut report_progress,
         };
         with_family_scanner_workers(workers, || {
             capture(&CheckpointTestAdapter, root, &resident, &mut sink).unwrap();
@@ -536,6 +540,7 @@ fn production_jsonl_scheduler_projects_multiple_sources_concurrently() {
     .unwrap();
     let mut owners = HashMap::new();
     let mut complete_inventories = Vec::new();
+    let mut report_progress = |_| Ok(());
     let mut sink = SourceBackedGenerationSink {
         writer: &mut writer,
         owners: &mut owners,
@@ -543,6 +548,7 @@ fn production_jsonl_scheduler_projects_multiple_sources_concurrently() {
         route_index: 0,
         leaf_worker_budget: 4,
         automatic_missing_observed_at_unix_ms: None,
+        report_current_source_progress: &mut report_progress,
     };
 
     with_family_scanner_workers(4, || {

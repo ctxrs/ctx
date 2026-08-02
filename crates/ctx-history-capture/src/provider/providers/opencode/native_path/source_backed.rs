@@ -34,11 +34,14 @@ use crate::{
     common::io::ProviderSourceRoot,
     provider::{
         normalization::provider_required_timestamp_millis,
-        providers::opencode::OpenCodeSqliteDialect, source_backed::SourceBackedRouteError,
+        providers::opencode::OpenCodeSqliteDialect,
+        source_backed::{
+            SourceBackedCurrentSourceProgress, SourceBackedRouteError, SourceBackedRouteResult,
+        },
     },
     provider_sources::{
         retain_sqlite_source_directory_authority, SqliteLogicalSnapshot, SqliteSourceAccessError,
-        SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
+        SqliteSourceDirectoryAuthority, SqliteSourceProgressError, SqliteSourceReadSnapshot,
     },
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -50,6 +53,7 @@ const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
 const SOURCE_BACKED_MAX_FILE_TOUCHES: usize = 32;
+const LOGICAL_SCAN_PROGRESS_ROW_CADENCE: u64 = 4_096;
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "OpenCode-family history database must be a regular file";
 
@@ -176,6 +180,10 @@ struct OpenCodeAuthorizedSnapshot {
 enum OpenCodeScanOutput {
     Begin(SourceKey),
     Document(CoreRecord),
+    Progress {
+        rows_scanned: u64,
+        certified_bytes: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -329,12 +337,22 @@ fn stream_logical_rows(
     let mut counts = ScannedSourceCounts::default();
     let mut session_sequences = HashMap::<String, u64>::new();
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
+    emit(OpenCodeScanOutput::Progress {
+        rows_scanned: 0,
+        certified_bytes: 0,
+    })?;
 
     while let Some(row) = rows.next()? {
         let event = decode_source_event_row(row, schema, dialect)?;
         hash_source_event(&mut hasher, &event);
         counts.complete_records = checked_add(counts.complete_records, 1)?;
         counts.certified_bytes = checked_add(counts.certified_bytes, event.content_bytes)?;
+        if counts.complete_records % LOGICAL_SCAN_PROGRESS_ROW_CADENCE == 0 {
+            emit(OpenCodeScanOutput::Progress {
+                rows_scanned: counts.complete_records,
+                certified_bytes: counts.certified_bytes,
+            })?;
+        }
         let disposition = projection_disposition(&event.projection);
         let retained = retained_projection(&event.projection);
         match disposition {
@@ -369,6 +387,10 @@ fn stream_logical_rows(
         )?;
         emit(OpenCodeScanOutput::Document(document))?;
     }
+    emit(OpenCodeScanOutput::Progress {
+        rows_scanned: counts.complete_records,
+        certified_bytes: counts.certified_bytes,
+    })?;
     Ok(StreamedLogicalRows {
         counts,
         content_digest: hasher.finalize().into(),
@@ -501,6 +523,7 @@ fn schema_family_for_source(
     })
 }
 
+#[cfg(test)]
 fn open_root_authorized_snapshot_retained(
     data_root: &Path,
     path: &Path,
@@ -508,10 +531,42 @@ fn open_root_authorized_snapshot_retained(
     open_root_authorized_snapshot_retained_with_hook(data_root, path, || {})
 }
 
+#[cfg(test)]
 fn open_root_authorized_snapshot_retained_with_hook(
     data_root: &Path,
     path: &Path,
     after_authorize: impl FnOnce(),
+) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
+    open_root_authorized_snapshot_retained_with_progress_and_hook(
+        data_root,
+        path,
+        after_authorize,
+        &mut |_| Ok(()),
+    )
+}
+
+fn open_root_authorized_snapshot_retained_with_progress(
+    data_root: &Path,
+    path: &Path,
+    report_progress: &mut dyn FnMut(
+        SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()>,
+) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
+    open_root_authorized_snapshot_retained_with_progress_and_hook(
+        data_root,
+        path,
+        || {},
+        report_progress,
+    )
+}
+
+fn open_root_authorized_snapshot_retained_with_progress_and_hook(
+    data_root: &Path,
+    path: &Path,
+    after_authorize: impl FnOnce(),
+    report_progress: &mut dyn FnMut(
+        SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
     let parent = path
         .parent()
@@ -530,7 +585,12 @@ fn open_root_authorized_snapshot_retained_with_hook(
         .map_err(CaptureError::from)?;
     let sqlite_authority =
         retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
-    let sqlite_snapshot = sqlite_authority.open_logical_online_backup_snapshot(database_leaf)?;
+    let sqlite_snapshot = sqlite_authority
+        .open_logical_online_backup_snapshot_with_progress(database_leaf, report_progress)
+        .map_err(|error| match error {
+            SqliteSourceProgressError::Source(error) => OpenCodeSourceBackedError::from(error),
+            SqliteSourceProgressError::Progress(error) => OpenCodeSourceBackedError::from(error),
+        })?;
     after_authorize();
     sqlite_snapshot.revalidate()?;
     source_directory.revalidate()?;

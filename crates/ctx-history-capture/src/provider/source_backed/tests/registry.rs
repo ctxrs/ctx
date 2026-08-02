@@ -42,6 +42,120 @@ fn heterogeneous_routes_publish_one_core_generation() {
     assert!(committed.stage_duration > Duration::ZERO);
 }
 
+fn fixture_route_with_current_source_progress(lineage: u8) -> SourceBackedRoute {
+    let route = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, lineage);
+    let scan = Arc::clone(&route.driver.as_ref().unwrap().scan);
+    rebuild_driver(route, move |sink| {
+        let mut progress = SourceBackedCurrentSourceProgress::new(
+            SourceBackedCurrentSourceProgressStage::LogicalScan,
+        );
+        progress.logical_rows_scanned = Some(7);
+        progress.logical_certified_bytes = Some(11);
+        sink.report_current_source_progress(progress)?;
+        scan(sink)
+    })
+}
+
+#[test]
+fn detailed_progress_projects_to_legacy_and_resets_at_source_transitions() {
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(fixture_route_with_current_source_progress(81));
+    let detailed_root = tempdir().unwrap();
+    let mut detailed = Vec::new();
+    refresh_source_backed_generation_with_detailed_progress(
+        detailed_root.path(),
+        &registry,
+        WriterOptions::default(),
+        |update| {
+            detailed.push(update);
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    let legacy_root = tempdir().unwrap();
+    let mut legacy = Vec::new();
+    refresh_source_backed_generation_with_progress(
+        legacy_root.path(),
+        &registry,
+        WriterOptions::default(),
+        |update| {
+            legacy.push(update);
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    let signature = |progress: &SourceBackedRefreshProgress| {
+        (
+            progress.phase,
+            progress.completed_sources,
+            progress.total_sources,
+            progress.current_source.clone(),
+            progress.certified_source_count,
+            progress.certified_source_bytes,
+        )
+    };
+    let projected = detailed
+        .iter()
+        .filter(|update| update.current_source_progress.is_none())
+        .cloned()
+        .map(SourceBackedDetailedRefreshProgress::into_legacy)
+        .map(|progress| signature(&progress))
+        .collect::<Vec<_>>();
+    assert_eq!(projected, legacy.iter().map(signature).collect::<Vec<_>>());
+
+    let detail_index = detailed
+        .iter()
+        .position(|update| update.current_source_progress.is_some())
+        .unwrap();
+    let current = detailed[detail_index].current_source_progress.unwrap();
+    assert_eq!(
+        current.stage,
+        SourceBackedCurrentSourceProgressStage::LogicalScan
+    );
+    assert_eq!(current.logical_rows_scanned, Some(7));
+    assert_eq!(current.logical_certified_bytes, Some(11));
+    assert!(detailed[detail_index - 1].current_source_progress.is_none());
+    assert!(detailed[detail_index + 1].current_source_progress.is_none());
+}
+
+#[test]
+fn current_source_progress_callback_failure_is_systemic_internal() {
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(fixture_route_with_current_source_progress(82));
+    let temp = tempdir().unwrap();
+
+    let error = refresh_source_backed_generation_with_detailed_progress(
+        temp.path(),
+        &registry,
+        WriterOptions::default(),
+        |update| {
+            if update.current_source_progress.is_some() {
+                Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Unavailable,
+                    "injected detailed progress failure",
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::RouteScan {
+            source: SourceBackedRouteError {
+                kind: SourceBackedRouteErrorKind::Internal,
+                detail,
+            },
+            ..
+        } if detail.contains("progress callback failed")
+            && detail.contains("injected detailed progress failure")
+    ));
+}
+
 fn controlled_revision_route(
     label: &'static str,
     lineage: u8,

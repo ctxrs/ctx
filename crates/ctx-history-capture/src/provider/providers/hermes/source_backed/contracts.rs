@@ -12,6 +12,8 @@ pub(crate) enum HermesSourceBackedError {
     CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Route(#[from] SourceBackedRouteError),
     #[error("Hermes source-backed source has an invalid profile path: {0:?}")]
     InvalidProfilePath(PathBuf),
     #[error("Hermes source-backed source changed while its snapshot was scanned")]

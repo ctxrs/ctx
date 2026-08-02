@@ -16,6 +16,80 @@ pub struct SourceBackedRefreshProgress {
     pub certified_source_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBackedCurrentSourceProgressStage {
+    SourceFamilyCopy,
+    OnlineBackup,
+    LogicalFingerprint,
+    LogicalScan,
+}
+
+impl SourceBackedCurrentSourceProgressStage {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceFamilyCopy => "source_family_copy",
+            Self::OnlineBackup => "online_backup",
+            Self::LogicalFingerprint => "logical_fingerprint",
+            Self::LogicalScan => "logical_scan",
+        }
+    }
+}
+
+/// Provider-neutral progress for work inside the currently refreshing source.
+///
+/// Fields remain optional because physical copies, SQLite backups, and logical
+/// traversals do not all expose the same units. Providers populate only units
+/// certified by the traversal already in progress; reporting must never add a
+/// counting pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceBackedCurrentSourceProgress {
+    pub stage: SourceBackedCurrentSourceProgressStage,
+    pub snapshot_pages_completed: Option<u64>,
+    pub snapshot_pages_total: Option<u64>,
+    pub snapshot_bytes_completed: Option<u64>,
+    pub snapshot_bytes_total: Option<u64>,
+    pub logical_rows_scanned: Option<u64>,
+    pub logical_certified_bytes: Option<u64>,
+}
+
+impl SourceBackedCurrentSourceProgress {
+    pub const fn new(stage: SourceBackedCurrentSourceProgressStage) -> Self {
+        Self {
+            stage,
+            snapshot_pages_completed: None,
+            snapshot_pages_total: None,
+            snapshot_bytes_completed: None,
+            snapshot_bytes_total: None,
+            logical_rows_scanned: None,
+            logical_certified_bytes: None,
+        }
+    }
+}
+
+/// Additive detailed progress surface. `progress` is the exact legacy
+/// source-level projection; `current_source_progress` is reset to `None` on
+/// every ordinary source/phase transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBackedDetailedRefreshProgress {
+    pub progress: SourceBackedRefreshProgress,
+    pub current_source_progress: Option<SourceBackedCurrentSourceProgress>,
+}
+
+impl SourceBackedDetailedRefreshProgress {
+    pub fn into_legacy(self) -> SourceBackedRefreshProgress {
+        self.progress
+    }
+}
+
+fn source_level_progress(
+    progress: SourceBackedRefreshProgress,
+) -> SourceBackedDetailedRefreshProgress {
+    SourceBackedDetailedRefreshProgress {
+        progress,
+        current_source_progress: None,
+    }
+}
+
 /// Capture-owned executor that can be installed behind the daemon's
 /// provider-neutral `SourceBackedRefreshExecutor` callback seam.
 #[derive(Debug, Clone)]
@@ -54,7 +128,28 @@ impl SourceBackedRefreshExecutor {
         index_root: impl AsRef<Path>,
         report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
     ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
-        refresh_source_backed_generation_with_progress_and_discovery_timing(
+        let mut report_progress = report_progress;
+        refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
+            index_root,
+            &self.registry,
+            self.writer_options.clone(),
+            self.discovery_duration,
+            self.work_budget,
+            move |update| {
+                if update.current_source_progress.is_some() {
+                    return Ok(());
+                }
+                report_progress(update.into_legacy())
+            },
+        )
+    }
+
+    pub fn refresh_with_detailed_progress(
+        &self,
+        index_root: impl AsRef<Path>,
+        report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
+    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+        refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             index_root,
             &self.registry,
             self.writer_options.clone(),
@@ -108,8 +203,31 @@ pub fn refresh_source_backed_generation_with_progress(
     writer_options: WriterOptions,
     report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
 ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+    let mut report_progress = report_progress;
     let work_budget = source_backed_refresh_work_budget(writer_options.indexer_threads);
-    refresh_source_backed_generation_with_progress_and_discovery_timing(
+    refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
+        index_root,
+        registry,
+        writer_options,
+        Duration::ZERO,
+        work_budget,
+        move |update| {
+            if update.current_source_progress.is_some() {
+                return Ok(());
+            }
+            report_progress(update.into_legacy())
+        },
+    )
+}
+
+pub fn refresh_source_backed_generation_with_detailed_progress(
+    index_root: impl AsRef<Path>,
+    registry: &SourceBackedProviderRegistry,
+    writer_options: WriterOptions,
+    report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
+) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+    let work_budget = source_backed_refresh_work_budget(writer_options.indexer_threads);
+    refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         index_root,
         registry,
         writer_options,
@@ -119,13 +237,13 @@ pub fn refresh_source_backed_generation_with_progress(
     )
 }
 
-fn refresh_source_backed_generation_with_progress_and_discovery_timing(
+fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
     index_root: impl AsRef<Path>,
     registry: &SourceBackedProviderRegistry,
     writer_options: WriterOptions,
     discovery_duration: Duration,
     work_budget: usize,
-    mut report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
+    mut report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
 ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
     let scanned_routes = registry
         .routes
@@ -133,7 +251,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         .filter(|route| route.driver.is_some())
         .count();
     let refresh_started = Instant::now();
-    report_progress(SourceBackedRefreshProgress {
+    report_progress(source_level_progress(SourceBackedRefreshProgress {
         phase: "discovering",
         completed_sources: 0,
         total_sources: scanned_routes,
@@ -142,7 +260,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         elapsed: discovery_duration,
         certified_source_count: None,
         certified_source_bytes: None,
-    })
+    }))
     .map_err(SourceBackedCoordinatorError::Progress)?;
     let unsupported_routes = registry
         .routes
@@ -199,21 +317,37 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             if isolated_failures.contains_key(&route_index) {
                 continue;
             }
-            report_progress(SourceBackedRefreshProgress {
+            let current_source = route.metadata.source.path.display().to_string();
+            report_progress(source_level_progress(SourceBackedRefreshProgress {
                 phase: "refreshing",
                 completed_sources: completed_routes,
                 total_sources: scanned_routes,
-                current_source: Some(route.metadata.source.path.display().to_string()),
+                current_source: Some(current_source.clone()),
                 stage_duration: scan_started.elapsed(),
                 elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
                 certified_source_count: None,
                 certified_source_bytes: None,
-            })
+            }))
             .map_err(SourceBackedCoordinatorError::Progress)?;
             writer.begin_source_stage()?;
             let owners_checkpoint = owners.clone();
             let complete_inventory_owners_checkpoint = complete_inventory_owners.clone();
             let scan_result = {
+                let mut report_current_source_progress = |current_source_progress| {
+                    report_progress(SourceBackedDetailedRefreshProgress {
+                        progress: SourceBackedRefreshProgress {
+                            phase: "refreshing",
+                            completed_sources: completed_routes,
+                            total_sources: scanned_routes,
+                            current_source: Some(current_source.clone()),
+                            stage_duration: scan_started.elapsed(),
+                            elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
+                            certified_source_count: None,
+                            certified_source_bytes: None,
+                        },
+                        current_source_progress: Some(current_source_progress),
+                    })
+                };
                 let mut sink = SourceBackedGenerationSink {
                     writer: &mut writer,
                     owners: &mut owners,
@@ -223,6 +357,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                     automatic_missing_observed_at_unix_ms: (route.metadata.selection
                         == Some(SourceBackedRouteSelection::Automatic))
                     .then_some(automatic_missing_observed_at_unix_ms),
+                    report_current_source_progress: &mut report_current_source_progress,
                 };
                 (driver.scan)(&mut sink)
             };
@@ -274,7 +409,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             completed_routes += 1;
         }
 
-        report_progress(SourceBackedRefreshProgress {
+        report_progress(source_level_progress(SourceBackedRefreshProgress {
             phase: "verifying",
             completed_sources: completed_routes,
             total_sources: scanned_routes,
@@ -283,7 +418,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
             certified_source_count: None,
             certified_source_bytes: None,
-        })
+        }))
         .map_err(SourceBackedCoordinatorError::Progress)?;
         require_complete_base_source_ownership(&writer, &owners, &complete_inventory_owners)?;
         if !isolated_failures.is_empty() && !writer.has_result_certified_sources() {
@@ -401,7 +536,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         }
     }
     let commit_duration = total_commit_duration;
-    let _ = report_progress(SourceBackedRefreshProgress {
+    let _ = report_progress(source_level_progress(SourceBackedRefreshProgress {
         phase: "committed",
         completed_sources: scanned_routes,
         total_sources: scanned_routes,
@@ -410,7 +545,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
         certified_source_count: Some(commit.certified_sources),
         certified_source_bytes: Some(commit.certified_source_bytes),
-    });
+    }));
     let certified_source_count = commit.certified_sources;
     let certified_source_bytes = commit.certified_source_bytes;
     let successful_routes = successful_route_indices.len();

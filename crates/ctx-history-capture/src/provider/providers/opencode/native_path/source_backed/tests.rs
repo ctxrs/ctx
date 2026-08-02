@@ -14,7 +14,9 @@ use serde_json::json;
 use super::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, SourceBackedProviderRegistry, SourceBackedRouteSelection,
+        refresh_source_backed_generation, refresh_source_backed_generation_with_detailed_progress,
+        SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
+        SourceBackedProviderRegistry, SourceBackedRouteSelection,
     },
     provider_sources::provider_source_for_path,
 };
@@ -316,17 +318,34 @@ fn refresh_fixture_with_work(
     index_root: &Path,
     registry: &SourceBackedProviderRegistry,
 ) -> super::adapter::OpenCodeSqliteWorkCounters {
+    refresh_fixture_with_work_and_progress(index_root, registry).0
+}
+
+fn refresh_fixture_with_work_and_progress(
+    index_root: &Path,
+    registry: &SourceBackedProviderRegistry,
+) -> (
+    super::adapter::OpenCodeSqliteWorkCounters,
+    Vec<SourceBackedCurrentSourceProgress>,
+) {
     let _ = super::adapter::take_last_work_counters();
-    refresh_source_backed_generation(
+    let mut progress = Vec::new();
+    refresh_source_backed_generation_with_detailed_progress(
         index_root,
         registry,
         WriterOptions {
             indexer_threads: 1,
             memory_bytes: 15_000_000,
         },
+        |update| {
+            if let Some(current) = update.current_source_progress {
+                progress.push(current);
+            }
+            Ok(())
+        },
     )
     .unwrap();
-    super::adapter::take_last_work_counters().unwrap()
+    (super::adapter::take_last_work_counters().unwrap(), progress)
 }
 
 fn create_indexed_synthetic_fixture(path: &Path, rows: i64) {
@@ -488,7 +507,7 @@ fn admitted_opencode_backup_stays_stable_across_later_wal_commit_and_next_open_a
 }
 
 #[test]
-fn indexed_synthetic_cold_and_changed_use_one_snapshot_and_one_logical_row_traversal() {
+fn indexed_synthetic_progress_uses_one_snapshot_and_one_logical_row_traversal() {
     const ROWS: u64 = 4_096;
     let temp = crate::test_support_paths::tempdir().unwrap();
     let database = temp.path().join("source/opencode.sqlite");
@@ -531,7 +550,7 @@ fn indexed_synthetic_cold_and_changed_use_one_snapshot_and_one_logical_row_trave
     )
     .unwrap();
 
-    let cold = refresh_fixture_with_work(&index_root, &registry);
+    let (cold, cold_progress) = refresh_fixture_with_work_and_progress(&index_root, &registry);
     assert_eq!(cold.snapshot_opens, 1);
     assert_eq!(cold.logical_online_backup_opens, 1);
     assert!(cold.logical_online_backup_steps > 0);
@@ -542,6 +561,29 @@ fn indexed_synthetic_cold_and_changed_use_one_snapshot_and_one_logical_row_trave
     assert_eq!(cold.projection_passes, 1);
     assert_eq!(cold.logical_rows_projected, ROWS);
     assert_eq!(cold.documents_staged, ROWS);
+    assert!(cold_progress
+        .iter()
+        .any(|update| update.stage == SourceBackedCurrentSourceProgressStage::OnlineBackup));
+    assert!(!cold_progress.iter().any(|update| {
+        update.stage == SourceBackedCurrentSourceProgressStage::LogicalFingerprint
+    }));
+    let logical_scan = cold_progress
+        .iter()
+        .filter(|update| update.stage == SourceBackedCurrentSourceProgressStage::LogicalScan)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        logical_scan.len() as u64,
+        ROWS / LOGICAL_SCAN_PROGRESS_ROW_CADENCE + 2
+    );
+    assert_eq!(logical_scan[0].logical_rows_scanned, Some(0));
+    assert!(logical_scan.windows(2).all(|pair| {
+        pair[0].logical_rows_scanned <= pair[1].logical_rows_scanned
+            && pair[0].logical_certified_bytes <= pair[1].logical_certified_bytes
+    }));
+    assert_eq!(
+        logical_scan.last().unwrap().logical_rows_scanned,
+        Some(ROWS)
+    );
 
     let unchanged = refresh_fixture_with_work(&index_root, &registry);
     assert_eq!(unchanged.snapshot_opens, 1);
@@ -584,7 +626,7 @@ fn indexed_synthetic_cold_and_changed_use_one_snapshot_and_one_logical_row_trave
 }
 
 #[test]
-fn kilo_and_mimocode_opt_into_one_logical_online_backup_and_streaming_pass() {
+fn kilo_and_mimocode_progress_uses_one_online_backup_and_streaming_pass() {
     for provider in [CaptureProvider::Kilo, CaptureProvider::MiMoCode] {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let database = temp.path().join("source/history.sqlite");
@@ -599,12 +641,25 @@ fn kilo_and_mimocode_opt_into_one_logical_online_backup_and_streaming_pass() {
         )
         .unwrap();
 
-        let work = refresh_fixture_with_work(&temp.path().join("index"), &registry);
+        let (work, progress) =
+            refresh_fixture_with_work_and_progress(&temp.path().join("index"), &registry);
         assert_eq!(work.snapshot_opens, 1, "{provider:?}");
         assert_eq!(work.logical_online_backup_opens, 1, "{provider:?}");
         assert_eq!(work.logical_fingerprint_passes, 0, "{provider:?}");
         assert_eq!(work.logical_row_traversals, 1, "{provider:?}");
         assert_eq!(work.logical_rows_projected, 32, "{provider:?}");
+        assert!(
+            progress
+                .iter()
+                .any(|update| update.stage == SourceBackedCurrentSourceProgressStage::OnlineBackup),
+            "{provider:?}"
+        );
+        assert!(
+            progress
+                .iter()
+                .any(|update| update.stage == SourceBackedCurrentSourceProgressStage::LogicalScan),
+            "{provider:?}"
+        );
     }
 }
 
