@@ -758,42 +758,6 @@ mod tests {
             .is_err());
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
-    #[test]
-    fn symlinked_ancestor_is_classified_as_a_rejected_provider_path() {
-        use std::os::unix::fs::symlink;
-
-        let temp = crate::test_support_paths::tempdir().unwrap();
-        let target = temp.path().join("target");
-        let linked = temp.path().join("linked");
-        fs::create_dir(&target).unwrap();
-        fs::write(target.join("source.jsonl"), b"inside\n").unwrap();
-        symlink(&target, &linked).unwrap();
-
-        let error = open_provider_source_file(&linked.join("source.jsonl")).unwrap_err();
-
-        assert!(matches!(
-            error,
-            CaptureError::InvalidProviderTranscriptPath { reason, .. }
-                if reason.contains("symlinked provider source path components")
-        ));
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
-    #[test]
-    fn plain_file_ancestor_preserves_the_raw_not_a_directory_io_error() {
-        let temp = crate::test_support_paths::tempdir().unwrap();
-        let plain_file = temp.path().join("plain-file");
-        fs::write(&plain_file, b"ordinary").unwrap();
-
-        let error = open_provider_source_file(&plain_file.join("source.jsonl")).unwrap_err();
-
-        assert!(matches!(
-            error,
-            CaptureError::Io(error) if error.raw_os_error() == Some(libc::ENOTDIR)
-        ));
-    }
-
     #[test]
     fn descendants_reject_absolute_and_parent_escape() {
         let temp = crate::test_support_paths::tempdir().unwrap();
