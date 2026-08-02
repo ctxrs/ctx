@@ -131,7 +131,10 @@ mod tests {
         match value {
             serde_json::Value::Object(fields) => {
                 for (key, value) in fields {
-                    assert!(!forbidden.contains(&key.as_str()), "{key} leaked into catalog");
+                    assert!(
+                        !forbidden.contains(&key.as_str()),
+                        "{key} leaked into catalog"
+                    );
                     assert_no_forbidden_catalog_keys(value, forbidden);
                 }
             }

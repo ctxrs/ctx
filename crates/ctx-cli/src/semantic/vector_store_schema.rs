@@ -15,7 +15,7 @@ use super::{
     },
 };
 
-pub(super) const SEMANTIC_VECTOR_SCHEMA_VERSION: i64 = 4;
+pub(super) const SEMANTIC_VECTOR_SCHEMA_VERSION: i64 = 5;
 pub(super) const SEMANTIC_VECTOR_BACKEND_FLAT_F32: &str = "flat-f32";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

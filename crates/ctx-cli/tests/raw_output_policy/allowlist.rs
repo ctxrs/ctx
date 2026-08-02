@@ -281,7 +281,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         BLAME,
-        "run#1@862efb434b34b780",
+        "run_with#1@862efb434b34b780",
         StdoutConstructor,
         CapabilityProbe,
         TERMINAL_PROBE,
@@ -289,7 +289,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         BLAME,
-        "run#1@862efb434b34b780",
+        "run_with#1@862efb434b34b780",
         StderrConstructor,
         CapabilityProbe,
         TERMINAL_PROBE,
@@ -465,8 +465,8 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "render_stable_pro_error_json#1@58d077696a0c7270",
-        StderrConstructor,
+        "render_stable_pro_error_json#1@cb8255dedc3256c6",
+        OutputRawHelper,
         MachineProtocol,
         JSON_PROTOCOL,
         PRO_MACHINE_ERROR
@@ -857,7 +857,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PRO_RENDER,
-        "print_blame_result#1@8692675e47437164",
+        "print_blame_result_inner#1@8692675e47437164",
         UiRawWriter,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -865,7 +865,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PRO_RENDER,
-        "print_blame_result#1@8692675e47437164",
+        "print_blame_result_inner#1@8692675e47437164",
         DirectWrite,
         MachineProtocol,
         JSON_PROTOCOL,

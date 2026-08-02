@@ -457,7 +457,7 @@ fn certified_local_root_allows_only_the_exact_authorized_absolute_path() {
 #[test]
 fn certified_local_root_preserves_exact_absolute_rename_old_and_new_paths() {
     let root =
-        "/home/daddy/code/ctx-worktrees/ctx-private/source-backed-ingestion-production-20260728";
+        "/worktrees/validated/evidence-preview-release-fixture-source-backed-ingestion-20260728";
     let old_path = "products/ctx-pro/src/graph/store/checkpoints.rs";
     let new_path = "products/ctx-pro/src/graph/store/generation.rs";
     let body = format!("*** Update File: {root}/{old_path}\n*** Move to: {root}/{new_path}");
