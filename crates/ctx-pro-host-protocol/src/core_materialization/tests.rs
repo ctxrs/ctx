@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, io::Cursor};
 
 use crate::{
+    apply_core_source_delta_page_request_frame_wire_bytes,
     core_source_delta_page_applied_frame_wire_bytes, read_frame, write_frame, HelperEnvelope,
     HelperMessage, HostEnvelope, HostMessage,
 };
@@ -23,6 +24,20 @@ fn source(lineage: u8) -> SourceKey {
         "fixture-v1",
         1,
         SourceAnchor::CatalogLineage([lineage; 32]),
+    )
+    .unwrap()
+}
+
+fn escaped_source() -> SourceKey {
+    SourceKey::derive(
+        "fixture",
+        "fixture_jsonl",
+        "escaped-frame-v1",
+        1,
+        SourceAnchor::ProviderNative {
+            namespace: "fixture-native".to_owned(),
+            key: TypedKey::Utf8("\u{001f}\"\\\n".repeat(8)),
+        },
     )
     .unwrap()
 }
@@ -855,23 +870,74 @@ fn source_acknowledgement_sizing_is_the_exact_complete_frame_at_decimal_boundari
 }
 
 #[test]
-fn source_delta_request_validation_measures_the_whole_request() {
+fn source_delta_request_sizing_is_the_exact_complete_host_frame() {
     let request = ApplyCoreSourceDeltaPageRequest {
-        page: CoreSourceDeltaPage::new("d".repeat(64), "a".repeat(64), 0, true, Vec::new())
-            .unwrap(),
+        page: CoreSourceDeltaPage::new(
+            "d".repeat(64),
+            "a".repeat(64),
+            0,
+            true,
+            vec![CoreSourceDelta::Present(state(escaped_source(), 1, 0))],
+        )
+        .unwrap(),
+        acknowledgement_page_index: 99,
+    };
+    for sequence in [0, 9, 10, 99, 100, u64::MAX] {
+        let mut frame = Vec::new();
+        write_frame(
+            &mut frame,
+            &HostEnvelope {
+                sequence,
+                request_id: Uuid::from_u128(1),
+                message: HostMessage::ApplyCoreSourceDeltaPage(request.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            apply_core_source_delta_page_request_frame_wire_bytes(sequence, &request).unwrap(),
+            frame.len()
+        );
+    }
+}
+
+#[test]
+fn source_delta_request_frame_bound_rejects_before_consumer_mutation() {
+    let request = ApplyCoreSourceDeltaPageRequest {
+        page: CoreSourceDeltaPage::new(
+            "d".repeat(64),
+            "a".repeat(64),
+            0,
+            true,
+            vec![CoreSourceDelta::Present(state(escaped_source(), 1, 0))],
+        )
+        .unwrap(),
         acknowledgement_page_index: 0,
     };
-    let page_bytes = serde_json::to_vec(&request.page).unwrap().len();
+    request.page.validate().unwrap();
     let request_bytes = serde_json::to_vec(&request).unwrap().len();
-    assert!(request_bytes > page_bytes);
+    let frame_bytes =
+        apply_core_source_delta_page_request_frame_wire_bytes(u64::MAX, &request).unwrap();
+    assert!(request_bytes < frame_bytes);
     request
-        .validate_with_control_wire_bound(request_bytes)
+        .validate_with_control_frame_wire_bound(frame_bytes)
         .unwrap();
+    let mut consumer_mutated = false;
     assert_eq!(
         request
-            .validate_with_control_wire_bound(request_bytes - 1)
+            .validate_with_control_frame_wire_bound(frame_bytes - 1)
+            .map(|()| consumer_mutated = true)
             .unwrap_err()
             .class,
+        ErrorClass::Bounds
+    );
+    assert!(!consumer_mutated);
+    assert_eq!(
+        crate::message::apply_core_source_delta_page_request_frame_wire_bytes_from_request_bytes(
+            u64::MAX,
+            usize::MAX,
+        )
+        .unwrap_err()
+        .class,
         ErrorClass::Bounds
     );
 }

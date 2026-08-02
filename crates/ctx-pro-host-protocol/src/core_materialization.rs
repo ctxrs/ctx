@@ -320,16 +320,18 @@ pub struct ApplyCoreSourceDeltaPageRequest {
 
 impl ApplyCoreSourceDeltaPageRequest {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        self.validate_with_control_wire_bound(MAX_CORE_CONTROL_WIRE_BYTES)
+        self.validate_with_control_frame_wire_bound(MAX_CORE_CONTROL_WIRE_BYTES)
     }
 
-    fn validate_with_control_wire_bound(&self, maximum: usize) -> Result<(), ProtocolError> {
+    fn validate_with_control_frame_wire_bound(&self, maximum: usize) -> Result<(), ProtocolError> {
         self.page.validate()?;
-        validate_encoded_bound(
-            self,
-            maximum,
-            "Core source delta request exceeds its control wire bound",
-        )
+        if crate::apply_core_source_delta_page_request_frame_wire_bytes(u64::MAX, self)? > maximum {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "Core source delta request exceeds its complete frame wire bound",
+            ));
+        }
+        Ok(())
     }
 
     /// Captures the complete source-page and acknowledgement-page CAS before

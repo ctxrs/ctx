@@ -17,9 +17,11 @@ use crate::{
 const ENVELOPE_SEQUENCE_PREFIX_BYTES: usize = "{\"sequence\":".len();
 const ENVELOPE_REQUEST_ID_PREFIX_BYTES: usize = ",\"request_id\":\"".len();
 const UUID_HYPHENATED_BYTES: usize = 36;
+const APPLY_CORE_SOURCE_DELTA_PAGE_MESSAGE_PREFIX_BYTES: usize =
+    "\",\"message\":{\"kind\":\"apply_core_source_delta_page\",\"body\":".len();
 const CORE_SOURCE_APPLIED_MESSAGE_PREFIX_BYTES: usize =
     "\",\"message\":{\"kind\":\"core_source_delta_page_applied\",\"body\":".len();
-const CORE_SOURCE_APPLIED_FRAME_SUFFIX_BYTES: usize = "}}".len();
+const CORE_MATERIALIZATION_FRAME_SUFFIX_BYTES: usize = "}}".len();
 
 const fn u64_decimal_bytes(mut value: u64) -> usize {
     let mut bytes = 1;
@@ -30,24 +32,60 @@ const fn u64_decimal_bytes(mut value: u64) -> usize {
     bytes
 }
 
-pub(crate) fn core_source_delta_page_applied_frame_wire_bytes_from_response_bytes(
+fn core_materialization_message_frame_wire_bytes(
     sequence: u64,
-    encoded_response_bytes: usize,
+    message_prefix_bytes: usize,
+    encoded_body_bytes: usize,
+    overflow_message: &'static str,
 ) -> Result<usize, ProtocolError> {
     FRAME_HEADER_BYTES
         .checked_add(ENVELOPE_SEQUENCE_PREFIX_BYTES)
         .and_then(|bytes| bytes.checked_add(u64_decimal_bytes(sequence)))
         .and_then(|bytes| bytes.checked_add(ENVELOPE_REQUEST_ID_PREFIX_BYTES))
         .and_then(|bytes| bytes.checked_add(UUID_HYPHENATED_BYTES))
-        .and_then(|bytes| bytes.checked_add(CORE_SOURCE_APPLIED_MESSAGE_PREFIX_BYTES))
-        .and_then(|bytes| bytes.checked_add(encoded_response_bytes))
-        .and_then(|bytes| bytes.checked_add(CORE_SOURCE_APPLIED_FRAME_SUFFIX_BYTES))
-        .ok_or_else(|| {
-            ProtocolError::new(
-                ErrorClass::Bounds,
-                "Core source delta acknowledgement frame byte count overflowed",
-            )
-        })
+        .and_then(|bytes| bytes.checked_add(message_prefix_bytes))
+        .and_then(|bytes| bytes.checked_add(encoded_body_bytes))
+        .and_then(|bytes| bytes.checked_add(CORE_MATERIALIZATION_FRAME_SUFFIX_BYTES))
+        .ok_or_else(|| ProtocolError::new(ErrorClass::Bounds, overflow_message))
+}
+
+pub(crate) fn apply_core_source_delta_page_request_frame_wire_bytes_from_request_bytes(
+    sequence: u64,
+    encoded_request_bytes: usize,
+) -> Result<usize, ProtocolError> {
+    core_materialization_message_frame_wire_bytes(
+        sequence,
+        APPLY_CORE_SOURCE_DELTA_PAGE_MESSAGE_PREFIX_BYTES,
+        encoded_request_bytes,
+        "Core source delta request frame byte count overflowed",
+    )
+}
+
+/// Returns the exact byte length of a complete framed source-page request.
+///
+/// UUIDs have a fixed 36-byte JSON representation. Callers that must admit a
+/// request before its transport sequence is available use `u64::MAX`; every
+/// actual Protocol V1 sequence is then no larger than the admitted frame.
+pub fn apply_core_source_delta_page_request_frame_wire_bytes(
+    sequence: u64,
+    request: &ApplyCoreSourceDeltaPageRequest,
+) -> Result<usize, ProtocolError> {
+    apply_core_source_delta_page_request_frame_wire_bytes_from_request_bytes(
+        sequence,
+        crate::core_materialization::encoded_len(request)?,
+    )
+}
+
+pub(crate) fn core_source_delta_page_applied_frame_wire_bytes_from_response_bytes(
+    sequence: u64,
+    encoded_response_bytes: usize,
+) -> Result<usize, ProtocolError> {
+    core_materialization_message_frame_wire_bytes(
+        sequence,
+        CORE_SOURCE_APPLIED_MESSAGE_PREFIX_BYTES,
+        encoded_response_bytes,
+        "Core source delta acknowledgement frame byte count overflowed",
+    )
 }
 
 /// Returns the exact byte length of a complete framed source acknowledgement.
