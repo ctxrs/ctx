@@ -134,9 +134,22 @@ fn render_import_report_human(context: &RenderContext, report: &ImportReport) ->
         ));
     }
 
+    let source_failures = source_failure_fields(report);
+    if !source_failures.is_empty() {
+        let source_failure_fields = source_failures
+            .iter()
+            .map(|(label, value)| Field::new(label, value))
+            .collect::<Vec<_>>();
+        document.push_blank();
+        document.append(section(
+            "Source failures",
+            fields(context, &source_failure_fields),
+        ));
+    }
+
     if totals.failed_sources > 0 || rejected_records > 0 {
         document.push_blank();
-        let fully_failed = totals.imported_sources == 0 && totals.failed_sources > 0;
+        let fully_failed = !totals.has_usable_source_result() && totals.failed_sources > 0;
         let (text, command) = if !fully_failed && rejected_records > 0 {
             (
                 "Diagnose rejected records while keeping the imported history available.",
@@ -153,8 +166,82 @@ fn render_import_report_human(context: &RenderContext, report: &ImportReport) ->
     document
 }
 
+fn source_failure_fields(report: &ImportReport) -> Vec<(String, String)> {
+    let mut fields = report
+        .sources
+        .iter()
+        .filter(|source| {
+            source.get("status").and_then(Value::as_str) == Some("failed")
+                && source.get("failure_type").and_then(Value::as_str) == Some("source")
+                && source
+                    .get("source_identity")
+                    .and_then(Value::as_str)
+                    .is_some()
+        })
+        .enumerate()
+        .map(|(index, source)| {
+            let selector = source
+                .get("source_selector")
+                .and_then(Value::as_str)
+                .or_else(|| source.get("source_identity").and_then(Value::as_str))
+                .unwrap_or("unknown source");
+            let provider = source
+                .get("provider")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown provider");
+            let class = source
+                .get("class")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let retained = if source
+                .get("carried_forward")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                ", retained prior data"
+            } else {
+                ""
+            };
+            let detail = source
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("no detail reported");
+            (
+                format!("Source {}", index.saturating_add(1)),
+                format!("{selector} ({provider}, {class}{retained}): {detail}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let omitted = report
+        .sources
+        .iter()
+        .find_map(|source| {
+            source
+                .get("source_failures_omitted")
+                .and_then(Value::as_u64)
+                .or_else(|| {
+                    source
+                        .get("source_failures")
+                        .and_then(|failures| failures.get("omitted"))
+                        .and_then(Value::as_u64)
+                })
+        })
+        .unwrap_or_default();
+    if omitted > 0 {
+        fields.push((
+            "Additional".to_owned(),
+            counted_failure(
+                omitted,
+                "source failure was omitted",
+                "source failures were omitted",
+            ),
+        ));
+    }
+    fields
+}
+
 fn import_outcome_copy(totals: &ImportTotals) -> (OutcomeState, &'static str, String) {
-    if totals.imported_sources == 0 && totals.failed_sources > 0 {
+    if !totals.has_usable_source_result() && totals.failed_sources > 0 {
         return (
             OutcomeState::Error,
             "History import failed",
@@ -523,6 +610,90 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.ends_with("Next\n  ctx doctor\n"), "{rendered}");
+    }
+
+    #[test]
+    fn retained_generation_with_source_failures_is_partial_and_reports_each_source() {
+        let source_identity = "ab".repeat(32);
+        let report = ImportReport {
+            resume: false,
+            totals: ImportTotals {
+                per_run_counts_available: true,
+                failed_sources: 2,
+                current_source_count: Some(2),
+                current_indexed_documents: Some(7),
+                work_result: ProviderImportWorkResult::NoOp,
+                ..ImportTotals::default()
+            },
+            sources: vec![
+                json!({
+                    "status": "published",
+                    "outcome": "completed_with_source_failures",
+                    "successful_routes": 0,
+                    "source_failure_total": 2,
+                    "source_failures_omitted": 1,
+                }),
+                json!({
+                    "status": "failed",
+                    "failure_type": "source",
+                    "source_identity": source_identity,
+                    "provider": "codex",
+                    "class": "source_changed",
+                    "carried_forward": true,
+                    "source_selector": "/history/session.jsonl",
+                    "detail": "source changed during refresh",
+                }),
+            ],
+        };
+
+        let json = import_report_json(&report);
+        assert_eq!(json["outcome"], "completed_with_source_failures");
+        assert_eq!(json["failure_scope"], "source");
+        assert_eq!(json["totals"]["imported_sources"], 0);
+        assert_eq!(json["totals"]["failed_sources"], 2);
+        assert_eq!(json["sources"][1]["source_identity"], source_identity);
+
+        let rendered =
+            render_import_report_human(&context(120, ColorMode::Never), &report).render_plain();
+        assert!(
+            rendered.starts_with("! History import completed with source failures\n"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Source failures\n"), "{rendered}");
+        assert!(rendered.contains("/history/session.jsonl"), "{rendered}");
+        assert!(rendered.contains("source_changed"), "{rendered}");
+        assert!(rendered.contains("retained prior data"), "{rendered}");
+        assert!(
+            rendered.contains("source changed during refresh"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("1 source failure was omitted"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn source_failures_without_a_usable_generation_remain_failure() {
+        let report = ImportReport {
+            resume: false,
+            totals: ImportTotals {
+                per_run_counts_available: true,
+                failed_sources: 1,
+                current_source_count: Some(0),
+                work_result: ProviderImportWorkResult::NoOp,
+                ..ImportTotals::default()
+            },
+            sources: Vec::new(),
+        };
+
+        assert_eq!(import_report_json(&report)["outcome"], "failure");
+        let rendered =
+            render_import_report_human(&context(80, ColorMode::Never), &report).render_plain();
+        assert!(
+            rendered.starts_with("✗ History import failed\n"),
+            "{rendered}"
+        );
     }
 
     #[test]

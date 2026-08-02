@@ -144,10 +144,47 @@ pub(super) fn refresh_all_provider_sources(
             "capture-owned source refresh receipt does not match its retained generation cardinalities"
         );
     }
+    let source_failures = SourceBackedRefreshSourceFailures {
+        failures: receipt
+            .source_failures
+            .failures()
+            .iter()
+            .map(|failure| SourceBackedRefreshSourceFailure {
+                source_identity: failure.source_identity.clone(),
+                provider: failure.provider.as_str().to_owned(),
+                class: match failure.class {
+                    CaptureSourceBackedSourceFailureClass::Unavailable => {
+                        SourceBackedRefreshSourceFailureClass::Unavailable
+                    }
+                    CaptureSourceBackedSourceFailureClass::SourceChanged => {
+                        SourceBackedRefreshSourceFailureClass::SourceChanged
+                    }
+                    CaptureSourceBackedSourceFailureClass::Unreadable => {
+                        SourceBackedRefreshSourceFailureClass::Unreadable
+                    }
+                    CaptureSourceBackedSourceFailureClass::Incompatible => {
+                        SourceBackedRefreshSourceFailureClass::Incompatible
+                    }
+                },
+                carried_forward: failure.carried_forward,
+                source_selector: failure.source_selector.clone(),
+                detail: failure.detail.clone(),
+            })
+            .collect(),
+        omitted: receipt.source_failures.omitted(),
+    };
+    validate_source_refresh_results(
+        receipt.scanned_routes,
+        receipt.successful_routes,
+        &source_failures,
+        current.source_count,
+    )?;
     Ok(SourceBackedRefreshPublication {
         generation_id: receipt.commit.generation_id,
         published_explicit_source_catalog,
         scanned_routes: receipt.scanned_routes,
+        successful_routes: receipt.successful_routes,
+        source_failures,
         unsupported_routes: receipt.unsupported_routes.len(),
         certified_source_count: receipt.certified_source_count,
         certified_source_bytes: receipt.certified_source_bytes,

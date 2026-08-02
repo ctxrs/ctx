@@ -45,6 +45,8 @@ fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPubl
         )
         .unwrap(),
         scanned_routes: 1,
+        successful_routes: 1,
+        source_failures: SourceBackedRefreshSourceFailures::default(),
         unsupported_routes: 0,
         certified_source_count: 1,
         certified_source_bytes: 128,

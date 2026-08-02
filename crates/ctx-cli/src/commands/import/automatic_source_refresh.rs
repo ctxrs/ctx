@@ -72,7 +72,25 @@ pub(super) fn run_automatic_source_refresh_import(
     let index = refresh.pin.into_index();
     let manifest = index.manifest();
     let current = receipt.current;
+    context
+        .provider_refreshes
+        .record_core_publication(ProviderRefreshTrigger::Import, receipt.generation_changed);
+
+    let completion = if context.options.progress == crate::progress::ProgressArg::Json {
+        format!(
+            "Published Core generation {}.",
+            receipt.published_generation
+        )
+    } else {
+        "Finished refreshing local history.".to_owned()
+    };
+    progress.finish_line();
+    progress.done("published", completion, current.certified_source_bytes);
+
     let totals = ImportTotals {
+        per_run_counts_available: true,
+        imported_sources: receipt.successful_routes,
+        failed_sources: receipt.source_failures.total(),
         current_source_count: Some(current.source_count),
         current_indexed_documents: Some(current.indexed_documents),
         current_complete_records: Some(current.complete_records),
@@ -89,50 +107,53 @@ pub(super) fn run_automatic_source_refresh_import(
         },
         ..ImportTotals::default()
     };
-    context
-        .provider_refreshes
-        .record_core_publication(ProviderRefreshTrigger::Import, receipt.generation_changed);
-
-    let completion = if context.options.progress == crate::progress::ProgressArg::Json {
-        format!(
-            "Published Core generation {}.",
-            receipt.published_generation
-        )
-    } else {
-        "Finished refreshing local history.".to_owned()
-    };
-    progress.finish_line();
-    progress.done("published", completion, current.certified_source_bytes);
-
+    let mut sources = vec![compact_json(json!({
+        "status": "published",
+        "outcome": receipt.terminal_outcome(),
+        "source_format": "provider_authoritative_all",
+        "change": if receipt.generation_changed { "changed" } else { "no_op" },
+        "previous_generation": receipt.previous_generation,
+        "published_generation": receipt.published_generation,
+            "generation_changed": receipt.generation_changed,
+            "scanned_routes": receipt.scanned_routes,
+            "successful_routes": receipt.successful_routes,
+            "source_failure_total": receipt.source_failures.total(),
+            "source_failures_omitted": receipt.source_failures.omitted,
+        "current_source_count": current.source_count,
+        "current_indexed_documents": current.indexed_documents,
+        "current_complete_records": current.complete_records,
+        "current_retained_records": current.retained_records,
+        "current_rejected_records": current.rejected_records,
+        "current_ignored_records": current.ignored_records,
+        "current_certified_source_bytes": current.certified_source_bytes,
+        "current_sources_with_rejections": current.sources_with_rejections,
+        "removed_source_count": current.removed_source_count,
+        "policy_schema_hash": manifest.policy_schema_hash.clone(),
+        "certified_source_count": current.source_count,
+        "certified_source_bytes": current.certified_source_bytes,
+        "daemon_request_id": request_id,
+        "daemon_request_metadata": {
+            "owner": "daemon",
+            "trigger": "import",
+            "trigger_provenance": "automatic_provider_refresh",
+        },
+    }))];
+    sources.extend(receipt.source_failures.failures.iter().map(|failure| {
+        compact_json(json!({
+            "status": "failed",
+            "failure_type": "source",
+            "source_identity": failure.source_identity,
+            "provider": failure.provider,
+            "class": failure.class.as_str(),
+            "carried_forward": failure.carried_forward,
+            "source_selector": failure.source_selector,
+            "detail": failure.detail,
+        }))
+    }));
     Ok(ImportReport {
         resume: context.args.resume,
         totals,
-        sources: vec![compact_json(json!({
-            "status": "published",
-            "source_format": "provider_authoritative_all",
-            "change": if receipt.generation_changed { "changed" } else { "no_op" },
-            "previous_generation": receipt.previous_generation,
-            "published_generation": receipt.published_generation,
-            "generation_changed": receipt.generation_changed,
-            "current_source_count": current.source_count,
-            "current_indexed_documents": current.indexed_documents,
-            "current_complete_records": current.complete_records,
-            "current_retained_records": current.retained_records,
-            "current_rejected_records": current.rejected_records,
-            "current_ignored_records": current.ignored_records,
-            "current_certified_source_bytes": current.certified_source_bytes,
-            "current_sources_with_rejections": current.sources_with_rejections,
-            "removed_source_count": current.removed_source_count,
-            "policy_schema_hash": manifest.policy_schema_hash.clone(),
-            "certified_source_count": current.source_count,
-            "certified_source_bytes": current.certified_source_bytes,
-            "daemon_request_id": request_id,
-            "daemon_request_metadata": {
-                "owner": "daemon",
-                "trigger": "import",
-                "trigger_provenance": "automatic_provider_refresh",
-            },
-        }))],
+        sources,
     })
 }
 
@@ -191,6 +212,37 @@ mod tests {
             assert!(
                 !source.contains(&forbidden),
                 "automatic source refresh contains forbidden legacy dependency `{forbidden}`"
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_import_reports_bounded_source_result_contract() {
+        let source = include_str!("automatic_source_refresh.rs");
+        for required in [
+            "receipt.terminal_outcome()",
+            "receipt.scanned_routes",
+            "receipt.successful_routes",
+            "receipt.source_failures.total()",
+            "receipt.source_failures.omitted",
+            "failure.source_identity",
+            "failure.class.as_str()",
+            "failure.carried_forward",
+            "failure.source_selector",
+            "failure.detail",
+        ] {
+            assert!(
+                source.contains(required),
+                "automatic source report omitted `{required}`"
+            );
+        }
+        for obsolete in [
+            ["successful_route", "_ids"].concat(),
+            ["route_", "identity"].concat(),
+        ] {
+            assert!(
+                !source.contains(&obsolete),
+                "automatic source report retained obsolete `{obsolete}`"
             );
         }
     }
