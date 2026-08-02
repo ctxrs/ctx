@@ -8,6 +8,24 @@ use serde_json::json;
 
 use super::*;
 
+fn assert_batched_ordering(scan: &OpenCodeSourceBackedScan, rows: u64) {
+    assert!(scan.bounds.fallback_disk_sort);
+    assert_eq!(scan.bounds.fallback_sort_rows, rows);
+    assert_eq!(scan.bounds.fallback_payload_hydrations, rows);
+    assert!(scan.bounds.max_sort_key_batch_rows <= OPENCODE_HYDRATION_BATCH_ROWS as u64);
+    assert!(scan.bounds.max_buffered_payload_rows <= OPENCODE_HYDRATION_BATCH_ROWS as u64);
+    assert!(scan.bounds.max_buffered_payload_bytes <= OPENCODE_HYDRATION_BATCH_BYTES);
+    assert_eq!(
+        scan.bounds.ordering_data_statements,
+        2 + scan.bounds.ordering_sort_key_batches + scan.bounds.ordering_hydration_batches
+    );
+    if rows >= 64 {
+        assert!(scan.bounds.ordering_data_statements < rows / 8);
+        assert!(scan.bounds.ordering_sort_key_batches < rows / 8);
+        assert!(scan.bounds.ordering_hydration_batches < rows / 8);
+    }
+}
+
 fn drop_message_part_stream_indexes(path: &Path) {
     let connection = Connection::open(path).unwrap();
     connection
@@ -77,8 +95,7 @@ fn indexed_message_part_partial_sort_routes_to_private_bounded_scratch() {
     drop(connection);
 
     let (_, direct_scan, direct_records) = scan_current_schema(&database);
-    assert!(!direct_scan.bounds.fallback_disk_sort);
-    assert_eq!(direct_scan.bounds.max_buffered_payload_rows, 0);
+    assert_batched_ordering(&direct_scan, PARTS);
 
     let connection = Connection::open(&database).unwrap();
     connection
@@ -87,30 +104,13 @@ fn indexed_message_part_partial_sort_routes_to_private_bounded_scratch() {
     let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
     let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
     assert!(schema.message_part_indexed_streaming);
-    let plan = connection
-        .prepare(&format!(
-            "EXPLAIN QUERY PLAN {}",
-            source_backed_indexed_part_rowids_sql()
-        ))
-        .unwrap()
-        .query_map([rusqlite::types::Null], |row| row.get::<_, String>(3))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert!(
-        plan.iter().any(|step| step.contains("USE TEMP B-TREE")),
-        "partial-index fixture did not require SQLite temporary sorting: {plan:?}"
-    );
     drop(connection);
 
     let (_, external_scan, external_records) = scan_current_schema(&database);
     assert_eq!(external_records, direct_records);
     assert_eq!(external_scan.source, direct_scan.source);
     assert_eq!(external_scan.certificate, direct_scan.certificate);
-    assert!(external_scan.bounds.fallback_disk_sort);
-    assert_eq!(external_scan.bounds.fallback_sort_rows, PARTS);
-    assert_eq!(external_scan.bounds.fallback_payload_hydrations, PARTS);
-    assert_eq!(external_scan.bounds.max_buffered_payload_rows, 1);
+    assert_batched_ordering(&external_scan, PARTS);
     assert!(external_scan.bounds.fallback_scratch_bytes > 0);
 }
 
@@ -126,9 +126,7 @@ fn multisession_missing_index_fallback_is_equivalent_bounded_and_read_only() {
     assert_eq!(indexed_scan.bounds.session_metadata_loads, SESSIONS);
     assert_eq!(indexed_scan.bounds.max_buffered_session_metadata, 1);
     assert_eq!(indexed_scan.bounds.max_session_ancestry_depth, 16);
-    assert_eq!(indexed_scan.bounds.fallback_payload_hydrations, 0);
-    assert_eq!(indexed_scan.bounds.max_buffered_payload_rows, 0);
-    assert!(!indexed_scan.bounds.fallback_disk_sort);
+    assert_batched_ordering(&indexed_scan, SESSIONS);
 
     drop_message_part_stream_indexes(&database);
     let connection = Connection::open(&database).unwrap();
@@ -196,10 +194,7 @@ fn multisession_missing_index_fallback_is_equivalent_bounded_and_read_only() {
     assert_eq!(fallback_scan.bounds.session_metadata_loads, SESSIONS);
     assert_eq!(fallback_scan.bounds.max_buffered_session_metadata, 1);
     assert_eq!(fallback_scan.bounds.max_session_ancestry_depth, 16);
-    assert_eq!(fallback_scan.bounds.fallback_payload_hydrations, SESSIONS);
-    assert_eq!(fallback_scan.bounds.max_buffered_payload_rows, 1);
-    assert!(fallback_scan.bounds.fallback_disk_sort);
-    assert_eq!(fallback_scan.bounds.fallback_sort_rows, SESSIONS);
+    assert_batched_ordering(&fallback_scan, SESSIONS);
     assert!(fallback_scan.bounds.fallback_scratch_bytes > 0);
     assert_eq!(fs::read(&database).unwrap(), before_database);
     assert_eq!(after_siblings, before_siblings);
@@ -226,8 +221,7 @@ fn fallback_external_sort_ignores_ambient_sqlite_tmpdir_without_transient_provid
                 .unwrap();
 
         assert_eq!(records.len() as u64, SESSIONS);
-        assert_eq!(scan.bounds.fallback_sort_rows, SESSIONS);
-        assert!(scan.bounds.fallback_disk_sort);
+        assert_batched_ordering(&scan, SESSIONS);
         assert!(
             scan.bounds.fallback_scratch_bytes > 512 * 1024,
             "fixture must exceed the fixed scratch page cache and exercise disk-backed ordering"

@@ -7,6 +7,7 @@ use std::{
 use ctx_history_core::{CaptureProvider, SourceKey};
 use sha2::{Digest, Sha256};
 
+use super::ordering::{OPENCODE_HYDRATION_BATCH_BYTES, OPENCODE_HYDRATION_BATCH_ROWS};
 use super::{
     observe_logical_source, open_root_authorized_snapshot_retained,
     opencode_family_source_backed_registrations, scan_pinned_source, OpenCodeLogicalObservation,
@@ -85,6 +86,11 @@ pub(super) struct OpenCodeSqliteWorkCounters {
     pub(super) fallback_disk_sort: bool,
     pub(super) fallback_sort_rows: u64,
     pub(super) fallback_scratch_bytes: u64,
+    pub(super) ordering_data_statements: u64,
+    pub(super) ordering_sort_key_batches: u64,
+    pub(super) ordering_hydration_batches: u64,
+    pub(super) max_sort_key_batch_rows: u64,
+    pub(super) max_buffered_payload_bytes: u64,
     pub(super) exact_replays: u64,
     pub(super) terminal_fences: u64,
     pub(super) terminal_revalidations: u64,
@@ -179,6 +185,11 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
             work.fallback_disk_sort = scan.bounds.fallback_disk_sort;
             work.fallback_sort_rows = scan.bounds.fallback_sort_rows;
             work.fallback_scratch_bytes = scan.bounds.fallback_scratch_bytes;
+            work.ordering_data_statements = scan.bounds.ordering_data_statements;
+            work.ordering_sort_key_batches = scan.bounds.ordering_sort_key_batches;
+            work.ordering_hydration_batches = scan.bounds.ordering_hydration_batches;
+            work.max_sort_key_batch_rows = scan.bounds.max_sort_key_batch_rows;
+            work.max_buffered_payload_bytes = scan.bounds.max_buffered_payload_bytes;
         }
         let observation = scan.certificate.observation().clone();
         Ok(DocumentSourceTerminal {
@@ -416,7 +427,10 @@ fn finalize_work_counters(
         || counters.max_buffered_documents > 1
         || counters.max_buffered_session_metadata > 1
         || counters.max_session_ancestry_depth > 64
-        || counters.max_buffered_payload_rows > 1
+        || counters.max_buffered_payload_rows > OPENCODE_HYDRATION_BATCH_ROWS as u64
+        || counters.max_sort_key_batch_rows > OPENCODE_HYDRATION_BATCH_ROWS as u64
+        || (counters.max_buffered_payload_bytes > OPENCODE_HYDRATION_BATCH_BYTES
+            && counters.max_buffered_payload_rows != 1)
         || counters.session_metadata_loads > counters.session_rows_scanned
         || (counters.fallback_disk_sort
             && counters.fallback_payload_hydrations != counters.logical_rows_projected)
@@ -426,6 +440,17 @@ fn finalize_work_counters(
                 || counters.fallback_scratch_bytes == 0))
         || (!counters.fallback_disk_sort
             && (counters.fallback_sort_rows != 0 || counters.fallback_scratch_bytes != 0))
+        || (counters.fallback_disk_sort
+            && counters.ordering_data_statements
+                != 2_u64
+                    .saturating_add(counters.ordering_sort_key_batches)
+                    .saturating_add(counters.ordering_hydration_batches))
+        || (!counters.fallback_disk_sort
+            && (counters.ordering_data_statements != 0
+                || counters.ordering_sort_key_batches != 0
+                || counters.ordering_hydration_batches != 0
+                || counters.max_sort_key_batch_rows != 0
+                || counters.max_buffered_payload_bytes != 0))
         || (leaf.observation.schema.message_part_indexed_streaming
             && counters.schema_event_validation_traversals != 2)
         || (exact_replay

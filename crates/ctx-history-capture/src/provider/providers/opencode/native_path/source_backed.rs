@@ -14,7 +14,7 @@ use ctx_history_core::{
     CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
 };
-use rusqlite::{limits::Limit, types::ValueRef, Connection, Row, Statement};
+use rusqlite::{limits::Limit, Connection, Row, Statement};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -81,13 +81,14 @@ pub(crate) type OpenCodeSourceBackedResult<T> = Result<T, OpenCodeSourceBackedEr
 mod adapter;
 mod ordering;
 mod projection;
+mod value;
 
 pub(crate) use adapter::register as register_source_backed_route;
 use ordering::{
-    message_part_requires_external_order, stream_fallback_ordered_events,
-    stream_indexed_message_part_events, FallbackSortStats, OPENCODE_FALLBACK_SCRATCH_MAX_BYTES,
+    stream_fallback_ordered_events, FallbackSortStats, OPENCODE_FALLBACK_SCRATCH_MAX_BYTES,
 };
 use projection::{core_record, decode_source_event_row, retained_projection};
+use value::SqliteSourceValue;
 
 /// Provider-local hook consumed later by the shared registration layer.
 #[derive(Clone, Copy, Debug)]
@@ -176,6 +177,11 @@ struct OpenCodeScanBounds {
     fallback_disk_sort: bool,
     fallback_sort_rows: u64,
     fallback_scratch_bytes: u64,
+    ordering_data_statements: u64,
+    ordering_sort_key_batches: u64,
+    ordering_hydration_batches: u64,
+    max_sort_key_batch_rows: u64,
+    max_buffered_payload_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -228,56 +234,6 @@ enum ProjectionDisposition {
     Ignored,
 }
 
-#[derive(Debug)]
-enum SqliteSourceValue {
-    Null,
-    Integer(i64),
-    Real(u64),
-    Text(Vec<u8>),
-    Blob(Vec<u8>),
-}
-
-impl SqliteSourceValue {
-    fn from_ref(value: ValueRef<'_>) -> Self {
-        match value {
-            ValueRef::Null => Self::Null,
-            ValueRef::Integer(value) => Self::Integer(value),
-            ValueRef::Real(value) => Self::Real(value.to_bits()),
-            ValueRef::Text(value) => Self::Text(value.to_vec()),
-            ValueRef::Blob(value) => Self::Blob(value.to_vec()),
-        }
-    }
-
-    fn hash_into(&self, hasher: &mut Sha256) {
-        match self {
-            Self::Null => hasher.update([0]),
-            Self::Integer(value) => {
-                hasher.update([1]);
-                hasher.update(value.to_le_bytes());
-            }
-            Self::Real(bits) => {
-                hasher.update([2]);
-                hasher.update(bits.to_le_bytes());
-            }
-            Self::Text(value) => {
-                hasher.update([3]);
-                hash_bytes(hasher, value);
-            }
-            Self::Blob(value) => {
-                hasher.update([4]);
-                hash_bytes(hasher, value);
-            }
-        }
-    }
-
-    fn exact_text(&self) -> Option<&[u8]> {
-        match self {
-            Self::Text(value) => Some(value),
-            _ => None,
-        }
-    }
-}
-
 fn scan_pinned_source(
     path: &Path,
     dialect: &'static OpenCodeSqliteDialect,
@@ -309,7 +265,7 @@ fn scan_pinned_source_with_scratch_limit(
             scan_session_evidence(connection, &observation.schema, &observation.source)?;
         emit(OpenCodeScanOutput::Begin(observation.source.clone()))?;
         let external_message_part =
-            message_part_requires_external_order(connection, &observation.schema)?;
+            observation.schema.family == OpenCodeNativeSchemaFamily::MessagePart;
         let streamed = if external_message_part {
             sqlite_snapshot.with_private_scratch_database(
                 "opencode-order-",
@@ -504,8 +460,10 @@ fn stream_logical_rows(
                 &mut consume_event,
             )?
         } else if schema.family == OpenCodeNativeSchemaFamily::MessagePart {
-            stream_indexed_message_part_events(connection, schema, dialect, &mut consume_event)?;
-            FallbackSortStats::default()
+            return Err(CaptureError::SystemInvariant(
+                "OpenCode message-part ordering lacks its private scratch database",
+            )
+            .into());
         } else {
             let mut sql = source_backed_event_sql(schema);
             sql.push_str(source_backed_event_order_sql(schema));
@@ -529,10 +487,15 @@ fn stream_logical_rows(
                 .max(u64::from(current_session.is_some())),
             max_session_ancestry_depth,
             fallback_payload_hydrations,
-            max_buffered_payload_rows: u64::from(fallback_payload_hydrations != 0),
+            max_buffered_payload_rows: fallback_stats.max_hydration_batch_rows,
             fallback_disk_sort: external_message_part,
             fallback_sort_rows: fallback_stats.rows,
             fallback_scratch_bytes: fallback_stats.scratch_bytes,
+            ordering_data_statements: fallback_stats.data_statements,
+            ordering_sort_key_batches: fallback_stats.sort_key_batches,
+            ordering_hydration_batches: fallback_stats.hydration_batches,
+            max_sort_key_batch_rows: fallback_stats.max_sort_key_batch_rows,
+            max_buffered_payload_bytes: fallback_stats.max_hydration_batch_bytes,
         },
     })
 }

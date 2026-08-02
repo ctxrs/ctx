@@ -25,7 +25,7 @@ use crate::{
         event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
         MAX_PROVIDER_FILE_TOUCHES_PER_EVENT,
     },
-    provider_sources::{SqliteLogicalSnapshot, SqliteSourceEvidence},
+    provider_sources::{SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceEvidence},
     CaptureError, KIRO_SQLITE_SOURCE_FORMAT,
 };
 
@@ -33,7 +33,10 @@ use super::super::history::{
     kiro_history_entry_events, kiro_provider_session_id, kiro_session_started_at,
     KiroConversationRow,
 };
-use super::{scan::stream_rows, KiroPhase, KiroTables};
+use super::{
+    scan::{KiroOrderingStats, KiroRowOrderer},
+    KiroPhase, KiroTables,
+};
 
 const KIRO_SOURCE_ANCHOR_NAMESPACE: &str = "kiro.legacy-sqlite";
 const KIRO_SOURCE_ANCHOR_KEY: &str = "default-history";
@@ -61,6 +64,8 @@ pub(crate) enum KiroSourceBackedErrorV0 {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    SqliteSource(#[from] SqliteSourceAccessError),
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
@@ -98,10 +103,13 @@ pub(super) struct KiroSourceBackedScan {
     pub(super) row_decode_passes: u64,
     pub(super) decoded_rows: u64,
     pub(super) peak_buffered_rows: u64,
+    pub(super) ordering: KiroOrderingStats,
 }
 
 pub(super) fn scan_kiro_snapshot(
     connection: &Connection,
+    scratch: &Connection,
+    scratch_path: &Path,
     source: SourceKey,
     terminal_fence: SqliteSourceEvidence,
     emit: &mut dyn FnMut(Vec<CoreRecord>) -> KiroSourceBackedResultV0<()>,
@@ -109,7 +117,9 @@ pub(super) fn scan_kiro_snapshot(
     let tables = KiroTables::probe(connection)?;
     let schema_evidence = relevant_schema_evidence(connection, tables)?;
     let mut scanner = KiroLogicalScan::new(source.clone(), tables, emit)?;
-    scanner.scan(connection)?;
+    let mut orderer = KiroRowOrderer::new(connection, scratch, scratch_path)?;
+    scanner.scan(&mut orderer)?;
+    let ordering = orderer.finish()?;
     let streamed = scanner.finish()?;
     let certificate = SqliteLogicalSnapshot::new(
         KIRO_SOURCE_BACKED_PARSER_REVISION,
@@ -126,11 +136,14 @@ pub(super) fn scan_kiro_snapshot(
         row_decode_passes: streamed.row_decode_passes,
         decoded_rows: streamed.decoded_rows,
         peak_buffered_rows: streamed.peak_buffered_rows,
+        ordering,
     })
 }
 
 pub(super) fn observe_kiro_logical_snapshot(
     connection: &Connection,
+    scratch: &Connection,
+    scratch_path: &Path,
 ) -> KiroSourceBackedResultV0<[u8; 32]> {
     let tables = KiroTables::probe(connection)?;
     let schema_evidence = relevant_schema_evidence(connection, tables)?;
@@ -145,12 +158,13 @@ pub(super) fn observe_kiro_logical_snapshot(
     digest.update(schema_evidence);
     let mut seen_keys = HashSet::new();
     let mut decoded_rows = 0_u64;
+    let mut orderer = KiroRowOrderer::new(connection, scratch, scratch_path)?;
     for phase in [KiroPhase::V2, KiroPhase::Legacy] {
         digest.update([phase.tag(), u8::from(phase_is_present(tables, phase))]);
         if !phase_is_present(tables, phase) {
             continue;
         }
-        let decoded = stream_rows(connection, phase, &mut |row| {
+        let decoded = orderer.stream_rows(phase, &mut |row| {
             if !seen_keys.insert((row.table, row.key.clone())) {
                 return Err(KiroSourceBackedErrorV0::AmbiguousConversationKey {
                     relation: row.table,
@@ -163,6 +177,7 @@ pub(super) fn observe_kiro_logical_snapshot(
         })?;
         decoded_rows = checked_add(decoded_rows, decoded)?;
     }
+    orderer.finish()?;
     digest.update(decoded_rows.to_be_bytes());
     Ok(digest.finalize().into())
 }
@@ -326,13 +341,13 @@ impl<'emit> KiroLogicalScan<'emit> {
         Ok(scan)
     }
 
-    fn scan(&mut self, connection: &Connection) -> KiroSourceBackedResultV0<()> {
+    fn scan(&mut self, orderer: &mut KiroRowOrderer<'_>) -> KiroSourceBackedResultV0<()> {
         self.row_decode_passes = checked_add(self.row_decode_passes, 1)?;
         for phase in [KiroPhase::V2, KiroPhase::Legacy] {
             if !phase_is_present(self.tables, phase) {
                 continue;
             }
-            let decoded = stream_rows(connection, phase, &mut |row| self.process_row(phase, row))?;
+            let decoded = orderer.stream_rows(phase, &mut |row| self.process_row(phase, row))?;
             self.decoded_rows = checked_add(self.decoded_rows, decoded)?;
         }
         Ok(())

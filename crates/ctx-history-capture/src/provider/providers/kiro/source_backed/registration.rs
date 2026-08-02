@@ -29,7 +29,14 @@ use crate::{
 };
 use ctx_history_core::SourceKey;
 
-use super::super::{absolute_kiro_path, KiroSqliteDatabase};
+use super::super::{
+    absolute_kiro_path,
+    scan::{
+        KIRO_HYDRATION_BATCH_BYTES, KIRO_HYDRATION_BATCH_ROWS, KIRO_KEY_BATCH_ROWS,
+        KIRO_ORDER_SCRATCH_MAX_BYTES,
+    },
+    KiroSqliteDatabase,
+};
 
 enum KiroTreeAuthority {
     Present(Box<KiroPresentAuthority>),
@@ -108,16 +115,26 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
         let path = absolute_kiro_path(&self.path).map_err(route_error)?;
         let database = take_database(&authority.database)?;
         sink.begin_source(leaf.clone())?;
-        let scan = scan_kiro_snapshot(
-            database.connection(&path).map_err(route_error)?,
-            leaf.clone(),
-            authority.opening_evidence.clone(),
-            &mut |page| {
-                page.into_iter()
-                    .try_for_each(|document| sink.emit_core_record(document).map_err(Into::into))
-            },
-        )
-        .map_err(kiro_scan_error)?;
+        let scan = database
+            .with_private_scratch_database(
+                "kiro-order-",
+                KIRO_ORDER_SCRATCH_MAX_BYTES,
+                |scratch, scratch_path| {
+                    scan_kiro_snapshot(
+                        database.connection(&path)?,
+                        scratch,
+                        scratch_path,
+                        leaf.clone(),
+                        authority.opening_evidence.clone(),
+                        &mut |page| {
+                            page.into_iter().try_for_each(|document| {
+                                sink.emit_core_record(document).map_err(Into::into)
+                            })
+                        },
+                    )
+                },
+            )
+            .map_err(kiro_scan_error)?;
         validate_scan_receipt(&scan)?;
         if !scan.source.exact_descriptor_eq(leaf)
             || scan.terminal_fence != authority.opening_evidence
@@ -186,11 +203,23 @@ fn validate_scan_receipt(scan: &KiroSourceBackedScan) -> SourceBackedRouteResult
     let page_rows = SOURCE_BACKED_PAGE_ROWS as u64;
     let expected_pages = indexed / page_rows + u64::from(!indexed.is_multiple_of(page_rows));
     let complete = scan.certificate.counts().complete_records;
+    let ordering = scan.ordering;
+    let expected_statements = ordering
+        .phases
+        .checked_mul(4)
+        .and_then(|fixed| fixed.checked_add(ordering.key_batches))
+        .and_then(|total| total.checked_add(ordering.hydration_batches));
     if scan.row_decode_passes != 1
         || scan.decoded_rows > complete
         || (scan.decoded_rows == 0) != (complete == 0)
         || scan.emitted_pages != expected_pages
         || scan.peak_buffered_rows != indexed.min(page_rows)
+        || ordering.rows != scan.decoded_rows
+        || ordering.max_key_batch_rows > KIRO_KEY_BATCH_ROWS as u64
+        || ordering.max_hydration_batch_rows > KIRO_HYDRATION_BATCH_ROWS as u64
+        || (ordering.max_hydration_batch_bytes > KIRO_HYDRATION_BATCH_BYTES
+            && ordering.max_hydration_batch_rows != 1)
+        || expected_statements != Some(ordering.data_statements)
     {
         return Err(internal_error(
             "Kiro scan receipt violated the one-pass bounded-stream contract",
@@ -228,7 +257,17 @@ fn observe_kiro_inventory(
             root.revalidate()?;
             drop(file);
             let database = KiroSqliteDatabase::open(data_root, &path)?;
-            let logical_fingerprint = observe_kiro_logical_snapshot(database.connection(&path)?)?;
+            let logical_fingerprint = database.with_private_scratch_database(
+                "kiro-order-",
+                KIRO_ORDER_SCRATCH_MAX_BYTES,
+                |scratch, scratch_path| {
+                    observe_kiro_logical_snapshot(
+                        database.connection(&path)?,
+                        scratch,
+                        scratch_path,
+                    )
+                },
+            )?;
             database.revalidate(&path)?;
             Ok(KiroPhysicalInventory::Present(Box::new(
                 KiroPresentInventory {

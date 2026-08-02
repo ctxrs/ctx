@@ -99,32 +99,36 @@ fn part_event_source_sql(schema: &OpenCodeNativeSchema) -> String {
 pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema) -> &'static str {
     if schema.message_part_indexed_streaming {
         "select p.rowid, m.session_id, m.time_created,
-                m.id, p.time_created, p.id
+                m.id, p.time_created, p.id,
+                (case when typeof(p.data) in ('text', 'blob')
+                      then octet_length(p.data) else 0 end)
+                + (case when typeof(m.data) in ('text', 'blob')
+                        then octet_length(m.data) else 0 end)
            from message m
            cross join part p on p.message_id = m.id"
     } else {
         "select p.rowid, p.session_id,
                 coalesce(m.time_created, p.time_created),
-                p.message_id, p.time_created, p.id
+                p.message_id, p.time_created, p.id,
+                (case when typeof(p.data) in ('text', 'blob')
+                      then octet_length(p.data) else 0 end)
+                + (case when typeof(m.data) in ('text', 'blob')
+                        then octet_length(m.data) else 0 end)
            from part p
            left join message m on m.id = p.message_id"
     }
 }
 
-pub(super) fn source_backed_indexed_message_ids_sql() -> &'static str {
-    "select id from message
-      order by session_id collate binary, time_created, id collate binary"
-}
-
-pub(super) fn source_backed_indexed_part_rowids_sql() -> &'static str {
-    "select rowid from part
-      where message_id = ?1
-      order by time_created, id collate binary"
-}
-
-pub(super) fn source_backed_fallback_event_by_rowid_sql(schema: &OpenCodeNativeSchema) -> String {
+pub(super) fn source_backed_fallback_events_by_rowids_sql(
+    schema: &OpenCodeNativeSchema,
+    rows: usize,
+) -> String {
     let mut sql = part_event_source_sql_with_payload(schema, true);
-    sql.push_str(" where p.rowid = ?1");
+    let placeholders = (1..=rows)
+        .map(|parameter| format!("?{parameter}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    sql.push_str(&format!(" where p.rowid in ({placeholders})"));
     sql
 }
 

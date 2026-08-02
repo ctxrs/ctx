@@ -12,9 +12,9 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 
 use super::super::query::{
-    source_backed_fallback_sort_key_sql, source_backed_indexed_message_ids_sql,
-    source_backed_indexed_part_rowids_sql,
+    source_backed_fallback_events_by_rowids_sql, source_backed_fallback_sort_key_sql,
 };
+use super::ordering::{OPENCODE_HYDRATION_BATCH_BYTES, OPENCODE_HYDRATION_BATCH_ROWS};
 use super::*;
 use crate::{
     provider::source_backed::{
@@ -866,51 +866,40 @@ fn indexed_message_part_cold_scan_preserves_chronology_with_bounded_message_sort
     let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
     assert_eq!(schema.family, OpenCodeNativeSchemaFamily::MessagePart);
     assert!(schema.message_part_indexed_streaming);
-    let message_plan = connection
+    let sort_key_plan = connection
         .prepare(&format!(
             "EXPLAIN QUERY PLAN {}",
-            source_backed_indexed_message_ids_sql()
+            source_backed_fallback_sort_key_sql(&schema)
         ))
         .unwrap()
         .query_map([], |row| row.get::<_, String>(3))
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
-    assert!(
-        message_plan
-            .iter()
-            .any(|step| step.contains("message_session_time_created_id_idx")),
-        "indexed current-schema query did not use the message stream index: {message_plan:?}"
-    );
-    let part_plan = connection
-        .prepare(&format!(
-            "EXPLAIN QUERY PLAN {}",
-            source_backed_indexed_part_rowids_sql()
-        ))
+    let hydration_sql = source_backed_fallback_events_by_rowids_sql(&schema, 64);
+    let hydration_plan = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {hydration_sql}",))
         .unwrap()
-        .query_map([rusqlite::types::Null], |row| row.get::<_, String>(3))
+        .query_map(
+            rusqlite::params_from_iter(std::iter::repeat_n(rusqlite::types::Null, 64)),
+            |row| row.get::<_, String>(3),
+        )
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
     assert!(
-        part_plan
+        sort_key_plan
             .iter()
-            .any(|step| step.contains("part_message_time_id_idx")),
-        "indexed current-schema query did not use the part stream index: {part_plan:?}"
-    );
-    assert!(
-        message_plan
-            .iter()
-            .chain(&part_plan)
+            .chain(&hydration_plan)
             .all(|step| !step.contains("USE TEMP B-TREE")),
-        "indexed current-schema key stream used SQLite temporary sorting: {message_plan:?} {part_plan:?}"
+        "indexed current-schema batches used SQLite temporary sorting: {sort_key_plan:?} {hydration_plan:?}"
     );
     assert!(
-        message_plan
+        sort_key_plan
             .iter()
-            .chain(&part_plan)
+            .chain(&hydration_plan)
             .all(|step| { !step.contains("CORRELATED") && !step.contains("VIRTUAL TABLE") }),
-        "indexed current-schema query repeated JSON-tree traversal in SQLite: {message_plan:?} {part_plan:?}"
+        "indexed current-schema query repeated JSON-tree traversal in SQLite: {sort_key_plan:?} {hydration_plan:?}"
     );
     drop(connection);
 
@@ -937,6 +926,15 @@ fn indexed_message_part_cold_scan_preserves_chronology_with_bounded_message_sort
     assert_eq!(cold.logical_rows_projected, ROWS);
     assert_eq!(cold.documents_staged, ROWS);
     assert_eq!(cold.max_buffered_documents, 1);
+    assert!(cold.fallback_disk_sort);
+    assert_eq!(cold.fallback_sort_rows, ROWS);
+    assert_eq!(cold.fallback_payload_hydrations, ROWS);
+    assert!(cold.ordering_data_statements < ROWS / 8);
+    assert!(cold.ordering_sort_key_batches < ROWS / 8);
+    assert!(cold.ordering_hydration_batches < ROWS / 8);
+    assert!(cold.max_sort_key_batch_rows <= OPENCODE_HYDRATION_BATCH_ROWS as u64);
+    assert!(cold.max_buffered_payload_rows <= OPENCODE_HYDRATION_BATCH_ROWS as u64);
+    assert!(cold.max_buffered_payload_bytes <= OPENCODE_HYDRATION_BATCH_BYTES);
 }
 
 #[test]

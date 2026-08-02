@@ -18,3 +18,7 @@ fn direct_core_projection_is_complete_and_self_contained() {
     assert!(!production.contains("body.truncate"));
     assert!(!production.contains("body.chars().take"));
 }
+
+#[cfg(unix)]
+#[path = "source_backed/tests/temp_authority.rs"]
+mod temp_authority;
