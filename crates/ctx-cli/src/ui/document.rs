@@ -32,30 +32,62 @@ impl Span {
 pub(super) fn neutralize_controls(text: &str) -> String {
     let mut safe = String::with_capacity(text.len());
     for character in text.chars() {
-        match character {
-            '\n' => safe.push_str("\\n"),
-            '\r' => safe.push_str("\\r"),
-            '\t' => safe.push_str("\\t"),
-            '\u{1b}' => safe.push_str("\\x1b"),
-            character
-                if character <= '\u{1f}'
-                    || character == '\u{7f}'
-                    || ('\u{80}'..='\u{9f}').contains(&character)
-                    || is_terminal_spoofing_control(character) =>
-            {
-                let _ = write!(safe, "\\u{{{:04x}}}", u32::from(character));
-            }
-            character => safe.push(character),
+        if !push_visible_terminal_control(&mut safe, character) {
+            safe.push(character);
         }
     }
     safe
 }
 
-fn is_terminal_spoofing_control(character: char) -> bool {
+/// Makes terminal-formatting controls in source-authored history visible.
+///
+/// Callers must sanitize history bodies before passing them to shared layout so
+/// wrapping and measurement operate on the same plain ASCII escape text that
+/// the terminal will receive.
+#[cfg_attr(not(test), allow(dead_code))] // Remove when the preview renderer calls this seam.
+pub(crate) fn sanitize_untrusted_history_body_for_terminal(text: &str) -> String {
+    let mut safe = String::with_capacity(text.len());
+    for character in text.chars() {
+        if push_visible_terminal_control(&mut safe, character) {
+            continue;
+        }
+        if is_untrusted_history_format_control(character) {
+            push_visible_unicode_escape(&mut safe, character);
+        } else {
+            safe.push(character);
+        }
+    }
+    safe
+}
+
+fn push_visible_terminal_control(safe: &mut String, character: char) -> bool {
+    match character {
+        '\n' => safe.push_str("\\n"),
+        '\r' => safe.push_str("\\r"),
+        '\t' => safe.push_str("\\t"),
+        '\u{1b}' => safe.push_str("\\x1b"),
+        character
+            if character <= '\u{1f}'
+                || character == '\u{7f}'
+                || ('\u{80}'..='\u{9f}').contains(&character) =>
+        {
+            push_visible_unicode_escape(safe, character);
+        }
+        _ => return false,
+    }
+    true
+}
+
+fn push_visible_unicode_escape(safe: &mut String, character: char) {
+    let _ = write!(safe, "\\u{{{:04x}}}", u32::from(character));
+}
+
+fn is_untrusted_history_format_control(character: char) -> bool {
     matches!(
         character,
         '\u{061c}'
-            | '\u{200b}'..='\u{200f}'
+            | '\u{200b}'
+            | '\u{200e}'..='\u{200f}'
             | '\u{202a}'..='\u{202e}'
             | '\u{2060}'
             | '\u{2066}'..='\u{206f}'

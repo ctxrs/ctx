@@ -11,9 +11,9 @@ use unicode_width::UnicodeWidthStr as _;
 use super::{
     bootstrap::{scan_color_mode, scan_machine_output_hint},
     canonical_human_output_bytes, diagnostic, empty_state, evidence_list, fields, hint, outcome,
-    progress, section, table, Action, ColorMode, Diagnostic, DiagnosticLevel, Document, EmptyState,
-    Evidence, Field, Hint, Line, Outcome, OutcomeState, Progress, RenderContext, Span, StreamKind,
-    Table, TestContext, Token, Ui,
+    progress, sanitize_untrusted_history_body_for_terminal, section, table, Action, ColorMode,
+    Diagnostic, DiagnosticLevel, Document, EmptyState, Evidence, Field, Hint, Line, Outcome,
+    OutcomeState, Progress, RenderContext, Span, StreamKind, Table, TestContext, Token, Ui,
 };
 
 fn tty(width: usize) -> RenderContext {
@@ -514,45 +514,134 @@ fn component_values_cannot_inject_ansi_or_terminal_controls() {
 }
 
 #[test]
-fn unicode_spoofing_controls_are_visible_safe_and_deterministic() {
-    const FORBIDDEN: &[char] = &[
-        '\u{061c}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}',
-        '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2060}', '\u{2066}', '\u{2067}',
-        '\u{2068}', '\u{2069}', '\u{206a}', '\u{206b}', '\u{206c}', '\u{206d}', '\u{206e}',
-        '\u{206f}', '\u{feff}',
-    ];
-    let controls = FORBIDDEN.iter().collect::<String>();
-    let benign = "café e\u{0301} 🧪👍🏽 🇺🇳 Καλημέρα 日本語";
-    let input = format!("before\u{1b}[2J{controls}after | {benign}");
-    let expected = concat!(
-        "before\\x1b[2J",
-        "\\u{061c}",
-        "\\u{200b}\\u{200c}\\u{200d}\\u{200e}\\u{200f}",
-        "\\u{202a}\\u{202b}\\u{202c}\\u{202d}\\u{202e}",
-        "\\u{2060}",
-        "\\u{2066}\\u{2067}\\u{2068}\\u{2069}",
-        "\\u{206a}\\u{206b}\\u{206c}\\u{206d}\\u{206e}\\u{206f}",
-        "\\u{feff}",
-        "after | café e\u{0301} 🧪👍🏽 🇺🇳 Καλημέρα 日本語\n",
+fn shared_production_wrapping_preserves_legitimate_unicode_at_all_widths() {
+    const FAMILY: &str = "👨‍👩‍👧‍👦";
+    const PROFESSION: &str = "👩🏽‍💻";
+    const PERSIAN_ZWNJ: &str = "می‌روم";
+    const ARABIC_COMBINING: &str = "اَلْعَرَبِيَّةُ";
+    const DECOMPOSED_LATIN: &str = "e\u{0301}";
+    const RTL_LETTERS: &str = "مرحبا";
+    const VARIATION_SELECTOR: &str = "✈\u{fe0f}";
+    let body = format!(
+        "Family {FAMILY} profession {PROFESSION} Persian {PERSIAN_ZWNJ} Arabic \
+         {ARABIC_COMBINING} decomposed {DECOMPOSED_LATIN} RTL {RTL_LETTERS} variant \
+         {VARIATION_SELECTOR}. This intentionally long history body traverses the shared \
+         production wrapping path without changing legitimate Unicode grapheme content at \
+         narrow or wide terminal sizes."
     );
-    let document = Document::from_line(Line::styled(input, Token::Heading));
-    let context =
-        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 120).color(ColorMode::Always));
 
+    for width in [32, 48, 80, 120] {
+        let context = RenderContext::for_test(
+            TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Always),
+        );
+        let document = fields(&context, &[Field::new("Body", &body)]);
+        let plain = document.render_plain();
+        let styled = document.render(&context);
+
+        for expected in [
+            FAMILY,
+            PROFESSION,
+            PERSIAN_ZWNJ,
+            ARABIC_COMBINING,
+            DECOMPOSED_LATIN,
+            RTL_LETTERS,
+            VARIATION_SELECTOR,
+        ] {
+            assert!(
+                plain.contains(expected),
+                "width {width} changed {expected:?}"
+            );
+        }
+        assert!(!plain.contains("\\u{200c}"), "width {width}");
+        assert!(!plain.contains("\\u{200d}"), "width {width}");
+        assert_eq!(strip_ansi(&styled), plain, "width {width}");
+        assert_within_terminal(&document, &context);
+    }
+}
+
+#[test]
+fn global_spans_preserve_ordinary_unicode_exactly() {
+    let ordinary = concat!("👨‍👩‍👧‍👦 👩🏽‍💻 می‌روم اَلْعَرَبِيَّةُ e\u{0301} ", "مرحبا ✈\u{fe0f}");
+
+    assert_eq!(Span::text(ordinary).content(), ordinary);
+    assert_eq!(
+        Document::from_line(Line::styled(ordinary, Token::Heading)).render_plain(),
+        format!("{ordinary}\n")
+    );
+}
+
+#[test]
+fn untrusted_history_body_controls_are_visibly_escaped_before_layout() {
+    const FORBIDDEN: &[char] = &[
+        '\u{061c}', '\u{200b}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}',
+        '\u{202d}', '\u{202e}', '\u{2060}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        '\u{206a}', '\u{206b}', '\u{206c}', '\u{206d}', '\u{206e}', '\u{206f}', '\u{feff}',
+    ];
+    const VISIBLE: &[&str] = &[
+        "\\u{061c}",
+        "\\u{200b}",
+        "\\u{200e}",
+        "\\u{200f}",
+        "\\u{202a}",
+        "\\u{202b}",
+        "\\u{202c}",
+        "\\u{202d}",
+        "\\u{202e}",
+        "\\u{2060}",
+        "\\u{2066}",
+        "\\u{2067}",
+        "\\u{2068}",
+        "\\u{2069}",
+        "\\u{206a}",
+        "\\u{206b}",
+        "\\u{206c}",
+        "\\u{206d}",
+        "\\u{206e}",
+        "\\u{206f}",
+        "\\u{feff}",
+    ];
+    const LEGITIMATE: &str = "می‌روم 👩🏽‍💻 اَلْعَرَبِيَّةُ e\u{0301} مرحبا ✈\u{fe0f}";
+    let controls = FORBIDDEN
+        .iter()
+        .map(char::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let visible_controls = VISIBLE.join(" ");
+    let input = format!(
+        "before \n \r \t \u{1b} \u{0000} \u{001f} \u{007f} \u{0085} \u{009b} \
+         {controls} after {LEGITIMATE}"
+    );
+    let expected = format!(
+        "before \\n \\r \\t \\x1b \\u{{0000}} \\u{{001f}} \\u{{007f}} \\u{{0085}} \\u{{009b}} \
+         {visible_controls} after {LEGITIMATE}"
+    );
+
+    let sanitized = sanitize_untrusted_history_body_for_terminal(&input);
+    assert_eq!(sanitized, expected);
+    assert!(VISIBLE.iter().all(|escape| escape.is_ascii()));
+    let dangerous_only = format!("\n\r\t\u{1b}\u{0000}\u{001f}\u{007f}\u{0085}\u{009b}{controls}");
+    assert!(sanitize_untrusted_history_body_for_terminal(&dangerous_only).is_ascii());
+    assert!(sanitized.contains(LEGITIMATE));
+    for forbidden in FORBIDDEN {
+        assert!(!sanitized.contains(*forbidden), "retained {forbidden:?}");
+    }
+
+    let context =
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 80).color(ColorMode::Always));
+    let document = fields(&context, &[Field::new("Body", &sanitized)]);
     let plain = document.render_plain();
     let styled = document.render(&context);
-    assert_eq!(plain, expected);
     assert_eq!(document.render_plain(), plain);
     assert_eq!(document.render(&context), styled);
     assert_eq!(strip_ansi(&styled), plain);
-    assert_eq!(
-        canonical_human_output_bytes(|_| document.clone()),
-        expected.len()
-    );
-    assert!(!plain.contains('\u{1b}'));
-    assert!(!styled.contains("\u{1b}[2J"));
-    assert!(plain.contains(benign));
-    assert_eq!(Span::text(benign).content(), benign);
+    for legitimate in ["می‌روم", "👩🏽‍💻", "اَلْعَرَبِيَّةُ", "e\u{0301}", "مرحبا", "✈\u{fe0f}"]
+    {
+        assert!(plain.contains(legitimate), "changed {legitimate:?}");
+    }
+    assert_within_terminal(&document, &context);
+    for escape in VISIBLE {
+        assert!(plain.contains(escape), "missing {escape}");
+    }
     for forbidden in FORBIDDEN {
         assert!(!plain.contains(*forbidden), "plain retained {forbidden:?}");
         assert!(
