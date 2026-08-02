@@ -125,6 +125,7 @@ struct ManualAllContinuation {
     predecessor_finished: bool,
     covered_route_ids: BTreeSet<SourceRouteIdentity>,
     covered_scanned_routes: usize,
+    covered_removed_source_count: usize,
     covered_timings: SourceBackedRefreshTimings,
 }
 
@@ -135,6 +136,7 @@ impl ManualAllContinuation {
             predecessor_finished: false,
             covered_route_ids: BTreeSet::new(),
             covered_scanned_routes: 0,
+            covered_removed_source_count: 0,
             covered_timings: SourceBackedRefreshTimings::default(),
         }
     }
@@ -142,6 +144,7 @@ impl ManualAllContinuation {
     fn invalidate_route(&mut self, route: &SourceRouteIdentity) {
         if self.covered_route_ids.remove(route) && self.covered_route_ids.is_empty() {
             self.covered_scanned_routes = 0;
+            self.covered_removed_source_count = 0;
             self.covered_timings = SourceBackedRefreshTimings::default();
         }
     }
@@ -302,10 +305,28 @@ impl CoreRefreshEngine {
         self.lock_state().dirty_routes.next_due_at_ms().is_some()
     }
 
+    pub(in crate::semantic) fn enqueue_next_scheduled_refresh(
+        &self,
+        data_root: &Path,
+        now_ms: u64,
+    ) -> Result<bool> {
+        self.enqueue_next_dirty_route_with_cold_all(data_root, now_ms, true)
+    }
+
+    #[cfg(test)]
     pub(in crate::semantic) fn enqueue_next_dirty_route(
         &self,
         data_root: &Path,
         now_ms: u64,
+    ) -> Result<bool> {
+        self.enqueue_next_dirty_route_with_cold_all(data_root, now_ms, false)
+    }
+
+    fn enqueue_next_dirty_route_with_cold_all(
+        &self,
+        data_root: &Path,
+        now_ms: u64,
+        cold_all: bool,
     ) -> Result<bool> {
         let observed_generation = self.observed_published_generation(data_root)?;
         let catalog = load_explicit_source_catalog_authority(data_root)?;
@@ -317,11 +338,19 @@ impl CoreRefreshEngine {
             let Some(route) = state.dirty_routes.next_due_route(now_ms) else {
                 return Ok(false);
             };
+            let refresh_scope = if cold_all && observed_generation.is_none() {
+                // A cold generation has no retained routes to carry. Publish
+                // the complete startup inventory atomically instead of one
+                // transient partial generation per initially dirty route.
+                SourceBackedRefreshScope::All
+            } else {
+                SourceBackedRefreshScope::exact([route])
+            };
             let attempt = new_refresh_attempt(
                 observed_generation,
                 SourceRefreshRuntimeMetadata::periodic(),
                 Some(catalog),
-                SourceBackedRefreshScope::exact([route]),
+                refresh_scope,
                 false,
             );
             let request_id = attempt.request_id.clone();
@@ -732,6 +761,7 @@ impl CoreRefreshEngine {
                 continuation.covered_route_ids = retained;
                 if continuation.covered_route_ids.is_empty() {
                     continuation.covered_scanned_routes = 0;
+                    continuation.covered_removed_source_count = 0;
                     continuation.covered_timings = SourceBackedRefreshTimings::default();
                 }
             }
@@ -758,6 +788,7 @@ impl CoreRefreshEngine {
                     if let Some(continuation) = state.manual_all_continuations.get_mut(request_id) {
                         continuation.covered_route_ids.clear();
                         continuation.covered_scanned_routes = 0;
+                        continuation.covered_removed_source_count = 0;
                         continuation.covered_timings = SourceBackedRefreshTimings::default();
                     }
                 }
@@ -1130,6 +1161,11 @@ impl CoreRefreshEngine {
                 .as_ref()
                 .and_then(|attempt| attempt.scanned_routes)
                 .unwrap_or_default();
+            continuation.covered_removed_source_count = attempt
+                .as_ref()
+                .and_then(|attempt| attempt.receipt.as_ref())
+                .map(|receipt| receipt.current.removed_source_count)
+                .unwrap_or_default();
             continuation.covered_timings = attempt
                 .as_ref()
                 .and_then(|attempt| attempt.timings)
@@ -1223,6 +1259,10 @@ fn aggregate_manual_all_continuation(
     publication.scanned_routes = publication
         .scanned_routes
         .saturating_add(continuation.covered_scanned_routes);
+    publication.current.removed_source_count = publication
+        .current
+        .removed_source_count
+        .saturating_add(continuation.covered_removed_source_count);
     publication.timings.discovery_us = publication
         .timings
         .discovery_us

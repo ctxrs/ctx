@@ -110,6 +110,8 @@ pub enum IndexError {
     ConcurrentGenerationChange,
     #[error("generation manifest {0} is missing")]
     MissingManifest(String),
+    #[error("generation {0} is not retained by the active generation pointer")]
+    GenerationNotRetained(String),
     #[error("generation manifest digest mismatch: expected {expected}, actual {actual}")]
     ManifestDigestMismatch { expected: String, actual: String },
     #[error("generation ID is not exactly 64 lowercase hexadecimal characters")]

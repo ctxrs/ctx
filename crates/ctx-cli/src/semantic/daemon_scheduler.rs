@@ -295,7 +295,7 @@ fn run_dirty_core_refresh(
             DaemonCycleStateV1::unknown(),
         ));
     };
-    if !source_refresh.enqueue_next_dirty_route(data_root, source_route_ledger_now_ms())? {
+    if !source_refresh.enqueue_next_scheduled_refresh(data_root, source_route_ledger_now_ms())? {
         return Ok(DaemonIteration::new(
             false,
             false,
@@ -309,11 +309,18 @@ fn run_dirty_core_refresh(
             DaemonCycleStateV1::unknown(),
         ));
     };
+    let cold_all_refresh = run.scope == SourceBackedRefreshScope::All
+        && run.job.get("trigger").and_then(Value::as_str) == Some("periodic")
+        && run
+            .job
+            .get("previous_generation")
+            .is_none_or(Value::is_null);
     debug_assert!(
         matches!(run.scope, SourceBackedRefreshScope::Exact(_))
             || (run.scope == SourceBackedRefreshScope::All
-                && run.job.get("trigger").and_then(Value::as_str) == Some("import")),
-        "dirty-route work may become All only when a manual import upgrades the queued exact refresh"
+                && run.job.get("trigger").and_then(Value::as_str) == Some("import"))
+            || cold_all_refresh,
+        "dirty-route work may become All only for cold startup or when a manual import upgrades the queued exact refresh"
     );
     write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &run.job)?;
     let published_generation = (!run.failed
@@ -332,6 +339,12 @@ fn run_dirty_core_refresh(
     let iteration = DaemonIteration::new(run.did_work, false, daemon_core_cycle_state(&run.job));
     if let Some(generation) = published_generation {
         runtime.sidecar_drain.generation = Some(generation);
+        // A successor queued behind an exact-route fence must yield to the
+        // daemon loop once so pending watcher events enter the dirty-route
+        // ledger before that successor is admitted.
+        if source_refresh.has_pending_request() {
+            return Ok(iteration);
+        }
         return Ok(immediate_follow_up(iteration));
     }
     Ok(iteration)

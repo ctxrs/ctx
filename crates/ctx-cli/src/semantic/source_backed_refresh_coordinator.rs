@@ -100,6 +100,19 @@ pub(super) fn open_verified_index(
     VerifiedIndex::open_pinned(index_root)
 }
 
+fn open_retained_verified_index(
+    index_root: &Path,
+    generation_id: &str,
+) -> std::result::Result<VerifiedIndex, IndexError> {
+    #[cfg(test)]
+    VERIFIED_INDEX_OPEN_COUNT.with(|count| {
+        if let Some(current) = count.get() {
+            count.set(Some(current.saturating_add(1)));
+        }
+    });
+    VerifiedIndex::open_retained(index_root, generation_id)
+}
+
 #[cfg(test)]
 pub(super) fn count_verified_index_opens<T>(operation: impl FnOnce() -> T) -> (T, usize) {
     VERIFIED_INDEX_OPEN_COUNT.with(|count| {
@@ -231,7 +244,10 @@ fn verify_source_backed_publication(
         );
     }
     let manifest = verified.manifest();
-    let verified_current = SourceBackedRefreshCurrent::from_sources(&manifest.sources, 0)?;
+    let verified_current = SourceBackedRefreshCurrent::from_sources(
+        &manifest.sources,
+        publication.current.removed_source_count,
+    )?;
     if verified_current != publication.current
         || publication.certified_source_count != verified_current.source_count
         || publication.certified_source_bytes != verified_current.certified_source_bytes
@@ -536,17 +552,11 @@ fn wait_for_published_generation(
                     .ok_or_else(|| {
                         anyhow!("published daemon source refresh has no generation ID")
                     })?;
-                let pin = pin_published_generation(data_root)?.ok_or_else(|| {
-                    anyhow!(
-                        "daemon published Core generation {expected}, but no verified generation can be opened"
+                let pin = pin_retained_generation(data_root, expected).with_context(|| {
+                    format!(
+                        "daemon published Core generation {expected}, but its retained terminal generation cannot be opened"
                     )
                 })?;
-                if pin.generation_id() != expected {
-                    bail!(
-                        "daemon reported Core generation {expected}, but the verified published generation is {}",
-                        pin.generation_id()
-                    );
-                }
                 let receipt = published_refresh_receipt(&response, &pin)?;
                 return Ok(SourceBackedRefreshObservation {
                     mode,
@@ -751,7 +761,8 @@ fn published_refresh_receipt(
     }
 
     let manifest = pin.index.manifest();
-    let verified_current = SourceBackedRefreshCurrent::from_sources(&manifest.sources, 0)?;
+    let verified_current =
+        SourceBackedRefreshCurrent::from_sources(&manifest.sources, current.removed_source_count)?;
     if current != verified_current
         || current.source_count
             != required_usize_from_value(
@@ -961,6 +972,20 @@ pub(super) fn pin_published_generation(
     data_root: &Path,
 ) -> Result<Option<PinnedSourceBackedGeneration>> {
     Ok(open_published_generation(data_root)?.map(|index| PinnedSourceBackedGeneration { index }))
+}
+
+fn pin_retained_generation(
+    data_root: &Path,
+    generation_id: &str,
+) -> Result<PinnedSourceBackedGeneration> {
+    let index_root = source_backed_index_root(data_root);
+    let index = open_retained_verified_index(&index_root, generation_id).with_context(|| {
+        format!(
+            "open retained Core generation {generation_id} from {}",
+            index_root.display()
+        )
+    })?;
+    Ok(PinnedSourceBackedGeneration { index })
 }
 
 pub(crate) fn pin_active_verified_generation(

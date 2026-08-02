@@ -428,6 +428,10 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    GenerationWriter::open(&data_root.join("search/lexical"), WriterOptions::default())
+        .unwrap()
+        .commit(|_| true)
+        .unwrap();
     let route =
         |byte: u8| SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap();
     let routes = BTreeSet::from([route(0x81), route(0x82), route(0x83)]);
@@ -500,7 +504,12 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
         let runner = Arc::clone(&coordinator);
         let runner_root = data_root.clone();
         let handle = scope.spawn(move || {
-            let mut runtime = DaemonRuntime::default();
+            let mut config = AppConfig::default();
+            config.daemon.mode = DaemonMode::SourceRefreshOnly;
+            let mut runtime = DaemonRuntime {
+                config,
+                ..DaemonRuntime::default()
+            };
             let iteration = run_daemon_scheduler_cycle_with_activity(
                 &daemon_args(),
                 &runner_root,
@@ -530,7 +539,10 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
         release.wait();
         let (first, runtime) = handle.join().unwrap();
         assert!(!first.failed);
-        assert!(first.continue_immediately);
+        assert!(
+            !first.continue_immediately,
+            "the daemon loop must drain watcher events before the queued all-route successor"
+        );
         (request_id, runtime)
     });
 

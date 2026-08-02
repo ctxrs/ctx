@@ -6,9 +6,9 @@ use std::{
 
 use crate::{
     analyzer::register_body_analyzer, durable_directory::DurableMmapDirectory,
-    load_active_generation_pointer, load_manifest_for_metas, meta_generation, open_slot_index,
-    payload_generation_id, searcher_generation, validate_schema, verify_searcher,
-    verify_searcher_structure, GenerationManifest, IndexError, Result,
+    identity::is_generation_id, load_active_generation_pointer, load_manifest_for_metas,
+    meta_generation, open_slot_index, payload_generation_id, searcher_generation, validate_schema,
+    verify_searcher, verify_searcher_structure, GenerationManifest, IndexError, Result,
 };
 use tantivy::{ReloadPolicy, Searcher};
 
@@ -45,7 +45,7 @@ impl VerifiedIndex {
     /// Opens a generation, verifies every physical checksum, and audits every
     /// stored Core record plus its source and identity aggregates.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(root.as_ref(), true)
+        Self::open_inner(root.as_ref(), true, None)
     }
 
     /// Opens a previously audited immutable generation for querying.
@@ -55,10 +55,24 @@ impl VerifiedIndex {
     /// open. The publication-time O(document-count) identity audit is not
     /// repeated for every query.
     pub fn open_pinned(root: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(root.as_ref(), false)
+        Self::open_inner(root.as_ref(), false, None)
     }
 
-    fn open_inner(root: &Path, audit_stored_core: bool) -> Result<Self> {
+    /// Opens one exact generation retained as either the active or previous
+    /// immutable slot. This lets a terminal publication remain observable
+    /// after one serialized successor advances the active pointer.
+    pub fn open_retained(root: impl AsRef<Path>, generation_id: &str) -> Result<Self> {
+        if !is_generation_id(generation_id) {
+            return Err(IndexError::InvalidGenerationId);
+        }
+        Self::open_inner(root.as_ref(), false, Some(generation_id))
+    }
+
+    fn open_inner(
+        root: &Path,
+        audit_stored_core: bool,
+        retained_generation_id: Option<&str>,
+    ) -> Result<Self> {
         if !root.is_dir() {
             return Err(IndexError::MissingActiveGenerationPointer);
         }
@@ -67,12 +81,19 @@ impl VerifiedIndex {
         let root = control_directory.root_path().to_path_buf();
         let pointer = load_active_generation_pointer(&root)?
             .ok_or(IndexError::MissingActiveGenerationPointer)?;
-        let index = open_slot_index(&root, pointer.active())?;
+        let slot = match retained_generation_id {
+            Some(generation_id) => std::iter::once(pointer.active())
+                .chain(pointer.previous())
+                .find(|slot| slot.generation_id() == generation_id)
+                .ok_or_else(|| IndexError::GenerationNotRetained(generation_id.to_owned()))?,
+            None => pointer.active(),
+        };
+        let index = open_slot_index(&root, slot)?;
         register_body_analyzer(&index);
         validate_schema(&index.schema())?;
         let metas = index.load_metas()?;
         let manifest = load_manifest_for_metas(&root, &metas)?;
-        if pointer.active().generation_id() != manifest.generation_id()? {
+        if slot.generation_id() != manifest.generation_id()? {
             return Err(IndexError::InvalidActiveGenerationPointer);
         }
         let reader = index

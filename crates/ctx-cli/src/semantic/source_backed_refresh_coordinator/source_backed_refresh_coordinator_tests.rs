@@ -207,14 +207,31 @@ fn publish_selected_routes(
 }
 
 fn publication_pin_source() -> SourceKey {
+    publication_pin_source_with_anchor(0x91)
+}
+
+fn publication_pin_source_with_anchor(anchor: u8) -> SourceKey {
     SourceKey::derive(
         "codex",
         "codex_session_jsonl",
         "session",
         1,
-        SourceAnchor::CatalogLineage([0x91; 32]),
+        SourceAnchor::CatalogLineage([anchor; 32]),
     )
     .unwrap()
+}
+
+fn publish_pin_source(index_root: &Path, source: SourceKey) -> String {
+    let mut writer =
+        ctx_history_index::GenerationWriter::open(index_root, WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer
+        .add_core_record(publication_pin_record(&source))
+        .unwrap();
+    writer
+        .certify_source(publication_pin_certificate(&source))
+        .unwrap();
+    writer.commit(|_| true).unwrap().generation_id
 }
 
 fn publication_pin_record(source: &SourceKey) -> CoreRecord {
@@ -436,7 +453,8 @@ fn running_startup_exact_continues_manual_all_without_rescanning() {
                     .entry(route.clone())
                     .or_default() += 1;
             }
-            if executor_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let first = executor_calls.fetch_add(1, Ordering::SeqCst) == 0;
+            if first {
                 assert!(matches!(
                     execution.scope,
                     SourceBackedRefreshScope::Exact(_)
@@ -448,7 +466,11 @@ fn running_startup_exact_continues_manual_all_without_rescanning() {
                 assert_eq!(execution.scope, SourceBackedRefreshScope::All);
                 assert_eq!(execution.covered_route_ids.len(), 1);
             }
-            publish_selected_routes(&execution, &selected, None)
+            let mut publication = publish_selected_routes(&execution, &selected, None)?;
+            if first {
+                publication.current.removed_source_count = 1;
+            }
+            Ok(publication)
         },
     )));
     coordinator.reconcile_watch_routes(
@@ -495,6 +517,7 @@ fn running_startup_exact_continues_manual_all_without_rescanning() {
     assert_eq!(terminal["request_state"], "published");
     assert_eq!(terminal["generation_changed"], true);
     assert_eq!(terminal["scanned_routes"], routes.len());
+    assert_eq!(terminal["receipt"]["current"]["removed_source_count"], 1);
     assert_eq!(
         terminal["receipt"]["successful_route_ids"]
             .as_array()
@@ -2086,6 +2109,58 @@ fn verified_publication_atomically_installs_pinned_core_receipt() {
             .generation_id()
     );
     assert!(!coordinator.has_pending_request());
+}
+
+#[test]
+fn terminal_generation_can_be_pinned_after_one_successor_advances_active() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    let terminal_generation = publish_pin_source(&index_root, publication_pin_source());
+    let successor_generation =
+        publish_pin_source(&index_root, publication_pin_source_with_anchor(0x93));
+    assert_ne!(terminal_generation, successor_generation);
+
+    let terminal = pin_retained_generation(&data_root, &terminal_generation).unwrap();
+    let active = pin_published_generation(&data_root).unwrap().unwrap();
+
+    assert_eq!(terminal.generation_id(), terminal_generation);
+    assert_eq!(active.generation_id(), successor_generation);
+}
+
+#[test]
+fn cold_dirty_routes_are_published_in_one_all_route_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let routes = BTreeSet::from([route_identity(0x94), route_identity(0x95)]);
+    let executor_routes = routes.clone();
+    let scopes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let executor_scopes = Arc::clone(&scopes);
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            executor_scopes
+                .lock()
+                .unwrap()
+                .push(execution.scope.clone());
+            let selected = physically_selected_routes(&execution, &executor_routes);
+            publish_selected_routes(&execution, &selected, None)
+        },
+    ));
+    coordinator.reconcile_watch_routes(
+        routes,
+        EventWatermark::new(1, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+
+    assert!(coordinator
+        .enqueue_next_scheduled_refresh(&data_root, ledger_now_ms())
+        .unwrap());
+    let run = coordinator.run_next(&data_root).unwrap();
+
+    assert!(!run.failed, "{:#}", run.job);
+    assert_eq!(*scopes.lock().unwrap(), vec![SourceBackedRefreshScope::All]);
+    assert!(!coordinator.has_scheduled_route_work());
 }
 
 #[test]

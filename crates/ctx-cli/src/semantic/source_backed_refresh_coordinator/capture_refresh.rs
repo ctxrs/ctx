@@ -210,7 +210,8 @@ fn refresh_all_provider_sources_with_failure_handling(
         executor.refresh_scope(index_root, physical_scope, report_progress)
     }
     .context("run capture-owned source-backed refresh")?;
-    let current = SourceBackedRefreshCurrent::from_sources(&receipt.sources, 0)?;
+    let current =
+        SourceBackedRefreshCurrent::from_sources(&receipt.sources, receipt.removals.len())?;
     if current.source_count != receipt.certified_source_count
         || current.certified_source_bytes != receipt.certified_source_bytes
         || current.indexed_documents != receipt.commit.indexed_documents
