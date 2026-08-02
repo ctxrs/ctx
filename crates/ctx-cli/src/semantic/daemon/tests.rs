@@ -213,6 +213,8 @@ fn publish_empty_source_refresh(
         published_explicit_source_catalog:
             crate::commands::import::load_explicit_source_catalog_authority(execution.data_root)?,
         scanned_routes: 0,
+        successful_routes: 0,
+        source_failures: Default::default(),
         unsupported_routes: 0,
         certified_source_count: 0,
         certified_source_bytes: 0,
