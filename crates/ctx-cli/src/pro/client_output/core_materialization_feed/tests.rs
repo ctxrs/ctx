@@ -6,7 +6,9 @@ use ctx_history_core::{
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey,
     SourceObservation, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, WriterOptions};
+use ctx_history_index::{
+    GenerationWriter, SourceRouteIdentity, SourceRouteSnapshot, WriterOptions,
+};
 use ctx_pro_host_protocol::{
     write_frame, HelperEnvelope, FRAME_HEADER_BYTES, MAX_CORE_CONTROL_WIRE_BYTES,
     MAX_FRAME_PAYLOAD_BYTES,
@@ -786,6 +788,88 @@ fn exact_replay_is_a_no_op_with_no_delta_or_event_pages() {
     let finish = consumer.finish.unwrap();
     assert_eq!(finish.changed_sources, 0);
     assert_eq!(finish.removed_sources, 0);
+    assert_eq!(finish.event_mutations, 0);
+}
+
+#[test]
+fn missing_route_grace_rollover_finishes_without_source_or_event_mutations() {
+    const DELETE_AFTER: u32 = 3;
+
+    let temp = tempdir().unwrap();
+    let source = source("missing-route-grace.jsonl");
+    let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    add_source(&mut writer, &source, 1, vec!["unchanged body".to_owned()]);
+    writer
+        .set_present_source_routes(vec![SourceRouteSnapshot::present(
+            route.clone(),
+            vec![source.clone()],
+        )
+        .unwrap()])
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+    let initial = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let prior = receipt_for(&initial, "test-core-materializer-v1");
+    let mut consumer = Consumer::new();
+    sync_core_feed(&initial, None, &mut consumer).unwrap();
+    drop(initial);
+
+    let prior_accumulators = consumer.known_accumulators.clone();
+    let prior_sources = consumer.known_sources.clone();
+    let prior_events = consumer.known_events.clone();
+    consumer.event_pages.clear();
+    consumer.finish = None;
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.set_present_source_routes(Vec::new()).unwrap();
+    let grace = writer
+        .observe_certified_missing_route(route.clone(), 100, DELETE_AFTER, || true)
+        .unwrap();
+    assert!(!grace.deleted());
+    assert_eq!(grace.retained_sources(), &[source.clone()]);
+    writer.commit(|_| true).unwrap();
+    let rollover = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    assert_ne!(rollover.generation_id(), prior.core_generation_id);
+    assert_eq!(rollover.manifest().indexed_documents, prior.event_count);
+    assert_eq!(
+        u32::try_from(rollover.manifest().sources.len()).unwrap(),
+        prior.source_count
+    );
+    assert_eq!(
+        rollover
+            .manifest()
+            .source_route(&route)
+            .unwrap()
+            .missing_state()
+            .unwrap()
+            .consecutive_missing()
+            .get(),
+        1
+    );
+
+    let report = sync_core_feed(&rollover, Some(&prior), &mut consumer).unwrap();
+    assert!(!report.replayed);
+    assert_eq!(report.changed_sources, 0);
+    assert_eq!(report.removed_sources, 0);
+    assert_eq!(report.event_delta_pages, 0);
+    assert_eq!(report.event_mutations, 0);
+    assert!(consumer.event_pages.is_empty());
+    assert_eq!(consumer.known_accumulators, prior_accumulators);
+    assert_eq!(consumer.known_sources, prior_sources);
+    assert_eq!(consumer.known_events, prior_events);
+
+    let expected = receipt_for(&rollover, "test-core-materializer-v1");
+    assert_eq!(report.receipt, expected);
+    assert_eq!(
+        report.receipt.source_snapshot_sha256,
+        prior.source_snapshot_sha256
+    );
+    assert_ne!(report.receipt.core_generation_id, prior.core_generation_id);
+    let finish = consumer.finish.as_ref().unwrap();
+    assert_eq!(finish.head.core_generation_id, rollover.generation_id());
+    assert_eq!(finish.changed_sources, 0);
+    assert_eq!(finish.removed_sources, 0);
+    assert_eq!(finish.event_delta_pages, 0);
     assert_eq!(finish.event_mutations, 0);
 }
 

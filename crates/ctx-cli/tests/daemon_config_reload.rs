@@ -104,6 +104,21 @@ mod unix {
         );
     }
 
+    fn write_nonsemantic_codex_session(temp: &tempfile::TempDir) {
+        let sessions = temp.path().join(".codex/sessions/2026/08/02");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(
+            sessions.join("daemon-config-reload.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-08-02T12:00:00.000Z","type":"session_meta","payload":{"id":"daemon-config-reload","timestamp":"2026-08-02T12:00:00.000Z","cwd":"/repo/daemon-config-reload","originator":"codex-cli","cli_version":"0.200.0","source":"cli","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-02T12:00:01.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"daemon config reload source publication oracle"}]}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+    }
+
     fn std_ctx_from_binary(temp: &tempfile::TempDir, binary: &Path) -> Command {
         let prepared = ctx_from_binary(temp, binary);
         let mut command = Command::new(prepared.get_program());
@@ -151,6 +166,10 @@ mod unix {
         read_json(data_root(temp).join("daemon/jobs/semantic-index.json"))
     }
 
+    fn core_refresh_job(temp: &tempfile::TempDir) -> Option<Value> {
+        read_json(data_root(temp).join("daemon/jobs/core-refresh.json"))
+    }
+
     fn wait_for(description: &str, mut condition: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(20);
         while !condition() {
@@ -176,17 +195,29 @@ mod unix {
     }
 
     fn wait_for_active_cycle(temp: &tempfile::TempDir, pid: u32) {
-        wait_for("semantic-active daemon cycle", || {
-            let Some(lifecycle) = daemon_lifecycle(temp) else {
-                return false;
-            };
-            lifecycle["status"] == "running"
-                && lifecycle["pid"] == pid
-                && lifecycle["semantic_runtime_active"] == true
-                && lifecycle["config_reload"]["status"] == "applied"
-                && lifecycle["config_reload"]["applied"]["semantic_enabled"] == true
-                && semantic_job(temp).is_some_and(|job| job["status"] == "ready")
-        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let lifecycle = daemon_lifecycle(temp);
+            let semantic = semantic_job(temp);
+            if lifecycle.as_ref().is_some_and(|lifecycle| {
+                lifecycle["status"] == "running"
+                    && lifecycle["pid"] == pid
+                    && lifecycle["semantic_runtime_active"] == true
+                    && lifecycle["config_reload"]["status"] == "applied"
+                    && lifecycle["config_reload"]["applied"]["semantic_enabled"] == true
+                    && semantic
+                        .as_ref()
+                        .is_some_and(|job| job["status"] == "ready")
+            }) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for semantic-active daemon cycle; lifecycle={lifecycle:#?}; semantic_job={semantic:#?}; core_refresh_job={:#?}",
+                core_refresh_job(temp)
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 
     fn run_supported_setup(temp: &tempfile::TempDir, binary: &Path) -> Value {
@@ -429,8 +460,15 @@ mod unix {
         let temp = tempdir();
         let binary = copied_ctx_binary(&temp);
         write_config(&temp, true);
+        // Semantic scheduling follows a published Core generation. Keep this
+        // fixture ineligible for embedding so the daemon proves a completed
+        // semantic cycle without loading a model or weakening the required
+        // `ready` receipt.
+        write_nonsemantic_codex_session(&temp);
         initialize_store(&temp, &binary);
         let mut daemon = spawn_daemon(&temp, &binary, 1);
+        let setup = run_supported_setup(&temp, &binary);
+        assert_eq!(setup["daemon_autostart"]["pid"], daemon.pid());
         wait_for_active_cycle(&temp, daemon.pid());
 
         fs::write(

@@ -129,6 +129,19 @@ impl Fixture {
         self.record_with_event_sequence(source_index, sequence, sequence, body)
     }
 
+    fn record_with_role(
+        &self,
+        source_index: usize,
+        sequence: u64,
+        body: &str,
+        role: EventRole,
+    ) -> Result<CoreRecord> {
+        let mut record = self.record(source_index, sequence, body)?;
+        record.role = Some(role.as_str().to_owned());
+        record.validate_contract()?;
+        Ok(record)
+    }
+
     fn record_with_event_sequence(
         &self,
         source_index: usize,
@@ -449,6 +462,77 @@ fn semantic_generation_mirrors_exact_per_source_core_aggregates() -> Result<()> 
             .sum::<u64>(),
         5
     );
+    Ok(())
+}
+
+#[test]
+fn mixed_core_roles_build_and_pin_only_the_semantic_candidate() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let user = fixture.record_with_role(0, 1, "eligible user question", EventRole::User)?;
+    let assistant =
+        fixture.record_with_role(0, 2, "ineligible assistant answer", EventRole::Assistant)?;
+    let root = fixture.data_root.join("index-mixed-core-roles");
+    let fixture_source = &fixture.sources[0];
+    let mut writer = GenerationWriter::open(&root, WriterOptions::default())?;
+    writer.begin_source(fixture_source.source.clone())?;
+    writer.add_core_record(user.clone())?;
+    writer.add_core_record(assistant)?;
+    let observation = SourceObservation::new(
+        fixture_source.source.clone(),
+        "fixture-mixed-core-roles",
+        b"mixed-core-roles".to_vec(),
+    )?;
+    writer.certify_source(CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        "fixture-parser-v1",
+        [1; 32],
+        ScannedSourceCounts {
+            complete_records: 2,
+            retained_records: 2,
+            indexed_documents: 2,
+            certified_bytes: 100,
+            ..ScannedSourceCounts::default()
+        },
+    )?)?;
+    writer.commit(|_| true)?;
+    let index = VerifiedIndex::open(root)?;
+
+    assert_eq!(index.manifest().indexed_documents, 2);
+    assert_eq!(index.manifest().semantic_eligible_documents, 1);
+    let source_aggregate = &index.manifest().core_record_aggregates[0];
+    assert_eq!(source_aggregate.indexed_documents(), 2);
+    assert_eq!(source_aggregate.semantic_eligible_documents(), 1);
+    let core_page = index.core_source_event_page(&fixture_source.source, None, 2)?;
+    assert!(core_page.terminal);
+    assert_eq!(core_page.items.len(), 2);
+    let semantic_page = index.core_semantic_event_page(None, 2)?;
+    assert!(semantic_page.terminal);
+    assert_eq!(semantic_page.eligible_total, 1);
+    assert_eq!(semantic_page.items.len(), 1);
+    assert_eq!(semantic_page.items[0].event_id, user.event_id);
+
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
+    let outcome = reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
+    assert_eq!(outcome.records_read, 2);
+    assert_eq!(outcome.records_scanned, 2);
+    assert_eq!(outcome.records_embedded, 1);
+    assert_eq!(outcome.records_filtered, 0);
+    assert_eq!(builder.calls, vec![user.event_id.as_uuid()]);
+    assert_eq!(embedder.chunks, 1);
+
+    let pin = match store.source_backed_generation_pin_exact(index.generation_id(), 1)? {
+        SourceBackedGenerationPin::Ready(pin) => pin,
+        SourceBackedGenerationPin::NotReady | SourceBackedGenerationPin::ReadyEmpty => {
+            return Err(anyhow!(
+                "mixed Core generation did not return its exact pin"
+            ));
+        }
+    };
+    assert_eq!(pin.stats().active_events, 1);
+    assert_eq!(pin.active_events()[0].event_id, user.event_id.as_uuid());
     Ok(())
 }
 
