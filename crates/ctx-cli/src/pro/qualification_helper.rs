@@ -630,12 +630,9 @@ mod tests {
         fs::write(&path, b"#!/bin/sh\nprintf 'attacker replacement\\n'\n").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
 
-        let output = std::process::Command::new(bundle.verified_path().unwrap())
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert_eq!(output.stdout, b"verified helper\n");
-        assert!(!String::from_utf8_lossy(&output.stdout).contains("attacker"));
+        let staged_bytes = fs::read(bundle.verified_path().unwrap()).unwrap();
+        assert_eq!(staged_bytes, b"#!/bin/sh\nprintf 'verified helper\\n'\n");
+        assert!(!String::from_utf8_lossy(&staged_bytes).contains("attacker"));
     }
 
     #[cfg(unix)]

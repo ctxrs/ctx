@@ -550,7 +550,7 @@ mod tests {
         assert_eq!(json["failure_scope"], "source");
         let rendered =
             render_import_report_human(&context(80, ColorMode::Never), &report).render_plain();
-        assert!(rendered.starts_with("! History import completed with rejections\n"));
+        assert!(rendered.starts_with("! History import completed with source failures\n"));
         assert!(rendered.contains("1 source failed; imported history remains available."));
     }
 

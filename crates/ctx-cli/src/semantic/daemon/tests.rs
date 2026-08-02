@@ -471,25 +471,32 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
 
 #[test]
 fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
+    use super::super::dirty_source_routes::EventWatermark;
     use super::super::source_backed_refresh_coordinator::{
         SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshPublication,
         SourceBackedRefreshTimings,
     };
 
     let temp = tempfile::tempdir()?;
+    let route = ctx_history_index::SourceRouteIdentity::from_sha256("42".repeat(32))?;
     let refresh_calls = Arc::new(AtomicUsize::new(0));
     let executor_calls = refresh_calls.clone();
+    let executor_route = route.clone();
     let coordinator = CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
             executor_calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                execution.scope,
+                ctx_history_capture::SourceBackedRefreshScope::exact([executor_route.clone()])
+            );
             let writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 ctx_history_index::WriterOptions::default(),
             )?;
             let receipt = writer.commit(|_| true)?;
             Ok(SourceBackedRefreshPublication {
-                selected_route_ids: Vec::new(),
-                successful_route_ids: Vec::new(),
+                selected_route_ids: vec![executor_route.as_str().to_owned()],
+                successful_route_ids: vec![executor_route.as_str().to_owned()],
                 source_failures: Vec::new(),
                 generation_id: receipt.generation_id,
                 published_explicit_source_catalog:
@@ -506,6 +513,8 @@ fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
         },
     ));
     assert!(!coordinator.has_pending_request());
+    coordinator.reconcile_watch_routes([route], EventWatermark::new(1, 0), 0);
+    assert!(coordinator.has_scheduled_route_work());
     let mut runtime = DaemonRuntime::default();
 
     let iteration = run_daemon_scheduler_cycle_with_activity(

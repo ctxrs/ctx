@@ -3,6 +3,75 @@ mod support;
 use support::*;
 
 #[test]
+fn bootstrap_colors_clap_help_and_parse_errors_before_dispatch() {
+    let temp = tempdir();
+    let always_help = ctx(&temp)
+        .args(["--color", "always", "--help"])
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .output()
+        .unwrap();
+    assert!(always_help.status.success());
+    assert!(always_help.stdout.contains(&0x1b));
+
+    let never_help = ctx(&temp)
+        .args(["--color=never", "--help"])
+        .output()
+        .unwrap();
+    assert!(never_help.status.success());
+    assert!(!never_help.stdout.contains(&0x1b));
+
+    let always_error = ctx(&temp)
+        .args(["--color=always", "--not-a-real-option"])
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .output()
+        .unwrap();
+    assert!(!always_error.status.success());
+    assert!(always_error.stderr.contains(&0x1b));
+
+    let auto_pipe = ctx(&temp)
+        .args(["--color=auto", "--help"])
+        .env_remove("CLICOLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env_remove("NO_COLOR")
+        .output()
+        .unwrap();
+    assert!(auto_pipe.status.success());
+    assert!(!auto_pipe.stdout.contains(&0x1b));
+
+    for args in [
+        &[
+            "--color=always",
+            "show",
+            "event",
+            "bad",
+            "--format=jsonl",
+            "--not-a-real-option",
+        ][..],
+        &[
+            "--color=always",
+            "show",
+            "session",
+            "bad",
+            "--format=json",
+            "--not-a-real-option",
+        ][..],
+        &[
+            "--color=always",
+            "setup",
+            "--progress=json",
+            "--not-a-real-option",
+        ][..],
+        &["--color=always", "mcp", "serve", "--not-a-real-option"][..],
+    ] {
+        let machine_error = ctx(&temp).args(args).output().unwrap();
+        assert!(!machine_error.status.success(), "{args:?}");
+        assert!(!machine_error.stderr.contains(&0x1b), "{args:?}");
+    }
+}
+
+#[test]
 fn release_cli_does_not_expose_or_invoke_the_index_dashboard_fixture() {
     const FIXTURE_COMMAND: &str = "_index-dashboard-renderer-fixture";
 
