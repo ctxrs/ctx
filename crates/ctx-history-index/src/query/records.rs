@@ -19,17 +19,21 @@ fn fast_uuid(
     high_field: &'static str,
     low_field: &'static str,
 ) -> Result<Uuid> {
-    let high = segment
-        .fast_fields()
-        .u64(high_field)?
-        .first(doc)
-        .ok_or(IndexError::InvalidStoredDocumentField(high_field))?;
-    let low = segment
-        .fast_fields()
-        .u64(low_field)?
-        .first(doc)
-        .ok_or(IndexError::InvalidStoredDocumentField(low_field))?;
+    let high = unique_fast_u64(segment, doc, high_field)?;
+    let low = unique_fast_u64(segment, doc, low_field)?;
     Ok(Uuid::from_u128((u128::from(high) << 64) | u128::from(low)))
+}
+
+fn unique_fast_u64(segment: &SegmentReader, doc: DocId, field_name: &'static str) -> Result<u64> {
+    let column = segment.fast_fields().u64(field_name)?;
+    let mut values = column.values_for_doc(doc);
+    let value = values
+        .next()
+        .ok_or(IndexError::InvalidStoredDocumentField(field_name))?;
+    if values.next().is_some() {
+        return Err(IndexError::InvalidStoredDocumentField(field_name));
+    }
+    Ok(value)
 }
 
 fn fast_string(segment: &SegmentReader, doc: DocId, field_name: &'static str) -> Result<String> {
@@ -70,6 +74,55 @@ pub(super) fn stored_core_event_record_with_size(
         decode_core_document(searcher, address, &document, fields)?;
     let event = event_record_from_core(&core_record);
     Ok((CoreEventRecord { event, core_record }, stored_core_bytes))
+}
+
+/// Reads one stored document and declines it before Core decode when its raw
+/// encoded field exceeds the caller's remaining aggregate budget.
+///
+/// Tantivy's public store API materializes the raw stored field before exposing
+/// its length, so one allocation bounded by the global Core-record contract can
+/// be unavoidable. The document is kept local to this call and dropped on
+/// either return path; oversized raw documents are never accumulated.
+pub(super) fn stored_core_event_record_if_encoded_size_at_most(
+    searcher: &tantivy::Searcher,
+    address: DocAddress,
+    fields: Fields,
+    maximum_encoded_core_bytes: usize,
+) -> Result<Option<(CoreEventRecord, usize)>> {
+    note_stored_core_event_record_materialization();
+    let document: TantivyDocument = searcher.doc(address)?;
+    let encoded_core_record = unique_required_bytes(&document, fields.core_record, "core_record")?;
+    let stored_core_bytes = encoded_core_record.len();
+    if stored_core_bytes > maximum_encoded_core_bytes {
+        return Ok(None);
+    }
+    let core_record = decode_core_bytes(searcher, address, encoded_core_record)?;
+    let event = event_record_from_core(&core_record);
+    Ok(Some((
+        CoreEventRecord { event, core_record },
+        stored_core_bytes,
+    )))
+}
+
+/// Returns exact indexed identity and content-size metadata without loading a
+/// stored document.
+pub(super) fn core_event_fast_preflight(
+    searcher: &tantivy::Searcher,
+    address: DocAddress,
+) -> Result<(Uuid, usize)> {
+    let segment = searcher
+        .segment_readers()
+        .get(address.segment_ord as usize)
+        .ok_or(IndexError::InvalidStoredDocumentField("event_id"))?;
+    let event_id = fast_uuid(
+        segment,
+        address.doc_id,
+        EVENT_ID_HIGH_FIELD,
+        EVENT_ID_LOW_FIELD,
+    )?;
+    let content_bytes = unique_fast_u64(segment, address.doc_id, CORE_CONTENT_BYTES_FIELD)?;
+    let content_bytes = usize::try_from(content_bytes).map_err(|_| IndexError::CountOverflow)?;
+    Ok((event_id, content_bytes))
 }
 
 pub(super) fn stored_core_verification_record(
@@ -128,6 +181,8 @@ fn decode_core_bytes(
     address: DocAddress,
     encoded_core_record: &[u8],
 ) -> Result<CoreRecord> {
+    #[cfg(test)]
+    CORE_RECORD_DECODES.set(CORE_RECORD_DECODES.get().saturating_add(1));
     let core_record = CoreRecord::decode_stored(encoded_core_record)?;
     let segment = searcher
         .segment_readers()
