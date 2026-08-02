@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
+
 use ctx_history_core::{
     derive_event_id, derive_session_id, EventIdentityInput, NativeItemKey, NativeSessionKey,
-    RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryEvidence,
-    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
-    RepositoryFileObservationKind, RepositoryLocalRootAuthorization, SessionIdentityInput,
-    SourceAnchor, SourceKey, TypedKey, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    RepositoryBinding, RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
+    RepositoryFileInvocationEvidence, RepositoryFileInvocationKind,
+    RepositoryFileInvocationTextRange, RepositoryFileObservation, RepositoryFileObservationKind,
+    RepositoryLocalRootAuthorization, SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
+    CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
 };
 use ctx_history_index::{CoreEventRecord, EventRecord};
@@ -14,8 +17,7 @@ use ctx_pro_host_protocol::{
 use sha2::{Digest, Sha256};
 
 use super::{
-    project_evidence_previews, VerifiedEvidenceRecord, MAX_EVIDENCE_PREVIEW_BODY_BYTES,
-    MAX_EVIDENCE_PREVIEW_BODY_LINES, MAX_EVIDENCE_PREVIEW_CITATIONS,
+    project_evidence_previews, VerifiedEvidenceRecord, MAX_EVIDENCE_PREVIEW_CITATIONS,
     MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
 };
 
@@ -43,22 +45,25 @@ fn repository() -> ResourceRef {
 fn source(provider: &str, seed: u8) -> SourceKey {
     source_contract(
         provider,
-        if provider == "codex" {
-            "codex_session_jsonl"
-        } else {
-            "unsupported_session_jsonl"
-        },
-        "codex-nativepath-jsonl-v0",
+        &format!("{provider}_native_history"),
+        &format!("{provider}-core-schema-v{seed}"),
+        u32::from(seed) + 1,
         seed,
     )
 }
 
-fn source_contract(provider: &str, format: &str, schema: &str, seed: u8) -> SourceKey {
+fn source_contract(
+    provider: &str,
+    format: &str,
+    schema: &str,
+    provider_identity_version: u32,
+    seed: u8,
+) -> SourceKey {
     SourceKey::derive(
         provider,
         format,
         schema,
-        1,
+        provider_identity_version,
         SourceAnchor::CatalogLineage([seed; 32]),
     )
     .unwrap()
@@ -85,52 +90,31 @@ fn binding_for(binding_id: &str, logical_repository_id: &str) -> RepositoryBindi
     }
 }
 
-fn authorize_local_root(record: &mut CoreEventRecord, local_root: &str) {
-    authorize_binding(
-        &mut record.core_record.repository_bindings[0],
-        local_root,
-        "1",
-    );
-}
-
-fn authorize_binding(binding: &mut RepositoryBinding, local_root: &str, identity: &str) {
-    binding.checkout_id = Some(format!("checkout-{identity}"));
-    binding.worktree_id = Some(format!("worktree-{identity}"));
+fn authorize_binding(binding: &mut RepositoryBinding, local_root: &str, seed: u8) {
+    binding.checkout_id = Some(format!("checkout-{seed}"));
+    binding.worktree_id = Some(format!("worktree-{seed}"));
     binding.local_root_authorization = Some(RepositoryLocalRootAuthorization {
         local_root: local_root.to_owned(),
         local_root_authorization_fingerprint_revision:
             CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
-        local_root_authorization_fingerprint: [7; 32],
-        observed_at_unix_ms: 1,
+        local_root_authorization_fingerprint: [seed; 32],
+        observed_at_unix_ms: i64::from(seed),
     });
 }
 
-fn base_record(
-    provider: &str,
-    seed: u8,
-    sequence: u64,
-    body: &str,
-    event_type: &str,
-    role: &str,
-) -> CoreEventRecord {
-    base_record_for_source(
-        source(provider, seed),
-        seed,
-        sequence,
-        body,
-        event_type,
-        role,
-        "codex-nativepath-core-record-v7",
-    )
+fn authorize_local_root(record: &mut CoreEventRecord, local_root: &str) {
+    authorize_binding(
+        &mut record.core_record.repository_bindings[0],
+        local_root,
+        1,
+    );
 }
 
-fn base_record_for_source(
+fn base_record(
     source: SourceKey,
     seed: u8,
     sequence: u64,
     body: &str,
-    event_type: &str,
-    role: &str,
     parser_revision: &str,
 ) -> CoreEventRecord {
     let provider = source.provider().to_owned();
@@ -144,7 +128,7 @@ fn base_record_for_source(
     let event_id = derive_event_id(EventIdentityInput {
         source: &source,
         session_id,
-        logical_item_kind: event_type,
+        logical_item_kind: "tool_call",
         native_item_key: &NativeItemKey::native_id("event", TypedKey::U64(sequence)).unwrap(),
         subrecord_selector: None,
     })
@@ -155,14 +139,14 @@ fn base_record_for_source(
         session_id,
         source.clone(),
         sequence,
-        event_type,
+        "tool_call",
         "primary",
         true,
         parser_revision,
         body,
     )
     .unwrap();
-    core.role = Some(role.to_owned());
+    core.role = Some("assistant".to_owned());
     let event = EventRecord {
         event_id,
         session_id,
@@ -178,8 +162,8 @@ fn base_record_for_source(
         is_primary: true,
         event_sequence: sequence,
         occurred_at_unix_ms: None,
-        event_type: event_type.to_owned(),
-        role: Some(role.to_owned()),
+        event_type: "tool_call".to_owned(),
+        role: Some("assistant".to_owned()),
         workspace: None,
         cwd: None,
         touched_files: Vec::new(),
@@ -190,32 +174,114 @@ fn base_record_for_source(
     }
 }
 
-fn file_record(
-    seed: u8,
-    sequence: u64,
-    body: &str,
+fn invocation(
+    ordinal: u32,
+    binding_id: &str,
     path: &str,
-    kind: RepositoryFileObservationKind,
     prior_path: Option<&str>,
-) -> CoreEventRecord {
-    let record = base_record("codex", seed, sequence, body, "tool_call", "assistant");
-    file_record_from_base(record, path, kind, prior_path)
+    operation: RepositoryFileInvocationKind,
+    tool_name: Option<&str>,
+    range: Option<RepositoryFileInvocationTextRange>,
+) -> RepositoryFileInvocationEvidence {
+    RepositoryFileInvocationEvidence {
+        operation_ordinal: ordinal,
+        repository_binding_id: binding_id.to_owned(),
+        relative_path: path.to_owned(),
+        prior_relative_path: prior_path.map(str::to_owned),
+        kind: operation,
+        tool_name: tool_name.map(str::to_owned),
+        normalized_text_range: range,
+    }
 }
 
-fn file_record_from_base(
-    mut record: CoreEventRecord,
+fn observation(
+    binding_id: &str,
     path: &str,
-    kind: RepositoryFileObservationKind,
     prior_path: Option<&str>,
-) -> CoreEventRecord {
-    record.core_record.repository_bindings = vec![binding()];
-    record.core_record.repository_file_observations = vec![RepositoryFileObservation {
-        repository_binding_id: "binding-1".to_owned(),
+    kind: RepositoryFileObservationKind,
+) -> RepositoryFileObservation {
+    RepositoryFileObservation {
+        repository_binding_id: binding_id.to_owned(),
         relative_path: path.to_owned(),
         kind,
         prior_relative_path: prior_path.map(str::to_owned),
-    }];
+    }
+}
+
+const fn observation_kind(kind: RepositoryFileInvocationKind) -> RepositoryFileObservationKind {
+    match kind {
+        RepositoryFileInvocationKind::Read => RepositoryFileObservationKind::Read,
+        RepositoryFileInvocationKind::Create => RepositoryFileObservationKind::Created,
+        RepositoryFileInvocationKind::Modify => RepositoryFileObservationKind::Modified,
+        RepositoryFileInvocationKind::Delete => RepositoryFileObservationKind::Deleted,
+        RepositoryFileInvocationKind::Rename => RepositoryFileObservationKind::Renamed,
+        RepositoryFileInvocationKind::Write => RepositoryFileObservationKind::Unknown,
+    }
+}
+
+fn exact_range(body: &str, excerpt: &str) -> RepositoryFileInvocationTextRange {
+    let mut matches = body.match_indices(excerpt);
+    let (start, _) = matches.next().expect("excerpt must occur");
+    assert!(matches.next().is_none(), "excerpt must be unique");
+    RepositoryFileInvocationTextRange {
+        start: u32::try_from(start).unwrap(),
+        end: u32::try_from(start + excerpt.len()).unwrap(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn file_record(
+    provider: &str,
+    seed: u8,
+    sequence: u64,
+    body: &str,
+    excerpt: Option<&str>,
+    path: &str,
+    prior_path: Option<&str>,
+    operation: RepositoryFileInvocationKind,
+    tool_name: Option<&str>,
+) -> CoreEventRecord {
+    let mut record = base_record(
+        source(provider, seed),
+        seed,
+        sequence,
+        body,
+        &format!("{provider}-projector-contract-v{seed}"),
+    );
+    record.core_record.repository_bindings = vec![binding()];
+    record.core_record.repository_file_invocation_evidence = vec![invocation(
+        0,
+        "binding-1",
+        path,
+        prior_path,
+        operation,
+        tool_name,
+        excerpt.map(|excerpt| exact_range(body, excerpt)),
+    )];
+    record.core_record.repository_file_observations = vec![observation(
+        "binding-1",
+        path,
+        prior_path,
+        observation_kind(operation),
+    )];
+    finalize_record(&mut record);
     record
+}
+
+fn finalize_record(record: &mut CoreEventRecord) {
+    record
+        .core_record
+        .repository_file_invocation_evidence
+        .sort();
+    let mut touched = BTreeSet::new();
+    for observation in &record.core_record.repository_file_observations {
+        touched.insert(observation.relative_path.clone());
+        if let Some(prior_path) = &observation.prior_relative_path {
+            touched.insert(prior_path.clone());
+        }
+    }
+    record.event.touched_files = touched.into_iter().collect();
+    record.core_record.validate_contract().unwrap();
 }
 
 fn numbered(record: &CoreEventRecord, number: u32) -> NumberedEvidence {
@@ -266,722 +332,744 @@ fn one_file_preview(target: &str, record: &CoreEventRecord) -> super::EvidencePr
 }
 
 #[test]
-fn file_operations_require_exact_typed_agreement() {
+fn tier_one_sources_project_the_same_typed_contract_without_provider_allowlists() {
     let cases = [
         (
-            "*** Begin Patch\n*** Add File: src/new.rs\n+body\n*** End Patch",
-            "src/new.rs",
-            RepositoryFileObservationKind::Created,
-            "*** Add File: src/new.rs",
-        ),
-        (
-            "before\n*** Update File: src/lib.rs\n@@\n-old\n+new\nafter",
-            "src/lib.rs",
-            RepositoryFileObservationKind::Modified,
+            "codex",
+            "apply_patch: *** Update File: src/lib.rs",
             "*** Update File: src/lib.rs",
+            "apply_patch",
         ),
         (
-            "*** Delete File: src/old.rs\n-old body",
-            "src/old.rs",
-            RepositoryFileObservationKind::Deleted,
-            "*** Delete File: src/old.rs",
+            "claude",
+            r#"{"type":"tool_use","name":"Edit","input":{"file_path":"src/lib.rs"}}"#,
+            r#""src/lib.rs""#,
+            "Edit",
         ),
         (
-            "read: src/read.rs\ncontents must stay adjacent",
-            "src/read.rs",
-            RepositoryFileObservationKind::Read,
-            "read: src/read.rs",
+            "cursor",
+            r#"{"type":"tool_use","name":"write_file","input":{"path":"src/lib.rs"}}"#,
+            r#"{"type":"tool_use","name":"write_file","input":{"path":"src/lib.rs"}}"#,
+            "write_file",
+        ),
+        (
+            "gemini",
+            r#"{"name":"write_file","args":{"path":"src/lib.rs"}}"#,
+            r#"{"name":"write_file","args":{"path":"src/lib.rs"}}"#,
+            "write_file",
+        ),
+        (
+            "opencode",
+            r#"{"tool":"edit","state":{"input":{"path":"src/lib.rs"}}}"#,
+            r#"{"tool":"edit","state":{"input":{"path":"src/lib.rs"}}}"#,
+            "edit",
+        ),
+        (
+            "openclaw",
+            r#"{"type":"toolCall","name":"write_file","arguments":{"path":"src/lib.rs"}}"#,
+            r#"{"type":"toolCall","name":"write_file","arguments":{"path":"src/lib.rs"}}"#,
+            "write_file",
         ),
     ];
-    for (index, (body, path, kind, expected)) in cases.into_iter().enumerate() {
-        let record = file_record(index as u8 + 1, 1, body, path, kind, None);
-        let model = one_file_preview(path, &record);
-        assert_eq!(model.previews.len(), 1, "{kind:?}");
-        assert_eq!(model.previews[0].file_kind, kind);
-        assert_eq!(model.previews[0].excerpt, expected);
+
+    for (index, (provider, body, excerpt, tool_name)) in cases.into_iter().enumerate() {
+        let mut record = file_record(
+            provider,
+            u8::try_from(index + 1).unwrap(),
+            1,
+            body,
+            Some(excerpt),
+            "src/lib.rs",
+            None,
+            RepositoryFileInvocationKind::Modify,
+            Some(tool_name),
+        );
+        record.core_record.repository_file_observations.clear();
+        finalize_record(&mut record);
+        let model = one_file_preview("src/lib.rs", &record);
+        assert_eq!(model.previews.len(), 1, "{provider}");
+        let preview = &model.previews[0];
+        assert_eq!(preview.operation, RepositoryFileInvocationKind::Modify);
+        assert_eq!(preview.path, "src/lib.rs");
+        assert_eq!(preview.prior_path, None);
+        assert_eq!(preview.tool_name, tool_name);
+        assert_eq!(preview.excerpt, excerpt);
+        assert!(record.core_record.repository_file_observations.is_empty());
     }
 }
 
 #[test]
-fn rename_old_and_new_paths_use_complete_boundary_safe_units() {
-    let body = "before\n*** Update File: src/old.rs\n*** Move to: src/new.rs\nafter";
-    let record = file_record(
-        5,
+fn every_typed_operation_preserves_request_metadata_without_claiming_effect_success() {
+    let cases = [
+        (RepositoryFileInvocationKind::Read, "read_file"),
+        (RepositoryFileInvocationKind::Create, "create_file"),
+        (RepositoryFileInvocationKind::Modify, "edit_file"),
+        (RepositoryFileInvocationKind::Delete, "delete_file"),
+        (RepositoryFileInvocationKind::Write, "write_file"),
+    ];
+    for (index, (operation, tool_name)) in cases.into_iter().enumerate() {
+        let excerpt = format!("{tool_name} request for src/lib.rs");
+        let record = file_record(
+            "provider",
+            u8::try_from(index + 10).unwrap(),
+            1,
+            &excerpt,
+            Some(&excerpt),
+            "src/lib.rs",
+            None,
+            operation,
+            Some(tool_name),
+        );
+        let preview = &one_file_preview("src/lib.rs", &record).previews[0];
+        assert_eq!(preview.operation, operation);
+        assert_eq!(preview.tool_name, tool_name);
+        assert_eq!(preview.excerpt, excerpt);
+    }
+
+    let body = "rename_file request: src/old.rs -> src/new.rs";
+    let rename = file_record(
+        "provider",
+        20,
         1,
         body,
+        Some(body),
         "src/new.rs",
-        RepositoryFileObservationKind::Renamed,
         Some("src/old.rs"),
+        RepositoryFileInvocationKind::Rename,
+        Some("rename_file"),
     );
-    assert_eq!(
-        one_file_preview("src/old.rs", &record).previews[0].excerpt,
-        "*** Update File: src/old.rs\n*** Move to: src/new.rs"
-    );
-    assert_eq!(
-        one_file_preview("src/new.rs", &record).previews[0].excerpt,
-        "*** Update File: src/old.rs\n*** Move to: src/new.rs"
-    );
-
-    let boundary = file_record(
-        6,
-        1,
-        "*** Update File: src/old.rs.bak\n*** Move to: src/new.rs.bak",
-        "src/new.rs",
-        RepositoryFileObservationKind::Renamed,
-        Some("src/old.rs"),
-    );
-    assert!(one_file_preview("src/old.rs", &boundary)
-        .previews
-        .is_empty());
-}
-
-#[test]
-fn unified_diff_markers_cover_created_modified_deleted_and_renamed() {
-    let cases = [
-        (
-            "diff --git a/src/new.rs b/src/new.rs\nnew file mode 100644\n--- /dev/null",
-            "src/new.rs",
-            RepositoryFileObservationKind::Created,
-            None,
-            "diff --git a/src/new.rs b/src/new.rs\nnew file mode 100644",
-        ),
-        (
-            "diff --git a/src/lib.rs b/src/lib.rs\nindex 1..2 100644\n--- a/src/lib.rs",
-            "src/lib.rs",
-            RepositoryFileObservationKind::Modified,
-            None,
-            "diff --git a/src/lib.rs b/src/lib.rs",
-        ),
-        (
-            "diff --git a/src/old.rs b/src/old.rs\ndeleted file mode 100644\n--- a/src/old.rs",
-            "src/old.rs",
-            RepositoryFileObservationKind::Deleted,
-            None,
-            "diff --git a/src/old.rs b/src/old.rs\ndeleted file mode 100644",
-        ),
-        (
-            "diff --git a/src/old.rs b/src/new.rs\nsimilarity index 100%\nrename from src/old.rs\nrename to src/new.rs",
-            "src/new.rs",
-            RepositoryFileObservationKind::Renamed,
-            Some("src/old.rs"),
-            "rename to src/new.rs",
-        ),
-    ];
-    for (index, (body, path, kind, prior, expected)) in cases.into_iter().enumerate() {
-        let record = file_record(index as u8 + 10, 1, body, path, kind, prior);
-        let model = one_file_preview(path, &record);
-        assert_eq!(model.previews.len(), 1, "{kind:?}");
-        assert_eq!(model.previews[0].excerpt, expected);
+    for target in ["src/old.rs", "src/new.rs"] {
+        let preview = &one_file_preview(target, &rename).previews[0];
+        assert_eq!(preview.operation, RepositoryFileInvocationKind::Rename);
+        assert_eq!(preview.path, "src/new.rs");
+        assert_eq!(preview.prior_path.as_deref(), Some("src/old.rs"));
+        assert_eq!(preview.tool_name, "rename_file");
+        assert_eq!(preview.excerpt, body);
     }
 }
 
 #[test]
-fn exact_path_matching_rejects_basename_case_and_token_boundary_lookalikes() {
-    for (index, body) in [
-        "*** Update File: lib.rs",
-        "*** Update File: src/Lib.rs",
-        "*** Update File: src/lib.rs.bak",
-        "*** Update File: prefixsrc/lib.rs",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let record = file_record(
-            index as u8 + 20,
-            1,
-            body,
-            "src/lib.rs",
-            RepositoryFileObservationKind::Modified,
-            None,
-        );
-        assert!(one_file_preview("src/lib.rs", &record).previews.is_empty());
-    }
-
-    let absolute = file_record(
-        24,
-        1,
-        "*** Update File: /tmp/worktree/src/lib.rs",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    assert!(one_file_preview("src/lib.rs", &absolute)
-        .previews
-        .is_empty());
-}
-
-#[test]
-fn certified_local_root_allows_only_the_exact_authorized_absolute_path() {
-    let root = "/worktrees/validated";
-    let mut authorized = file_record(
-        25,
-        1,
-        "*** Update File: /worktrees/validated/src/lib.rs",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    authorize_local_root(&mut authorized, root);
-    assert_eq!(
-        one_file_preview("src/lib.rs", &authorized).previews[0].excerpt,
-        "*** Update File: /worktrees/validated/src/lib.rs"
-    );
-
-    let mut other_root = file_record(
-        26,
-        1,
-        "*** Update File: /other/repository/src/lib.rs",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    authorize_local_root(&mut other_root, root);
-    assert!(one_file_preview("src/lib.rs", &other_root)
-        .previews
-        .is_empty());
-
-    let mut traversal = file_record(
-        27,
-        1,
-        "*** Update File: /worktrees/validated/src/lib.rs",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    authorize_local_root(&mut traversal, "/worktrees/validated/../validated");
-    assert!(one_file_preview("src/lib.rs", &traversal)
-        .previews
-        .is_empty());
-}
-
-#[test]
-fn certified_local_root_preserves_exact_absolute_rename_old_and_new_paths() {
-    let root =
-        "/home/daddy/code/ctx-worktrees/ctx-private/source-backed-ingestion-production-20260728";
-    let old_path = "products/ctx-pro/src/graph/store/checkpoints.rs";
-    let new_path = "products/ctx-pro/src/graph/store/generation.rs";
-    let body = format!("*** Update File: {root}/{old_path}\n*** Move to: {root}/{new_path}");
-    assert_eq!(body.len(), 298);
-    let mut record = file_record(
-        28,
-        1,
-        &body,
-        new_path,
-        RepositoryFileObservationKind::Renamed,
-        Some(old_path),
-    );
-    authorize_local_root(&mut record, root);
-    assert_eq!(
-        one_file_preview(old_path, &record).previews[0].excerpt,
-        body
-    );
-    assert_eq!(
-        one_file_preview(new_path, &record).previews[0].excerpt,
-        body
-    );
-}
-
-#[test]
-fn duplicate_conflicting_and_multiple_decisive_file_units_omit() {
-    let mut duplicate = file_record(
+fn typed_range_and_binding_are_authority_while_ordinary_observations_do_not_gate() {
+    let valid = file_record(
+        "provider",
         30,
         1,
-        "*** Update File: src/lib.rs",
+        "exact request src/lib.rs",
+        Some("exact request src/lib.rs"),
         "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
         None,
+        RepositoryFileInvocationKind::Modify,
+        Some("edit_file"),
     );
-    duplicate
-        .core_record
-        .repository_file_observations
-        .push(duplicate.core_record.repository_file_observations[0].clone());
-    assert!(one_file_preview("src/lib.rs", &duplicate)
+    assert_eq!(one_file_preview("src/lib.rs", &valid).previews.len(), 1);
+
+    let mut no_range = valid.clone();
+    no_range.core_record.repository_file_invocation_evidence[0].normalized_text_range = None;
+    finalize_record(&mut no_range);
+    assert!(one_file_preview("src/lib.rs", &no_range)
         .previews
         .is_empty());
 
-    let mut conflicting = file_record(
+    let mut no_tool = valid.clone();
+    no_tool.core_record.repository_file_invocation_evidence[0].tool_name = None;
+    finalize_record(&mut no_tool);
+    assert!(one_file_preview("src/lib.rs", &no_tool).previews.is_empty());
+
+    let mut whitespace_tool = valid.clone();
+    whitespace_tool
+        .core_record
+        .repository_file_invocation_evidence[0]
+        .tool_name = Some(" \t ".to_owned());
+    finalize_record(&mut whitespace_tool);
+    assert!(one_file_preview("src/lib.rs", &whitespace_tool)
+        .previews
+        .is_empty());
+
+    let mut no_observation = valid.clone();
+    no_observation
+        .core_record
+        .repository_file_observations
+        .clear();
+    finalize_record(&mut no_observation);
+    assert_eq!(
+        one_file_preview("src/lib.rs", &no_observation)
+            .previews
+            .len(),
+        1
+    );
+
+    let mut wrong_observation = valid.clone();
+    wrong_observation.core_record.repository_file_observations[0].kind =
+        RepositoryFileObservationKind::Read;
+    finalize_record(&mut wrong_observation);
+    assert_eq!(
+        one_file_preview("src/lib.rs", &wrong_observation)
+            .previews
+            .len(),
+        1
+    );
+
+    let mut unknown_observation = valid;
+    unknown_observation.core_record.repository_file_observations[0].kind =
+        RepositoryFileObservationKind::Unknown;
+    finalize_record(&mut unknown_observation);
+    assert_eq!(
+        one_file_preview("src/lib.rs", &unknown_observation)
+            .previews
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn legacy_text_grammar_and_structured_content_have_no_independent_authority() {
+    let mut record = file_record(
+        "codex",
         31,
         1,
-        "*** Add File: src/lib.rs\n*** Delete File: src/lib.rs",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Deleted,
+        "*** Update File: src/lib.rs",
         None,
+        "src/lib.rs",
+        None,
+        RepositoryFileInvocationKind::Modify,
+        Some("apply_patch"),
     );
-    conflicting
+    record
         .core_record
-        .repository_file_observations
-        .push(RepositoryFileObservation {
-            repository_binding_id: "binding-1".to_owned(),
-            relative_path: "src/lib.rs".to_owned(),
-            kind: RepositoryFileObservationKind::Created,
-            prior_relative_path: None,
-        });
-    assert!(one_file_preview("src/lib.rs", &conflicting)
-        .previews
-        .is_empty());
-
-    let repeated = file_record(
-        32,
-        1,
-        "*** Update File: src/lib.rs\n*** Update File: src/lib.rs",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    assert!(one_file_preview("src/lib.rs", &repeated)
-        .previews
-        .is_empty());
+        .repository_file_invocation_evidence
+        .clear();
+    record.core_record.content.structured_content = Some(serde_json::json!({
+        "tool_name": "provider_tool",
+        "path": "src/lib.rs",
+        "command_output": "must never be projected"
+    }));
+    finalize_record(&mut record);
+    assert!(one_file_preview("src/lib.rs", &record).previews.is_empty());
 }
 
 #[test]
-fn codex_contract_allowlist_rejects_unknown_format_schema_revision_and_event_shape() {
-    let valid = file_record(
-        33,
-        1,
-        "*** Update File: src/lib.rs",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
+fn excerpt_limit_is_exact_in_utf8_bytes_and_model_keeps_verbatim_bytes() {
+    let exact = format!(
+        "src/lib.rs:{}x",
+        "é".repeat((512 - "src/lib.rs:x".len()) / 2)
     );
-    let evidence = numbered(&valid, 1);
-    assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, &valid).is_some());
-
-    for variant in 0..5 {
-        let mut record = if matches!(variant, 0 | 1) {
-            file_record_from_base(
-                base_record_for_source(
-                    source_contract(
-                        "codex",
-                        if variant == 0 {
-                            "unknown_codex_jsonl"
-                        } else {
-                            "codex_session_jsonl"
-                        },
-                        if variant == 1 {
-                            "unknown-schema"
-                        } else {
-                            "codex-nativepath-jsonl-v0"
-                        },
-                        34 + variant,
-                    ),
-                    34 + variant,
-                    1,
-                    "*** Update File: src/lib.rs",
-                    "tool_call",
-                    "assistant",
-                    "codex-nativepath-core-record-v7",
-                ),
-                "src/lib.rs",
-                RepositoryFileObservationKind::Modified,
-                None,
-            )
-        } else {
-            valid.clone()
-        };
-        match variant {
-            0 | 1 => {}
-            2 => record.core_record.parser_revision = "codex-nativepath-core-record-v8".to_owned(),
-            3 => record.core_record.normalization_revision += 1,
-            4 => {
-                record.event.event_type = "message".to_owned();
-                record.core_record.event_type = "message".to_owned();
-            }
-            _ => unreachable!(),
-        }
-        let evidence = numbered(&record, 1);
-        assert!(
-            VerifiedEvidenceRecord::new(&evidence, GENERATION, &record).is_none(),
-            "variant {variant}"
-        );
-    }
-}
-
-#[test]
-fn unsupported_and_mixed_file_grammars_omit() {
-    for (index, body) in [
-        "updated file src/lib.rs",
-        "*** Update File: src/lib.rs\ndiff --git a/src/lib.rs b/src/lib.rs",
-        "*** Update File: src/lib.rs\nmodified: src/lib.rs",
-        "diff --git a/src/lib.rs b/src/lib.rs\nmodified: src/lib.rs",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let record = file_record(
-            34 + u8::try_from(index).unwrap(),
-            1,
-            body,
-            "src/lib.rs",
-            RepositoryFileObservationKind::Modified,
-            None,
-        );
-        assert!(
-            one_file_preview("src/lib.rs", &record).previews.is_empty(),
-            "{body}"
-        );
-    }
-
-    let wrong_shape = base_record(
-        "codex",
-        38,
-        1,
-        "*** Update File: src/lib.rs",
-        "command_output",
-        "tool",
-    );
-    let mut wrong_shape = wrong_shape;
-    wrong_shape.core_record.repository_bindings = vec![binding()];
-    wrong_shape.core_record.repository_file_observations = vec![RepositoryFileObservation {
-        repository_binding_id: "binding-1".to_owned(),
-        relative_path: "src/lib.rs".to_owned(),
-        kind: RepositoryFileObservationKind::Modified,
-        prior_relative_path: None,
-    }];
-    let evidence = numbered(&wrong_shape, 1);
-    assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, &wrong_shape).is_none());
-}
-
-#[test]
-fn production_repository_display_mapping_scopes_file_observations_exactly() {
-    let exact = file_record(
-        39,
-        1,
-        "*** Update File: src/lib.rs",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    assert_ne!(repository().id, repository().display);
-    assert_eq!(
-        one_file_preview("src/lib.rs", &exact).previews[0].excerpt,
-        "*** Update File: src/lib.rs"
-    );
-
-    let mut other_repository = file_record(
+    assert_eq!(exact.len(), 512);
+    let exact_record = file_record(
+        "provider",
         40,
         1,
-        "*** Update File: src/lib.rs",
+        &exact,
+        Some(&exact),
         "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
         None,
+        RepositoryFileInvocationKind::Read,
+        Some("read_file"),
     );
+    assert_eq!(
+        one_file_preview("src/lib.rs", &exact_record).previews[0].excerpt,
+        exact
+    );
+
+    let oversized = format!("{exact}x");
+    assert_eq!(oversized.len(), 513);
+    let oversized_record = file_record(
+        "provider",
+        41,
+        1,
+        &oversized,
+        Some(&oversized),
+        "src/lib.rs",
+        None,
+        RepositoryFileInvocationKind::Read,
+        Some("read_file"),
+    );
+    assert!(one_file_preview("src/lib.rs", &oversized_record)
+        .previews
+        .is_empty());
+
+    let unsafe_terminal_text = "\u{1b}[31mrequest src/lib.rs\u{202e}";
+    let unsafe_record = file_record(
+        "provider",
+        42,
+        1,
+        unsafe_terminal_text,
+        Some(unsafe_terminal_text),
+        "src/lib.rs",
+        None,
+        RepositoryFileInvocationKind::Read,
+        Some("read_file"),
+    );
+    assert_eq!(
+        one_file_preview("src/lib.rs", &unsafe_record).previews[0].excerpt,
+        unsafe_terminal_text
+    );
+}
+
+#[test]
+fn same_path_and_multi_unit_ambiguity_fail_closed() {
+    let base = file_record(
+        "provider",
+        50,
+        1,
+        "first unit\nsecond unit",
+        Some("first unit"),
+        "src/lib.rs",
+        None,
+        RepositoryFileInvocationKind::Modify,
+        Some("edit_file"),
+    );
+
+    let mut duplicate_target = base.clone();
+    duplicate_target
+        .core_record
+        .repository_file_invocation_evidence
+        .push(invocation(
+            1,
+            "binding-1",
+            "src/lib.rs",
+            None,
+            RepositoryFileInvocationKind::Modify,
+            Some("edit_file"),
+            Some(exact_range("first unit\nsecond unit", "second unit")),
+        ));
+    finalize_record(&mut duplicate_target);
+    assert!(one_file_preview("src/lib.rs", &duplicate_target)
+        .previews
+        .is_empty());
+
+    let mut shared_range = base.clone();
+    let selected_range =
+        shared_range.core_record.repository_file_invocation_evidence[0].normalized_text_range;
+    shared_range
+        .core_record
+        .repository_file_invocation_evidence
+        .push(invocation(
+            1,
+            "binding-1",
+            "src/other.rs",
+            None,
+            RepositoryFileInvocationKind::Modify,
+            Some("edit_file"),
+            selected_range,
+        ));
+    shared_range
+        .core_record
+        .repository_file_observations
+        .push(observation(
+            "binding-1",
+            "src/other.rs",
+            None,
+            RepositoryFileObservationKind::Modified,
+        ));
+    finalize_record(&mut shared_range);
+    assert!(one_file_preview("src/lib.rs", &shared_range)
+        .previews
+        .is_empty());
+
+    let mut duplicate_observation = base.clone();
+    duplicate_observation
+        .core_record
+        .repository_file_observations
+        .push(
+            duplicate_observation
+                .core_record
+                .repository_file_observations[0]
+                .clone(),
+        );
+    finalize_record(&mut duplicate_observation);
+    assert_eq!(
+        one_file_preview("src/lib.rs", &duplicate_observation)
+            .previews
+            .len(),
+        1
+    );
+
+    let mut other_repository = base.clone();
     other_repository
         .core_record
         .repository_bindings
         .push(binding_for("binding-2", "forge:github.com/fork/ctx"));
-    other_repository.core_record.repository_file_observations[0].repository_binding_id =
-        "binding-2".to_owned();
+    other_repository
+        .core_record
+        .repository_file_invocation_evidence
+        .push(invocation(
+            1,
+            "binding-2",
+            "src/lib.rs",
+            None,
+            RepositoryFileInvocationKind::Modify,
+            Some("edit_file"),
+            None,
+        ));
+    other_repository
+        .core_record
+        .repository_file_observations
+        .push(observation(
+            "binding-2",
+            "src/lib.rs",
+            None,
+            RepositoryFileObservationKind::Modified,
+        ));
+    finalize_record(&mut other_repository);
     assert!(one_file_preview("src/lib.rs", &other_repository)
         .previews
         .is_empty());
+}
 
-    let mut ambiguous = file_record(
-        41,
+#[test]
+fn exact_repository_binding_is_required() {
+    let valid = file_record(
+        "provider",
+        60,
         1,
-        "*** Update File: src/lib.rs",
+        "request src/lib.rs",
+        Some("request src/lib.rs"),
         "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
         None,
+        RepositoryFileInvocationKind::Modify,
+        Some("edit_file"),
     );
+    assert_ne!(repository().id, repository().display);
+    assert_eq!(one_file_preview("src/lib.rs", &valid).previews.len(), 1);
+
+    let mut ambiguous = valid.clone();
     ambiguous
         .core_record
         .repository_bindings
         .push(binding_for("binding-2", REPOSITORY_ID));
+    finalize_record(&mut ambiguous);
     assert!(one_file_preview("src/lib.rs", &ambiguous)
         .previews
         .is_empty());
 
-    let mut exact_alias = file_record(
-        42,
-        1,
-        "*** Update File: src/lib.rs",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    exact_alias.core_record.repository_bindings[0].logical_repository_id =
-        "local:certified".to_owned();
-    exact_alias.core_record.repository_bindings[0].aliases = vec![RepositoryAlias {
-        kind: RepositoryAliasKind::Forge,
-        host: "github.com".to_owned(),
-        namespace: vec!["ctxrs".to_owned()],
-        name: "ctx".to_owned(),
-        remote_name: Some("origin".to_owned()),
-    }];
-    assert!(one_file_preview("src/lib.rs", &exact_alias)
+    let mut wrong_binding = valid.clone();
+    wrong_binding
+        .core_record
+        .repository_bindings
+        .push(binding_for("binding-2", "forge:github.com/fork/ctx"));
+    wrong_binding
+        .core_record
+        .repository_file_invocation_evidence[0]
+        .repository_binding_id = "binding-2".to_owned();
+    wrong_binding.core_record.repository_file_observations[0].repository_binding_id =
+        "binding-2".to_owned();
+    finalize_record(&mut wrong_binding);
+    assert!(one_file_preview("src/lib.rs", &wrong_binding)
         .previews
         .is_empty());
 }
 
 #[test]
-fn same_path_other_repositories_require_distinct_certified_absolute_roots() {
-    for (index, logical_repository_id) in [
-        "forge:github.com/fork/ctx",
-        "local:certified-other-repository",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let mut record = file_record(
-            43 + u8::try_from(index).unwrap(),
-            1,
-            "*** Update File: src/lib.rs",
-            "src/lib.rs",
-            RepositoryFileObservationKind::Modified,
-            None,
-        );
-        record
-            .core_record
-            .repository_bindings
-            .push(binding_for("binding-2", logical_repository_id));
-        record
-            .core_record
-            .repository_file_observations
-            .push(RepositoryFileObservation {
-                repository_binding_id: "binding-2".to_owned(),
-                relative_path: "src/lib.rs".to_owned(),
-                kind: RepositoryFileObservationKind::Modified,
-                prior_relative_path: None,
-            });
+fn certified_local_root_resolves_exact_absolute_current_and_prior_targets() {
+    let body = "rename request: src/old.rs -> src/new.rs";
+    let mut record = file_record(
+        "provider",
+        61,
+        1,
+        body,
+        Some(body),
+        "src/new.rs",
+        Some("src/old.rs"),
+        RepositoryFileInvocationKind::Rename,
+        Some("rename_file"),
+    );
+
+    assert!(one_file_preview("/worktrees/target/src/new.rs", &record)
+        .previews
+        .is_empty());
+    authorize_local_root(&mut record, "/worktrees/target");
+    for target in [
+        "src/new.rs",
+        "/worktrees/target/src/new.rs",
+        "/worktrees/target/src/old.rs",
+    ] {
+        let preview = &one_file_preview(target, &record).previews[0];
+        assert_eq!(preview.path, "src/new.rs");
+        assert_eq!(preview.prior_path.as_deref(), Some("src/old.rs"));
+        assert_eq!(preview.excerpt, body);
+    }
+
+    for unsafe_or_inexact in [
+        "/other/target/src/new.rs",
+        "/worktrees/target/../target/src/new.rs",
+        "/worktrees//target/src/new.rs",
+        "/worktrees/target/src/new.rs/",
+    ] {
         assert!(
-            one_file_preview("src/lib.rs", &record).previews.is_empty(),
-            "{logical_repository_id}"
+            one_file_preview(unsafe_or_inexact, &record)
+                .previews
+                .is_empty(),
+            "{unsafe_or_inexact}"
         );
     }
 
-    let mut prior_path = file_record(
-        45,
-        1,
-        "*** Update File: src/old.rs\n*** Move to: src/new.rs",
-        "src/new.rs",
-        RepositoryFileObservationKind::Renamed,
-        Some("src/old.rs"),
-    );
-    prior_path
-        .core_record
-        .repository_bindings
-        .push(binding_for("binding-2", "local:prior-path-repository"));
-    prior_path
-        .core_record
-        .repository_file_observations
-        .push(RepositoryFileObservation {
-            repository_binding_id: "binding-2".to_owned(),
-            relative_path: "other/new.rs".to_owned(),
-            kind: RepositoryFileObservationKind::Renamed,
-            prior_relative_path: Some("src/old.rs".to_owned()),
-        });
-    assert!(one_file_preview("src/old.rs", &prior_path)
-        .previews
-        .is_empty());
-
-    let absolute_body = "*** Update File: /worktrees/target/src/lib.rs";
-    let mut distinct_roots = file_record(
-        46,
-        1,
-        absolute_body,
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    authorize_local_root(&mut distinct_roots, "/worktrees/target");
-    let mut competing = binding_for("binding-2", "forge:github.com/fork/ctx");
-    authorize_binding(&mut competing, "/worktrees/fork", "2");
-    distinct_roots
-        .core_record
-        .repository_bindings
-        .push(competing);
-    distinct_roots
-        .core_record
-        .repository_file_observations
-        .push(RepositoryFileObservation {
-            repository_binding_id: "binding-2".to_owned(),
-            relative_path: "src/lib.rs".to_owned(),
-            kind: RepositoryFileObservationKind::Modified,
-            prior_relative_path: None,
-        });
-    assert_eq!(
-        one_file_preview("src/lib.rs", &distinct_roots).previews[0].excerpt,
-        absolute_body
-    );
-
-    let mut same_roots = distinct_roots.clone();
-    authorize_binding(
-        &mut same_roots.core_record.repository_bindings[1],
-        "/worktrees/target",
-        "2",
-    );
-    assert!(one_file_preview("src/lib.rs", &same_roots)
+    authorize_local_root(&mut record, "/worktrees/target/../target");
+    assert!(one_file_preview("/worktrees/target/src/new.rs", &record)
         .previews
         .is_empty());
 }
 
 #[test]
-fn utf8_exact_512_byte_unit_is_kept_and_oversized_unit_is_omitted() {
-    let prefix = "*** Update File: ";
-    let exact_path = format!("{}x", "é".repeat((512 - prefix.len() - 1) / 2));
-    let exact_body = format!("{prefix}{exact_path}");
-    assert_eq!(exact_body.len(), 512);
-    let exact = file_record(
-        50,
-        1,
-        &exact_body,
-        &exact_path,
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    assert_eq!(
-        one_file_preview(&exact_path, &exact).previews[0].excerpt,
-        exact_body
-    );
+fn certified_windows_drive_and_unc_roots_resolve_only_canonical_exact_targets() {
+    let cases = [
+        (
+            r"C:\worktrees\target",
+            r"C:\worktrees\target\src\new.rs",
+            r"C:\worktrees\target\src\old.rs",
+            r"D:\worktrees\target\src\new.rs",
+        ),
+        (
+            "D:/worktrees/target",
+            "D:/worktrees/target/src/new.rs",
+            "D:/worktrees/target/src/old.rs",
+            "D:/worktrees/other/src/new.rs",
+        ),
+        (
+            r"\\server\share\target",
+            r"\\server\share\target\src\new.rs",
+            r"\\server\share\target\src\old.rs",
+            r"\\server\other\target\src\new.rs",
+        ),
+    ];
 
-    let oversized_path = format!("{exact_path}a");
-    let oversized_body = format!("{prefix}{oversized_path}");
-    assert_eq!(oversized_body.len(), 513);
-    let oversized = file_record(
-        51,
+    for (index, (root, current_target, prior_target, wrong_root)) in cases.into_iter().enumerate() {
+        let body = "rename request: src/old.rs -> src/new.rs";
+        let mut record = file_record(
+            "provider",
+            63 + u8::try_from(index).unwrap(),
+            1,
+            body,
+            Some(body),
+            "src/new.rs",
+            Some("src/old.rs"),
+            RepositoryFileInvocationKind::Rename,
+            Some("rename_file"),
+        );
+        authorize_local_root(&mut record, root);
+
+        assert_eq!(one_file_preview("src/new.rs", &record).previews.len(), 1);
+        for target in [current_target, prior_target] {
+            let preview = &one_file_preview(target, &record).previews[0];
+            assert_eq!(preview.path, "src/new.rs");
+            assert_eq!(preview.prior_path.as_deref(), Some("src/old.rs"));
+        }
+        assert!(one_file_preview(wrong_root, &record).previews.is_empty());
+    }
+
+    let mut drive = file_record(
+        "provider",
+        66,
         1,
-        &oversized_body,
-        &oversized_path,
-        RepositoryFileObservationKind::Modified,
+        "modify request src/lib.rs",
+        Some("modify request src/lib.rs"),
+        "src/lib.rs",
         None,
+        RepositoryFileInvocationKind::Modify,
+        Some("edit_file"),
     );
-    assert!(one_file_preview(&oversized_path, &oversized)
-        .previews
-        .is_empty());
+    authorize_local_root(&mut drive, r"C:\worktrees\target");
+    for unsafe_or_noncanonical in [
+        r"C:\worktrees\target\src\..\src\lib.rs",
+        r"C:\worktrees\target\src\\lib.rs",
+        r"C:\worktrees\target/src/lib.rs",
+        r"C:\worktrees\target\src\lib.rs\",
+    ] {
+        assert!(
+            one_file_preview(unsafe_or_noncanonical, &drive)
+                .previews
+                .is_empty(),
+            "{unsafe_or_noncanonical}"
+        );
+    }
+
+    let mut unc = drive;
+    authorize_local_root(&mut unc, r"\\server\share\target");
+    for unsafe_or_noncanonical in [
+        r"\\server\share\target\src\..\src\lib.rs",
+        r"\\server\share\target\src\\lib.rs",
+        r"\\server/share/target/src/lib.rs",
+        r"\\server\share\target\src\lib.rs\",
+    ] {
+        assert!(
+            one_file_preview(unsafe_or_noncanonical, &unc)
+                .previews
+                .is_empty(),
+            "{unsafe_or_noncanonical}"
+        );
+    }
 }
 
 #[test]
-fn parser_body_and_line_ceilings_are_checked_before_projection() {
-    let marker = "*** Update File: src/lib.rs";
-    let bounded_body = format!(
-        "{marker}\n{}",
-        "x".repeat(MAX_EVIDENCE_PREVIEW_BODY_BYTES - marker.len() - 1)
-    );
-    assert_eq!(bounded_body.len(), MAX_EVIDENCE_PREVIEW_BODY_BYTES);
-    let bounded = file_record(
-        52,
-        1,
-        &bounded_body,
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    assert_eq!(
-        one_file_preview("src/lib.rs", &bounded).previews[0].excerpt,
-        marker
-    );
+fn windows_same_path_competitors_require_distinct_certified_roots() {
+    let cases = [
+        (
+            r"C:\worktrees\target",
+            r"C:\worktrees\target\src\lib.rs",
+            r"D:\worktrees\fork",
+            r"D:\worktrees\fork\src\lib.rs",
+        ),
+        (
+            r"\\server\share\target",
+            r"\\server\share\target\src\lib.rs",
+            r"\\server\other-share\fork",
+            r"\\server\other-share\fork\src\lib.rs",
+        ),
+    ];
 
-    let oversized_body = format!("{bounded_body}x");
-    let oversized = file_record(
-        53,
-        1,
-        &oversized_body,
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    assert!(one_file_preview("src/lib.rs", &oversized)
-        .previews
-        .is_empty());
+    for (index, (selected_root, selected_target, distinct_root, wrong_root_target)) in
+        cases.into_iter().enumerate()
+    {
+        let mut record = file_record(
+            "provider",
+            67 + u8::try_from(index).unwrap(),
+            1,
+            "modify request src/lib.rs",
+            Some("modify request src/lib.rs"),
+            "src/lib.rs",
+            None,
+            RepositoryFileInvocationKind::Modify,
+            Some("edit_file"),
+        );
+        authorize_local_root(&mut record, selected_root);
+        let mut competing_binding = binding_for("binding-2", "forge:github.com/fork/ctx");
+        authorize_binding(&mut competing_binding, distinct_root, 2);
+        record
+            .core_record
+            .repository_bindings
+            .push(competing_binding);
+        record
+            .core_record
+            .repository_file_invocation_evidence
+            .push(invocation(
+                1,
+                "binding-2",
+                "src/lib.rs",
+                None,
+                RepositoryFileInvocationKind::Modify,
+                Some("edit_file"),
+                None,
+            ));
+        record
+            .core_record
+            .repository_file_observations
+            .push(observation(
+                "binding-2",
+                "src/lib.rs",
+                None,
+                RepositoryFileObservationKind::Modified,
+            ));
+        finalize_record(&mut record);
 
-    let bounded_lines = format!(
-        "{marker}\n{}",
-        "\n".repeat(MAX_EVIDENCE_PREVIEW_BODY_LINES - 1)
-    );
-    let bounded = file_record(
-        54,
-        1,
-        &bounded_lines,
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    assert_eq!(
-        one_file_preview("src/lib.rs", &bounded).previews[0].excerpt,
-        marker
-    );
+        assert_eq!(one_file_preview(selected_target, &record).previews.len(), 1);
+        assert!(one_file_preview(wrong_root_target, &record)
+            .previews
+            .is_empty());
 
-    let newline_dense = format!("{bounded_lines}\n");
-    assert!(newline_dense.len() < MAX_EVIDENCE_PREVIEW_BODY_BYTES);
-    let dense = file_record(
-        55,
-        1,
-        &newline_dense,
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    assert!(one_file_preview("src/lib.rs", &dense).previews.is_empty());
+        authorize_binding(
+            &mut record.core_record.repository_bindings[1],
+            selected_root,
+            2,
+        );
+        assert!(one_file_preview(selected_target, &record)
+            .previews
+            .is_empty());
+    }
 }
 
 #[test]
-fn evidence_is_number_ordered_limited_and_deduplicated_by_exact_replay_content() {
-    let shared = file_record(
-        60,
-        1,
-        "*** Update File: src/lib.rs",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    let second = file_record(
-        61,
-        2,
-        "*** Delete File: src/lib.rs\nsecond adjacent",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Deleted,
-        None,
-    );
-    let fourth = file_record(
+fn same_relative_path_across_repositories_requires_distinct_certified_absolute_roots() {
+    let mut record = file_record(
+        "provider",
         62,
-        3,
-        "*** Update File: src/lib.rs\nfourth adjacent",
+        1,
+        "modify request src/lib.rs",
+        Some("modify request src/lib.rs"),
         "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
         None,
+        RepositoryFileInvocationKind::Modify,
+        Some("edit_file"),
     );
-    let replay = file_record(
-        63,
-        4,
-        "*** Update File: src/lib.rs",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
+    authorize_local_root(&mut record, "/worktrees/target");
+    let mut competing_binding = binding_for("binding-2", "forge:github.com/fork/ctx");
+    authorize_binding(&mut competing_binding, "/worktrees/fork", 2);
+    record
+        .core_record
+        .repository_bindings
+        .push(competing_binding);
+    record
+        .core_record
+        .repository_file_invocation_evidence
+        .push(invocation(
+            1,
+            "binding-2",
+            "src/lib.rs",
+            None,
+            RepositoryFileInvocationKind::Modify,
+            Some("edit_file"),
+            None,
+        ));
+    record
+        .core_record
+        .repository_file_observations
+        .push(observation(
+            "binding-2",
+            "src/lib.rs",
+            None,
+            RepositoryFileObservationKind::Modified,
+        ));
+    finalize_record(&mut record);
+
+    assert!(one_file_preview("src/lib.rs", &record).previews.is_empty());
+    assert_eq!(
+        one_file_preview("/worktrees/target/src/lib.rs", &record)
+            .previews
+            .len(),
+        1
     );
-    assert_ne!(shared.event_id, replay.event_id);
-    let evidence = [
-        numbered(&shared, 1),
-        numbered(&replay, 2),
-        numbered(&second, 3),
-        numbered(&fourth, 4),
-    ];
-    let proofs = [
-        verified(&evidence[2], &second),
-        verified(&evidence[1], &replay),
-        verified(&evidence[3], &fourth),
-        verified(&evidence[0], &shared),
-    ];
-    let result = file_result("src/lib.rs", evidence.to_vec());
-    let model = project_evidence_previews(&result, &proofs);
-    assert_eq!(MAX_EVIDENCE_PREVIEW_CITATIONS, 3);
-    assert_eq!(model.previews.len(), 2);
-    assert_eq!(model.previews[0].evidence_numbers, vec![1, 2]);
-    assert_eq!(model.previews[1].evidence_numbers, vec![3]);
-    assert!(model
+
+    let mut same_root = record.clone();
+    authorize_binding(
+        &mut same_root.core_record.repository_bindings[1],
+        "/worktrees/target",
+        2,
+    );
+    assert!(one_file_preview("/worktrees/target/src/lib.rs", &same_root)
         .previews
-        .iter()
-        .all(|preview| !preview.evidence_numbers.contains(&4)));
+        .is_empty());
+
+    let mut uncertified_competitor = record.clone();
+    uncertified_competitor.core_record.repository_bindings[1].local_root_authorization = None;
+    assert!(
+        one_file_preview("/worktrees/target/src/lib.rs", &uncertified_competitor)
+            .previews
+            .is_empty()
+    );
+
+    let mut unsafe_competitor = record;
+    authorize_binding(
+        &mut unsafe_competitor.core_record.repository_bindings[1],
+        "/worktrees/fork/../fork",
+        2,
+    );
+    assert!(
+        one_file_preview("/worktrees/target/src/lib.rs", &unsafe_competitor)
+            .previews
+            .is_empty()
+    );
 }
 
 #[test]
-fn digest_generation_and_all_coordinates_must_match() {
+fn digest_generation_source_and_full_event_coordinates_are_authenticated() {
     let record = file_record(
+        "provider",
         70,
         7,
-        "*** Update File: src/lib.rs",
+        "request src/lib.rs",
+        Some("request src/lib.rs"),
         "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
         None,
+        RepositoryFileInvocationKind::Modify,
+        Some("edit_file"),
     );
     let evidence = numbered(&record, 1);
     assert!(VerifiedEvidenceRecord::new(&evidence, "b", &record).is_none());
@@ -996,9 +1084,9 @@ fn digest_generation_and_all_coordinates_must_match() {
     wrong_digest.citation.evidence_sha256 = Some("f".repeat(64));
     assert!(VerifiedEvidenceRecord::new(&wrong_digest, GENERATION, &record).is_none());
 
-    let mut missing = evidence.clone();
-    missing.citation.evidence_sha256 = None;
-    assert!(VerifiedEvidenceRecord::new(&missing, GENERATION, &record).is_none());
+    let mut missing_digest = evidence.clone();
+    missing_digest.citation.evidence_sha256 = None;
+    assert!(VerifiedEvidenceRecord::new(&missing_digest, GENERATION, &record).is_none());
 
     let mut ranged = evidence.clone();
     ranged.citation.byte_range = Some(ctx_pro_host_protocol::ByteRange {
@@ -1014,43 +1102,159 @@ fn digest_generation_and_all_coordinates_must_match() {
         .normalized_body
         .as_mut()
         .unwrap()
-        .push_str("\nmutated");
+        .push_str(" mutated");
     assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, &mutated_content).is_none());
 
-    let other = file_record(
-        71,
-        8,
-        "*** Update File: src/lib.rs",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, &other).is_none());
-
-    for mutate in [0, 1, 2] {
+    for mutation in 0..5 {
         let mut mismatch = record.clone();
-        match mutate {
+        match mutation {
             0 => mismatch.event.event_sequence += 1,
-            1 => mismatch.core_record.event_sequence += 1,
-            2 => mismatch.event.session_id = other.session_id,
+            1 => mismatch.event.provider = "other-provider".to_owned(),
+            2 => mismatch.event.source_format = "other-format".to_owned(),
+            3 => mismatch.event.touched_files.clear(),
+            4 => mismatch.event.role = Some("tool".to_owned()),
             _ => unreachable!(),
         }
-        assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, &mismatch).is_none());
+        assert!(
+            VerifiedEvidenceRecord::new(&evidence, GENERATION, &mismatch).is_none(),
+            "mutation {mutation}"
+        );
     }
 }
 
 #[test]
-fn non_file_targets_non_codex_and_unverified_records_are_normal_omissions() {
-    let record = file_record(
+fn current_core_contract_accepts_new_descriptors_and_rejects_stale_revisions() {
+    let custom_source = source_contract(
+        "future-provider",
+        "future_sqlite_snapshot",
+        "future-tool-schema-v42",
+        91,
         80,
-        1,
-        "*** Update File: src/lib.rs",
+    );
+    let body = "future request src/lib.rs";
+    let mut record = base_record(custom_source, 80, 1, body, "future-parser-v999");
+    record.core_record.repository_bindings = vec![binding()];
+    record.core_record.repository_file_invocation_evidence = vec![invocation(
+        0,
+        "binding-1",
         "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
         None,
+        RepositoryFileInvocationKind::Modify,
+        Some("future_edit"),
+        Some(exact_range(body, body)),
+    )];
+    record.core_record.repository_file_observations = vec![observation(
+        "binding-1",
+        "src/lib.rs",
+        None,
+        RepositoryFileObservationKind::Modified,
+    )];
+    finalize_record(&mut record);
+    let evidence = numbered(&record, 1);
+    assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, &record).is_some());
+
+    let mut stale = record.clone();
+    stale.core_record.normalization_revision += 1;
+    let stale_evidence = numbered(&stale, 1);
+    assert!(VerifiedEvidenceRecord::new(&stale_evidence, GENERATION, &stale).is_none());
+}
+
+#[test]
+fn evidence_is_number_ordered_limited_and_grouped_by_the_complete_exact_item() {
+    let shared = file_record(
+        "codex",
+        90,
+        1,
+        "modify request src/lib.rs",
+        Some("modify request src/lib.rs"),
+        "src/lib.rs",
+        None,
+        RepositoryFileInvocationKind::Modify,
+        Some("edit_file"),
+    );
+    let replay = file_record(
+        "claude",
+        91,
+        2,
+        "modify request src/lib.rs",
+        Some("modify request src/lib.rs"),
+        "src/lib.rs",
+        None,
+        RepositoryFileInvocationKind::Modify,
+        Some("edit_file"),
+    );
+    let deleted = file_record(
+        "gemini",
+        92,
+        3,
+        "delete request src/lib.rs",
+        Some("delete request src/lib.rs"),
+        "src/lib.rs",
+        None,
+        RepositoryFileInvocationKind::Delete,
+        Some("delete_file"),
+    );
+    let fourth = file_record(
+        "cursor",
+        93,
+        4,
+        "fourth request src/lib.rs",
+        Some("fourth request src/lib.rs"),
+        "src/lib.rs",
+        None,
+        RepositoryFileInvocationKind::Modify,
+        Some("edit_file"),
+    );
+    let evidence = [
+        numbered(&shared, 1),
+        numbered(&replay, 2),
+        numbered(&deleted, 3),
+        numbered(&fourth, 4),
+    ];
+    let proofs = [
+        verified(&evidence[2], &deleted),
+        verified(&evidence[1], &replay),
+        verified(&evidence[3], &fourth),
+        verified(&evidence[0], &shared),
+    ];
+    let model = project_evidence_previews(&file_result("src/lib.rs", evidence.to_vec()), &proofs);
+    assert_eq!(MAX_EVIDENCE_PREVIEW_CITATIONS, 3);
+    assert_eq!(model.previews.len(), 2);
+    assert_eq!(model.previews[0].citation_numbers, vec![1, 2]);
+    assert_eq!(model.previews[1].citation_numbers, vec![3]);
+    assert!(model
+        .previews
+        .iter()
+        .all(|preview| !preview.citation_numbers.contains(&4)));
+}
+
+#[test]
+fn duplicate_verifiers_unverified_records_and_non_file_targets_omit() {
+    let record = file_record(
+        "provider",
+        100,
+        1,
+        "request src/lib.rs",
+        Some("request src/lib.rs"),
+        "src/lib.rs",
+        None,
+        RepositoryFileInvocationKind::Read,
+        Some("read_file"),
     );
     let evidence = numbered(&record, 1);
     let proof = verified(&evidence, &record);
+    assert!(project_evidence_previews(
+        &file_result("src/lib.rs", vec![evidence.clone()]),
+        &[proof, proof],
+    )
+    .previews
+    .is_empty());
+    assert!(
+        project_evidence_previews(&file_result("src/lib.rs", vec![evidence.clone()]), &[],)
+            .previews
+            .is_empty()
+    );
+
     for target in [
         ResolvedBlameTarget::Commit {
             commit: resource("commit:1", ResourceKind::Commit, OID),
@@ -1073,48 +1277,73 @@ fn non_file_targets_non_codex_and_unverified_records_are_normal_omissions() {
             .previews
             .is_empty());
     }
-    assert!(
-        project_evidence_previews(&file_result("src/lib.rs", vec![evidence]), &[])
-            .previews
-            .is_empty()
-    );
-
-    let mut non_codex = file_record(
-        81,
-        1,
-        "*** Update File: src/lib.rs",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
-    );
-    non_codex.event.provider = "claude".to_owned();
-    let evidence = numbered(&non_codex, 1);
-    assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, &non_codex).is_none());
 }
 
 #[test]
-fn excerpt_never_expands_to_adjacent_content_and_repeats_deterministically() {
+fn serializable_model_exposes_only_provider_neutral_invocation_fields() {
+    let body = "rename request src/old.rs -> src/new.rs";
     let record = file_record(
-        90,
+        "provider",
+        110,
         1,
-        "SECRET BEFORE\n*** Update File: src/lib.rs\nSECRET AFTER",
-        "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
-        None,
+        body,
+        Some(body),
+        "src/new.rs",
+        Some("src/old.rs"),
+        RepositoryFileInvocationKind::Rename,
+        Some("rename_file"),
     );
-    let evidence = numbered(&record, 1);
-    let proof = verified(&evidence, &record);
-    let result = file_result("src/lib.rs", vec![evidence.clone()]);
-    let expected = project_evidence_previews(&result, &[proof]);
-    assert_eq!(expected.previews[0].excerpt, "*** Update File: src/lib.rs");
-    for _ in 0..20 {
-        assert_eq!(project_evidence_previews(&result, &[proof]), expected);
-    }
+    let value = serde_json::to_value(one_file_preview("src/new.rs", &record)).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "previews": [{
+                "citation_numbers": [1],
+                "operation": "rename",
+                "path": "src/new.rs",
+                "prior_path": "src/old.rs",
+                "tool_name": "rename_file",
+                "excerpt": body,
+            }]
+        })
+    );
+    let encoded = serde_json::to_string(&value).unwrap();
+    assert!(!encoded.contains("evidence_numbers"));
+    assert!(!encoded.contains("file_kind"));
+    assert!(!encoded.contains("structured_content"));
+
+    let read = file_record(
+        "provider",
+        111,
+        1,
+        "read request src/lib.rs",
+        Some("read request src/lib.rs"),
+        "src/lib.rs",
+        None,
+        RepositoryFileInvocationKind::Read,
+        Some("read_file"),
+    );
+    let read_value = serde_json::to_value(one_file_preview("src/lib.rs", &read)).unwrap();
+    assert_eq!(
+        read_value,
+        serde_json::json!({
+            "previews": [{
+                "citation_numbers": [1],
+                "operation": "read",
+                "path": "src/lib.rs",
+                "tool_name": "read_file",
+                "excerpt": "read request src/lib.rs",
+            }]
+        })
+    );
+    assert!(!read_value["previews"][0]
+        .as_object()
+        .unwrap()
+        .contains_key("prior_path"));
 }
 
 #[test]
 fn public_projector_limits_are_exact() {
     assert_eq!(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES, 512);
-    assert_eq!(MAX_EVIDENCE_PREVIEW_BODY_BYTES, 64 * 1_024);
-    assert_eq!(MAX_EVIDENCE_PREVIEW_BODY_LINES, 4_096);
+    assert_eq!(MAX_EVIDENCE_PREVIEW_CITATIONS, 3);
 }

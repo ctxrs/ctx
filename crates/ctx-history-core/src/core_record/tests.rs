@@ -65,6 +65,7 @@ fn record() -> CoreRecord {
         repository_candidate_evidence: RepositoryCandidateEvidence::default(),
         repository_bindings: Vec::new(),
         repository_abstentions: Vec::new(),
+        repository_file_invocation_evidence: Vec::new(),
         repository_file_observations: Vec::new(),
         repository_vcs_observations: Vec::new(),
     }
@@ -103,6 +104,7 @@ fn selected_constructor_defaults_the_active_core_contract() {
     );
     assert!(constructed.metadata.is_empty());
     assert!(constructed.repository_bindings.is_empty());
+    assert!(constructed.repository_file_invocation_evidence.is_empty());
 }
 
 fn binding() -> RepositoryBinding {
@@ -140,10 +142,30 @@ fn binding() -> RepositoryBinding {
     }
 }
 
+fn invocation(
+    operation_ordinal: u32,
+    kind: RepositoryFileInvocationKind,
+    relative_path: &str,
+) -> RepositoryFileInvocationEvidence {
+    RepositoryFileInvocationEvidence {
+        operation_ordinal,
+        repository_binding_id: "binding-1".to_owned(),
+        relative_path: relative_path.to_owned(),
+        prior_relative_path: None,
+        kind,
+        tool_name: Some("read_file".to_owned()),
+        normalized_text_range: None,
+    }
+}
+
 #[test]
 fn complete_record_round_trips_stored_encoding() {
     let mut record = record();
     record.repository_bindings.push(binding());
+    record.content.normalized_body = Some("prefix α suffix".to_owned());
+    let mut evidence = invocation(0, RepositoryFileInvocationKind::Read, "src/lib.rs");
+    evidence.normalized_text_range = Some(RepositoryFileInvocationTextRange { start: 7, end: 9 });
+    record.repository_file_invocation_evidence.push(evidence);
     let encoded = record.encode_stored().unwrap();
     let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
     let authorization = wire["repository_bindings"][0]["local_root_authorization"]
@@ -151,7 +173,27 @@ fn complete_record_round_trips_stored_encoding() {
         .unwrap();
     assert!(authorization.contains_key("local_root_authorization_fingerprint_revision"));
     assert!(authorization.contains_key("local_root_authorization_fingerprint"));
+    assert_eq!(
+        wire["repository_file_invocation_evidence"][0]["normalized_text_range"],
+        serde_json::json!({"start": 7, "end": 9})
+    );
+    let invocation = wire["repository_file_invocation_evidence"][0]
+        .as_object()
+        .unwrap();
+    assert!(!invocation.contains_key("body"));
+    assert!(!invocation.contains_key("preview"));
+    assert!(!invocation.contains_key("text"));
     assert_eq!(CoreRecord::decode_stored(&encoded).unwrap(), record);
+}
+
+#[test]
+fn old_stored_records_default_missing_invocation_evidence_to_empty() {
+    let mut wire = serde_json::to_value(record()).unwrap();
+    wire.as_object_mut()
+        .unwrap()
+        .remove("repository_file_invocation_evidence");
+    let decoded = CoreRecord::decode_stored(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    assert!(decoded.repository_file_invocation_evidence.is_empty());
 }
 
 #[test]
@@ -165,6 +207,148 @@ fn core_record_has_no_locator_or_canonical_preview_field() {
         .as_object()
         .unwrap()
         .contains_key("body_preview"));
+}
+
+#[test]
+fn invocation_evidence_has_closed_action_names_without_unknown() {
+    let cases = [
+        (RepositoryFileInvocationKind::Read, "read"),
+        (RepositoryFileInvocationKind::Create, "create"),
+        (RepositoryFileInvocationKind::Modify, "modify"),
+        (RepositoryFileInvocationKind::Delete, "delete"),
+        (RepositoryFileInvocationKind::Rename, "rename"),
+        (RepositoryFileInvocationKind::Write, "write"),
+    ];
+    for (kind, wire_name) in cases {
+        assert_eq!(
+            serde_json::to_string(&kind).unwrap(),
+            format!("\"{wire_name}\"")
+        );
+    }
+    assert!(serde_json::from_str::<RepositoryFileInvocationKind>("\"unknown\"").is_err());
+}
+
+#[test]
+fn invocation_contract_validates_binding_paths_rename_shape_and_tool_bounds() {
+    let mut record = record();
+    record.repository_bindings.push(binding());
+    record.repository_file_invocation_evidence = vec![invocation(
+        0,
+        RepositoryFileInvocationKind::Modify,
+        "src/lib.rs",
+    )];
+    record.validate_contract().unwrap();
+
+    record.repository_file_invocation_evidence[0].repository_binding_id = "missing".to_owned();
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::UnknownRepositoryBinding(binding)) if binding == "missing"
+    ));
+    record.repository_file_invocation_evidence[0].repository_binding_id = "binding-1".to_owned();
+
+    record.repository_file_invocation_evidence[0].relative_path = "../outside".to_owned();
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryRelativePath(_))
+    ));
+    record.repository_file_invocation_evidence[0].relative_path = "src/lib.rs".to_owned();
+
+    record.repository_file_invocation_evidence[0].prior_relative_path =
+        Some("src/old.rs".to_owned());
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryFileInvocationEvidence)
+    ));
+    record.repository_file_invocation_evidence[0].kind = RepositoryFileInvocationKind::Rename;
+    record.validate_contract().unwrap();
+    record.repository_file_invocation_evidence[0].prior_relative_path = None;
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryFileInvocationEvidence)
+    ));
+
+    record.repository_file_invocation_evidence[0].kind = RepositoryFileInvocationKind::Modify;
+    record.repository_file_invocation_evidence[0].tool_name = Some("x".repeat(513));
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::FieldTooLarge {
+            field: "repository_file_invocation_tool_name",
+            actual: 513,
+            maximum: 512,
+        })
+    ));
+}
+
+#[test]
+fn invocation_text_range_is_nonempty_bounded_and_on_utf8_boundaries() {
+    let mut record = record();
+    record.repository_bindings.push(binding());
+    record.content.normalized_body = Some("aαz".to_owned());
+    let mut evidence = invocation(0, RepositoryFileInvocationKind::Read, "src/lib.rs");
+    evidence.normalized_text_range = Some(RepositoryFileInvocationTextRange { start: 1, end: 3 });
+    record.repository_file_invocation_evidence = vec![evidence];
+    record.validate_contract().unwrap();
+
+    for range in [
+        RepositoryFileInvocationTextRange { start: 1, end: 1 },
+        RepositoryFileInvocationTextRange { start: 2, end: 3 },
+        RepositoryFileInvocationTextRange { start: 1, end: 2 },
+        RepositoryFileInvocationTextRange { start: 3, end: 5 },
+    ] {
+        record.repository_file_invocation_evidence[0].normalized_text_range = Some(range);
+        assert!(matches!(
+            record.validate_contract(),
+            Err(CoreRecordError::InvalidRepositoryFileInvocationEvidence)
+        ));
+    }
+
+    record.repository_file_invocation_evidence[0].normalized_text_range =
+        Some(RepositoryFileInvocationTextRange { start: 1, end: 3 });
+    record.content.normalized_body = None;
+    record.content.structured_content = None;
+    record.content.policy_status = CoreContentPolicyStatus::Omitted {
+        reason: "policy".to_owned(),
+    };
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryFileInvocationEvidence)
+    ));
+}
+
+#[test]
+fn invocation_evidence_must_be_strictly_sorted_and_unique() {
+    let mut record = record();
+    record.repository_bindings.push(binding());
+    let first = invocation(0, RepositoryFileInvocationKind::Read, "src/a.rs");
+    let second = invocation(1, RepositoryFileInvocationKind::Write, "src/b.rs");
+    record.repository_file_invocation_evidence = vec![first.clone(), second.clone()];
+    record.validate_contract().unwrap();
+
+    record.repository_file_invocation_evidence = vec![second, first.clone()];
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::NonCanonicalRepositoryFileInvocationEvidence)
+    ));
+    record.repository_file_invocation_evidence = vec![first.clone(), first];
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::NonCanonicalRepositoryFileInvocationEvidence)
+    ));
+}
+
+#[test]
+fn invocation_evidence_count_is_bounded() {
+    let mut record = record();
+    record.repository_file_invocation_evidence =
+        vec![invocation(0, RepositoryFileInvocationKind::Read, "src/a.rs"); 4_097];
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::TooManyItems {
+            field: "repository_file_invocation_evidence",
+            actual: 4_097,
+            maximum: 4_096,
+        })
+    ));
 }
 
 #[test]
@@ -292,6 +476,12 @@ fn missing_candidate_reuses_only_the_exact_prior_certificate_and_revokes_local_a
         "/old/repo".to_owned(),
     );
     prior.repository_bindings.push(binding());
+    let mut prior_invocation = invocation(3, RepositoryFileInvocationKind::Modify, "src/lib.rs");
+    prior_invocation.normalized_text_range =
+        Some(RepositoryFileInvocationTextRange { start: 0, end: 8 });
+    prior
+        .repository_file_invocation_evidence
+        .push(prior_invocation);
     prior
         .repository_file_observations
         .push(RepositoryFileObservation {
@@ -319,6 +509,11 @@ fn missing_candidate_reuses_only_the_exact_prior_certificate_and_revokes_local_a
         .local_root_authorization
         .is_none());
     assert_eq!(current.repository_file_observations.len(), 1);
+    assert_eq!(current.repository_file_invocation_evidence.len(), 1);
+    assert_eq!(
+        current.repository_file_invocation_evidence[0].operation_ordinal,
+        3
+    );
     assert!(current.repository_abstentions.iter().any(|abstention| {
         abstention.reason == RepositoryAbstentionReason::Unavailable
             && abstention.detail.as_deref()
@@ -858,7 +1053,7 @@ fn every_repository_revision_changes_the_core_contract_fingerprint() {
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
-        "68991e8e9894e3ea16a752af306adb66fceda6667eb802637a9e14ed776c5cae"
+        "931172482d0ee38770bc21b173bfd0c304c2d1d8e0dfa0c51b2654ec2134a7e7"
     );
     for changed in [
         CoreContractRevisions {

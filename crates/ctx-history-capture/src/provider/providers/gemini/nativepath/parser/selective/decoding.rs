@@ -320,24 +320,7 @@ pub(super) fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
 }
 
 fn tool_call_search_text(calls: &[GeminiToolCall]) -> String {
-    let mut text = String::new();
-    for call in calls {
-        if let Some(name) = call.name.as_deref() {
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(name);
-        }
-        if let Some(args) = call.args.as_ref() {
-            if let Ok(args) = serde_json::to_string(args) {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(&args);
-            }
-        }
-    }
-    text
+    super::super::super::file_invocation::normalize_gemini_tool_calls(calls).text
 }
 
 fn safe_file_touches(

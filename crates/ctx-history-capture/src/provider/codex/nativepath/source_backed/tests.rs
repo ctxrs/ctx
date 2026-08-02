@@ -7,6 +7,7 @@ use ctx_history_core::EventType;
 
 use super::*;
 
+mod invocation_evidence;
 mod lifecycle;
 mod projection;
 

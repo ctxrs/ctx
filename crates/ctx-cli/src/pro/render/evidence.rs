@@ -17,16 +17,9 @@ use crate::pro::evidence_preview::{
 
 const EVIDENCE_PREVIEW_BUDGET_WIDTH: usize = 32;
 pub(super) const MAX_EVIDENCE_PREVIEW_RENDERED_BYTES: usize = 4_096;
-const EVIDENCE_PREVIEW_DISCLOSURE: &str =
-    "Evidence preview (local history content; explicitly requested)";
-const EVIDENCE_PREVIEW_UNAVAILABLE: &str =
-    "A safe preview of cited local-history evidence is unavailable for this result.";
+const EVIDENCE_CONTEXT_HEADING: &str = "Evidence context (local history content)";
 
-pub(super) fn render_previews(
-    document: &mut Document,
-    context: &RenderContext,
-    model: &EvidencePreviewModel,
-) {
+pub(super) fn admitted_previews(model: &EvidencePreviewModel) -> EvidencePreviewModel {
     let budget_context = RenderContext::for_test(
         TestContext::tty(StreamKind::Stdout, EVIDENCE_PREVIEW_BUDGET_WIDTH)
             .color(ColorMode::Always),
@@ -34,10 +27,7 @@ pub(super) fn render_previews(
     let mut rendered = Document::new();
     rendered.push_blank();
     rendered.append(preview_header(&budget_context));
-    let mut actual = Document::new();
-    actual.push_blank();
-    actual.append(preview_header(context));
-    let mut admitted = 0usize;
+    let mut previews = Vec::new();
 
     for preview in model.previews.iter().take(MAX_EVIDENCE_PREVIEW_CITATIONS) {
         if preview.excerpt.len() > MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES {
@@ -48,42 +38,46 @@ pub(super) fn render_previews(
             .split('\n')
             .map(sanitize_untrusted_history_body_for_terminal)
             .collect::<Vec<_>>();
-        let Some(budget_item) = preview_item(&budget_context, preview, &excerpt_lines) else {
+        let Some(item) = preview_item(&budget_context, preview, &excerpt_lines) else {
             continue;
         };
         let mut candidate = rendered.clone();
-        candidate.append(budget_item);
+        candidate.append(item);
         if !within_rendered_preview_budget(&candidate, &budget_context) {
             continue;
         }
+        rendered = candidate;
+        previews.push(preview.clone());
+    }
+
+    EvidencePreviewModel { previews }
+}
+
+pub(super) fn render_previews(
+    document: &mut Document,
+    context: &RenderContext,
+    model: &EvidencePreviewModel,
+) {
+    let admitted = admitted_previews(model);
+    if admitted.previews.is_empty() {
+        return;
+    }
+    let mut actual = Document::new();
+    actual.push_blank();
+    actual.append(preview_header(context));
+
+    for preview in &admitted.previews {
+        let excerpt_lines = preview
+            .excerpt
+            .split('\n')
+            .map(sanitize_untrusted_history_body_for_terminal)
+            .collect::<Vec<_>>();
         let Some(actual_item) = preview_item(context, preview, &excerpt_lines) else {
             continue;
         };
-        let mut actual_candidate = actual.clone();
-        actual_candidate.append(actual_item);
-        if !within_rendered_preview_budget(&actual_candidate, context) {
-            continue;
-        }
-        rendered = candidate;
-        actual = actual_candidate;
-        admitted += 1;
+        actual.append(actual_item);
     }
-
-    if admitted == 0 {
-        let mut unavailable = Document::new();
-        unavailable.push_blank();
-        unavailable.append(preview_header(context));
-        push_authored(
-            &mut unavailable,
-            context,
-            2,
-            EVIDENCE_PREVIEW_UNAVAILABLE,
-            Token::Text,
-        );
-        document.append(unavailable);
-    } else {
-        document.append(actual);
-    }
+    document.append(actual);
 }
 
 fn preview_header(context: &RenderContext) -> Document {
@@ -92,7 +86,7 @@ fn preview_header(context: &RenderContext) -> Document {
         &mut document,
         context,
         0,
-        EVIDENCE_PREVIEW_DISCLOSURE,
+        EVIDENCE_CONTEXT_HEADING,
         Token::Heading,
     );
     document
@@ -103,25 +97,29 @@ fn preview_item(
     preview: &EvidencePreview,
     excerpt_lines: &[String],
 ) -> Option<Document> {
-    if preview.evidence_numbers.is_empty()
-        || preview.evidence_numbers.len() > MAX_EVIDENCE_PREVIEW_CITATIONS
-        || preview.evidence_numbers.contains(&0)
+    if preview.citation_numbers.is_empty()
+        || preview.citation_numbers.len() > MAX_EVIDENCE_PREVIEW_CITATIONS
+        || preview.citation_numbers.contains(&0)
     {
         return None;
     }
     let mut document = Document::new();
-    let kind = format!("{} file evidence", enum_heading(preview.file_kind));
+    let tool_name = sanitize_untrusted_history_body_for_terminal(&preview.tool_name);
+    let kind = format!(
+        "{} file request via {tool_name}",
+        enum_heading(preview.operation)
+    );
     let references_width = preview
-        .evidence_numbers
+        .citation_numbers
         .iter()
         .map(|number| display_width(&format!("[{number}]")))
         .sum::<usize>()
-        .saturating_add(preview.evidence_numbers.len().saturating_sub(1));
+        .saturating_add(preview.citation_numbers.len().saturating_sub(1));
     let combined_width = 2usize
         .saturating_add(references_width)
         .saturating_add(1)
         .saturating_add(display_width(&kind));
-    let mut references = preview_reference_line(&preview.evidence_numbers);
+    let mut references = preview_reference_line(&preview.citation_numbers);
     if context
         .content_width()
         .is_none_or(|width| combined_width <= width)
@@ -235,7 +233,6 @@ pub(super) fn render_continuation(
     document: &mut Document,
     context: &RenderContext,
     result: &BlameResult,
-    evidence_preview: bool,
 ) {
     let Some(next) = &result.next else {
         return;
@@ -264,7 +261,7 @@ pub(super) fn render_continuation(
     push_atomic(
         document,
         4,
-        &continuation_command(result, &next.cursor, evidence_preview),
+        &continuation_command(result, &next.cursor),
         Token::Command,
     );
 }
@@ -279,7 +276,7 @@ fn citation_text(citation: &EvidenceCitation) -> String {
     )
 }
 
-fn continuation_command(result: &BlameResult, cursor: &str, evidence_preview: bool) -> String {
+fn continuation_command(result: &BlameResult, cursor: &str) -> String {
     let (mut command, repository) = match &result.target {
         ResolvedBlameTarget::File {
             path,
@@ -310,9 +307,6 @@ fn continuation_command(result: &BlameResult, cursor: &str, evidence_preview: bo
     command.push_str(&shell_display(&repository.display));
     command.push_str(" --cursor ");
     command.push_str(&shell_display(cursor));
-    if evidence_preview && matches!(&result.target, ResolvedBlameTarget::File { .. }) {
-        command.push_str(" --evidence-preview");
-    }
     command
 }
 

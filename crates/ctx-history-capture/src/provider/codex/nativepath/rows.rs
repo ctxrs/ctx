@@ -17,9 +17,10 @@ use crate::provider::codex::events::{
 };
 use crate::{
     provider::codex::repository::{
-        repository_tool_evidence, CodexRepositoryResultEvidence, CodexRepositoryToolEvidence,
+        repository_tool_evidence_for_core, CodexRepositoryResultEvidence,
+        CodexRepositoryToolEvidence,
     },
-    repository_attribution::UnscopedFileObservation,
+    repository_attribution::{UnscopedFileObservation, UnscopedRepositoryFileInvocationEvidence},
     CaptureError, OutputOutcomeMetadata, Result as CaptureResult, CODEX_SESSION_SOURCE_FORMAT,
     PROVIDER_MAX_PREVIEW_CHARS,
 };
@@ -104,6 +105,28 @@ impl CodexSourceBackedRowV0 {
                             .map(|observation| observation.path.capacity())
                             .sum::<usize>(),
                     )
+                    .saturating_add(
+                        evidence
+                            .file_invocations
+                            .capacity()
+                            .saturating_mul(size_of::<UnscopedRepositoryFileInvocationEvidence>()),
+                    )
+                    .saturating_add(
+                        evidence
+                            .file_invocations
+                            .iter()
+                            .map(|invocation| {
+                                invocation.path.capacity()
+                                    + invocation.prior_path.as_ref().map_or(0, String::capacity)
+                                    + invocation.tool_name.as_ref().map_or(0, String::capacity)
+                            })
+                            .sum::<usize>(),
+                    )
+                    .saturating_add(evidence.abstentions.capacity().saturating_mul(size_of::<(
+                        ctx_history_core::RepositoryAbstentionReason,
+                        &'static str,
+                    )>(
+                    )))
             });
         let repository_result_bytes = self.repository_result.as_ref().map_or(0, |evidence| {
             evidence.command.as_ref().map_or(0, String::capacity)
@@ -252,7 +275,8 @@ pub(super) fn build_source_backed_event_row(
             return Ok(Err(CodexRetainedNonMaterialized::Malformed));
         }
     };
-    let repository_tools = repository_tool_evidence(&retained.payload);
+    let repository_tools =
+        repository_tool_evidence_for_core(&retained.payload, Some(&semantic.lexical_body));
     let mut tool_context = semantic.tool_context;
     if let (Some((call_id, context)), [evidence]) =
         (tool_context.as_mut(), repository_tools.as_slice())

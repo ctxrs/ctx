@@ -4,7 +4,8 @@ use anyhow::anyhow;
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
     NativeItemKey, NativeSessionKey, RepositoryBinding, RepositoryEvidence,
-    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
+    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileInvocationEvidence,
+    RepositoryFileInvocationKind, RepositoryFileInvocationTextRange, RepositoryFileObservation,
     RepositoryFileObservationKind, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
     SourceKey, SourceObservation, TypedKey, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
 };
@@ -50,6 +51,10 @@ fn binding() -> RepositoryBinding {
 }
 
 fn core_record(seed: u8, sequence: u64, body: impl Into<String>) -> CoreRecord {
+    let body = body.into();
+    let excerpt = "modified: src/lib.rs";
+    let excerpt_start = body.find(excerpt).unwrap();
+    let excerpt_end = excerpt_start + excerpt.len();
     let source = source(seed);
     let session_id = derive_session_id(SessionIdentityInput {
         source: &source,
@@ -81,6 +86,18 @@ fn core_record(seed: u8, sequence: u64, body: impl Into<String>) -> CoreRecord {
     .unwrap();
     record.role = Some("assistant".to_owned());
     record.repository_bindings = vec![binding()];
+    record.repository_file_invocation_evidence = vec![RepositoryFileInvocationEvidence {
+        operation_ordinal: 0,
+        repository_binding_id: "binding-1".to_owned(),
+        relative_path: PATH.to_owned(),
+        prior_relative_path: None,
+        kind: RepositoryFileInvocationKind::Modify,
+        tool_name: Some("apply_patch".to_owned()),
+        normalized_text_range: Some(RepositoryFileInvocationTextRange {
+            start: u32::try_from(excerpt_start).unwrap(),
+            end: u32::try_from(excerpt_end).unwrap(),
+        }),
+    }];
     record.repository_file_observations = vec![RepositoryFileObservation {
         repository_binding_id: "binding-1".to_owned(),
         relative_path: PATH.to_owned(),
@@ -234,11 +251,11 @@ fn one_strict_bounded_batch_deduplicates_ids_and_caps_citations() {
 
     assert_eq!(calls.get(), 1);
     assert_eq!(model.previews.len(), 1);
-    assert_eq!(model.previews[0].evidence_numbers, vec![1, 2, 3]);
+    assert_eq!(model.previews[0].citation_numbers, vec![1, 2, 3]);
     assert!(model
         .previews
         .iter()
-        .all(|preview| !preview.evidence_numbers.contains(&4)));
+        .all(|preview| !preview.citation_numbers.contains(&4)));
 }
 
 #[test]
@@ -350,7 +367,7 @@ fn digest_and_every_event_coordinate_mismatch_are_omitted() {
 }
 
 #[test]
-fn non_file_preview_is_rejected_without_any_core_read() {
+fn non_file_context_is_not_applicable_without_any_core_read() {
     let mut result = result(Vec::new());
     let repository = ResourceRef {
         id: "repository:ctxrs-ctx".to_owned(),

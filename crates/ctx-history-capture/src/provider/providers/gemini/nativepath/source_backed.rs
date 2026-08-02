@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+mod file_invocation;
 mod projection;
 
 use chrono::{DateTime, Utc};
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::dto::{GeminiEventBody, GeminiTranscriptLayout};
+use super::file_invocation::extract_gemini_file_invocations;
 use super::parser::{read_gemini_session_header, GeminiBorrowedRecordParser};
 use super::{
     discover_gemini_transcripts, GeminiFileObservation, GeminiScanError, GeminiSession,
@@ -36,6 +38,7 @@ use crate::{
     repository_attribution::{linked_outcome_evidence, LinkedOutcomeInput},
     CaptureError, OutputOutcome, GEMINI_CLI_SOURCE_FORMAT,
 };
+pub(super) use file_invocation::apply_gemini_file_invocation_extraction;
 use projection::{gemini_event_id, gemini_session_id, gemini_source_key, project_event};
 
 const GEMINI_SOURCE_ANCHOR_NAMESPACE: &str = "gemini.session";
@@ -423,6 +426,11 @@ fn gemini_attribution_for_event(
                 .collect::<Vec<_>>();
             let combined = combine_gemini_tool_contexts(&contexts, &event.safe_file_touches);
             apply_gemini_context(&mut input, &combined);
+            apply_gemini_file_invocation_extraction(
+                &mut input,
+                &mut adapter_abstentions,
+                extract_gemini_file_invocations(calls, &event.searchable_text),
+            );
             if combined.ambiguous_native_fields {
                 input.provider_native_context_ambiguous = true;
                 adapter_abstentions.push((
@@ -831,6 +839,12 @@ fn apply_gemini_context(
             }
         }));
 }
+
+type GeminiAdapterAbstention = (
+    RepositoryEvidenceKind,
+    RepositoryAbstentionReason,
+    &'static str,
+);
 
 fn gemini_outcome_abstentions(
     context: &GeminiToolContext,

@@ -89,6 +89,7 @@ fn previous(outcome: &GeminiScanOutcome, prior_route_still_live: bool) -> Gemini
 }
 
 mod discovery;
+mod file_invocation;
 mod paging;
 mod parsing;
 mod resume;

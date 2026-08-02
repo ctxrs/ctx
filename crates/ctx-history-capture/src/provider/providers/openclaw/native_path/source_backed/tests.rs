@@ -1,6 +1,10 @@
 use super::*;
-use ctx_history_core::{CertifiedSource, ScannedSourceCounts, SourceObservation};
+use ctx_history_core::{
+    CertifiedSource, RepositoryFileInvocationKind, ScannedSourceCounts, SourceObservation,
+};
 use ctx_history_index::{GenerationWriter, WriterOptions};
+#[cfg(unix)]
+use std::process::Command;
 
 const HISTORY: &str =
     include_str!("../../../../../../tests/fixtures/repository_attribution/openclaw-native.jsonl");
@@ -39,6 +43,19 @@ fn test_projector() -> (tempfile::TempDir, OpenClawProjector) {
             fallback_identities: FallbackEventIdentityState::default(),
         },
     )
+}
+
+#[cfg(unix)]
+fn run_git(path: &Path, arguments: &[&str]) {
+    let status = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(path)
+        .args(arguments)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {arguments:?} failed");
 }
 
 fn fallback_event_ids(bodies: &[&str]) -> Vec<StableEntityId> {
@@ -228,6 +245,30 @@ fn every_tool_call_block_projects_with_a_stable_selector() {
     assert_ne!(emitted[0].native_event_id, emitted[1].native_event_id);
     assert_eq!(emitted[0].event_sequence, 1);
     assert_eq!(emitted[1].event_sequence, 3);
+    let calls = native_tool_calls(&value);
+    let first = strict_tool_call_projection(&calls[0].block, calls[0].block_index as u64).unwrap();
+    let second = strict_tool_call_projection(&calls[1].block, calls[1].block_index as u64).unwrap();
+    let [read] = first.file_invocations.as_slice() else {
+        panic!("expected one exact read invocation");
+    };
+    let [write] = second.file_invocations.as_slice() else {
+        panic!("expected one exact write invocation");
+    };
+    assert_eq!(read.operation_ordinal, 1);
+    assert_eq!(read.tool_name.as_deref(), Some("read_file"));
+    assert_eq!(read.path, "a.rs");
+    assert_eq!(read.kind, RepositoryFileInvocationKind::Read);
+    assert_eq!(write.operation_ordinal, 3);
+    assert_eq!(write.tool_name.as_deref(), Some("write_file"));
+    assert_eq!(write.path, "b.rs");
+    assert_eq!(write.kind, RepositoryFileInvocationKind::Write);
+    for (projected, invocation) in [(&first, read), (&second, write)] {
+        let range = invocation.normalized_text_range.unwrap();
+        assert_eq!(
+            &projected.normalized_body[range.start as usize..range.end as usize],
+            projected.normalized_body
+        );
+    }
     assert!(emitted[0]
         .content
         .normalized_body
@@ -254,6 +295,208 @@ fn every_tool_call_block_projects_with_a_stable_selector() {
             .collect::<Vec<_>>(),
         replayed
     );
+}
+
+#[test]
+fn strict_tool_call_ambiguity_rename_and_overflow_abstain_without_narrowing_observations() {
+    let ambiguous = serde_json::json!({
+        "type": "toolCall",
+        "id": "ambiguous",
+        "name": "edit_file",
+        "arguments": {"path": "src/a.rs", "file_path": "src/b.rs"}
+    });
+    let ambiguous_record = serde_json::json!({
+        "message": {"content": [ambiguous.clone()]}
+    });
+    let call = native_tool_calls(&ambiguous_record).pop().unwrap();
+    assert_eq!(call.file_observations.len(), 2);
+    let projected = strict_tool_call_projection(call.block, call.block_index as u64).unwrap();
+    assert!(projected.file_invocations.is_empty());
+    assert_eq!(
+        projected.abstention,
+        Some(StrictInvocationAbstention::Opaque)
+    );
+
+    let duplicate_same = serde_json::json!({
+        "type": "toolCall",
+        "name": "edit_file",
+        "arguments": {"path": "src/a.rs", "file_path": "src/a.rs"}
+    });
+    let projected = strict_tool_call_projection(&duplicate_same, 1).unwrap();
+    assert!(projected.file_invocations.is_empty());
+    assert_eq!(
+        projected.abstention,
+        Some(StrictInvocationAbstention::Opaque)
+    );
+
+    let rename = serde_json::json!({
+        "type": "toolCall",
+        "name": "rename_file",
+        "arguments": {"oldPath": "src/old.rs", "newPath": "src/new.rs"}
+    });
+    let projected = strict_tool_call_projection(&rename, 7).unwrap();
+    let [invocation] = projected.file_invocations.as_slice() else {
+        panic!("expected one exact rename invocation");
+    };
+    assert_eq!(invocation.operation_ordinal, 7);
+    assert_eq!(invocation.path, "src/new.rs");
+    assert_eq!(invocation.prior_path.as_deref(), Some("src/old.rs"));
+    assert_eq!(invocation.kind, RepositoryFileInvocationKind::Rename);
+
+    let incomplete_rename = serde_json::json!({
+        "type": "toolCall",
+        "name": "rename_file",
+        "arguments": {"newPath": "src/new.rs"}
+    });
+    let projected = strict_tool_call_projection(&incomplete_rename, 8).unwrap();
+    assert!(projected.file_invocations.is_empty());
+    assert_eq!(
+        projected.abstention,
+        Some(StrictInvocationAbstention::Opaque)
+    );
+
+    let paths = (0..=MAX_STRICT_FILE_TARGETS)
+        .map(|index| format!("src/{index}.rs"))
+        .collect::<Vec<_>>();
+    let overflow = serde_json::json!({
+        "type": "toolCall",
+        "name": "read_file",
+        "arguments": {"files": paths}
+    });
+    let projected = strict_tool_call_projection(&overflow, 9).unwrap();
+    assert!(projected.file_invocations.is_empty());
+    assert_eq!(
+        projected.abstention,
+        Some(StrictInvocationAbstention::Capacity)
+    );
+    let overflow_record = serde_json::to_vec(&serde_json::json!({
+        "type": "message",
+        "id": "overflow-record",
+        "timestamp": "2026-07-31T12:00:00Z",
+        "message": {"role": "assistant", "content": [overflow]}
+    }))
+    .unwrap();
+    let (_temp, mut projector) = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(
+            JsonlRecordRef::for_test(&overflow_record, 0),
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
+        .unwrap();
+    let [record] = emitted.as_slice() else {
+        panic!("expected the overflowing call to remain a Core record");
+    };
+    assert!(record.repository_file_invocation_evidence.is_empty());
+    assert!(record.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::CandidateLimitExceeded
+            && abstention.detail.as_deref() == Some("openclaw_file_invocation_evidence_overflow")
+    }));
+
+    for name in [
+        "READ_FILE",
+        "Read_File",
+        "grep",
+        "glob",
+        "search",
+        "apply_patch",
+        "patch",
+    ] {
+        let projected = strict_tool_call_projection(
+            &serde_json::json!({"type": "toolCall", "name": name, "arguments": {"path": "src/no.rs"}}),
+            10,
+        )
+        .unwrap();
+        assert!(projected.file_invocations.is_empty(), "promoted {name}");
+        assert_eq!(
+            projected.abstention,
+            Some(StrictInvocationAbstention::Opaque)
+        );
+    }
+
+    let byte_overflow = serde_json::json!({
+        "type": "toolCall",
+        "name": "read_file",
+        "arguments": {"files": (0..5).map(|index| format!("{}-{index}", "x".repeat(16 * 1024 - 2))).collect::<Vec<_>>()}
+    });
+    let projected = strict_tool_call_projection(&byte_overflow, 11).unwrap();
+    assert!(projected.file_invocations.is_empty());
+    assert_eq!(
+        projected.abstention,
+        Some(StrictInvocationAbstention::Capacity)
+    );
+    assert!(strict_text_range(0, u32::MAX as usize + 1).is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn strict_tool_call_evidence_is_scoped_additively_and_selects_the_complete_call() {
+    let (temp, mut projector) = test_projector();
+    let repository = temp.path().join("repository");
+    fs::create_dir(&repository).unwrap();
+    run_git(&repository, &["init", "-q"]);
+    fs::create_dir(repository.join("src")).unwrap();
+    fs::write(repository.join("src/lib.rs"), "pub fn before() {}\n").unwrap();
+
+    let header = serde_json::to_vec(&serde_json::json!({
+        "type": "session",
+        "id": "test-session",
+        "cwd": repository,
+        "timestamp": "2026-07-31T12:00:00Z"
+    }))
+    .unwrap();
+    projector
+        .project(JsonlRecordRef::for_test(&header, 0), &mut |_| Ok(()))
+        .unwrap();
+    let call = serde_json::to_vec(&serde_json::json!({
+        "type": "message",
+        "id": "strict-call-record",
+        "timestamp": "2026-07-31T12:00:01Z",
+        "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "before"},
+            {
+                "type": "toolCall",
+                "id": "strict-call",
+                "name": "edit_file",
+                "arguments": {"path": "src/lib.rs", "replacement": "after"}
+            }
+        ]}
+    }))
+    .unwrap();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&call, 1), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    let [record] = emitted.as_slice() else {
+        panic!("expected one OpenClaw tool-call subrecord");
+    };
+    let [evidence] = record.repository_file_invocation_evidence.as_slice() else {
+        panic!("expected one scoped invocation evidence item");
+    };
+    assert_eq!(evidence.operation_ordinal, 1);
+    assert_eq!(evidence.relative_path, "src/lib.rs");
+    assert_eq!(evidence.kind, RepositoryFileInvocationKind::Modify);
+    assert_eq!(evidence.tool_name.as_deref(), Some("edit_file"));
+    let body = record.content.normalized_body.as_deref().unwrap();
+    let range = evidence.normalized_text_range.unwrap();
+    assert_eq!(&body[range.start as usize..range.end as usize], body);
+    assert_eq!(
+        record.content.structured_content.as_ref().unwrap()["arguments"]["path"],
+        "src/lib.rs"
+    );
+    assert_eq!(record.repository_file_observations.len(), 1);
+    assert_eq!(
+        record.repository_file_observations[0].kind,
+        RepositoryFileObservationKind::Modified
+    );
+    record.validate_contract().unwrap();
 }
 
 #[test]
@@ -350,6 +593,7 @@ fn running_result_is_emitted_before_continuation_state_is_checkpointed() {
         .as_deref()
         .is_some_and(|body| body.contains("partial exact output")));
     assert!(projector.running_processes.contains_key("process-1"));
+    assert!(emitted[1].repository_file_invocation_evidence.is_empty());
     assert!(encode_projector_checkpoint(&projector).is_ok());
 }
 

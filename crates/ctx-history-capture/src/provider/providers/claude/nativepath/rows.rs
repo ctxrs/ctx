@@ -4,7 +4,7 @@ use ctx_history_core::RepositoryFileObservationKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::source::ClaudeSessionKey;
+use super::{invocation_evidence::ClaudeExactFileInvocations, source::ClaudeSessionKey};
 
 // Native event ordering reserves 16 bits for subrecords within one physical
 // record, so every index from 0 through u16::MAX is representable without
@@ -65,6 +65,11 @@ pub(crate) struct ToolCallRequest {
     pub(crate) command_too_large: bool,
     pub(crate) declared_workdir: Option<String>,
     pub(crate) file_touches: Vec<ClaudeFileTouch>,
+    // Projection-only cache. Fallback event identity predates exact invocation
+    // evidence and serializes ToolCallRequest, so this must never enter that
+    // compatibility digest.
+    #[serde(skip)]
+    pub(crate) exact_file_invocations: ClaudeExactFileInvocations,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

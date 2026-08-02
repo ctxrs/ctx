@@ -2,6 +2,7 @@ use super::*;
 use crate::provider::normalization::provider_role;
 use crate::repository_attribution::{
     apply_annotation, AttributionInput, RepositoryAttributor, UnscopedFileObservation,
+    UnscopedRepositoryFileInvocationEvidence,
 };
 use ctx_history_core::RepositoryFileObservationKind;
 
@@ -177,6 +178,7 @@ fn repository_attribution_input(
     kind: OpenCodeNativeEventKind,
     activity_at_unix_ms: i64,
     file_touches: &[OpenCodeNativeFileTouch],
+    file_invocations: &[UnscopedRepositoryFileInvocationEvidence],
 ) -> AttributionInput {
     let has_tool_context = matches!(
         kind,
@@ -220,6 +222,7 @@ fn repository_attribution_input(
         session_cwd: session.directory.clone(),
         declared_tool_workdir: declared_tool_workdir.flatten(),
         command: command.flatten(),
+        repository_file_invocation_evidence: file_invocations.to_vec(),
         file_observations: file_touches
             .iter()
             .map(|touch| UnscopedFileObservation {
@@ -344,11 +347,22 @@ pub(super) fn core_record(
         source_backed_retained_event_kind(&retained.effective_type, &retained.role, &retained.body);
     let searchable =
         source_backed_retained_searchable_text(kind, &retained.effective_type, &retained.body);
-    let body = if searchable.is_empty() {
+    let lexical_body = if searchable.is_empty() {
         "OpenCode event".to_owned()
     } else {
         searchable
     };
+    let strict_tool_call = (kind == OpenCodeNativeEventKind::ToolCall)
+        .then(|| strict_tool_call_projection(&retained.body, &lexical_body))
+        .transpose()
+        .map_err(|error| {
+            CaptureError::InvalidPayload(format!(
+                "OpenCode provider-native tool call no longer serializes: {error}"
+            ))
+        })?;
+    let body = strict_tool_call
+        .as_ref()
+        .map_or(lexical_body, |projected| projected.normalized_body.clone());
     let (file_touches, _) = source_backed_retained_file_touches(kind, &retained.body);
     // Keep provider-authentic role/type evidence in the retained projection and
     // expose only the canonical role vocabulary through Core metadata.
@@ -382,13 +396,22 @@ pub(super) fn core_record(
     record.role = Some(role.as_str().to_owned());
     record.branch = session.branch.clone();
     record.cwd = session.directory.clone();
-    let attribution = repository_attributor.attribute(repository_attribution_input(
+    let mut attribution = repository_attributor.attribute(repository_attribution_input(
         session,
         &retained,
         kind,
         normalized_time,
         &file_touches,
+        strict_tool_call
+            .as_ref()
+            .map_or(&[], |projection| projection.file_invocations.as_slice()),
     ));
+    if let Some(abstention) = strict_tool_call
+        .as_ref()
+        .and_then(|projection| projection.abstention)
+    {
+        append_invocation_abstention(&mut attribution, abstention);
+    }
     apply_annotation(&mut record, attribution);
     if let Some(native_file_touches) = native_file_touches {
         record.metadata.insert(
@@ -398,4 +421,29 @@ pub(super) fn core_record(
     }
     record.validate_contract()?;
     Ok(record)
+}
+
+fn append_invocation_abstention(
+    annotation: &mut ctx_history_core::CoreRecordAnnotation,
+    abstention: StrictInvocationAbstention,
+) {
+    let (reason, detail) = match abstention {
+        StrictInvocationAbstention::Capacity => (
+            RepositoryAbstentionReason::CandidateLimitExceeded,
+            "opencode_file_invocation_evidence_overflow",
+        ),
+        StrictInvocationAbstention::Opaque => (
+            RepositoryAbstentionReason::Unsupported,
+            "opencode_file_invocation_schema_not_proven",
+        ),
+    };
+    let abstention = RepositoryAbstention {
+        evidence_kind: RepositoryEvidenceKind::FileActivity,
+        reason,
+        detail: Some(detail.to_owned()),
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    };
+    if !annotation.repository_abstentions.contains(&abstention) {
+        annotation.repository_abstentions.push(abstention);
+    }
 }

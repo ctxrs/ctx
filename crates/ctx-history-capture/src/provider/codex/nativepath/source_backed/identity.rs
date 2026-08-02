@@ -327,6 +327,7 @@ pub(super) fn codex_core_record(
             crate::repository_attribution::CommandEvidenceDisposition::Analyze
         },
         structured_content: None,
+        repository_file_invocation_evidence: Vec::new(),
         file_observations: repository_files,
         vcs_observations: Vec::new(),
         outcome_operation_repository_path,
@@ -346,7 +347,9 @@ pub(super) fn codex_core_record(
                 crate::repository_attribution::CommandEvidenceDisposition::Analyze
             },
             structured_content: None,
+            repository_file_invocation_evidence: evidence.file_invocations,
             file_observations: evidence.file_observations,
+            outcome_abstentions: evidence.abstentions,
             ..crate::repository_attribution::AttributionInput::default()
         });
         merge_repository_annotation(&mut annotation, activity);
@@ -415,6 +418,7 @@ pub(super) fn codex_core_record(
     record.repository_candidate_evidence = annotation.repository_candidate_evidence;
     record.repository_bindings = annotation.repository_bindings;
     record.repository_abstentions = annotation.repository_abstentions;
+    record.repository_file_invocation_evidence = annotation.repository_file_invocation_evidence;
     record.repository_file_observations = annotation.repository_file_observations;
     record.repository_vcs_observations = annotation.repository_vcs_observations;
     record.validate_contract()?;
@@ -463,6 +467,15 @@ fn merge_repository_annotation(
             target.repository_file_observations.push(observation);
         }
     }
+    for evidence in additional.repository_file_invocation_evidence {
+        if !target
+            .repository_file_invocation_evidence
+            .contains(&evidence)
+        {
+            target.repository_file_invocation_evidence.push(evidence);
+        }
+    }
+    target.repository_file_invocation_evidence.sort();
     for observation in additional.repository_vcs_observations {
         if !target.repository_vcs_observations.contains(&observation) {
             target.repository_vcs_observations.push(observation);

@@ -249,9 +249,7 @@ fn blame_help_explains_launch_targets_and_bounds() {
     assert!(help.contains("ctx blame [OPTIONS] <TARGET>"), "{help}");
     assert!(help.contains("ctx blame <COMMAND>"), "{help}");
     assert!(help.contains("--type <TYPE>"), "{help}");
-    assert!(help.contains("--evidence-preview"), "{help}");
-    assert!(help.contains("exact cited Codex file evidence"), "{help}");
-    assert!(help.contains("resolves to a file"), "{help}");
+    assert!(!help.contains("--evidence-preview"), "{help}");
     assert!(help.contains("possible values: file, commit, pr"), "{help}");
     assert!(help.contains("overrides auto-detection"), "{help}");
 
@@ -268,7 +266,6 @@ fn blame_help_explains_launch_targets_and_bounds() {
             .stdout
             .clone();
         let help = String::from_utf8(output).unwrap();
-        let normalized_help = help.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             help.to_ascii_lowercase()
                 .contains("logical repository identity"),
@@ -283,21 +280,11 @@ fn blame_help_explains_launch_targets_and_bounds() {
             "{args:?} help omitted the limit contract:\n{help}"
         );
         assert!(help.contains("--cursor <CURSOR>"));
-        if args.as_slice() == ["blame", "file", "--help"] {
-            assert!(help.contains("--evidence-preview"), "{args:?}:\n{help}");
-            assert!(
-                normalized_help.contains("Request exact cited Codex file evidence in human output"),
-                "{args:?}:\n{help}"
-            );
-        } else {
-            assert!(!help.contains("--evidence-preview"), "{args:?}:\n{help}");
-        }
+        assert!(!help.contains("--evidence-preview"), "{args:?}:\n{help}");
         for secret in ["generation", "project", "heuristic"] {
             assert!(!help.contains(secret), "{args:?} leaked {secret}:\n{help}");
         }
-        if args.as_slice() != ["blame", "file", "--help"] {
-            assert!(!help.contains("Codex"), "{args:?} leaked Codex:\n{help}");
-        }
+        assert!(!help.contains("Codex"), "{args:?} leaked Codex:\n{help}");
         if args.as_slice() == ["blame", "file", "--help"] {
             assert!(
                 help.contains("--lines <START[:END]>"),
@@ -373,35 +360,21 @@ fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
 }
 
 #[test]
-fn all_preview_json_conflicts_emit_exact_stable_json_before_pro_or_core_access() {
+fn removed_evidence_preview_flag_is_unknown_before_pro_or_core_access() {
     let temp = tempdir();
     let root = data_root(&temp);
-    let expected = b"{\"error\":\"invalid_request\",\"error_code\":\"invalid_request\"}\n";
     for args in [
-        &["blame", "src/lib.rs", "--evidence-preview", "--format=json"][..],
-        &["blame", "abc1234", "--evidence-preview", "--format=json"],
+        &["blame", "src/lib.rs", "--evidence-preview"][..],
+        &["blame", "abc1234", "--evidence-preview"],
         &[
             "blame",
             "42",
             "--repository",
             "forge:github.com/ctxrs/ctx",
             "--evidence-preview",
-            "--format=json",
         ],
-        &[
-            "blame",
-            "file",
-            "src/lib.rs",
-            "--evidence-preview",
-            "--format=json",
-        ],
-        &[
-            "blame",
-            "commit",
-            "abc1234",
-            "--evidence-preview",
-            "--format=json",
-        ],
+        &["blame", "file", "src/lib.rs", "--evidence-preview"],
+        &["blame", "commit", "abc1234", "--evidence-preview"],
         &[
             "blame",
             "pr",
@@ -409,17 +382,17 @@ fn all_preview_json_conflicts_emit_exact_stable_json_before_pro_or_core_access()
             "--repository",
             "forge:github.com/ctxrs/ctx",
             "--evidence-preview",
-            "--format=json",
         ],
     ] {
         let output = ctx(&temp).args(args).output().unwrap();
         assert!(!output.status.success(), "{args:?}");
         assert!(output.stdout.is_empty(), "{args:?}");
-        assert_eq!(output.stderr, expected, "{args:?}");
         assert!(!output.stderr.contains(&0x1b), "{args:?}");
-        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
-        assert_eq!(error["error"], "invalid_request", "{args:?}");
-        assert_eq!(error["error_code"], "invalid_request", "{args:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("unexpected argument '--evidence-preview'"),
+            "{args:?}: {stderr}"
+        );
         assert!(
             !root.exists(),
             "rejected {args:?} created {}",

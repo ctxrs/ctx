@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::Value;
 
-fn initialize_repository(path: &Path) {
+pub(super) fn initialize_repository(path: &Path) {
     use std::process::Command;
 
     fs::create_dir(path).unwrap();
@@ -89,7 +89,7 @@ fn running_result(call_id: &str, cell_id: &str) -> String {
     )
 }
 
-fn outcome_for_sequence(
+pub(super) fn outcome_for_sequence(
     index: &VerifiedIndex,
     session_id: StableEntityId,
     sequence: u64,

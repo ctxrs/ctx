@@ -13,7 +13,8 @@ pub use repository::{
     GitObjectFormat, GitObjectId, RepositoryAbstention, RepositoryAbstentionReason,
     RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryCandidate,
     RepositoryCandidateEvidence, RepositoryCandidateKind, RepositoryEvidence,
-    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
+    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileInvocationEvidence,
+    RepositoryFileInvocationKind, RepositoryFileInvocationTextRange, RepositoryFileObservation,
     RepositoryFileObservationKind, RepositoryLocalRootAuthorization, RepositoryObjectReplacement,
     RepositoryOutcomeKind, RepositoryOutcomeLinkage, RepositoryOutcomeObservation,
     RepositoryPullRequestIdentity, RepositoryVcsObservation, RepositoryVcsObservationKind,
@@ -26,7 +27,7 @@ use validation::{
 pub const CORE_RECORD_VERSION: u32 = 1;
 pub const CORE_NORMALIZATION_REVISION: u32 = 1;
 pub const CORE_CONTENT_POLICY_REVISION: u32 = 2;
-pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 6;
+pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 7;
 pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 2;
 pub const CORE_BOUNDED_SHELL_SUBSET_REVISION: u32 = 1;
 pub const CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION: u32 = 3;
@@ -146,7 +147,7 @@ pub enum CoreRecordError {
     InvalidMetadata,
     #[error("Core record repository identity {field} is duplicated: {value}")]
     DuplicateRepositoryIdentity { field: &'static str, value: String },
-    #[error("Core record repository observation names unknown binding {0}")]
+    #[error("Core record repository evidence names unknown binding {0}")]
     UnknownRepositoryBinding(String),
     #[error("repository path is not canonical repository-relative data: {0}")]
     InvalidRepositoryRelativePath(String),
@@ -160,6 +161,10 @@ pub enum CoreRecordError {
     InvalidRepositoryOutcome,
     #[error("repository candidate evidence is not strictly sorted and unique")]
     NonCanonicalRepositoryCandidateEvidence,
+    #[error("repository file invocation evidence is not strictly sorted and unique")]
+    NonCanonicalRepositoryFileInvocationEvidence,
+    #[error("repository file invocation evidence has an invalid shape or text range")]
+    InvalidRepositoryFileInvocationEvidence,
 }
 
 /// Complete normalized content retained under one explicit product policy.
@@ -218,6 +223,9 @@ pub struct CoreRecord {
     pub repository_candidate_evidence: RepositoryCandidateEvidence,
     pub repository_bindings: Vec<RepositoryBinding>,
     pub repository_abstentions: Vec<RepositoryAbstention>,
+    /// Certified provider-native request intent, distinct from file effects.
+    #[serde(default)]
+    pub repository_file_invocation_evidence: Vec<RepositoryFileInvocationEvidence>,
     pub repository_file_observations: Vec<RepositoryFileObservation>,
     pub repository_vcs_observations: Vec<RepositoryVcsObservation>,
 }
@@ -233,6 +241,7 @@ pub struct CoreRecordAnnotation {
     pub repository_candidate_evidence: RepositoryCandidateEvidence,
     pub repository_bindings: Vec<RepositoryBinding>,
     pub repository_abstentions: Vec<RepositoryAbstention>,
+    pub repository_file_invocation_evidence: Vec<RepositoryFileInvocationEvidence>,
     pub repository_file_observations: Vec<RepositoryFileObservation>,
     pub repository_vcs_observations: Vec<RepositoryVcsObservation>,
 }
@@ -342,6 +351,7 @@ impl CoreRecord {
             repository_candidate_evidence: RepositoryCandidateEvidence::default(),
             repository_bindings: Vec::new(),
             repository_abstentions: Vec::new(),
+            repository_file_invocation_evidence: Vec::new(),
             repository_file_observations: Vec::new(),
             repository_vcs_observations: Vec::new(),
         };
@@ -458,6 +468,8 @@ impl CoreRecord {
                 binding
             })
             .collect();
+        self.repository_file_invocation_evidence =
+            prior.repository_file_invocation_evidence.clone();
         self.repository_file_observations = prior.repository_file_observations.clone();
         self.repository_vcs_observations = prior.repository_vcs_observations.clone();
         let evidence_kind = self
@@ -503,6 +515,11 @@ impl CoreRecord {
             MAX_REPOSITORY_ITEMS,
         )?;
         validate_count(
+            "repository_file_invocation_evidence",
+            self.repository_file_invocation_evidence.len(),
+            MAX_REPOSITORY_OBSERVATIONS,
+        )?;
+        validate_count(
             "repository_file_observations",
             self.repository_file_observations.len(),
             MAX_REPOSITORY_OBSERVATIONS,
@@ -525,6 +542,21 @@ impl CoreRecord {
         }
         for abstention in &self.repository_abstentions {
             abstention.validate_contract()?;
+        }
+        if self
+            .repository_file_invocation_evidence
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(CoreRecordError::NonCanonicalRepositoryFileInvocationEvidence);
+        }
+        for evidence in &self.repository_file_invocation_evidence {
+            evidence.validate_contract(self.content.normalized_body.as_deref())?;
+            if !binding_ids.contains(evidence.repository_binding_id.as_str()) {
+                return Err(CoreRecordError::UnknownRepositoryBinding(
+                    evidence.repository_binding_id.clone(),
+                ));
+            }
         }
         for observation in &self.repository_file_observations {
             observation.validate_contract()?;
