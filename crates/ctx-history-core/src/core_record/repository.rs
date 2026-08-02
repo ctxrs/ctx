@@ -111,8 +111,8 @@ impl RepositoryBinding {
         let aliases_match = self
             .aliases
             .iter()
-            .all(|alias| repository_alias_identity_matches(alias, &pull_request.forge_repository));
-        aliases_match && (logical_forge_matches == Some(true) || !self.aliases.is_empty())
+            .any(|alias| repository_alias_identity_matches(alias, &pull_request.forge_repository));
+        logical_forge_matches == Some(true) || (logical_forge_matches.is_none() && aliases_match)
     }
 }
 

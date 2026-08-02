@@ -156,11 +156,11 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     assert_eq!(
         canonical["core_record_contract"],
         serde_json::json!({
-            "fingerprint": "931172482d0ee38770bc21b173bfd0c304c2d1d8e0dfa0c51b2654ec2134a7e7",
+            "fingerprint": "4b98a0de80615ce7742d79622dc5743482d3ed4a8c7b48a002cdb681fd39c7a0",
             "repository_contract_revision": 7,
             "repository_observation_revision": 2,
             "bounded_shell_subset_revision": 1,
-            "repository_association_policy_revision": 3,
+            "repository_association_policy_revision": 4,
             "repository_outcome_capture_revision": 2,
             "repository_local_root_authorization_fingerprint_revision": 1,
             "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs",
@@ -177,7 +177,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     let evidence =
         &envelope["message"]["body"]["page"]["deltas"][0]["value"]["repository_candidate_evidence"];
     assert_eq!(evidence["repository_observation_revision"], 2);
-    assert_eq!(evidence["association_policy_revision"], 3);
+    assert_eq!(evidence["association_policy_revision"], 4);
     assert_eq!(evidence["outcome_capture_revision"], 2);
     assert_eq!(
         evidence["candidates"],

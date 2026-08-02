@@ -53,7 +53,6 @@ pub(super) enum CandidateKind {
 pub(super) enum ProbeFailure {
     Missing,
     Unsafe(&'static str),
-    AmbiguousRemote,
     Failed(&'static str),
     ConcurrentDrift,
     ConflictingEventTimeIdentity,
@@ -582,7 +581,7 @@ impl GitSnapshot {
                 &worktree_fingerprint,
             ])
         );
-        let logical_repository_id = self.aliases.first().map_or_else(
+        let logical_repository_id = single_logical_alias(&self.aliases).map_or_else(
             || {
                 format!(
                     "local:{}",
@@ -635,6 +634,18 @@ impl GitSnapshot {
             mutable_evidence_state: self.mutable_evidence_state,
         })
     }
+}
+
+fn single_logical_alias(aliases: &[RepositoryAlias]) -> Option<&RepositoryAlias> {
+    let first = aliases.first()?;
+    aliases
+        .iter()
+        .all(|alias| {
+            alias.host.eq_ignore_ascii_case(&first.host)
+                && alias.namespace == first.namespace
+                && alias.name == first.name
+        })
+        .then_some(first)
 }
 
 impl CertifiedCandidate {
