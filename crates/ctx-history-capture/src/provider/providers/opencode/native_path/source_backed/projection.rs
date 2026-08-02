@@ -234,9 +234,45 @@ fn repository_attribution_input(
 
 pub(super) fn decode_source_event_row(
     row: &Row<'_>,
-    _schema: &OpenCodeNativeSchema,
+    schema: &OpenCodeNativeSchema,
     dialect: &OpenCodeSqliteDialect,
 ) -> OpenCodeSourceBackedResult<SourceEventRow> {
+    match row.get::<_, i64>(13)? {
+        0 => {}
+        1 => {
+            return Err(CaptureError::InvalidPayload(format!(
+                "OpenCode NativePath {} contains an unsafe native identity/order key",
+                schema.family.event_table()
+            ))
+            .into())
+        }
+        2 => {
+            return Err(CaptureError::InvalidPayload(
+                "OpenCode NativePath part.message_id is not a safe native relationship key"
+                    .to_owned(),
+            )
+            .into())
+        }
+        3 => {
+            return Err(CaptureError::InvalidPayload(format!(
+                "OpenCode NativePath {} contains a non-integer native ordering value",
+                schema.family.event_table()
+            ))
+            .into())
+        }
+        4 => {
+            return Err(CaptureError::InvalidPayload(
+                "OpenCode NativePath message parent identity/order rows are unsafe".to_owned(),
+            )
+            .into())
+        }
+        _ => {
+            return Err(CaptureError::SystemInvariant(
+                "OpenCode source-backed row returned an unknown native validation code",
+            )
+            .into())
+        }
+    }
     let native_identity: String = row.get(0)?;
     let message_identity: String = row.get(1)?;
     let session_identity: String = row.get(2)?;
@@ -248,17 +284,32 @@ pub(super) fn decode_source_event_row(
     let content_bytes = u64::try_from(row.get::<_, i64>(8)?).map_err(|_| {
         CaptureError::InvalidPayload("OpenCode-family content byte count is negative".to_owned())
     })?;
-    let mut projection_bytes: Vec<u8> = row.get(9)?;
-    let has_explicit_event_time: i64 = row.get(10)?;
-    if has_explicit_event_time == 0 {
+    let column_type: String = row.get(9)?;
+    let source_data = SqliteSourceValue::from_ref(row.get_ref(12)?);
+    let parent_source_data = SqliteSourceValue::from_ref(row.get_ref(14)?);
+    let (mut projection, has_explicit_event_time) = project_sqlite_json(
+        &source_data,
+        &parent_source_data,
+        &column_type,
+        schema.family,
+        dialect,
+    );
+    let relationship_code = row.get::<_, i64>(15)?;
+    if !has_explicit_event_time {
         if let Err(error) = provider_required_timestamp_millis(
             time_created,
             dialect.session_message_time_created_field,
         ) {
-            projection_bytes = encode_rejection_reason(error.to_string());
+            projection = OpenCodeJsonProjection::RejectedWithReason(
+                OpenCodeNativeRejectionKind::InvalidTimestamp,
+                error.to_string(),
+            );
         }
     }
-    let projection = decode_projection(&projection_bytes)?;
+    // Relationship failures are the outermost fail-closed classification in
+    // the provider contract. Preserve that precedence even when malformed
+    // payload or timestamp evidence is present in the same unsafe row.
+    projection = apply_relationship_rejection(projection, relationship_code)?;
     Ok(SourceEventRow {
         native_order: source_backed_decode_order(
             order_tag,
@@ -275,9 +326,93 @@ pub(super) fn decode_source_event_row(
         time_updated,
         content_bytes,
         projection,
-        projection_bytes,
-        source_data: SqliteSourceValue::from_ref(row.get_ref(12)?),
+        source_data,
+        parent_source_data,
     })
+}
+
+fn apply_relationship_rejection(
+    projection: OpenCodeJsonProjection,
+    relationship_code: i64,
+) -> OpenCodeSourceBackedResult<OpenCodeJsonProjection> {
+    Ok(match relationship_code {
+        0 => projection,
+        1 => OpenCodeJsonProjection::Rejected(OpenCodeNativeRejectionKind::MissingSession),
+        2 => OpenCodeJsonProjection::Rejected(OpenCodeNativeRejectionKind::MissingMessage),
+        3 => OpenCodeJsonProjection::Rejected(
+            OpenCodeNativeRejectionKind::SessionRelationshipMismatch,
+        ),
+        _ => {
+            return Err(CaptureError::SystemInvariant(
+                "OpenCode source-backed row returned an unknown relationship code",
+            )
+            .into())
+        }
+    })
+}
+
+fn project_sqlite_json(
+    source_data: &SqliteSourceValue,
+    parent_source_data: &SqliteSourceValue,
+    column_type: &str,
+    family: OpenCodeNativeSchemaFamily,
+    dialect: &OpenCodeSqliteDialect,
+) -> (OpenCodeJsonProjection, bool) {
+    let Some(source_bytes) = source_data.exact_text() else {
+        return (
+            OpenCodeJsonProjection::Rejected(OpenCodeNativeRejectionKind::UnsupportedStorageClass),
+            false,
+        );
+    };
+    if source_bytes.len() > MAX_PROVIDER_SQLITE_VALUE_BYTES {
+        return (
+            OpenCodeJsonProjection::Rejected(OpenCodeNativeRejectionKind::OversizedRetainedContent),
+            false,
+        );
+    }
+    let Ok(source_text) = std::str::from_utf8(source_bytes) else {
+        return (
+            super::super::json::malformed_json_projection(column_type),
+            false,
+        );
+    };
+    let parent_text = if family == OpenCodeNativeSchemaFamily::MessagePart {
+        let Some(parent_bytes) = parent_source_data.exact_text() else {
+            return (
+                OpenCodeJsonProjection::Rejected(
+                    OpenCodeNativeRejectionKind::UnsupportedStorageClass,
+                ),
+                false,
+            );
+        };
+        if parent_bytes.len() > MAX_PROVIDER_SQLITE_VALUE_BYTES {
+            return (
+                OpenCodeJsonProjection::Rejected(
+                    OpenCodeNativeRejectionKind::OversizedRetainedContent,
+                ),
+                false,
+            );
+        }
+        let Ok(parent_text) = std::str::from_utf8(parent_bytes) else {
+            return (
+                super::super::json::malformed_json_projection(column_type),
+                false,
+            );
+        };
+        Some(parent_text)
+    } else {
+        None
+    };
+    let mut has_explicit_event_time = false;
+    let projection = super::super::json::project_json(
+        source_text,
+        column_type,
+        parent_text,
+        family,
+        dialect,
+        &mut has_explicit_event_time,
+    );
+    (projection, has_explicit_event_time)
 }
 
 pub(super) fn retained_projection(
@@ -398,4 +533,32 @@ pub(super) fn core_record(
     }
     record.validate_contract()?;
     Ok(record)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relationship_rejection_precedes_payload_and_timestamp_rejections() {
+        let invalid_timestamp = OpenCodeJsonProjection::RejectedWithReason(
+            OpenCodeNativeRejectionKind::InvalidTimestamp,
+            "bad timestamp".to_owned(),
+        );
+
+        assert!(matches!(
+            apply_relationship_rejection(invalid_timestamp.clone(), 1).unwrap(),
+            OpenCodeJsonProjection::Rejected(OpenCodeNativeRejectionKind::MissingSession)
+        ));
+        assert!(matches!(
+            apply_relationship_rejection(invalid_timestamp.clone(), 2).unwrap(),
+            OpenCodeJsonProjection::Rejected(OpenCodeNativeRejectionKind::MissingMessage)
+        ));
+        assert!(matches!(
+            apply_relationship_rejection(invalid_timestamp, 3).unwrap(),
+            OpenCodeJsonProjection::Rejected(
+                OpenCodeNativeRejectionKind::SessionRelationshipMismatch
+            )
+        ));
+    }
 }

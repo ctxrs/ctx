@@ -64,6 +64,10 @@ fn write_current_schema(
                  time_updated integer not null,
                  data text not null
              );
+             create index message_session_time_created_id_idx
+                 on message(session_id, time_created, id);
+             create index part_message_id_id_idx on part(message_id, id);
+             create index part_session_idx on part(session_id);
              create table event (
                  id text primary key,
                  aggregate_id text not null,
@@ -372,6 +376,85 @@ fn create_indexed_synthetic_fixture(path: &Path, rows: i64) {
     transaction.commit().unwrap();
 }
 
+fn create_indexed_message_part_fixture(path: &Path, rows: i64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "create table session (
+                 id text primary key,
+                 parent_id text,
+                 directory text,
+                 branch text,
+                 agent text,
+                 time_created integer not null,
+                 time_updated integer not null
+             );
+             create table session_message (
+                 id text primary key,
+                 session_id text not null,
+                 type text not null,
+                 seq integer not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create table message (
+                 id text primary key,
+                 session_id text not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create table part (
+                 id text primary key,
+                 message_id text not null,
+                 session_id text not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create index message_session_time_created_id_idx
+                 on message(session_id, time_created, id);
+             create index part_message_id_id_idx on part(message_id, id);
+             create index part_session_idx on part(session_id);
+             insert into session values (
+                 'session-1', null, '/tmp/project', 'main', 'build', 0, 0
+             );",
+        )
+        .unwrap();
+    let transaction = connection.transaction().unwrap();
+    for sequence in 0..rows {
+        let message_id = format!("message-{sequence:08}");
+        transaction
+            .execute(
+                "insert into message values (?1, 'session-1', ?2, ?2, ?3)",
+                params![
+                    message_id,
+                    sequence,
+                    json!({"role": "user", "time": {"created": sequence}}).to_string()
+                ],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "insert into part values (?1, ?2, 'session-1', ?3, ?3, ?4)",
+                params![
+                    format!("part-{sequence:08}"),
+                    message_id,
+                    sequence,
+                    json!({
+                        "type": "text",
+                        "text": format!("synthetic current OpenCode part {sequence}")
+                    })
+                    .to_string()
+                ],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+}
+
 #[test]
 fn admitted_opencode_backup_stays_stable_across_later_wal_commit_and_next_open_advances() {
     let temp = crate::test_support_paths::tempdir().unwrap();
@@ -477,16 +560,13 @@ fn indexed_synthetic_cold_and_changed_use_one_snapshot_and_one_logical_row_trave
 
     let connection = Connection::open(&database).unwrap();
     let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
-    register_projection_function(&connection, dialect).unwrap();
     let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
     let mut sql = source_backed_event_sql(&schema);
     sql.push_str(source_backed_event_order_sql(&schema));
     let plan = connection
         .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
         .unwrap()
-        .query_map([MAX_PROVIDER_SQLITE_VALUE_BYTES as i64], |row| {
-            row.get::<_, String>(3)
-        })
+        .query_map([], |row| row.get::<_, String>(3))
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
@@ -516,6 +596,7 @@ fn indexed_synthetic_cold_and_changed_use_one_snapshot_and_one_logical_row_trave
     assert_eq!(cold.snapshot_opens, 1);
     assert_eq!(cold.logical_online_backup_opens, 1);
     assert_eq!(cold.schema_probe_passes, 1);
+    assert_eq!(cold.schema_event_validation_traversals, 3);
     assert_eq!(cold.logical_fingerprint_passes, 0);
     assert_eq!(cold.logical_row_traversals, 1);
     assert_eq!(cold.projection_passes, 1);
@@ -555,6 +636,225 @@ fn indexed_synthetic_cold_and_changed_use_one_snapshot_and_one_logical_row_trave
     assert_eq!(changed.projection_passes, 1);
     assert_eq!(changed.logical_rows_projected, ROWS + 1);
     assert_eq!(changed.documents_staged, ROWS + 1);
+}
+
+#[test]
+fn indexed_message_part_cold_scan_preserves_chronology_with_bounded_message_sort() {
+    const ROWS: u64 = 4_096;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_message_part_fixture(&database, ROWS as i64);
+
+    let connection = Connection::open(&database).unwrap();
+    let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+    let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
+    assert_eq!(schema.family, OpenCodeNativeSchemaFamily::MessagePart);
+    assert!(schema.message_part_indexed_streaming);
+    let mut sql = source_backed_event_sql(&schema);
+    sql.push_str(source_backed_event_order_sql(&schema));
+    let plan = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("message_session_time_created_id_idx")),
+        "indexed current-schema query did not use the message stream index: {plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("part_message_id_id_idx")),
+        "indexed current-schema query did not use the part stream index: {plan:?}"
+    );
+    assert!(
+        plan.iter().all(|step| {
+            !step.contains("USE TEMP B-TREE")
+                || step.contains("RIGHT PART OF ORDER BY")
+                || step.contains("LAST 2 TERMS OF ORDER BY")
+        }),
+        "indexed current-schema query materialized the full corpus: {plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .all(|step| { !step.contains("CORRELATED") && !step.contains("VIRTUAL TABLE") }),
+        "indexed current-schema query repeated JSON-tree traversal in SQLite: {plan:?}"
+    );
+    drop(connection);
+
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let source = provider_source_for_path(CaptureProvider::OpenCode, database);
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        &data_root,
+    )
+    .unwrap();
+
+    let cold = refresh_fixture_with_work(&index_root, &registry);
+    assert_eq!(cold.snapshot_opens, 1);
+    assert_eq!(cold.logical_online_backup_opens, 1);
+    assert_eq!(cold.schema_probe_passes, 1);
+    assert_eq!(cold.schema_event_validation_traversals, 2);
+    assert_eq!(cold.logical_fingerprint_passes, 0);
+    assert_eq!(cold.logical_row_traversals, 1);
+    assert_eq!(cold.projection_passes, 1);
+    assert_eq!(cold.logical_rows_projected, ROWS);
+    assert_eq!(cold.documents_staged, ROWS);
+    assert_eq!(cold.max_buffered_documents, 1);
+}
+
+#[test]
+fn partial_or_incompatible_part_indexes_do_not_enable_unqualified_streaming() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_message_part_fixture(&database, 8);
+    let connection = Connection::open(&database).unwrap();
+    let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+
+    connection
+        .execute_batch(
+            "drop index part_message_id_id_idx;
+             create index partial_part_message_id_id_idx on part(message_id, id)
+                 where message_id <> '';",
+        )
+        .unwrap();
+    let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
+    assert!(!schema.message_part_indexed_streaming);
+
+    connection
+        .execute_batch(
+            "drop index partial_part_message_id_id_idx;
+             create index nocase_part_message_id_id_idx
+                 on part(message_id collate nocase, id);",
+        )
+        .unwrap();
+    let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
+    assert!(!schema.message_part_indexed_streaming);
+
+    connection
+        .execute_batch(
+            "drop index nocase_part_message_id_id_idx;
+             create index descending_part_message_id_id_idx
+                 on part(message_id desc, id);",
+        )
+        .unwrap();
+    let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
+    assert!(!schema.message_part_indexed_streaming);
+}
+
+#[test]
+fn message_part_v5_order_is_independent_of_index_presence() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("opencode.sqlite");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "text", "text": "later assistant part"}),
+    );
+    connection
+        .execute(
+            "insert into part values (
+                 'current-user-part', 'current-user', 'current-session',
+                 1782259200000, 1782259200000, ?1
+             )",
+            [json!({"type": "text", "text": "earlier user part"}).to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into part values (
+                 'part-z-early', 'current-assistant', 'current-session',
+                 1782259201001, 1782259201001, ?1
+             )",
+            [json!({"type": "text", "text": "earlier nonlexical part"}).to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into part values (
+                 'part-a-late', 'current-assistant', 'current-session',
+                 1782259201002, 1782259201002, ?1
+             )",
+            [json!({"type": "text", "text": "later nonlexical part"}).to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let (_, _, indexed) = scan_current_schema(&database);
+    let indexed_order = indexed
+        .iter()
+        .map(|record| {
+            (
+                record.event_sequence,
+                record.content.normalized_body.clone().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        indexed_order,
+        vec![
+            (0, "earlier user part".to_owned()),
+            (1, "later assistant part".to_owned()),
+            (2, "earlier nonlexical part".to_owned()),
+            (3, "later nonlexical part".to_owned()),
+        ]
+    );
+
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute("drop index part_message_id_id_idx", [])
+        .unwrap();
+    drop(connection);
+    let (_, _, unindexed) = scan_current_schema(&database);
+    let unindexed_order = unindexed
+        .iter()
+        .map(|record| {
+            (
+                record.event_sequence,
+                record.content.normalized_body.clone().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(unindexed_order, indexed_order);
+}
+
+#[test]
+fn unsafe_unreferenced_message_fails_with_complete_or_partial_part_index() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_message_part_fixture(&database, 8);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "insert into message values (
+                 'unreferenced', 'session-1', 'not-an-integer', 99, '{}'
+             )",
+            [],
+        )
+        .unwrap();
+    let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+    let indexed_error = OpenCodeNativeSchema::probe(&connection, dialect).unwrap_err();
+    assert!(indexed_error
+        .to_string()
+        .contains("message parent identity/order rows are unsafe"));
+
+    connection
+        .execute_batch(
+            "drop index part_message_id_id_idx;
+             create index partial_part_message_id_id_idx on part(message_id, id)
+                 where message_id <> '';",
+        )
+        .unwrap();
+    let partial_error = OpenCodeNativeSchema::probe(&connection, dialect).unwrap_err();
+    assert!(partial_error
+        .to_string()
+        .contains("message parent identity/order rows are unsafe"));
 }
 
 #[test]

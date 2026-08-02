@@ -19,11 +19,11 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    json::{
-        decode_projection, encode_rejection_reason, register_projection_function,
-        OpenCodeJsonProjection, OpenCodeRetainedJson,
+    json::{OpenCodeJsonProjection, OpenCodeRetainedJson},
+    model::{
+        OpenCodeNativeEventKind, OpenCodeNativeFileTouch, OpenCodeNativeRejectionKind,
+        OpenCodeNativeSchemaFamily,
     },
-    model::{OpenCodeNativeEventKind, OpenCodeNativeFileTouch, OpenCodeNativeSchemaFamily},
     query::{
         source_backed_decode_order, source_backed_event_order_sql, source_backed_event_sql,
         source_backed_native_record_identity,
@@ -45,7 +45,7 @@ use crate::{
 
 const SOURCE_ANCHOR_KEY: &str = "active-database";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const PARSER_REVISION: &str = "opencode-family-source-backed-v4-repository-attribution";
+const PARSER_REVISION: &str = "opencode-family-source-backed-v5-indexed-message-part-streaming";
 const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
@@ -188,8 +188,8 @@ struct SourceEventRow {
     time_updated: i64,
     content_bytes: u64,
     projection: OpenCodeJsonProjection,
-    projection_bytes: Vec<u8>,
     source_data: SqliteSourceValue,
+    parent_source_data: SqliteSourceValue,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -258,7 +258,6 @@ fn scan_pinned_source(
 ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
     let working = {
         let connection = sqlite_snapshot.connection()?;
-        register_projection_function(connection, dialect)?;
         let sessions = load_sessions(connection, &observation.schema, &observation.source)?;
         emit(OpenCodeScanOutput::Begin(observation.source.clone()))?;
         let streamed = stream_logical_rows(
@@ -322,17 +321,34 @@ fn stream_logical_rows(
     hash_sessions(&mut hasher, sessions);
     let mut sql = source_backed_event_sql(schema);
     sql.push_str(source_backed_event_order_sql(schema));
-    let max_json_bytes = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
-        .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
     let mut statement = connection.prepare(&sql)?;
-    let mut rows = statement.query([max_json_bytes])?;
+    let mut rows = statement.query([])?;
     let mut counts = ScannedSourceCounts::default();
-    let mut sequence_session = None::<String>;
-    let mut next_session_sequence = 0_u64;
+    let mut next_session_sequences = BTreeMap::<String, u64>::new();
+    let mut previous_explicit_order = None::<(String, i64)>;
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
 
     while let Some(row) = rows.next()? {
         let event = decode_source_event_row(row, schema, dialect)?;
+        if let super::model::OpenCodeNativeOrder::ExplicitSequence {
+            session_id,
+            sequence,
+            ..
+        } = &event.native_order
+        {
+            if previous_explicit_order.as_ref().is_some_and(
+                |(previous_session, previous_sequence)| {
+                    previous_session == session_id && previous_sequence == sequence
+                },
+            ) {
+                return Err(CaptureError::InvalidPayload(
+                    "OpenCode NativePath explicit session_message sequence is not unique"
+                        .to_owned(),
+                )
+                .into());
+            }
+            previous_explicit_order = Some((session_id.clone(), *sequence));
+        }
         hash_source_event(&mut hasher, &event);
         counts.complete_records = checked_add(counts.complete_records, 1)?;
         counts.certified_bytes = checked_add(counts.certified_bytes, event.content_bytes)?;
@@ -356,20 +372,9 @@ fn stream_logical_rows(
         let session = sessions.get(&event.session_identity).ok_or_else(|| {
             OpenCodeSourceBackedError::MissingSession(event.session_identity.clone())
         })?;
-        if sequence_session.as_deref() != Some(event.session_identity.as_str()) {
-            if sequence_session
-                .as_deref()
-                .is_some_and(|previous| previous.as_bytes() >= event.session_identity.as_bytes())
-            {
-                return Err(OpenCodeSourceBackedError::Capture(
-                    CaptureError::SystemInvariant(
-                        "OpenCode source-backed rows are not ordered by session identity",
-                    ),
-                ));
-            }
-            sequence_session = Some(event.session_identity.clone());
-            next_session_sequence = 0;
-        }
+        let next_session_sequence = next_session_sequences
+            .entry(event.session_identity.clone())
+            .or_default();
         let document = core_record(
             source,
             schema.family,
@@ -377,7 +382,7 @@ fn stream_logical_rows(
             session,
             event,
             retained,
-            &mut next_session_sequence,
+            next_session_sequence,
             &mut repository_attributor,
         )?;
         emit(OpenCodeScanOutput::Document(document))?;
@@ -415,7 +420,7 @@ fn load_sessions(
                            or typeof(time_updated) <> 'integer'
                            or {parent_invalid}
                      then 1 else 0 end
-         from session order by cast(id as text)"
+         from session order by id collate binary"
     );
     let mut statement = connection.prepare(&sql)?;
     let mut rows = statement.query([])?;
@@ -613,8 +618,51 @@ fn hash_source_event(hasher: &mut Sha256, event: &SourceEventRow) {
         ProjectionDisposition::Rejected => 2,
         ProjectionDisposition::Ignored => 3,
     }]);
-    hash_bytes(hasher, &event.projection_bytes);
+    hash_projection(hasher, &event.projection);
     event.source_data.hash_into(hasher);
+    event.parent_source_data.hash_into(hasher);
+}
+
+fn hash_projection(hasher: &mut Sha256, projection: &OpenCodeJsonProjection) {
+    match projection {
+        OpenCodeJsonProjection::Retained(retained) => {
+            hasher.update([1]);
+            hash_str(hasher, &retained.effective_type);
+            hash_str(hasher, &retained.role);
+        }
+        OpenCodeJsonProjection::Output(output) => {
+            hasher.update([2]);
+            if let Some(diagnostic) = &output.diagnostic {
+                hasher.update([1]);
+                hash_str(hasher, &diagnostic.effective_type);
+                hash_str(hasher, &diagnostic.role);
+            } else {
+                hasher.update([0]);
+            }
+        }
+        OpenCodeJsonProjection::ExcludedOutput => hasher.update([3]),
+        OpenCodeJsonProjection::Rejected(kind) => {
+            hasher.update([4, rejection_kind_tag(*kind)]);
+        }
+        OpenCodeJsonProjection::RejectedWithReason(kind, reason) => {
+            hasher.update([5, rejection_kind_tag(*kind)]);
+            hash_str(hasher, reason);
+        }
+    }
+}
+
+fn rejection_kind_tag(kind: OpenCodeNativeRejectionKind) -> u8 {
+    match kind {
+        OpenCodeNativeRejectionKind::MalformedJson => 1,
+        OpenCodeNativeRejectionKind::MalformedResultJson => 2,
+        OpenCodeNativeRejectionKind::UnsupportedStorageClass => 3,
+        OpenCodeNativeRejectionKind::OversizedRetainedContent => 4,
+        OpenCodeNativeRejectionKind::MissingSession => 5,
+        OpenCodeNativeRejectionKind::MissingMessage => 6,
+        OpenCodeNativeRejectionKind::SessionRelationshipMismatch => 7,
+        OpenCodeNativeRejectionKind::UnknownRecordType => 8,
+        OpenCodeNativeRejectionKind::InvalidTimestamp => 9,
+    }
 }
 
 fn hash_native_order(hasher: &mut Sha256, order: &super::model::OpenCodeNativeOrder) {

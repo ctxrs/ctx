@@ -69,6 +69,7 @@ pub(super) struct OpenCodeSqliteWorkCounters {
     pub(super) logical_online_backup_opens: u64,
     pub(super) source_bytes_copied: u64,
     pub(super) schema_probe_passes: u64,
+    pub(super) schema_event_validation_traversals: u64,
     pub(super) logical_fingerprint_passes: u64,
     pub(super) logical_row_traversals: u64,
     pub(super) projection_passes: u64,
@@ -277,6 +278,7 @@ fn observe_present_document_tree(
     let replay_from_frontier = authorized
         .sqlite_snapshot
         .admitted_revision_is_replay_safe();
+    let schema_event_validation_traversals = observation.schema.event_validation_traversals;
     let tree_fingerprint = leaf_fingerprint.as_bytes();
     Ok(CompleteDocumentTree::new(
         tree_fingerprint,
@@ -290,6 +292,7 @@ fn observe_present_document_tree(
                 terminal_revalidate,
                 work: Mutex::new(OpenCodeSqliteWorkCounters {
                     schema_probe_passes: 1,
+                    schema_event_validation_traversals,
                     ..OpenCodeSqliteWorkCounters::default()
                 }),
             },
@@ -390,6 +393,8 @@ fn finalize_work_counters(
         || counters.max_active_snapshots != 1
         || counters.projection_passes + counters.exact_replays != 1
         || counters.max_buffered_documents > 1
+        || (leaf.observation.schema.message_part_indexed_streaming
+            && counters.schema_event_validation_traversals != 2)
         || (exact_replay
             && (counters.projection_passes != 0
                 || counters.logical_row_traversals != 0

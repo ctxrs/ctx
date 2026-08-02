@@ -1,8 +1,8 @@
 use super::*;
 
-pub(super) fn project_output(body: &Value, effective_type: &str) -> Vec<u8> {
+pub(super) fn project_output(body: &Value, effective_type: &str) -> OpenCodeJsonProjection {
     let aggregate = collect_outcome(body);
-    encode_output(OutputWire {
+    OpenCodeJsonProjection::Output(OpenCodeOutputJson {
         diagnostic: output_diagnostic(body, effective_type, &aggregate),
     })
 }
@@ -11,7 +11,7 @@ fn output_diagnostic(
     body: &Value,
     effective_type: &str,
     aggregate: &OutcomeAggregate,
-) -> Option<RetainedWire> {
+) -> Option<OpenCodeRetainedJson> {
     if !matches!(aggregate.outcome(), 2 | 3) {
         return None;
     }
@@ -71,136 +71,11 @@ fn output_diagnostic(
     ) {
         diagnostic.insert("cwd".to_owned(), Value::String(cwd));
     }
-    Some(RetainedWire {
+    Some(OpenCodeRetainedJson {
         effective_type: effective_type.to_owned(),
         role: "tool".to_owned(),
         body: Value::Object(diagnostic),
     })
-}
-
-pub(super) fn tag(value: u8) -> Vec<u8> {
-    vec![value]
-}
-
-pub(super) fn hex_tag(value: u8) -> String {
-    format!("{value:02x}")
-}
-
-pub(super) fn output_predicate_sql(
-    data: &str,
-    column_type: &str,
-    parent_data: Option<&str>,
-) -> String {
-    let direct_tokens = "'result','toolresult','toolresponse','commandresult','output',\
-                         'tooloutput','commandoutput'";
-    let normalized_column = normalized_sql(column_type);
-    let value_predicate = |value: &str| {
-        format!(
-            "{normalized} in ({direct_tokens})
-             or {normalized} like '%result'
-             or {normalized} like '%output'",
-            normalized = normalized_sql(value),
-        )
-    };
-    let tree_predicate = |value: &str| {
-        format!(
-            "exists(
-                 select 1 from json_tree({value}) jt
-                 where (
-                     ({key} in ({direct_tokens})
-                       or {key} like '%result'
-                       or {key} like '%output')
-                     and not (
-                         {key} = 'output'
-                         and jt.type in ('integer', 'real')
-                         and replace(jt.fullkey, '[', '.') like '%.tokens.output'
-                     )
-                 )
-                 or (
-                     {key} in ('type', 'role')
-                     and ({atom})
-                 )
-             )",
-            key = normalized_sql("coalesce(jt.key, '')"),
-            atom = value_predicate("coalesce(jt.atom, '')"),
-        )
-    };
-    let mut predicates = vec![value_predicate(&normalized_column), tree_predicate(data)];
-    if let Some(parent) = parent_data {
-        predicates.push(tree_predicate(parent));
-    }
-    predicates
-        .into_iter()
-        .map(|predicate| format!("({predicate})"))
-        .collect::<Vec<_>>()
-        .join(" or ")
-}
-
-pub(super) fn failure_predicate_sql(data: &str, parent_data: Option<&str>) -> String {
-    let predicate = |value: &str| {
-        format!(
-            "exists(
-                 select 1 from json_tree({value}) jt
-                 where (
-                     {key} in ('timedout', 'timeout', 'iserror')
-                     and (
-                         (jt.type = 'true')
-                         or {atom} in (
-                             'timeout','timedout','failed','failure','error','errored',
-                             'cancelled','canceled'
-                         )
-                     )
-                 )
-                 or (
-                     {key} in ('status', 'outcome', 'state')
-                     and {atom} in (
-                         'timeout','timedout','failed','failure','error','errored',
-                         'cancelled','canceled'
-                     )
-                 )
-                 or (
-                     {key} in ('exit', 'exitcode')
-                     and jt.type = 'integer'
-                     and cast(jt.atom as integer) <> 0
-                 )
-                 or (
-                     {key} = 'success' and jt.type = 'false'
-                 )
-                 or (
-                     {key} = 'error' and jt.type not in ('null', 'false')
-                     and cast(jt.atom as text) <> ''
-                 )
-             )",
-            key = normalized_sql("coalesce(jt.key, '')"),
-            atom = normalized_sql("coalesce(cast(jt.atom as text), '')"),
-        )
-    };
-    let mut predicates = vec![predicate(data)];
-    if let Some(parent) = parent_data {
-        predicates.push(predicate(parent));
-    }
-    predicates
-        .into_iter()
-        .map(|predicate| format!("({predicate})"))
-        .collect::<Vec<_>>()
-        .join(" or ")
-}
-
-fn normalized_sql(value: &str) -> String {
-    format!("lower(replace(replace(replace(trim({value}), '_', ''), '-', ''), ' ', ''))")
-}
-
-pub(super) fn family_from_label(label: &str) -> Option<OpenCodeNativeSchemaFamily> {
-    match label {
-        "session_message_seq" => Some(OpenCodeNativeSchemaFamily::SessionMessageSeq),
-        "session_message_synthesized_seq" => {
-            Some(OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq)
-        }
-        "session_entry" => Some(OpenCodeNativeSchemaFamily::SessionEntry),
-        "legacy_message" => Some(OpenCodeNativeSchemaFamily::LegacyMessage),
-        "message_part" => Some(OpenCodeNativeSchemaFamily::MessagePart),
-        _ => None,
-    }
 }
 
 pub(super) fn effective_type(
