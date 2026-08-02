@@ -428,7 +428,7 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
-    GenerationWriter::open(&data_root.join("search/lexical"), WriterOptions::default())
+    GenerationWriter::open(data_root.join("search/lexical"), WriterOptions::default())
         .unwrap()
         .commit(|_| true)
         .unwrap();
