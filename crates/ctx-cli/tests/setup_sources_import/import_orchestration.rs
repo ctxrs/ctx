@@ -700,6 +700,142 @@ fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
     );
 }
 
+fn write_valid_explicit_custom_source(path: &Path, text: &str) {
+    fs::write(
+        path,
+        format!(
+            concat!(
+                "{{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}}\n",
+                "{{\"record_type\":\"source\",\"source_id\":\"explicit-receipt-source\",\"provider_key\":\"explicit-receipt-agent\",\"source_format\":\"explicit-receipt-jsonl\"}}\n",
+                "{{\"record_type\":\"session\",\"source_id\":\"explicit-receipt-source\",\"session_id\":\"explicit-receipt-session\",\"started_at\":\"2026-08-01T12:00:00Z\",\"agent_type\":\"primary\",\"is_primary\":true}}\n",
+                "{{\"record_type\":\"event\",\"source_id\":\"explicit-receipt-source\",\"session_id\":\"explicit-receipt-session\",\"event_index\":0,\"event_type\":\"message\",\"role\":\"user\",\"occurred_at\":\"2026-08-01T12:00:01Z\",\"payload\":{{\"text\":{text:?}}}}}\n",
+            ),
+            text = text,
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn explicit_import_reports_requested_route_failure_when_another_cold_route_publishes() {
+    let temp = tempdir();
+    write_codex_setup_session(&temp);
+    let _daemon = start_full_source_refresh_daemon(&temp);
+    let fixture = temp.path().join("cold-explicit-failure.jsonl");
+    fs::write(&fixture, b"").unwrap();
+
+    let output = ctx(&temp)
+        .args([
+            "import",
+            "--input-format",
+            "ctx-history-jsonl-v1",
+            "--path",
+            fixture.to_str().unwrap(),
+            "--no-daemon",
+            "--format=json",
+            "--progress",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["outcome"], "completed_with_source_failures",
+        "{report:#}"
+    );
+    assert_eq!(report["failure_scope"], "source", "{report:#}");
+    assert_eq!(report["failure_type"], "source_failure", "{report:#}");
+    assert_eq!(report["totals"]["imported_sources"], 0, "{report:#}");
+    assert_eq!(report["totals"]["failed_sources"], 1, "{report:#}");
+    assert!(report["totals"]["current_indexed_documents"]
+        .as_u64()
+        .is_some_and(|count| count >= 1));
+
+    let source = &report["sources"][0];
+    assert_eq!(source["status"], "failure", "{source:#}");
+    assert_eq!(source["failure_scope"], "source", "{source:#}");
+    assert_eq!(source["failure_type"], "other", "{source:#}");
+    assert_eq!(source["source_failure_class"], "unreadable", "{source:#}");
+    assert_eq!(source["carried_forward"], false, "{source:#}");
+    assert_eq!(
+        source["daemon_request_metadata"]["operation"], "import",
+        "{source:#}"
+    );
+    assert_eq!(source["source_failure_total"], 1, "{source:#}");
+    assert!(source["successful_routes"]
+        .as_u64()
+        .is_some_and(|routes| routes >= 1));
+    assert!(source["source_identity"].is_string(), "{source:#}");
+    assert_eq!(source["detail"], source["error"], "{source:#}");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let terminal_progress = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["done"] == true)
+        .expect("terminal explicit-import progress event");
+    assert_eq!(terminal_progress["operation"], "import", "{stderr}");
+    assert_eq!(terminal_progress["phase"], "failed", "{stderr}");
+}
+
+#[test]
+fn explicit_import_reports_warm_carried_route_failure() {
+    let temp = tempdir();
+    let _daemon = start_full_source_refresh_daemon(&temp);
+    let fixture = temp.path().join("warm-explicit-failure.jsonl");
+    write_valid_explicit_custom_source(&fixture, "warm carried explicit route oracle");
+
+    let first = json_output(ctx(&temp).args([
+        "import",
+        "--input-format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        fixture.to_str().unwrap(),
+        "--no-daemon",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(first["outcome"], "success", "{first:#}");
+    assert_eq!(provider_core_counts(&data_root(&temp), "custom"), (1, 1));
+
+    fs::write(&fixture, b"").unwrap();
+    let carried = json_output(ctx(&temp).args([
+        "import",
+        "--input-format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        fixture.to_str().unwrap(),
+        "--no-daemon",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+
+    assert_eq!(
+        carried["outcome"], "completed_with_source_failures",
+        "{carried:#}"
+    );
+    assert_eq!(carried["failure_scope"], "source", "{carried:#}");
+    assert_eq!(carried["failure_type"], "source_failure", "{carried:#}");
+    assert_eq!(carried["totals"]["imported_sources"], 0, "{carried:#}");
+    assert_eq!(carried["totals"]["failed_sources"], 1, "{carried:#}");
+    assert_eq!(
+        carried["totals"]["current_indexed_documents"], 1,
+        "{carried:#}"
+    );
+    let source = &carried["sources"][0];
+    assert_eq!(source["status"], "failure", "{source:#}");
+    assert_eq!(source["source_failure_total"], 1, "{source:#}");
+    assert_eq!(source["source_failure_class"], "unreadable", "{source:#}");
+    assert_eq!(source["carried_forward"], true, "{source:#}");
+    assert_eq!(source["successful_routes"], 0, "{source:#}");
+    assert!(source["source_identity"].is_string(), "{source:#}");
+    assert_eq!(provider_core_counts(&data_root(&temp), "custom"), (1, 1));
+}
+
 #[test]
 fn all_invalid_custom_source_publishes_empty_then_refreshes_after_fix() {
     let temp = tempdir();
