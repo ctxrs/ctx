@@ -37,14 +37,18 @@ const HERMES_SESSION_METADATA_MAX_CHARS: usize = 8 * 1024;
 pub(super) const HERMES_SESSION_KEY_MAX_BYTES: usize = 64 * 1024;
 const HERMES_CONTEXT_ENTRY_OVERHEAD_BYTES: usize = 512;
 const HERMES_LINK_ENTRY_OVERHEAD_BYTES: usize = 192;
+pub(super) const HERMES_ANCESTRY_ROW_MAX_BYTES: usize =
+    HERMES_LINK_ENTRY_OVERHEAD_BYTES + HERMES_SESSION_KEY_MAX_BYTES * 2;
+// Cycle detection borrows keys already owned by the direct/ancestry maps and retains no clones.
+pub(super) const HERMES_ANCESTRY_TRAVERSAL_MAX_OWNED_BYTES: usize = 0;
 pub(super) const HERMES_DIRECT_CONTEXT_RESIDENT_MAX_BYTES: usize =
     HERMES_DIRECT_CONTEXT_WORKSET_MAX_BYTES
         + HERMES_CONTEXT_ENTRY_OVERHEAD_BYTES
         + HERMES_SESSION_KEY_MAX_BYTES * 2
         + HERMES_SESSION_METADATA_MAX_CHARS * 4 * 3;
 pub(super) const HERMES_ANCESTRY_RESIDENT_MAX_BYTES: usize = HERMES_ANCESTRY_WORKSET_MAX_BYTES
-    + HERMES_LINK_ENTRY_OVERHEAD_BYTES
-    + HERMES_SESSION_KEY_MAX_BYTES * 2;
+    + HERMES_ANCESTRY_ROW_MAX_BYTES
+    + HERMES_ANCESTRY_TRAVERSAL_MAX_OWNED_BYTES;
 
 #[derive(Debug, Clone)]
 pub(super) struct HermesSessionContext {
@@ -461,42 +465,18 @@ impl<'connection> HermesSessionContextMemo<'connection> {
         direct_rows: &BTreeMap<String, DirectSessionRow>,
         ancestry: &BTreeMap<String, ParentLink>,
     ) -> Result<StableEntityId, CaptureError> {
+        ensure_acyclic_ancestry(provider_session_id, direct_rows, ancestry)?;
         let mut root = provider_session_id;
         let mut parent = row.parent_session_id.as_deref();
-        let mut visited = BTreeSet::new();
-        visited.insert(root.to_owned());
         for _ in 0..HERMES_PARENT_CHAIN_MAX_DEPTH {
             let Some(parent_id) = parent else {
                 return hermes_session_id(&self.source, root);
             };
-            if !visited.insert(parent_id.to_owned()) {
-                return Err(CaptureError::InvalidPayload(format!(
-                    "Hermes session {} has a cyclic parent chain",
-                    provider_session_id
-                )));
-            }
             if let Some(HermesSessionResolution::Context(context)) = self.cache_get(parent_id)? {
                 return Ok(context.root_session_id);
             }
-            let (next_parent, error) = if let Some(direct) = direct_rows.get(parent_id) {
-                (
-                    direct.parent_session_id.as_deref(),
-                    direct_parent_error(parent_id, direct.error_code),
-                )
-            } else if let Some(link) = ancestry.get(parent_id) {
-                (
-                    link.parent_session_id.as_deref(),
-                    parent_error_reason(parent_id, link.error_code),
-                )
-            } else {
-                return Err(CaptureError::InvalidPayload(format!(
-                    "Hermes session {} depends on missing parent session {parent_id}",
-                    provider_session_id
-                )));
-            };
-            if let Some(error) = error {
-                return Err(CaptureError::InvalidPayload(error));
-            }
+            let next_parent =
+                ancestry_parent(provider_session_id, parent_id, direct_rows, ancestry)?;
             root = parent_id;
             parent = next_parent;
             if parent.is_none() {
@@ -564,6 +544,69 @@ impl<'connection> HermesSessionContextMemo<'connection> {
             self.counters.peak_cache_bytes.max(self.cache_bytes as u64);
         Ok(())
     }
+}
+
+fn ensure_acyclic_ancestry(
+    provider_session_id: &str,
+    direct_rows: &BTreeMap<String, DirectSessionRow>,
+    ancestry: &BTreeMap<String, ParentLink>,
+) -> Result<(), CaptureError> {
+    let mut slow = Some(provider_session_id);
+    let mut fast = Some(provider_session_id);
+    for _ in 0..=HERMES_PARENT_CHAIN_MAX_DEPTH {
+        slow = advance_ancestry(provider_session_id, slow, direct_rows, ancestry)?;
+        fast = advance_ancestry(provider_session_id, fast, direct_rows, ancestry)?;
+        fast = advance_ancestry(provider_session_id, fast, direct_rows, ancestry)?;
+        match (slow, fast) {
+            (Some(slow), Some(fast)) if slow == fast => {
+                return Err(CaptureError::InvalidPayload(format!(
+                    "Hermes session {provider_session_id} has a cyclic parent chain"
+                )));
+            }
+            (None, _) | (_, None) => return Ok(()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn advance_ancestry<'rows>(
+    provider_session_id: &str,
+    current: Option<&str>,
+    direct_rows: &'rows BTreeMap<String, DirectSessionRow>,
+    ancestry: &'rows BTreeMap<String, ParentLink>,
+) -> Result<Option<&'rows str>, CaptureError> {
+    current
+        .map(|current| ancestry_parent(provider_session_id, current, direct_rows, ancestry))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn ancestry_parent<'rows>(
+    provider_session_id: &str,
+    current: &str,
+    direct_rows: &'rows BTreeMap<String, DirectSessionRow>,
+    ancestry: &'rows BTreeMap<String, ParentLink>,
+) -> Result<Option<&'rows str>, CaptureError> {
+    let (parent, error) = if let Some(direct) = direct_rows.get(current) {
+        (
+            direct.parent_session_id.as_deref(),
+            direct_parent_error(current, direct.error_code),
+        )
+    } else if let Some(link) = ancestry.get(current) {
+        (
+            link.parent_session_id.as_deref(),
+            parent_error_reason(current, link.error_code),
+        )
+    } else {
+        return Err(CaptureError::InvalidPayload(format!(
+            "Hermes session {provider_session_id} depends on missing parent session {current}"
+        )));
+    };
+    if let Some(error) = error {
+        return Err(CaptureError::InvalidPayload(error));
+    }
+    Ok(parent)
 }
 
 enum BoundedDirectRows {

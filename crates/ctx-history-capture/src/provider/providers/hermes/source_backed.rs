@@ -47,7 +47,9 @@ const HERMES_LOGICAL_EVENT_KIND: &str = "hermes-message";
 const HERMES_SOURCE_SCHEMA_VARIANT: &str = "hermes-state-db-v1";
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "Hermes SQLite source must have an authorized parent and database leaf";
-const HERMES_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v1";
+#[cfg(test)]
+const HERMES_LEGACY_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v1";
+const HERMES_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v2";
 const HERMES_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-snapshot-v1\0";
 const HERMES_TREE_FINGERPRINT_DOMAIN: &[u8] = b"ctx-hermes-source-inventory-v1\0";
 const HERMES_SESSION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-session-v1\0";

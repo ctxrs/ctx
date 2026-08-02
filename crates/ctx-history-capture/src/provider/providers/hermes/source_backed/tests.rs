@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, fs, path::Path};
 
 use ctx_history_core::{CaptureProvider, SourceAnchor};
-use ctx_history_index::WriterOptions;
+use ctx_history_index::{GenerationWriter, SourceRouteSnapshot, VerifiedIndex, WriterOptions};
 use rusqlite::Connection;
 
 use super::*;
@@ -266,6 +266,15 @@ fn disjoint_and_deep_ancestry_streams_with_bounded_memory_and_queries() {
             let id = format!("byte-{depth:03}-{large_ancestry_key_tail}");
             insert_context_session(&mut insert, &id, parent.as_deref(), None, "");
             parent = Some(id);
+            if depth == 126 {
+                insert_context_session(
+                    &mut insert,
+                    "near-byte-leaf",
+                    parent.as_deref(),
+                    Some(&large_direct_metadata),
+                    "",
+                );
+            }
         }
         insert_context_session(
             &mut insert,
@@ -312,7 +321,12 @@ fn disjoint_and_deep_ancestry_streams_with_bounded_memory_and_queries() {
              values ('projection-bad-parent', 'acp', null, 1782259200.0, x'ff');
              insert into sessions
              (id, source, parent_session_id, started_at, cwd)
-             values ('projection-child', 'acp', 'projection-bad-parent', 1782259200.0, '/repo');",
+             values ('projection-child', 'acp', 'projection-bad-parent', 1782259200.0, '/repo');
+             insert into sessions
+             (id, source, parent_session_id, started_at)
+             values ('cycle-a', 'acp', 'cycle-b', 1782259200.0),
+                    ('cycle-b', 'acp', 'cycle-a', 1782259200.0),
+                    ('cycle-leaf', 'acp', 'cycle-a', 1782259200.0);",
         )
         .unwrap();
     transaction.commit().unwrap();
@@ -327,6 +341,27 @@ fn disjoint_and_deep_ancestry_streams_with_bounded_memory_and_queries() {
     let source = provider_source_for_path(CaptureProvider::Hermes, path.clone());
     let candidate =
         HermesSourceCandidate::automatic(crate::test_provider_sqlite_data_root(), source).unwrap();
+    let mut near_limit_memo =
+        HermesSessionContextMemo::new(&connection, &schema, &candidate.source);
+    let near_limit = near_limit_memo
+        .resolve_page(&BTreeSet::from(["near-byte-leaf".to_owned()]))
+        .unwrap();
+    assert!(matches!(
+        near_limit.get("near-byte-leaf"),
+        Some(HermesSessionResolution::Context(_))
+    ));
+    let near_limit_counters = near_limit_memo.counters();
+    assert!(
+        near_limit_counters.max_ancestry_bytes_per_query
+            > (ancestry::HERMES_ANCESTRY_WORKSET_MAX_BYTES
+                - ancestry::HERMES_ANCESTRY_ROW_MAX_BYTES) as u64
+    );
+    assert!(
+        near_limit_counters.max_ancestry_bytes_per_query
+            <= ancestry::HERMES_ANCESTRY_WORKSET_MAX_BYTES as u64
+    );
+    assert_eq!(ancestry::HERMES_ANCESTRY_TRAVERSAL_MAX_OWNED_BYTES, 0);
+    drop(near_limit_memo);
     let mut memo = HermesSessionContextMemo::new(&connection, &schema, &candidate.source);
 
     let projection_page = BTreeSet::from([
@@ -343,12 +378,19 @@ fn disjoint_and_deep_ancestry_streams_with_bounded_memory_and_queries() {
         resolution => panic!("child lost independent ancestry evidence: {resolution:?}"),
     };
 
-    let byte_resolution = memo
-        .resolve_page(&BTreeSet::from(["byte-leaf".to_owned()]))
+    let bounded_failures = memo
+        .resolve_page(&BTreeSet::from([
+            "byte-leaf".to_owned(),
+            "cycle-leaf".to_owned(),
+        ]))
         .unwrap();
     assert!(matches!(
-        byte_resolution.get("byte-leaf"),
+        bounded_failures.get("byte-leaf"),
         Some(HermesSessionResolution::Rejected(reason)) if reason.contains("byte per-session")
+    ));
+    assert!(matches!(
+        bounded_failures.get("cycle-leaf"),
+        Some(HermesSessionResolution::Rejected(reason)) if reason.contains("cyclic parent chain")
     ));
 
     let deep = BTreeSet::from(["deep-leaf".to_owned()]);
@@ -411,7 +453,7 @@ fn disjoint_and_deep_ancestry_streams_with_bounded_memory_and_queries() {
         queries_before_revisit.ancestry_query_batches + 1
     );
     assert_eq!(counters.direct_query_batches, 12);
-    assert_eq!(counters.ancestry_query_batches, 133);
+    assert_eq!(counters.ancestry_query_batches, 134);
     assert_eq!(counters.max_query_batches_per_page, 65);
     assert_eq!(
         counters.max_ancestry_rows_per_query,
@@ -571,6 +613,124 @@ fn fixture_writer_options() -> WriterOptions {
         indexer_threads: 1,
         memory_bytes: 15_000_000,
     }
+}
+
+#[test]
+fn unchanged_legacy_v1_observation_is_rescanned_and_replaced_by_v2() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let database = temp.path().join("source/state.db");
+    create_refresh_fixture(&database, 1);
+    let source_bytes = provider_family_bytes(&database);
+    let source_names = provider_directory_names(&database);
+    let anchor = SourceAnchor::CatalogLineage([0x48; 32]);
+    let candidate = hermes_source_backed_explicit(&data_root, &database, anchor).unwrap();
+    let registry = fixture_registry(&data_root, &database);
+    let route_identity = registry
+        .routes()
+        .next()
+        .and_then(|route| route.route_identity.clone())
+        .unwrap();
+    let (_authority, snapshot) = open_root_authorized_snapshot(&data_root, &database).unwrap();
+    let connection = snapshot.connection().unwrap();
+    let sqlite_user_version = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+        .unwrap();
+    let schema_fingerprint = sqlite_schema_fingerprint(connection).unwrap();
+    let schema_evidence = hermes_schema_evidence(sqlite_user_version, &schema_fingerprint);
+    let mut legacy_records = Vec::new();
+    let projection = project_hermes_snapshot(&candidate, connection, &mut |page| {
+        legacy_records.extend(page.records.into_iter().filter_map(|record| match record {
+            HermesSourceBackedRecord::Event(mut event) => {
+                event.parser_revision = HERMES_LEGACY_SOURCE_PARSER_REVISION.to_owned();
+                Some(event)
+            }
+            HermesSourceBackedRecord::Session(_) | HermesSourceBackedRecord::Rejected(_) => None,
+        }));
+        Ok(())
+    })
+    .unwrap();
+    snapshot.finish().unwrap();
+    assert_eq!(legacy_records.len(), 1);
+    let stable_event_id = legacy_records[0].event_id;
+    let projected = projection.certificate;
+    assert_eq!(projected.parser_revision(), HERMES_SOURCE_PARSER_REVISION);
+    let legacy_certificate = SqliteLogicalSnapshot::new(
+        HERMES_LEGACY_SOURCE_PARSER_REVISION,
+        &schema_evidence,
+        *projected.content_digest(),
+        projected.counts(),
+    )
+    .certify(candidate.source.clone())
+    .unwrap();
+    assert_ne!(legacy_certificate.observation(), projected.observation());
+
+    let mut legacy_writer = GenerationWriter::open(&index_root, fixture_writer_options()).unwrap();
+    legacy_writer
+        .set_source_route_plan(BTreeSet::from([route_identity.clone()]), BTreeSet::new())
+        .unwrap();
+    legacy_writer
+        .begin_source_route_stage(route_identity.clone())
+        .unwrap();
+    legacy_writer
+        .begin_source(candidate.source.clone())
+        .unwrap();
+    for record in legacy_records {
+        legacy_writer.add_core_record(record).unwrap();
+    }
+    legacy_writer
+        .certify_source(legacy_certificate.clone())
+        .unwrap();
+    legacy_writer
+        .finish_source_route_stage(&route_identity)
+        .unwrap();
+    legacy_writer
+        .set_present_source_routes(vec![SourceRouteSnapshot::present(
+            route_identity.clone(),
+            vec![candidate.source.clone()],
+        )
+        .unwrap()])
+        .unwrap();
+    let legacy_commit = legacy_writer.commit(|_| true).unwrap();
+    assert_eq!(
+        legacy_commit.manifest().sources[0].parser_revision(),
+        HERMES_LEGACY_SOURCE_PARSER_REVISION
+    );
+
+    reset_logical_row_traversals();
+    let upgraded =
+        refresh_source_backed_generation(&index_root, &registry, fixture_writer_options()).unwrap();
+    assert_eq!(logical_row_traversals(), 1);
+    assert_ne!(upgraded.commit.generation_id, legacy_commit.generation_id);
+    assert!(upgraded.removals.is_empty());
+    assert_eq!(upgraded.sources.len(), 1);
+    assert_eq!(
+        upgraded.sources[0].parser_revision(),
+        HERMES_SOURCE_PARSER_REVISION
+    );
+    assert_eq!(upgraded.sources[0].observation(), projected.observation());
+    assert_ne!(
+        upgraded.sources[0].observation(),
+        legacy_certificate.observation()
+    );
+    assert_eq!(
+        upgraded.sources[0].content_digest(),
+        legacy_certificate.content_digest()
+    );
+    assert_eq!(upgraded.sources[0].counts(), legacy_certificate.counts());
+    let upgraded_record = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .core_record_by_id(stable_event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(upgraded_record.event_id, stable_event_id);
+    assert_eq!(
+        upgraded_record.parser_revision,
+        HERMES_SOURCE_PARSER_REVISION
+    );
+    assert_eq!(provider_family_bytes(&database), source_bytes);
+    assert_eq!(provider_directory_names(&database), source_names);
 }
 
 #[test]
