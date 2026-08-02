@@ -18,6 +18,32 @@ fn import_ready_history(temp: &TempDir) {
     wait_for_test_lexical_projection(temp, generation);
 }
 
+fn persist_stopped_daemon_state(temp: &TempDir, semantic_enabled: bool) {
+    ctx(temp)
+        .args(["daemon", "disable", "--format=json"])
+        .assert()
+        .success();
+    fs::write(
+        data_root(temp).join("config.toml"),
+        format!("[daemon]\nenabled = true\n\n[search]\nsemantic = {semantic_enabled}\n"),
+    )
+    .unwrap();
+    let daemon_root = data_root(temp).join("daemon");
+    fs::create_dir_all(daemon_root.join("jobs")).unwrap();
+    fs::write(
+        daemon_root.join("status.json"),
+        json!({
+            "schema_version": 1,
+            "status": "running",
+            "pid": 0,
+            "started_at_ms": 1,
+            "semantic_runtime_active": false,
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
 fn strip_ansi(rendered: &[u8]) -> Vec<u8> {
     let mut stream = anstream::StripStream::new(Vec::new());
     stream.write_all(rendered).unwrap();
@@ -324,6 +350,134 @@ fn index_wait_lexical_reports_ready_after_import() {
 }
 
 #[test]
+fn index_wait_lexical_accepts_retained_core_after_refresh_failure() {
+    let temp = daemon_test_root();
+    import_ready_history(&temp);
+    persist_stopped_daemon_state(&temp, false);
+    fs::write(
+        data_root(&temp).join("daemon/jobs/core-refresh.json"),
+        json!({
+            "status": "failed",
+            "request_state": "failed",
+            "last_error": "synthetic refresh failure",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let wait = json_output(ctx(&temp).args([
+        "index",
+        "wait",
+        "--lexical",
+        "--format=json",
+        "--timeout-seconds",
+        "1",
+        "--interval-seconds",
+        "1",
+    ]));
+    assert_eq!(wait["status"], "ready", "{wait:#}");
+    assert_eq!(wait["selection"]["lexical"], true, "{wait:#}");
+    assert_eq!(wait["readiness"]["lexical"]["status"], "ready");
+    assert_eq!(
+        wait["readiness"]["refresh"]["reason"],
+        "core_refresh_failed"
+    );
+    assert_eq!(wait["readiness"]["daemon"]["running"], false);
+}
+
+#[test]
+fn stopped_queued_or_running_refresh_blocks_default_wait_despite_stale_status() {
+    let temp = daemon_test_root();
+    import_ready_history(&temp);
+    persist_stopped_daemon_state(&temp, false);
+
+    for request_state in ["queued", "running"] {
+        fs::write(
+            data_root(&temp).join("daemon/jobs/core-refresh.json"),
+            json!({
+                "status": "pending",
+                "request_state": request_state,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let output = ctx(&temp)
+            .timeout(Duration::from_secs(3))
+            .args(["index", "wait", "--format=json", "--interval-seconds", "1"])
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let wait: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(wait["status"], "blocked", "{wait:#}");
+        assert_eq!(
+            wait["readiness"]["refresh"]["request_state"], request_state,
+            "{wait:#}"
+        );
+        let persisted: Value =
+            serde_json::from_slice(&fs::read(data_root(&temp).join("daemon/status.json")).unwrap())
+                .unwrap();
+        assert_eq!(persisted["status"], "running");
+        assert_eq!(wait["readiness"]["daemon"]["status"], "stale_lock");
+        assert_eq!(wait["readiness"]["daemon"]["running"], false);
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "Error: background indexing stopped before the index was ready; run `ctx doctor` for details\n"
+        );
+    }
+}
+
+#[test]
+fn stopped_queued_or_running_semantic_blocks_wait_despite_stale_status() {
+    let temp = daemon_test_root();
+    import_ready_history(&temp);
+    persist_stopped_daemon_state(&temp, true);
+
+    for semantic_state in ["queued", "running"] {
+        fs::write(
+            data_root(&temp).join("daemon/jobs/semantic-index.json"),
+            json!({
+                "status": semantic_state,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let output = ctx(&temp)
+            .timeout(Duration::from_secs(3))
+            .args([
+                "index",
+                "wait",
+                "--semantic",
+                "--format=json",
+                "--interval-seconds",
+                "1",
+            ])
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let wait: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(wait["status"], "blocked", "{wait:#}");
+        assert_eq!(
+            wait["readiness"]["daemon"]["jobs"]["semantic_index"]["status"], semantic_state,
+            "{wait:#}"
+        );
+        let persisted: Value =
+            serde_json::from_slice(&fs::read(data_root(&temp).join("daemon/status.json")).unwrap())
+                .unwrap();
+        assert_eq!(persisted["status"], "running");
+        assert_eq!(wait["readiness"]["daemon"]["status"], "stale_lock");
+        assert_eq!(wait["readiness"]["daemon"]["running"], false);
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "Error: background indexing stopped before the index was ready; run `ctx doctor` for details\n"
+        );
+    }
+}
+
+#[test]
 fn index_wait_default_skips_semantic_when_disabled_after_import() {
     let temp = daemon_test_root();
     import_ready_history(&temp);
@@ -592,7 +746,7 @@ fn human_wait_semantic_disabled_renders_a_truthful_blocked_snapshot() {
 }
 
 #[test]
-fn human_wait_timeout_does_not_duplicate_an_unchanged_active_snapshot() {
+fn human_wait_stops_when_selected_semantic_work_has_no_running_daemon() {
     let temp = daemon_test_root();
     import_ready_history(&temp);
     fs::write(
@@ -627,20 +781,12 @@ fn human_wait_timeout_does_not_duplicate_an_unchanged_active_snapshot() {
         "{stdout}"
     );
     assert!((1..=2).contains(&searchable_frames), "{stdout}");
-    if searchable_frames == 2 {
-        assert!(
-            stdout.contains("Background indexing stopped"),
-            "a second frame is valid only when the terminal status changed: {stdout}"
-        );
-    }
     assert!(stdout.contains("Your history is searchable"), "{stdout}");
     assert!(stdout.contains("Embedded"));
+    assert!(stdout.contains("Background indexing stopped"), "{stdout}");
     assert!(!stdout.contains("Throughput"));
     assert!(!stdout.contains("Remaining"));
-    assert!(
-        stderr.contains("timed out before indexing was ready"),
-        "{stderr}"
-    );
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[test]

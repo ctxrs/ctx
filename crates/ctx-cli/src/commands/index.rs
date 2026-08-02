@@ -111,14 +111,14 @@ fn run_index_watch(
         } else if !quiet {
             output.print_human(&status)?;
         }
-        if index_ready(&status, selection) {
-            break;
-        }
         if let Some(message) = index_terminal_error(&status, selection) {
             return Err(forward_index_terminal_error(
                 message,
                 !jsonl_output && !quiet,
             ));
+        }
+        if index_ready(&status, selection) {
+            break;
         }
         thread::sleep(interval);
     }
@@ -250,15 +250,6 @@ fn run_index_wait(
         telemetry.wait_lexical = Some(selection.lexical);
         telemetry.wait_semantic = Some(selection.semantic);
         record_index_telemetry(telemetry, &status);
-        if index_ready(&status, selection) {
-            telemetry.wait_outcome = Some(WaitOutcome::Ready);
-            if args.format.is_json() {
-                print_json(index_wait_json(status, selection, "ready"))?;
-            } else if !quiet {
-                human_output.print(ui, &status)?;
-            }
-            return Ok(());
-        }
         if let Some(message) = index_terminal_error(&status, selection) {
             telemetry.wait_outcome = Some(WaitOutcome::Blocked);
             if args.format.is_json() {
@@ -278,6 +269,15 @@ fn run_index_wait(
                 message,
                 !args.format.is_json() && !quiet,
             ));
+        }
+        if index_ready(&status, selection) {
+            telemetry.wait_outcome = Some(WaitOutcome::Ready);
+            if args.format.is_json() {
+                print_json(index_wait_json(status, selection, "ready"))?;
+            } else if !quiet {
+                human_output.print(ui, &status)?;
+            }
+            return Ok(());
         }
         if args
             .timeout_seconds
@@ -370,6 +370,7 @@ fn index_readiness_snapshot(data_root: &Path) -> Result<Value> {
 struct IndexSelection {
     lexical: bool,
     semantic: bool,
+    refresh_convergence: bool,
 }
 
 impl IndexSelection {
@@ -377,6 +378,7 @@ impl IndexSelection {
         Self {
             lexical: true,
             semantic: true,
+            refresh_convergence: true,
         }
     }
 
@@ -387,6 +389,7 @@ impl IndexSelection {
             Some(Self {
                 lexical: args.lexical,
                 semantic: args.semantic,
+                refresh_convergence: false,
             })
         } else {
             None
@@ -397,18 +400,22 @@ impl IndexSelection {
         Self {
             lexical: true,
             semantic: bool_at(status, &["semantic", "enabled"]),
+            refresh_convergence: true,
         }
     }
 }
 
 fn index_ready(status: &Value, selection: IndexSelection) -> bool {
-    (!selection.lexical || lexical_ready(status)) && (!selection.semantic || semantic_ready(status))
+    (!selection.lexical || lexical_ready(status))
+        && (!selection.refresh_convergence || refresh_converged(status))
+        && (!selection.semantic || semantic_ready(status))
 }
 
 fn lexical_ready(status: &Value) -> bool {
-    if string_at(status, &["lexical", "status"], "unknown") != "ready" {
-        return false;
-    }
+    string_at(status, &["lexical", "status"], "unknown") == "ready"
+}
+
+fn refresh_converged(status: &Value) -> bool {
     let refresh_status = string_at(status, &["refresh", "status"], "unknown");
     let refresh_reason = string_at(status, &["refresh", "reason"], "");
     refresh_status == "ready"
@@ -436,13 +443,12 @@ fn index_terminal_error(status: &Value, selection: IndexSelection) -> Option<Str
     if selection.lexical
         && matches!(lexical_status.as_str(), "stale" | "unavailable")
         && refresh_status != "pending"
-        && !bool_at(status, &["daemon", "running"])
+        && (lexical_reason == "core_refresh_failed" || !bool_at(status, &["daemon", "running"]))
     {
         return Some("history refresh is unavailable; run `ctx doctor` for details".to_owned());
     }
     let refresh_reason = string_at(status, &["refresh", "reason"], "");
-    if selection.lexical
-        && lexical_status == "ready"
+    if selection.refresh_convergence
         && matches!(refresh_status.as_str(), "stale" | "unavailable")
         && !matches!(
             refresh_reason.as_str(),
@@ -473,16 +479,36 @@ fn index_terminal_error(status: &Value, selection: IndexSelection) -> Option<Str
             return Some(format!("semantic indexing is {semantic_status}"));
         }
     }
-    if !index_ready(status, selection)
-        && string_at(status, &["daemon", "status"], "unknown") == "failed"
-        && !bool_at(status, &["daemon", "running"])
-    {
+    if selected_pending_work(status, selection) && !bool_at(status, &["daemon", "running"]) {
         return Some(
             "background indexing stopped before the index was ready; run `ctx doctor` for details"
                 .to_owned(),
         );
     }
     None
+}
+
+fn selected_pending_work(status: &Value, selection: IndexSelection) -> bool {
+    let refresh_pending =
+        pending_state(&string_at(status, &["refresh", "request_state"], "unknown"))
+            || pending_state(&string_at(status, &["refresh", "status"], "unknown"));
+    let lexical_pending = !lexical_ready(status)
+        && (pending_state(&string_at(status, &["lexical", "status"], "unknown"))
+            || refresh_pending);
+    let semantic_pending = pending_state(&string_at(status, &["semantic", "status"], "unknown"))
+        || pending_state(&string_at(
+            status,
+            &["daemon", "jobs", "semantic_index", "status"],
+            "unknown",
+        ));
+
+    (selection.lexical && lexical_pending)
+        || (selection.refresh_convergence && refresh_pending)
+        || (selection.semantic && semantic_pending)
+}
+
+fn pending_state(state: &str) -> bool {
+    matches!(state, "pending" | "queued" | "running")
 }
 
 fn forward_index_terminal_error(message: String, human_output_rendered: bool) -> anyhow::Error {

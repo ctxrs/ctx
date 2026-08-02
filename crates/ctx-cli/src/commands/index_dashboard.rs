@@ -350,7 +350,23 @@ fn humanize(value: &str) -> String {
 }
 
 fn format_count_u64(value: u64) -> String {
-    format_count(usize::try_from(value).unwrap_or(usize::MAX))
+    if let Ok(value) = usize::try_from(value) {
+        return format_count(value);
+    }
+
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    let first_group_len = digits.len() % 3;
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0
+            && (index == first_group_len
+                || (index > first_group_len && (index - first_group_len).is_multiple_of(3)))
+        {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn value_at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -495,5 +511,10 @@ mod tests {
         let styled = document.render(&context);
         assert!(styled.contains("\u{1b}["));
         assert_eq!(strip_ansi(&styled), document.render_plain());
+    }
+
+    #[test]
+    fn count_formatting_preserves_the_full_u64_domain() {
+        assert_eq!(format_count_u64(u64::MAX), "18,446,744,073,709,551,615");
     }
 }

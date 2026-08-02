@@ -7,8 +7,9 @@ use serde_json::json;
 
 use super::{
     index_ready, index_terminal_error, index_wait_json, index_watch_output, IndexSelection,
-    IndexWaitHumanOutput, IndexWatchOutput,
+    IndexWaitArgs, IndexWaitHumanOutput, IndexWatchOutput,
 };
+use crate::output::JsonOutputFormat;
 use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext, Ui};
 
 #[derive(Clone, Default)]
@@ -85,6 +86,18 @@ fn first_publication_pending() -> serde_json::Value {
     status
 }
 
+fn wait_selection(lexical: bool, semantic: bool, all: bool) -> IndexSelection {
+    IndexSelection::from_wait_args(&IndexWaitArgs {
+        format: JsonOutputFormat::Text,
+        lexical,
+        semantic,
+        all,
+        timeout_seconds: None,
+        interval_seconds: 1,
+    })
+    .expect("explicit wait selection")
+}
+
 #[test]
 fn first_publication_pending_is_not_collapsed_to_missing() {
     let status = first_publication_pending();
@@ -116,12 +129,34 @@ fn machine_snapshot_contains_only_authoritative_readiness_units() {
 }
 
 #[test]
-fn lexical_wait_requires_refresh_convergence() {
+fn explicit_lexical_wait_accepts_a_verified_generation_during_refresh() {
+    let pending = readiness("pending", 4, true);
+    let selection = wait_selection(true, false, false);
+    assert!(index_ready(&pending, selection));
+    assert!(index_terminal_error(&pending, selection).is_none());
+
+    let mut failed = pending;
+    failed["refresh"] = json!({
+        "status": "unavailable",
+        "reason": "core_refresh_failed",
+        "request_state": "failed",
+    });
+    failed["daemon"]["running"] = json!(false);
+    assert!(index_ready(&failed, selection));
+    assert!(index_terminal_error(&failed, selection).is_none());
+}
+
+#[test]
+fn default_and_all_waits_preserve_refresh_convergence() {
     let pending = readiness("pending", 4, true);
     let ready = readiness("ready", 12, true);
     let selection = IndexSelection::default_for(&pending);
     assert!(!index_ready(&pending, selection));
     assert!(index_ready(&ready, selection));
+
+    let all = wait_selection(false, false, true);
+    assert!(!index_ready(&pending, all));
+    assert!(index_ready(&ready, all));
 }
 
 #[test]
@@ -138,7 +173,7 @@ fn lexical_wait_accepts_a_verified_generation_when_no_refresh_is_active() {
 }
 
 #[test]
-fn failed_refresh_is_terminal_even_when_the_daemon_and_an_older_generation_remain_available() {
+fn failed_refresh_is_terminal_only_when_refresh_convergence_is_selected() {
     let mut status = readiness("ready", 12, true);
     status["refresh"] = json!({
         "status": "unavailable",
@@ -149,6 +184,7 @@ fn failed_refresh_is_terminal_even_when_the_daemon_and_an_older_generation_remai
         index_terminal_error(&status, IndexSelection::default_for(&status)).as_deref(),
         Some("history refresh is unavailable; run `ctx doctor` for details")
     );
+    assert!(index_terminal_error(&status, wait_selection(true, false, false)).is_none());
 }
 
 #[test]
@@ -259,4 +295,45 @@ fn stopped_refresh_is_terminal_without_fabricated_failure_counts() {
             "background indexing stopped before the index was ready; run `ctx doctor` for details"
         )
     );
+}
+
+#[test]
+fn stopped_queued_or_running_refresh_is_terminal_despite_stale_daemon_status() {
+    for request_state in ["queued", "running"] {
+        let mut status = readiness("pending", 4, false);
+        status["refresh"]["request_state"] = json!(request_state);
+        status["daemon"]["status"] = json!("running");
+
+        assert_eq!(
+            index_terminal_error(&status, IndexSelection::default_for(&status)).as_deref(),
+            Some(
+                "background indexing stopped before the index was ready; run `ctx doctor` for details"
+            ),
+            "request_state={request_state}"
+        );
+    }
+}
+
+#[test]
+fn stopped_queued_or_running_semantic_work_is_terminal_despite_stale_daemon_status() {
+    for semantic_state in ["queued", "running"] {
+        let mut status = readiness("ready", 12, false);
+        status["semantic"] = json!({
+            "status": "pending",
+            "enabled": true,
+            "coverage": {},
+        });
+        status["daemon"]["status"] = json!("running");
+        status["daemon"]["jobs"]["semantic_index"] = json!({
+            "status": semantic_state,
+        });
+
+        assert_eq!(
+            index_terminal_error(&status, wait_selection(false, true, false)).as_deref(),
+            Some(
+                "background indexing stopped before the index was ready; run `ctx doctor` for details"
+            ),
+            "semantic_state={semantic_state}"
+        );
+    }
 }
