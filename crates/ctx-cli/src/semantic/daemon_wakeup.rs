@@ -286,6 +286,9 @@ impl WatchAuthority {
     }
 }
 
+#[cfg(test)]
+type RearmGapHook = Box<dyn FnMut(&Path)>;
+
 pub(super) struct DaemonFileWatcher {
     data_root: PathBuf,
     wakeup: Arc<DaemonWakeup>,
@@ -300,7 +303,7 @@ pub(super) struct DaemonFileWatcher {
     watcher_epoch: u64,
     callback_sequence: Arc<AtomicU64>,
     #[cfg(test)]
-    rearm_gap_hook: Option<Box<dyn FnMut(&Path)>>,
+    rearm_gap_hook: Option<RearmGapHook>,
 }
 
 impl DaemonFileWatcher {
@@ -555,6 +558,9 @@ impl Drop for DaemonFileWatcher {
     }
 }
 
+// This is the narrow adapter between notify's callback and the independently
+// owned queue, wakeup, lifecycle, and watermark state.
+#[allow(clippy::too_many_arguments)]
 fn forward_watch_event(
     data_root: &Path,
     counters: &Mutex<WatchCounters>,

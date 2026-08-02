@@ -145,7 +145,7 @@ impl<W: io::Write> IndexWatchOutput<W> {
             context,
             interactive: context.is_terminal(),
             rendered_lines: 0,
-            dashboard: IndexDashboard::default(),
+            dashboard: IndexDashboard,
         }
     }
 

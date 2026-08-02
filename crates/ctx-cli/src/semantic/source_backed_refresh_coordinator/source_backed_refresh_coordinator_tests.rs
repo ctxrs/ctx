@@ -1457,12 +1457,14 @@ fn duplicate_concurrent_requests_launch_one_writer() {
                 writer_launches.fetch_add(1, Ordering::SeqCst);
                 let _ = coordinator.set_progress(
                     request_id,
-                    "refreshing",
-                    0,
-                    1,
-                    Some("source-a".to_owned()),
-                    Some(1),
-                    Some(128),
+                    SourceBackedRefreshProgressUpdate {
+                        phase: "refreshing".to_owned(),
+                        completed_sources: 0,
+                        total_sources: 1,
+                        current_source: Some("source-a".to_owned()),
+                        completed_records: Some(1),
+                        completed_bytes: Some(128),
+                    },
                 );
                 Ok(test_publication("generation-2"))
             },
@@ -1908,12 +1910,14 @@ fn failed_refresh_retains_the_previous_published_generation() {
             |request_id, coordinator| {
                 let _ = coordinator.set_progress(
                     request_id,
-                    "refreshing",
-                    0,
-                    1,
-                    Some("source-a".to_owned()),
-                    Some(3),
-                    Some(384),
+                    SourceBackedRefreshProgressUpdate {
+                        phase: "refreshing".to_owned(),
+                        completed_sources: 0,
+                        total_sources: 1,
+                        current_source: Some("source-a".to_owned()),
+                        completed_records: Some(3),
+                        completed_bytes: Some(384),
+                    },
                 );
                 Err(anyhow!("injected writer failure before publication"))
             },
@@ -2333,12 +2337,14 @@ fn recovered_wait_after_restart_attaches_to_equivalent_running_attempt() {
     let running_job = first
         .set_progress(
             &interrupted_request_id,
-            "refreshing",
-            0,
-            1,
-            Some("interrupted-source".to_owned()),
-            Some(5),
-            Some(640),
+            SourceBackedRefreshProgressUpdate {
+                phase: "refreshing".to_owned(),
+                completed_sources: 0,
+                total_sources: 1,
+                current_source: Some("interrupted-source".to_owned()),
+                completed_records: Some(5),
+                completed_bytes: Some(640),
+            },
         )
         .expect("interrupted running job");
     assert_eq!(running_job["progress"]["completed_records"], 5);

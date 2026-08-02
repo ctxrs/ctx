@@ -371,7 +371,7 @@ fn generation_route_validation_binds_exact_current_membership() {
     let canonical =
         GenerationManifest::from_parts(vec![certificate(&first, 1, 0)], vec![route.clone()])
             .unwrap();
-    assert_eq!(canonical.source_routes(), &[route.clone()]);
+    assert_eq!(canonical.source_routes(), std::slice::from_ref(&route));
 
     assert!(matches!(
         GenerationManifest::from_parts(vec![certificate(&first, 1, 0)], vec![route.clone(), route],),

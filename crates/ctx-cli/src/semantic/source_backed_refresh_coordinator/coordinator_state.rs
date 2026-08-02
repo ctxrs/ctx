@@ -792,12 +792,7 @@ impl CoreRefreshEngine {
     pub(super) fn set_progress(
         &self,
         request_id: &str,
-        phase: &str,
-        completed_sources: usize,
-        total_sources: usize,
-        current_source: Option<String>,
-        completed_records: Option<u64>,
-        completed_bytes: Option<u64>,
+        update: SourceBackedRefreshProgressUpdate,
     ) -> Option<Value> {
         let mut state = self.lock_state();
         let attempt = find_attempt_mut(&mut state, request_id)?;
@@ -805,12 +800,12 @@ impl CoreRefreshEngine {
             return None;
         }
         attempt.progress = SourceBackedRefreshProgress {
-            phase: phase.to_owned(),
-            completed_sources,
-            total_sources,
-            current_source,
-            completed_records,
-            completed_bytes,
+            phase: update.phase,
+            completed_sources: update.completed_sources,
+            total_sources: update.total_sources,
+            current_source: update.current_source,
+            completed_records: update.completed_records,
+            completed_bytes: update.completed_bytes,
         };
         Some(attempt.job_json())
     }

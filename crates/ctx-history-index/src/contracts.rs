@@ -593,7 +593,7 @@ impl SourceRouteSnapshot {
         mut sources: Vec<SourceKey>,
         missing: Option<SourceRouteMissingState>,
     ) -> Result<Self> {
-        sources.sort_by(|left, right| source_sort_key(left).cmp(&source_sort_key(right)));
+        sources.sort_by_key(source_sort_key);
         let snapshot = Self {
             route_identity,
             sources,

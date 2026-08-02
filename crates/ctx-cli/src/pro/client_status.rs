@@ -50,7 +50,7 @@ pub(crate) struct ProStatus {
 
 enum StatusCore<'a> {
     Borrowed(&'a VerifiedIndex),
-    Owned(crate::semantic::PinnedSourceBackedGeneration),
+    Owned(Box<crate::semantic::PinnedSourceBackedGeneration>),
 }
 
 impl StatusCore<'_> {
@@ -149,7 +149,8 @@ pub(crate) fn status_with_helper_resolver(
     resolve_helper: impl FnOnce(&Path) -> Result<PathBuf>,
 ) -> ProStatus {
     status_with_helper_resolver_and_core(data_root, resolve_helper, || {
-        crate::semantic::pin_active_verified_generation(data_root).map(StatusCore::Owned)
+        crate::semantic::pin_active_verified_generation(data_root)
+            .map(|index| StatusCore::Owned(Box::new(index)))
     })
 }
 

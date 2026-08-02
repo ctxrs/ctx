@@ -11,17 +11,7 @@ pub(super) fn execute_source_backed_refresh(
 ) -> Result<SourceBackedRefreshPublication> {
     let index_root = source_backed_index_root(data_root);
     let report_progress = |update: SourceBackedRefreshProgressUpdate| {
-        record_source_backed_refresh_progress(
-            data_root,
-            coordinator,
-            request_id,
-            &update.phase,
-            update.completed_sources,
-            update.total_sources,
-            update.current_source,
-            update.completed_records,
-            update.completed_bytes,
-        )
+        record_source_backed_refresh_progress(data_root, coordinator, request_id, update)
     };
     executor.refresh(SourceBackedRefreshExecution {
         data_root,
@@ -107,6 +97,9 @@ where
     )
 }
 
+// This is the capture-provider boundary; keeping its independent authorities
+// explicit makes test injection and ownership visible at the call site.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn refresh_all_provider_sources(
     discovery: &DiscoveryContext,
     report: DiscoveryReport,
@@ -361,22 +354,9 @@ fn record_source_backed_refresh_progress(
     data_root: &Path,
     coordinator: &CoreRefreshEngine,
     request_id: &str,
-    phase: &str,
-    completed_sources: usize,
-    total_sources: usize,
-    current_source: Option<String>,
-    completed_records: Option<u64>,
-    completed_bytes: Option<u64>,
+    update: SourceBackedRefreshProgressUpdate,
 ) -> Result<()> {
-    if let Some(job) = coordinator.set_progress(
-        request_id,
-        phase,
-        completed_sources,
-        total_sources,
-        current_source,
-        completed_records,
-        completed_bytes,
-    ) {
+    if let Some(job) = coordinator.set_progress(request_id, update) {
         write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
     }
     Ok(())

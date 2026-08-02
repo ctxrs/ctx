@@ -225,7 +225,7 @@ fn render_refresh_progress(readiness: &Value, context: &RenderContext) -> Docume
     }
     let detail_fields = details
         .iter()
-        .map(|(label, value)| Field::new(*label, value.as_str()))
+        .map(|(label, value)| Field::new(label, value.as_str()))
         .collect::<Vec<_>>();
     document.push_blank();
     document.append(fields(context, &detail_fields));

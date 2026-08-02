@@ -63,7 +63,7 @@ impl PinnedCorePublication {
 pub(super) enum CoreRefreshTerminalSuccess {
     Verified(Arc<PinnedCorePublication>),
     #[cfg(test)]
-    StateOnly(SourceBackedRefreshReceipt),
+    StateOnly(Box<SourceBackedRefreshReceipt>),
 }
 
 impl CoreRefreshTerminalSuccess {
@@ -79,7 +79,7 @@ impl CoreRefreshTerminalSuccess {
 
     #[cfg(test)]
     pub(super) fn state_only(receipt: SourceBackedRefreshReceipt) -> Self {
-        Self::StateOnly(receipt)
+        Self::StateOnly(Box::new(receipt))
     }
 
     /// Installs retained authority before returning the receipt that may be
@@ -92,7 +92,7 @@ impl CoreRefreshTerminalSuccess {
                 receipt
             }
             #[cfg(test)]
-            Self::StateOnly(receipt) => receipt,
+            Self::StateOnly(receipt) => *receipt,
         }
     }
 }

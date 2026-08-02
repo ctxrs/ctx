@@ -23,7 +23,7 @@ fn render(case: FixtureCase, columns: usize) -> String {
     let context = RenderContext::for_test(
         TestContext::tty(StreamKind::Stdout, columns).color(ColorMode::Never),
     );
-    let mut dashboard = IndexDashboard::default();
+    let mut dashboard = IndexDashboard;
     dashboard
         .render(&case.status().unwrap(), &context)
         .render_plain()
