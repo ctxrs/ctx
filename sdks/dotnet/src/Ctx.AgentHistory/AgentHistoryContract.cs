@@ -4,6 +4,8 @@ namespace Ctx.AgentHistory;
 
 internal static class AgentHistoryContract
 {
+    private const ulong MaximumExactStatusCounter = 9_007_199_254_740_991UL;
+
     public static JsonObject Envelope(string operation, JsonObject backend, string payloadName, JsonNode? payload)
     {
         var result = new JsonObject
@@ -50,10 +52,30 @@ internal static class AgentHistoryContract
         {
             if (current[key] is JsonNode value)
             {
+                if (key.StartsWith("indexed", StringComparison.Ordinal))
+                {
+                    ValidateStatusCounter(key, value);
+                }
                 status[key] = JsonHelpers.Clone(value);
             }
         }
         return status;
+    }
+
+    private static void ValidateStatusCounter(string key, JsonNode value)
+    {
+        if (value is not JsonValue jsonValue
+            || !jsonValue.TryGetValue<ulong>(out var counter)
+            || counter > MaximumExactStatusCounter)
+        {
+            throw new CtxAgentHistoryProtocolException(
+                $"ctx status counter {key} is outside the exact JSON integer domain",
+                new JsonObject
+                {
+                    ["field"] = key,
+                    ["maximum"] = MaximumExactStatusCounter
+                });
+        }
     }
 
     public static JsonArray NormalizeSources(JsonObject raw)

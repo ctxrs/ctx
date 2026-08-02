@@ -42,17 +42,17 @@ func TestStatusDecodesAgentHistoryV1(t *testing.T) {
 	}
 }
 
-func TestInitDecodesProductionSetupCountersAsUint64(t *testing.T) {
+func TestInitAcceptsMaximumExactCrossSDKStatusCounters(t *testing.T) {
 	client := NewClient(WithTransport(fakeTransport{
 		response: `{
 			"schema_version": 2,
 			"initialized": true,
 			"data_root": "/tmp/ctx",
 			"mode": "ready",
-			"indexed_items": 9007199254740993,
-			"indexed_sessions": 9007199254740994,
-			"indexed_events": 9007199254740995,
-			"indexed_sources": 9007199254740996,
+			"indexed_items": 9007199254740991,
+			"indexed_sessions": 9007199254740991,
+			"indexed_events": 9007199254740991,
+			"indexed_sources": 9007199254740991,
 			"lexical": {"status": "ready", "generation_id": "gen-64"},
 			"refresh": {"status": "ready"}
 		}`,
@@ -62,11 +62,25 @@ func TestInitDecodesProductionSetupCountersAsUint64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init returned error: %v", err)
 	}
-	if initialized.Status.IndexedItems != uint64(1<<53)+1 ||
-		initialized.Status.IndexedSessions != uint64(1<<53)+2 ||
-		initialized.Status.IndexedEvents != uint64(1<<53)+3 ||
-		initialized.Status.IndexedSources != uint64(1<<53)+4 {
-		t.Fatalf("status counters were not decoded as uint64: %+v", initialized.Status)
+	if initialized.Status.IndexedItems != MaxSafeStatusCounter ||
+		initialized.Status.IndexedSessions != MaxSafeStatusCounter ||
+		initialized.Status.IndexedEvents != MaxSafeStatusCounter ||
+		initialized.Status.IndexedSources != MaxSafeStatusCounter {
+		t.Fatalf("status counters did not preserve the exact maximum: %+v", initialized.Status)
+	}
+}
+
+func TestStatusRejectsCountersOutsideExactCrossSDKDomain(t *testing.T) {
+	for _, rejected := range []string{"9007199254740993", "18446744073709551615"} {
+		t.Run(rejected, func(t *testing.T) {
+			client := NewClient(WithTransport(fakeTransport{
+				response: `{"initialized":true,"indexed_items":` + rejected + `}`,
+			}))
+
+			if _, err := client.Status(context.Background()); !IsErrorKind(err, ErrorKindDecode) {
+				t.Fatalf("Status error = %v, want decode_error", err)
+			}
+		})
 	}
 }
 

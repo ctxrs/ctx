@@ -319,6 +319,28 @@ fn init_normalizes_real_setup_json_into_status_contract() {
 }
 
 #[test]
+fn status_normalization_rejects_counters_outside_the_exact_json_domain() {
+    for rejected in [9_007_199_254_740_993_u64, u64::MAX] {
+        let error = normalize(
+            AgentHistoryOperation::Status,
+            BackendInfo::local(Some("/tmp/ctx".to_owned())),
+            json!({
+                "initialized": true,
+                "indexed_items": rejected
+            }),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.body.code, AgentHistoryErrorCode::DecodeError);
+        assert!(error
+            .body
+            .cause
+            .as_deref()
+            .is_some_and(|cause| cause.contains("status counter exceeds maximum")));
+    }
+}
+
+#[test]
 fn hosted_backend_returns_structured_error() {
     let client = AgentHistoryClient::hosted(HostedBackendConfig {
         base_url: "https://ctx.example.invalid".to_owned(),

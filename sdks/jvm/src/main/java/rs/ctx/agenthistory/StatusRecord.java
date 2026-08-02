@@ -1,13 +1,43 @@
 package rs.ctx.agenthistory;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /** Local agent history index status. */
 public final class StatusRecord {
+    public static final long MAX_SAFE_COUNTER = 9_007_199_254_740_991L;
+
     private final Map<String, Object> fields;
 
     StatusRecord(Map<String, Object> fields) {
+        for (String key : new String[] {
+                "indexedItems", "indexedSessions", "indexedEvents", "indexedSources"
+        }) {
+            validateCounter(fields, key);
+        }
         this.fields = AgentHistoryValue.copyObject(fields);
+    }
+
+    private static void validateCounter(Map<String, Object> fields, String key) {
+        Object value = fields.get(key);
+        if (value == null) {
+            return;
+        }
+        boolean numeric = value instanceof Number;
+        double exact = numeric ? ((Number) value).doubleValue() : Double.NaN;
+        boolean valid = Double.isFinite(exact)
+                && exact == Math.rint(exact)
+                && exact >= 0.0d
+                && exact <= (double) MAX_SAFE_COUNTER;
+        if (!valid) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("field", key);
+            details.put("maximum", Long.valueOf(MAX_SAFE_COUNTER));
+            throw new CtxAgentHistoryException.Protocol(
+                    "ctx status counter " + key + " is outside the exact JSON integer domain",
+                    details,
+                    null);
+        }
     }
 
     static StatusRecord from(Object value) {

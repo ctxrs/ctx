@@ -122,6 +122,7 @@ public sealed record AgentHistoryBackend
     internal static AgentHistoryBackend FromJson(JsonObject? json) => new(json ?? new JsonObject());
 }
 
+/// <summary>Status with native unsigned counters bounded to the exact cross-SDK JSON range.</summary>
 public sealed record AgentHistoryStatus
 {
     private readonly JsonObject _json;

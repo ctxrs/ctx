@@ -65,6 +65,11 @@ Important reusable records:
 - `Status.lexical` and `Status.refresh`: the verified generation and daemon-owned
   refresh readiness reported by `ctx status`; `Status.semantic` and
   `Status.daemon` remain extensible local diagnostic objects.
+- `Status.indexedItems`, `indexedSessions`, `indexedEvents`, and
+  `indexedSources` are operational counters in the exact integer range
+  `0..9007199254740991` (`2^53-1`). SDKs retain their native integer/number
+  types but must reject out-of-domain values instead of rounding, saturating,
+  or dropping them.
 - `SearchRetrieval`: requested/effective retrieval mode, applied semantic
   weight, semantic coverage, optional fallback code/message, and optional
   diagnostics. The CLI adapter camel-cases raw CLI retrieval fields for this

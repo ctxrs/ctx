@@ -11,6 +11,7 @@ public final class AgentHistoryClientTest {
     public static void main(String[] args) throws Exception {
         wrapsRawStatusAsTypedEnvelope();
         normalizesSetupJsonAsInitStatus();
+        rejectsStatusCountersOutsideExactCrossSDKDomain();
         acceptsCanonicalSearchFixture();
         camelizesSearchRetrievalJson();
         decodesAllCanonicalFixturesThroughTypedResponses();
@@ -44,8 +45,8 @@ public final class AgentHistoryClientTest {
         AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport(
                 "local-cli",
                 "{\"schema_version\":2,\"initialized\":true,\"data_root\":\"/tmp/ctx\","
-                        + "\"indexed_items\":2147483648,\"indexed_sessions\":2147483649,"
-                        + "\"indexed_events\":2147483650,\"indexed_sources\":2147483651,"
+                        + "\"indexed_items\":9007199254740991,\"indexed_sessions\":9007199254740991,"
+                        + "\"indexed_events\":9007199254740991,\"indexed_sources\":9007199254740991,"
                         + "\"lexical\":{\"status\":\"ready\",\"generation_id\":\"gen-9\"},"
                         + "\"refresh\":{\"status\":\"ready\",\"generation_id\":\"gen-9\"},"
                         + "\"network_required\":false}"));
@@ -55,10 +56,19 @@ public final class AgentHistoryClientTest {
         assertEquals("init", response.operation());
         assertEquals(Boolean.TRUE, response.getStatus().getInitialized());
         assertEquals(Boolean.TRUE, response.getStatus().getLocalOnly());
-        assertEquals(Long.valueOf(2147483648L), response.getStatus().getIndexedItems());
-        assertEquals(Long.valueOf(2147483649L), response.getStatus().getIndexedSessions());
-        assertEquals(Long.valueOf(2147483650L), response.getStatus().getIndexedEvents());
-        assertEquals(Long.valueOf(2147483651L), response.getStatus().getIndexedSources());
+        assertEquals(Long.valueOf(StatusRecord.MAX_SAFE_COUNTER), response.getStatus().getIndexedItems());
+        assertEquals(Long.valueOf(StatusRecord.MAX_SAFE_COUNTER), response.getStatus().getIndexedSessions());
+        assertEquals(Long.valueOf(StatusRecord.MAX_SAFE_COUNTER), response.getStatus().getIndexedEvents());
+        assertEquals(Long.valueOf(StatusRecord.MAX_SAFE_COUNTER), response.getStatus().getIndexedSources());
+    }
+
+    private static void rejectsStatusCountersOutsideExactCrossSDKDomain() {
+        for (String rejected : new String[] {"9007199254740993", "9223372036854775807"}) {
+            AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport(
+                    "local-cli",
+                    "{\"initialized\":true,\"indexed_items\":" + rejected + "}"));
+            assertProtocol(client::status);
+        }
     }
 
     private static void wrapsRawStatusAsTypedEnvelope() {
@@ -345,6 +355,16 @@ public final class AgentHistoryClientTest {
             return;
         }
         throw new AssertionError("expected validation error");
+    }
+
+    private static void assertProtocol(Runnable action) {
+        try {
+            action.run();
+        } catch (CtxAgentHistoryException.Protocol error) {
+            assertEquals("decode_error", error.code());
+            return;
+        }
+        throw new AssertionError("expected protocol error");
     }
 
     private static final class FakeTransport implements AgentHistoryTransport {

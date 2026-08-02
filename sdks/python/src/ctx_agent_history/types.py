@@ -59,6 +59,7 @@ class _StatusRequired(TypedDict):
 
 
 class Status(_StatusRequired, total=False):
+    # Operational counters are exact non-negative integers no greater than 2^53-1.
     dataRoot: Optional[str]
     readOnly: bool
     indexedItems: int

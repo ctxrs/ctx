@@ -165,9 +165,13 @@ export interface AgentHistoryStatus {
   localOnly: boolean;
   readOnly?: boolean;
   dataRoot?: string | null;
+  /** Exact operational counter in the inclusive range 0..Number.MAX_SAFE_INTEGER. */
   indexedItems?: number;
+  /** Exact operational counter in the inclusive range 0..Number.MAX_SAFE_INTEGER. */
   indexedSessions?: number;
+  /** Exact operational counter in the inclusive range 0..Number.MAX_SAFE_INTEGER. */
   indexedEvents?: number;
+  /** Exact operational counter in the inclusive range 0..Number.MAX_SAFE_INTEGER. */
   indexedSources?: number;
   historyEpoch?: Record<string, unknown>;
   lexical?: Record<string, unknown>;

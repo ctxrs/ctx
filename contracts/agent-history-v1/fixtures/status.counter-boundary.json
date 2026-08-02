@@ -1,0 +1,27 @@
+{
+  "contractVersion": "agent-history-v1",
+  "schemaVersion": 1,
+  "operation": "status",
+  "backend": {
+    "kind": "local",
+    "dataRoot": "/tmp/ctx-sdk-fixture"
+  },
+  "status": {
+    "initialized": true,
+    "localOnly": true,
+    "dataRoot": "/tmp/ctx-sdk-fixture",
+    "indexedItems": 9007199254740991,
+    "indexedSessions": 9007199254740991,
+    "indexedEvents": 9007199254740991,
+    "indexedSources": 9007199254740991,
+    "lexical": {
+      "status": "ready",
+      "generationId": "fixture-counter-boundary"
+    },
+    "refresh": {
+      "status": "ready",
+      "publishedGeneration": "fixture-counter-boundary",
+      "generationMatches": true
+    }
+  }
+}

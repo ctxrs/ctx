@@ -43,6 +43,41 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertEqual(raw["analyticsEnabled"], "false")
     }
 
+    func testStatusCountersUseTheExactCrossSDKIntegerDomain() throws {
+        let decoder = JSONDecoder()
+        let maximum = AgentHistoryStatus.maximumExactCounter
+        let accepted = try decoder.decode(
+            AgentHistoryStatus.self,
+            from: Data(
+                """
+                {"initialized":true,"localOnly":true,"indexedItems":\(maximum),"indexedSessions":\(maximum),"indexedEvents":\(maximum),"indexedSources":\(maximum)}
+                """.utf8
+            )
+        )
+        XCTAssertEqual(accepted.indexedItems, maximum)
+        XCTAssertEqual(accepted.indexedSessions, maximum)
+        XCTAssertEqual(accepted.indexedEvents, maximum)
+        XCTAssertEqual(accepted.indexedSources, maximum)
+
+        for rejected in ["9007199254740993", "9223372036854775807"] {
+            XCTAssertThrowsError(
+                try decoder.decode(
+                    AgentHistoryStatus.self,
+                    from: Data(
+                        "{\"initialized\":true,\"localOnly\":true,\"indexedItems\":\(rejected)}".utf8
+                    )
+                )
+            )
+        }
+
+        let invalid = AgentHistoryStatus(
+            initialized: true,
+            localOnly: true,
+            indexedItems: maximum + 2
+        )
+        XCTAssertThrowsError(try JSONEncoder().encode(invalid))
+    }
+
     func testWrapsCoreCLICommands() throws {
         let runner = CapturingRunner { request in
             CommandResult(stdout: #"{"schema_version":1,"initialized":true,"sources":[],"totals":{},"results":[]}"#)

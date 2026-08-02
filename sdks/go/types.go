@@ -1,6 +1,9 @@
 package ctxagenthistory
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // Object stores JSON sub-documents whose shape can grow across ctx releases.
 type Object map[string]any
@@ -137,6 +140,30 @@ type StatusRecord struct {
 	Refresh         Object `json:"refresh,omitempty"`
 	Semantic        Object `json:"semantic,omitempty"`
 	Daemon          Object `json:"daemon,omitempty"`
+}
+
+// MaxSafeStatusCounter is the largest exact status counter in every supported SDK.
+const MaxSafeStatusCounter uint64 = (1 << 53) - 1
+
+// UnmarshalJSON rejects counters that other SDKs cannot represent exactly.
+func (s *StatusRecord) UnmarshalJSON(data []byte) error {
+	type statusRecord StatusRecord
+	var decoded statusRecord
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	for name, value := range map[string]uint64{
+		"indexedItems":    decoded.IndexedItems,
+		"indexedSessions": decoded.IndexedSessions,
+		"indexedEvents":   decoded.IndexedEvents,
+		"indexedSources":  decoded.IndexedSources,
+	} {
+		if value > MaxSafeStatusCounter {
+			return fmt.Errorf("status counter %s exceeds maximum %d", name, MaxSafeStatusCounter)
+		}
+	}
+	*s = StatusRecord(decoded)
+	return nil
 }
 
 // InitResponse is returned by Client.Init.

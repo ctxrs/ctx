@@ -22,6 +22,7 @@ internal static class Program
             ("builds local CLI operation arguments", BuildsOperationArguments),
             ("forces analytics off after ambient and user environment merging", ForcesAnalyticsOff),
             ("normalizes setup init status", NormalizesSetupInitStatus),
+            ("enforces the exact status counter domain", EnforcesExactStatusCounterDomain),
             ("builds search flags", BuildsSearchFlags),
             ("camelizes search retrieval json", CamelizesSearchRetrievalJson),
             ("rejects search without intent", RejectsSearchWithoutIntent),
@@ -86,7 +87,7 @@ internal static class Program
 
     private static async Task NormalizesSetupInitStatus()
     {
-        var transport = new RecordingTransport("""{"schema_version":2,"initialized":true,"data_root":"/tmp/ctx","mode":"ready","indexed_items":2147483648,"indexed_sessions":2147483649,"indexed_events":2147483650,"indexed_sources":2147483651,"lexical":{"status":"ready","generation_id":"gen-64"},"refresh":{"status":"ready","generation_id":"gen-64"},"network_required":false}""");
+        var transport = new RecordingTransport("""{"schema_version":2,"initialized":true,"data_root":"/tmp/ctx","mode":"ready","indexed_items":9007199254740991,"indexed_sessions":9007199254740991,"indexed_events":9007199254740991,"indexed_sources":9007199254740991,"lexical":{"status":"ready","generation_id":"gen-64"},"refresh":{"status":"ready","generation_id":"gen-64"},"network_required":false}""");
         var client = new AgentHistoryClient(transport);
 
         var response = await client.InitAsync(new InitOptions());
@@ -94,10 +95,20 @@ internal static class Program
         Equal("init", response.Operation);
         Equal(true, response.Status.Initialized);
         Equal(true, response.Status.LocalOnly);
-        Equal(2147483648UL, response.Status.IndexedItems ?? 0UL);
-        Equal(2147483649UL, response.Status.IndexedSessions ?? 0UL);
-        Equal(2147483650UL, response.Status.IndexedEvents ?? 0UL);
-        Equal(2147483651UL, response.Status.IndexedSources ?? 0UL);
+        Equal(9007199254740991UL, response.Status.IndexedItems ?? 0UL);
+        Equal(9007199254740991UL, response.Status.IndexedSessions ?? 0UL);
+        Equal(9007199254740991UL, response.Status.IndexedEvents ?? 0UL);
+        Equal(9007199254740991UL, response.Status.IndexedSources ?? 0UL);
+    }
+
+    private static async Task EnforcesExactStatusCounterDomain()
+    {
+        foreach (var rejected in new[] { "9007199254740993", "18446744073709551615" })
+        {
+            var client = new AgentHistoryClient(new RecordingTransport(
+                $$"""{"initialized":true,"indexed_items":{{rejected}}}"""));
+            await ThrowsAsync<CtxAgentHistoryProtocolException>(() => client.StatusAsync());
+        }
     }
 
     private static async Task WrapsStatus()

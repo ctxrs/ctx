@@ -24,7 +24,7 @@ from ctx_agent_history import (
 )
 from ctx_agent_history.errors import CtxAgentHistoryCliError, CtxAgentHistoryProtocolError
 from ctx_agent_history.errors import CtxAgentHistoryTimeoutError, CtxAgentHistoryValidationError
-from ctx_agent_history.agent_history_v1 import normalize_import, normalize_sources
+from ctx_agent_history.agent_history_v1 import normalize_import, normalize_sources, normalize_status
 from ctx_agent_history.transport import LocalCliAdapter
 from ctx_agent_history.types import AgentHistoryErrorCode, SearchHit
 import dogfood_local
@@ -91,6 +91,29 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertTrue(result["status"]["localOnly"])
         self.assertEqual(result["status"]["lexical"]["generationId"], "gen-1")
         self.assertNotIn("futureField", result["status"])
+
+    def test_status_counters_use_the_exact_cross_sdk_integer_domain(self) -> None:
+        maximum = (1 << 53) - 1
+        normalized = normalize_status(
+            {
+                "initialized": True,
+                "indexed_items": maximum,
+                "indexed_sessions": maximum,
+                "indexed_events": maximum,
+                "indexed_sources": maximum,
+            }
+        )
+        self.assertEqual(normalized["indexedItems"], maximum)
+        self.assertEqual(normalized["indexedSessions"], maximum)
+        self.assertEqual(normalized["indexedEvents"], maximum)
+        self.assertEqual(normalized["indexedSources"], maximum)
+
+        for rejected in ((1 << 53) + 1, (1 << 64) - 1):
+            with self.subTest(rejected=rejected):
+                with self.assertRaises(CtxAgentHistoryProtocolError) as raised:
+                    normalize_status({"initialized": True, "indexed_items": rejected})
+                self.assertEqual(raised.exception.code, "decode_error")
+                self.assertEqual(raised.exception.details["field"], "indexedItems")
 
     def test_local_cli_forces_analytics_off_after_ambient_and_user_env(self) -> None:
         completed = subprocess.CompletedProcess(

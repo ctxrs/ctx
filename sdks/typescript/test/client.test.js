@@ -85,6 +85,32 @@ test("wraps status, init, sources, import, and sync CLI commands", async () => {
   );
 });
 
+test("status counters use the exact cross-SDK integer domain", async () => {
+  const maximum = Number.MAX_SAFE_INTEGER;
+  const accepted = toAgentHistoryEnvelope("status", {
+    initialized: true,
+    indexed_items: maximum,
+    indexed_sessions: maximum,
+    indexed_events: maximum,
+    indexed_sources: maximum,
+  });
+  assert.equal(accepted.status.indexedItems, maximum);
+  assert.equal(accepted.status.indexedSessions, maximum);
+  assert.equal(accepted.status.indexedEvents, maximum);
+  assert.equal(accepted.status.indexedSources, maximum);
+
+  for (const wireValue of ["9007199254740993", "18446744073709551615"]) {
+    const raw = JSON.parse(`{"initialized":true,"indexed_items":${wireValue}}`);
+    assert.throws(
+      () => toAgentHistoryEnvelope("status", raw),
+      (error) =>
+        error instanceof CtxParseError &&
+        error.details.field === "indexedItems" &&
+        error.details.maximum === maximum,
+    );
+  }
+});
+
 test("forces analytics off after ambient and user environment merging", async () => {
   const original = process.env.CTX_ANALYTICS_ENABLED;
   process.env.CTX_ANALYTICS_ENABLED = "true";

@@ -378,12 +378,26 @@ function normalizeStatus(raw) {
     "daemon",
   ]) {
     if (current[key] !== undefined) {
+      if (key.startsWith("indexed")) {
+        requireExactStatusCounter(key, current[key]);
+      }
       status[key] = current[key];
     }
   }
   status.initialized ??= typeof current.lexical?.generationId === "string";
   status.localOnly = true;
   return status;
+}
+
+function requireExactStatusCounter(key, value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new CtxParseError(
+      `ctx status counter ${key} is outside the exact JSON integer domain`,
+      {
+        details: { field: key, maximum: Number.MAX_SAFE_INTEGER },
+      },
+    );
+  }
 }
 
 function camelizeKeys(value) {
