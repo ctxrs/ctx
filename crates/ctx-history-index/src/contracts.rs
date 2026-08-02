@@ -106,6 +106,22 @@ pub enum IndexError {
     UnboundIndexState,
     #[error("the lexical generation changed while a verified reader was opening")]
     ConcurrentGenerationChange,
+    #[error(
+        "requested lexical generation {expected_generation_id} is not retained: \
+         active generation is {active_generation_id}, previous generation is {previous_generation_id:?}"
+    )]
+    PinnedGenerationNotRetained {
+        expected_generation_id: String,
+        active_generation_id: String,
+        previous_generation_id: Option<String>,
+    },
+    #[error(
+        "requested lexical generation {expected_generation_id} resolved to publication payload/manifest generation {actual_generation_id}"
+    )]
+    PinnedGenerationMismatch {
+        expected_generation_id: String,
+        actual_generation_id: String,
+    },
     #[error("generation manifest {0} is missing")]
     MissingManifest(String),
     #[error("generation manifest digest mismatch: expected {expected}, actual {actual}")]
