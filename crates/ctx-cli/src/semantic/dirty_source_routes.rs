@@ -255,6 +255,10 @@ impl DirtySourceRoutes {
             return None;
         }
         state.in_flight = None;
+        if state.dirty_revision != admission.dirty_revision {
+            state.reset_retry();
+            return Some(0);
+        }
         state.consecutive_retry_failures = state.consecutive_retry_failures.saturating_add(1);
         let delay_ms = retry_delay_ms(state.consecutive_retry_failures);
         state.retry_not_before_ms = Some(now_ms.saturating_add(delay_ms));
@@ -285,7 +289,7 @@ impl DirtySourceRoutes {
         let needs_new_order = self
             .dirty
             .get(&route)
-            .is_none_or(|state| state.permanently_blocked);
+            .is_none_or(|state| state.permanently_blocked || state.in_flight.is_some());
         let new_order = needs_new_order.then(|| self.allocate_dirty_order());
         let Some(state) = self.dirty.get_mut(&route) else {
             self.dirty.insert(
@@ -307,8 +311,10 @@ impl DirtySourceRoutes {
             state.permanently_blocked = false;
             state.reset_retry();
         } else if starts_work_after_admission {
+            state.dirty_order = new_order.unwrap_or(state.dirty_order);
             state.first_event_at_ms = observed_at_ms;
             state.last_event_at_ms = observed_at_ms;
+            state.reset_retry();
         } else {
             state.last_event_at_ms = observed_at_ms;
         }
@@ -476,6 +482,37 @@ mod tests {
         assert_eq!(ledger.len(), 1);
         assert!(ledger.acknowledge(&current));
         assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn stale_retryable_failure_does_not_back_off_a_newer_event() {
+        let mut ledger = DirtySourceRoutes::default();
+        let route = route(17);
+
+        ledger.record_event(route.clone(), watermark(1, 1), 0);
+        let stale = ledger.admit_next(250).unwrap();
+        ledger.record_event(route.clone(), watermark(1, 2), 300);
+
+        assert_eq!(ledger.retryable_failure(&stale, 301), Some(0));
+        assert_eq!(ledger.next_due_at_ms(), Some(550));
+        assert!(ledger.admit_next(549).is_none());
+        assert_eq!(ledger.admit_next(550).unwrap().route(), &route);
+    }
+
+    #[test]
+    fn event_during_work_reenters_equal_time_fairness_at_the_tail() {
+        let mut ledger = DirtySourceRoutes::default();
+        let first = route(18);
+        let waiting = route(19);
+
+        ledger.record_event(first.clone(), watermark(1, 1), 0);
+        let admitted = ledger.admit_next(250).unwrap();
+        ledger.record_event(waiting.clone(), watermark(1, 2), 300);
+        ledger.record_event(first.clone(), watermark(1, 3), 300);
+        assert!(!ledger.acknowledge(&admitted));
+
+        assert_eq!(ledger.admit_next(550).unwrap().route(), &waiting);
+        assert_eq!(ledger.admit_next(550).unwrap().route(), &first);
     }
 
     #[test]
