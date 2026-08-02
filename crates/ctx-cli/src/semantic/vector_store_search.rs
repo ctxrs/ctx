@@ -198,18 +198,21 @@ mod tests {
         let event_id = Uuid::new_v4();
         let mut embedding = vec![0.0; SEMANTIC_DIMENSIONS];
         embedding[0] = 1.0;
-        store.upsert_chunk_embeddings(&[(
-            SemanticChunkDocument {
-                event_id,
-                seq: 1,
-                chunk_index: 0,
-                source_text_hash: "00".repeat(32),
-                text: String::new(),
-                start_char: 0,
-                end_char: 1,
-            },
-            embedding.clone(),
-        )])?;
+        store.publish_chunk_replacements(
+            &[(
+                SemanticChunkDocument {
+                    event_id,
+                    seq: 1,
+                    chunk_index: 0,
+                    source_text_hash: "00".repeat(32),
+                    text: String::new(),
+                    start_char: 0,
+                    end_char: 1,
+                },
+                embedding.clone(),
+            )],
+            &[],
+        )?;
         let pinned = store
             .flat_pin_generation()?
             .expect("fixture must publish a flat generation");

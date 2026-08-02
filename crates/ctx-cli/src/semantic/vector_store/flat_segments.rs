@@ -284,16 +284,6 @@ impl FlatSegmentStore {
             .map(|pinned| pinned.generation_hash().to_owned()))
     }
 
-    pub(in crate::semantic) fn active_events(&self) -> FlatResult<Vec<FlatActiveEvent>> {
-        #[cfg(test)]
-        self.active_event_snapshot_count
-            .fetch_add(1, Ordering::Relaxed);
-        Ok(self
-            .pin_generation()?
-            .map(|pinned| pinned.active_events().to_vec())
-            .unwrap_or_default())
-    }
-
     #[cfg(test)]
     pub(in crate::semantic) fn reset_active_event_snapshot_count(&self) {
         self.active_event_snapshot_count.store(0, Ordering::Relaxed);
@@ -347,12 +337,6 @@ impl FlatSegmentStore {
         })
     }
 
-    pub(in crate::semantic) fn delete_events(
-        &self,
-        event_ids: &[Uuid],
-    ) -> FlatResult<FlatPublishOutcome> {
-        self.publish_replacement_event_chunks(&[], event_ids)
-    }
     fn load_current_locked(&self) -> FlatResult<Option<SelectedManifest>> {
         let selected = select_manifest(&self.root, &self.contract)?;
         if let Some(selected) = &selected {

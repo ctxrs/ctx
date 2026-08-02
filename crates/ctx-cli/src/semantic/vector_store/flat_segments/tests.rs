@@ -139,7 +139,7 @@ fn replacement_tombstone_and_read_only_enumeration_are_exact() -> FlatResult<()>
         .vector;
     assert_eq!(active_vector.as_ptr() as usize % VECTOR_ALIGNMENT, 0);
     assert!(matches!(
-        read_only.delete_events(&[first]),
+        read_only.publish_replacement_event_chunks(&[], &[first]),
         Err(FlatStoreError::ReadOnly)
     ));
     Ok(())

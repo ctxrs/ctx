@@ -28,8 +28,9 @@ use super::{
     source_backed_refresh_coordinator::{pin_published_generation, PinnedSourceBackedGeneration},
     vector_store::{
         semantic_core_content_is_control, source_backed_semantic_vector_path,
-        SemanticChunkDocument, SemanticVectorStore, SourceBackedSemanticDocumentBuilder,
-        SourceBackedSemanticEmbedder, SourceBackedSemanticOutcome,
+        SemanticChunkDocument, SemanticVectorStore, SourceBackedGenerationPin,
+        SourceBackedSemanticDocumentBuilder, SourceBackedSemanticEmbedder,
+        SourceBackedSemanticOutcome,
     },
     SemanticEventDocument,
 };
@@ -215,10 +216,13 @@ pub(super) fn run_daemon_semantic_job(
     let vector_path = source_backed_semantic_vector_path(data_root);
     let mut vector_store = SemanticVectorStore::open(&vector_path)?;
     let source_eligible_events = source_generation.semantic_eligible_event_count()?;
-    let source_pending = !vector_store.source_backed_generation_ready_exact(
-        source_generation.generation_id(),
-        source_eligible_events,
-    )?;
+    let source_pending = matches!(
+        vector_store.source_backed_generation_pin_exact(
+            source_generation.generation_id(),
+            source_eligible_events,
+        )?,
+        SourceBackedGenerationPin::NotReady
+    );
     if !source_pending {
         return Ok(daemon_semantic_job_json(
             "ready",

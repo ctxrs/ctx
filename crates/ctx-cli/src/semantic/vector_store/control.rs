@@ -20,8 +20,9 @@ use crate::semantic::{
 
 pub(super) const CONTROL_FILE: &str = "state.sqlite";
 const CONTROL_APPLICATION_ID: i64 = 0x4354_584D; // "CTXM"
-const CONTROL_SCHEMA_VERSION: i64 = 2;
+const CONTROL_SCHEMA_VERSION: i64 = 3;
 const MODEL_CONTRACT_STATE: &str = "projection_model_contract";
+pub(super) const FULL_REBUILD_STATE: &str = "projection_full_rebuild_v1";
 
 pub(in crate::semantic) fn open_writable(root: &Path) -> Result<Connection> {
     validate_root(root, true)?;
@@ -116,8 +117,8 @@ fn validate_control_file(path: &Path) -> Result<()> {
 }
 
 fn prepare_schema(connection: &Connection) -> Result<()> {
-    let mut application_id = pragma_i64(connection, "application_id")?;
-    let mut schema_version = pragma_i64(connection, "user_version")?;
+    let application_id = pragma_i64(connection, "application_id")?;
+    let schema_version = pragma_i64(connection, "user_version")?;
     if application_id == CONTROL_APPLICATION_ID
         && (1..CONTROL_SCHEMA_VERSION).contains(&schema_version)
     {
@@ -128,53 +129,16 @@ fn prepare_schema(connection: &Connection) -> Result<()> {
             DROP TABLE IF EXISTS semantic_index_stats;
             DROP TABLE IF EXISTS semantic_maintenance_state;
             DROP TABLE IF EXISTS semantic_source_documents;
+            DROP TABLE IF EXISTS semantic_source_receipts;
             "#,
         )?;
-        transaction.pragma_update(None, "application_id", 0)?;
-        transaction.pragma_update(None, "user_version", 0)?;
+        create_schema(&transaction, true)?;
         transaction.commit()?;
-        application_id = 0;
-        schema_version = 0;
+        return Ok(());
     }
     if application_id == 0 && schema_version == 0 && user_table_count(connection)? == 0 {
         let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Exclusive)?;
-        transaction.execute_batch(
-            r#"
-            CREATE TABLE semantic_index_stats (
-                id INTEGER PRIMARY KEY CHECK(id = 1),
-                dirty_items INTEGER NOT NULL CHECK(dirty_items >= 0)
-            );
-            INSERT INTO semantic_index_stats(id, dirty_items) VALUES (1, 0);
-            CREATE TABLE semantic_dirty_events (
-                event_id TEXT PRIMARY KEY,
-                queued_at_ms INTEGER NOT NULL,
-                priority_seq INTEGER,
-                reason TEXT NOT NULL,
-                attempts INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX idx_semantic_dirty_events_priority
-                ON semantic_dirty_events(priority_seq DESC, queued_at_ms ASC, event_id ASC);
-            CREATE TABLE semantic_maintenance_state (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            CREATE TABLE semantic_source_documents (
-                event_id TEXT PRIMARY KEY,
-                stable_event_identity BLOB NOT NULL UNIQUE,
-                source_text_sha256 TEXT NOT NULL,
-                core_generation_id TEXT NOT NULL,
-                consumer_build_id TEXT NOT NULL
-            );
-            CREATE INDEX idx_semantic_source_documents_generation
-                ON semantic_source_documents(core_generation_id, event_id);
-            "#,
-        )?;
-        transaction.execute(
-            "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)",
-            params![MODEL_CONTRACT_STATE, semantic_model_contract_descriptor()],
-        )?;
-        transaction.pragma_update(None, "application_id", CONTROL_APPLICATION_ID)?;
-        transaction.pragma_update(None, "user_version", CONTROL_SCHEMA_VERSION)?;
+        create_schema(&transaction, false)?;
         transaction.commit()?;
         return Ok(());
     }
@@ -191,6 +155,7 @@ fn prepare_schema(connection: &Connection) -> Result<()> {
         let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Exclusive)?;
         transaction.execute("DELETE FROM semantic_dirty_events", [])?;
         transaction.execute("DELETE FROM semantic_source_documents", [])?;
+        transaction.execute("DELETE FROM semantic_source_receipts", [])?;
         transaction.execute("DELETE FROM semantic_maintenance_state", [])?;
         transaction.execute(
             "UPDATE semantic_index_stats SET dirty_items = 0 WHERE id = 1",
@@ -200,8 +165,70 @@ fn prepare_schema(connection: &Connection) -> Result<()> {
             "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)",
             params![MODEL_CONTRACT_STATE, expected_contract],
         )?;
+        transaction.execute(
+            "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, 'true')",
+            [FULL_REBUILD_STATE],
+        )?;
         transaction.commit()?;
     }
+    Ok(())
+}
+
+fn create_schema(transaction: &Transaction<'_>, requires_full_rebuild: bool) -> Result<()> {
+    transaction.execute_batch(
+        r#"
+        CREATE TABLE semantic_index_stats (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            dirty_items INTEGER NOT NULL CHECK(dirty_items >= 0)
+        );
+        INSERT INTO semantic_index_stats(id, dirty_items) VALUES (1, 0);
+        CREATE TABLE semantic_dirty_events (
+            event_id TEXT PRIMARY KEY,
+            queued_at_ms INTEGER NOT NULL,
+            priority_seq INTEGER,
+            reason TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX idx_semantic_dirty_events_priority
+            ON semantic_dirty_events(priority_seq DESC, queued_at_ms ASC, event_id ASC);
+        CREATE TABLE semantic_maintenance_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE semantic_source_documents (
+            event_id TEXT PRIMARY KEY,
+            stable_event_identity BLOB NOT NULL UNIQUE,
+            source_text_sha256 TEXT NOT NULL,
+            source_identity_digest TEXT NOT NULL,
+            source_reconciliation_id TEXT NOT NULL
+        );
+        CREATE INDEX idx_semantic_source_documents_source
+            ON semantic_source_documents(source_identity_digest, event_id);
+        CREATE TABLE semantic_source_receipts (
+            source_identity_digest TEXT PRIMARY KEY,
+            indexed_documents INTEGER NOT NULL CHECK(indexed_documents >= 0),
+            semantic_eligible_documents INTEGER NOT NULL
+                CHECK(semantic_eligible_documents >= 0),
+            core_record_accumulator TEXT NOT NULL,
+            contract_fingerprint TEXT NOT NULL,
+            semantic_policy_fingerprint TEXT NOT NULL,
+            owned_event_count INTEGER NOT NULL CHECK(owned_event_count >= 0),
+            owned_event_ids_hash TEXT NOT NULL
+        );
+        "#,
+    )?;
+    transaction.execute(
+        "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)",
+        params![MODEL_CONTRACT_STATE, semantic_model_contract_descriptor()],
+    )?;
+    if requires_full_rebuild {
+        transaction.execute(
+            "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, 'true')",
+            [FULL_REBUILD_STATE],
+        )?;
+    }
+    transaction.pragma_update(None, "application_id", CONTROL_APPLICATION_ID)?;
+    transaction.pragma_update(None, "user_version", CONTROL_SCHEMA_VERSION)?;
     Ok(())
 }
 
@@ -228,6 +255,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         "semantic_index_stats",
         "semantic_maintenance_state",
         "semantic_source_documents",
+        "semantic_source_receipts",
     ];
     for table in expected_tables {
         let exists = connection.query_row(

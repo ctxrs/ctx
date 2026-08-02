@@ -10,7 +10,7 @@ use super::{
             FlatActiveEventLookup, FlatChunk, FlatEventReplacement, FlatSourceHash,
             PinnedFlatGeneration,
         },
-        SemanticChunkDocument, SemanticStoredEvent, SemanticVectorStore,
+        SemanticChunkDocument, SemanticVectorStore,
     },
     vector_store_schema::{semantic_owned_sidecar_result, SemanticVectorStoreError},
 };
@@ -22,13 +22,16 @@ impl SemanticVectorStore {
         semantic_owned_sidecar_result(self.flat.active_event_lookup().map_err(anyhow::Error::new))
     }
 
-    pub(super) fn upsert_chunk_embeddings(
+    /// Publishes all replacements and retirements for one bounded source page
+    /// in a single flat-store generation.
+    pub(super) fn publish_chunk_replacements(
         &mut self,
         items: &[(SemanticChunkDocument, Vec<f32>)],
-    ) -> Result<()> {
+        event_ids: &[Uuid],
+    ) -> Result<usize> {
         semantic_owned_sidecar_result((|| {
-            if items.is_empty() {
-                return Ok(());
+            if items.is_empty() && event_ids.is_empty() {
+                return Ok(0);
             }
             if items.iter().any(|(_, embedding)| {
                 embedding.len() != SEMANTIC_DIMENSIONS
@@ -39,7 +42,36 @@ impl SemanticVectorStore {
                 ))
                 .into());
             }
-            self.flat_publish_upsert(items)
+            let tombstones = event_ids.iter().copied().collect::<HashSet<_>>();
+            if items
+                .iter()
+                .any(|(document, _)| tombstones.contains(&document.event_id))
+            {
+                return Err(SemanticVectorStoreError::storage_conflict(
+                    "semantic page cannot replace and retire the same event",
+                )
+                .into());
+            }
+            let replacements = grouped_replacements(items)?;
+            let lookup = self.flat_active_event_lookup()?;
+            let deleted = tombstones.iter().try_fold(0_usize, |count, event_id| {
+                let chunks = lookup
+                    .event(*event_id)
+                    .map_or(0_usize, |event| event.chunk_count as usize);
+                count.checked_add(chunks).ok_or_else(|| {
+                    anyhow::Error::new(SemanticVectorStoreError::reset_required(
+                        "semantic deleted chunk count overflowed",
+                    ))
+                })
+            })?;
+            self.flat
+                .publish_replacement_event_chunks(
+                    &replacements,
+                    &tombstones.into_iter().collect::<Vec<_>>(),
+                )
+                .map_err(anyhow::Error::new)?;
+            self.flat_compact_if_needed()?;
+            Ok(deleted)
         })())
     }
 
@@ -51,7 +83,7 @@ impl SemanticVectorStore {
             // Flat publication happens first. A crash before the following
             // metadata cleanup leaves a safe, repeatable tombstone rather than
             // exposing stale vectors.
-            let deleted = self.flat_publish_delete(event_ids)?;
+            let deleted = self.publish_chunk_replacements(&[], event_ids)?;
             let transaction = self.conn.transaction()?;
             {
                 let mut delete_source_metadata = transaction
@@ -67,92 +99,6 @@ impl SemanticVectorStore {
 
     pub(super) fn flat_pin_generation(&self) -> Result<Option<PinnedFlatGeneration>> {
         self.flat.pin_generation().map_err(anyhow::Error::new)
-    }
-
-    fn flat_publish_upsert(&mut self, items: &[(SemanticChunkDocument, Vec<f32>)]) -> Result<()> {
-        let mut grouped = BTreeMap::<Uuid, (u64, FlatSourceHash, Vec<FlatChunk>)>::new();
-        for (document, embedding) in items {
-            let source_hash = FlatSourceHash::parse_hex(&document.source_text_hash)
-                .map_err(anyhow::Error::new)?;
-            let chunk = FlatChunk {
-                chunk_index: u32::try_from(document.chunk_index)?,
-                start_char: u32::try_from(document.start_char)?,
-                end_char: u32::try_from(document.end_char)?,
-                vector: embedding.clone(),
-            };
-            match grouped.entry(document.event_id) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert((document.seq, source_hash, vec![chunk]));
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    let (seq, existing_hash, chunks) = entry.get_mut();
-                    if *seq != document.seq || *existing_hash != source_hash {
-                        return Err(SemanticVectorStoreError::storage_conflict(format!(
-                            "semantic chunks for {} disagree on sequence or source hash",
-                            document.event_id
-                        ))
-                        .into());
-                    }
-                    chunks.push(chunk);
-                }
-            }
-        }
-        let replacements = grouped
-            .into_iter()
-            .map(|(event_id, (seq, source_text_hash, mut chunks))| {
-                chunks.sort_by_key(|chunk| chunk.chunk_index);
-                FlatEventReplacement {
-                    event_id,
-                    seq,
-                    source_text_hash,
-                    chunks,
-                }
-            })
-            .collect::<Vec<_>>();
-        self.flat
-            .publish_replacement_event_chunks(&replacements, &[])
-            .map_err(anyhow::Error::new)?;
-        self.flat_compact_if_needed()?;
-        Ok(())
-    }
-
-    fn flat_publish_delete(&mut self, event_ids: &[Uuid]) -> Result<usize> {
-        let requested = event_ids.iter().copied().collect::<HashSet<_>>();
-        let deleted = self
-            .flat
-            .active_events()
-            .map_err(anyhow::Error::new)?
-            .into_iter()
-            .filter(|event| requested.contains(&event.event_id))
-            .try_fold(0_usize, |count, event| {
-                count
-                    .checked_add(event.chunk_count as usize)
-                    .ok_or_else(|| {
-                        anyhow::Error::new(SemanticVectorStoreError::reset_required(
-                            "semantic deleted chunk count overflowed",
-                        ))
-                    })
-            })?;
-        self.flat
-            .delete_events(event_ids)
-            .map_err(anyhow::Error::new)?;
-        self.flat_compact_if_needed()?;
-        Ok(deleted)
-    }
-
-    pub(super) fn flat_active_events(&self) -> Result<Vec<SemanticStoredEvent>> {
-        self.flat
-            .active_events()
-            .map_err(anyhow::Error::new)?
-            .into_iter()
-            .map(|event| {
-                Ok(SemanticStoredEvent {
-                    event_id: event.event_id,
-                    source_text_hash: event.source_text_hash.to_hex(),
-                    seq: event.seq,
-                })
-            })
-            .collect()
     }
 
     #[cfg(test)]
@@ -175,4 +121,48 @@ impl SemanticVectorStore {
         }
         Ok(())
     }
+}
+
+fn grouped_replacements(
+    items: &[(SemanticChunkDocument, Vec<f32>)],
+) -> Result<Vec<FlatEventReplacement>> {
+    let mut grouped = BTreeMap::<Uuid, (u64, FlatSourceHash, Vec<FlatChunk>)>::new();
+    for (document, embedding) in items {
+        let source_hash =
+            FlatSourceHash::parse_hex(&document.source_text_hash).map_err(anyhow::Error::new)?;
+        let chunk = FlatChunk {
+            chunk_index: u32::try_from(document.chunk_index)?,
+            start_char: u32::try_from(document.start_char)?,
+            end_char: u32::try_from(document.end_char)?,
+            vector: embedding.clone(),
+        };
+        match grouped.entry(document.event_id) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((document.seq, source_hash, vec![chunk]));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let (seq, existing_hash, chunks) = entry.get_mut();
+                if *seq != document.seq || *existing_hash != source_hash {
+                    return Err(SemanticVectorStoreError::storage_conflict(format!(
+                        "semantic chunks for {} disagree on sequence or source hash",
+                        document.event_id
+                    ))
+                    .into());
+                }
+                chunks.push(chunk);
+            }
+        }
+    }
+    Ok(grouped
+        .into_iter()
+        .map(|(event_id, (seq, source_text_hash, mut chunks))| {
+            chunks.sort_by_key(|chunk| chunk.chunk_index);
+            FlatEventReplacement {
+                event_id,
+                seq,
+                source_text_hash,
+                chunks,
+            }
+        })
+        .collect())
 }

@@ -17,7 +17,9 @@ use super::{
         daemon_core_refresh_job_path, daemon_jobs_path, daemon_report_with_disabled_status,
         daemon_semantic_job_path, read_daemon_job_status,
     },
-    vector_store::{source_backed_semantic_vector_path, SemanticVectorStore},
+    vector_store::{
+        source_backed_semantic_vector_path, SemanticVectorStore, SourceBackedGenerationPin,
+    },
 };
 
 const SEARCH_DIRECTORY: &str = "search";
@@ -391,31 +393,36 @@ fn semantic_report(data_root: &Path, config: &AppConfig, index: Option<&Verified
     let flat_f32 = match SemanticVectorStore::open_read_only(&path) {
         Ok(Some(store)) => match index.semantic_eligible_event_count() {
             Ok(semantic_documents) => match store
-                .source_backed_generation_ready_exact(index.generation_id(), semantic_documents)
+                .source_backed_generation_pin_exact(index.generation_id(), semantic_documents)
             {
-                Ok(true) => match store
-                    .pin_source_backed_generation(index.generation_id(), semantic_documents)
-                {
-                    Ok(pin) => {
-                        let stats = pin.as_ref().map(|pin| pin.stats());
-                        compact_json(json!({
-                            "status": "ready",
-                            "reason": Value::Null,
-                            "path": path,
-                            "core_generation_id": index.generation_id(),
-                            "semantic_documents": semantic_documents,
-                            "flat_generation": pin.as_ref().map(|pin| pin.generation()),
-                            "flat_generation_hash": pin
-                                .as_ref()
-                                .map(|pin| pin.generation_hash()),
-                            "active_events": stats.map(|stats| stats.active_events),
-                            "active_chunks": stats.map(|stats| stats.active_chunks),
-                            "active_vector_bytes": stats.map(|stats| stats.active_vector_bytes),
-                        }))
-                    }
-                    Err(error) => typed_unavailable_with_error("flat_f32_pin_failed", path, error),
-                },
-                Ok(false) => compact_json(json!({
+                Ok(SourceBackedGenerationPin::Ready(pin)) => {
+                    let stats = pin.stats();
+                    compact_json(json!({
+                        "status": "ready",
+                        "reason": Value::Null,
+                        "path": path,
+                        "core_generation_id": index.generation_id(),
+                        "semantic_documents": semantic_documents,
+                        "flat_generation": pin.generation(),
+                        "flat_generation_hash": pin.generation_hash(),
+                        "active_events": stats.active_events,
+                        "active_chunks": stats.active_chunks,
+                        "active_vector_bytes": stats.active_vector_bytes,
+                    }))
+                }
+                Ok(SourceBackedGenerationPin::ReadyEmpty) => compact_json(json!({
+                    "status": "ready",
+                    "reason": Value::Null,
+                    "path": path,
+                    "core_generation_id": index.generation_id(),
+                    "semantic_documents": semantic_documents,
+                    "flat_generation": Value::Null,
+                    "flat_generation_hash": Value::Null,
+                    "active_events": 0,
+                    "active_chunks": 0,
+                    "active_vector_bytes": 0,
+                })),
+                Ok(SourceBackedGenerationPin::NotReady) => compact_json(json!({
                     "status": "pending",
                     "reason": "generation_not_acknowledged",
                     "path": path,

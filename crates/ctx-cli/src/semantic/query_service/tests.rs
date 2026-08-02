@@ -41,3 +41,23 @@ fn semantic_disabled_contract_is_stable_and_not_retryable() {
         })
     );
 }
+
+#[test]
+fn semantic_query_admission_fails_closed_but_permits_ready_empty() {
+    let error =
+        source_backed_query_pin_from_readiness("generation-a", SourceBackedGenerationPin::NotReady)
+            .err()
+            .expect("an unacknowledged generation must fail closed");
+    let not_ready = error
+        .downcast_ref::<SourceBackedSemanticNotReady>()
+        .expect("admission failure must retain the typed unavailable contract");
+    assert_eq!(not_ready.code(), "semantic_generation_not_acknowledged");
+
+    let pin = source_backed_query_pin_from_readiness(
+        "generation-empty",
+        SourceBackedGenerationPin::ReadyEmpty,
+    )
+    .expect("an acknowledged empty generation must be admitted");
+    assert_eq!(pin.core_generation_id, "generation-empty");
+    assert!(pin.pinned.is_none());
+}

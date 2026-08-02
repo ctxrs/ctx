@@ -36,15 +36,6 @@ pub(super) struct SemanticChunkDocument {
     pub(super) end_char: usize,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct SemanticStoredEvent {
-    pub(super) event_id: Uuid,
-    #[expect(dead_code)]
-    pub(super) source_text_hash: String,
-    #[expect(dead_code)]
-    pub(super) seq: u64,
-}
-
 pub(super) struct SemanticVectorStore {
     pub(super) conn: Connection,
     pub(super) flat: flat_segments::FlatSegmentStore,
@@ -55,7 +46,8 @@ use uuid::Uuid;
 mod source_projection;
 pub(super) use source_projection::{
     semantic_core_content_is_control, source_backed_semantic_vector_path,
-    SourceBackedSemanticDocumentBuilder, SourceBackedSemanticEmbedder, SourceBackedSemanticOutcome,
+    SourceBackedGenerationPin, SourceBackedSemanticDocumentBuilder, SourceBackedSemanticEmbedder,
+    SourceBackedSemanticOutcome,
 };
 pub(super) mod control;
 pub(super) mod flat_scan;

@@ -16,7 +16,7 @@ use super::{
     source_backed_refresh_coordinator::PinnedSourceBackedGeneration,
     vector_store::{
         flat_segments::PinnedFlatGeneration, source_backed_semantic_vector_path,
-        SemanticVectorSearchStats, SemanticVectorStore,
+        SemanticVectorSearchStats, SemanticVectorStore, SourceBackedGenerationPin,
     },
     vector_store_search::scan_exact_generation,
 };
@@ -115,35 +115,15 @@ impl PinnedSourceBackedGeneration {
                 format!("semantic-eligible event count failed: {error}"),
             )
         })?;
-        let ready = vector_store
-            .source_backed_generation_ready_exact(index.generation_id(), semantic_documents)
+        let readiness = vector_store
+            .source_backed_generation_pin_exact(index.generation_id(), semantic_documents)
             .map_err(|error| {
                 source_semantic_not_ready(
                     "semantic_generation_unreadable",
                     format!("semantic source acknowledgement could not be verified: {error:#}"),
                 )
             })?;
-        if !ready {
-            return Err(source_semantic_not_ready(
-                "semantic_generation_not_acknowledged",
-                format!(
-                    "flat-F32 projection is missing, stale, partial, or not pinned to Core generation {}",
-                    index.generation_id()
-                ),
-            ));
-        }
-        let pinned = vector_store
-            .pin_source_backed_generation(index.generation_id(), semantic_documents)
-            .map_err(|error| {
-                source_semantic_not_ready(
-                    "semantic_generation_unreadable",
-                    format!("semantic source generation could not be pinned: {error:#}"),
-                )
-            })?;
-        Ok(SourceBackedSemanticQueryPin {
-            core_generation_id: index.generation_id().to_owned(),
-            pinned,
-        })
+        source_backed_query_pin_from_readiness(index.generation_id(), readiness)
     }
 
     pub(crate) fn semantic_candidates_for_pinned_source_generation(
@@ -341,6 +321,28 @@ fn source_semantic_diagnostics(
 
 fn source_semantic_not_ready(code: &'static str, detail: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(SourceBackedSemanticNotReady::new(code, detail))
+}
+
+fn source_backed_query_pin_from_readiness(
+    core_generation_id: &str,
+    readiness: SourceBackedGenerationPin,
+) -> Result<SourceBackedSemanticQueryPin> {
+    let pinned = match readiness {
+        SourceBackedGenerationPin::NotReady => {
+            return Err(source_semantic_not_ready(
+                "semantic_generation_not_acknowledged",
+                format!(
+                    "flat-F32 projection is missing, stale, partial, or not pinned to Core generation {core_generation_id}"
+                ),
+            ));
+        }
+        SourceBackedGenerationPin::ReadyEmpty => None,
+        SourceBackedGenerationPin::Ready(pinned) => Some(pinned),
+    };
+    Ok(SourceBackedSemanticQueryPin {
+        core_generation_id: core_generation_id.to_owned(),
+        pinned,
+    })
 }
 
 fn validate_semantic_query_generation(
