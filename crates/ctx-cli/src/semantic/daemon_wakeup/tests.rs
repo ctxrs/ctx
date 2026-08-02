@@ -1,0 +1,638 @@
+use super::*;
+use ctx_history_capture::{
+    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceStatus, SourceBackedProviderRegistry, SourceBackedRoute, SourceBackedRouteDriver,
+    SourceBackedSelectorAuthority,
+};
+use ctx_history_core::CaptureProvider;
+
+fn catalog_route(
+    provider: CaptureProvider,
+    path: PathBuf,
+    source_format: &'static str,
+) -> SourceBackedRoute {
+    SourceBackedRoute::automatic(
+        ProviderSource {
+            provider,
+            path,
+            exists: true,
+            source_format,
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Native,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Available,
+            unsupported_reason: None,
+        },
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        SourceBackedRouteDriver::new(|_| Ok(()), |_| false, |_| true),
+    )
+    .unwrap()
+}
+
+fn watch_catalog(routes: impl IntoIterator<Item = SourceBackedRoute>) -> SourceBackedWatchCatalog {
+    let mut registry = SourceBackedProviderRegistry::new();
+    for route in routes {
+        registry.register(route);
+    }
+    registry.watch_catalog()
+}
+
+fn catalog_owner(catalog: SourceBackedWatchCatalog) -> DaemonWatchCatalog {
+    let owner = DaemonWatchCatalog::default();
+    owner.publish(catalog);
+    owner
+}
+
+fn watch_authority(data_root: &Path, catalog: SourceBackedWatchCatalog) -> WatchAuthority {
+    WatchAuthority::new(data_root, catalog_owner(catalog))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn catalog_lock_query_churn_stays_idle_but_provider_append_wakes() {
+    use std::{fs::OpenOptions, io::Write};
+
+    let temp = tempfile::tempdir().expect("create watcher fixture");
+    let data_root = temp.path().join("data");
+    let catalog_root = data_root.join("catalogs").join("explicit-sources");
+    let provider_root = temp.path().join("provider");
+    let provider_file = provider_root.join("session.jsonl");
+    fs::create_dir_all(&catalog_root).expect("create catalog root");
+    fs::create_dir_all(&provider_root).expect("create provider root");
+    fs::write(
+        catalog_root.join("catalog-00000000000000000001.json"),
+        b"{\"revision\":1}\n",
+    )
+    .expect("write catalog");
+    fs::write(catalog_root.join("catalog.lock"), b"").expect("write catalog lock");
+    fs::write(&provider_file, b"{\"event\":1}\n").expect("write provider fixture");
+
+    let targets = Arc::new(RwLock::new(watch_authority(
+        &data_root,
+        watch_catalog([catalog_route(
+            CaptureProvider::Codex,
+            provider_file.clone(),
+            "codex_history_jsonl",
+        )]),
+    )));
+    let counters = Arc::new(Mutex::new(WatchCounters::default()));
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let (sender, receiver) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
+    let accepting_events = Arc::new(AtomicBool::new(true));
+    let sequence = Arc::new(AtomicU64::new(0));
+    let callback_sender = sender.clone();
+    let callback_counters = Arc::clone(&counters);
+    let callback_wakeup = Arc::clone(&wakeup);
+    let callback_accepting_events = Arc::clone(&accepting_events);
+    let callback_sequence = Arc::clone(&sequence);
+    let callback_data_root = data_root.clone();
+    let mut watcher = RecommendedWatcher::new(
+        move |event: notify::Result<Event>| {
+            forward_watch_event(
+                &callback_data_root,
+                &callback_counters,
+                &callback_sender,
+                &callback_wakeup,
+                &callback_accepting_events,
+                1,
+                &callback_sequence,
+                event,
+            );
+        },
+        Config::default(),
+    )
+    .expect("start fixture watcher");
+    watcher
+        .watch(&catalog_root, RecursiveMode::Recursive)
+        .expect("watch catalog");
+    watcher
+        .watch(&provider_root, RecursiveMode::Recursive)
+        .expect("watch provider");
+
+    let thread_targets = Arc::clone(&targets);
+    let thread_counters = Arc::clone(&counters);
+    let thread_wakeup = Arc::clone(&wakeup);
+    let thread_data_root = data_root.clone();
+    let thread_daemon_root = daemon_root_path(&data_root);
+    let watch_thread = thread::spawn(move || {
+        watch_event_loop(
+            receiver,
+            thread_targets,
+            thread_counters,
+            thread_wakeup,
+            thread_data_root,
+            thread_daemon_root,
+        );
+    });
+
+    for _ in 0..128 {
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(catalog_root.join("catalog.lock"))
+            .expect("open catalog lock like a query");
+        fs::read_to_string(catalog_root.join("catalog-00000000000000000001.json"))
+            .expect("query catalog");
+        drop(lock);
+    }
+    thread::sleep(WATCH_DEBOUNCE_QUIET * 3);
+
+    let idle = wakeup.snapshot();
+    assert_eq!(idle["filesystem_signals"], 0, "{idle:#}");
+    assert_eq!(idle["work_cycles"], 0, "{idle:#}");
+    assert_eq!(idle["no_work_cycles"], 0, "{idle:#}");
+    let counters_after_churn = counters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(counters_after_churn.coalesced_wakeups, 0);
+    assert_eq!(counters_after_churn.reconciliations, 0);
+    assert!(counters_after_churn.ignored_catalog_lock_events > 0);
+    drop(counters_after_churn);
+
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(provider_file)
+        .expect("open provider fixture for append");
+    file.write_all(b"{\"event\":2}\n")
+        .expect("append provider event");
+    file.flush().expect("flush provider append");
+    drop(file);
+    let wake = wakeup.wait(Duration::from_secs(2));
+    assert!(wake.filesystem, "provider append did not wake the daemon");
+    assert!(!wake.timed_out, "provider append exceeded two seconds");
+    assert_eq!(wake.source_watch.routes.len(), 1);
+    assert!(wake.source_watch.reconcile.is_none());
+
+    sender.send(WatchMessage::Stop).expect("stop watch thread");
+    watch_thread.join().expect("join watch thread");
+    drop(watcher);
+}
+
+#[test]
+fn wakeup_blocks_until_signaled_and_coalesces_reasons() {
+    let wakeup = Arc::new(DaemonWakeup::default());
+    wakeup.signal_filesystem();
+    wakeup.signal_ipc();
+    let wake = wakeup.wait(Duration::from_secs(1));
+    assert!(wake.filesystem);
+    assert!(!wake.shutdown);
+    assert!(!wake.timed_out);
+    assert_eq!(wakeup.snapshot()["ipc_signals"], 1);
+}
+
+#[test]
+fn source_watch_batches_coalesce_to_catalog_cardinality() {
+    let catalog = watch_catalog([catalog_route(
+        CaptureProvider::Codex,
+        PathBuf::from("/tmp/provider/session.jsonl"),
+        "codex_history_jsonl",
+    )]);
+    let route = catalog.route_ids().next().unwrap().clone();
+    let wakeup = DaemonWakeup::default();
+
+    for sequence in 1..=WATCH_EVENT_QUEUE_CAPACITY as u64 * 4 {
+        let watermark = EventWatermark::new(7, sequence);
+        let mut batch = SourceWatchBatch::default();
+        batch.routes.insert(route.clone(), watermark);
+        if sequence % 2 == 0 {
+            batch.reconcile = Some(watermark);
+            batch.rearm = true;
+        }
+        wakeup.signal_source_watch(batch);
+    }
+
+    let pending = wakeup.lock_state();
+    assert_eq!(pending.source_watch.routes.len(), 1);
+    assert_eq!(
+        pending.source_watch.routes.get(&route),
+        Some(&EventWatermark::new(
+            7,
+            WATCH_EVENT_QUEUE_CAPACITY as u64 * 4
+        ))
+    );
+    assert_eq!(
+        pending.source_watch.reconcile,
+        Some(EventWatermark::new(
+            7,
+            WATCH_EVENT_QUEUE_CAPACITY as u64 * 4
+        ))
+    );
+    assert!(pending.source_watch.rearm);
+    drop(pending);
+
+    let wake = wakeup.wait(Duration::ZERO);
+    assert_eq!(wake.source_watch.routes.len(), 1);
+    assert!(wakeup.lock_state().source_watch.is_empty());
+}
+
+#[test]
+fn full_watcher_ingress_fails_closed_into_catalog_reconciliation() {
+    use notify::event::DataChange;
+
+    let data_root = Path::new("/tmp/ctx-data");
+    let counters = Mutex::new(WatchCounters::default());
+    let wakeup = DaemonWakeup::default();
+    let accepting_events = AtomicBool::new(true);
+    let sequence = AtomicU64::new(0);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let event = || {
+        Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
+            .add_path(data_root.join("config.toml"))
+    };
+
+    forward_watch_event(
+        data_root,
+        &counters,
+        &sender,
+        &wakeup,
+        &accepting_events,
+        9,
+        &sequence,
+        Ok(event()),
+    );
+    forward_watch_event(
+        data_root,
+        &counters,
+        &sender,
+        &wakeup,
+        &accepting_events,
+        9,
+        &sequence,
+        Ok(event()),
+    );
+
+    let wake = wakeup.wait(Duration::ZERO);
+    assert!(wake.filesystem);
+    assert_eq!(wake.source_watch.reconcile, Some(EventWatermark::new(9, 2)));
+    assert!(wake.source_watch.rearm);
+    assert!(wake.source_watch.routes.is_empty());
+    assert_eq!(counters.lock().unwrap().ingress_overflows, 1);
+    match receiver.try_recv().expect("one event remains bounded") {
+        WatchMessage::Event { watermark, .. } => {
+            assert_eq!(watermark, EventWatermark::new(9, 1));
+        }
+        WatchMessage::Stop => panic!("unexpected stop message"),
+    }
+    assert!(receiver.try_recv().is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_rearm_observes_a_recreated_recursive_root() {
+    let temp = tempfile::tempdir().expect("create watcher fixture");
+    let data_root = temp.path().join("data");
+    let provider_root = temp.path().join("provider");
+    fs::create_dir_all(&data_root).expect("create data root");
+    fs::create_dir_all(&provider_root).expect("create provider root");
+    fs::write(provider_root.join("initial.jsonl"), b"{\"event\":1}\n")
+        .expect("write initial source");
+    let catalog = watch_catalog([catalog_route(
+        CaptureProvider::Codex,
+        provider_root.clone(),
+        "codex_session_jsonl_tree",
+    )]);
+    let route = catalog.route_ids().next().unwrap().clone();
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let mut watcher =
+        DaemonFileWatcher::start(&data_root, Arc::clone(&wakeup), catalog_owner(catalog)).unwrap();
+
+    fs::remove_dir_all(&provider_root).expect("remove watched root");
+    let removed = wakeup.wait(Duration::from_secs(3));
+    assert!(removed.filesystem, "root removal did not wake the watcher");
+    assert!(removed.source_watch.routes.contains_key(&route));
+    assert!(removed.source_watch.rearm);
+
+    fs::create_dir_all(&provider_root).expect("recreate watched root");
+    let attempts_before = watcher.lock_counters().registration_attempts;
+    let (_, registration) = watcher.reconcile_roots(true);
+    registration.expect("force native watcher re-registration");
+    fs::write(provider_root.join("recreated.jsonl"), b"{\"event\":2}\n")
+        .expect("write recreated source");
+
+    let recreated = wakeup.wait(Duration::from_secs(3));
+    assert!(
+        recreated.filesystem,
+        "recreated root write did not wake the watcher"
+    );
+    assert!(recreated.source_watch.routes.contains_key(&route));
+    let counters = watcher.lock_counters();
+    assert_eq!(counters.forced_rearms, 1);
+    assert!(counters.registration_attempts > attempts_before);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_rearm_conservatively_dirties_a_route_mutated_in_the_registration_gap() {
+    let temp = tempfile::tempdir().expect("create watcher fixture");
+    let data_root = temp.path().join("data");
+    let provider_root = temp.path().join("provider");
+    let provider_file = provider_root.join("history.jsonl");
+    fs::create_dir_all(&data_root).expect("create data root");
+    fs::create_dir_all(&provider_root).expect("create provider root");
+    fs::write(&provider_file, b"{\"event\":1}\n").expect("write initial source");
+    let catalog = watch_catalog([catalog_route(
+        CaptureProvider::Codex,
+        provider_root.clone(),
+        "codex_session_jsonl_tree",
+    )]);
+    let route = catalog.route_ids().next().unwrap().clone();
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let mut watcher =
+        DaemonFileWatcher::start(&data_root, Arc::clone(&wakeup), catalog_owner(catalog))
+            .expect("start watcher");
+    let mutation_observed = Arc::new(AtomicBool::new(false));
+    let hook_observed = Arc::clone(&mutation_observed);
+    let hook_root = provider_root.clone();
+    let hook_file = provider_file.clone();
+    watcher.install_rearm_gap_hook(move |unwatched| {
+        if unwatched == hook_root && !hook_observed.swap(true, Ordering::SeqCst) {
+            fs::write(&hook_file, b"{\"event\":2}\n")
+                .expect("mutate source inside forced-rearm gap");
+        }
+    });
+
+    let (affected, registration) = watcher.reconcile_roots(true);
+    registration.expect("force native watcher re-registration");
+
+    assert!(mutation_observed.load(Ordering::SeqCst));
+    assert_eq!(
+        fs::read(&provider_file).expect("read gap mutation"),
+        b"{\"event\":2}\n"
+    );
+    assert_eq!(affected.routes.len(), 1);
+    assert!(affected.routes.contains_key(&route));
+}
+
+#[test]
+fn rescan_and_backend_errors_require_catalog_reconciliation_and_rearm() {
+    use notify::event::Flag;
+
+    let data_root = Path::new("/tmp/ctx-data");
+    let daemon_root = data_root.join("daemon");
+    let authority = RwLock::new(watch_authority(data_root, watch_catalog([])));
+    let counters = Mutex::new(WatchCounters::default());
+    let rescan = Event::new(EventKind::Access(AccessKind::Read))
+        .add_path(data_root.join("catalogs/explicit-sources/catalog.lock"))
+        .set_flag(Flag::Rescan);
+
+    let rescan_batch = record_watch_event(
+        &authority,
+        &counters,
+        data_root,
+        &daemon_root,
+        Ok(rescan),
+        EventWatermark::new(3, 1),
+    );
+    assert_eq!(rescan_batch.reconcile, Some(EventWatermark::new(3, 1)));
+    assert!(rescan_batch.rearm);
+
+    let error_batch = record_watch_event(
+        &authority,
+        &counters,
+        data_root,
+        &daemon_root,
+        Err(notify::Error::generic("backend watch loss")),
+        EventWatermark::new(3, 2),
+    );
+    assert_eq!(error_batch.reconcile, Some(EventWatermark::new(3, 2)));
+    assert!(error_batch.rearm);
+    let counters = counters.lock().unwrap();
+    assert_eq!(counters.rescan_notifications, 1);
+    assert_eq!(counters.backend_errors, 1);
+    assert_eq!(counters.ignored_catalog_lock_events, 0);
+}
+
+#[test]
+fn sqlite_companion_files_are_exact_catalog_targets() {
+    let catalog = watch_catalog([catalog_route(
+        CaptureProvider::OpenCode,
+        PathBuf::from("/tmp/history.sqlite"),
+        "opencode_sqlite",
+    )]);
+    assert_eq!(
+        catalog
+            .routes_overlapping_path(Path::new("/tmp/history.sqlite-wal"))
+            .len(),
+        1
+    );
+    assert_eq!(
+        catalog
+            .routes_overlapping_path(Path::new("/tmp/history.sqlite-shm"))
+            .len(),
+        1
+    );
+    assert!(catalog
+        .routes_overlapping_path(Path::new("/tmp/unrelated.sqlite-wal"))
+        .is_empty());
+}
+
+#[test]
+fn missing_target_uses_exact_nearest_ancestor_without_sibling_matching() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp
+        .path()
+        .join("missing")
+        .join("nested")
+        .join("history.jsonl");
+    let catalog = watch_catalog([catalog_route(
+        CaptureProvider::Codex,
+        missing.clone(),
+        "codex_history_jsonl",
+    )]);
+    let roots = watch_roots(catalog.target_paths());
+    assert_eq!(roots, BTreeMap::from([(temp.path().to_path_buf(), false)]));
+    assert_eq!(
+        catalog
+            .routes_overlapping_path(&temp.path().join("missing"))
+            .len(),
+        1
+    );
+    assert!(catalog
+        .routes_overlapping_path(
+            &temp
+                .path()
+                .join("unrelated")
+                .join("nested")
+                .join("history.jsonl"),
+        )
+        .is_empty());
+}
+
+#[test]
+fn core_owned_writes_do_not_retrigger_provider_refresh_or_increment_work_counters() {
+    let data_root = Path::new("/tmp/ctx-data");
+    let daemon_root = data_root.join("daemon");
+    let targets = RwLock::new(watch_authority(
+        data_root,
+        watch_catalog([catalog_route(
+            CaptureProvider::Codex,
+            PathBuf::from("/tmp/provider/session.jsonl"),
+            "codex_history_jsonl",
+        )]),
+    ));
+    let counters = Mutex::new(WatchCounters::default());
+    let event = |path: &Path| {
+        let mut event = Event::new(notify::EventKind::Any);
+        event.paths.push(path.to_path_buf());
+        event
+    };
+
+    assert!(record_watch_event(
+        &targets,
+        &counters,
+        data_root,
+        &daemon_root,
+        Ok(event(&daemon_root.join("wakeup.json"))),
+        EventWatermark::new(1, 1),
+    )
+    .is_empty());
+    assert!(record_watch_event(
+        &targets,
+        &counters,
+        data_root,
+        &daemon_root,
+        Ok(event(data_root)),
+        EventWatermark::new(1, 2),
+    )
+    .is_empty());
+    let mut access = event(&data_root.join("config.toml"));
+    access.kind = EventKind::Access(AccessKind::Read);
+    assert!(record_watch_event(
+        &targets,
+        &counters,
+        data_root,
+        &daemon_root,
+        Ok(access),
+        EventWatermark::new(1, 3),
+    )
+    .is_empty());
+    assert_eq!(counters.lock().unwrap().raw_events, 0);
+    let mut access_time = event(&data_root.join("config.toml"));
+    access_time.kind = EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime));
+    assert!(record_watch_event(
+        &targets,
+        &counters,
+        data_root,
+        &daemon_root,
+        Ok(access_time),
+        EventWatermark::new(1, 4),
+    )
+    .is_empty());
+    let mut catalog_lock = event(
+        &data_root
+            .join("catalogs")
+            .join("explicit-sources")
+            .join("catalog.lock"),
+    );
+    catalog_lock.kind = EventKind::Access(AccessKind::Close(AccessMode::Write));
+    assert!(record_watch_event(
+        &targets,
+        &counters,
+        data_root,
+        &daemon_root,
+        Ok(catalog_lock),
+        EventWatermark::new(1, 5),
+    )
+    .is_empty());
+    let mut close_write = event(&data_root.join("config.toml"));
+    close_write.kind = EventKind::Access(AccessKind::Close(AccessMode::Write));
+    assert!(!record_watch_event(
+        &targets,
+        &counters,
+        data_root,
+        &daemon_root,
+        Ok(close_write),
+        EventWatermark::new(1, 6),
+    )
+    .is_empty());
+    assert!(!record_watch_event(
+        &targets,
+        &counters,
+        data_root,
+        &daemon_root,
+        Ok(event(&data_root.join("config.toml"))),
+        EventWatermark::new(1, 7),
+    )
+    .is_empty());
+    assert_eq!(counters.lock().unwrap().raw_events, 2);
+}
+
+#[test]
+fn authoritative_changes_and_dynamic_discovery_remain_relevant() {
+    use notify::event::{CreateKind, DataChange, RenameMode};
+
+    let data_root = Path::new("/tmp/ctx-data");
+    let daemon_root = data_root.join("daemon");
+    let provider_file = PathBuf::from("/tmp/provider/session.jsonl");
+    let sqlite = PathBuf::from("/tmp/provider/history.sqlite");
+    let dynamic_source = PathBuf::from("/tmp/home/.codex/sessions");
+    let catalog_root = data_root.join("catalogs").join("explicit-sources");
+    let targets = RwLock::new(watch_authority(
+        data_root,
+        watch_catalog([
+            catalog_route(
+                CaptureProvider::Codex,
+                provider_file.clone(),
+                "codex_history_jsonl",
+            ),
+            catalog_route(CaptureProvider::OpenCode, sqlite.clone(), "opencode_sqlite"),
+            catalog_route(
+                CaptureProvider::Codex,
+                dynamic_source,
+                "codex_session_jsonl_tree",
+            ),
+        ]),
+    ));
+    let counters = Mutex::new(WatchCounters::default());
+    let sequence = std::cell::Cell::new(0_u64);
+    let relevant = |kind, paths: &[&Path]| {
+        let mut event = Event::new(kind);
+        event
+            .paths
+            .extend(paths.iter().map(|path| path.to_path_buf()));
+        sequence.set(sequence.get().saturating_add(1));
+        !record_watch_event(
+            &targets,
+            &counters,
+            data_root,
+            &daemon_root,
+            Ok(event),
+            EventWatermark::new(1, sequence.get()),
+        )
+        .is_empty()
+    };
+
+    assert!(relevant(
+        EventKind::Access(AccessKind::Close(AccessMode::Write)),
+        &[&data_root.join("config.toml")],
+    ));
+    assert!(relevant(
+        EventKind::Create(CreateKind::File),
+        &[&catalog_root.join("catalog-00000000000000000002.json")],
+    ));
+    assert!(relevant(
+        EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+        &[&provider_file],
+    ));
+    assert!(relevant(
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        &[Path::new("/tmp/provider/session.tmp"), &provider_file],
+    ));
+    assert!(relevant(
+        EventKind::Create(CreateKind::Folder),
+        &[Path::new("/tmp/home/.codex")],
+    ));
+    assert!(relevant(
+        EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+        &[Path::new("/tmp/provider/history.sqlite-wal")],
+    ));
+    assert!(!record_watch_event(
+        &targets,
+        &counters,
+        data_root,
+        &daemon_root,
+        Err(notify::Error::generic("overflow")),
+        EventWatermark::new(1, 99),
+    )
+    .is_empty());
+}
