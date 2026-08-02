@@ -1358,6 +1358,38 @@ fn distinct_remotes_preserve_local_attribution_and_scope_exact_pull_request() {
 }
 
 #[test]
+fn multiple_remote_names_for_one_repository_keep_one_forge_identity() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(
+        temp.path(),
+        "repo",
+        Some("https://github.com/acme/repo.git"),
+    );
+    run_git(
+        &repo,
+        &["remote", "add", "backup", "git@github.com:acme/repo.git"],
+    );
+
+    let annotation = attribute(AttributionInput {
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_bindings.len(), 1);
+    let binding = &annotation.repository_bindings[0];
+    assert_eq!(binding.logical_repository_id, "forge:github.com/acme/repo");
+    assert_eq!(binding.aliases.len(), 2);
+    assert!(binding
+        .aliases
+        .iter()
+        .any(|alias| alias.remote_name.as_deref() == Some("origin")));
+    assert!(binding
+        .aliases
+        .iter()
+        .any(|alias| alias.remote_name.as_deref() == Some("backup")));
+}
+
+#[test]
 fn move_preserves_certified_identity_but_old_path_first_seen_missing_abstains() {
     let temp = TempDir::new().unwrap();
     let old = repository(temp.path(), "old", None);
