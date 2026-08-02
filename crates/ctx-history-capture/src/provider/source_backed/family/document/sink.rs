@@ -397,6 +397,17 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
         Ok(())
     }
 
+    pub(crate) fn report_completed_bytes(&mut self, bytes: u64) -> SourceBackedRouteResult<()> {
+        match &mut self.target {
+            ChangedDocumentTarget::Generation(sink) => sink
+                .report_completed_bytes(bytes)
+                .map_err(route_coordinator_error),
+            ChangedDocumentTarget::Parallel(_) => Err(document_internal(
+                "parallel document leaves cannot report source byte progress",
+            )),
+        }
+    }
+
     pub(super) fn source(&self) -> SourceBackedRouteResult<&SourceKey> {
         self.source
             .as_ref()

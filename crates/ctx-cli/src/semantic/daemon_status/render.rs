@@ -2,6 +2,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::progress::format_bytes;
 use crate::ui::{
     fields, hint, outcome, section, Action, Document, Field, Hint, Outcome, OutcomeState,
     RenderContext, Token,
@@ -259,6 +260,12 @@ pub(in crate::semantic) fn render_daemon_status_human(
                 .and_then(Value::as_u64)
             {
                 history_details.push(("Accepted", counted(records, "record", "records")));
+            }
+            if let Some(bytes) = progress
+                .and_then(|progress| progress.get("completed_bytes"))
+                .and_then(Value::as_u64)
+            {
+                history_details.push(("Scanned", format_bytes(bytes)));
             }
         }
         if let Some(count) = core_refresh

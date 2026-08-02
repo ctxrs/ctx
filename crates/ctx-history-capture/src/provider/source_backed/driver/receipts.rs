@@ -1,5 +1,11 @@
 use super::super::*;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in super::super) struct SourceBackedRecordProgressDelta {
+    pub(in super::super) accepted_records: u64,
+    pub(in super::super) completed_bytes: u64,
+}
+
 pub type SourceBackedCoordinatorResult<T> = Result<T, SourceBackedCoordinatorError>;
 pub type SourceBackedRouteResult<T> = Result<T, SourceBackedRouteError>;
 
@@ -184,8 +190,11 @@ pub struct SourceBackedGenerationSink<'writer> {
     pub(in super::super) applied_removals: &'writer mut Vec<SourceBackedCertifiedRemoval>,
     pub(in super::super) route_index: usize,
     pub(in super::super) leaf_worker_budget: usize,
-    pub(in super::super) record_progress:
-        Option<&'writer mut dyn FnMut() -> SourceBackedCoordinatorResult<()>>,
+    pub(in super::super) record_progress: Option<
+        &'writer mut dyn FnMut(
+            SourceBackedRecordProgressDelta,
+        ) -> SourceBackedCoordinatorResult<()>,
+    >,
 }
 
 #[derive(Clone)]
@@ -235,7 +244,20 @@ impl SourceBackedGenerationSink<'_> {
     pub fn add_core_record(&mut self, record: CoreRecord) -> SourceBackedCoordinatorResult<()> {
         self.writer.add_core_record(record)?;
         if let Some(report_progress) = self.record_progress.as_mut() {
-            report_progress()?;
+            report_progress(SourceBackedRecordProgressDelta {
+                accepted_records: 1,
+                completed_bytes: 0,
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn report_completed_bytes(&mut self, bytes: u64) -> SourceBackedCoordinatorResult<()> {
+        if let Some(report_progress) = self.record_progress.as_mut() {
+            report_progress(SourceBackedRecordProgressDelta {
+                accepted_records: 0,
+                completed_bytes: bytes,
+            })?;
         }
         Ok(())
     }

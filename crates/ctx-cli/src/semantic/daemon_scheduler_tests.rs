@@ -325,7 +325,7 @@ fn core_publication_is_ready_and_searchable_before_consumer_receipts() {
     let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
             let publication = publish_readiness_generation(execution.index_root);
-            execution.report_progress("committed", 1, 1, None, None)?;
+            execution.report_progress("committed", 1, 1, None, None, None)?;
             Ok(publication)
         },
     ));

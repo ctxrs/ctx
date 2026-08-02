@@ -26,6 +26,7 @@ pub(super) struct SourceBackedRefreshProgressUpdate {
     pub(super) total_sources: usize,
     pub(super) current_source: Option<String>,
     pub(super) completed_records: Option<u64>,
+    pub(super) completed_bytes: Option<u64>,
 }
 
 /// Daemon-owned execution context passed to the capture refresh callback.
@@ -52,6 +53,7 @@ impl SourceBackedRefreshExecution<'_> {
         total_sources: usize,
         current_source: Option<String>,
         completed_records: Option<u64>,
+        completed_bytes: Option<u64>,
     ) -> Result<()> {
         (self.report_progress)(SourceBackedRefreshProgressUpdate {
             phase: phase.to_owned(),
@@ -59,6 +61,7 @@ impl SourceBackedRefreshExecution<'_> {
             total_sources,
             current_source,
             completed_records,
+            completed_bytes,
         })
     }
 }
@@ -794,6 +797,7 @@ impl CoreRefreshEngine {
         total_sources: usize,
         current_source: Option<String>,
         completed_records: Option<u64>,
+        completed_bytes: Option<u64>,
     ) -> Option<Value> {
         let mut state = self.lock_state();
         let attempt = find_attempt_mut(&mut state, request_id)?;
@@ -806,6 +810,7 @@ impl CoreRefreshEngine {
             total_sources,
             current_source,
             completed_records,
+            completed_bytes,
         };
         Some(attempt.job_json())
     }
@@ -926,6 +931,7 @@ impl CoreRefreshEngine {
                 attempt.finished_at_ms = Some(utc_now().timestamp_millis());
                 attempt.progress.current_source = None;
                 attempt.progress.completed_records = None;
+                attempt.progress.completed_bytes = None;
                 attempt.state = SourceBackedRefreshState::Published;
                 attempt.published_generation = Some(observed.clone());
                 attempt.progress.phase = "published".to_owned();
@@ -947,6 +953,7 @@ impl CoreRefreshEngine {
                 attempt.finished_at_ms = Some(utc_now().timestamp_millis());
                 attempt.progress.current_source = None;
                 attempt.progress.completed_records = None;
+                attempt.progress.completed_bytes = None;
                 if observed_for_status.is_some() {
                     attempt.published_generation = observed_for_status.clone();
                 }

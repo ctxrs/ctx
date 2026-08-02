@@ -175,6 +175,7 @@ struct OpenCodeAuthorizedSnapshot {
 #[allow(clippy::large_enum_variant)]
 enum OpenCodeScanOutput {
     Begin(SourceKey),
+    CompletedBytes(u64),
     Document(CoreRecord),
 }
 
@@ -353,6 +354,7 @@ fn stream_logical_rows(
         hash_source_event(&mut hasher, &event);
         counts.complete_records = checked_add(counts.complete_records, 1)?;
         counts.certified_bytes = checked_add(counts.certified_bytes, event.content_bytes)?;
+        emit(OpenCodeScanOutput::CompletedBytes(event.content_bytes))?;
         let disposition = projection_disposition(&event.projection);
         let retained = retained_projection(&event.projection);
         match disposition {

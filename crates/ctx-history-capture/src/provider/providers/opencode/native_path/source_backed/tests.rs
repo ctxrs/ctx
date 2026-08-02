@@ -14,7 +14,8 @@ use serde_json::json;
 use super::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, SourceBackedProviderRegistry, SourceBackedRouteSelection,
+        refresh_source_backed_generation, refresh_source_backed_generation_with_progress,
+        SourceBackedProviderRegistry, SourceBackedRouteSelection,
     },
     provider_sources::provider_source_for_path,
 };
@@ -374,6 +375,113 @@ fn create_indexed_synthetic_fixture(path: &Path, rows: i64) {
             .unwrap();
     }
     transaction.commit().unwrap();
+}
+
+#[test]
+fn rejection_heavy_scan_reports_authoritative_completed_bytes_before_finishing() {
+    const ROWS: i64 = 128;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_synthetic_fixture(&database, ROWS);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "update session_message set data = 'not-json' where seq < ?1",
+            [ROWS - 1],
+        )
+        .unwrap();
+    drop(connection);
+
+    let authorized =
+        open_root_authorized_snapshot_retained(crate::test_provider_sqlite_data_root(), &database)
+            .unwrap();
+    let observation = observe_logical_source(
+        authorized.sqlite_snapshot.connection().unwrap(),
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+    )
+    .unwrap();
+    let mut completed_bytes = Vec::new();
+    let mut accepted = 0_u64;
+    let scan = scan_pinned_source(
+        &database,
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+        &observation,
+        authorized.sqlite_snapshot,
+        &mut |output| {
+            match output {
+                OpenCodeScanOutput::Begin(_) => {}
+                OpenCodeScanOutput::CompletedBytes(bytes) => completed_bytes.push(bytes),
+                OpenCodeScanOutput::Document(_) => accepted = accepted.saturating_add(1),
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    let counts = scan.certificate.counts();
+    assert_eq!(counts.complete_records, ROWS as u64);
+    assert_eq!(counts.retained_records, 1);
+    assert_eq!(counts.rejected_records, (ROWS - 1) as u64);
+    assert_eq!(accepted, 1);
+    assert_eq!(completed_bytes.len(), ROWS as usize);
+    assert_eq!(completed_bytes.iter().sum::<u64>(), counts.certified_bytes);
+}
+
+#[test]
+fn rejection_heavy_production_refresh_advances_bytes_and_clears_them_terminally() {
+    const ROWS: i64 = 128;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_synthetic_fixture(&database, ROWS);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "update session_message set data = 'not-json' where seq < ?1",
+            [ROWS - 1],
+        )
+        .unwrap();
+    drop(connection);
+
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let source = provider_source_for_path(CaptureProvider::OpenCode, database.clone());
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        &data_root,
+    )
+    .unwrap();
+    let mut progress = Vec::new();
+    let refresh = refresh_source_backed_generation_with_progress(
+        &index_root,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+        |update| {
+            progress.push(update);
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    let counts = refresh.sources[0].counts();
+    assert_eq!(counts.retained_records, 1);
+    assert_eq!(counts.rejected_records, (ROWS - 1) as u64);
+    assert!(progress.iter().any(|update| {
+        update.phase == "refreshing"
+            && update.current_source.as_deref() == database.to_str()
+            && update.completed_records == Some(0)
+            && update.completed_bytes.is_some_and(|bytes| bytes > 0)
+    }));
+    let terminal = progress.last().expect("terminal refresh progress");
+    assert_eq!(terminal.phase, "committed");
+    assert!(terminal.current_source.is_none());
+    assert!(terminal.completed_records.is_none());
+    assert!(terminal.completed_bytes.is_none());
 }
 
 fn create_indexed_message_part_fixture(path: &Path, rows: i64) {

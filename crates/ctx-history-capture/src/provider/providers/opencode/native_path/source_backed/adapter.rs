@@ -136,6 +136,9 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
             snapshot,
             &mut |output| match output {
                 OpenCodeScanOutput::Begin(source) => sink.begin_source(source).map_err(Into::into),
+                OpenCodeScanOutput::CompletedBytes(bytes) => {
+                    sink.report_completed_bytes(bytes).map_err(Into::into)
+                }
                 OpenCodeScanOutput::Document(document) => {
                     sink.emit_core_record(document).map_err(Into::into)
                 }

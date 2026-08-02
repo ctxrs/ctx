@@ -944,6 +944,7 @@ fn source_record_progress_resets_per_route_and_is_absent_outside_scans() {
                 progress.phase,
                 progress.current_source,
                 progress.completed_records,
+                progress.completed_bytes,
             ));
             Ok(())
         },
@@ -954,14 +955,26 @@ fn source_record_progress_resets_per_route_and_is_absent_outside_scans() {
 
     let active = updates
         .iter()
-        .filter(|(_, source, _)| source.is_some())
-        .map(|(_, _, completed_records)| *completed_records)
+        .filter(|(_, source, _, _)| source.is_some())
+        .map(|(_, _, completed_records, completed_bytes)| (*completed_records, *completed_bytes))
         .collect::<Vec<_>>();
-    assert_eq!(active, vec![Some(0), Some(1), Some(0), Some(1)]);
+    assert_eq!(
+        active,
+        vec![
+            (Some(0), Some(0)),
+            (Some(0), Some(1)),
+            (Some(1), Some(1)),
+            (Some(0), Some(0)),
+            (Some(0), Some(1)),
+            (Some(1), Some(1)),
+        ]
+    );
     assert!(updates
         .iter()
-        .filter(|(_, source, _)| source.is_none())
-        .all(|(_, _, completed_records)| completed_records.is_none()));
+        .filter(|(_, source, _, _)| source.is_none())
+        .all(|(_, _, completed_records, completed_bytes)| {
+            completed_records.is_none() && completed_bytes.is_none()
+        }));
 }
 
 #[test]

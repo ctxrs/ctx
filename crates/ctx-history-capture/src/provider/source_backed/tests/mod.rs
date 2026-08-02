@@ -164,6 +164,8 @@ fn fixture_route(
     let owned_source = source;
     let driver = SourceBackedRouteDriver::new(
         move |sink| {
+            sink.report_completed_bytes(1)
+                .map_err(route_coordinator_error)?;
             sink.replace_source(scan_certificate.clone(), [record.clone()])
                 .map_err(route_coordinator_error)
         },

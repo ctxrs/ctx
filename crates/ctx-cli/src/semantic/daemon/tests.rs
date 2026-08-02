@@ -602,8 +602,9 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                     1,
                     Some("all-providers".to_owned()),
                     Some(12),
+                    Some(4_096),
                 )?;
-                execution.report_progress("verifying", 1, 1, None, None)?;
+                execution.report_progress("verifying", 1, 1, None, None, None)?;
                 let writer = ctx_history_index::GenerationWriter::open(
                     execution.index_root,
                     ctx_history_index::WriterOptions::default(),

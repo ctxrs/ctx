@@ -208,6 +208,7 @@ fn render_refresh_progress(readiness: &Value, context: &RenderContext) -> Docume
     let current_source =
         value_at(readiness, &["refresh", "progress", "current_source"]).and_then(Value::as_str);
     let completed_records = u64_at(readiness, &["refresh", "progress", "completed_records"]);
+    let completed_bytes = u64_at(readiness, &["refresh", "progress", "completed_bytes"]);
     let phase = humanize(&phase);
     let mut details = vec![("Sources", sources), ("Phase", phase)];
     if let Some(current_source) = current_source {
@@ -217,6 +218,9 @@ fn render_refresh_progress(readiness: &Value, context: &RenderContext) -> Docume
                 "Records",
                 format!("{} accepted", format_count_u64(completed_records)),
             ));
+        }
+        if let Some(completed_bytes) = completed_bytes {
+            details.push(("Scanned", format_bytes(completed_bytes)));
         }
     }
     let detail_fields = details
@@ -441,6 +445,7 @@ mod tests {
                     "total_sources": 12,
                     "current_source": "~/.local/share/opencode/opencode.db",
                     "completed_records": 1234,
+                    "completed_bytes": 4 * 1024 * 1024,
                 },
             },
             "semantic": {

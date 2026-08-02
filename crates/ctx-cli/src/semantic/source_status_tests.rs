@@ -219,7 +219,7 @@ fn pristine_source_status_is_read_only_and_exposes_stable_paths() {
 }
 
 #[test]
-fn refresh_report_preserves_optional_active_source_record_progress() {
+fn refresh_report_preserves_optional_active_source_record_and_byte_progress() {
     let job = json!({
         "request_state": "running",
         "progress": {
@@ -228,6 +228,7 @@ fn refresh_report_preserves_optional_active_source_record_progress() {
             "total_sources": 6,
             "current_source": "source.db",
             "completed_records": 1234,
+            "completed_bytes": 4 * 1024 * 1024,
         },
     });
     let daemon = json!({"running": true});
@@ -236,6 +237,7 @@ fn refresh_report_preserves_optional_active_source_record_progress() {
 
     assert_eq!(report["progress"]["current_source"], "source.db");
     assert_eq!(report["progress"]["completed_records"], 1234);
+    assert_eq!(report["progress"]["completed_bytes"], 4 * 1024 * 1024);
 }
 
 #[test]

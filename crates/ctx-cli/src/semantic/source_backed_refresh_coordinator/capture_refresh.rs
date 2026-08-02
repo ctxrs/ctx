@@ -20,6 +20,7 @@ pub(super) fn execute_source_backed_refresh(
             update.total_sources,
             update.current_source,
             update.completed_records,
+            update.completed_bytes,
         )
     };
     executor.refresh(SourceBackedRefreshExecution {
@@ -75,7 +76,7 @@ where
         validate_explicit_source_catalog_roots(execution.data_root)
             .context("validate explicit provider roots before source-refresh state writes")?;
     }
-    execution.report_progress("discovering", 0, 0, None, None)?;
+    execution.report_progress("discovering", 0, 0, None, None, None)?;
     let mut report_progress = |update: CaptureSourceBackedRefreshProgress| {
         execution
             .report_progress(
@@ -84,6 +85,7 @@ where
                 update.total_sources,
                 update.current_source,
                 update.completed_records,
+                update.completed_bytes,
             )
             .map_err(|error| {
                 SourceBackedRouteError::new(
@@ -364,6 +366,7 @@ fn record_source_backed_refresh_progress(
     total_sources: usize,
     current_source: Option<String>,
     completed_records: Option<u64>,
+    completed_bytes: Option<u64>,
 ) -> Result<()> {
     if let Some(job) = coordinator.set_progress(
         request_id,
@@ -372,6 +375,7 @@ fn record_source_backed_refresh_progress(
         total_sources,
         current_source,
         completed_records,
+        completed_bytes,
     ) {
         write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
     }

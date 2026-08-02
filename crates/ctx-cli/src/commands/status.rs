@@ -8,6 +8,7 @@ use crate::config::{self, CONFIG_FILE};
 use crate::local_usage;
 use crate::output::print_json;
 use crate::pro::PRO_MONTHLY_PRICE_DISPLAY;
+use crate::progress::format_bytes;
 use crate::semantic::source_epoch_status_report;
 use crate::ui::{
     fields, outcome, section, Document, Field, Line, Outcome, OutcomeState, RenderContext, Span,
@@ -225,6 +226,12 @@ fn render_status_human(
             .and_then(Value::as_u64)
         {
             history_values.push(("Accepted", counted(records, "record", "records")));
+        }
+        if let Some(bytes) = progress
+            .and_then(|progress| progress.get("completed_bytes"))
+            .and_then(Value::as_u64)
+        {
+            history_values.push(("Scanned", format_bytes(bytes)));
         }
     }
     let history_fields = history_values
@@ -628,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn active_refresh_status_shows_accepted_records_without_inventing_a_total() {
+    fn active_refresh_status_shows_record_and_byte_progress_without_inventing_a_total() {
         let mut report = status_report(true, "ready", "pending");
         report["refresh"]["progress"] = json!({
             "phase": "refreshing",
@@ -636,11 +643,13 @@ mod tests {
             "total_sources": 6,
             "current_source": "~/.local/share/opencode/opencode.db",
             "completed_records": 1234,
+            "completed_bytes": 4 * 1024 * 1024,
         });
 
         let rendered = render_report(&context(80, ColorMode::Never), &report).render_plain();
         assert!(rendered.contains("Active source  ~/.local/share/opencode/opencode.db"));
         assert!(rendered.contains("Accepted       1,234 records"));
+        assert!(rendered.contains("Scanned        4.0 MiB"));
         assert!(!rendered.contains("records /"));
     }
 
