@@ -54,7 +54,9 @@ mod capture_refresh;
 mod coordinator_state;
 mod current_state;
 
-use capture_refresh::{execute_capture_owned_refresh, execute_source_backed_refresh};
+use capture_refresh::{
+    execute_capture_owned_refresh, execute_source_backed_refresh, SourceBackedRefreshPlan,
+};
 #[cfg(test)]
 use capture_refresh::{
     execute_capture_owned_refresh_with, refresh_all_provider_sources,
@@ -132,14 +134,6 @@ impl SourceBackedRefreshMode {
             Self::Background => "background",
             Self::Wait => "wait",
         }
-    }
-
-    pub(crate) fn coordinate_explicit_source_catalog(
-        self,
-        data_root: &Path,
-        authority: &ExplicitSourceCatalogAuthority,
-    ) -> Result<SourceBackedRefreshObservation> {
-        coordinate_source_backed_refresh_with_catalog(data_root, self, Some(authority), false)
     }
 }
 
@@ -344,14 +338,22 @@ pub(crate) fn coordinate_source_backed_refresh(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, true)
+    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, true, false)
 }
 
-pub(crate) fn coordinate_core_refresh_without_autostart(
+pub(crate) fn coordinate_import_source_backed_refresh(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
+    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    allow_daemon_autostart: bool,
 ) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, false)
+    coordinate_source_backed_refresh_with_catalog(
+        data_root,
+        mode,
+        explicit_source_catalog,
+        allow_daemon_autostart,
+        true,
+    )
 }
 
 fn coordinate_source_backed_refresh_with_catalog(
@@ -359,6 +361,7 @@ fn coordinate_source_backed_refresh_with_catalog(
     mode: SourceBackedRefreshMode,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     allow_daemon_autostart: bool,
+    fail_on_source_failure: bool,
 ) -> Result<SourceBackedRefreshObservation> {
     if mode == SourceBackedRefreshMode::Off {
         if explicit_source_catalog.is_some() {
@@ -393,6 +396,7 @@ fn coordinate_source_backed_refresh_with_catalog(
         "schema_version": 1,
         "op": SOURCE_REFRESH_REQUEST_OP,
         "mode": mode.as_str(),
+        "fail_on_source_failure": fail_on_source_failure,
         "explicit_source_catalog": explicit_source_catalog
             .map(ExplicitSourceCatalogAuthority::to_json),
     }));
@@ -448,6 +452,7 @@ fn coordinate_source_backed_refresh_with_catalog(
         mode,
         explicit_source_catalog,
         allow_daemon_autostart,
+        fail_on_source_failure,
     )
 }
 
@@ -457,6 +462,7 @@ fn wait_for_published_generation(
     mode: SourceBackedRefreshMode,
     expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
     allow_daemon_autostart: bool,
+    fail_on_source_failure: bool,
 ) -> Result<SourceBackedRefreshObservation> {
     loop {
         let response = match daemon_source_refresh_request(
@@ -475,6 +481,7 @@ fn wait_for_published_generation(
                     data_root,
                     expected_catalog,
                     allow_daemon_autostart,
+                    fail_on_source_failure,
                 )
                 .with_context(|| {
                     format!("recover daemon while waiting for source refresh request {request_id}")
@@ -490,6 +497,7 @@ fn wait_for_published_generation(
                     data_root,
                     expected_catalog,
                     allow_daemon_autostart,
+                    fail_on_source_failure,
                 )
                 .with_context(|| {
                         format!(
@@ -595,6 +603,7 @@ fn recover_wait_refresh_request(
     data_root: &Path,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     allow_daemon_autostart: bool,
+    fail_on_source_failure: bool,
 ) -> Result<String> {
     if !allow_daemon_autostart {
         return Err(SourceBackedRefreshDaemonUnavailable::new(Some(
@@ -622,6 +631,7 @@ fn recover_wait_refresh_request(
             "schema_version": 1,
             "op": SOURCE_REFRESH_REQUEST_OP,
             "mode": SourceBackedRefreshMode::Wait.as_str(),
+            "fail_on_source_failure": fail_on_source_failure,
             "explicit_source_catalog": explicit_source_catalog
                 .map(ExplicitSourceCatalogAuthority::to_json),
         })),

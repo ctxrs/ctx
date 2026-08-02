@@ -5,8 +5,8 @@ use anyhow::{bail, Context, Result};
 use crate::{
     config::AppConfig,
     semantic::{
-        autostart_daemon_and_wait, coordinate_core_refresh_without_autostart,
-        coordinate_source_backed_refresh, SourceBackedRefreshMode, SourceBackedRefreshObservation,
+        autostart_daemon_and_wait, coordinate_import_source_backed_refresh,
+        SourceBackedRefreshMode, SourceBackedRefreshObservation,
     },
     DaemonTriggerCommandArg,
 };
@@ -33,14 +33,19 @@ pub(super) fn wait_for_import_core_refresh(
     }
 
     let refresh = match request {
-        ImportCoreRefreshRequest::Automatic if no_daemon => {
-            coordinate_core_refresh_without_autostart(data_root, SourceBackedRefreshMode::Wait)
-        }
-        ImportCoreRefreshRequest::Automatic => {
-            coordinate_source_backed_refresh(data_root, SourceBackedRefreshMode::Wait)
-        }
+        ImportCoreRefreshRequest::Automatic => coordinate_import_source_backed_refresh(
+            data_root,
+            SourceBackedRefreshMode::Wait,
+            None,
+            !no_daemon,
+        ),
         ImportCoreRefreshRequest::ExplicitCatalog(authority) => {
-            SourceBackedRefreshMode::Wait.coordinate_explicit_source_catalog(data_root, authority)
+            coordinate_import_source_backed_refresh(
+                data_root,
+                SourceBackedRefreshMode::Wait,
+                Some(authority),
+                false,
+            )
         }
     }
     .context("publish provider inputs through the Core refresh engine")?;

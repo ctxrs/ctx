@@ -86,7 +86,8 @@ fn source_epoch_status_report_with_pro_query(
         serde_json::to_value(&current_policy)?,
     );
     let history_epoch = history_epoch_report(&lexical, index.as_ref());
-    let initialized = index.is_some();
+    let initialized =
+        index.is_some() && lexical.get("status").and_then(Value::as_str) != Some("unavailable");
     let generation_id = index.as_ref().map(|index| index.generation_id().to_owned());
     let daemon = source_daemon_report(data_root);
     let catalog = catalog_report(
@@ -230,7 +231,17 @@ fn lexical_report(
             let policy_matches = manifest.policy_schema_hash == current_policy_hash;
             let generation_matches =
                 published_generation.map(|generation| generation == index.generation_id());
-            let (status, reason) = lexical_state(policy_matches);
+            let failed_without_indexed_history = request_state == Some("failed")
+                && manifest.sources.is_empty()
+                && index.document_count() == 0;
+            let (status, reason) = if failed_without_indexed_history {
+                (
+                    "unavailable",
+                    Some("core_refresh_failed_without_indexed_history"),
+                )
+            } else {
+                lexical_state(policy_matches)
+            };
             let value = compact_json(json!({
                 "status": status,
                 "reason": reason,

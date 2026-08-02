@@ -1093,6 +1093,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
         explicit_source_catalog: None,
         scope: SourceBackedRefreshScope::All,
         covered_route_ids: BTreeSet::new(),
+        fail_on_source_failure: false,
         report_progress: &report_progress,
     };
     let mut provider_wide_calls = 0;

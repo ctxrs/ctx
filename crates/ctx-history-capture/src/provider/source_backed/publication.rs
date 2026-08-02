@@ -114,7 +114,7 @@ impl SourceBackedRefreshExecutor {
             self.writer_options.clone(),
             self.discovery_duration,
             self.work_budget,
-            SourceBackedRefreshScope::All,
+            SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
             report_progress,
         )
     }
@@ -131,9 +131,49 @@ impl SourceBackedRefreshExecutor {
             self.writer_options.clone(),
             self.discovery_duration,
             self.work_budget,
-            scope,
+            SourceBackedRefreshPlan::isolate(scope),
             report_progress,
         )
+    }
+
+    /// Runs a caller-owned refresh transaction that must not publish a
+    /// generation when any selected provider route fails.
+    pub fn refresh_scope_fail_closed(
+        &self,
+        index_root: impl AsRef<Path>,
+        scope: SourceBackedRefreshScope,
+        report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
+    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+        refresh_source_backed_generation_with_progress_and_discovery_timing(
+            index_root,
+            &self.registry,
+            self.writer_options.clone(),
+            self.discovery_duration,
+            self.work_budget,
+            SourceBackedRefreshPlan::fail_closed(scope),
+            report_progress,
+        )
+    }
+}
+
+struct SourceBackedRefreshPlan {
+    scope: SourceBackedRefreshScope,
+    fail_on_source_failure: bool,
+}
+
+impl SourceBackedRefreshPlan {
+    fn isolate(scope: SourceBackedRefreshScope) -> Self {
+        Self {
+            scope,
+            fail_on_source_failure: false,
+        }
+    }
+
+    fn fail_closed(scope: SourceBackedRefreshScope) -> Self {
+        Self {
+            scope,
+            fail_on_source_failure: true,
+        }
     }
 }
 
@@ -207,7 +247,7 @@ pub fn refresh_source_backed_generation_with_progress(
         writer_options,
         Duration::ZERO,
         work_budget,
-        SourceBackedRefreshScope::All,
+        SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
         report_progress,
     )
 }
@@ -225,7 +265,7 @@ pub fn refresh_source_backed_generation_for_routes(
         writer_options,
         Duration::ZERO,
         work_budget,
-        SourceBackedRefreshScope::exact(route_identities),
+        SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::exact(route_identities)),
         |_| Ok(()),
     )
 }
@@ -236,10 +276,10 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
     writer_options: WriterOptions,
     discovery_duration: Duration,
     work_budget: usize,
-    scope: SourceBackedRefreshScope,
+    plan: SourceBackedRefreshPlan,
     mut report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
 ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
-    if matches!(scope, SourceBackedRefreshScope::All) {
+    if matches!(&plan.scope, SourceBackedRefreshScope::All) {
         if let Some(unavailable) = registry.routes.iter().find(|route| {
             route.driver.is_none()
                 && route.certified_missing_paths.is_empty()
@@ -261,7 +301,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         .filter(|route| route.driver.is_some() || !route.certified_missing_paths.is_empty())
         .filter_map(|route| route.metadata.route_identity.clone())
         .collect::<BTreeSet<_>>();
-    let selected_route_ids = match &scope {
+    let selected_route_ids = match &plan.scope {
         SourceBackedRefreshScope::All => executable_route_ids,
         SourceBackedRefreshScope::Exact(selected) => {
             if let Some(unknown) = selected.difference(&executable_route_ids).next() {
@@ -322,7 +362,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                     .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default();
-        if matches!(scope, SourceBackedRefreshScope::Exact(_))
+        if matches!(&plan.scope, SourceBackedRefreshScope::Exact(_))
             && carried_unselected_route_ids.is_empty()
         {
             carried_unselected_route_ids = base_route_ids
@@ -457,6 +497,15 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                         writer.finish_source_route_stage(route_identity)?;
                         successful_this_attempt.insert(route_identity.clone());
                     } else {
+                        if plan.fail_on_source_failure {
+                            return Err(SourceBackedCoordinatorError::RouteScan {
+                                provider: route.metadata.source.provider,
+                                source: SourceBackedRouteError::new(
+                                    SourceBackedRouteErrorKind::SourceChanged,
+                                    "source changed during bounded refresh revalidation",
+                                ),
+                            });
+                        }
                         writer.rollback_source_route_stage(route_identity)?;
                         owners.retain(|_, owner| owner.route_index != route_index);
                         complete_inventory_owners.retain(|owner| owner.route_index != route_index);
@@ -481,6 +530,12 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                             source,
                         });
                     };
+                    if plan.fail_on_source_failure {
+                        return Err(SourceBackedCoordinatorError::RouteScan {
+                            provider: route.metadata.source.provider,
+                            source,
+                        });
+                    }
                     writer.rollback_source_route_stage(route_identity)?;
                     owners.retain(|_, owner| owner.route_index != route_index);
                     complete_inventory_owners.retain(|owner| owner.route_index != route_index);
@@ -532,6 +587,15 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 .iter()
                 .all(|path| path_presence(path) == PathPresence::Missing)
             {
+                if plan.fail_on_source_failure {
+                    return Err(SourceBackedCoordinatorError::RouteScan {
+                        provider: route.metadata.source.provider,
+                        source: SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::SourceChanged,
+                            "certified-missing source changed during refresh verification",
+                        ),
+                    });
+                }
                 writer.rollback_source_route_stage(route_identity)?;
                 let carried_forward = writer.carry_failed_source_route_from_base(route_identity)?;
                 attempt_carried.insert(route_identity.clone());
