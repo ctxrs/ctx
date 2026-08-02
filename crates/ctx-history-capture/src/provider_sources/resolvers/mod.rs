@@ -364,10 +364,16 @@ mod tests {
         let dangling = temp.path().join("dangling");
         symlink(temp.path().join("absent-target"), &dangling).unwrap();
         assert_eq!(path_presence(&dangling), PathPresence::Unsupported);
-        assert!(matches!(
+        // A path routed through a symlinked ancestor is rejected the same
+        // way regardless of what lies beyond it: both `dangling` itself and
+        // `dangling/child` resolve to `Unsupported`. `suppresses_fallback`
+        // treats this identically to `Unknown(_)` (anything but `Missing`
+        // suppresses the legacy fallback), so this assertion only pins the
+        // more accurate diagnostic classification, not a behavior change.
+        assert_eq!(
             path_presence(&dangling.join("child")),
-            PathPresence::Unknown(ErrorKind::NotADirectory)
-        ));
+            PathPresence::Unsupported
+        );
 
         let loop_link = temp.path().join("loop");
         symlink(&loop_link, &loop_link).unwrap();
