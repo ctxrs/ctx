@@ -180,22 +180,30 @@ import or daemon refresh publishes a new Core generation.
 Lexical publication keeps the active generation and one previous generation
 for recovery and pinned readers; their manifests and integrity receipts use the
 same two-generation bound. Append-only segments merge after eight comparable
-segments accumulate. A mutating refresh also expunges any individual segment
-with more than 25% deleted documents, regardless of segment size, and waits for
-that merge before publication completes. Thus every published active segment
-has at most 25% deletions (at most 4/3 as many physical document slots as live
-documents), while exact no-op refreshes perform no writer or merge work.
+segments accumulate. A refresh that rewrites, replaces, or deletes indexed
+records marks the superseded documents deleted in their Tantivy segments. This
+incremental behavior is independent of the removed `relational.sqlite` path.
+The merge policy expunges an individual segment only when its deleted-document
+share is strictly more than 25%; exactly 25% does not trigger reclamation. The
+refresh waits for any triggered merge before publication completes. Thus every
+published active segment has at most 25% deletions, while exact no-op refreshes
+perform no writer or merge work.
 
 Generation candidates hard-link unchanged base segments when the filesystem
-supports it. On such filesystems, during a comparable large replacement the
-retained previous generation, active generation, newly staged replacement, and
-merge output can coexist for a typical roughly 4x live-generation peak. These
-amplification figures are estimates, not hard byte bounds: at the 25% deletion
-limit, steady physical document slots across the retained active and previous
-generations can approach 8/3 of one live generation. Compression and changed
-content can move byte ratios, and the candidate-cloning fallback copies files
-when hard links are unavailable, so physical byte amplification can be higher.
-Merge latency and I/O are charged only to a mutating refresh that crosses the
+supports it. For threshold planning, let `F` be the physical footprint of the
+same live documents in a deletion-free generation. Assume stored bytes scale
+with physical document slots, the active and retained previous generations are
+distinct and each sits at exactly 25% deletions, and a worst-case compaction
+rewrites all active live documents; semantic and Pro storage are excluded.
+Under those assumptions, the active generation approaches `4/3 F` (about
+`1.33 F`), and active plus previous approach `8/3 F` (about `2.67 F`). A
+hard-linked candidate reuses the active segment bytes, so one deletion-free
+merge output brings peak physical storage to about `11/3 F` (`3.67 F`). When
+candidate cloning must copy instead, the extra `4/3 F` candidate copy brings
+the peak to about `5 F`. These are conservative theoretical estimates, not hard
+byte bounds: compression, changed content, partial-segment reclamation, and
+segment sharing between retained generations can move actual ratios. Merge
+latency and I/O are charged only to a mutating refresh that crosses the strict
 deletion or fan-in bound. Delete reclamation rewrites only the affected segment
 unless it is already part of scheduled fan-in work, so same-size cold segments
 are not pulled into the rewrite. There are no unbounded background generations
