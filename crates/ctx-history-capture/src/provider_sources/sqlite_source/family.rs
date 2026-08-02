@@ -205,6 +205,28 @@ impl SqliteSourceFamily {
         Ok(())
     }
 
+    /// Revalidates only the durable source identity after a private logical
+    /// backup has been certified. WAL/SHM creation, checkpoint removal, and
+    /// recreation are normal writer lifecycle after that point and cannot
+    /// change the retained backup that will be published.
+    pub(super) fn revalidate_logical_database_identity(
+        &self,
+        expected: &SqliteFamilyEvidence,
+    ) -> SqliteSourceAccessResult<()> {
+        #[cfg(test)]
+        let _ =
+            self.revalidation_count
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    Some(count.saturating_add(1))
+                });
+        self.authority.revalidate()?;
+        if self.authority.identity != expected.parent_identity {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        self.database
+            .revalidate_identity(&self.authority, &expected.database.identity)
+    }
+
     pub(super) fn revalidate(
         &self,
         expected: &SqliteFamilyEvidence,

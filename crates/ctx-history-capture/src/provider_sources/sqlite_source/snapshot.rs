@@ -139,18 +139,22 @@ fn open_logical_online_backup_snapshot(
     // approved database object are ordinary writer progress. The object and
     // root identities remain authoritative, while this bounded evidence is a
     // conservative routing key for the exact admitted view.
-    family.revalidate_logical_identity(&opening_evidence)?;
-    let native_evidence = family.capture_revision_evidence()?;
-    let admitted_revision_is_replay_safe =
-        opening_evidence.revision_token() == native_evidence.revision_token();
-    if native_evidence.database.identity != opening_evidence.database.identity {
-        return Err(SqliteSourceAccessError::SourceChanged);
-    }
+    let (native_evidence, admitted_revision_is_replay_safe) = if source.requires_live_family_fence {
+        family.revalidate_logical_identity(&opening_evidence)?;
+        let native_evidence = family.capture_revision_evidence()?;
+        let replay_safe = opening_evidence.revision_token() == native_evidence.revision_token();
+        (native_evidence, replay_safe)
+    } else {
+        // The exact physical family was fenced around its private copy.
+        // Later sidecar lifecycle belongs to the next eventual refresh.
+        family.revalidate_logical_database_identity(&opening_evidence)?;
+        (opening_evidence.clone(), true)
+    };
     let source_sqlite_evidence = capture_sqlite_evidence(&source.connection)?;
     enforce_online_backup_bounds(&source.connection, &family.database.path)?;
     let (snapshot_directory, snapshot_path, snapshot_bytes) =
         online_backup_to_ctx(authority.data_root(), &source.connection)?;
-    family.revalidate_logical_identity(&native_evidence)?;
+    family.revalidate_logical_database_identity(&native_evidence)?;
     end_pinned_read_snapshot(&source.connection)?;
     drop(source);
 
@@ -170,7 +174,7 @@ fn open_logical_online_backup_snapshot(
             reason: "the private SQLite backup does not match its pinned source view".to_owned(),
         });
     }
-    family.revalidate_logical_identity(&native_evidence)?;
+    family.revalidate_logical_database_identity(&native_evidence)?;
     let evidence = SqliteSourceEvidence::from_snapshot(&native_evidence, &sqlite_evidence);
     authority
         .snapshot_context
@@ -200,6 +204,7 @@ fn open_logical_online_backup_snapshot(
 
 struct OnlineBackupSource {
     connection: Connection,
+    requires_live_family_fence: bool,
     _copied_source_directory: Option<TempDir>,
 }
 
@@ -227,6 +232,7 @@ fn acquire_online_backup_source(
             .map_err(|source| {
                 sqlite_error("opening the exact copied logical-backup source", source)
             })?,
+            requires_live_family_fence: false,
             _copied_source_directory: Some(snapshot_directory),
         });
     }
@@ -235,6 +241,7 @@ fn acquire_online_backup_source(
         let connection = open_live_authorized_source(family)?;
         return Ok(OnlineBackupSource {
             connection,
+            requires_live_family_fence: true,
             _copied_source_directory: None,
         });
     }
@@ -253,6 +260,7 @@ fn acquire_online_backup_source(
     .map_err(|source| sqlite_error("opening the ctx-owned online-backup source", source))?;
     Ok(OnlineBackupSource {
         connection,
+        requires_live_family_fence: false,
         _copied_source_directory: Some(snapshot_directory),
     })
 }

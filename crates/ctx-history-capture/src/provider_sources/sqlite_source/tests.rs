@@ -1009,7 +1009,7 @@ fn logical_online_backup_terminal_fence_allows_same_object_wal_growth() {
 }
 
 #[test]
-fn logical_online_backup_fails_closed_when_an_optional_wal_appears_after_preflight() {
+fn logical_online_backup_publishes_private_view_when_wal_appears_after_copy() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     create_database(&database, "before-wal");
@@ -1023,7 +1023,7 @@ fn logical_online_backup_fails_closed_when_an_optional_wal_appears_after_preflig
     assert!(!wal.exists());
     let parent = retain_parent(temp.path());
 
-    let result = open_root_handle_sqlite_source_online_backup_before_identity_check_for_test(
+    let snapshot = open_root_handle_sqlite_source_online_backup_before_identity_check_for_test(
         &parent,
         OsStr::new("provider.sqlite"),
         || {
@@ -1031,12 +1031,10 @@ fn logical_online_backup_fails_closed_when_an_optional_wal_appears_after_preflig
                 .execute("INSERT INTO messages (body) VALUES ('new-in-wal')", [])
                 .unwrap();
         },
-    );
-
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    )
+    .unwrap();
+    assert_eq!(read_values(&snapshot), ["before-wal"]);
+    snapshot.finish().unwrap();
     let refreshed = parent
         .open_logical_online_backup_snapshot(OsStr::new("provider.sqlite"))
         .unwrap();
@@ -1118,7 +1116,7 @@ fn logical_online_backup_terminal_fence_rejects_database_leaf_replacement() {
 
 #[cfg(unix)]
 #[test]
-fn logical_online_backup_terminal_fence_rejects_wal_leaf_replacement() {
+fn logical_online_backup_terminal_fence_ignores_post_backup_wal_replacement() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let _writer = create_persistent_wal(&database);
@@ -1133,10 +1131,7 @@ fn logical_online_backup_terminal_fence_rejects_wal_leaf_replacement() {
     fs::rename(&wal, &retained_wal).unwrap();
     fs::copy(&retained_wal, &wal).unwrap();
 
-    assert!(matches!(
-        fence.revalidate(),
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    fence.revalidate().unwrap();
 }
 
 #[cfg(unix)]

@@ -7,11 +7,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     path::Path,
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
-    },
-    time::{Duration, Instant},
 };
 
 use ctx_history_core::{
@@ -56,11 +51,6 @@ const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
 const SOURCE_BACKED_MAX_FILE_TOUCHES: usize = 32;
 const SOURCE_BACKED_MAX_NATIVE_IDENTITY_BYTES: usize = 4 * 1024;
-const SOURCE_BACKED_MAX_SESSIONS: u64 = 65_536;
-const SOURCE_BACKED_MAX_SESSION_TEXT_BYTES: u64 = 64 * 1024 * 1024;
-const SOURCE_BACKED_SCHEMA_PROGRESS_OPS: i32 = 1_000;
-const SOURCE_BACKED_SCHEMA_MAX_PROGRESS_CALLBACKS: u64 = 250_000;
-const SOURCE_BACKED_SCHEMA_DEADLINE: Duration = Duration::from_secs(5);
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "OpenCode-family history database must be a regular file";
 
@@ -84,16 +74,6 @@ pub(crate) enum OpenCodeSourceBackedError {
     MissingSession(String),
     #[error("OpenCode-family retained row is not backed by an exact text value")]
     MissingExactText,
-    #[error(
-        "OpenCode-family source-backed session cardinality exceeds {SOURCE_BACKED_MAX_SESSIONS}"
-    )]
-    SessionCardinalityExceeded,
-    #[error(
-        "OpenCode-family source-backed session text exceeds {SOURCE_BACKED_MAX_SESSION_TEXT_BYTES} bytes"
-    )]
-    SessionTextBudgetExceeded,
-    #[error("OpenCode-family source-backed schema preflight exceeded its bounded work budget")]
-    SchemaPreflightBudgetExceeded,
 }
 
 pub(crate) type OpenCodeSourceBackedResult<T> = Result<T, OpenCodeSourceBackedError>;
@@ -181,27 +161,6 @@ struct WorkingScan {
 struct OpenCodeLogicalObservation {
     source: SourceKey,
     schema: OpenCodeNativeSchema,
-    schema_preflight_progress_callbacks: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct SessionLoadBudget {
-    sessions: u64,
-    text_bytes: u64,
-}
-
-impl SessionLoadBudget {
-    fn admit(&mut self, text_bytes: u64) -> OpenCodeSourceBackedResult<()> {
-        self.sessions = checked_add(self.sessions, 1)?;
-        if self.sessions > SOURCE_BACKED_MAX_SESSIONS {
-            return Err(OpenCodeSourceBackedError::SessionCardinalityExceeded);
-        }
-        self.text_bytes = checked_add(self.text_bytes, text_bytes)?;
-        if self.text_bytes > SOURCE_BACKED_MAX_SESSION_TEXT_BYTES {
-            return Err(OpenCodeSourceBackedError::SessionTextBudgetExceeded);
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug)]
@@ -335,40 +294,9 @@ fn observe_logical_source(
     connection: &Connection,
     dialect: &'static OpenCodeSqliteDialect,
 ) -> OpenCodeSourceBackedResult<OpenCodeLogicalObservation> {
-    let progress_callbacks = Arc::new(AtomicU64::new(0));
-    let exhausted = Arc::new(AtomicBool::new(false));
-    let deadline = Instant::now()
-        .checked_add(SOURCE_BACKED_SCHEMA_DEADLINE)
-        .ok_or(OpenCodeSourceBackedError::SchemaPreflightBudgetExceeded)?;
-    let callback_count = Arc::clone(&progress_callbacks);
-    let callback_exhausted = Arc::clone(&exhausted);
-    connection.progress_handler(
-        SOURCE_BACKED_SCHEMA_PROGRESS_OPS,
-        Some(move || {
-            let calls = callback_count.fetch_add(1, Ordering::Relaxed) + 1;
-            let stop = schema_preflight_should_stop(calls, Instant::now(), deadline);
-            if stop {
-                callback_exhausted.store(true, Ordering::Relaxed);
-            }
-            stop
-        }),
-    );
-    let schema = OpenCodeNativeSchema::probe(connection, dialect);
-    connection.progress_handler(0, None::<fn() -> bool>);
-    if exhausted.load(Ordering::Relaxed) {
-        return Err(OpenCodeSourceBackedError::SchemaPreflightBudgetExceeded);
-    }
-    let schema = schema?;
+    let schema = OpenCodeNativeSchema::probe(connection, dialect)?;
     let source = source_key(dialect, schema.family)?;
-    Ok(OpenCodeLogicalObservation {
-        source,
-        schema,
-        schema_preflight_progress_callbacks: progress_callbacks.load(Ordering::Relaxed),
-    })
-}
-
-fn schema_preflight_should_stop(calls: u64, now: Instant, deadline: Instant) -> bool {
-    calls > SOURCE_BACKED_SCHEMA_MAX_PROGRESS_CALLBACKS || now >= deadline
+    Ok(OpenCodeLogicalObservation { source, schema })
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -491,7 +419,6 @@ fn load_sessions(
     );
     let mut statement = connection.prepare(&sql)?;
     let mut rows = statement.query([])?;
-    let mut budget = SessionLoadBudget::default();
     let mut raw = BTreeMap::new();
     while let Some(row) = rows.next()? {
         if row.get::<_, i64>(5)? != 0 {
@@ -506,10 +433,6 @@ fn load_sessions(
         let directory = nonempty(row.get::<_, String>(2)?);
         let branch = nonempty(row.get::<_, String>(3)?);
         let agent = nonempty(row.get::<_, String>(4)?);
-        budget.admit(session_text_bytes(
-            &identity,
-            [&parent, &directory, &branch, &agent],
-        )?)?;
         raw.insert(identity, (parent, directory, branch, agent));
     }
 
@@ -556,21 +479,6 @@ fn root_session_identity(identity: &str, sessions: &BTreeMap<String, RawSession>
         root = parent.to_owned();
     }
     root
-}
-
-fn session_text_bytes<const N: usize>(
-    identity: &str,
-    optional: [&Option<String>; N],
-) -> OpenCodeSourceBackedResult<u64> {
-    let mut bytes =
-        u64::try_from(identity.len()).map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
-    for value in optional.into_iter().filter_map(|value| value.as_deref()) {
-        bytes = checked_add(
-            bytes,
-            u64::try_from(value.len()).map_err(|_| OpenCodeSourceBackedError::CountOverflow)?,
-        )?;
-    }
-    Ok(bytes)
 }
 
 fn session_id(

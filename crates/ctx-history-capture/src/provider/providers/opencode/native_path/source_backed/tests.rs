@@ -516,7 +516,6 @@ fn indexed_synthetic_cold_and_changed_use_one_snapshot_and_one_logical_row_trave
     assert_eq!(cold.snapshot_opens, 1);
     assert_eq!(cold.logical_online_backup_opens, 1);
     assert_eq!(cold.schema_probe_passes, 1);
-    assert!(cold.schema_preflight_progress_callbacks > 0);
     assert_eq!(cold.logical_fingerprint_passes, 0);
     assert_eq!(cold.logical_row_traversals, 1);
     assert_eq!(cold.projection_passes, 1);
@@ -526,7 +525,6 @@ fn indexed_synthetic_cold_and_changed_use_one_snapshot_and_one_logical_row_trave
     let unchanged = refresh_fixture_with_work(&index_root, &registry);
     assert_eq!(unchanged.snapshot_opens, 1);
     assert_eq!(unchanged.exact_replays, 1);
-    assert!(unchanged.schema_preflight_progress_callbacks > 0);
     assert_eq!(unchanged.logical_row_traversals, 0);
     assert_eq!(unchanged.logical_rows_projected, 0);
 
@@ -552,50 +550,11 @@ fn indexed_synthetic_cold_and_changed_use_one_snapshot_and_one_logical_row_trave
     let changed = refresh_fixture_with_work(&index_root, &registry);
     assert_eq!(changed.snapshot_opens, 1);
     assert_eq!(changed.logical_online_backup_opens, 1);
-    assert!(changed.schema_preflight_progress_callbacks > 0);
     assert_eq!(changed.logical_fingerprint_passes, 0);
     assert_eq!(changed.logical_row_traversals, 1);
     assert_eq!(changed.projection_passes, 1);
     assert_eq!(changed.logical_rows_projected, ROWS + 1);
     assert_eq!(changed.documents_staged, ROWS + 1);
-}
-
-#[test]
-fn source_backed_session_maps_have_explicit_cardinality_and_text_bounds() {
-    let mut cardinality = SessionLoadBudget {
-        sessions: SOURCE_BACKED_MAX_SESSIONS,
-        text_bytes: 0,
-    };
-    assert!(matches!(
-        cardinality.admit(0),
-        Err(OpenCodeSourceBackedError::SessionCardinalityExceeded)
-    ));
-
-    let mut text = SessionLoadBudget {
-        sessions: 0,
-        text_bytes: SOURCE_BACKED_MAX_SESSION_TEXT_BYTES,
-    };
-    assert!(matches!(
-        text.admit(1),
-        Err(OpenCodeSourceBackedError::SessionTextBudgetExceeded)
-    ));
-}
-
-#[test]
-fn source_backed_schema_preflight_stops_at_opcode_or_deadline_bound() {
-    let now = std::time::Instant::now();
-    let future = now + std::time::Duration::from_secs(60);
-    assert!(!schema_preflight_should_stop(
-        SOURCE_BACKED_SCHEMA_MAX_PROGRESS_CALLBACKS,
-        now,
-        future,
-    ));
-    assert!(schema_preflight_should_stop(
-        SOURCE_BACKED_SCHEMA_MAX_PROGRESS_CALLBACKS + 1,
-        now,
-        future,
-    ));
-    assert!(schema_preflight_should_stop(0, now, now));
 }
 
 #[test]

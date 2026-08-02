@@ -597,7 +597,7 @@ impl SqliteSourceTerminalFence {
             SqliteSourceSnapshotPolicy::LogicalOnlineBackup => {
                 let family = SqliteSourceFamily::open(&authority, &self.inner.database_name, || {})
                     .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
-                family.revalidate_logical_identity(&self.inner.native_evidence)?;
+                family.revalidate_logical_database_identity(&self.inner.native_evidence)?;
             }
         }
         self.inner.snapshot_context.record_terminal_revalidation()
@@ -732,7 +732,7 @@ impl SqliteSourceReadSnapshot {
                 family.revalidate(&self.native_evidence)
             }
             SqliteSourceSnapshotPolicy::LogicalOnlineBackup => {
-                family.revalidate_logical_identity(&self.native_evidence)
+                family.revalidate_logical_database_identity(&self.native_evidence)
             }
         }
     }
