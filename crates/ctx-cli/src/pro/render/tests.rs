@@ -277,46 +277,6 @@ fn attribution(
 }
 
 #[test]
-fn producer_hierarchy_shows_parent_and_root_without_duplicate_noise() {
-    let mut nested = attribution(
-        "fact:nested",
-        ProductionRelationship::ProducedBy,
-        "worker",
-        1,
-    );
-    nested.parent_session = Some(resource(
-        "session:manager",
-        ResourceKind::Session,
-        "manager",
-    ));
-    nested.owning_root = Some(resource("run:root", ResourceKind::Run, "root"));
-    let mut document = Document::new();
-    super::relationships::render_attribution_groups(
-        &mut document,
-        &context(80),
-        0,
-        std::slice::from_ref(&nested),
-    );
-    let rendered = document.render_plain();
-    assert!(
-        rendered.contains("parent session  session manager"),
-        "{rendered}"
-    );
-    assert!(rendered.contains("owning root   run root"), "{rendered}");
-
-    nested.parent_session = Some(resource("session:root", ResourceKind::Session, "root"));
-    let mut document = Document::new();
-    super::relationships::render_attribution_groups(&mut document, &context(80), 0, &[nested]);
-    let rendered = document.render_plain();
-    assert!(
-        rendered.contains("delegated/owned by  session root"),
-        "{rendered}"
-    );
-    assert!(!rendered.contains("parent session"), "{rendered}");
-    assert!(!rendered.contains("owning root"), "{rendered}");
-}
-
-#[test]
 fn direct_commit_blame_shows_its_parent_session() {
     let commit = resource("commit:abcdef", ResourceKind::Commit, "abcdef");
     let mut item = commit_match(
@@ -351,7 +311,7 @@ fn direct_commit_blame_shows_its_parent_session() {
 
     let rendered = render_plain(&result, 80);
     assert!(
-        rendered.contains("parent session  session manager"),
+        rendered.contains("parent        session manager"),
         "{rendered}"
     );
     assert!(rendered.contains("owning root   run root"), "{rendered}");

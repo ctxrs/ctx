@@ -93,17 +93,14 @@ pub(super) fn render_session_lineage(
     parent_session: Option<&ctx_pro_host_protocol::ResourceRef>,
     owning_root: Option<&ctx_pro_host_protocol::ResourceRef>,
 ) {
-    match (parent_session, owning_root) {
-        (Some(parent), Some(root)) if parent.display == root.display => {
-            push_role_resource(document, context, indent, "delegated/owned by", parent);
-        }
-        (parent, root) => {
-            if let Some(parent) = parent {
-                push_role_resource(document, context, indent, "parent session", parent);
-            }
-            if let Some(root) = root {
-                push_role_resource(document, context, indent, "owning root", root);
-            }
-        }
+    if let Some(parent) = parent_session {
+        push_role_resource(document, context, indent, "parent", parent);
+    }
+    if let Some(root) = owning_root {
+        push_role_resource(document, context, indent, "owning root", root);
     }
 }
+
+#[cfg(test)]
+#[path = "relationships_tests.rs"]
+mod tests;
