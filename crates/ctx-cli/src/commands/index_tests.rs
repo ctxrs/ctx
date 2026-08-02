@@ -148,8 +148,16 @@ fn explicit_lexical_wait_accepts_a_verified_generation_during_refresh() {
 
 #[test]
 fn default_and_all_waits_preserve_refresh_convergence() {
-    let pending = readiness("pending", 4, true);
-    let ready = readiness("ready", 12, true);
+    let mut pending = readiness("pending", 4, true);
+    let mut ready = readiness("ready", 12, true);
+    for status in [&mut pending, &mut ready] {
+        status["semantic"] = json!({
+            "status": "ready",
+            "enabled": true,
+            "coverage": {},
+        });
+        status["daemon"]["jobs"]["semantic_index"] = json!({"status": "ready"});
+    }
     let selection = IndexSelection::default_for(&pending);
     assert!(!index_ready(&pending, selection));
     assert!(index_ready(&ready, selection));
