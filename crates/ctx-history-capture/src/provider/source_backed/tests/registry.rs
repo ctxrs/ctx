@@ -298,8 +298,31 @@ fn cold_final_revalidation_failures_scan_each_route_once_and_publish_only_succes
     registry.register(third);
     let temp = tempdir().unwrap();
 
-    let receipt =
-        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    let mut progress = Vec::new();
+    let receipt = refresh_source_backed_generation_with_progress(
+        temp.path(),
+        &registry,
+        WriterOptions::default(),
+        |update| {
+            progress.push(update);
+            Ok(())
+        },
+    )
+    .unwrap();
+    let completed_sources = progress
+        .iter()
+        .map(|update| update.completed_sources)
+        .collect::<Vec<_>>();
+    assert!(
+        completed_sources
+            .windows(2)
+            .all(|window| window[0] <= window[1]),
+        "route-attempt progress must be monotonic: {completed_sources:?}"
+    );
+    let committed = progress.last().unwrap();
+    assert_eq!(committed.phase, "committed");
+    assert_eq!(committed.completed_sources, 3);
+    assert_eq!(committed.total_sources, 3);
     assert_eq!(receipt.successful_route_ids, vec![first_id.clone()]);
     assert_eq!(receipt.failed_routes.len(), 2);
     assert_eq!(
