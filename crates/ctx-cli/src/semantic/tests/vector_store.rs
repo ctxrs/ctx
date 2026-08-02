@@ -52,7 +52,7 @@ fn flat_store_control_catalog_has_no_vectors_or_plaintext() -> Result<()> {
         [],
         |row| row.get::<_, String>(0),
     )?;
-    assert!(schema.contains("semantic_source_documents"));
+    assert!(!schema.contains("semantic_source_documents"));
     assert!(!schema.contains("locator_json"));
     assert!(!schema.contains("embedding_f32"));
     assert!(!schema.contains("event_embedding"));

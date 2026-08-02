@@ -118,12 +118,25 @@ impl Fixture {
     }
 
     fn record(&self, source_index: usize, sequence: u64, body: &str) -> Result<CoreRecord> {
+        self.record_with_event_sequence(source_index, sequence, sequence, body)
+    }
+
+    fn record_with_event_sequence(
+        &self,
+        source_index: usize,
+        identity_sequence: u64,
+        event_sequence: u64,
+        body: &str,
+    ) -> Result<CoreRecord> {
         let fixture_source = &self.sources[source_index];
         let event_id = derive_event_id(EventIdentityInput {
             source: &fixture_source.source,
             session_id: fixture_source.session_id,
             logical_item_kind: "message",
-            native_item_key: &NativeItemKey::native_id("message", TypedKey::U64(sequence))?,
+            native_item_key: &NativeItemKey::native_id(
+                "message",
+                TypedKey::U64(identity_sequence),
+            )?,
             subrecord_selector: None,
         })?;
         let mut record = CoreRecord::new_selected(
@@ -131,7 +144,7 @@ impl Fixture {
             fixture_source.session_id,
             fixture_source.session_id,
             fixture_source.source.clone(),
-            sequence,
+            event_sequence,
             "message",
             "primary",
             true,
@@ -139,9 +152,9 @@ impl Fixture {
             body,
         )?;
         record.provider_session_id = Some(format!("fixture-session-{source_index}"));
-        record.native_event_id = Some(TypedKey::U64(sequence));
+        record.native_event_id = Some(TypedKey::U64(identity_sequence));
         record.role = Some("user".to_owned());
-        record.occurred_at_unix_ms = Some(sequence as i64);
+        record.occurred_at_unix_ms = Some(event_sequence as i64);
         record.workspace = Some("/workspace".to_owned());
         record.cwd = Some("/workspace".to_owned());
         record.validate_contract()?;
@@ -165,6 +178,48 @@ impl Fixture {
                 writer.add_core_record(self.record(
                     *source_index,
                     u64::try_from(offset + 1)?,
+                    body,
+                )?)?;
+            }
+            let observation = SourceObservation::new(
+                fixture_source.source.clone(),
+                format!("fixture-{name}"),
+                name.as_bytes().to_vec(),
+            )?;
+            let count = u64::try_from(records.len())?;
+            writer.certify_source(CertifiedSource::certify(
+                observation.clone(),
+                observation,
+                "fixture-parser-v1",
+                [u8::try_from(*source_index + 1)?; 32],
+                ScannedSourceCounts {
+                    complete_records: count,
+                    retained_records: count,
+                    indexed_documents: count,
+                    certified_bytes: count.saturating_mul(50),
+                    ..ScannedSourceCounts::default()
+                },
+            )?)?;
+        }
+        writer.commit(|_| true)?;
+        Ok(VerifiedIndex::open(root)?)
+    }
+
+    fn publish_with_event_sequences(
+        &self,
+        name: &str,
+        specs: &[(usize, Vec<(u64, String)>)],
+    ) -> Result<VerifiedIndex> {
+        let root = self.data_root.join(format!("index-{name}"));
+        let mut writer = GenerationWriter::open(&root, WriterOptions::default())?;
+        for (source_index, records) in specs {
+            let fixture_source = &self.sources[*source_index];
+            writer.begin_source(fixture_source.source.clone())?;
+            for (offset, (event_sequence, body)) in records.iter().enumerate() {
+                writer.add_core_record(self.record_with_event_sequence(
+                    *source_index,
+                    u64::try_from(offset + 1)?,
+                    *event_sequence,
                     body,
                 )?)?;
             }
@@ -223,6 +278,13 @@ fn merge(total: &mut SourceBackedSemanticOutcome, next: SourceBackedSemanticOutc
         .invalidated_chunks
         .saturating_add(next.invalidated_chunks);
     total.deleted_chunks = total.deleted_chunks.saturating_add(next.deleted_chunks);
+    total.vectors_touched = total.vectors_touched.saturating_add(next.vectors_touched);
+    total.vector_bytes_touched = total
+        .vector_bytes_touched
+        .saturating_add(next.vector_bytes_touched);
+    total.metadata_records_touched = total
+        .metadata_records_touched
+        .saturating_add(next.metadata_records_touched);
     total.ready |= next.ready;
 }
 
@@ -235,8 +297,13 @@ fn reconcile_generation(
 ) -> Result<SourceBackedSemanticOutcome> {
     let mut total = SourceBackedSemanticOutcome::default();
     for _ in 0..128 {
-        let outcome =
+        let work_before = store.flat.work_stats();
+        let mut outcome =
             store.reconcile_source_backed_generation(index, generation, builder, embedder)?;
+        let work = store.flat.work_since(work_before);
+        outcome.vectors_touched = work.vectors_touched;
+        outcome.vector_bytes_touched = work.vector_bytes_touched;
+        outcome.metadata_records_touched = work.metadata_records_touched;
         let ready = outcome.ready;
         merge(&mut total, outcome);
         if ready {
@@ -269,12 +336,20 @@ fn active_events(store: &SemanticVectorStore) -> Result<usize> {
 }
 
 fn source_rows(store: &SemanticVectorStore, digest: &str) -> Result<Vec<(String, String, String)>> {
-    let mut statement = store.conn.prepare(
-        "SELECT event_id, source_text_sha256, source_reconciliation_id
-         FROM semantic_source_documents WHERE source_identity_digest = ?1 ORDER BY event_id",
-    )?;
-    let rows = statement.query_map([digest], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
+    Ok(store
+        .flat
+        .source_event_lookup(digest)
+        .map_err(anyhow::Error::new)?
+        .events()
+        .iter()
+        .map(|event| {
+            (
+                event.event_id.to_string(),
+                event.source_text_hash.to_hex(),
+                event.source_reconciliation_id.clone(),
+            )
+        })
+        .collect())
 }
 
 #[test]
@@ -285,7 +360,7 @@ fn semantic_generation_mirrors_exact_per_source_core_aggregates() -> Result<()> 
         &[(0, bodies("stable", 3)), (1, bodies("changed", 2))],
     )?;
     let generation = SourceBackedSemanticGeneration::from_verified_index(&index)?;
-    assert_eq!(SOURCE_CONTRACT_VERSION, 7);
+    assert_eq!(SOURCE_CONTRACT_VERSION, 8);
     assert_eq!(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION, 15);
     assert_eq!(generation.semantic_documents, 5);
     assert_eq!(generation.sources.len(), 2);
@@ -339,10 +414,13 @@ fn exact_generation_pin_distinguishes_not_ready_empty_and_pinned() -> Result<()>
 }
 
 #[test]
-fn complexity_oracle_reads_only_changed_source_records() -> Result<()> {
+fn four_event_source_work_is_independent_of_740k_equivalent_corpus() -> Result<()> {
+    const PRODUCTION_EQUIVALENT_CORPUS_EVENTS: u64 = 740_000;
     let fixture = Fixture::new(2)?;
     let stable_large = bodies("large-stable", 100);
     let stable_small = bodies("small", 3);
+    let mut appended_small = stable_small.clone();
+    appended_small.push("small appended record".to_owned());
     let initial = fixture.publish(
         "complexity-a",
         &[(0, stable_large.clone()), (1, stable_small.clone())],
@@ -351,10 +429,7 @@ fn complexity_oracle_reads_only_changed_source_records() -> Result<()> {
         "complexity-unchanged",
         &[(0, stable_large.clone()), (1, stable_small)],
     )?;
-    let target = fixture.publish(
-        "complexity-b",
-        &[(0, stable_large), (1, bodies("small-appended", 4))],
-    )?;
+    let target = fixture.publish("complexity-b", &[(0, stable_large), (1, appended_small)])?;
     let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
@@ -389,6 +464,13 @@ fn complexity_oracle_reads_only_changed_source_records() -> Result<()> {
     assert_eq!(outcome.records_read, 4);
     assert_eq!(outcome.records_scanned, 4);
     assert_eq!(builder.calls.len(), 4);
+    assert_eq!(outcome.vectors_touched, 1);
+    assert_eq!(outcome.vector_bytes_touched, SEMANTIC_DIMENSIONS as u64 * 4);
+    assert!(outcome.metadata_records_touched < 64);
+    // The untouched source contributes zero records, vectors, and bytes to the
+    // measured refresh. The same bound therefore applies at the production
+    // 740k-event corpus size; only manifest segment descriptors are inspected.
+    assert!(outcome.vectors_touched < PRODUCTION_EQUIVALENT_CORPUS_EVENTS);
     assert_eq!(source_rows(&store, &stable_digest)?, stable_rows);
     assert_eq!(
         store.flat_active_event_snapshot_count(),
@@ -398,13 +480,58 @@ fn complexity_oracle_reads_only_changed_source_records() -> Result<()> {
     assert_eq!(active_events(&store)?, 104);
     assert_eq!(
         store.flat_pin_generation()?.unwrap().generation(),
-        flat_generation + 1,
-        "one changed page must publish one flat mutation"
+        flat_generation + 3,
+        "one changed page publishes vectors, event authority, and a source snapshot"
     );
     assert!(matches!(
         store.source_backed_generation_pin_exact(target.generation_id(), 104)?,
         SourceBackedGenerationPin::Ready(_)
     ));
+    Ok(())
+}
+
+#[test]
+fn sequence_only_core_change_updates_authority_without_embedding() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let initial = fixture.publish_with_event_sequences(
+        "sequence-a",
+        &[(0, vec![(1, "same semantic body".to_owned())])],
+    )?;
+    let target = fixture.publish_with_event_sequences(
+        "sequence-b",
+        &[(0, vec![(91, "same semantic body".to_owned())])],
+    )?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
+    reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
+    let embedded_before = embedder.chunks;
+
+    let outcome = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
+    assert_eq!(outcome.records_read, 1);
+    assert_eq!(outcome.records_reused, 1);
+    assert_eq!(outcome.records_embedded, 0);
+    assert_eq!(outcome.vectors_touched, 0);
+    assert_eq!(outcome.vector_bytes_touched, 0);
+    assert!(outcome.metadata_records_touched < 32);
+    assert_eq!(embedder.chunks, embedded_before);
+    assert!(matches!(
+        store.source_backed_generation_pin_exact(initial.generation_id(), 1)?,
+        SourceBackedGenerationPin::NotReady
+    ));
+    let pin = match store.source_backed_generation_pin_exact(target.generation_id(), 1)? {
+        SourceBackedGenerationPin::Ready(pin) => pin,
+        SourceBackedGenerationPin::NotReady | SourceBackedGenerationPin::ReadyEmpty => {
+            return Err(anyhow!("sequence-only target did not produce an exact pin"));
+        }
+    };
+    let chunk = pin
+        .scan_segments()
+        .iter()
+        .flat_map(|segment| segment.chunks())
+        .next()
+        .ok_or_else(|| anyhow!("sequence-only target lost its vector"))?;
+    assert_eq!(chunk.seq, 91);
     Ok(())
 }
 
@@ -480,6 +607,11 @@ fn multi_page_restart_reconstructs_one_view_for_remaining_pages() -> Result<()> 
     let resumed = reconcile_all(&mut restarted, &index, &mut builder, &mut embedder)?;
     assert_eq!(resumed.records_read, 4);
     assert_eq!(resumed.records_embedded, 4);
+    assert_eq!(resumed.vectors_touched, 4);
+    assert_eq!(
+        resumed.vector_bytes_touched,
+        4 * SEMANTIC_DIMENSIONS as u64 * 4
+    );
     assert_eq!(active_events(&restarted)?, record_count);
     assert_eq!(
         restarted.flat_active_event_snapshot_count(),
@@ -499,6 +631,55 @@ fn multi_page_restart_reconstructs_one_view_for_remaining_pages() -> Result<()> 
             .segment_count
             <= segments_before_resume + 1,
         "the resumed bounded page may add at most one durable delta"
+    );
+    Ok(())
+}
+
+#[test]
+fn threshold_compaction_rewrites_only_the_changed_source() -> Result<()> {
+    let fixture = Fixture::new(2)?;
+    let stable = bodies("stable-threshold", 5);
+    let initial = fixture.publish(
+        "threshold-0",
+        &[(0, stable.clone()), (1, bodies("mutable-threshold-0", 2))],
+    )?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
+    reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
+    let stable_digest = fixture.source_digest(&initial, 0)?;
+    let stable_rows = source_rows(&store, &stable_digest)?;
+
+    let mut threshold = SourceBackedSemanticOutcome::default();
+    for revision in 1..=14 {
+        let target = fixture.publish(
+            &format!("threshold-{revision}"),
+            &[
+                (0, stable.clone()),
+                (1, bodies(&format!("mutable-threshold-{revision}"), 2)),
+            ],
+        )?;
+        threshold = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
+    }
+    assert_eq!(threshold.records_read, 2);
+    assert_eq!(threshold.records_embedded, 2);
+    assert_eq!(
+        threshold.vectors_touched, 4,
+        "two embedded vectors plus two source-local compacted vectors"
+    );
+    assert_eq!(
+        threshold.vector_bytes_touched,
+        4 * SEMANTIC_DIMENSIONS as u64 * 4
+    );
+    assert_eq!(source_rows(&store, &stable_digest)?, stable_rows);
+    assert_eq!(
+        store
+            .flat
+            .active_stats()
+            .map_err(anyhow::Error::new)?
+            .segment_count,
+        3,
+        "stable source segments plus one compacted changed-source segment"
     );
     Ok(())
 }
@@ -610,11 +791,12 @@ fn crash_restart_replays_flat_publication_gap_idempotently() -> Result<()> {
     assert_eq!(outcome.records_read, 6);
     assert_eq!(outcome.records_reused, 6);
     assert_eq!(outcome.records_embedded, 0);
+    assert_eq!(outcome.vectors_touched, 0);
     assert_eq!(builder.calls.len(), 6);
     assert_eq!(active_events(&restarted)?, 6);
     assert_eq!(
         restarted.flat_pin_generation()?.unwrap().generation(),
-        published_generation
+        published_generation + 2
     );
     let no_op = restarted.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
     assert!(no_op.ready);
@@ -811,8 +993,8 @@ fn control_reset_retires_unowned_flat_vectors_before_rebuild() -> Result<()> {
     );
     assert_eq!(
         store.flat.active_generation_load_count(),
-        3,
-        "full rebuild and source terminals load once each, plus the compacted authority pin"
+        0,
+        "cold rebuild and source completion must not pin the corpus"
     );
     assert_eq!(active_events(&store)?, 3);
     let final_pin = store
@@ -820,8 +1002,8 @@ fn control_reset_retires_unowned_flat_vectors_before_rebuild() -> Result<()> {
         .ok_or_else(|| anyhow!("rebuilt projection lost its flat generation"))?;
     assert_eq!(
         final_pin.stats().segment_count,
-        1,
-        "terminal threshold compaction must collapse the restarted rebuild deltas"
+        2,
+        "rebuild retains one source vector segment and one catalog snapshot"
     );
     assert!(final_pin
         .active_events()

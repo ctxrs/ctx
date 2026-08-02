@@ -20,7 +20,7 @@ use crate::semantic::{
 
 pub(super) const CONTROL_FILE: &str = "state.sqlite";
 const CONTROL_APPLICATION_ID: i64 = 0x4354_584D; // "CTXM"
-const CONTROL_SCHEMA_VERSION: i64 = 3;
+const CONTROL_SCHEMA_VERSION: i64 = 4;
 const MODEL_CONTRACT_STATE: &str = "projection_model_contract";
 pub(super) const FULL_REBUILD_STATE: &str = "projection_full_rebuild_v1";
 
@@ -154,7 +154,6 @@ fn prepare_schema(connection: &Connection) -> Result<()> {
     if stored_contract.as_deref() != Some(expected_contract.as_str()) {
         let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Exclusive)?;
         transaction.execute("DELETE FROM semantic_dirty_events", [])?;
-        transaction.execute("DELETE FROM semantic_source_documents", [])?;
         transaction.execute("DELETE FROM semantic_source_receipts", [])?;
         transaction.execute("DELETE FROM semantic_maintenance_state", [])?;
         transaction.execute(
@@ -195,15 +194,6 @@ fn create_schema(transaction: &Transaction<'_>, requires_full_rebuild: bool) -> 
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
-        CREATE TABLE semantic_source_documents (
-            event_id TEXT PRIMARY KEY,
-            stable_event_identity BLOB NOT NULL UNIQUE,
-            source_text_sha256 TEXT NOT NULL,
-            source_identity_digest TEXT NOT NULL,
-            source_reconciliation_id TEXT NOT NULL
-        );
-        CREATE INDEX idx_semantic_source_documents_source
-            ON semantic_source_documents(source_identity_digest, event_id);
         CREATE TABLE semantic_source_receipts (
             source_identity_digest TEXT PRIMARY KEY,
             indexed_documents INTEGER NOT NULL CHECK(indexed_documents >= 0),
@@ -254,7 +244,6 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         "semantic_dirty_events",
         "semantic_index_stats",
         "semantic_maintenance_state",
-        "semantic_source_documents",
         "semantic_source_receipts",
     ];
     for table in expected_tables {

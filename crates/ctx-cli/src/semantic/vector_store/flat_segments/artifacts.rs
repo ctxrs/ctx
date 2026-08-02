@@ -50,9 +50,24 @@ pub(super) fn load_and_validate_segment(
         descriptor: descriptor.clone(),
         vectors,
         metadata,
-        mutations,
         stride_bytes,
     })
+}
+
+pub(super) fn load_catalog_mutations(
+    root: &Path,
+    contract: &FlatModelContract,
+    descriptor: &SegmentDescriptor,
+) -> FlatResult<Vec<EventMutation>> {
+    let mapping = map_artifact(
+        root,
+        descriptor,
+        &descriptor.mutations,
+        ArtifactRole::Mutations,
+        contract,
+    )?;
+    let header = decode_header(&mapping)?;
+    validate_mutation_payload(&mapping, &header, descriptor.kind, descriptor.generation)
 }
 
 pub(super) fn validate_staged_segment(
@@ -153,6 +168,7 @@ pub(super) fn write_replacement_segment(
     root: &Path,
     contract: &FlatModelContract,
     generation: u64,
+    source: &FlatSourceScope,
     replacements: &[FlatEventReplacement],
     tombstones: &[Uuid],
 ) -> FlatResult<StagedSegment> {
@@ -182,7 +198,10 @@ pub(super) fn write_replacement_segment(
     let mut vectors = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Vectors)?;
     let mut metadata = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Metadata)?;
     let mut vector_scratch = vec![0_u8; stride];
+    let mut first_ordinals = HashMap::with_capacity(ordered_replacements.len());
+    let mut next_ordinal = 0_u64;
     for replacement in ordered_replacements {
+        first_ordinals.insert(replacement.event_id, next_ordinal);
         let mut chunks = replacement.chunks.iter().collect::<Vec<_>>();
         chunks.sort_by_key(|chunk| chunk.chunk_index);
         for chunk in chunks {
@@ -196,6 +215,9 @@ pub(super) fn write_replacement_segment(
                 start_char: chunk.start_char,
                 end_char: chunk.end_char,
             }))?;
+            next_ordinal = next_ordinal.checked_add(1).ok_or_else(|| {
+                FlatStoreError::InvalidInput("publication vector ordinal overflow".to_owned())
+            })?;
         }
     }
 
@@ -205,6 +227,12 @@ pub(super) fn write_replacement_segment(
         .map(|replacement| EventMutation {
             event_id: replacement.event_id,
             kind: MutationKind::Replace,
+            seq: replacement.seq,
+            source_text_hash: replacement.source_text_hash,
+            stable_identity_hash: [0; 32],
+            vector_generation: generation,
+            first_vector_ordinal: first_ordinals[&replacement.event_id],
+            chunk_count: u32::try_from(replacement.chunks.len()).unwrap_or(u32::MAX),
         })
         .chain(
             ordered_tombstones
@@ -212,6 +240,12 @@ pub(super) fn write_replacement_segment(
                 .map(|event_id| EventMutation {
                     event_id,
                     kind: MutationKind::Delete,
+                    seq: 0,
+                    source_text_hash: FlatSourceHash::from_bytes([0; 32]),
+                    stable_identity_hash: [0; 32],
+                    vector_generation: 0,
+                    first_vector_ordinal: 0,
+                    chunk_count: 0,
                 }),
         )
         .collect::<Vec<_>>();
@@ -230,6 +264,56 @@ pub(super) fn write_replacement_segment(
             kind: SegmentKind::Delta,
             vector_count,
             mutation_count,
+            source_identity_digest: source.source_identity_digest.clone(),
+            source_reconciliation_id: source.source_reconciliation_id.clone(),
+            vectors,
+            metadata,
+            mutations,
+        },
+    })
+}
+
+pub(super) fn write_catalog_segment(
+    root: &Path,
+    contract: &FlatModelContract,
+    generation: u64,
+    source: &FlatSourceScope,
+    kind: SegmentKind,
+    mutations: &[EventMutation],
+) -> FlatResult<StagedSegment> {
+    let mut ordered = mutations.to_vec();
+    ordered.sort_by_key(|mutation| mutation.event_id);
+    if ordered
+        .windows(2)
+        .any(|pair| pair[0].event_id == pair[1].event_id)
+    {
+        return Err(FlatStoreError::InvalidInput(
+            "catalog publication repeats an event".to_owned(),
+        ));
+    }
+    let directory = segments_directory(root);
+    let stride = vector_stride(contract.dimensions)?;
+    let vectors = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Vectors)?
+        .finalize(0, stride, contract.dimensions)?;
+    let metadata = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Metadata)?
+        .finalize(0, METADATA_RECORD_BYTES as u32, 0)?;
+    let mut mutation_writer =
+        StagedArtifactWriter::new(&directory, generation, ArtifactRole::Mutations)?;
+    for mutation in &ordered {
+        mutation_writer.write_payload(&encode_mutation_record(*mutation))?;
+    }
+    let mutation_count = u64::try_from(ordered.len())
+        .map_err(|_| FlatStoreError::InvalidInput("mutation count overflow".to_owned()))?;
+    let mutations = mutation_writer.finalize(mutation_count, MUTATION_RECORD_BYTES as u32, 0)?;
+    Ok(StagedSegment {
+        descriptor: SegmentDescriptor {
+            format_version: SEGMENT_FORMAT_VERSION,
+            generation,
+            kind,
+            vector_count: 0,
+            mutation_count,
+            source_identity_digest: source.source_identity_digest.clone(),
+            source_reconciliation_id: source.source_reconciliation_id.clone(),
             vectors,
             metadata,
             mutations,
@@ -405,6 +489,12 @@ pub(super) fn encode_mutation_record(mutation: EventMutation) -> [u8; MUTATION_R
     let mut record = [0_u8; MUTATION_RECORD_BYTES];
     record[..16].copy_from_slice(mutation.event_id.as_bytes());
     record[16] = mutation.kind as u8;
+    record[24..32].copy_from_slice(&mutation.seq.to_le_bytes());
+    record[32..64].copy_from_slice(mutation.source_text_hash.as_bytes());
+    record[64..96].copy_from_slice(&mutation.stable_identity_hash);
+    record[96..104].copy_from_slice(&mutation.vector_generation.to_le_bytes());
+    record[104..112].copy_from_slice(&mutation.first_vector_ordinal.to_le_bytes());
+    record[112..116].copy_from_slice(&mutation.chunk_count.to_le_bytes());
     record
 }
 
@@ -412,7 +502,10 @@ pub(super) fn decode_mutation_record(record: &[u8]) -> FlatResult<EventMutation>
     let mut event_id = [0_u8; 16];
     event_id.copy_from_slice(&record[..16]);
     let event_id = Uuid::from_bytes(event_id);
-    if event_id.is_nil() || record[17..].iter().any(|byte| *byte != 0) {
+    if event_id.is_nil()
+        || record[17..24].iter().any(|byte| *byte != 0)
+        || record[116..].iter().any(|byte| *byte != 0)
+    {
         return Err(FlatStoreError::Corrupt(
             "mutation record has invalid identity or reserved bytes".to_owned(),
         ));
@@ -426,7 +519,20 @@ pub(super) fn decode_mutation_record(record: &[u8]) -> FlatResult<EventMutation>
             )));
         }
     };
-    Ok(EventMutation { event_id, kind })
+    let mut source_text_hash = [0_u8; 32];
+    source_text_hash.copy_from_slice(&record[32..64]);
+    let mut stable_identity_hash = [0_u8; 32];
+    stable_identity_hash.copy_from_slice(&record[64..96]);
+    Ok(EventMutation {
+        event_id,
+        kind,
+        seq: read_u64(record, 24),
+        source_text_hash: FlatSourceHash::from_bytes(source_text_hash),
+        stable_identity_hash,
+        vector_generation: read_u64(record, 96),
+        first_vector_ordinal: read_u64(record, 104),
+        chunk_count: read_u32(record, 112),
+    })
 }
 
 pub(super) fn encode_header(header: SegmentHeader) -> [u8; HEADER_BYTES] {

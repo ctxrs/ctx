@@ -142,6 +142,29 @@ pub(super) fn validate_mutation_payload(
                 "base segment generation {generation} contains a deletion"
             )));
         }
+        match mutation.kind {
+            MutationKind::Replace
+                if mutation.vector_generation == 0 || mutation.chunk_count == 0 =>
+            {
+                return Err(FlatStoreError::Corrupt(format!(
+                    "segment generation {generation} has an invalid replacement locator"
+                )));
+            }
+            MutationKind::Replace => {}
+            MutationKind::Delete
+                if mutation.seq != 0
+                    || mutation.source_text_hash.as_bytes() != &[0; 32]
+                    || mutation.stable_identity_hash != [0; 32]
+                    || mutation.vector_generation != 0
+                    || mutation.first_vector_ordinal != 0
+                    || mutation.chunk_count != 0 =>
+            {
+                return Err(FlatStoreError::Corrupt(format!(
+                    "segment generation {generation} deletion has non-zero authority fields"
+                )));
+            }
+            MutationKind::Delete => {}
+        }
         previous = Some(mutation.event_id);
         mutations.push(mutation);
     }
@@ -154,9 +177,12 @@ pub(super) fn validate_metadata_payload(
     mutations: &[EventMutation],
     generation: u64,
 ) -> FlatResult<()> {
-    let mutation_kinds = mutations
+    let mutation_authority = mutations
         .iter()
-        .map(|mutation| (mutation.event_id, mutation.kind))
+        .filter(|mutation| {
+            mutation.kind == MutationKind::Replace && mutation.vector_generation == generation
+        })
+        .map(|mutation| (mutation.event_id, *mutation))
         .collect::<HashMap<_, _>>();
     let count = usize_from_u64(header.record_count, "metadata count")?;
     let mut current_event = None::<Uuid>;
@@ -194,9 +220,24 @@ pub(super) fn validate_metadata_payload(
             }
             current_event = Some(metadata.event_id);
         }
-        if mutation_kinds.get(&metadata.event_id) != Some(&MutationKind::Replace) {
+        let Some(authority) = mutation_authority.get(&metadata.event_id) else {
             return Err(FlatStoreError::Corrupt(format!(
                 "segment generation {generation} metadata has no replacement mutation"
+            )));
+        };
+        let ordinal = u64::try_from(ordinal)
+            .map_err(|_| FlatStoreError::Corrupt("metadata ordinal does not fit u64".to_owned()))?;
+        let end = authority
+            .first_vector_ordinal
+            .checked_add(u64::from(authority.chunk_count))
+            .ok_or_else(|| FlatStoreError::Corrupt("replacement range overflow".to_owned()))?;
+        if ordinal < authority.first_vector_ordinal
+            || ordinal >= end
+            || authority.seq != metadata.seq
+            || authority.source_text_hash != metadata.source_text_hash
+        {
+            return Err(FlatStoreError::Corrupt(format!(
+                "segment generation {generation} metadata disagrees with event authority"
             )));
         }
         if event_evidence
@@ -211,12 +252,17 @@ pub(super) fn validate_metadata_payload(
         previous_chunk_index = Some(metadata.chunk_index);
     }
     for mutation in mutations {
-        if mutation.kind == MutationKind::Replace && !metadata_events.contains(&mutation.event_id) {
+        if mutation.kind == MutationKind::Replace
+            && mutation.vector_generation == generation
+            && !metadata_events.contains(&mutation.event_id)
+        {
             return Err(FlatStoreError::Corrupt(format!(
                 "segment generation {generation} replacement has no chunks"
             )));
         }
-        if mutation.kind == MutationKind::Delete && metadata_events.contains(&mutation.event_id) {
+        if (mutation.kind == MutationKind::Delete || mutation.vector_generation != generation)
+            && metadata_events.contains(&mutation.event_id)
+        {
             return Err(FlatStoreError::Corrupt(format!(
                 "segment generation {generation} deletion also has chunks"
             )));
@@ -230,6 +276,11 @@ pub(super) fn validate_manifest(
     filename_generation: u64,
     filename_digest: &str,
 ) -> FlatResult<()> {
+    if envelope.manifest.schema_version < MANIFEST_SCHEMA_VERSION {
+        return Err(FlatStoreError::LegacySchema(
+            envelope.manifest.schema_version,
+        ));
+    }
     if envelope.format != STORE_FORMAT
         || envelope.envelope_version != MANIFEST_ENVELOPE_VERSION
         || envelope.manifest.schema_version != MANIFEST_SCHEMA_VERSION
@@ -256,9 +307,32 @@ pub(super) fn validate_manifest(
             "manifest generation or segment set is invalid".to_owned(),
         ));
     }
+    if envelope.manifest.active_chunks < envelope.manifest.active_events {
+        return Err(FlatStoreError::Corrupt(
+            "manifest active chunk count is smaller than its event count".to_owned(),
+        ));
+    }
+    let mut previous_snapshot = None::<&str>;
+    for snapshot in &envelope.manifest.source_snapshots {
+        validate_source_scope_field(&snapshot.source_identity_digest, "snapshot source")?;
+        if snapshot.generation == 0
+            || snapshot.generation > envelope.manifest.generation
+            || previous_snapshot
+                .is_some_and(|previous| previous >= snapshot.source_identity_digest.as_str())
+            || !envelope.manifest.segments.iter().any(|segment| {
+                segment.generation == snapshot.generation
+                    && segment.source_identity_digest == snapshot.source_identity_digest
+                    && segment.kind == SegmentKind::Base
+            })
+        {
+            return Err(FlatStoreError::Corrupt(
+                "manifest source snapshots are invalid".to_owned(),
+            ));
+        }
+        previous_snapshot = Some(&snapshot.source_identity_digest);
+    }
     let mut prior_generation = 0_u64;
-    let mut saw_base = false;
-    for (index, segment) in envelope.manifest.segments.iter().enumerate() {
+    for segment in &envelope.manifest.segments {
         if segment.format_version != SEGMENT_FORMAT_VERSION
             || segment.generation <= prior_generation
             || segment.generation > envelope.manifest.generation
@@ -267,15 +341,8 @@ pub(super) fn validate_manifest(
                 "manifest segment generations are invalid".to_owned(),
             ));
         }
-        match segment.kind {
-            SegmentKind::Base if index != 0 || saw_base => {
-                return Err(FlatStoreError::Corrupt(
-                    "base segment must be the first and only base".to_owned(),
-                ));
-            }
-            SegmentKind::Base => saw_base = true,
-            SegmentKind::Delta => {}
-        }
+        validate_source_scope_field(&segment.source_identity_digest, "segment source")?;
+        validate_source_scope_field(&segment.source_reconciliation_id, "segment reconciliation")?;
         validate_artifact_descriptor(segment, &segment.vectors, ArtifactRole::Vectors)?;
         validate_artifact_descriptor(segment, &segment.metadata, ArtifactRole::Metadata)?;
         validate_artifact_descriptor(segment, &segment.mutations, ArtifactRole::Mutations)?;
@@ -285,6 +352,15 @@ pub(super) fn validate_manifest(
         return Err(FlatStoreError::Corrupt(
             "manifest has no segment for its publication generation".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_source_scope_field(value: &str, name: &str) -> FlatResult<()> {
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(FlatStoreError::Corrupt(format!(
+            "{name} is empty, oversized, or contains control characters"
+        )));
     }
     Ok(())
 }

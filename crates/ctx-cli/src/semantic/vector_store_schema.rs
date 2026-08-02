@@ -15,7 +15,7 @@ use super::{
     },
 };
 
-pub(super) const SEMANTIC_VECTOR_SCHEMA_VERSION: i64 = 3;
+pub(super) const SEMANTIC_VECTOR_SCHEMA_VERSION: i64 = 4;
 pub(super) const SEMANTIC_VECTOR_BACKEND_FLAT_F32: &str = "flat-f32";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,6 +152,10 @@ fn semantic_flat_store_error(error: FlatStoreError) -> anyhow::Error {
         .into(),
         FlatStoreError::Incompatible(message) => SemanticVectorStoreError::reset_required(format!(
             "semantic flat F32 generation is incompatible; rebuild required: {message}"
+        ))
+        .into(),
+        FlatStoreError::LegacySchema(version) => SemanticVectorStoreError::reset_required(format!(
+            "semantic flat F32 generation uses legacy schema {version}; rebuild required"
         ))
         .into(),
         FlatStoreError::InvalidInput(message) => SemanticVectorStoreError::unavailable(format!(

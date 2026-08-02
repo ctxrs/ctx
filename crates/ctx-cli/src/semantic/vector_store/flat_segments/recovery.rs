@@ -5,52 +5,229 @@ impl FlatSegmentStore {
         self.require_writable()?;
         let _guard = self.lock_exclusive()?;
         let Some(current) = self.load_current_locked()? else {
-            return Ok(FlatPublishOutcome {
-                published: false,
-                generation: 0,
-                generation_hash: None,
-                replaced_events: 0,
-                deleted_events: 0,
-            });
+            return Ok(noop_outcome(None));
         };
-        if current.envelope.manifest.segments.len() == 1
-            && current.envelope.manifest.segments[0].kind == SegmentKind::Base
+        if current
+            .envelope
+            .manifest
+            .segments
+            .iter()
+            .all(|segment| segment.kind == SegmentKind::Base)
         {
             return Ok(noop_outcome(Some(&current)));
         }
-
-        let pinned = self.load_pinned(&current)?;
-        let generation = next_generation(Some(&current))?;
-        let staged = write_compacted_segment(&self.root, &self.contract, generation, &pinned)?;
-        let replaced_events = pinned.active_events().len();
+        let (events, catalog_touches) =
+            load_active_events(&self.root, &self.contract, &current.envelope.manifest, None)?;
+        self.touch_metadata(catalog_touches);
+        let active_chunks = events.iter().try_fold(0_u64, |total, event| {
+            total
+                .checked_add(u64::from(event.chunk_count))
+                .ok_or_else(|| FlatStoreError::Corrupt("active chunk count overflow".to_owned()))
+        })?;
+        if u64::try_from(events.len()).ok() != Some(current.envelope.manifest.active_events)
+            || active_chunks != current.envelope.manifest.active_chunks
+        {
+            return Err(FlatStoreError::Corrupt(
+                "manifest counters disagree before full compaction".to_owned(),
+            ));
+        }
+        let mut groups = BTreeMap::<String, Vec<FlatActiveEvent>>::new();
+        for event in events.iter() {
+            groups
+                .entry(event.source_identity_digest.clone())
+                .or_default()
+                .push(event.clone());
+        }
+        let mut generation = current.envelope.manifest.generation;
+        let mut staged = Vec::new();
+        if groups.is_empty() {
+            generation = generation.checked_add(1).ok_or_else(|| {
+                FlatStoreError::Corrupt("manifest generation overflow".to_owned())
+            })?;
+            staged.push(write_empty_base_segment(
+                &self.root,
+                &self.contract,
+                generation,
+            )?);
+        } else {
+            for (source_identity_digest, source_events) in &groups {
+                let source_reconciliation_id = source_events
+                    .first()
+                    .map(|event| event.source_reconciliation_id.clone())
+                    .ok_or_else(|| {
+                        FlatStoreError::Corrupt("empty source event group".to_owned())
+                    })?;
+                if source_events
+                    .iter()
+                    .any(|event| event.source_reconciliation_id != source_reconciliation_id)
+                {
+                    return Err(FlatStoreError::Corrupt(format!(
+                        "source {source_identity_digest} has mixed reconciliation authority"
+                    )));
+                }
+                generation = generation.checked_add(1).ok_or_else(|| {
+                    FlatStoreError::Corrupt("manifest generation overflow".to_owned())
+                })?;
+                staged.push(write_source_compacted_segment(
+                    &self.root,
+                    &self.contract,
+                    generation,
+                    &FlatSourceScope {
+                        source_identity_digest: source_identity_digest.clone(),
+                        source_reconciliation_id,
+                    },
+                    source_events,
+                    &current.envelope.manifest,
+                )?);
+            }
+        }
         sync_directory(&segments_directory(&self.root))?;
-        validate_staged_segment(&self.root, &self.contract, &staged.descriptor)?;
-
+        for segment in &staged {
+            validate_staged_segment(&self.root, &self.contract, &segment.descriptor)?;
+        }
         let mut manifest = Manifest::new(self.contract.clone());
         manifest.generation = generation;
         manifest.created_unix_millis = unix_millis();
-        manifest.segments.push(staged.descriptor);
+        manifest.active_events = u64::try_from(events.len())
+            .map_err(|_| FlatStoreError::Corrupt("active event count is too large".to_owned()))?;
+        manifest.active_chunks = active_chunks;
+        manifest.segments = staged
+            .into_iter()
+            .map(|segment| segment.descriptor)
+            .collect();
+        let snapshots = manifest
+            .segments
+            .iter()
+            .filter(|segment| segment.vector_count != 0)
+            .map(|segment| (segment.source_identity_digest.clone(), segment.generation))
+            .collect::<Vec<_>>();
+        for (source, generation) in snapshots {
+            set_source_snapshot(&mut manifest, &source, generation);
+        }
         let selected = publish_manifest(&self.root, manifest)?;
-        self.remember_validated(&selected)?;
-        drop(pinned);
         self.clear_pinned()?;
+        self.record_compaction_work(active_chunks, events.len())?;
         let _ = cleanup_obsolete_locked(&self.root, &selected);
         Ok(FlatPublishOutcome {
             published: true,
             generation,
             generation_hash: Some(selected.generation_hash),
-            replaced_events,
+            replaced_events: events.len(),
             deleted_events: 0,
         })
+    }
+
+    pub(super) fn compact_source_if_needed(&self, source: &FlatSourceScope) -> FlatResult<()> {
+        let _ = self.compact_source(source, false)?;
+        Ok(())
+    }
+
+    fn compact_source(
+        &self,
+        source: &FlatSourceScope,
+        force: bool,
+    ) -> FlatResult<FlatPublishOutcome> {
+        self.require_writable()?;
+        let _guard = self.lock_exclusive()?;
+        let Some(current) = self.load_current_locked()? else {
+            return Ok(noop_outcome(None));
+        };
+        let source_segments = current
+            .envelope
+            .manifest
+            .segments
+            .iter()
+            .filter(|segment| segment.source_identity_digest == source.source_identity_digest)
+            .collect::<Vec<_>>();
+        if source_segments.is_empty() {
+            return Ok(noop_outcome(Some(&current)));
+        }
+        let (events, catalog_touches) = self.load_source_events(Some(&current), source)?;
+        self.touch_metadata(catalog_touches);
+        let active_chunks = events.events().iter().try_fold(0_u64, |total, event| {
+            total
+                .checked_add(u64::from(event.chunk_count))
+                .ok_or_else(|| FlatStoreError::Corrupt("source chunk count overflow".to_owned()))
+        })?;
+        let stored_chunks = source_segments.iter().try_fold(0_u64, |total, segment| {
+            total
+                .checked_add(segment.vector_count)
+                .ok_or_else(|| FlatStoreError::Corrupt("stored source chunk overflow".to_owned()))
+        })?;
+        let already_compact = source_segments.len() == 1
+            && source_segments[0].kind == SegmentKind::Base
+            && source_segments[0].vector_count == active_chunks;
+        let over_threshold = source_segments.len() >= COMPACT_SEGMENT_THRESHOLD
+            || (active_chunks > 0 && stored_chunks > active_chunks.saturating_mul(2));
+        if already_compact || (!force && !over_threshold) {
+            return Ok(noop_outcome(Some(&current)));
+        }
+
+        let generation = next_generation(Some(&current))?;
+        let staged = write_source_compacted_segment(
+            &self.root,
+            &self.contract,
+            generation,
+            source,
+            events.events(),
+            &current.envelope.manifest,
+        )?;
+        sync_directory(&segments_directory(&self.root))?;
+        validate_staged_segment(&self.root, &self.contract, &staged.descriptor)?;
+        let mut manifest = current.envelope.manifest.clone();
+        manifest.generation = generation;
+        manifest.created_unix_millis = unix_millis();
+        manifest
+            .segments
+            .retain(|segment| segment.source_identity_digest != source.source_identity_digest);
+        manifest.segments.push(staged.descriptor);
+        manifest.segments.sort_by_key(|segment| segment.generation);
+        set_source_snapshot(&mut manifest, &source.source_identity_digest, generation);
+        let selected = publish_manifest(&self.root, manifest)?;
+        self.clear_pinned()?;
+        self.record_compaction_work(active_chunks, events.events().len())?;
+        let _ = cleanup_obsolete_locked(&self.root, &selected);
+        Ok(FlatPublishOutcome {
+            published: true,
+            generation,
+            generation_hash: Some(selected.generation_hash),
+            replaced_events: events.events().len(),
+            deleted_events: 0,
+        })
+    }
+
+    fn record_compaction_work(&self, vectors: u64, events: usize) -> FlatResult<()> {
+        let vector_bytes = vectors
+            .checked_mul(u64::from(self.contract.dimensions))
+            .and_then(|value| value.checked_mul(4))
+            .ok_or_else(|| {
+                FlatStoreError::Corrupt("compaction vector bytes overflow".to_owned())
+            })?;
+        let event_records = u64::try_from(events).map_err(|_| {
+            FlatStoreError::Corrupt("compaction event count is too large".to_owned())
+        })?;
+        self.vectors_touched.fetch_add(vectors, Ordering::Relaxed);
+        self.vector_bytes_touched
+            .fetch_add(vector_bytes, Ordering::Relaxed);
+        self.touch_metadata(vectors.saturating_mul(2).saturating_add(event_records));
+        Ok(())
     }
 
     pub(super) fn recover_internal(&self) -> FlatResult<FlatRecoveryReport> {
         let _guard = self.lock_exclusive()?;
         let mut report = remove_temporary_files(&self.root)?;
-        let selected = select_manifest_any(&self.root)?;
+        let selected = match select_manifest_any(&self.root) {
+            Ok(selected) => selected,
+            Err(FlatStoreError::LegacySchema(_)) => {
+                reset_legacy_store(&self.root, &self.contract, &mut report)?;
+                self.clear_pinned()?;
+                report.model_contract_reset = true;
+                return Ok(report);
+            }
+            Err(error) => return Err(error),
+        };
         if let Some(selected) = selected {
             if selected.envelope.manifest.model == self.contract {
-                let _ = self.load_pinned(&selected)?;
                 merge_recovery_reports(
                     &mut report,
                     cleanup_obsolete_locked(&self.root, &selected)?,
@@ -72,54 +249,210 @@ impl FlatSegmentStore {
                 manifest.created_unix_millis = unix_millis();
                 manifest.segments.push(staged.descriptor);
                 let reset = publish_manifest(&self.root, manifest)?;
-                self.remember_validated(&reset)?;
                 self.clear_pinned()?;
                 report.model_contract_reset = true;
                 merge_recovery_reports(&mut report, cleanup_obsolete_locked(&self.root, &reset)?);
             }
         } else {
             merge_recovery_reports(&mut report, cleanup_without_manifest(&self.root)?);
-            self.clear_validated()?;
             self.clear_pinned()?;
         }
         Ok(report)
     }
 }
 
-pub(super) fn write_compacted_segment(
+fn reset_legacy_store(
+    root: &Path,
+    contract: &FlatModelContract,
+    report: &mut FlatRecoveryReport,
+) -> FlatResult<()> {
+    for entry in fs::read_dir(manifests_directory(root)).map_err(|source| {
+        io_error(
+            "read legacy flat manifest directory",
+            &manifests_directory(root),
+            source,
+        )
+    })? {
+        let entry = entry.map_err(|source| {
+            io_error(
+                "read legacy flat manifest entry",
+                &manifests_directory(root),
+                source,
+            )
+        })?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if parse_manifest_name(&name).is_some() {
+            remove_recoverable_file(
+                &entry.path(),
+                &mut report.removed_obsolete_manifests,
+                &mut report.retained_busy_files,
+            )?;
+        }
+    }
+    for entry in fs::read_dir(segments_directory(root)).map_err(|source| {
+        io_error(
+            "read legacy flat segment directory",
+            &segments_directory(root),
+            source,
+        )
+    })? {
+        let entry = entry.map_err(|source| {
+            io_error(
+                "read legacy flat segment entry",
+                &segments_directory(root),
+                source,
+            )
+        })?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.starts_with(SEGMENT_PREFIX) {
+            remove_recoverable_file(
+                &entry.path(),
+                &mut report.removed_orphan_segments,
+                &mut report.retained_busy_files,
+            )?;
+        }
+    }
+    if report.retained_busy_files != 0 {
+        return Err(FlatStoreError::Io {
+            operation: "retire incompatible flat store",
+            path: root.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "legacy flat artifacts are still busy",
+            ),
+        });
+    }
+    sync_directory(&manifests_directory(root))?;
+    sync_directory(&segments_directory(root))?;
+    let generation = 1;
+    let staged = write_empty_base_segment(root, contract, generation)?;
+    sync_directory(&segments_directory(root))?;
+    validate_staged_segment(root, contract, &staged.descriptor)?;
+    let mut manifest = Manifest::new(contract.clone());
+    manifest.generation = generation;
+    manifest.created_unix_millis = unix_millis();
+    manifest.segments.push(staged.descriptor);
+    let _ = publish_manifest(root, manifest)?;
+    Ok(())
+}
+
+pub(super) fn write_source_compacted_segment(
     root: &Path,
     contract: &FlatModelContract,
     generation: u64,
-    pinned: &PinnedFlatGeneration,
+    source: &FlatSourceScope,
+    events: &[FlatActiveEvent],
+    manifest: &Manifest,
 ) -> FlatResult<StagedSegment> {
-    let vector_count = u64::try_from(pinned.stats().active_chunks)
-        .map_err(|_| FlatStoreError::Corrupt("active vector count is too large".to_owned()))?;
-    let mutation_count = u64::try_from(pinned.active_events().len())
+    let vector_count = events.iter().try_fold(0_u64, |total, event| {
+        total
+            .checked_add(u64::from(event.chunk_count))
+            .ok_or_else(|| FlatStoreError::Corrupt("active vector count overflow".to_owned()))
+    })?;
+    let mutation_count = u64::try_from(events.len())
         .map_err(|_| FlatStoreError::Corrupt("active event count is too large".to_owned()))?;
+    let mut loaded = BTreeMap::<u64, LoadedSegment>::new();
+    for event in events {
+        if loaded.contains_key(&event.vector_generation) {
+            continue;
+        }
+        let descriptor = manifest
+            .segments
+            .binary_search_by_key(&event.vector_generation, |segment| segment.generation)
+            .ok()
+            .map(|index| &manifest.segments[index])
+            .ok_or_else(|| {
+                FlatStoreError::Corrupt(format!(
+                    "event {} references absent compacted vector generation",
+                    event.event_id
+                ))
+            })?;
+        if descriptor.source_identity_digest != source.source_identity_digest {
+            return Err(FlatStoreError::Corrupt(format!(
+                "event {} references a vector owned by another source",
+                event.event_id
+            )));
+        }
+        loaded.insert(
+            event.vector_generation,
+            load_and_validate_segment(root, contract, descriptor)?,
+        );
+    }
     let directory = segments_directory(root);
     let stride = usize_from_u32(vector_stride(contract.dimensions)?, "vector stride")?;
     let mut vectors = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Vectors)?;
     let mut metadata = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Metadata)?;
-    let mut scratch = vec![0_u8; stride];
-    for segment in pinned.scan_segments() {
-        for chunk in segment.chunks() {
-            encode_vector(chunk.vector, &mut scratch)?;
-            vectors.write_payload(&scratch)?;
+    let mut first_ordinals = HashMap::<Uuid, u64>::new();
+    let mut ordinal = 0_u64;
+    for event in events {
+        first_ordinals.insert(event.event_id, ordinal);
+        let segment = &loaded[&event.vector_generation];
+        for offset in 0..u64::from(event.chunk_count) {
+            let source_ordinal =
+                event
+                    .first_vector_ordinal
+                    .checked_add(offset)
+                    .ok_or_else(|| {
+                        FlatStoreError::Corrupt("source vector ordinal overflow".to_owned())
+                    })?;
+            let source_ordinal = usize_from_u64(source_ordinal, "source vector ordinal")?;
+            let vector_start = HEADER_BYTES
+                .checked_add(
+                    source_ordinal
+                        .checked_mul(segment.stride_bytes)
+                        .ok_or_else(|| {
+                            FlatStoreError::Corrupt("source vector byte offset overflow".to_owned())
+                        })?,
+                )
+                .ok_or_else(|| {
+                    FlatStoreError::Corrupt("source vector byte offset overflow".to_owned())
+                })?;
+            let vector_end = vector_start.checked_add(stride).ok_or_else(|| {
+                FlatStoreError::Corrupt("source vector byte range overflow".to_owned())
+            })?;
+            let vector = segment
+                .vectors
+                .get(vector_start..vector_end)
+                .ok_or_else(|| {
+                    FlatStoreError::Corrupt("source vector range exceeds its segment".to_owned())
+                })?;
+            let chunk = metadata_at(&segment.metadata, source_ordinal);
+            if chunk.event_id != event.event_id || chunk.source_text_hash != event.source_text_hash
+            {
+                return Err(FlatStoreError::Corrupt(format!(
+                    "event {} compacted vector metadata disagrees with authority",
+                    event.event_id
+                )));
+            }
+            vectors.write_payload(vector)?;
             metadata.write_payload(&encode_metadata_record(FlatChunkMetadata {
-                event_id: chunk.event_id,
-                seq: chunk.seq,
-                source_text_hash: chunk.source_text_hash,
+                event_id: event.event_id,
+                seq: event.seq,
+                source_text_hash: event.source_text_hash,
                 chunk_index: chunk.chunk_index,
                 start_char: chunk.start_char,
                 end_char: chunk.end_char,
             }))?;
+            ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                FlatStoreError::Corrupt("compacted vector ordinal overflow".to_owned())
+            })?;
         }
     }
     let mut mutations = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Mutations)?;
-    for event in pinned.active_events() {
+    for event in events {
         mutations.write_payload(&encode_mutation_record(EventMutation {
             event_id: event.event_id,
             kind: MutationKind::Replace,
+            seq: event.seq,
+            source_text_hash: event.source_text_hash,
+            stable_identity_hash: event.stable_identity_hash,
+            vector_generation: generation,
+            first_vector_ordinal: first_ordinals[&event.event_id],
+            chunk_count: event.chunk_count,
         }))?;
     }
     let vectors = vectors.finalize(vector_count, stride as u32, contract.dimensions)?;
@@ -132,6 +465,8 @@ pub(super) fn write_compacted_segment(
             kind: SegmentKind::Base,
             vector_count,
             mutation_count,
+            source_identity_digest: source.source_identity_digest.clone(),
+            source_reconciliation_id: source.source_reconciliation_id.clone(),
             vectors,
             metadata,
             mutations,
@@ -159,6 +494,8 @@ pub(super) fn write_empty_base_segment(
             kind: SegmentKind::Base,
             vector_count: 0,
             mutation_count: 0,
+            source_identity_digest: UNSCOPED_SOURCE_IDENTITY.to_owned(),
+            source_reconciliation_id: UNSCOPED_RECONCILIATION_ID.to_owned(),
             vectors,
             metadata,
             mutations,

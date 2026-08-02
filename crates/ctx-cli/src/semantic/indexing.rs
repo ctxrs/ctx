@@ -43,6 +43,9 @@ pub(super) fn semantic_document_hash(
     source_text: &str,
     semantic_policy_fingerprint: &str,
 ) -> String {
+    // Sequence is event authority, not embedding input. Flat catalog mutations
+    // carry it separately so a Core reorder updates exact-result metadata
+    // without invalidating otherwise identical vectors.
     semantic_text_hash(&format!(
         "semantic_policy: {semantic_policy_fingerprint}\n\n{}",
         semantic_embedded_document_text(doc, source_text)

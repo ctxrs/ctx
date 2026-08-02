@@ -7,12 +7,12 @@ use sha2::{Digest, Sha256};
 use super::{SourceBackedSemanticGeneration, SourceBackedSemanticPage};
 use crate::semantic::{
     model_contract::semantic_model_key, vector_store::flat_segments::PinnedFlatGeneration,
-    vector_store_schema::SemanticVectorStoreError, SemanticEventDocument,
+    SemanticEventDocument,
 };
 
 pub(super) const SOURCE_FRONTIER_STATE: &str = "core_semantic_frontier_v1";
 pub(super) const SOURCE_ACKNOWLEDGEMENT_STATE: &str = "core_semantic_acknowledgement_v1";
-pub(super) const SOURCE_CONTRACT_VERSION: u16 = 7;
+pub(super) const SOURCE_CONTRACT_VERSION: u16 = 8;
 const SOURCE_CONTRACT_DOMAIN: &[u8] = b"ctx-source-backed-semantic-contract-v1\0";
 const SOURCE_BUILD_DOMAIN: &[u8] = b"ctx-source-backed-semantic-build-v1\0";
 pub(super) const SOURCE_INPUT_LEXICAL_SCHEMA_VERSION: u32 = 15;
@@ -72,49 +72,6 @@ pub(super) struct SourceProjectionAcknowledgement {
 pub(super) struct AcknowledgedSourceProjection {
     pub(super) flat: Option<PinnedFlatGeneration>,
     pub(super) projected_documents: u64,
-}
-
-pub(super) fn validate_flat_projection(
-    frontier: &SourceProjectionFrontier,
-    source_document_count: u64,
-    pinned: Option<&PinnedFlatGeneration>,
-) -> Result<u64> {
-    if source_document_count > frontier.semantic_documents {
-        return Err(SemanticVectorStoreError::reset_required(format!(
-            "source-backed semantic completion has {source_document_count} projected documents, but only {} metadata-eligible records",
-            frontier.semantic_documents
-        ))
-        .into());
-    }
-    if source_document_count == 0 {
-        if pinned.is_some_and(|pinned| {
-            pinned.stats().active_events != 0 || pinned.stats().active_chunks != 0
-        }) {
-            return Err(SemanticVectorStoreError::reset_required(
-                "empty source-backed semantic generation has active flat F32 records",
-            )
-            .into());
-        }
-        return Ok(0);
-    }
-    let pinned = pinned.ok_or_else(|| {
-        SemanticVectorStoreError::reset_required(
-            "source-backed semantic completion has no flat F32 generation",
-        )
-    })?;
-    if pinned.stats().active_events as u64 != source_document_count {
-        return Err(SemanticVectorStoreError::reset_required(
-            "source-backed semantic source-document count does not match flat F32 events",
-        )
-        .into());
-    }
-    if pinned.stats().active_chunks < pinned.stats().active_events {
-        return Err(SemanticVectorStoreError::reset_required(
-            "source-backed semantic flat F32 events have missing chunks",
-        )
-        .into());
-    }
-    Ok(source_document_count)
 }
 
 pub(super) fn validate_generation(generation: &SourceBackedSemanticGeneration) -> Result<()> {

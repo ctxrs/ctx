@@ -78,20 +78,7 @@ impl SemanticVectorStore {
             if event_ids.is_empty() {
                 return Ok(0);
             }
-            // Flat publication happens first. A crash before the following
-            // metadata cleanup leaves a safe, repeatable tombstone rather than
-            // exposing stale vectors.
-            let deleted = self.publish_chunk_replacements(&[], event_ids)?;
-            let transaction = self.conn.transaction()?;
-            {
-                let mut delete_source_metadata = transaction
-                    .prepare("DELETE FROM semantic_source_documents WHERE event_id = ?1")?;
-                for event_id in event_ids.iter().copied().collect::<HashSet<_>>() {
-                    delete_source_metadata.execute([event_id.to_string()])?;
-                }
-            }
-            transaction.commit()?;
-            Ok(deleted)
+            self.publish_chunk_replacements(&[], event_ids)
         })())
     }
 

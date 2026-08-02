@@ -17,12 +17,14 @@ use thiserror::Error;
 use uuid::Uuid;
 
 mod artifacts;
+mod catalog;
 mod manifest;
 mod pinned;
 mod recovery;
 mod validation;
 
 use artifacts::*;
+use catalog::*;
 use manifest::*;
 use pinned::load_pinned_generation;
 pub(in crate::semantic) use pinned::PinnedFlatGeneration;
@@ -50,6 +52,8 @@ pub(in crate::semantic) enum FlatStoreError {
     Corrupt(String),
     #[error("incompatible flat F32 store: {0}")]
     Incompatible(String),
+    #[error("legacy flat F32 manifest schema {0} requires rebuild")]
+    LegacySchema(u32),
     #[error("flat F32 store is read-only")]
     ReadOnly,
     #[error("unsupported flat F32 platform: {0}")]
@@ -110,12 +114,25 @@ pub(in crate::semantic) struct FlatEventReplacement {
     pub(in crate::semantic) chunks: Vec<FlatChunk>,
 }
 
+#[derive(Debug, Clone)]
+pub(in crate::semantic) struct FlatEventMetadataUpdate {
+    pub(in crate::semantic) event_id: Uuid,
+    pub(in crate::semantic) seq: u64,
+    pub(in crate::semantic) source_text_hash: FlatSourceHash,
+    pub(in crate::semantic) stable_identity_hash: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::semantic) struct FlatActiveEvent {
     pub(in crate::semantic) event_id: Uuid,
     pub(in crate::semantic) seq: u64,
     pub(in crate::semantic) source_text_hash: FlatSourceHash,
     pub(in crate::semantic) chunk_count: u32,
+    pub(in crate::semantic) source_identity_digest: String,
+    pub(in crate::semantic) source_reconciliation_id: String,
+    pub(in crate::semantic) stable_identity_hash: [u8; 32],
+    vector_generation: u64,
+    first_vector_ordinal: u64,
 }
 
 /// Read-only event lookup bound to one exact flat generation.
@@ -125,16 +142,19 @@ pub(in crate::semantic) struct FlatActiveEvent {
 /// corpus for every event.
 #[derive(Clone)]
 pub(in crate::semantic) struct FlatActiveEventLookup {
-    pinned: Option<PinnedFlatGeneration>,
+    events: Arc<Vec<FlatActiveEvent>>,
 }
 
 impl FlatActiveEventLookup {
     pub(in crate::semantic) fn event(&self, event_id: Uuid) -> Option<&FlatActiveEvent> {
-        let events = self.pinned.as_ref()?.active_events();
-        events
+        self.events
             .binary_search_by_key(&event_id, |event| event.event_id)
             .ok()
-            .map(|index| &events[index])
+            .map(|index| &self.events[index])
+    }
+
+    pub(in crate::semantic) fn events(&self) -> &[FlatActiveEvent] {
+        &self.events
     }
 }
 
@@ -169,6 +189,27 @@ pub(in crate::semantic) struct FlatPublishOutcome {
     pub(in crate::semantic) deleted_events: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::semantic) struct FlatWorkStats {
+    pub(in crate::semantic) vectors_touched: u64,
+    pub(in crate::semantic) vector_bytes_touched: u64,
+    pub(in crate::semantic) metadata_records_touched: u64,
+}
+
+impl FlatWorkStats {
+    fn saturating_delta(self, earlier: Self) -> Self {
+        Self {
+            vectors_touched: self.vectors_touched.saturating_sub(earlier.vectors_touched),
+            vector_bytes_touched: self
+                .vector_bytes_touched
+                .saturating_sub(earlier.vector_bytes_touched),
+            metadata_records_touched: self
+                .metadata_records_touched
+                .saturating_sub(earlier.metadata_records_touched),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StoreMode {
     ReadWrite,
@@ -179,9 +220,11 @@ pub(in crate::semantic) struct FlatSegmentStore {
     root: PathBuf,
     contract: FlatModelContract,
     mode: StoreMode,
-    validated: Mutex<Option<ValidatedGeneration>>,
     pinned: Mutex<Option<PinnedFlatGeneration>>,
     reconciliation_view: Mutex<Option<FlatReconciliationView>>,
+    vectors_touched: AtomicU64,
+    vector_bytes_touched: AtomicU64,
+    metadata_records_touched: AtomicU64,
     #[cfg(test)]
     recovery: FlatRecoveryReport,
     #[cfg(test)]
@@ -192,20 +235,21 @@ pub(in crate::semantic) struct FlatSegmentStore {
 
 struct FlatReconciliationView {
     id: String,
+    source: Option<FlatSourceScope>,
     lookup: FlatActiveEventLookup,
     after_event_id: Option<Uuid>,
     pending_event_page: Option<FlatReconciliationEventPage>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FlatSourceScope {
+    source_identity_digest: String,
+    source_reconciliation_id: String,
+}
+
 struct FlatReconciliationEventPage {
     event_ids: Vec<Uuid>,
     after_event_id: Uuid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ValidatedGeneration {
-    generation: u64,
-    generation_hash: String,
 }
 
 impl FlatSegmentStore {
@@ -221,9 +265,11 @@ impl FlatSegmentStore {
             root,
             contract,
             mode: StoreMode::ReadWrite,
-            validated: Mutex::new(None),
             pinned: Mutex::new(None),
             reconciliation_view: Mutex::new(None),
+            vectors_touched: AtomicU64::new(0),
+            vector_bytes_touched: AtomicU64::new(0),
+            metadata_records_touched: AtomicU64::new(0),
             #[cfg(test)]
             recovery: FlatRecoveryReport::default(),
             #[cfg(test)]
@@ -255,9 +301,11 @@ impl FlatSegmentStore {
             root,
             contract,
             mode: StoreMode::ReadOnly,
-            validated: Mutex::new(None),
             pinned: Mutex::new(None),
             reconciliation_view: Mutex::new(None),
+            vectors_touched: AtomicU64::new(0),
+            vector_bytes_touched: AtomicU64::new(0),
+            metadata_records_touched: AtomicU64::new(0),
             #[cfg(test)]
             recovery: FlatRecoveryReport::default(),
             #[cfg(test)]
@@ -265,10 +313,6 @@ impl FlatSegmentStore {
             #[cfg(test)]
             active_generation_load_count: AtomicU64::new(0),
         };
-        let _guard = store.lock_shared()?;
-        if let Some(selected) = select_manifest(&store.root, &store.contract)? {
-            let _ = store.load_pinned(&selected)?;
-        }
         Ok(store)
     }
 
@@ -283,14 +327,14 @@ impl FlatSegmentStore {
             return Ok(None);
         };
         let pinned = self.load_pinned(&selected)?;
-        self.remember_validated(&selected)?;
         Ok(Some(pinned))
     }
 
     pub(in crate::semantic) fn active_stats(&self) -> FlatResult<FlatActiveStats> {
-        Ok(self
-            .pin_generation()?
-            .map(|pinned| pinned.stats().clone())
+        let _guard = self.lock_shared()?;
+        Ok(select_manifest(&self.root, &self.contract)?
+            .as_ref()
+            .map(manifest_stats)
             .unwrap_or_default())
     }
 
@@ -298,12 +342,22 @@ impl FlatSegmentStore {
         if let Some(lookup) = self.reconciliation_lookup()? {
             return Ok(lookup);
         }
-        #[cfg(test)]
-        self.active_event_snapshot_count
-            .fetch_add(1, Ordering::Relaxed);
-        Ok(FlatActiveEventLookup {
-            pinned: self.pin_generation()?,
-        })
+        let _guard = self.lock_shared()?;
+        let events = match select_manifest(&self.root, &self.contract)? {
+            Some(selected) => {
+                let (events, touched) = load_active_events(
+                    &self.root,
+                    &self.contract,
+                    &selected.envelope.manifest,
+                    None,
+                )?;
+                self.touch_metadata(touched);
+                events
+            }
+            None => Arc::new(Vec::new()),
+        };
+        self.record_active_event_snapshot();
+        Ok(FlatActiveEventLookup { events })
     }
 
     /// Retains one immutable flat generation for a complete reconciliation.
@@ -313,6 +367,26 @@ impl FlatSegmentStore {
     /// or restart can retain no more durable deltas than the pages in that one
     /// reconciliation; releasing the view runs exact threshold compaction.
     pub(in crate::semantic) fn begin_reconciliation_view(&self, id: &str) -> FlatResult<()> {
+        self.begin_reconciliation_view_inner(id, None)
+    }
+
+    pub(in crate::semantic) fn begin_source_reconciliation_view(
+        &self,
+        source_identity_digest: &str,
+        source_reconciliation_id: &str,
+    ) -> FlatResult<()> {
+        let source = FlatSourceScope {
+            source_identity_digest: source_identity_digest.to_owned(),
+            source_reconciliation_id: source_reconciliation_id.to_owned(),
+        };
+        self.begin_reconciliation_view_inner(source_reconciliation_id, Some(source))
+    }
+
+    fn begin_reconciliation_view_inner(
+        &self,
+        id: &str,
+        source: Option<FlatSourceScope>,
+    ) -> FlatResult<()> {
         if id.is_empty() {
             return Err(FlatStoreError::InvalidInput(
                 "flat reconciliation view id cannot be empty".to_owned(),
@@ -323,7 +397,7 @@ impl FlatSegmentStore {
                 FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
             })?;
             match view.as_ref() {
-                Some(view) if view.id == id => return Ok(()),
+                Some(view) if view.id == id && view.source == source => return Ok(()),
                 Some(_) => true,
                 None => false,
             }
@@ -332,17 +406,30 @@ impl FlatSegmentStore {
             self.finish_reconciliation_view()?;
         }
 
-        let pinned = self.pin_generation()?;
-        let lookup = FlatActiveEventLookup { pinned };
-        #[cfg(test)]
-        self.active_event_snapshot_count
-            .fetch_add(1, Ordering::Relaxed);
+        let _guard = self.lock_shared()?;
+        let events = match select_manifest(&self.root, &self.contract)? {
+            Some(selected) => {
+                let (events, touched) = load_active_events(
+                    &self.root,
+                    &self.contract,
+                    &selected.envelope.manifest,
+                    source
+                        .as_ref()
+                        .map(|scope| scope.source_identity_digest.as_str()),
+                )?;
+                self.touch_metadata(touched);
+                events
+            }
+            None => Arc::new(Vec::new()),
+        };
+        self.record_active_event_snapshot();
         let mut view = self.reconciliation_view.lock().map_err(|_| {
             FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
         })?;
         *view = Some(FlatReconciliationView {
             id: id.to_owned(),
-            lookup,
+            source,
+            lookup: FlatActiveEventLookup { events },
             after_event_id: None,
             pending_event_page: None,
         });
@@ -373,10 +460,7 @@ impl FlatSegmentStore {
         if let Some(pending) = view.pending_event_page.as_ref() {
             return Ok(pending.event_ids.clone());
         }
-        let Some(pinned) = view.lookup.pinned.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let events = pinned.active_events();
+        let events = view.lookup.events();
         let start = view.after_event_id.map_or(0, |after| {
             events.partition_point(|event| event.event_id <= after)
         });
@@ -404,7 +488,13 @@ impl FlatSegmentStore {
         let Some(retained) = retained else {
             return Ok(());
         };
-        if let Err(error) = self.compact_if_needed() {
+        let finish = match retained.source.as_ref() {
+            Some(source) => self
+                .publish_source_snapshot(source)
+                .and_then(|()| self.compact_source_if_needed(source)),
+            None => self.compact().map(|_| ()),
+        };
+        if let Err(error) = finish {
             let mut current = self.reconciliation_view.lock().map_err(|_| {
                 FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
             })?;
@@ -441,11 +531,20 @@ impl FlatSegmentStore {
         Ok(view.as_ref().map(|view| view.lookup.clone()))
     }
 
+    fn full_reconciliation_lookup(&self) -> FlatResult<Option<FlatActiveEventLookup>> {
+        let view = self.reconciliation_view.lock().map_err(|_| {
+            FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
+        })?;
+        Ok(view
+            .as_ref()
+            .filter(|view| view.source.is_none())
+            .map(|view| view.lookup.clone()))
+    }
+
     #[cfg(test)]
     pub(in crate::semantic) fn active_hash(&self) -> FlatResult<Option<String>> {
-        Ok(self
-            .pin_generation()?
-            .map(|pinned| pinned.generation_hash().to_owned()))
+        let _guard = self.lock_shared()?;
+        Ok(select_manifest(&self.root, &self.contract)?.map(|selected| selected.generation_hash))
     }
 
     #[cfg(test)]
@@ -477,11 +576,18 @@ impl FlatSegmentStore {
         if replacements.is_empty() && tombstones.is_empty() {
             return Ok(noop_outcome(current.as_ref()));
         }
+        let source = self.current_source_scope()?;
+        let (existing, touched) = match self.full_reconciliation_lookup()? {
+            Some(lookup) => (lookup, 0),
+            None => self.load_source_events(current.as_ref(), &source)?,
+        };
+        self.touch_metadata(touched);
         let generation = next_generation(current.as_ref())?;
         let staged = write_replacement_segment(
             &self.root,
             &self.contract,
             generation,
+            &source,
             replacements,
             tombstones,
         )?;
@@ -494,11 +600,22 @@ impl FlatSegmentStore {
             .unwrap_or_else(|| Manifest::new(self.contract.clone()));
         manifest.generation = generation;
         manifest.created_unix_millis = unix_millis();
+        apply_publication_counts(&mut manifest, &existing, replacements, tombstones)?;
+        if source.source_identity_digest != UNSCOPED_SOURCE_IDENTITY {
+            manifest.segments.retain(|segment| {
+                segment.source_identity_digest != UNSCOPED_SOURCE_IDENTITY
+                    || segment.vector_count != 0
+                    || segment.mutation_count != 0
+            });
+        }
         manifest.segments.push(staged.descriptor);
         let selected = publish_manifest(&self.root, manifest)?;
-        self.remember_validated(&selected)?;
         self.record_reconciliation_publication(tombstones)?;
         self.clear_pinned()?;
+        self.touch_vectors(replacements)?;
+        self.touch_metadata(
+            u64::try_from(replacements.len() + tombstones.len()).unwrap_or(u64::MAX),
+        );
         let _ = cleanup_obsolete_locked(&self.root, &selected);
         Ok(FlatPublishOutcome {
             published: true,
@@ -509,14 +626,266 @@ impl FlatSegmentStore {
         })
     }
 
-    fn load_current_locked(&self) -> FlatResult<Option<SelectedManifest>> {
-        let selected = select_manifest(&self.root, &self.contract)?;
-        if let Some(selected) = &selected {
-            if !self.is_validated(selected)? {
-                let _ = self.load_pinned(selected)?;
-            }
+    pub(in crate::semantic) fn publish_event_metadata_updates(
+        &self,
+        updates: &[FlatEventMetadataUpdate],
+    ) -> FlatResult<FlatPublishOutcome> {
+        self.require_writable()?;
+        if updates.is_empty() {
+            let _guard = self.lock_shared()?;
+            let current = select_manifest(&self.root, &self.contract)?;
+            return Ok(noop_outcome(current.as_ref()));
         }
-        Ok(selected)
+        let mut ids = HashSet::with_capacity(updates.len());
+        if updates.iter().any(|update| !ids.insert(update.event_id)) {
+            return Err(FlatStoreError::InvalidInput(
+                "metadata update repeats an event".to_owned(),
+            ));
+        }
+        let _guard = self.lock_exclusive()?;
+        let current = self.load_current_locked()?;
+        let source = self.current_source_scope()?;
+        let (existing, touched) = self.load_source_events(current.as_ref(), &source)?;
+        self.touch_metadata(touched);
+        let mutations = updates
+            .iter()
+            .map(|update| {
+                let prior = existing.event(update.event_id).ok_or_else(|| {
+                    FlatStoreError::InvalidInput(format!(
+                        "metadata update references absent event {}",
+                        update.event_id
+                    ))
+                })?;
+                if prior.source_text_hash != update.source_text_hash {
+                    return Err(FlatStoreError::InvalidInput(format!(
+                        "metadata-only update changes source hash for {}",
+                        update.event_id
+                    )));
+                }
+                Ok(EventMutation {
+                    event_id: update.event_id,
+                    kind: MutationKind::Replace,
+                    seq: update.seq,
+                    source_text_hash: update.source_text_hash,
+                    stable_identity_hash: update.stable_identity_hash,
+                    vector_generation: prior.vector_generation,
+                    first_vector_ordinal: prior.first_vector_ordinal,
+                    chunk_count: prior.chunk_count,
+                })
+            })
+            .collect::<FlatResult<Vec<_>>>()?;
+        let generation = next_generation(current.as_ref())?;
+        let staged = write_catalog_segment(
+            &self.root,
+            &self.contract,
+            generation,
+            &source,
+            SegmentKind::Delta,
+            &mutations,
+        )?;
+        sync_directory(&segments_directory(&self.root))?;
+        validate_staged_segment(&self.root, &self.contract, &staged.descriptor)?;
+        let mut manifest = current
+            .as_ref()
+            .map(|selected| selected.envelope.manifest.clone())
+            .unwrap_or_else(|| Manifest::new(self.contract.clone()));
+        manifest.generation = generation;
+        manifest.created_unix_millis = unix_millis();
+        manifest.segments.push(staged.descriptor);
+        let selected = publish_manifest(&self.root, manifest)?;
+        self.clear_pinned()?;
+        self.touch_metadata(u64::try_from(updates.len()).unwrap_or(u64::MAX));
+        let _ = cleanup_obsolete_locked(&self.root, &selected);
+        Ok(FlatPublishOutcome {
+            published: true,
+            generation,
+            generation_hash: Some(selected.generation_hash),
+            replaced_events: updates.len(),
+            deleted_events: 0,
+        })
+    }
+
+    pub(in crate::semantic) fn source_event_lookup(
+        &self,
+        source_identity_digest: &str,
+    ) -> FlatResult<FlatActiveEventLookup> {
+        let _guard = self.lock_shared()?;
+        let Some(current) = select_manifest(&self.root, &self.contract)? else {
+            return Ok(FlatActiveEventLookup {
+                events: Arc::new(Vec::new()),
+            });
+        };
+        let (events, touched) = load_active_events(
+            &self.root,
+            &self.contract,
+            &current.envelope.manifest,
+            Some(source_identity_digest),
+        )?;
+        self.touch_metadata(touched);
+        Ok(FlatActiveEventLookup { events })
+    }
+
+    pub(in crate::semantic) fn source_event_ids_except_reconciliation(
+        &self,
+        source_identity_digest: &str,
+        reconciliation_id: Option<&str>,
+        limit: usize,
+    ) -> FlatResult<Vec<Uuid>> {
+        if limit == 0 {
+            return Err(FlatStoreError::InvalidInput(
+                "source event page limit cannot be zero".to_owned(),
+            ));
+        }
+        let lookup = self.source_event_lookup(source_identity_digest)?;
+        Ok(lookup
+            .events()
+            .iter()
+            .filter(|event| {
+                reconciliation_id.is_none_or(|reconciliation_id| {
+                    event.source_reconciliation_id != reconciliation_id
+                })
+            })
+            .take(limit)
+            .map(|event| event.event_id)
+            .collect())
+    }
+
+    pub(in crate::semantic) fn work_stats(&self) -> FlatWorkStats {
+        FlatWorkStats {
+            vectors_touched: self.vectors_touched.load(Ordering::Relaxed),
+            vector_bytes_touched: self.vector_bytes_touched.load(Ordering::Relaxed),
+            metadata_records_touched: self.metadata_records_touched.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(in crate::semantic) fn work_since(&self, earlier: FlatWorkStats) -> FlatWorkStats {
+        self.work_stats().saturating_delta(earlier)
+    }
+
+    fn current_source_scope(&self) -> FlatResult<FlatSourceScope> {
+        let view = self.reconciliation_view.lock().map_err(|_| {
+            FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
+        })?;
+        Ok(view
+            .as_ref()
+            .and_then(|view| view.source.clone())
+            .unwrap_or_else(unscoped_source))
+    }
+
+    fn load_source_events(
+        &self,
+        current: Option<&SelectedManifest>,
+        source: &FlatSourceScope,
+    ) -> FlatResult<(FlatActiveEventLookup, u64)> {
+        let Some(current) = current else {
+            return Ok((
+                FlatActiveEventLookup {
+                    events: Arc::new(Vec::new()),
+                },
+                0,
+            ));
+        };
+        let (events, touched) = load_active_events(
+            &self.root,
+            &self.contract,
+            &current.envelope.manifest,
+            Some(&source.source_identity_digest),
+        )?;
+        Ok((FlatActiveEventLookup { events }, touched))
+    }
+
+    fn publish_source_snapshot(&self, source: &FlatSourceScope) -> FlatResult<()> {
+        self.require_writable()?;
+        let _guard = self.lock_exclusive()?;
+        let Some(current) = self.load_current_locked()? else {
+            return Ok(());
+        };
+        let (events, touched) = self.load_source_events(Some(&current), source)?;
+        self.touch_metadata(touched);
+        let mutations = events
+            .events()
+            .iter()
+            .map(event_mutation)
+            .collect::<Vec<_>>();
+        let snapshot_source = if events.events().is_empty() {
+            unscoped_source()
+        } else {
+            source.clone()
+        };
+        let generation = next_generation(Some(&current))?;
+        let staged = write_catalog_segment(
+            &self.root,
+            &self.contract,
+            generation,
+            &snapshot_source,
+            SegmentKind::Base,
+            &mutations,
+        )?;
+        sync_directory(&segments_directory(&self.root))?;
+        validate_staged_segment(&self.root, &self.contract, &staged.descriptor)?;
+        let mut manifest = current.envelope.manifest.clone();
+        manifest.generation = generation;
+        manifest.created_unix_millis = unix_millis();
+        if events.events().is_empty() {
+            manifest.segments.retain(|segment| {
+                segment.source_identity_digest != source.source_identity_digest
+                    && (segment.source_identity_digest != UNSCOPED_SOURCE_IDENTITY
+                        || segment.vector_count != 0
+                        || segment.mutation_count != 0)
+            });
+            remove_source_snapshot(&mut manifest, &source.source_identity_digest);
+        } else {
+            manifest.segments.retain(|segment| {
+                segment.source_identity_digest != source.source_identity_digest
+                    || segment.vector_count != 0
+            });
+        }
+        manifest.segments.push(staged.descriptor);
+        if !events.events().is_empty() {
+            set_source_snapshot(&mut manifest, &source.source_identity_digest, generation);
+        }
+        let selected = publish_manifest(&self.root, manifest)?;
+        self.clear_pinned()?;
+        self.touch_metadata(u64::try_from(mutations.len()).unwrap_or(u64::MAX));
+        let _ = cleanup_obsolete_locked(&self.root, &selected);
+        Ok(())
+    }
+
+    fn touch_vectors(&self, replacements: &[FlatEventReplacement]) -> FlatResult<()> {
+        let vectors = replacements.iter().try_fold(0_u64, |total, replacement| {
+            total
+                .checked_add(u64::try_from(replacement.chunks.len()).map_err(|_| {
+                    FlatStoreError::InvalidInput("replacement chunk count is too large".to_owned())
+                })?)
+                .ok_or_else(|| {
+                    FlatStoreError::InvalidInput("vector touch count overflow".to_owned())
+                })
+        })?;
+        let bytes = vectors
+            .checked_mul(u64::from(self.contract.dimensions))
+            .and_then(|value| value.checked_mul(4))
+            .ok_or_else(|| {
+                FlatStoreError::InvalidInput("vector touch bytes overflow".to_owned())
+            })?;
+        self.vectors_touched.fetch_add(vectors, Ordering::Relaxed);
+        self.vector_bytes_touched
+            .fetch_add(bytes, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn touch_metadata(&self, records: u64) {
+        self.metadata_records_touched
+            .fetch_add(records, Ordering::Relaxed);
+    }
+
+    fn record_active_event_snapshot(&self) {
+        #[cfg(test)]
+        self.active_event_snapshot_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn load_current_locked(&self) -> FlatResult<Option<SelectedManifest>> {
+        select_manifest(&self.root, &self.contract)
     }
 
     fn load_pinned(&self, selected: &SelectedManifest) -> FlatResult<PinnedFlatGeneration> {
@@ -535,7 +904,6 @@ impl FlatSegmentStore {
         self.active_generation_load_count
             .fetch_add(1, Ordering::Relaxed);
         let pinned = load_pinned_generation(&self.root, selected)?;
-        self.remember_validated(selected)?;
         let mut guard = self.pinned.lock().map_err(|_| {
             FlatStoreError::Corrupt("flat pinned generation cache lock is poisoned".to_owned())
         })?;
@@ -563,35 +931,6 @@ impl FlatSegmentStore {
             })?;
             view.after_event_id = Some(pending.after_event_id);
         }
-        Ok(())
-    }
-
-    fn is_validated(&self, selected: &SelectedManifest) -> FlatResult<bool> {
-        let guard = self.validated.lock().map_err(|_| {
-            FlatStoreError::Corrupt("flat validation cache lock is poisoned".to_owned())
-        })?;
-        Ok(guard.as_ref().is_some_and(|validated| {
-            validated.generation == selected.envelope.manifest.generation
-                && validated.generation_hash == selected.generation_hash
-        }))
-    }
-
-    fn remember_validated(&self, selected: &SelectedManifest) -> FlatResult<()> {
-        let mut guard = self.validated.lock().map_err(|_| {
-            FlatStoreError::Corrupt("flat validation cache lock is poisoned".to_owned())
-        })?;
-        *guard = Some(ValidatedGeneration {
-            generation: selected.envelope.manifest.generation,
-            generation_hash: selected.generation_hash.clone(),
-        });
-        Ok(())
-    }
-
-    fn clear_validated(&self) -> FlatResult<()> {
-        let mut guard = self.validated.lock().map_err(|_| {
-            FlatStoreError::Corrupt("flat validation cache lock is poisoned".to_owned())
-        })?;
-        *guard = None;
         Ok(())
     }
 
