@@ -462,7 +462,10 @@ fn apply_patch_units(
                 {
                     units.push(FileUnit {
                         kind: RepositoryFileObservationKind::Renamed,
-                        span: move_line.span,
+                        span: ByteSpan {
+                            start: lines[index].span.start,
+                            end: move_line.span.end,
+                        },
                         authorized_absolute,
                     });
                 }
@@ -730,16 +733,34 @@ fn commit_unit(
     }
 
     let output_start = successful_output_start(lines)?;
-    let mut matched_span = None;
-    let mut occurrences = 0usize;
-    for line in lines.iter().copied().skip(output_start) {
-        let count = exact_oid_occurrences(line.text, target);
-        if count > 0 {
-            occurrences = occurrences.checked_add(count)?;
-            matched_span = Some(line.span);
+    let mut outcome_index = None;
+    let mut full_oid_index = None;
+    let mut raw_target_occurrences = 0usize;
+    for (index, line) in lines.iter().enumerate().skip(output_start) {
+        raw_target_occurrences =
+            raw_target_occurrences.checked_add(line.text.matches(target).count())?;
+        if line.text == target && full_oid_index.replace(index).is_some() {
+            return None;
+        }
+        match canonical_commit_outcome_prefix(line.text) {
+            Ok(Some(prefix)) if target.starts_with(prefix) => {
+                if outcome_index.replace(index).is_some() {
+                    return None;
+                }
+            }
+            Ok(Some(_)) | Err(()) => return None,
+            Ok(None) => {}
         }
     }
-    (occurrences == 1).then_some(matched_span?)
+    let outcome_index = outcome_index?;
+    let full_oid_index = full_oid_index?;
+    if raw_target_occurrences != 1 || outcome_index >= full_oid_index {
+        return None;
+    }
+    Some(ByteSpan {
+        start: lines[outcome_index].span.start,
+        end: lines[full_oid_index].span.end,
+    })
 }
 
 fn is_canonical_oid(value: &str) -> bool {
@@ -749,16 +770,29 @@ fn is_canonical_oid(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn exact_oid_occurrences(line: &str, target: &str) -> usize {
-    line.match_indices(target)
-        .filter(|(start, _)| {
-            let before = (*start > 0).then(|| line.as_bytes()[*start - 1]);
-            let end = *start + target.len();
-            let after = (end < line.len()).then(|| line.as_bytes()[end]);
-            before.is_none_or(|byte| !byte.is_ascii_hexdigit())
-                && after.is_none_or(|byte| !byte.is_ascii_hexdigit())
-        })
-        .count()
+fn canonical_commit_outcome_prefix(line: &str) -> Result<Option<&str>, ()> {
+    if !line.starts_with('[') {
+        return Ok(None);
+    }
+    let close = line.find(']').ok_or(())?;
+    let suffix = &line[close + 1..];
+    if !suffix.is_empty() && !suffix.starts_with(' ') {
+        return Err(());
+    }
+    let inside = &line[1..close];
+    let (context, prefix) = inside.rsplit_once(' ').ok_or(())?;
+    if context.is_empty()
+        || context.chars().next().is_some_and(char::is_whitespace)
+        || context.chars().last().is_some_and(char::is_whitespace)
+        || context.chars().any(char::is_control)
+        || !(7..=40).contains(&prefix.len())
+        || !prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(());
+    }
+    Ok(Some(prefix))
 }
 
 fn successful_output_start(lines: &[BodyLine<'_>]) -> Option<usize> {

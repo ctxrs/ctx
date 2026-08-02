@@ -226,6 +226,16 @@ fn file_record_from_base(
 }
 
 fn commit_record(seed: u8, sequence: u64, body: &str, outcomes: usize) -> CoreEventRecord {
+    commit_record_for_oid(seed, sequence, body, outcomes, OID)
+}
+
+fn commit_record_for_oid(
+    seed: u8,
+    sequence: u64,
+    body: &str,
+    outcomes: usize,
+    oid: &str,
+) -> CoreEventRecord {
     let mut record = base_record("codex", seed, sequence, body, "command_output", "tool");
     record.core_record.repository_bindings = vec![binding(Some(GitObjectFormat::Sha1))];
     record.core_record.repository_vcs_observations = (0..outcomes)
@@ -235,7 +245,7 @@ fn commit_record(seed: u8, sequence: u64, body: &str, outcomes: usize) -> CoreEv
                 kind: RepositoryOutcomeKind::Commit,
                 produced_object_ids: vec![GitObjectId {
                     format: GitObjectFormat::Sha1,
-                    hex: OID.to_owned(),
+                    hex: oid.to_owned(),
                 }],
                 replacement_lineage: Vec::new(),
                 pull_request: None,
@@ -373,7 +383,7 @@ fn rename_old_and_new_paths_use_complete_boundary_safe_units() {
     );
     assert_eq!(
         one_file_preview("src/new.rs", &record).previews[0].excerpt,
-        "*** Move to: src/new.rs"
+        "*** Update File: src/old.rs\n*** Move to: src/new.rs"
     );
 
     let boundary = file_record(
@@ -510,23 +520,28 @@ fn certified_local_root_allows_only_the_exact_authorized_absolute_path() {
 
 #[test]
 fn certified_local_root_preserves_exact_absolute_rename_old_and_new_paths() {
-    let body = "*** Update File: /worktrees/validated/src/old.rs\n*** Move to: /worktrees/validated/src/new.rs";
+    let root =
+        "/home/daddy/code/ctx-worktrees/ctx-private/source-backed-ingestion-production-20260728";
+    let old_path = "products/ctx-pro/src/graph/store/checkpoints.rs";
+    let new_path = "products/ctx-pro/src/graph/store/generation.rs";
+    let body = format!("*** Update File: {root}/{old_path}\n*** Move to: {root}/{new_path}");
+    assert_eq!(body.len(), 298);
     let mut record = file_record(
         28,
         1,
-        body,
-        "src/new.rs",
+        &body,
+        new_path,
         RepositoryFileObservationKind::Renamed,
-        Some("src/old.rs"),
+        Some(old_path),
     );
-    authorize_local_root(&mut record, "/worktrees/validated");
+    authorize_local_root(&mut record, root);
     assert_eq!(
-        one_file_preview("src/old.rs", &record).previews[0].excerpt,
+        one_file_preview(old_path, &record).previews[0].excerpt,
         body
     );
     assert_eq!(
-        one_file_preview("src/new.rs", &record).previews[0].excerpt,
-        "*** Move to: /worktrees/validated/src/new.rs"
+        one_file_preview(new_path, &record).previews[0].excerpt,
+        body
     );
 }
 
@@ -887,7 +902,10 @@ fn commit_requires_one_certified_success_outcome_and_one_exact_oid_unit() {
             &[verified(&evidence, &success)],
         );
         assert_eq!(model.previews[0].kind, EvidencePreviewKind::Commit);
-        assert_eq!(model.previews[0].excerpt, OID);
+        assert_eq!(
+            model.previews[0].excerpt,
+            format!("[main 0123456] exact\n{OID}")
+        );
     }
 
     let failed = commit_record(
@@ -924,12 +942,31 @@ fn commit_requires_one_certified_success_outcome_and_one_exact_oid_unit() {
 }
 
 #[test]
+fn commit_preserves_the_evaluated_h033_outcome_stats_and_full_oid_unit() {
+    const H033_OID: &str = "7a8e20ecfbe6b05fdc182fc71511e08794f6343f";
+    let expected = format!(
+        "[ctx/v026-pro-blame-consolidation-20260725 7a8e20ecf] fix(release): complete paired native qualification\n 2 files changed, 197 insertions(+), 10 deletions(-)\n{H033_OID}"
+    );
+    assert_eq!(expected.len(), 198);
+    let body = format!(
+        "Chunk ID: ea50da\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 99\nOutput:\n scripts/ctx-pro/native-platform-smoke.py           | 170 +++++++++++++++++++--\n .../ctx_pro_native_platform_smoke_contract.py      |  37 +++++\n 2 files changed, 197 insertions(+), 10 deletions(-)\n[ctx/v026-pro-blame-consolidation-20260725 7a8e20ecf] fix(release): complete paired native qualification\n 2 files changed, 197 insertions(+), 10 deletions(-)\n{H033_OID}"
+    );
+    let record = commit_record_for_oid(48, 2, &body, 1, H033_OID);
+    let evidence = numbered(&record, 1);
+    let model = project_evidence_previews(
+        &commit_result(H033_OID, vec![evidence.clone()]),
+        &[verified(&evidence, &record)],
+    );
+    assert_eq!(model.previews[0].excerpt, expected);
+}
+
+#[test]
 fn commit_case_token_duplicate_unit_and_duplicate_outcome_ambiguity_omit() {
     let uppercase = OID.to_ascii_uppercase();
     let case = commit_record(
         43,
         2,
-        &format!("Process exited with code 0\nOutput:\n{uppercase}"),
+        &format!("Process exited with code 0\nOutput:\n[main 0123456] exact\n{uppercase}"),
         1,
     );
     let evidence = numbered(&case, 1);
@@ -943,7 +980,7 @@ fn commit_case_token_duplicate_unit_and_duplicate_outcome_ambiguity_omit() {
     let boundary = commit_record(
         44,
         2,
-        &format!("Process exited with code 0\nOutput:\na{OID}"),
+        &format!("Process exited with code 0\nOutput:\n[main 0123456] exact\na{OID}"),
         1,
     );
     let evidence = numbered(&boundary, 1);
@@ -957,7 +994,7 @@ fn commit_case_token_duplicate_unit_and_duplicate_outcome_ambiguity_omit() {
     let repeated = commit_record(
         45,
         2,
-        &format!("Process exited with code 0\nOutput:\n{OID}\n{OID}"),
+        &format!("Process exited with code 0\nOutput:\n[main 0123456] exact\n{OID}\n{OID}"),
         1,
     );
     let evidence = numbered(&repeated, 1);
@@ -971,7 +1008,7 @@ fn commit_case_token_duplicate_unit_and_duplicate_outcome_ambiguity_omit() {
     let outcomes = commit_record(
         46,
         2,
-        &format!("Process exited with code 0\nOutput:\n{OID}"),
+        &format!("Process exited with code 0\nOutput:\n[main 0123456] exact\n{OID}"),
         2,
     );
     let evidence = numbered(&outcomes, 1);
@@ -984,14 +1021,59 @@ fn commit_case_token_duplicate_unit_and_duplicate_outcome_ambiguity_omit() {
 }
 
 #[test]
+fn commit_anchor_rejects_ambiguous_order_case_prefix_and_boundaries() {
+    for (index, body) in [
+        format!(
+            "Process exited with code 0\nOutput:\n[main 0123456] one\n[other 0123456] two\n{OID}"
+        ),
+        format!("Process exited with code 0\nOutput:\n{OID}\n[main 0123456] exact"),
+        format!("Process exited with code 0\nOutput:\n[main 012345A] exact\n{OID}"),
+        format!("Process exited with code 0\nOutput:\n[main 012345] exact\n{OID}"),
+        format!("Process exited with code 0\nOutput:\n[main 0123456]exact\n{OID}"),
+        format!("Process exited with code 0\nOutput:\n[main 0123456] exact {OID}\n{OID}"),
+        format!("Process exited with code 0\nOutput:\n[main 0123456] exact\n {OID}"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let record = commit_record(60 + u8::try_from(index).unwrap(), 2, &body, 1);
+        let evidence = numbered(&record, 1);
+        assert!(
+            project_evidence_previews(
+                &commit_result(OID, vec![evidence.clone()]),
+                &[verified(&evidence, &record)],
+            )
+            .previews
+            .is_empty(),
+            "{body}"
+        );
+    }
+
+    let oversized_body = format!(
+        "Process exited with code 0\nOutput:\n[main 0123456] exact\n{}\n{OID}",
+        "x".repeat(460)
+    );
+    let oversized = commit_record(67, 2, &oversized_body, 1);
+    let evidence = numbered(&oversized, 1);
+    assert!(project_evidence_previews(
+        &commit_result(OID, vec![evidence.clone()]),
+        &[verified(&evidence, &oversized)],
+    )
+    .previews
+    .is_empty());
+}
+
+#[test]
 fn commit_output_framing_rejects_malformed_duplicate_and_mixed_markers() {
     for (index, body) in [
-        format!("Process exited with code 0\nFinal output: \n{OID}"),
-        format!("Process exited with code 0\nfinal output:\n{OID}"),
-        format!("Process exited with code 0\nOutput:\nFinal output:\n{OID}"),
-        format!("Process exited with code 0\nOutput:\nOutput:\n{OID}"),
-        format!("Process exited with code 0\nFinal output:\nFinal output:\n{OID}"),
-        format!(" Process exited with code 0\nFinal output:\n{OID}"),
+        format!("Process exited with code 0\nFinal output: \n[main 0123456] exact\n{OID}"),
+        format!("Process exited with code 0\nfinal output:\n[main 0123456] exact\n{OID}"),
+        format!("Process exited with code 0\nOutput:\nFinal output:\n[main 0123456] exact\n{OID}"),
+        format!("Process exited with code 0\nOutput:\nOutput:\n[main 0123456] exact\n{OID}"),
+        format!(
+            "Process exited with code 0\nFinal output:\nFinal output:\n[main 0123456] exact\n{OID}"
+        ),
+        format!(" Process exited with code 0\nFinal output:\n[main 0123456] exact\n{OID}"),
     ]
     .into_iter()
     .enumerate()
@@ -1024,7 +1106,7 @@ fn commit_outcome_must_belong_to_the_exact_resolved_repository_binding() {
     )
     .is_some());
 
-    let body = format!("Process exited with code 0\nOutput:\n{OID}");
+    let body = format!("Process exited with code 0\nOutput:\n[main 0123456] exact\n{OID}");
     let mut other_repository = commit_record(48, 2, &body, 1);
     other_repository
         .core_record
@@ -1054,7 +1136,7 @@ fn commit_outcome_must_belong_to_the_exact_resolved_repository_binding() {
         let mut simultaneous = commit_record(
             56 + u8::try_from(index).unwrap(),
             2,
-            &format!("Process exited with code 0\nFinal output:\n{OID}"),
+            &format!("Process exited with code 0\nFinal output:\n[main 0123456] exact\n{OID}"),
             1,
         );
         simultaneous
