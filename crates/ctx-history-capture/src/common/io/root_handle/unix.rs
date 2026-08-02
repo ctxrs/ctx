@@ -303,9 +303,7 @@ fn classify_open_component_error(
             AuthorityOpenError::Rejected("symlinked provider source path components are rejected")
         }
         Some(libc::ENXIO) | Some(libc::ENODEV) | Some(libc::EOPNOTSUPP) => {
-            AuthorityOpenError::Rejected(
-                "provider source paths must be regular files or directories",
-            )
+            AuthorityOpenError::Rejected(super::NON_REGULAR_PROVIDER_SOURCE_REASON)
         }
         _ => AuthorityOpenError::Io(cause),
     }
@@ -349,7 +347,7 @@ fn classify_opened(file: File) -> Result<OpenedPath, AuthorityOpenError> {
         })
     } else {
         Err(AuthorityOpenError::Rejected(
-            "provider source paths must be regular files or directories",
+            super::NON_REGULAR_PROVIDER_SOURCE_REASON,
         ))
     }
 }

@@ -692,6 +692,24 @@ fn map_changed_open_error(path: &Path, error: AuthorityOpenError) -> CaptureErro
     }
 }
 
+/// Reason recorded when a provider source path component is neither a regular
+/// file nor a directory (for example a Unix-domain socket, FIFO, or device
+/// node). Traversal callers can skip such entries safely without treating the
+/// enclosing provider source as unreadable.
+pub(crate) const NON_REGULAR_PROVIDER_SOURCE_REASON: &str =
+    "provider source paths must be regular files or directories";
+
+/// True when `error` is the safe rejection of a non-regular special-file entry
+/// (see [`NON_REGULAR_PROVIDER_SOURCE_REASON`]), as opposed to a symlink
+/// rejection or a genuine IO failure that must fail the enclosing traversal.
+pub(crate) fn is_non_regular_source_rejection(error: &CaptureError) -> bool {
+    matches!(
+        error,
+        CaptureError::InvalidProviderTranscriptPath { reason, .. }
+            if *reason == NON_REGULAR_PROVIDER_SOURCE_REASON
+    )
+}
+
 fn invalid_path(path: &Path, reason: &'static str) -> CaptureError {
     CaptureError::InvalidProviderTranscriptPath {
         path: path.to_path_buf(),
