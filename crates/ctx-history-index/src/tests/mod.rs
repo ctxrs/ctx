@@ -349,6 +349,7 @@ fn multisegment_fixture(
     (temp, sources)
 }
 
+mod pinned_generation;
 mod query;
 mod recovery;
 mod writer;
