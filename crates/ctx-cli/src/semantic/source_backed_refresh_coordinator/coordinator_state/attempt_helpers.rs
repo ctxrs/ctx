@@ -257,7 +257,7 @@ mod tests {
 
         assert_eq!(publication.selected_route_ids, [route.as_str()]);
         assert_eq!(publication.successful_route_ids, [route.as_str()]);
-        assert_eq!(publication.successful_route_changes[route.as_str()], false);
+        assert!(!publication.successful_route_changes[route.as_str()]);
         assert_eq!(publication.catalog_route_outcomes[0].outcome, "succeeded");
         assert_eq!(publication.catalog_route_outcomes[0].changed, Some(false));
     }
