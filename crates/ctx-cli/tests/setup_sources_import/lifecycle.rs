@@ -2,15 +2,6 @@ use super::{
     assert_daemon_process_running, assert_no_daemon_autostart_mutation, ctx, support, support::*,
     wait_for_daemon_status, write_codex_setup_session,
 };
-use rusqlite::OpenFlags;
-
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Barrier,
-    },
-    thread,
-};
 
 #[path = "../support/setup_sources_import/lifecycle_helpers.rs"]
 mod lifecycle_helpers;
@@ -205,14 +196,12 @@ fn setup_wait_indexes_committed_provider_sqlite_wal_content() {
     assert_eq!(setup["schema_version"], 2, "{setup:#}");
     assert_eq!(setup["mode"], "ready", "{setup:#}");
     let generation = setup["lexical"]["generation_id"].as_str().unwrap();
-    let status = wait_for_relational_projection(&temp, generation);
-    assert_eq!(status["relational"]["source_count"], 1, "{status:#}");
+    let _status = wait_for_core_generation(&temp, generation);
     assert!(
-        status["relational"]["event_count"]
-            .as_u64()
-            .is_some_and(|count| count >= 3),
-        "{status:#}"
+        provider_core_counts(&data_root(&temp), "hermes").1 >= 3,
+        "committed provider WAL records must be included in Core"
     );
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -304,10 +293,7 @@ fn status_missing_source_epoch_is_read_only_and_does_not_initialize_files() {
         status["lexical"]["path"],
         json!(data_root.join("search/lexical"))
     );
-    assert_eq!(
-        status["relational"]["path"],
-        json!(data_root.join("relational.sqlite"))
-    );
+    assert!(status.get("relational").is_none(), "{status:#}");
     assert!(status.get("prior_epoch").is_none());
 
     let output = ctx(&temp)
@@ -337,74 +323,6 @@ fn status_missing_source_epoch_is_read_only_and_does_not_initialize_files() {
 }
 
 #[test]
-fn status_existing_relational_projection_does_not_mutate_database() {
-    let temp = tempdir();
-    write_codex_setup_session(&temp);
-    let generation = {
-        let _daemon = start_full_source_refresh_daemon(&temp);
-        let setup = ready_setup(&temp);
-        let generation = setup["lexical"]["generation_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        wait_for_relational_projection(&temp, &generation);
-        generation
-    };
-    let relational_path = data_root(&temp).join("relational.sqlite");
-    let relational_before = fs::read(&relational_path).unwrap();
-
-    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-
-    assert_eq!(status["initialized"], true);
-    assert_eq!(status["read_only"], true);
-    assert_eq!(status["relational"]["status"], "ready", "{status:#}");
-    assert_eq!(
-        status["relational"]["active_core_generation_id"], generation,
-        "{status:#}"
-    );
-    assert_eq!(
-        fs::read(&relational_path).unwrap(),
-        relational_before,
-        "status must not mutate relational projection pages"
-    );
-}
-
-#[test]
-fn status_reports_unsupported_relational_schema_without_migrating_it() {
-    let temp = tempdir();
-    fs::create_dir_all(data_root(&temp)).unwrap();
-    let db_path = data_root(&temp).join("relational.sqlite");
-    let conn = Connection::open(&db_path).unwrap();
-    conn.pragma_update(None, "user_version", 1).unwrap();
-    drop(conn);
-    let before = fs::read(&db_path).unwrap();
-
-    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["relational"]["status"], "unavailable", "{status:#}");
-    assert_eq!(
-        status["relational"]["reason"], "projection_open_failed",
-        "{status:#}"
-    );
-    assert!(
-        status["relational"]["last_error"]
-            .as_str()
-            .is_some_and(|error| !error.is_empty()),
-        "{status:#}"
-    );
-
-    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    let user_version: i64 = conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(user_version, 1);
-    drop(conn);
-    assert_eq!(fs::read(&db_path).unwrap(), before);
-    assert!(!data_root(&temp).join("config.toml").exists());
-    assert!(!data_root(&temp).join("search").exists());
-    assert!(!data_root(&temp).join("catalogs").exists());
-}
-
-#[test]
 fn status_does_not_repair_missing_tantivy_publication_pointer() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
@@ -415,7 +333,7 @@ fn status_does_not_repair_missing_tantivy_publication_pointer() {
             .as_str()
             .unwrap()
             .to_owned();
-        wait_for_relational_projection(&temp, &generation);
+        wait_for_core_generation(&temp, &generation);
         generation
     };
     let lexical_root = data_root(&temp).join("search/lexical");
@@ -961,14 +879,10 @@ fn foreground_import_rejections_complete_and_preserve_diagnostics() {
     );
     assert_eq!(source["status"], "published", "{import:#}");
 
-    let status = wait_for_relational_projection(&temp, generation);
+    let status = wait_for_core_generation(&temp, generation);
     assert_eq!(status["lexical"]["generation_id"], generation, "{status:#}");
-    assert_eq!(status["relational"]["status"], "ready", "{status:#}");
-    assert_eq!(
-        status["relational"]["active_core_generation_id"], generation,
-        "{status:#}"
-    );
-    assert!(data_root(&temp).join("relational.sqlite").is_file());
+    assert!(status.get("relational").is_none(), "{status:#}");
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 
     let index =
         json_output(ctx_from_binary(&temp, &binary).args(["index", "status", "--format=json"]));
@@ -1043,12 +957,9 @@ fn foreground_import_rejection_diagnostics_survive_a_noop_source_cycle() {
             assert_eq!(Some(published), generation.as_deref(), "{report:#}");
             assert_eq!(refresh["generation_changed"], false, "{report:#}");
         }
-        let status = wait_for_relational_projection(&temp, published);
-        assert_eq!(status["relational"]["status"], "ready", "{status:#}");
-        assert_eq!(
-            status["relational"]["active_core_generation_id"], published,
-            "{status:#}"
-        );
+        let status = wait_for_core_generation(&temp, published);
+        assert_eq!(status["lexical"]["generation_id"], published, "{status:#}");
+        assert!(status.get("relational").is_none(), "{status:#}");
     }
 
     let doctor = json_output(ctx_from_binary(&temp, &binary).args(["doctor", "--format=json"]));
@@ -1060,7 +971,7 @@ fn foreground_import_rejection_diagnostics_survive_a_noop_source_cycle() {
 }
 
 #[test]
-fn foreground_import_returns_at_core_then_full_daemon_catches_up_relational() {
+fn foreground_import_returns_at_ready_core_generation() {
     let temp = tempdir();
     let binary = copied_ctx_binary(&temp);
     let history = temp.path().join(".codex/history.jsonl");
@@ -1116,11 +1027,8 @@ fn foreground_import_returns_at_core_then_full_daemon_catches_up_relational() {
         status["refresh"]["published_generation"], generation,
         "{status:#}"
     );
-    assert_eq!(status["relational"]["status"], "pending", "{status:#}");
-    assert!(
-        status["relational"]["active_core_generation_id"].is_null(),
-        "{status:#}"
-    );
+    assert!(status.get("relational").is_none(), "{status:#}");
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 
     let search = json_output(ctx_from_binary(&temp, &binary).args([
         "search",
@@ -1140,10 +1048,6 @@ fn foreground_import_returns_at_core_then_full_daemon_catches_up_relational() {
     );
 
     drop(core_daemon);
-    let _full_daemon = start_full_source_refresh_daemon(&temp);
-    let caught_up = wait_for_relational_projection(&temp, generation);
-    assert_eq!(caught_up["lexical"]["generation_id"], generation);
-    assert_eq!(caught_up["relational"]["event_count"], 1, "{caught_up:#}");
 }
 
 #[test]
@@ -1214,10 +1118,12 @@ fn setup_inventories_and_imports_claude_sources_by_default() {
         "{setup:#}"
     );
     let generation = setup["lexical"]["generation_id"].as_str().unwrap();
-    let status = wait_for_relational_projection(&temp, generation);
-    assert_eq!(status["relational"]["session_count"], 1, "{status:#}");
+    let status = wait_for_core_generation(&temp, generation);
     assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
-    assert_eq!(status["relational"]["status"], "ready", "{status:#}");
+    let (sessions, events) = provider_core_counts(&data_root(&temp), "claude");
+    assert_eq!(sessions, 1);
+    assert!(events >= 2);
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 }
 
 #[test]
@@ -1237,87 +1143,38 @@ fn setup_inventories_whole_source_sqlite_providers() {
     );
 
     let generation = setup["lexical"]["generation_id"].as_str().unwrap();
-    let status = wait_for_relational_projection(&temp, generation);
+    let status = wait_for_core_generation(&temp, generation);
     assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
-    assert_eq!(status["relational"]["status"], "ready", "{status:#}");
+    let (sessions, events) = provider_core_counts(&data_root(&temp), "hermes");
+    assert_eq!(sessions, 1);
+    assert!(events >= 2);
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 }
 
 #[test]
-fn clean_multisource_setup_bounds_relational_wal_and_preserves_projection_identity() {
+fn clean_multisource_setup_preserves_core_identity() {
     let temp = tempdir();
     write_large_codex_setup_sessions(&temp, 40, 4, 4 * 1024);
     write_large_hermes_setup_db(&temp, 130, 8 * 1024);
     let _daemon = start_full_source_refresh_daemon(&temp);
-    let db_path = data_root(&temp).join("relational.sqlite");
-    let wal_path = data_root(&temp).join("relational.sqlite-wal");
-
-    let running = Arc::new(AtomicBool::new(true));
-    let peak_wal_bytes = Arc::new(AtomicU64::new(0));
-    let sampler_ready = Arc::new(Barrier::new(2));
-    let sampler = {
-        let running = Arc::clone(&running);
-        let peak_wal_bytes = Arc::clone(&peak_wal_bytes);
-        let sampler_ready = Arc::clone(&sampler_ready);
-        thread::spawn(move || {
-            sampler_ready.wait();
-            loop {
-                if let Ok(metadata) = fs::metadata(&wal_path) {
-                    peak_wal_bytes.fetch_max(metadata.len(), Ordering::AcqRel);
-                }
-                if !running.load(Ordering::Acquire) {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(1));
-            }
-        })
-    };
-    sampler_ready.wait();
     let setup = ready_setup(&temp);
     let generation = setup["lexical"]["generation_id"]
         .as_str()
         .unwrap()
         .to_owned();
-    let status = wait_for_relational_projection(&temp, &generation);
-    running.store(false, Ordering::Release);
-    sampler.join().unwrap();
+    let status = wait_for_core_generation(&temp, &generation);
 
     assert_eq!(setup["schema_version"], 2, "{setup:#}");
     assert_eq!(setup["mode"], "ready", "{setup:#}");
-    assert_eq!(status["relational"]["status"], "ready", "{status:#}");
-    assert_eq!(status["relational"]["source_count"], 41, "{status:#}");
-    assert!(
-        peak_wal_bytes.load(Ordering::Acquire) <= 32 * 1024 * 1024,
-        "clean multi-source setup grew relational WAL to {} bytes",
-        peak_wal_bytes.load(Ordering::Acquire)
+    assert_eq!(status["lexical"]["generation_id"], generation, "{status:#}");
+    assert!(status.get("relational").is_none(), "{status:#}");
+    let core_counts = (
+        provider_core_counts(&data_root(&temp), "codex"),
+        provider_core_counts(&data_root(&temp), "hermes"),
     );
-    assert!(
-        fs::metadata(data_root(&temp).join("relational.sqlite-wal"))
-            .map(|metadata| metadata.len())
-            .unwrap_or(0)
-            <= 4 * 1024 * 1024,
-        "setup left a large final relational WAL"
-    );
-
-    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    assert_eq!(
-        conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
-            .unwrap(),
-        "ok"
-    );
-    assert!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex'"
-        ) > 0
-    );
-    assert!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'hermes'"
-        ) > 0
-    );
-    let event_count = sqlite_count(&conn, "SELECT COUNT(*) FROM ctx_events");
-    drop(conn);
+    assert!((core_counts.0).1 > 0);
+    assert!((core_counts.1).1 > 0);
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 
     let codex_search = json_output(ctx(&temp).args([
         "search",
@@ -1344,10 +1201,13 @@ fn clean_multisource_setup_bounds_relational_wal_and_preserves_projection_identi
 
     let replay = ready_setup(&temp);
     assert_eq!(replay["lexical"]["generation_id"], generation, "{replay:#}");
-    wait_for_relational_projection(&temp, &generation);
-    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    wait_for_core_generation(&temp, &generation);
     assert_eq!(
-        sqlite_count(&conn, "SELECT COUNT(*) FROM ctx_events"),
-        event_count
+        (
+            provider_core_counts(&data_root(&temp), "codex"),
+            provider_core_counts(&data_root(&temp), "hermes"),
+        ),
+        core_counts
     );
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 }

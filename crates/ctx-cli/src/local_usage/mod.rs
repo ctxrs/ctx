@@ -82,8 +82,8 @@ pub(crate) enum ResultObservationAction {
     Search,
     OpenSession,
     OpenEvent,
+    Locate,
     Sources,
-    Sql,
     Blame,
 }
 
@@ -329,6 +329,7 @@ impl CliUsage {
                 }),
                 TargetType::NotApplicable,
             ),
+            CommandRoot::Locate(_) => (Some("locate"), TargetType::NotApplicable),
             CommandRoot::Search(_) => (Some("search"), TargetType::NotApplicable),
             CommandRoot::Pro(args) => (
                 Some(args.local_usage_operation()),
@@ -336,7 +337,6 @@ impl CliUsage {
             ),
             CommandRoot::Referral(_) => (None, TargetType::NotApplicable),
             CommandRoot::Blame(_) => (Some("blame"), TargetType::NotApplicable),
-            CommandRoot::Sql(_) => (Some("sql"), TargetType::NotApplicable),
             CommandRoot::Docs(_) => (Some("docs"), TargetType::NotApplicable),
             CommandRoot::Integrations(_) => (Some("integrations"), TargetType::NotApplicable),
             CommandRoot::Mcp(_) => (None, TargetType::NotApplicable),
@@ -491,7 +491,6 @@ impl McpInvocation {
             "status" => "status",
             "sources" => "sources",
             "search" => "search",
-            "sql" => "sql",
             "show_session" => "show_session",
             "show_event" => "show_event",
             "pro_status" => "pro_status",
@@ -636,7 +635,6 @@ fn mcp_result_count(operation: &str, structured: Option<&Value>) -> Option<usize
     let field = match operation {
         "sources" => "sources",
         "search" => "results",
-        "sql" => "rows",
         "show_session" | "show_event" => "events",
         "blame" => "matches",
         _ => return None,

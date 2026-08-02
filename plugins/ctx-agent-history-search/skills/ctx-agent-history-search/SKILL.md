@@ -95,12 +95,12 @@ Use this skill in two modes:
    ctx show session <ctx-session-id>
    ```
 
-4. Read provider-owned session identity from Core-backed search/show results
-   when resume hints matter. `provider_session_id` is the Codex resume UUID:
+4. Locate original provider material when source identity or resume hints
+   matter. `provider_session_id` is the Codex resume UUID:
 
    ```bash
-   ctx show session <ctx-session-id> --format json
-   ctx show session --provider codex --provider-session <codex-resume-uuid>
+   ctx locate event <ctx-event-id>
+   ctx locate session <ctx-session-id>
    ```
 
 5. Write a transcript of relevant sessions when you, the human, or another
@@ -110,29 +110,26 @@ Use this skill in two modes:
    ctx show session <ctx-session-id> --format markdown --out <output-path>
    ```
 
-## When Search Is Not Enough
+## When Search Needs Narrowing
 
-Use `ctx sql` only when normal search cannot express the question, such as
-counts, joins, audits, or scripts over stable local views. Do not use SQL for
-broad transcript text search; `ctx search` is built for that.
-
-Start with the bundled SQL docs:
+Vary the query and use search filters before drawing conclusions. Useful
+follow-ups include dense event search, session-scoped search, and source
+location checks:
 
 ```bash
-ctx docs show sql
-ctx docs search "stable views"
+ctx search "<query variant>" --events --refresh off
+ctx search "<query>" --session <ctx-session-id> --refresh off
+ctx search "<query>" --include-subagents --refresh off
+ctx show event <ctx-event-id> --window 5
+ctx show session <ctx-session-id>
+ctx locate event <ctx-event-id>
+ctx locate session <ctx-session-id>
 ```
 
-Common SQL examples:
-
-```bash
-ctx sql "SELECT provider, COUNT(*) AS sessions FROM ctx_sessions GROUP BY provider"
-ctx sql "SELECT event_type, COUNT(*) AS events FROM ctx_events GROUP BY event_type ORDER BY events DESC"
-ctx sql "SELECT path, provider, provider_session_id FROM ctx_files_touched WHERE path LIKE '%AGENTS.md%' LIMIT 20"
-```
-
-`ctx sql` is read-only and queries the existing index. It does not refresh,
-import, initialize, or migrate ctx storage.
+Search result windows are bounded. Do not claim exact corpus-wide counts or a
+complete audit from the number of returned hits. If the requested conclusion
+cannot be supported with search, show, and locate evidence, state that limit
+and report the strongest retrieved evidence instead.
 
 ## History Research Reports
 

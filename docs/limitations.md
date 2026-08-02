@@ -68,9 +68,9 @@ shipped.
 - Search output is retrieval material, not generated analysis.
 - Token counts are estimates.
 - JSON is local/private and can include sensitive content.
-- Show reads policy-selected normalized content from the active Core generation
-  and does not require provider files at query time.
-- Core presentation includes accepted structured tool input, tool output,
+- Show reads complete policy-selected normalized records from the active
+  verified Core/Tantivy generation without reopening provider history.
+- Exact presentation includes accepted structured tool input, tool output,
   command output, patch, and diff content. Explicitly redacted content,
   unsupported binary payloads, and provider-private blobs remain unavailable.
 

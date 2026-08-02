@@ -36,7 +36,6 @@ Use direct Bazel targets when a narrower check is enough:
 
 ```bash
 scripts/bazelw test //:docs_check --config=test
-scripts/bazelw test //crates/ctx-cli:search_show_locate_sql_tests --config=test
 scripts/bazelw test //crates/ctx-cli:native_providers_tests --config=test
 scripts/bazelw test //sdks/go:go_sdk_tests --config=test
 scripts/bazelw test //:package_audit_release --config=release

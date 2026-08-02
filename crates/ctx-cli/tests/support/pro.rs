@@ -10,20 +10,6 @@ use std::{
     any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
 ))]
 use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
-#[cfg(all(
-    unix,
-    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
-))]
-use ctx_history_relational::{
-    CommittedCoreGeneration, RelationalProjectionRecord, RelationalSourceHealth,
-    RelationalSourceMetadata, SourceBackedRelationalProjection,
-};
-#[cfg(all(
-    unix,
-    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
-))]
-use sha2::{Digest as _, Sha256};
-
 #[cfg(unix)]
 const PYTHON3_SHEBANG: &str = "#!/usr/bin/python3\n";
 
@@ -231,7 +217,6 @@ fn initialize_provider_neutral_core_projection(data_root: &Path) -> String {
         },
     )
     .unwrap();
-    let relational_record = record.clone();
     writer.begin_source(source).unwrap();
     writer.add_core_record(record).unwrap();
     writer
@@ -240,42 +225,6 @@ fn initialize_provider_neutral_core_projection(data_root: &Path) -> String {
     let core_receipt = writer.commit(|_| true).unwrap();
     let verified = VerifiedIndex::open(index_root).unwrap();
     assert_eq!(verified.generation_id(), core_receipt.generation_id);
-
-    let manifest = verified.manifest();
-    let sources = manifest
-        .sources
-        .iter()
-        .map(|certificate| RelationalSourceMetadata {
-            source: certificate.observation().source().clone(),
-            parser_revision: certificate.parser_revision().to_owned(),
-            revision_digest: Sha256::digest(serde_json::to_vec(certificate).unwrap()).into(),
-            indexed_event_count: certificate.counts().indexed_documents,
-            health: RelationalSourceHealth::Ready,
-        })
-        .collect::<Vec<_>>();
-    let source_id = sources[0].source.identity().as_uuid();
-    let relational_records = vec![
-        RelationalProjectionRecord::BeginSource(Box::new(sources[0].clone())),
-        RelationalProjectionRecord::CoreRecord(Box::new(relational_record)),
-        RelationalProjectionRecord::EndSource { source_id },
-    ];
-    let generation = CommittedCoreGeneration {
-        generation_id: verified.generation_id().to_owned(),
-        manifest_version: manifest.manifest_version,
-        core_record_version: manifest.core_record_version,
-        core_record_contract_fingerprint: manifest.core_record_contract_fingerprint.clone(),
-        lexical_schema_version: manifest.lexical_schema_version,
-        policy_schema_hash: manifest.policy_schema_hash.clone(),
-        indexed_documents: manifest.indexed_documents,
-        sources,
-    };
-    let mut projection =
-        SourceBackedRelationalProjection::open(data_root.join("relational.sqlite")).unwrap();
-    let relational_receipt = projection.rebuild(&generation, relational_records).unwrap();
-    assert_eq!(
-        relational_receipt.core_generation_id,
-        core_receipt.generation_id
-    );
     core_receipt.generation_id
 }
 

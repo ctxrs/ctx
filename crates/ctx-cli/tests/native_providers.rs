@@ -85,22 +85,16 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "none",
         ]));
         assert_authoritative_provider_publication(&first);
-        wait_for_imported_projections(&temp, &first);
+        wait_for_imported_core(&temp, &first);
         assert_eq!(first["totals"]["current_rejected_records"], 1, "{first:#}");
+        let (session_count, event_count) = provider_core_counts(&data_root(&temp), stored_provider);
         assert!(
-            source_backed_count(
-                &temp,
-                &format!("SELECT COUNT(*) FROM ctx_events WHERE provider = '{stored_provider}'")
-            ) >= minimum_events,
+            event_count >= minimum_events,
             "expected at least {minimum_events} indexed {stored_provider} events"
         );
         if stored_provider == "mux" {
             assert_eq!(
-                source_backed_count(
-                    &temp,
-                    "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'mux'"
-                ),
-                2,
+                session_count, 2,
                 "manifested Mux files must reuse one canonical source-scoped parent session"
             );
         }
@@ -547,24 +541,15 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             "--format=json",
         ]));
         assert_explicit_source_publication(&first, stored_provider, expected_format);
-        wait_for_imported_projections(&temp, &first);
+        wait_for_imported_core(&temp, &first);
         let expected_rejected_records = u64::from(stored_provider == "qwen_code");
         assert_eq!(
             first["totals"]["current_rejected_records"], expected_rejected_records,
             "{first:#}"
         );
-        assert!(
-            source_backed_count(
-                &temp,
-                &format!("SELECT COUNT(*) FROM ctx_sessions WHERE provider = '{stored_provider}'")
-            ) >= 1
-        );
-        assert!(
-            source_backed_count(
-                &temp,
-                &format!("SELECT COUNT(*) FROM ctx_events WHERE provider = '{stored_provider}'")
-            ) >= 1
-        );
+        let (session_count, event_count) = provider_core_counts(&data_root(&temp), stored_provider);
+        assert!(session_count >= 1);
+        assert!(event_count >= 1);
 
         let search = json_output(ctx(&temp).args([
             "search",
@@ -677,7 +662,7 @@ fn native_provider_cli_preserves_complete_tool_outputs_without_legacy_payloads()
             "none",
         ]));
         assert_explicit_source_publication(&imported, provider, source_format);
-        wait_for_imported_projections(&temp, &imported);
+        wait_for_imported_core(&temp, &imported);
         assert_eq!(
             imported["totals"]["current_rejected_records"], 0,
             "{imported:#}"
@@ -712,17 +697,10 @@ fn native_provider_cli_preserves_complete_tool_outputs_without_legacy_payloads()
             );
         }
 
-        assert_eq!(
-            source_backed_count(
-                &temp,
-                "SELECT COUNT(*) FROM pragma_table_info('ctx_events') WHERE name = 'payload_json'",
-            ),
-            0,
-            "the metadata-only relational projection must expose no payload column"
-        );
-        assert_eq!(
-            source_backed_count(&temp, "SELECT COUNT(*) FROM ctx_files_touched"),
-            0,
+        assert!(
+            provider_core_records(&data_root(&temp), provider)
+                .iter()
+                .all(|record| record.repository_file_observations.is_empty()),
             "unscoped file paths must not cross the Core repository boundary"
         );
     }
@@ -810,11 +788,8 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             assert_explicit_source_publication(&first, stored_provider, source_format);
             assert_eq!(first["totals"]["current_rejected_records"], 0);
         }
-        wait_for_imported_projections(&temp, &first);
-        let initial_event_count = source_backed_count(
-            &temp,
-            &format!("SELECT COUNT(*) FROM ctx_events WHERE provider = '{stored_provider}'"),
-        );
+        wait_for_imported_core(&temp, &first);
+        let initial_event_count = provider_core_records(&data_root(&temp), stored_provider).len();
         assert!(initial_event_count >= 1, "{stored_provider}: {first:#}");
 
         let mut second_command = ctx(&temp);
@@ -852,14 +827,12 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             assert_explicit_source_publication(&third, stored_provider, source_format);
             assert_eq!(third["totals"]["current_rejected_records"], 0);
         }
-        wait_for_imported_projections(&temp, &third);
+        wait_for_imported_core(&temp, &third);
         assert!(
-            source_backed_count(
-                &temp,
-                &format!("SELECT COUNT(*) FROM ctx_events WHERE provider = '{stored_provider}'")
-            ) > initial_event_count,
+            provider_core_records(&data_root(&temp), stored_provider).len() > initial_event_count,
             "{third:#}"
         );
+        assert!(!data_root(&temp).join("relational.sqlite").exists());
 
         let mut search_command = ctx(&temp);
         if exact_cwd {
@@ -1079,22 +1052,9 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "cline", "cline_task_directory_json");
-    wait_for_imported_projections(&temp, &imported);
+    wait_for_imported_core(&temp, &imported);
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'cline'"
-        ),
-        1
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'cline'"
-        ),
-        5
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "cline"), (1, 5));
 
     let second = json_output(ctx(&temp).args([
         "import",
@@ -1130,22 +1090,9 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "roo_code", "roo_task_directory_json");
-    wait_for_imported_projections(&temp, &imported);
+    wait_for_imported_core(&temp, &imported);
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'roo_code'"
-        ),
-        2
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'roo_code'"
-        ),
-        7
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "roo_code"), (2, 7));
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -1189,38 +1136,30 @@ fn antigravity_cli_imports_native_transcript_tree() {
         "antigravity",
         "antigravity_cli_transcript_jsonl_tree",
     );
-    wait_for_imported_projections(&temp, &imported);
+    wait_for_imported_core(&temp, &imported);
+    let records = provider_core_records(&data_root(&temp), "antigravity");
     assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'antigravity'"
-        ),
-        3
+        provider_core_counts(&data_root(&temp), "antigravity"),
+        (3, 8)
     );
     assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'antigravity'"
-        ),
-        8
-    );
-
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions \
-             WHERE provider = 'antigravity' AND provider_session_id = 'agy-future'",
-        ),
+        records
+            .iter()
+            .filter(|record| record.provider_session_id.as_deref() == Some("agy-future"))
+            .map(|record| record.session_id.as_uuid())
+            .collect::<BTreeSet<_>>()
+            .len(),
         1,
         "the future-shape transcript must retain its notice-only session"
     );
     assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events \
-             WHERE provider = 'antigravity' AND provider_session_id = 'agy-future' \
-             AND event_type = 'notice'",
-        ),
+        records
+            .iter()
+            .filter(|record| {
+                record.provider_session_id.as_deref() == Some("agy-future")
+                    && record.event_type == "notice"
+            })
+            .count(),
         2,
         "both future-shape records must survive as notices"
     );
@@ -1271,7 +1210,7 @@ fn antigravity_cli_inventory_prefers_full_transcript_over_live_partial() {
         "antigravity",
         "antigravity_cli_transcript_jsonl_tree",
     );
-    wait_for_imported_projections(&temp, &imported);
+    wait_for_imported_core(&temp, &imported);
     assert_eq!(
         imported["sources"][0]["source_files"],
         2,
@@ -1282,10 +1221,7 @@ fn antigravity_cli_inventory_prefers_full_transcript_over_live_partial() {
         "{imported:#}"
     );
     assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'antigravity'"
-        ),
+        provider_core_counts(&data_root(&temp), "antigravity").0,
         1,
         "{imported:#}"
     );
@@ -1305,25 +1241,12 @@ fn codex_cli_catalogs_valid_content_from_mixed_fixture() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl");
-    wait_for_imported_projections(&temp, &imported);
+    wait_for_imported_core(&temp, &imported);
     assert_eq!(
         imported["totals"]["current_rejected_records"], 1,
         "{imported:#}"
     );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'codex'"
-        ),
-        1
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex'"
-        ),
-        2
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "codex"), (1, 2));
 
     let search = json_output(ctx(&temp).args(["search", "after malformed", "--format=json"]));
     assert!(!search["results"].as_array().unwrap().is_empty());
@@ -1343,25 +1266,12 @@ fn pi_cli_catalogs_valid_content_from_mixed_fixture() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "pi", "pi_session_jsonl");
-    wait_for_imported_projections(&temp, &imported);
+    wait_for_imported_core(&temp, &imported);
     assert_eq!(
         imported["totals"]["current_rejected_records"], 2,
         "{imported:#}"
     );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'pi'"
-        ),
-        1
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi'"
-        ),
-        2
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "pi"), (1, 2));
 
     let query = "after malformed line";
     let search =

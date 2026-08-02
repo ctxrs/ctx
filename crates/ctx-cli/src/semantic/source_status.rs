@@ -4,14 +4,12 @@ use anyhow::Result;
 use ctx_history_index::{
     current_source_generation_policy, current_source_generation_policy_hash, VerifiedIndex,
 };
-use ctx_history_relational::RelationalProjectionStatus;
 use serde_json::{json, Value};
 
 use crate::{
     commands::import::{load_explicit_source_catalog_authority, ExplicitSourceCatalogAuthority},
     compact_json,
     config::AppConfig,
-    source_sql::{sql_compatibility_path, SqlCompatibility},
 };
 
 use super::{
@@ -19,7 +17,6 @@ use super::{
         daemon_core_refresh_job_path, daemon_jobs_path, daemon_report_with_disabled_status,
         daemon_semantic_job_path, read_daemon_job_status,
     },
-    source_backed_relational_catch_up::read_status_json as read_relational_catch_up_status,
     vector_store::{source_backed_semantic_vector_path, SemanticVectorStore},
 };
 
@@ -64,9 +61,6 @@ pub(crate) fn source_epoch_status_report(
         &mut semantic,
         read_daemon_job_status(&daemon_semantic_job_path(data_root)),
     );
-    let (mut relational, relational_counts) =
-        relational_report(data_root, index.as_ref(), &current_policy_hash);
-    attach_catch_up_status(&mut relational, read_relational_catch_up_status(data_root));
     let pro_projection = pro_projection_report(data_root, generation_id.as_deref());
     let refresh = refresh_report(refresh_job.as_ref(), generation_id.as_deref(), &daemon);
 
@@ -75,7 +69,10 @@ pub(crate) fn source_epoch_status_report(
     let indexed_sources = index
         .as_ref()
         .map(|index| index.manifest().sources.len() as u64);
-    let indexed_sessions = relational_counts.map(|counts| counts.sessions);
+    let indexed_sessions = index
+        .as_ref()
+        .map(|index| index.session_count())
+        .transpose()?;
 
     Ok(SourceEpochStatus {
         initialized,
@@ -93,7 +90,6 @@ pub(crate) fn source_epoch_status_report(
             "catalog": catalog,
             "refresh": refresh,
             "semantic": semantic,
-            "relational": relational,
             "pro_projection": pro_projection,
             "daemon": daemon,
             "indexed_items": indexed_items,
@@ -457,123 +453,6 @@ fn semantic_report(data_root: &Path, config: &AppConfig, index: Option<&Verified
         "config_source": config.semantic_search_source(),
         "flat_f32": flat_f32,
     }))
-}
-
-#[derive(Clone, Copy)]
-struct RelationalCounts {
-    sessions: u64,
-}
-
-fn relational_report(
-    data_root: &Path,
-    index: Option<&VerifiedIndex>,
-    current_policy_hash: &str,
-) -> (Value, Option<RelationalCounts>) {
-    let path = sql_compatibility_path(data_root);
-    if !path.is_file() {
-        return (
-            compact_json(json!({
-                "status": if index.is_some() { "pending" } else { "unavailable" },
-                "reason": if index.is_some() {
-                    "projection_missing"
-                } else {
-                    "lexical_generation_unavailable"
-                },
-                "path": path,
-            })),
-            None,
-        );
-    }
-    let projection = match SqlCompatibility::open(&path) {
-        Ok(projection) => projection,
-        Err(error) => {
-            return (
-                compact_json(json!({
-                    "status": "unavailable",
-                    "reason": "projection_open_failed",
-                    "path": path,
-                    "last_error": error.to_string(),
-                })),
-                None,
-            )
-        }
-    };
-    let metadata = match projection.metadata() {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            return (
-                compact_json(json!({
-                    "status": "unavailable",
-                    "reason": "projection_metadata_failed",
-                    "path": path,
-                    "last_error": error.to_string(),
-                })),
-                None,
-            )
-        }
-    };
-    let projection_state = match metadata.status {
-        RelationalProjectionStatus::Empty => "empty",
-        RelationalProjectionStatus::Ready => "ready",
-        RelationalProjectionStatus::Behind => "behind",
-    };
-    let generation_matches = index
-        .map(|index| metadata.active_core_generation_id.as_deref() == Some(index.generation_id()));
-    let policy_matches =
-        Some(metadata.active_policy_schema_hash.as_deref() == Some(current_policy_hash));
-    let exact_generation = generation_matches == Some(true) && policy_matches == Some(true);
-    let ready = metadata.status == RelationalProjectionStatus::Ready && exact_generation;
-    let stale = index.is_some()
-        && (metadata.active_core_generation_id.is_some() && generation_matches == Some(false)
-            || metadata.active_policy_schema_hash.is_some() && policy_matches == Some(false));
-    let value = compact_json(json!({
-        "status": if ready {
-            "ready"
-        } else if index.is_none() {
-            "unavailable"
-        } else if stale {
-            "stale"
-        } else {
-            "pending"
-        },
-        "reason": if ready {
-            Value::Null
-        } else if index.is_none() {
-            json!("lexical_generation_unavailable")
-        } else if generation_matches == Some(false)
-            && metadata.active_core_generation_id.is_some()
-        {
-            json!("generation_mismatch")
-        } else if policy_matches == Some(false)
-            && metadata.active_policy_schema_hash.is_some()
-        {
-            json!("policy_mismatch")
-        } else if metadata.status == RelationalProjectionStatus::Behind {
-            json!("projection_behind")
-        } else {
-            json!("projection_empty")
-        },
-        "path": path,
-        "projection_status": projection_state,
-        "build_generation": metadata.build_generation,
-        "active_core_generation_id": metadata.active_core_generation_id,
-        "target_core_generation_id": metadata.target_core_generation_id,
-        "generation_matches": generation_matches,
-        "active_manifest_version": metadata.active_manifest_version,
-        "active_lexical_schema_version": metadata.active_lexical_schema_version,
-        "active_policy_schema_hash": metadata.active_policy_schema_hash,
-        "policy_matches": policy_matches,
-        "source_count": metadata.source_count,
-        "session_count": metadata.session_count,
-        "event_count": metadata.event_count,
-        "file_touch_count": metadata.file_touch_count,
-        "last_error": metadata.last_error,
-        "read_only": true,
-    }));
-    let counts = ready.then_some(RelationalCounts {
-        sessions: metadata.session_count,
-    });
-    (value, counts)
 }
 
 fn pro_projection_report(data_root: &Path, generation_id: Option<&str>) -> Value {

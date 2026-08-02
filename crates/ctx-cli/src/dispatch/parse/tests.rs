@@ -88,7 +88,7 @@ fn root_errors_wrap_at_terminal_width_with_public_ctx_usage() {
         assert!(invalid.contains("unrecognized subcommand"), "{invalid}");
         assert!(invalid.contains("frobnicate"), "{invalid}");
         assert!(
-            !normalized.contains("A similar subcommand exists:"),
+            normalized.contains("A similar subcommand exists: 'locate'."),
             "{invalid}"
         );
         assert!(invalid.contains("ctx [OPTIONS] <COMMAND>"), "{invalid}");

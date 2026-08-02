@@ -14,20 +14,7 @@ fn warp_cli_imports_default_sqlite() {
     ]));
     assert_authoritative_provider_publication(&imported);
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'warp'"
-        ),
-        1
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'warp'"
-        ),
-        3
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "warp"), (1, 3));
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -100,20 +87,7 @@ fn warp_native_default_discovery_is_included_in_import_all() {
         json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
     assert_authoritative_provider_publication(&imported);
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'warp'"
-        ),
-        1
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'warp'"
-        ),
-        3
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "warp"), (1, 3));
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -148,20 +122,7 @@ fn lingma_cli_default_source_imports_home_local_db() {
         json_output(ctx(&temp).args(["import", "--provider", "lingma", "--format=json"]));
     assert_authoritative_provider_publication(&imported);
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'lingma'"
-        ),
-        1
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'lingma'"
-        ),
-        2
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "lingma"), (1, 2));
 
     let search =
         json_output(ctx(&temp).args(["search", query, "--provider", "lingma", "--format=json"]));
@@ -192,20 +153,7 @@ fn tabnine_cli_imports_default_agent_home_searches_and_reimports() {
     ]));
     assert_authoritative_provider_publication(&imported);
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'tabnine'"
-        ),
-        2
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'tabnine'"
-        ),
-        7
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "tabnine"), (2, 7));
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -272,18 +220,8 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
     assert_authoritative_provider_publication(&imported);
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
     assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'deepagents'"
-        ),
-        1
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'deepagents'"
-        ),
-        3
+        provider_core_counts(&data_root(&temp), "deepagents"),
+        (1, 3)
     );
 
     let search = json_output(ctx(&temp).args([
@@ -306,13 +244,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
     ]));
     assert_authoritative_provider_publication(&second);
     assert_eq!(second["totals"]["current_rejected_records"], 0);
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'deepagents'"
-        ),
-        3
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "deepagents").1, 3);
 }
 
 #[test]
@@ -399,38 +331,30 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             assert_eq!(imported["totals"]["current_rejected_records"], 0);
         }
         assert_eq!(
-            source_backed_count(
-                &temp,
-                &format!("SELECT COUNT(*) FROM ctx_sessions WHERE provider = '{stored_provider}'")
-            ),
-            sessions,
-            "unexpected {stored_provider} session count"
-        );
-        assert_eq!(
-            source_backed_count(
-                &temp,
-                &format!("SELECT COUNT(*) FROM ctx_events WHERE provider = '{stored_provider}'")
-            ),
-            events,
-            "unexpected {stored_provider} event count"
+            provider_core_counts(&data_root(&temp), stored_provider),
+            (sessions, events),
+            "unexpected {stored_provider} Core counts"
         );
         if stored_provider == "crush" {
+            let records = provider_core_records(&data_root(&temp), "crush");
             assert_eq!(
-                source_backed_count(
-                    &temp,
-                    "SELECT COUNT(*) FROM ctx_events \
-                     WHERE provider = 'crush' AND provider_session_id = 'crush-child' \
-                     AND event_type = 'command_output'",
-                ),
+                records
+                    .iter()
+                    .filter(|record| {
+                        record.provider_session_id.as_deref() == Some("crush-child")
+                            && record.event_type == "command_output"
+                    })
+                    .count(),
                 1,
                 "the successful child-only shell command output must remain in self-contained Core"
             );
             assert_eq!(
-                source_backed_count(
-                    &temp,
-                    "SELECT COUNT(*) FROM ctx_events \
-                     WHERE provider = 'crush' AND provider_session_id = 'crush-root'",
-                ),
+                records
+                    .iter()
+                    .filter(|record| {
+                        record.provider_session_id.as_deref() == Some("crush-root")
+                    })
+                    .count(),
                 3,
                 "the fourth Crush event must not duplicate a root message"
             );

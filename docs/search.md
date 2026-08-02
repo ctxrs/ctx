@@ -1,18 +1,15 @@
 # Search
 
-`ctx search` finds agent-history records imported into Core. The v0.26 search
-epoch has one self-contained Core generation and two rebuildable derived
-projections:
+`ctx search` finds agent-history records indexed into Core. The v0.26 search
+epoch has an immutable lexical generation and an optional semantic sidecar:
 
 - immutable Core/Tantivy generations under `search/lexical`, containing complete
-  normalized stored records and lexical fields;
+  policy-selected normalized records and source identities;
 - flat-F32 semantic projections under `search/semantic`;
-- the optional read-only SQL metadata projection in `relational.sqlite`.
 
-The Core/Tantivy generation contains the full policy-selected meaningful text
-and the metadata needed to match and present imported Core events. Search
-snippets come from those stored records; search does not reopen provider
-transcript files.
+The Core/Tantivy generation contains policy-selected meaningful text, complete
+normalized records, and the metadata needed to match indexed events. Search
+snippets and typed event/session presentation come from those stored records.
 
 Default results are session-diverse: ctx shows the strongest matching event
 from each session, then lets you drill into dense event-level results.
@@ -139,10 +136,10 @@ remains lexical-safe in those cases.
 
 `--refresh background` is the default. Search health-checks and, when needed,
 wakes or recovers the default-enabled persistent daemon, then serves the latest
-committed generation without waiting for every independent projection. The
-daemon owns bounded provider discovery, source refresh, immutable
-candidate-generation construction, publication, relational catch-up, opted-in
-semantic catch-up, and Pro catch-up. The query process never becomes a
+committed lexical generation without waiting for optional semantic indexing or
+independent Pro materialization. The daemon owns bounded provider discovery,
+source refresh, immutable candidate-generation construction, publication,
+opted-in semantic catch-up, and Pro catch-up. The query process never becomes a
 foreground history writer.
 
 On a fresh root, background mode asks the daemon to publish the first lexical
@@ -168,16 +165,16 @@ Winner-only provider precedence prevents combining a selected replacement with
 stale defaults.
 
 `ctx status`, `ctx index status`, and search JSON report lexical generation,
-source catalog availability, semantic generation binding and coverage,
-relational projection state, daemon work, and typed fallback reasons.
+source catalog availability, semantic generation binding and coverage, daemon
+work, and typed fallback reasons.
 
 ## Core-backed presentation
 
-Search snippets and `ctx show` transcripts come from the active verified Core
-generation. Query-time commands do not reopen provider transcript files.
-Provider changes become visible after explicit import or daemon refresh
-publishes a new Core generation. `ctx show session` preserves the imported
-event order.
+Search snippets and `ctx show` presentation come from complete policy-selected
+records in the active verified Core/Tantivy generation. Query-time reads do not
+reopen provider history. Provider changes become searchable and visible to show
+after explicit import or daemon refresh publishes a new Core generation.
+`ctx show session` preserves provider event order.
 
 ## History reports
 

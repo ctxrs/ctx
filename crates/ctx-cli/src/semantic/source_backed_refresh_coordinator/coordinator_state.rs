@@ -319,7 +319,7 @@ impl CoreRefreshEngine {
             let request_id = run.job.get("request_id").and_then(Value::as_str);
             let receipt = request_id.and_then(|request_id| self.receipt_for_request(request_id));
             let binding = match (pin, receipt) {
-                (Some(pin), Some(receipt)) => self.bind_core_publication(data_root, receipt, pin),
+                (Some(pin), Some(receipt)) => self.bind_core_publication(receipt, pin),
                 _ => Err(anyhow!(
                     "completed Core publication has no exact verified generation pin and receipt"
                 )),

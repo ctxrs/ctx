@@ -142,15 +142,6 @@ const TOPICS: &[DocTopic] = &[
         body: include_str!("../../../docs/search.md"),
     },
     DocTopic {
-        id: "sql",
-        title: "SQL",
-        audience: "agent",
-        summary: "Read-only SQL usage, stable view schemas, limits, and examples.",
-        tags: &["sql", "sqlite", "views", "advanced"],
-        source_path: "docs/sql.md",
-        body: include_str!("../../../docs/sql.md"),
-    },
-    DocTopic {
         id: "mcp",
         title: "MCP",
         audience: "agent",
@@ -848,13 +839,13 @@ mod ui_tests {
 
     #[test]
     fn docs_search_success_is_outcome_first_and_actionable() {
-        let topic = TOPICS.iter().find(|topic| topic.id == "sql").unwrap();
+        let topic = TOPICS.iter().find(|topic| topic.id == "search").unwrap();
         let context = context(48, ColorMode::Never);
-        let document = render_docs_search(&context, "sql", &[(1_000, topic)]);
+        let document = render_docs_search(&context, "filters", &[(1_000, topic)]);
         let rendered = document.render_plain();
-        assert!(rendered.starts_with("✓ 1 doc matched \"sql\"\n"));
+        assert!(rendered.starts_with("✓ 1 doc matched \"filters\"\n"));
         assert!(rendered.contains("Matches\n"));
-        assert!(rendered.contains("Next\n  ctx docs show sql\n"));
+        assert!(rendered.contains("Next\n  ctx docs show search\n"));
         assert_fits(&document, &context);
     }
 

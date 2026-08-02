@@ -29,8 +29,9 @@ The duplicate `upgrade.interval_seconds` config key is also removed. Use
 `upgrade.interval_hours` for persistent configuration or
 `CTX_UPGRADE_INTERVAL_SECONDS` for a process-level override.
 
-ctx stores self-contained Core generations and derived indexes locally. Treat
-the ctx data root like private source history.
+ctx stores immutable Core/Tantivy search generations, optional semantic data,
+content-free local usage aggregates, and optional encrypted Pro data locally.
+Treat the ctx data root like private source history.
 
 ## Local Layout
 
@@ -41,9 +42,10 @@ Default root:
   search/
     lexical/
     semantic/
-  relational.sqlite
   usage.sqlite
   config.toml
+  pro/
+    ctx-pro.db  # when Local Pro is installed
   runtime/
     onnxruntime/
       <runtime-version>/
@@ -67,8 +69,8 @@ installed executable, not indexed provider history.
 ## Local Usage Product State
 
 `usage.sqlite` is an owner-private SQLite sidecar under the selected ctx data
-root. It is separate from provider history, the disposable
-`relational.sqlite` metadata projection, and the encrypted Local Pro graph.
+root. It is separate from provider history, Core/Tantivy and semantic search
+data, and the encrypted Local Pro graph.
 Local usage is product state, not telemetry: it has no network path or
 analytics identity and remains available when analytics are disabled.
 
@@ -148,27 +150,32 @@ installer and development installer place those native runtime files under
 They are product runtime assets, not provider-history storage, and may be shared
 by multiple ctx data roots on the same machine.
 
-## Core and derived storage
+## Provider sources, Core, and derived storage
 
-Import reads provider transcript files and explicit plugin/custom source
-streams, applies content policy, and publishes a self-contained Core
-generation with stable identities, metadata, and policy-selected normalized
-content. ctx also maintains local consumers:
+Provider-owned history remains source authority. Import reads native JSONL,
+document/tree, and provider SQLite formats plus explicit plugin/custom streams,
+applies content policy, and publishes a Core/Tantivy generation with stable ctx
+identities, complete policy-selected normalized records, and source identity
+metadata. Provider SQLite adapters use short read-only logical snapshots with
+normal committed WAL visibility and never checkpoint or write provider data.
 
 - `search/lexical` contains immutable verified Core/Tantivy generations used
-  for lexical search and complete show presentation.
+  for lexical search and indexed snippets.
 - `search/semantic` contains generation-bound flat-F32 vectors, hashes, and
   offsets derived from eligible Core content; it does not persist separate
   plaintext transcript chunks.
-- `relational.sqlite` contains a disposable metadata projection for stable
-  read-only `ctx_*` SQL views. It can contain IDs, provider/source metadata,
-  timestamps, workspace/cwd data, touched-file metadata, event classes, and
-  projection state. It does not contain message bodies or display previews.
+- `pro/ctx-pro.db`, when Local Pro is installed, is an encrypted derived facts
+  graph advanced from a pinned Core generation through the bounded Pro
+  materialization protocol. It is independent of semantic readiness and is not
+  Core search authority.
+- `usage.sqlite` contains only the bounded content-free aggregates documented
+  above. It is product state, not history or search authority.
 
-Search, show, and MCP presentation read the active verified Core generation.
-They do not reopen provider transcript files at query time. Provider-file
-changes become visible after import or daemon refresh publishes a new Core
-generation.
+Search, show, locate, and MCP retrieval read the active verified Core/Tantivy
+generation. Show presents complete policy-selected normalized records stored in
+Core, while locate returns bounded Core source identity metadata; neither
+reopens provider history at query time. Provider changes become visible after
+import or daemon refresh publishes a new Core generation.
 
 Lexical publication keeps the active generation and one previous generation
 for recovery and pinned readers; their manifests and integrity receipts use the
@@ -284,8 +291,8 @@ same identity-aware `--delete-data` operation completes. The nonsecret
 
 The current CLI does not retain payload classes excluded by policy, including
 binary artifacts, image payloads, raw diffs, and provider-private blobs. Core
-does retain policy-selected normalized message and result content needed for
-search and show; the relational projection remains metadata-only.
+retains complete policy-selected normalized message/result records, metadata,
+and stable provider/source identities. Show reads those stored Core records.
 See
 [`provider-import-policy.md`](provider-import-policy.md) for the native adapter
 content policy.
@@ -298,10 +305,10 @@ copy token values from `agent_conversations.conversation_data`.
 No session text, prompts, transcripts, or indexed snippets are sent by ctx by
 default.
 
-Search, show, MCP, and eligible Pro materialization consume the verified Core
-generation rather than reopening original provider records. Output remains
-bounded, and content excluded by import policy is not reconstructed at query
-time.
+Search, show, and MCP presentation consume the verified Core/Tantivy generation,
+while eligible Pro materialization consumes a bounded feed from the same pinned
+Core generation. Output remains bounded, and content excluded by import policy
+is not reconstructed.
 
 ## Provider-Owned Data
 
@@ -312,9 +319,10 @@ files needed to choose the provider's winning root. It does not create provider
 directories, migrate provider data, execute provider commands, or combine a
 selected replacement with old defaults. Exact one-shot paths are read only
 after the user supplies `--path` and are not remembered as discovery policy.
-If a source moves, changes, or is deleted, the active Core generation remains
-self-contained and queryable. Refresh or explicit import discovers the new
-source state and atomically publishes the corresponding generation.
+If a source moves, changes, or is deleted, the active Core/Tantivy generation
+remains available for search and typed presentation. Refresh or explicit import
+discovers the new source state and atomically publishes the corresponding
+generation; a failed refresh leaves the prior verified generation active.
 
 ## Command Read/Write Behavior
 
@@ -325,25 +333,24 @@ local upsert as described above.
 
 | Command | Reads | Writes |
 | --- | --- | --- |
-| `ctx setup` | provider transcript files and bounded path metadata for source discovery | data root, source catalog/epoch metadata, `search/lexical`, `relational.sqlite`, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs; old Store artifacts are neither opened nor deleted |
-| `ctx status` | data root metadata, source epoch, lexical/semantic generation metadata, relational projection metadata, daemon state, and Pro authorization state when installed | may advance nonsecret anti-clock-rollback security metadata during Pro entitlement authorization; does not mutate provider history, Core generations, or local Pro graph data |
+| `ctx setup` | provider transcript files and bounded path metadata for source discovery | data root, source catalog/epoch metadata, `search/lexical`, and optional daemon lock/status/job files when eligible human-readable daemon autostart runs; old Store artifacts are neither opened nor deleted |
+| `ctx status` | data root metadata, source epoch, lexical/semantic generation metadata, daemon state, compact local usage health, and Pro authorization state when installed | may advance nonsecret anti-clock-rollback security metadata during Pro entitlement authorization; does not mutate provider history, Core generations, usage aggregates, or local Pro graph data |
 | `ctx stats` | owner-private aggregate `usage.sqlite` when present | none; does not create pristine usage state or count itself |
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, and local history-source plugin manifests | none |
-| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v1 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core generation with complete normalized stored records and atomic publication, catalog/epoch metadata, and optional daemon files; relational, Pro, and semantic catch-up are daemon-owned and do not delay foreground completion |
-| `ctx show session` / `ctx show event` | active verified Core generation | selected `--out` path for `show session` when provided |
-| `ctx search` | active verified Core generation and existing semantic generation; depending on refresh mode, bounded provider discovery/path metadata | candidate Core generation publication and relational catch-up only when refresh runs; background mode may write daemon state, and semantic-enabled search may create query endpoint files |
-| `ctx sql` | `relational.sqlite` metadata projection and active lexical generation identity for generation checks | may initialize an empty disposable projection on a completely fresh root; never refreshes sources or creates prior-epoch storage |
-| `ctx pro` / `ctx pro setup` | selected credential store, commercial account state, signed release metadata/artifact, active Core generation, and an optional first-challenge codename only for `ctx pro --referral <codename>` | selected credential store, signed helper installation, encrypted derived graph, and an optional opaque referral claim after accepted activation; the raw codename is not retained, and the explicit `setup` form is a synonym without referral attribution |
+| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v1 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, and optional daemon files; Pro and semantic work is daemon-owned and does not delay foreground completion |
+| `ctx show session` / `ctx show event` | complete policy-selected records in the active verified Core/Tantivy generation | selected `--out` path for `show session` when provided |
+| `ctx search` | active verified Core/Tantivy generation and existing semantic generation; depending on refresh mode, bounded provider discovery/path metadata | candidate Core generation publication only when refresh runs; background mode may write daemon state, and semantic-enabled search may create query endpoint files |
+| `ctx pro` / `ctx pro setup` | selected credential store, commercial account state, signed release metadata/artifact, pinned Core materialization feed, and an optional first-challenge codename only for `ctx pro --referral <codename>` | selected credential store, signed helper installation, encrypted derived graph, and an optional opaque referral claim after accepted activation; the raw codename is not retained, and the explicit `setup` form is a synonym without referral attribution |
 | `ctx pro manage` | selected credential store and commercial account state | may refresh the WorkOS session in the selected credential store and open a hosted billing-portal URL |
 | `ctx pro uninstall` | helper and local Pro paths | requires or prompts for a data choice; `--keep-data` removes only the helper and records preserved local Pro graph data when it exists, while `--delete-data` removes and verifies local Pro data; never-Pro roots leave Pro state unchanged, while independent default-on Core usage reporting may create or increment `usage.sqlite` |
 | `ctx referral create` / `status` / `payout` | selected-store commercial session and explicit hosted referral state; status reads only the authenticated referrer's aggregate summary | may refresh the commercial session in the selected credential store; human mode may open WorkOS AuthKit, and payout may open a one-use Stripe-hosted onboarding URL; JSON mode never opens a browser |
 | first successful nonempty interactive `ctx blame` | normal Pro blame inputs and whether the local shown-once marker already exists | may atomically create the private nonsecret shown-once marker after delivering the result; no referral network request or telemetry |
 | `ctx docs` | embedded documentation in the binary | selected topic `--out` path for `ctx docs show --out` or selected `--out` directory for `ctx docs man --out` |
 | `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, and executable-adjacent `.ctx.upgrade-state.json`, `.ctx.install.lock`, and transaction journal |
-| `ctx doctor` | source epoch, lexical/semantic generation metadata, relational projection metadata, and ctx-owned daemon lock/status/job metadata | none |
+| `ctx doctor` | source epoch, lexical/semantic generation metadata, and ctx-owned daemon lock/status/job metadata | none |
 | `ctx daemon status` | lexical/semantic generation and ctx-owned daemon lock/status/job metadata | none |
 | `ctx daemon enable` / `ctx daemon disable` | `config.toml` | `config.toml` |
-| `ctx daemon run` | provider transcripts, active lexical generation, relational projection, semantic generation, model-cache metadata, and daemon state | candidate lexical generation publication, relational and semantic catch-up, and daemon state |
+| `ctx daemon run` | provider transcripts, active lexical and semantic generations, model-cache metadata, independent Pro source-generation state, and daemon state | candidate lexical generation publication, semantic and Pro catch-up, and daemon state |
 
 Setup, import, and default search do not require source repository writes, model
 APIs, API keys, or remote accounts. Without semantic opt-in they do not download
@@ -498,17 +505,18 @@ ctx import --history-source example-agent/default
 
 Current adapters are safe to re-run. They rescan sources idempotently and keep
 stable source identity and import-progress metadata. Imports always commit valid
-records and report rejected records. Sources with no usable imported content fail, as do
-unreadable or incompatible sources; ctx-owned generation failures abort the
-command. Native provider progress is scoped by provider, source format, and an
-opaque source identity derived from the configured source root.
+records and report rejected records. Sources with no usable imported content
+fail, as do unreadable or incompatible sources; ctx-owned generation failures
+abort the command. Native provider progress is scoped by provider, source format,
+and an opaque source identity derived from the configured source root.
 
 Refresh builds a private immutable Core/Tantivy candidate containing complete
 normalized stored records from current provider sources, verifies its manifest
 and policy identity, then atomically publishes it under `search/lexical`.
-Published generations are never opened writable. Relational, semantic, and Pro
-consumers are advanced only against a verified active Core generation and fail
-closed on generation mismatch.
+Published generations are never opened writable. Semantic data and Pro
+materialization are advanced only against a verified pinned Core generation;
+each derived consumer maintains its own receipt and fails closed on generation
+mismatch.
 
 Custom history JSONL and history-source plugins follow the same import and Core
 publication lifecycle. Failed plugin runs do not advance cursor state.
@@ -517,11 +525,13 @@ treated as fixed provider homes.
 
 ## v0.26 epoch transition
 
-v0.26 starts a fresh self-contained Core history epoch. It does not migrate,
-read, or delete the legacy canonical Store or use it as fallback. An old
-`work.sqlite` family is inert and remains an explicit owner-managed artifact.
+v0.26 starts a fresh Core/Tantivy search epoch from provider-owned source
+history. It does not migrate, read, or delete the legacy canonical Store or use
+it as fallback. An old `work.sqlite` family is inert and remains an explicit
+owner-managed artifact.
 
-Setup discovers current provider sources and builds new derived generations.
+Setup discovers current provider sources and builds a new Core/Tantivy
+generation, then schedules optional semantic and independent Pro work.
 If a source needed for rebuilding no longer exists, ctx reports that source as
 unavailable; it does not recover content from prior-epoch rows.
 
@@ -542,51 +552,25 @@ not remembered as future defaults. Custom history JSONL paths are also
 one-shot explicit imports. To remove already imported data, rebuild the Core
 generation with only the sources you still want.
 
-## SQL Inspection
+## Reset And Inspect Local Search Storage
 
-`ctx sql` is a read-only advanced inspection command for cases normal search
-does not express, such as exact metadata counts, joins, audits, and one-off
-scripts. It queries `relational.sqlite`, a disposable projection bound to the
-active lexical generation. It rejects writes and multiple statements, enforces
-row/column/value caps, and times out long-running queries.
-
-On a completely fresh root, SQL may initialize an empty projection. If a
-lexical generation exists but its relational projection is missing, behind, or
-bound to another generation, SQL fails closed until catch-up completes. It
-never opens or migrates prior-epoch storage and does not refresh provider
-sources.
-
-Stable read-only views are the preferred compatibility surface:
-
-- `ctx_sessions`;
-- `ctx_events`;
-- `ctx_files_touched`;
-- `ctx_sources`.
-
-Run `ctx docs show sql` for view schemas, examples, limits, and output formats.
-Internal projection tables remain local and queryable, but they are
-implementation details and can change across versions. The projection contains
-metadata rather than provider content. SQL output can still expose private
-paths and identifiers.
-
-Reset and rebuild Core and its derived projections:
+Reset and rebuild Core/Tantivy plus optional semantic data:
 
 ```bash
 rm -rf ~/.ctx/search/lexical ~/.ctx/search/semantic
-rm -f ~/.ctx/relational.sqlite ~/.ctx/relational.sqlite-wal ~/.ctx/relational.sqlite-shm
 ctx setup
 ```
 
-This removes the active Core/Tantivy generation and its derived semantic and SQL
-projections, then imports complete normalized stored records from the available
-provider histories. It does not delete provider transcripts.
+This removes the active Core/Tantivy generation and semantic sidecar, then
+imports searchable records and exact locators from the available provider
+histories. It does not delete provider transcripts, `usage.sqlite`, or Local Pro
+data.
 
 Inspect storage size:
 
 ```bash
 du -sh ~/.ctx
 du -sh ~/.ctx/search/lexical ~/.ctx/search/semantic
-du -h ~/.ctx/relational.sqlite*
 ctx status --format json
 ```
 
@@ -605,8 +589,8 @@ removing `/path/to/ctx`. Deleting the directory first can orphan Pro credentials
 or graph keys in the selected credential store because their opaque record IDs
 depend on that identity.
 
-The final directory removal deletes ctx's Core generations, derived
-projections, config, logs, lifecycle lock, and remaining root-local metadata.
+The final directory removal deletes ctx's Core/Tantivy and semantic data,
+`usage.sqlite`, config, logs, lifecycle lock, and remaining root-local metadata.
 It does not remove provider-owned history such as
 `~/.codex/sessions`. The small installation-bound anti-rollback watermark
 described above may remain in the selected credential store after verified Pro
@@ -621,7 +605,8 @@ proprietary design notes.
 Recommended handling:
 
 - keep `~/.ctx` out of source repositories;
-- do not share provider transcripts, ctx search generations, projections, or logs;
+- do not share provider transcripts, ctx search generations, Local Pro data, or
+  logs;
 - review JSON output before sharing it outside the machine;
 - delete or rebuild local Core and derived data when working on shared machines;
 - use provider filters and result limits to keep agent retrieval focused on
@@ -629,8 +614,8 @@ Recommended handling:
 
 ## Network Behavior
 
-Core indexing work uses local filesystem, Tantivy, flat-vector, and projection
-operations. The tools that
+Core indexing work uses the local filesystem and Tantivy; optional semantic
+indexing uses local flat-vector operations. The tools that
 originally produced provider transcripts may have used the network according to
 their own configuration; ctx indexing those transcripts does not repeat that
 behavior.
@@ -657,9 +642,9 @@ grants keep local graph operations usable when renewal is temporarily
 unavailable.
 
 The referral feature writes no state to Core search generations,
-`relational.sqlite`, `usage.sqlite`, the encrypted Pro graph, provider
-transcripts, Git data, local analytics, routine `ctx status`, MCP, or ordinary
-Core flows. It emits no referral telemetry. The hosted service is authoritative for distinct qualifying
+`usage.sqlite`, the encrypted Pro graph, provider transcripts, Git data, local
+analytics, routine `ctx status`, MCP, or ordinary Core flows. It emits no
+referral telemetry. The hosted service is authoritative for distinct qualifying
 $20 monthly invoice reconciliation, 14-day holds, the invoice 2 gate for
 invoices 1 and 2, invoices 3 through 12, refunds, disputes, manual payability,
 paid-reversal debt and negative adjustments, and the $120-per-referral cap. The
@@ -695,8 +680,8 @@ is product state independent of analytics.
 
 `operation_completed@1` reports one terminal outcome for eligible foreground
 operations. Current CLI coverage includes setup, explicit import, status,
-index, sources, show, search, read-only SQL, docs, integrations, upgrade, and
-doctor. Help, version output, and command-line parse errors are not
+index, sources, show, search, docs, integrations, upgrade, and doctor. Help,
+version output, and command-line parse errors are not
 observed. MCP and the daemon are first-class reporting surfaces rather than
 being labeled as CLI traffic. Pro reporting is limited to the public host
 surface; private Pro graph, entitlement, and query internals are not telemetry
@@ -731,7 +716,7 @@ Engine or NVIDIA CUDA acceleration. It does not load an accelerator runtime,
 collect component names, or derive a machine identity.
 
 Telemetry never includes raw history or transcript data, prompts, responses,
-SQL or search query text, result rows or snippets, source bodies, source or
+search query text, result rows or snippets, source bodies, source or
 repository paths, target values, repository or branch names, native session
 IDs, command text or output, raw error strings, credentials, authorization
 headers, access tokens, secrets, usernames, hostnames, raw IP addresses, exact

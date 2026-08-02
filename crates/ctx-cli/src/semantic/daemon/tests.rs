@@ -195,9 +195,7 @@ fn source_refresh_only_scheduler_runs_no_unrelated_job() -> Result<()> {
     let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let _hooks = install_daemon_test_job_hooks(DaemonTestJobHooks {
         calls: calls.clone(),
-        relational_projection: None,
         semantic_index: Some(json!({"status": "completed"})),
-        relational_blocker: None,
     });
     let mut runtime = DaemonRuntime {
         config: AppConfig {
@@ -330,7 +328,7 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
 }
 
 #[test]
-fn one_scheduler_cycle_publishes_core_without_entering_a_blocked_sidecar() -> Result<()> {
+fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
     use super::super::source_backed_refresh_coordinator::{
         SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshPublication,
         SourceBackedRefreshTimings,
@@ -363,31 +361,6 @@ fn one_scheduler_cycle_publishes_core_without_entering_a_blocked_sidecar() -> Re
         },
     ));
     assert!(!coordinator.has_pending_request());
-    let sidecar_calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(1);
-    let (_release_sender, release_receiver) = std::sync::mpsc::channel::<()>();
-    let _hooks = install_daemon_test_job_hooks(DaemonTestJobHooks {
-        calls: sidecar_calls.clone(),
-        relational_projection: Some(json!({
-            "status": "completed",
-            "pending": false,
-            "retryable": false,
-            "did_work": true,
-        })),
-        semantic_index: Some(json!({
-            "status": "ready",
-            "source_generation_ready": true,
-            "source_work_remaining": false,
-        })),
-        relational_blocker: Some(std::rc::Rc::new(move || {
-            started_sender
-                .send(())
-                .expect("report blocked relational test job");
-            release_receiver
-                .recv_timeout(StdDuration::from_secs(10))
-                .expect("release blocked relational test job");
-        })),
-    });
     let mut runtime = DaemonRuntime::default();
 
     let iteration = run_daemon_scheduler_cycle_with_activity(
@@ -404,11 +377,6 @@ fn one_scheduler_cycle_publishes_core_without_entering_a_blocked_sidecar() -> Re
     assert!(!iteration.failed);
     assert!(iteration.continue_immediately);
     assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
-    assert!(sidecar_calls.borrow().is_empty());
-    assert!(matches!(
-        started_receiver.try_recv(),
-        Err(std::sync::mpsc::TryRecvError::Empty)
-    ));
     let job = read_daemon_job_status(&daemon_core_refresh_job_path(temp.path()))
         .ok_or_else(|| anyhow!("periodic source refresh job was not persisted"))?;
     assert_eq!(job["status"], "completed");
@@ -419,7 +387,6 @@ fn one_scheduler_cycle_publishes_core_without_entering_a_blocked_sidecar() -> Re
         job["published_explicit_source_catalog"],
         job["receipt"]["published_explicit_source_catalog"]
     );
-    assert!(job.get("relational_projection").is_none());
     assert!(job.get("pro_projection").is_none());
     assert!(job.get("semantic_projection").is_none());
     assert!(!super::super::paths_status::daemon_semantic_job_path(temp.path()).exists());
@@ -429,12 +396,6 @@ fn one_scheduler_cycle_publishes_core_without_entering_a_blocked_sidecar() -> Re
     assert_eq!(
         runtime.sidecar_drain.generation.as_deref(),
         Some(published_generation)
-    );
-    assert!(
-        super::super::source_backed_relational_catch_up::generation_needs_catch_up(
-            temp.path(),
-            published_generation
-        )
     );
     assert!(temp
         .path()

@@ -69,10 +69,7 @@ _CTX_CLI_TEST_SUPPORT = {
             "sha2",
             "windows-sys",
         ],
-        deps = [
-            "//crates/ctx-history-index:lib",
-            "//crates/ctx-history-relational:lib",
-        ],
+        deps = ["//crates/ctx-history-index:lib"],
         rustc_flags = ["--cfg=ctx_cli_test_support_fixtures"],
         srcs = [
             "tests/support/daemon.rs",

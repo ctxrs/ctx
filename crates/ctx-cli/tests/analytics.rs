@@ -324,7 +324,7 @@ fn help_version_and_parse_errors_are_unobserved() {
 }
 
 #[test]
-fn import_index_and_sql_emit_closed_safe_summaries() {
+fn import_and_index_emit_closed_safe_summaries() {
     let temp = tempdir();
     let events_path = temp.path().join("analytics.jsonl");
     let home = temp.path().join("private-home");
@@ -346,15 +346,6 @@ fn import_index_and_sql_emit_closed_safe_summaries() {
             .assert()
             .success();
     };
-    let generation_id = initialize_generation_only_sql_projection(&data_root);
-    assert!(!generation_id.is_empty());
-    run(&[
-        "sql",
-        "SELECT 'raw-query-secret' AS value",
-        "--format",
-        "json",
-    ]);
-
     let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
     run(&[
         "import",
@@ -368,27 +359,19 @@ fn import_index_and_sql_emit_closed_safe_summaries() {
     run(&["index", "status", "--format=json"]);
 
     let events = read_analytics_events(&events_path);
-    assert_eq!(events.len(), 3);
-    assert_operation_event(&events[0], "sql", "success");
-    assert_operation_event(&events[1], "import", "success");
-    assert_operation_event(&events[2], "index", "success");
-    let sql = analytics_event_properties(&events[0]);
-    assert_eq!(sql["input"], "inline");
-    assert_eq!(sql["returned_rows_bucket"], "1");
-    assert_eq!(sql["returned_columns_bucket"], "1");
-    let import = analytics_event_properties(&events[1]);
+    assert_eq!(events.len(), 2);
+    assert_operation_event(&events[0], "import", "success");
+    assert_operation_event(&events[1], "index", "success");
+    let import = analytics_event_properties(&events[0]);
     assert_eq!(import["source_mode"], "explicit_path");
     assert_eq!(import["provider_filter"], "codex");
     assert_eq!(import["import_outcome"], "success");
-    let index = analytics_event_properties(&events[2]);
+    let index = analytics_event_properties(&events[1]);
     assert_eq!(index["index_operation"], "status");
     assert!(index["lexical_state"].as_str().is_some());
     for event in &events {
         assert_analytics_properties_are_allowlisted(analytics_event_properties(event));
-        assert_no_json_string_contains(
-            event,
-            &["raw-query-secret", fixture.as_str(), home.to_str().unwrap()],
-        );
+        assert_no_json_string_contains(event, &[fixture.as_str(), home.to_str().unwrap()]);
     }
 }
 
@@ -519,7 +502,7 @@ fn analytics_payloads_omit_sensitive_command_data() {
     let data_root = temp.path().join("ctx-data");
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(&home).unwrap();
-    let generation_id = initialize_generation_only_sql_projection(&data_root);
+    let generation_id = initialize_generation_only_core(&data_root);
     assert!(!generation_id.is_empty());
     assert!(data_root.join("search/lexical").is_dir());
     assert!(!data_root.join("work.sqlite").exists());
@@ -657,7 +640,7 @@ fn search_analytics_reports_empty_source_backed_generation() {
     let data_root = temp.path().join("ctx-data");
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(&home).unwrap();
-    let generation_id = initialize_generation_only_sql_projection(&data_root);
+    let generation_id = initialize_generation_only_core(&data_root);
     assert!(!generation_id.is_empty());
 
     ctx(&temp)
@@ -692,7 +675,7 @@ fn search_analytics_reports_empty_source_backed_generation() {
         );
     }
     assert!(data_root.join("search/lexical").is_dir());
-    assert!(data_root.join("relational.sqlite").is_file());
+    assert!(!data_root.join("relational.sqlite").exists());
     assert!(!data_root.join("work.sqlite").exists());
     assert_analytics_properties_are_allowlisted(properties);
 }

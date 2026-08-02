@@ -3,9 +3,9 @@
 ctx includes experimental in-repo SDKs for using agent history search from
 tools, scripts, editors, and services.
 
-The SDKs all target the same `agent-history-v1` contract. They are thin clients over
-agent-history search primitives, not wrappers around SQLite tables, migrations, release
-tooling, or internal Rust crate shapes.
+The SDKs all target the same `agent-history-v1` contract. They are thin clients
+over agent-history search primitives, not wrappers around provider-native
+storage schemas, migrations, release tooling, or internal Rust crate shapes.
 
 ## Status
 

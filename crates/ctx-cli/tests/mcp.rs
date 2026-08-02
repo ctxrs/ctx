@@ -57,6 +57,7 @@ fn mcp_status_exactly_matches_cli_json_for_pristine_unavailable_state() {
     assert_eq!(cli["initialized"], false, "{cli:#}");
     assert_eq!(cli["history_epoch"]["status"], "unavailable", "{cli:#}");
     assert_eq!(cli["lexical"]["status"], "unavailable", "{cli:#}");
+    assert!(cli.get("relational").is_none(), "{cli:#}");
     assert!(cli["upgrade"].is_object(), "{cli:#}");
     assert_eq!(cli["upgrade"]["auto"], "apply", "{cli:#}");
     assert_eq!(cli["upgrade"]["install"]["marker"], "absent", "{cli:#}");
@@ -86,7 +87,7 @@ fn mcp_status_exactly_matches_cli_json_for_pristine_unavailable_state() {
 fn mcp_status_exactly_matches_cli_json_for_existing_healthy_generation() {
     let temp = tempdir();
     let root = data_root(&temp);
-    initialize_generation_only_sql_projection(&root);
+    initialize_generation_only_core(&root);
 
     let (cli, result) =
         assert_cli_mcp_status_parity(&temp, &[("CTX_LOCAL_USAGE_ENABLED", "false")]);
@@ -94,7 +95,7 @@ fn mcp_status_exactly_matches_cli_json_for_existing_healthy_generation() {
     assert_eq!(cli["initialized"], true, "{cli:#}");
     assert_eq!(cli["history_epoch"]["status"], "ready", "{cli:#}");
     assert_eq!(cli["lexical"]["status"], "ready", "{cli:#}");
-    assert_eq!(cli["relational"]["status"], "ready", "{cli:#}");
+    assert!(cli.get("relational").is_none(), "{cli:#}");
     assert_eq!(cli["read_only"], true, "{cli:#}");
     assert_status_facts_stay_machine_only(&result);
 }
@@ -178,22 +179,17 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
     );
 
     let tools = responses[1]["result"]["tools"].as_array().unwrap();
-    for expected in [
-        "status",
-        "sources",
-        "search",
-        "sql",
-        "show_session",
-        "show_event",
-    ] {
+    for expected in ["status", "sources", "search", "show_session", "show_event"] {
         assert!(
             tools.iter().any(|tool| tool["name"] == expected),
             "missing MCP tool {expected} in {tools:#?}"
         );
     }
     assert!(
-        tools.iter().all(|tool| tool["name"] != "research"),
-        "MCP research tool should not be exposed in {tools:#?}"
+        tools
+            .iter()
+            .all(|tool| !matches!(tool["name"].as_str(), Some("research" | "sql"))),
+        "removed MCP tools should not be exposed in {tools:#?}"
     );
     let search_tool = tools.iter().find(|tool| tool["name"] == "search").unwrap();
     for name in ["show_session", "show_event"] {
@@ -300,13 +296,7 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
         ),
         "{status:#}"
     );
-    assert!(
-        matches!(
-            status["relational"]["status"].as_str(),
-            Some("ready" | "pending" | "unavailable")
-        ),
-        "{status:#}"
-    );
+    assert!(status.get("relational").is_none(), "{status:#}");
     assert!(status.get("prior_epoch").is_none());
     assert_eq!(status["read_only"], true, "{status:#}");
     assert_eq!(status["semantic"]["status"], "disabled");
@@ -328,7 +318,6 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
             "history_epoch: status=",
             "lexical: status=",
             "source_refresh: status=",
-            "relational: status=",
             "read_only: true",
             "local_only: true",
             "semantic: status=disabled",
@@ -344,6 +333,7 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
     assert!(data_root
         .join("daemon/source-refresh-endpoint.json")
         .is_file());
+    assert!(!data_root.join("relational.sqlite").exists());
     assert!(
         !data_root.join("work.sqlite").exists(),
         "MCP startup must not initialize the previous history epoch"
@@ -494,191 +484,6 @@ fn mcp_rejects_invalid_utf8_input_line_and_continues() {
         "MCP message is not valid UTF-8"
     );
     assert_eq!(responses[1]["result"]["serverInfo"]["name"], "ctx");
-}
-
-#[test]
-fn mcp_sql_tool_returns_structured_json_and_rejects_writes() {
-    let temp = tempdir();
-    let generation_id = initialize_generation_only_sql_projection(&data_root(&temp));
-    assert!(
-        !data_root(&temp).join("work.sqlite").exists(),
-        "relational projection setup must not create prior-epoch storage"
-    );
-
-    let responses = mcp_roundtrip(
-        &temp,
-        &[
-            json!({
-                "jsonrpc": "2.0",
-                "id": "init",
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-11-25",
-                    "capabilities": {},
-                    "clientInfo": { "name": "ctx-test", "version": "0" }
-                }
-            }),
-            json!({
-                "jsonrpc": "2.0",
-                "id": "sql",
-                "method": "tools/call",
-                "params": {
-                    "name": "sql",
-                    "arguments": {
-                        "sql": "SELECT core_generation_id, status, (SELECT COUNT(*) FROM ctx_sessions) AS sessions FROM ctx_projection_metadata",
-                        "max_rows": 5
-                    }
-                }
-            }),
-            json!({
-                "jsonrpc": "2.0",
-                "id": "unsupported",
-                "method": "tools/call",
-                "params": {
-                    "name": "sql",
-                    "arguments": {
-                        "sql": "SELECT * FROM events"
-                    }
-                }
-            }),
-            json!({
-                "jsonrpc": "2.0",
-                "id": "write",
-                "method": "tools/call",
-                "params": {
-                    "name": "sql",
-                    "arguments": {
-                        "sql": "CREATE TABLE nope(x INTEGER)"
-                    }
-                }
-            }),
-            json!({
-                "jsonrpc": "2.0",
-                "id": "budget",
-                "method": "tools/call",
-                "params": {
-                    "name": "sql",
-                    "arguments": {
-                        "sql": format!(
-                            "SELECT {}",
-                            (0..256).map(|index| format!("1 AS c{index}")).collect::<Vec<_>>().join(", ")
-                        ),
-                        "max_rows": 10000,
-                        "max_columns": 256,
-                        "max_value_bytes": 32
-                    }
-                }
-            }),
-        ],
-    );
-
-    let sql = &responses[1]["result"]["structuredContent"];
-    assert_eq!(sql["schema_version"], 2);
-    assert_eq!(sql["payload_type"], "sql_result");
-    assert_eq!(sql["read_only"], true);
-    assert_eq!(sql["share_safe"], false);
-    assert_eq!(
-        sql["snapshot"],
-        json!({
-            "observed_core_generation_id": generation_id.clone(),
-            "projection_status": "ready",
-            "relational_build_generation": 1,
-            "relational_core_generation_id": generation_id.clone(),
-            "stale": false,
-        })
-    );
-    assert_eq!(
-        sql["columns"],
-        json!(["core_generation_id", "status", "sessions"])
-    );
-    assert_eq!(sql["rows"], json!([[generation_id, "ready", 0]]));
-    assert_useful_mcp_text(
-        &responses[1]["result"],
-        &[
-            "ctx sql",
-            "returned_rows: 1",
-            "truncated: rows=false, values=false",
-            "core_generation_id",
-            "ready",
-        ],
-    );
-
-    let unsupported = &responses[2]["result"];
-    assert_eq!(unsupported["isError"], true);
-    assert!(unsupported["structuredContent"]["error"]
-        .as_str()
-        .unwrap()
-        .contains("no such table: events"));
-    assert!(mcp_content_text(unsupported).contains("no such table: events"));
-
-    let write = &responses[3]["result"];
-    assert_eq!(write["isError"], true);
-    assert!(write["structuredContent"]["error"]
-        .as_str()
-        .unwrap()
-        .contains("SQL query must be read-only"));
-    assert!(mcp_content_text(write).contains("SQL query must be read-only"));
-
-    let budget = &responses[4]["result"];
-    assert_eq!(budget["isError"], true);
-    assert!(budget["structuredContent"]["error"]
-        .as_str()
-        .unwrap()
-        .contains("SQL result preview budget"));
-    assert!(mcp_content_text(budget).contains("SQL result preview budget"));
-    assert!(
-        !data_root(&temp).join("work.sqlite").exists(),
-        "MCP SQL must remain in the fresh relational projection"
-    );
-}
-
-#[test]
-fn mcp_sql_fresh_root_reports_missing_projection_without_initializing_storage() {
-    let temp = tempdir();
-    let responses = mcp_roundtrip_with_env(
-        &temp,
-        &[
-            json!({
-                "jsonrpc": "2.0",
-                "id": "init",
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-11-25",
-                    "capabilities": {},
-                    "clientInfo": { "name": "ctx-test", "version": "0" }
-                }
-            }),
-            json!({
-                "jsonrpc": "2.0",
-                "id": "sql",
-                "method": "tools/call",
-                "params": {
-                    "name": "sql",
-                    "arguments": {
-                        "sql": "SELECT 1 AS one"
-                    }
-                }
-            }),
-        ],
-        &[("CTX_DAEMON_AUTOSTART_OFF", "1")],
-    );
-
-    let error = &responses[1]["result"];
-    assert_eq!(error["isError"], true, "{error:#}");
-    assert!(
-        error["structuredContent"]["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("Core SQL projection is missing")),
-        "{error:#}"
-    );
-    assert!(
-        !data_root(&temp).exists()
-            || std::fs::read_dir(data_root(&temp))
-                .unwrap()
-                .next()
-                .is_none(),
-        "existing-only MCP SQL may establish the data-root directory but must not create storage"
-    );
 }
 
 #[test]

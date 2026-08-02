@@ -2,7 +2,6 @@ use super::{
     assert_daemon_process_running, assert_no_daemon_autostart_mutation, ctx, support::*,
     wait_for_daemon_status, write_active_daemon_upgrade_handoff, write_codex_setup_session,
 };
-use rusqlite::OpenFlags;
 use std::{
     io::Read,
     process::{Child, Command as StdCommand, Stdio},
@@ -106,18 +105,19 @@ fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
     }
 }
 
-fn wait_for_relational_projection(temp: &TempDir, generation: &str) -> Value {
+fn wait_for_core_generation(temp: &TempDir, generation: &str) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let status = json_output(ctx(temp).args(["status", "--format=json"]));
-        if status["relational"]["status"] == "ready"
-            && status["relational"]["active_core_generation_id"] == generation
+        if status["history_epoch"]["status"] == "ready"
+            && status["lexical"]["status"] == "ready"
+            && status["lexical"]["generation_id"] == generation
         {
             return status;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for relational projection at generation {generation}: {status:#}"
+            "timed out waiting for Core generation {generation}: {status:#}"
         );
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -408,7 +408,7 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
 }
 
 #[test]
-fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projections() {
+fn one_event_native_and_explicit_imports_publish_core_generations() {
     let native = tempdir();
     let _native_daemon = start_full_source_refresh_daemon(&native);
     let source_root = native.path().join("openhands-user");
@@ -447,13 +447,16 @@ fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projecti
         native_import["sources"][0]["daemon_request_metadata"]["owner"],
         "daemon"
     );
-    let native_status = wait_for_relational_projection(&native, &native_generation);
+    let native_status = wait_for_core_generation(&native, &native_generation);
     assert_eq!(native_status["lexical"]["indexed_documents"], 1);
-    assert_eq!(native_status["relational"]["event_count"], 1);
+    assert_eq!(
+        provider_core_counts(&data_root(&native), "openhands"),
+        (1, 1)
+    );
     assert!(data_root(&native)
         .join("search/lexical/active-generation.json")
         .is_file());
-    assert!(data_root(&native).join("relational.sqlite").is_file());
+    assert!(!data_root(&native).join("relational.sqlite").exists());
     let native_search = json_output(ctx(&native).args([
         "search",
         "one event must publish",
@@ -539,13 +542,16 @@ fn one_event_native_and_explicit_imports_publish_tantivy_and_relational_projecti
         explicit_import["sources"][0]["daemon_request_metadata"]["owner"],
         "daemon"
     );
-    let explicit_status = wait_for_relational_projection(&explicit, &explicit_generation);
+    let explicit_status = wait_for_core_generation(&explicit, &explicit_generation);
     assert_eq!(explicit_status["lexical"]["indexed_documents"], 1);
-    assert_eq!(explicit_status["relational"]["event_count"], 1);
+    assert_eq!(
+        provider_core_counts(&data_root(&explicit), "custom"),
+        (1, 1)
+    );
     assert!(data_root(&explicit)
         .join("search/lexical/active-generation.json")
         .is_file());
-    assert!(data_root(&explicit).join("relational.sqlite").is_file());
+    assert!(!data_root(&explicit).join("relational.sqlite").exists());
     let explicit_search = json_output(ctx(&explicit).args([
         "search",
         "explicit one event",
@@ -727,15 +733,12 @@ fn all_invalid_custom_source_publishes_empty_then_refreshes_after_fix() {
         "{empty:#}"
     );
     let empty_generation = published_generation(&empty);
-    let empty_status = wait_for_relational_projection(&temp, &empty_generation);
+    let empty_status = wait_for_core_generation(&temp, &empty_generation);
     assert_eq!(
         empty_status["lexical"]["indexed_documents"], 0,
         "{empty_status:#}"
     );
-    assert_eq!(
-        empty_status["relational"]["event_count"], 0,
-        "{empty_status:#}"
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "custom"), (0, 0));
 
     fs::write(&fixture, records("0")).unwrap();
     let retry = json_output(ctx(&temp).args([
@@ -753,9 +756,10 @@ fn all_invalid_custom_source_publishes_empty_then_refreshes_after_fix() {
     assert_eq!(retry["sources"][0]["catalog_changed"], false, "{retry:#}");
     let generation = published_generation(&retry);
     assert_ne!(generation, empty_generation);
-    let status = wait_for_relational_projection(&temp, &generation);
+    let status = wait_for_core_generation(&temp, &generation);
     assert_eq!(status["lexical"]["indexed_documents"], 1, "{status:#}");
-    assert_eq!(status["relational"]["event_count"], 1, "{status:#}");
+    assert_eq!(provider_core_counts(&data_root(&temp), "custom"), (1, 1));
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
     let search = json_output(ctx(&temp).args([
         "search",
         "retry oracle",
@@ -974,59 +978,57 @@ fn failed_import_attempt_does_not_count_as_indexed_history() {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct ProviderProjectionSnapshot {
+struct ProviderCoreSnapshot {
     generation: String,
     sessions: Vec<String>,
     events: Vec<String>,
     sources: Vec<String>,
 }
 
-fn relational_rows(conn: &Connection, sql: &str, selector: &str) -> Vec<String> {
-    conn.prepare(sql)
-        .unwrap()
-        .query_map(params![selector], |row| row.get::<_, String>(0))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap()
-}
-
-fn provider_projection_snapshot(temp: &TempDir, provider: &str) -> ProviderProjectionSnapshot {
+fn provider_core_snapshot(temp: &TempDir, provider: &str) -> ProviderCoreSnapshot {
     let status = json_output(ctx(temp).args(["status", "--format=json"]));
     let generation = status["lexical"]["generation_id"]
         .as_str()
         .expect("published lexical Core generation")
         .to_owned();
-    let status = wait_for_relational_projection(temp, &generation);
-    assert_eq!(
-        status["relational"]["active_core_generation_id"],
-        generation
-    );
-    let relational_path = data_root(temp).join("relational.sqlite");
-    let conn =
-        Connection::open_with_flags(&relational_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    ProviderProjectionSnapshot {
+    wait_for_core_generation(temp, &generation);
+    let records = provider_core_records(&data_root(temp), provider);
+    let mut sessions = records
+        .iter()
+        .map(|record| {
+            format!(
+                "{}:{}",
+                record.session_id,
+                record.provider_session_id.as_deref().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>();
+    sessions.sort();
+    sessions.dedup();
+    let mut events = records
+        .iter()
+        .map(|record| {
+            format!(
+                "{}:{}:{}",
+                record.event_id, record.session_id, record.event_type
+            )
+        })
+        .collect::<Vec<_>>();
+    events.sort();
+    let manifest = generation_manifest(temp, &generation);
+    let mut sources = manifest["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|source| source["observation"]["source"]["provider"] == provider)
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>();
+    sources.sort();
+    ProviderCoreSnapshot {
         generation,
-        sessions: relational_rows(
-            &conn,
-            "SELECT ctx_session_id || ':' || COALESCE(provider_session_id, '')
-             FROM ctx_sessions WHERE provider = ?1 ORDER BY ctx_session_id",
-            provider,
-        ),
-        events: relational_rows(
-            &conn,
-            "SELECT ctx_event_id || ':' || ctx_session_id || ':' || event_type
-             FROM ctx_events WHERE provider = ?1 ORDER BY ctx_event_id",
-            provider,
-        ),
-        sources: relational_rows(
-            &conn,
-            "SELECT source_id || ':' || source_format || ':' || parser_revision || ':' ||
-                    indexed_event_count || ':' || health
-             FROM ctx_sources
-             WHERE provider = ?1
-             ORDER BY source_id",
-            provider,
-        ),
+        sessions,
+        events,
+        sources,
     }
 }
 
@@ -1099,7 +1101,7 @@ fn assert_searchable_and_showable(temp: &TempDir, provider: &str, query: &str) -
 }
 
 #[test]
-fn fresh_setup_publishes_provider_sources_to_tantivy_and_relational() {
+fn fresh_setup_publishes_provider_sources_to_core() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
     let _daemon = start_full_source_refresh_daemon(&temp);
@@ -1117,16 +1119,15 @@ fn fresh_setup_publishes_provider_sources_to_tantivy_and_relational() {
         manifest_providers(&temp, generation),
         vec!["codex".to_owned()]
     );
-    let status = wait_for_relational_projection(&temp, generation);
-    assert_eq!(status["relational"]["source_count"], 1, "{status:#}");
-    assert_eq!(status["relational"]["session_count"], 1, "{status:#}");
-    assert_eq!(status["relational"]["event_count"], 1, "{status:#}");
+    let status = wait_for_core_generation(&temp, generation);
+    assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
+    assert_eq!(provider_core_counts(&data_root(&temp), "codex"), (1, 1));
     assert!(data_root(&temp)
         .join("search/lexical/active-generation.json")
         .is_file());
-    assert!(data_root(&temp).join("relational.sqlite").is_file());
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 
-    let projection = provider_projection_snapshot(&temp, "codex");
+    let projection = provider_core_snapshot(&temp, "codex");
     assert_eq!(projection.generation, generation);
     assert_eq!(projection.sessions.len(), 1, "{projection:#?}");
     assert_eq!(projection.events.len(), 1, "{projection:#?}");
@@ -1152,11 +1153,12 @@ fn mixed_setup_publishes_each_provider_once() {
         manifest_providers(&temp, generation),
         vec!["claude".to_owned(), "codex".to_owned()]
     );
-    let status = wait_for_relational_projection(&temp, generation);
-    assert_eq!(status["relational"]["source_count"], 2, "{status:#}");
+    let status = wait_for_core_generation(&temp, generation);
+    assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 
-    let codex = provider_projection_snapshot(&temp, "codex");
-    let claude = provider_projection_snapshot(&temp, "claude");
+    let codex = provider_core_snapshot(&temp, "codex");
+    let claude = provider_core_snapshot(&temp, "claude");
     assert_eq!(codex.sessions.len(), 1, "{codex:#?}");
     assert_eq!(claude.sessions.len(), 1, "{claude:#?}");
     assert_eq!(codex.sources.len(), 1, "{codex:#?}");
@@ -1175,7 +1177,7 @@ fn setup_adds_provider_without_changing_unchanged_source_ids() {
     install_default_pi_fixture(&temp, pi_query);
     let _daemon = start_full_source_refresh_daemon(&temp);
     ready_setup(&temp);
-    let pi_before = provider_projection_snapshot(&temp, "pi");
+    let pi_before = provider_core_snapshot(&temp, "pi");
     let pi_ids_before = assert_searchable_and_showable(&temp, "pi", pi_query);
 
     write_codex_setup_session(&temp);
@@ -1185,7 +1187,7 @@ fn setup_adds_provider_without_changing_unchanged_source_ids() {
         manifest_providers(&temp, generation),
         vec!["codex".to_owned(), "pi".to_owned()]
     );
-    let pi_after = provider_projection_snapshot(&temp, "pi");
+    let pi_after = provider_core_snapshot(&temp, "pi");
     assert_ne!(pi_after.generation, pi_before.generation);
     assert_eq!(pi_after.sessions, pi_before.sessions);
     assert_eq!(pi_after.events, pi_before.events);
@@ -1208,8 +1210,9 @@ fn repeated_setup_and_import_preserve_generation_and_public_ids() {
         .as_str()
         .unwrap()
         .to_owned();
-    let projection = provider_projection_snapshot(&temp, "codex");
+    let projection = provider_core_snapshot(&temp, "codex");
     let ids = assert_searchable_and_showable(&temp, "codex", "setup should import");
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 
     let second = ready_setup(&temp);
     assert_eq!(
@@ -1220,7 +1223,7 @@ fn repeated_setup_and_import_preserve_generation_and_public_ids() {
         second["refresh_request"]["published_generation"], first_generation,
         "{second:#}"
     );
-    assert_eq!(provider_projection_snapshot(&temp, "codex"), projection);
+    assert_eq!(provider_core_snapshot(&temp, "codex"), projection);
 
     let imported = json_output(ctx(&temp).args([
         "import",
@@ -1239,7 +1242,8 @@ fn repeated_setup_and_import_preserve_generation_and_public_ids() {
         imported["sources"][0]["published_generation"],
         first_generation
     );
-    assert_eq!(provider_projection_snapshot(&temp, "codex"), projection);
+    assert_eq!(provider_core_snapshot(&temp, "codex"), projection);
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
     assert_eq!(
         assert_searchable_and_showable(&temp, "codex", "setup should import"),
         ids

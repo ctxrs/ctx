@@ -1,9 +1,9 @@
 # CLI Reference
 
-ctx is a local CLI for importing and searching agent session history. Core keeps
-the imported transcript content used by search, show, export, and MCP. Lexical
-search lives under `search/lexical`, semantic search under `search/semantic`,
-and read-only SQL uses the disposable `relational.sqlite` metadata projection.
+ctx is a local CLI for importing and searching agent session history. Provider
+histories remain authoritative. Core/Tantivy lexical search lives under
+`search/lexical`, optional flat-F32 semantic data lives under
+`search/semantic`, and typed presentation reads complete stored Core records.
 
 ## Global Options
 
@@ -50,8 +50,8 @@ ctx daemon enable
 
 - `setup` creates the data root, discovers known provider history locations,
   inventories current sources, builds and atomically publishes the
-  self-contained Core generation, schedules derived catch-up, and prints next
-  steps. It never opens, migrates, or deletes pre-v0.26 history. Old Store
+  Core/Tantivy generation, schedules optional semantic and independent Pro work,
+  and prints next steps. It never opens, migrates, or deletes pre-v0.26 history. Old Store
   files are ignored and may be removed explicitly by their owner.
   Setup does not write `config.toml` for implicit defaults or execute
   history-source plugin commands. When `[daemon].enabled` is true, setup may
@@ -64,11 +64,11 @@ ctx daemon enable
   summaries, data-root details, or get-started tips. It still exits nonzero and
   prints errors on failure.
 - `status` reports the ctx root, source epoch, lexical generation and policy,
-  source catalog state, semantic generation and coverage,
-  relational projection state, daemon state, initialization state, compact
+  source catalog state, semantic generation and coverage, daemon state,
+  initialization state, compact
   local usage health, local-only marker, and read-only marker. It does not
   include usage counts or estimates, initialize or repair Core generations or
-  derived projections, or open old history.
+  semantic or Pro state, or open old history.
 - `stats` is the read-only, local, offline report for History retrieval, Code
   provenance, Measured delivery, and Estimated savings. Measured facts and
   model-based estimates are separate in JSON; the estimate model and
@@ -88,8 +88,8 @@ ctx daemon enable
   reporting controls.
 - `status --quiet` performs the same local checks but prints nothing on
   success. Use `status --format json` when scripts need the actual state.
-- `doctor` validates source-epoch storage and reports lexical, semantic,
-  relational, and daemon lock/status problems when present.
+- `doctor` validates source-epoch storage and reports lexical, semantic, and
+  daemon lock/status problems when present.
 - `daemon status` reports the same ctx-owned daemon coordinator state without
   mutating storage. It separates current requested config from the last config
   applied by the running daemon, and reports observed semantic query-runtime
@@ -313,10 +313,10 @@ provider/path. It creates the data root if needed, reads provider transcript
 files, builds a private immutable Core/Tantivy candidate containing complete
 normalized stored records plus lexical fields, identities, and filter metadata,
 verifies it, and atomically publishes it under `search/lexical`. Before
-returning, it waits only for that Core publication. The daemon-owned
-`relational.sqlite`, Pro, and semantic projections catch up independently and
-do not extend the foreground import boundary. It does not write `config.toml`
-for implicit defaults.
+returning, it waits only for that Core publication. Pro materialization and
+optional semantic indexing advance independently and do not extend the
+foreground import boundary. It does not write `config.toml` for implicit
+defaults.
 
 History-source plugin import is explicit and single-source in 1.0. A selected
 manifest declares a durable provider-owned `ctx-history-jsonl-v1` path; the
@@ -337,7 +337,7 @@ to the same stable event identities.
 
 When `[daemon].enabled` is true, `import` may opportunistically start the
 ctx-owned persistent daemon and uses its source-refresh endpoint for foreground
-Core publication and required relational catch-up. Pro and semantic work
+Core publication. Pro and semantic work
 continue independently; semantic indexing may acquire the local embedding
 model. Explicit custom JSONL and history-source imports use the same
 daemon-owned endpoint and may start it unless `import --no-daemon` is set. With
@@ -647,10 +647,10 @@ the bounded presentation limit require `--max-events`; the value is capped at
 neighboring events in the same session; `--window N` is shorthand for
 `--before N --after N`. It accepts the same output formats as `show session`.
 
-Both commands render policy-selected normalized content from the active verified
-Core generation. They do not reopen provider transcript files at query time.
-Show preserves event order and never expands payload classes excluded by import
-policy, such as binary data or provider-private blobs.
+Both commands read complete policy-selected normalized records from the active
+verified Core/Tantivy generation. They do not reopen provider history at query
+time. Show preserves event order and never expands payload classes excluded by
+import policy, such as binary data or provider-private blobs.
 
 Provider-owned IDs are metadata, not positional IDs. Positional session and
 event arguments are ctx-owned IDs. To look up a provider-owned session, use an
@@ -660,11 +660,28 @@ explicit provider lookup such as `--provider codex --provider-session
 JSON output may expose transcript content and local workspace metadata, so
 treat it as private local data.
 
+## Locate
+
+```bash
+ctx locate session <ctx-session-id>
+ctx locate session --provider codex --provider-session <provider-session-id> --format json
+ctx locate event <ctx-event-id> --format json
+```
+
+`locate` returns bounded source identity metadata stored in the active verified
+Core/Tantivy generation. Session lookup accepts a ctx-owned ID or the explicit
+provider-session selector; event lookup accepts a ctx-owned event ID. `--format`
+accepts `text` or `json`.
+
+The result identifies the Core source with `ctx_source_id`, `source_format`,
+`schema_variant`, and `provider_identity_version`. It does not expose a provider
+path, reopen provider history, or recreate provider-native locator state.
+
 ## Search
 
 ```bash
 ctx search "build failure"
-ctx search "sqlite storage" --provider codex
+ctx search "storage layout" --provider codex
 ctx search "retry handling" --workspace checkout --since 60d
 ctx search "tool output" --event-type tool_output
 ctx search --file crates/foo/src/lib.rs
@@ -681,8 +698,8 @@ ctx search "release notes" --provider-key example-agent --source-id default
 ```
 
 `search` defaults to `--refresh background`, which serves the published
-Tantivy generation while the ctx daemon owns lexical publication plus
-relational and semantic catch-up. If no local generation exists yet, search
+Tantivy generation while the ctx daemon owns lexical publication and optional
+semantic catch-up. If no local generation exists yet, search
 performs a bounded foreground lexical bootstrap. If daemon maintenance is
 disabled, background mode uses the same bounded foreground source-refresh path
 for discovered native providers. History-source plugins are searched from the
@@ -738,8 +755,8 @@ When ctx is run from Codex and `CODEX_THREAD_ID` is available, search excludes
 the active Codex session tree by default so the current task and its subagents
 do not dominate historical retrieval. Use `--include-current-session` to opt
 back in. `--refresh off` is read-only for ctx-derived storage, but it still
-serves exact snippets from the active Core generation without reopening
-provider records. Explicit semantic or hybrid
+serves indexed snippets and typed show/locate data from the active Core
+generation. Explicit semantic or hybrid
 requests may read a compatible semantic generation and ask the retained daemon
 query service to embed the query from an already-cached model.
 
@@ -783,64 +800,20 @@ Filters:
 - `--refresh background|off|wait`;
 - `--include-current-session`.
 
-CLI provider filters use kebab-case names. JSON output and stable SQL views use
-provider IDs in ctx output; multiword IDs may be snake_case, such as
+CLI provider filters use kebab-case names. JSON output uses provider IDs in ctx
+output; multiword IDs may be snake_case, such as
 `copilot_cli`, `factory_ai_droid`, `qwen_code`, `kimi_code_cli`, `kiro_cli`, `mistral_vibe`, and `roo_code`; compact IDs such as `forgecode`, `deepagents`, `mux`, `rovodev`, `openclaw`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and `openhands` stay compact.
 
-Lexical matching indexes the complete policy-selected meaningful body. Search
-serializes every returned hit from the imported Core event associated with the
-match; it does not reopen provider transcript files at query time.
+Lexical matching indexes the policy-selected meaningful body. Search serializes
+the indexed Core hit associated with the match; show/locate presentation reads
+the complete policy-selected record and source identity stored in Core.
 
 Default daemon maintenance owns provider/plugin refresh, immutable candidate
-construction, atomic lexical publication, source catalog lifetime, relational
-projection catch-up, and semantic catch-up. Use
+construction, atomic lexical publication, source catalog lifetime, and semantic
+catch-up. Use
 `ctx daemon run` for explicit foreground maintenance. JSON status exposes
-`lexical`, `catalog`, `semantic`, `relational`, and `daemon`
+`lexical`, `catalog`, `semantic`, and `daemon`
 objects. `ctx doctor` is the diagnostic surface for those components.
-
-## SQL
-
-```bash
-ctx sql "SELECT COUNT(*) AS sessions FROM ctx_sessions"
-ctx sql "SELECT provider, COUNT(*) AS sessions FROM ctx_sessions GROUP BY provider"
-ctx sql --file query.sql --format json
-cat query.sql | ctx sql - --format csv
-ctx sql "SELECT ctx_session_id FROM ctx_sessions LIMIT 5" --format raw
-```
-
-`sql` runs one read-only SQL statement against `relational.sqlite`, the
-disposable metadata projection bound to the active lexical generation. On a
-completely fresh root it may initialize an empty projection. If a lexical
-generation exists but the projection is missing, behind, or generation-mismatched,
-SQL fails closed until catch-up completes. It does not refresh provider history,
-import sources, run background upgrade checks, or open/migrate prior-epoch
-storage.
-
-Prefer stable read-only `ctx_*` views for scripts:
-
-- `ctx_sessions`, one row per indexed session;
-- `ctx_events`, one row per indexed event;
-- `ctx_files_touched`, one row per normalized touched-file record;
-- `ctx_sources`, one row per indexed provider source session.
-
-Advanced users can query internal projection tables directly, but they are not
-the compatibility surface. SQL contains metadata rather than transcript
-bodies; output can still expose private paths, IDs, and source metadata.
-
-Formats:
-
-- default `table` output is compact and intended for humans and agents;
-- `--format json` returns a structured result with `columns`,
-  array rows, limits, truncation flags, and `read_only: true`;
-- `--format csv` prints a CSV header unless `--no-header` is set;
-- `--format raw` requires exactly one selected column and prints one value per
-  line for piping.
-
-Limits default to `--max-rows 100`, `--max-columns 64`,
-`--max-value-bytes 512`, `--max-sql-bytes 65536`, and `--timeout 10s`.
-SQLite-side value allocation is also bounded, so very large generated values
-can fail before result truncation. `--timeout` accepts values such as `250ms`,
-`5s`, or `1m`, capped at one minute.
 
 ## Docs
 
@@ -860,7 +833,8 @@ ctx docs man --out ~/.local/share/man/man1
 `docs` exposes a curated copy of the public ctx docs inside the binary. It is
 intended for humans and agents that need local command help without opening the
 website. `docs list`, `docs search`, and `docs show` read embedded text and do
-not touch provider history, Core generations, or derived projections.
+not touch provider history, Core/Tantivy generations, semantic data, or the Pro
+graph.
 `docs show --out PATH` writes one embedded topic to that explicit path.
 `docs man --print PAGE` prints one generated man page to stdout.
 `docs man --out DIR` writes generated section-1 man pages for `ctx` and its
@@ -878,22 +852,21 @@ ctx integrations install mcp
 ```
 
 `mcp serve` starts a local MCP server over newline-delimited stdio JSON-RPC. It
-exposes eight tools: six OSS tools (`status`, `sources`, `search`, `sql`,
-`show_session`, `show_event`) and two Pro tools (`pro_status`, `blame`).
+exposes Core tools (`status`, `sources`, `search`, `show_session`, and
+`show_event`) plus two Pro tools (`pro_status` and `blame`).
 `pro_status` remains read-only. Pro blame advertises `readOnlyHint: false`
-because bounded local catch-up reads the active Core generation, writes the
-encrypted derived Pro graph, and writes the projection acknowledgement. It
+because bounded local catch-up consumes a feed from the pinned Core generation,
+writes the encrypted derived Pro graph, and advances its generation receipt. It
 never writes provider history or repositories. Its final serialized response,
 including exact structured content plus text fallback, is capped at 1 MiB; an
-over-cap page fails intact with guidance to lower `limit` or use CLI JSON. The
-MCP `search` tool queries the active Core generation, and the `sql` tool queries
-the existing relational metadata projection. Neither refreshes or imports
-provider history; MCP search currently uses the lexical search path only. Tool
-results include MCP text content plus `structuredContent` JSON. Treat all MCP
-output as private local history: it may
-include absolute paths, source metadata, snippets, transcript
-text, and raw SQL result fields, and the MCP host may log or forward tool
-output.
+over-cap page fails intact with guidance to lower `limit` or use CLI JSON.
+
+MCP `search` queries the active Core/Tantivy generation and can use a compatible
+semantic generation under the normal search contract. It does not become an
+importer. Tool results include MCP text content plus `structuredContent` JSON.
+Treat all MCP output as private local history: it may include absolute paths,
+source metadata, snippets, and transcript text, and the MCP host may log or
+forward tool output.
 
 MCP search follows the same active Codex session-tree exclusion as the CLI when
 `CODEX_THREAD_ID` is set. Pass `include_current_session: true` to the search
@@ -987,7 +960,6 @@ ctx blame file <path> --format json
 ctx blame commit <sha> --format json
 ctx blame pr <number-or-url> [--repository <logical-repository>] --format json
 ctx search <query>|--term <term>|--file <path> --format json
-ctx sql "SELECT COUNT(*) FROM ctx_sessions" --format json
 ctx docs list --format json
 ctx docs search <query> --format json
 ctx docs show <topic> --format json

@@ -10,11 +10,11 @@ use crate::{
         doctor::run_doctor,
         import::{run_import, ProviderRefreshCollector},
         index::run_index,
+        locate::run_locate,
         search::run_search,
         setup::run_setup,
         show::run_show,
         sources::run_sources,
-        sql::run_sql,
         stats::{malformed_config_failure as malformed_stats_config_failure, run as run_stats},
         status::{
             malformed_config_failure, removed_cloud_config_failure, run_status, run_usage_action,
@@ -23,7 +23,7 @@ use crate::{
     config::AppConfig,
     deprecated_controls::DeprecatedControls,
     docs, integrations, local_usage, mcp,
-    output::{OutputFormat, OutputMeasurement, SqlFormat},
+    output::{OutputFormat, OutputMeasurement},
     presentation_limit, pro, semantic,
     ui::{
         diagnostic, outcome, scan_color_mode, scan_machine_output_hint, ColorMode, Diagnostic,
@@ -317,6 +317,16 @@ pub(crate) fn run_cli() -> Result<()> {
             &mut local_usage_draft,
             &mut ui,
         ),
+        CommandRoot::Locate(args) => run_locate(
+            args,
+            data_root.clone(),
+            analytics_draft
+                .as_mut()
+                .expect("locate has a telemetry draft")
+                .locate_mut(),
+            &mut local_usage_draft,
+            &mut ui,
+        ),
         CommandRoot::Search(args) => run_search(
             args,
             data_root.clone(),
@@ -343,16 +353,6 @@ pub(crate) fn run_cli() -> Result<()> {
         CommandRoot::Blame(args) => {
             crate::commands::blame::run(args, data_root.clone(), &mut local_usage_draft, &mut ui)
         }
-        CommandRoot::Sql(args) => run_sql(
-            args,
-            data_root.clone(),
-            analytics_draft
-                .as_mut()
-                .expect("sql has a telemetry draft")
-                .sql_mut(),
-            &mut local_usage_draft,
-            &mut ui,
-        ),
         CommandRoot::Docs(args) => docs::run(
             args,
             analytics_draft
@@ -548,11 +548,14 @@ fn command_json_output(command: &CommandRoot) -> bool {
         CommandRoot::Sources(args) => args.format.is_json(),
         CommandRoot::Import(args) => args.format.is_json(),
         CommandRoot::Show(args) => show_json_output(args),
+        CommandRoot::Locate(args) => match &args.target {
+            crate::LocateTarget::Session(args) => args.format.is_json(),
+            crate::LocateTarget::Event(args) => args.format.is_json(),
+        },
         CommandRoot::Search(args) => args.format.is_json(),
         CommandRoot::Pro(args) => args.json_output(),
         CommandRoot::Referral(args) => args.json_output(),
         CommandRoot::Blame(args) => args.json_output(),
-        CommandRoot::Sql(args) => args.output_format() == SqlFormat::Json,
         CommandRoot::Docs(args) => args.json_output(),
         CommandRoot::Integrations(args) => args.json_output(),
         CommandRoot::Mcp(_) => false,
@@ -595,7 +598,6 @@ fn command_machine_readable_output(command: &CommandRoot, json_output: bool) -> 
                     if matches!(args.format, OutputFormat::Jsonl | OutputFormat::Markdown)
             )
         }
-        CommandRoot::Sql(args) => args.output_format() != SqlFormat::Table,
         CommandRoot::Mcp(_) => true,
         _ => false,
     }
@@ -820,8 +822,6 @@ mod tests {
         for args in [
             &["show", "session", "bad", "--format", "jsonl"][..],
             &["show", "event", "bad", "--format", "markdown"][..],
-            &["sql", "SELECT 1", "--format", "csv"][..],
-            &["sql", "SELECT 1", "--format", "raw"][..],
             &["setup", "--progress", "json"][..],
             &["import", "--progress", "json"][..],
             &["mcp", "serve"][..],

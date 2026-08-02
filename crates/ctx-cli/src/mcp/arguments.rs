@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use anyhow::Result;
 use ctx_history_core::EventType;
 use serde_json::Value;
@@ -16,10 +14,6 @@ pub(super) fn optional_string(arguments: &Value, key: &str) -> Result<Option<Str
         Some(Value::String(value)) => Ok(Some(value.clone())),
         Some(_) => Err(invalid_tool_request(format!("{key} must be a string"))),
     }
-}
-
-pub(super) fn duration_millis_u64(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 pub(super) fn optional_bool(arguments: &Value, key: &str) -> Result<Option<bool>> {
@@ -113,14 +107,6 @@ pub(super) fn allowed_tool_arguments(name: &str) -> Option<&'static [&'static st
             "include_current_session",
             "backend",
             "semantic_weight",
-        ]),
-        "sql" => Some(&[
-            "sql",
-            "max_rows",
-            "max_columns",
-            "max_value_bytes",
-            "max_sql_bytes",
-            "timeout_ms",
         ]),
         "show_session" => Some(&["ctx_session_id", "mode", "limit", "cursor"]),
         "show_event" => Some(&["ctx_event_id", "before", "after", "window"]),

@@ -85,21 +85,19 @@ pub(super) fn status_next_command(
     }
 }
 
-fn history_components(report: &Value) -> [(&'static str, &Value); 5] {
+fn history_components(report: &Value) -> [(&'static str, &Value); 4] {
     [
         ("Epoch", &report["history_epoch"]),
         ("Search", &report["lexical"]),
         ("Catalog", &report["catalog"]),
         ("Refresh", &report["refresh"]),
-        ("Session view", &report["relational"]),
     ]
 }
 
-pub(super) fn supporting_history_components(report: &Value) -> [(&'static str, &Value); 3] {
+pub(super) fn supporting_history_components(report: &Value) -> [(&'static str, &Value); 2] {
     [
         ("Catalog", &report["catalog"]),
         ("Refresh", &report["refresh"]),
-        ("Session view", &report["relational"]),
     ]
 }
 

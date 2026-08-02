@@ -1,6 +1,5 @@
 use super::{parse_event_window_limit, Cli};
 use crate::cli::parse_search_limit;
-use crate::commands::sql::parse_sql_timeout;
 use crate::pro::parse_referral_codename;
 use crate::search_filters::parse_since_filter;
 use crate::transcript::{normalize_uuid_prefix, shell_quote_arg};
@@ -66,10 +65,6 @@ fn cli_value_parsers_do_not_panic_on_adversarial_inputs() {
             "parse_event_window_limit panicked for {input:?}"
         );
         assert!(
-            panic::catch_unwind(|| parse_sql_timeout(input)).is_ok(),
-            "parse_sql_timeout panicked for {input:?}"
-        );
-        assert!(
             panic::catch_unwind(|| normalize_uuid_prefix(input, "test")).is_ok(),
             "normalize_uuid_prefix panicked for {input:?}"
         );
@@ -94,7 +89,6 @@ fn foreground_analytics_eligibility_is_closed_and_remote_safe() {
         ],
         vec!["ctx", "status", "--format=json"],
         vec!["ctx", "index", "status", "--format=json"],
-        vec!["ctx", "sql", "select 1"],
         vec!["ctx", "doctor"],
         vec!["ctx", "show", "event", "deadbeef"],
     ] {

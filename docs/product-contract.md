@@ -4,12 +4,14 @@ ctx is a local search CLI for existing agent history.
 
 ## Promise
 
-Given local provider transcripts that ctx supports, the CLI publishes a
-self-contained local Core generation and returns deterministic retrieval
-results with citations. The paid Local Pro helper adds an encrypted local work
-graph with deterministic, evidence-backed fact materialization. Neither path
-generates an LLM interpretation, uploads transcript or repository content, or
-requires a hosted research agent.
+Given local provider histories that ctx supports, the CLI treats those native
+records as source authority, publishes an immutable local Core/Tantivy search
+generation, and returns deterministic retrieval results with citations and
+stable provider/source identities. The paid Local Pro helper adds an encrypted
+local work graph with deterministic, evidence-backed fact materialization from
+a pinned Core generation through its bounded materialization protocol. Neither
+path generates an LLM interpretation, uploads transcript or repository content,
+or requires a hosted research agent.
 
 ## In Scope
 
@@ -41,8 +43,9 @@ requires a hosted research agent.
   embedding models. Hybrid uses semantic evidence only after sidecar coverage
   is complete and dirty work is drained; explicit semantic search may query
   partial coverage for diagnostics.
-- `ctx show session` and `ctx show event` render transcripts, hits, and context
-  windows from the active verified Core generation using ctx-owned IDs, and
+- `ctx show session` and `ctx show event` resolve ctx-owned IDs and read complete
+  policy-selected normalized records from the active Core/Tantivy generation.
+  They do not reopen provider history at query time.
   `ctx show session --out` writes transcript artifacts. Search/show expose the
   provider-owned session ID when known; for Codex, it is the resume UUID.
 - `ctx pro` starts or resumes an anonymous 14-day trial without an account,
@@ -135,7 +138,8 @@ requires a hosted research agent.
   interactive human Pro blame result; machine-readable, noninteractive, empty,
   failed, install, setup, Core, and subsequent blame paths suppress it.
 - Pro materialization is an internal idempotent capability invoked by setup,
-  daemon freshness, and blame. Repository roots are inferred from
+  daemon freshness, and blame. It consumes a bounded feed from a pinned Core
+  generation and does not depend on semantic readiness. Repository roots are inferred from
   canonical activity rather than accepted as setup flags.
 - The only public Pro query is `ctx blame file|commit|pr`. It returns typed,
   bounded matches with complete deduplicated canonical evidence. OSS
@@ -152,9 +156,6 @@ requires a hosted research agent.
   only when a recognized structured forge record binds the canonical PR
   identity and exact Git object ID. Without that proof, associated commits are
   explicitly unproven.
-- `ctx sql` runs one read-only SQL statement against the existing relational
-  metadata projection for advanced inspection when normal search is not
-  expressive enough.
 - `ctx doctor` reports local storage health.
 - `ctx docs` exposes embedded public documentation and generated man pages.
 - `ctx upgrade` checks and applies signed CLI releases for official
@@ -191,7 +192,7 @@ requires a hosted research agent.
 
 `ctx pro manage` handles cancellation, payment recovery, and resubscription.
 Pro is $20 USD per month.
-Core OSS setup, search, show, and SQL remain available in every state. Pro
+Core OSS setup, search, and show remain available in every state. Pro
 uninstall and explicit Pro data deletion also remain available.
 Explicit status, MCP `pro_status`, and Pro management may show the
 `$20/month` continuation action for trial access or a neutral
@@ -223,7 +224,6 @@ paths or URLs, Git objects, graph facts, citations, and queries.
 - a ctx history or work-graph browser UI;
 - source repository modification;
 - shell startup-file modification;
-- write-capable SQL access;
 - API-key requirements for core setup/import/search;
 - provider-owned history daemons, hooks, or background collection outside
   documented ctx-owned daemon maintenance;
@@ -233,9 +233,9 @@ paths or URLs, Git objects, graph facts, citations, and queries.
 
 ## Determinism
 
-For the same database, query, filters, and result limit, search should return
-the same ranked material in the same order. Timestamps such as `generated_at`
-can differ between runs.
+For the same verified generation, query, filters, and result limit, search
+should return the same ranked material in the same order. Timestamps such as
+`generated_at` can differ between runs.
 
 ## Citation Contract
 
@@ -250,14 +250,14 @@ details:
 Provider-owned IDs are metadata. Positional command arguments are ctx-owned
 IDs unless a command explicitly accepts `--provider ... --provider-session ...`.
 
-Search and show read complete normalized content from Core. They do not reopen
-provider transcript files at query time. Explicit import and daemon refresh are
-the surfaces that discover and ingest provider-file changes.
+Search and show read indexed content and complete policy-selected normalized
+records from the active Core/Tantivy generation. Explicit import and daemon
+refresh publish provider-file changes into a new search generation.
 
 ## Privacy Contract
 
-Core generations, local projections, the encrypted Pro graph, and JSON output
-are private by default.
+Core/Tantivy generations, semantic sidecars, `usage.sqlite`, the encrypted Pro
+graph, and JSON output are private by default.
 Identity, billing, entitlement, and signed-artifact requests do not carry
 history, repository, graph, citation, or query content. A user must review
 copied output before sharing it outside the machine.

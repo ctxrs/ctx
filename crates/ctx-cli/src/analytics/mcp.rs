@@ -24,7 +24,6 @@ pub(crate) enum McpToolV1 {
     Status,
     Sources,
     Search,
-    Sql,
     ShowSession,
     ShowEvent,
     Blame,
@@ -39,7 +38,6 @@ impl McpToolV1 {
             Some("status") => Self::Status,
             Some("sources") => Self::Sources,
             Some("search") => Self::Search,
-            Some("sql") => Self::Sql,
             Some("show_session") => Self::ShowSession,
             Some("show_event") => Self::ShowEvent,
             Some("blame") => Self::Blame,
@@ -54,7 +52,6 @@ impl McpToolV1 {
             Self::Status => "status",
             Self::Sources => "sources",
             Self::Search => "search",
-            Self::Sql => "sql",
             Self::ShowSession => "show_session",
             Self::ShowEvent => "show_event",
             Self::Blame => "blame",
@@ -139,11 +136,8 @@ impl McpResponseBoundV1 {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct McpResultMetadataV1 {
     pub(crate) result_count: Option<CountBucket>,
-    pub(crate) column_count: Option<CountBucket>,
     pub(crate) zero_result: Option<bool>,
     pub(crate) result_truncated: Option<bool>,
-    pub(crate) rows_truncated: Option<bool>,
-    pub(crate) values_truncated: Option<bool>,
     pub(crate) events_truncated: Option<bool>,
     pub(crate) response_bound: Option<McpResponseBoundV1>,
 }
@@ -152,11 +146,6 @@ impl McpResultMetadataV1 {
     pub(crate) fn with_result_count(mut self, count: usize) -> Self {
         self.result_count = Some(count_bucket(count as u64));
         self.zero_result = Some(count == 0);
-        self
-    }
-
-    pub(crate) fn with_column_count(mut self, count: usize) -> Self {
-        self.column_count = Some(count_bucket(count as u64));
         self
     }
 }
@@ -185,11 +174,8 @@ impl McpOperationV1 {
             error_class: None,
             result: McpResultMetadataV1 {
                 result_count: None,
-                column_count: None,
                 zero_result: None,
                 result_truncated: None,
-                rows_truncated: None,
-                values_truncated: None,
                 events_truncated: None,
                 response_bound: None,
             },
@@ -204,11 +190,8 @@ impl McpOperationV1 {
             error_class: None,
             result: McpResultMetadataV1 {
                 result_count: None,
-                column_count: None,
                 zero_result: None,
                 result_truncated: None,
-                rows_truncated: None,
-                values_truncated: None,
                 events_truncated: None,
                 response_bound: None,
             },
@@ -252,11 +235,8 @@ impl McpOperationV1 {
             self.error_class.map(McpErrorClassV1::as_str),
         );
         insert_optional_bucket(properties, "result_count_bucket", self.result.result_count);
-        insert_optional_bucket(properties, "column_count_bucket", self.result.column_count);
         insert_optional_bool(properties, "zero_result", self.result.zero_result);
         insert_optional_bool(properties, "result_truncated", self.result.result_truncated);
-        insert_optional_bool(properties, "rows_truncated", self.result.rows_truncated);
-        insert_optional_bool(properties, "values_truncated", self.result.values_truncated);
         insert_optional_bool(properties, "events_truncated", self.result.events_truncated);
         insert_optional_enum(
             properties,

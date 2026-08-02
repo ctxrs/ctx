@@ -10,7 +10,6 @@ fn mcp_tool_input_validation_returns_stable_invalid_request_and_server_recovers(
             json!({"query": "onboarding", "limit": "five"}),
             "limit must be a non-negative integer",
         ),
-        ("bad-sql", "sql", json!({}), "sql is required"),
         (
             "bad-show",
             "show_event",

@@ -11,9 +11,10 @@ Security review for the current product covers:
 
 - the `ctx` CLI commands documented in `docs/cli-reference.md`;
 - the default data root `${CTX_DATA_ROOT:-~/.ctx}`;
-- the immutable Core/Tantivy generations in `search/lexical`, the optional
-  flat-F32 semantic projection in `search/semantic`, and metadata-only
-  `relational.sqlite`;
+- the immutable Core/Tantivy generations in `search/lexical` and the optional
+  generation-bound flat-F32 semantic data in `search/semantic`;
+- the content-free local usage sidecar in `usage.sqlite` and, when installed,
+  the encrypted Local Pro graph;
 - local `config.toml` and diagnostic logs when present;
 - read-only discovery of known provider history paths;
 - explicit imports for supported local transcript formats, including Codex,
@@ -51,20 +52,21 @@ Treat the ctx data root and command output as sensitive. They may contain source
 code, prompts, local paths, tool-call arguments, private repository names, and
 typed identifiers extracted from provider transcripts.
 
-Provider transcript files remain provider-owned acquisition inputs. Import and
-daemon refresh publish policy-selected normalized content and metadata into
-self-contained Core generations. Search and show read the active verified Core
-generation without reopening provider transcripts at query time. Acquisition
-paths remain source-level discovery and import metadata; `show` does not return
-them. A temporarily inaccessible input fails that source's refresh without being
-treated as confirmed deletion, while the active Core generation remains
-queryable until a later refresh publishes new source state.
+Provider transcript files remain provider-owned source authority. Import and
+daemon refresh publish policy-selected searchable content, metadata, and exact
+provider and source identities into immutable Core/Tantivy generations. Search,
+show, locate, and MCP retrieval read the active verified generation; they do not
+reopen provider history at query time. Provider SQLite inputs are opened only as
+short read-only logical snapshots during import or refresh. A temporarily
+inaccessible or changed input may fail that refresh, while the last verified
+Core generation remains available for retrieval until a later refresh publishes
+new content.
 
 ## Local Output Limits
 
-Search, show, SQL, MCP, and JSON output are local/private by default and may
-contain Core-backed transcript text, local paths, token-shaped strings, command
-output, and other transcript data. Review copied output before sharing it
+Search, show, MCP, and JSON output are local/private by default and may contain
+indexed transcript text, local paths, token-shaped strings,
+command output, and other transcript data. Review copied output before sharing it
 outside the machine.
 
 Before adding a new provider importer or expanding stored fields, the change

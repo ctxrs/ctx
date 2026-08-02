@@ -415,21 +415,6 @@ fn result_metadata(tool: McpToolV1, response: &Value) -> McpResultMetadataV1 {
                 (None, None) => None,
             };
         }
-        McpToolV1::Sql => {
-            if let Some(count) = result.get("returned_rows").and_then(Value::as_u64) {
-                metadata = metadata.with_result_count(usize::try_from(count).unwrap_or(usize::MAX));
-            }
-            if let Some(count) = result
-                .get("columns")
-                .and_then(Value::as_array)
-                .map(Vec::len)
-            {
-                metadata = metadata.with_column_count(count);
-            }
-            metadata.rows_truncated = result.pointer("/truncated/rows").and_then(Value::as_bool);
-            metadata.values_truncated =
-                result.pointer("/truncated/values").and_then(Value::as_bool);
-        }
         McpToolV1::ShowSession | McpToolV1::ShowEvent => {
             if let Some(count) = result.get("events").and_then(Value::as_array).map(Vec::len) {
                 metadata = metadata.with_result_count(count);

@@ -14,6 +14,7 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
     writer.commit(|_| true).unwrap();
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(index.session_count().unwrap(), 1);
     let candidates = index
         .search_event_candidates("atomic:generation", 10)
         .unwrap();
@@ -100,6 +101,33 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
         index.sessions_by_id_prefix(session_prefix).unwrap(),
         vec![session]
     );
+}
+
+#[test]
+fn session_count_excludes_sessions_removed_by_source_replacement() {
+    let temp = tempdir().unwrap();
+    let source = source("replaced-session.jsonl");
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document_for_session(&source, "retired", 1, "retired"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    initial.commit(|_| true).unwrap();
+
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    replacement.begin_source(source.clone()).unwrap();
+    replacement
+        .add_core_record(document_for_session(&source, "current", 1, "current"))
+        .unwrap();
+    replacement
+        .certify_source(certificate(&source, 2, 1))
+        .unwrap();
+    replacement.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(index.session_count().unwrap(), 1);
 }
 
 #[test]

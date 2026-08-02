@@ -18,8 +18,8 @@ ctx docs man --out ~/.local/share/man/man1
 ```
 
 `ctx docs list`, `ctx docs search`, and `ctx docs show` read embedded text and
-do not read provider history, Core generations, or the relational metadata
-projection. `ctx docs show --out PATH` writes one embedded topic to that
+do not read provider history, Core/Tantivy generations, semantic data, or the
+Local Pro graph. `ctx docs show --out PATH` writes one embedded topic to that
 explicit path.
 
 `ctx docs man --print PAGE` prints one generated man page to stdout. `ctx docs
@@ -33,7 +33,6 @@ text, or JSON that is easier for agents to inspect and cite.
 Useful starting points:
 
 - `ctx docs show search` for search filters and output behavior;
-- `ctx docs show sql` for stable read-only SQL views;
 - `ctx docs show provider-import-policy` for native history import policy;
 - `ctx docs show mcp` for read-only MCP tools;
 - `ctx docs show mcp-integrations` for MCP client config installation;

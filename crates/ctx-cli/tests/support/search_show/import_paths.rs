@@ -26,20 +26,7 @@ fn pi_cli_imports_directory_tree_path() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&imported, "pi", "pi_session_jsonl");
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'pi'"
-        ),
-        2
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi'"
-        ),
-        2
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "pi"), (2, 2));
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -181,7 +168,7 @@ fn import_path_requires_provider_before_initializing_source_epoch() {
     );
     assert!(
         !data_root(&temp).join("relational.sqlite").exists(),
-        "native path import without provider should not initialize relational state"
+        "native path import without provider should not create removed relational storage"
     );
     assert!(
         !data_root(&temp).join("catalogs").exists(),

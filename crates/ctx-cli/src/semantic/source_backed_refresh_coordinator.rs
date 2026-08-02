@@ -1,13 +1,14 @@
-#[cfg(test)]
-use std::fs;
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
     fmt,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex},
     time::{Duration as StdDuration, Instant as StdInstant},
 };
+
+#[cfg(test)]
+use std::fs;
 
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_capture::{
@@ -77,15 +78,8 @@ const SOURCE_REFRESH_IPC_TIMEOUT: StdDuration = StdDuration::from_secs(2);
 const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
 const SOURCE_REFRESH_BUILD_ISSUE_LIMIT: usize = 8;
 const TERMINAL_COVERAGE_ERROR_CODE: &str = "all_provider_terminal_coverage_unavailable";
+#[cfg(test)]
 thread_local! {
-    /// Weak, exact-generation handoff for the synchronous daemon publication
-    /// cycle. The coordinator's generation authority owns the strong pin; this
-    /// slot neither prolongs its lifetime nor serves another generation.
-    static DAEMON_CYCLE_VERIFIED_INDEX: RefCell<
-        Option<(PathBuf, String, Weak<VerifiedIndex>)>,
-    > = const { RefCell::new(None) };
-
-    #[cfg(test)]
     static VERIFIED_INDEX_OPEN_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
@@ -112,31 +106,6 @@ pub(super) fn count_verified_index_opens<T>(operation: impl FnOnce() -> T) -> (T
         let output = operation();
         let observed = count.replace(None).unwrap_or(0);
         (output, observed)
-    })
-}
-
-fn retain_daemon_cycle_verified_index(index_root: &Path, index: &Arc<VerifiedIndex>) {
-    let generation_id = index.generation_id().to_owned();
-    let index = Arc::downgrade(index);
-    DAEMON_CYCLE_VERIFIED_INDEX.with(|retained| {
-        retained.replace(Some((index_root.to_path_buf(), generation_id, index)));
-    });
-}
-
-pub(super) fn daemon_cycle_verified_index(
-    data_root: &Path,
-    generation_id: &str,
-) -> Option<Arc<VerifiedIndex>> {
-    let index_root = source_backed_index_root(data_root);
-    DAEMON_CYCLE_VERIFIED_INDEX.with(|retained| {
-        let retained = retained.borrow();
-        let (retained_root, retained_generation, retained_index) = retained.as_ref()?;
-        if retained_root != &index_root || retained_generation != generation_id {
-            return None;
-        }
-        retained_index
-            .upgrade()
-            .filter(|index| index.generation_id() == generation_id)
     })
 }
 

@@ -49,64 +49,38 @@ fn pi_cli_import_search_flow() {
         "{second:#}"
     );
 
+    let records = provider_core_records(&data_root(&temp), "pi");
+    assert_eq!(provider_core_counts(&data_root(&temp), "pi"), (1, 4));
     assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'pi'"
-        ),
+        records
+            .iter()
+            .filter(
+                |record| record.event_type == "message" && record.role.as_deref() == Some("user")
+            )
+            .count(),
         1
     );
     assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi'"
-        ),
-        4
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi' AND event_type = 'message' AND role = 'user'"
-        ),
-        1
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'pi' AND event_type = 'message' AND role = 'assistant'"
-        ),
+        records
+            .iter()
+            .filter(|record| record.event_type == "message"
+                && record.role.as_deref() == Some("assistant"))
+            .count(),
         1
     );
     for event_type in ["tool_output", "command_output"] {
         assert_eq!(
-            source_backed_count(
-                &temp,
-                &format!(
-                    "SELECT COUNT(*) FROM ctx_events \
-                     WHERE provider = 'pi' AND event_type = '{event_type}'"
-                ),
-            ),
+            records
+                .iter()
+                .filter(|record| record.event_type == event_type)
+                .count(),
             0,
-            "successful Pi output created a Core {event_type} row"
+            "successful Pi output created a Core {event_type} record"
         );
     }
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM pragma_table_info('ctx_events') WHERE name = 'payload_json'",
-        ),
-        0,
-        "the metadata-only relational projection must expose no payload column"
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_projection_metadata WHERE status = 'ready'"
-        ),
-        1
-    );
     assert!(
         !temp.path().join("work.sqlite").exists(),
-        "Pi acceptance must use the Core generation and relational projection"
+        "Pi acceptance must use the Core generation"
     );
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 }

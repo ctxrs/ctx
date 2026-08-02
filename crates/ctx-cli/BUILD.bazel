@@ -73,7 +73,6 @@ CTX_CLI_DEPS = [
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-index:lib",
-    "//crates/ctx-history-relational:lib",
     "//crates/ctx-pro-host-protocol:lib",
 ]
 
@@ -241,7 +240,7 @@ ctx_rust_test(
         proc_macro_dev = True,
     ),
     compile_data = CTX_CLI_TEST_COMPILE_DATA,
-    data = ctx_cli_test_data(),
+    data = ctx_cli_test_data() + [":ctx"],
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
@@ -253,6 +252,9 @@ ctx_rust_test(
     rustc_env = COMMON_RUSTC_ENV,
     rustc_env_files = [":cargo_toml_env_vars"],
     rustc_flags = CTX_CLI_RUSTC_FLAGS,
+    env = {
+        "CARGO_BIN_EXE_ctx": "$(rootpath :ctx)",
+    },
     tags = ["exclusive"],
 )
 
@@ -613,17 +615,17 @@ ctx_cli_integration_test(
 )
 
 ctx_cli_integration_test(
-    name = "search_show_locate_sql_tests",
-    src = "tests/search_show_locate_sql.rs",
+    name = "search_show_tests",
+    src = "tests/search_show.rs",
     extra_crates = [
         "anstream",
         "unicode-width",
     ],
     extra_srcs = [
-        "tests/support/search_show_locate_sql/import_paths.rs",
-        "tests/support/search_show_locate_sql/pi_flow.rs",
-        "tests/support/search_show_locate_sql/search_filters.rs",
-        "tests/support/search_show_locate_sql/search_flows.rs",
+        "tests/support/search_show/import_paths.rs",
+        "tests/support/search_show/pi_flow.rs",
+        "tests/support/search_show/search_filters.rs",
+        "tests/support/search_show/search_flows.rs",
     ],
     test_support = [
         "base",

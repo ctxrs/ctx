@@ -31,7 +31,6 @@ pub(crate) fn run_doctor(
         ("history_epoch", true),
         ("lexical", true),
         ("catalog", true),
-        ("relational", true),
         ("semantic", config.semantic_search_enabled()),
         (
             "pro_projection",
@@ -202,7 +201,6 @@ fn humanize_doctor_finding(finding: &str) -> HumanDoctorFinding {
         "history_epoch" => "History",
         "lexical" => "Search index",
         "catalog" => "History source catalog",
-        "relational" => "Session view",
         "semantic" => "Semantic search",
         "pro_projection" => "ctx Pro index",
         _ => {
@@ -279,7 +277,6 @@ mod ui_tests {
             "history_epoch is unavailable (source_refresh_failed)",
             "lexical is unavailable (source_refresh_failed)",
             "catalog is pending (catalog_publication_pending)",
-            "relational is unavailable (lexical_generation_unavailable)",
         ]
         .map(str::to_owned);
 
@@ -288,12 +285,11 @@ mod ui_tests {
             let document = render_doctor_human(&context, "apply", &findings);
             let rendered = document.render_plain();
             let flattened = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
-            assert!(rendered.starts_with("! ctx found 4 issues\n"));
+            assert!(rendered.starts_with("! ctx found 3 issues\n"));
             for expected in [
                 "History is unavailable",
                 "Search index is unavailable",
                 "History source catalog is still preparing",
-                "Session view is unavailable",
                 "Check the history refresh service.",
                 "ctx daemon status",
             ] {

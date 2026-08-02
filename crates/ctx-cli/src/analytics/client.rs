@@ -1,7 +1,7 @@
 use ctx_history_core::CaptureProvider;
 
 use crate::{
-    output::{OutputFormat, SqlFormat},
+    output::{JsonOutputFormat, OutputFormat},
     progress::ProgressArg,
     transcript::TranscriptMode,
 };
@@ -358,11 +358,16 @@ pub(crate) enum RenderFormat {
     Json,
     Jsonl,
     Markdown,
-    Csv,
-    Raw,
 }
 
 impl RenderFormat {
+    pub(crate) fn from_json_output_format(value: JsonOutputFormat) -> Self {
+        match value {
+            JsonOutputFormat::Text => Self::Text,
+            JsonOutputFormat::Json => Self::Json,
+        }
+    }
+
     pub(crate) fn from_output_format(value: OutputFormat) -> Self {
         match value {
             OutputFormat::Text => Self::Text,
@@ -372,23 +377,12 @@ impl RenderFormat {
         }
     }
 
-    pub(crate) fn from_sql_format(value: SqlFormat) -> Self {
-        match value {
-            SqlFormat::Table => Self::Text,
-            SqlFormat::Json => Self::Json,
-            SqlFormat::Csv => Self::Csv,
-            SqlFormat::Raw => Self::Raw,
-        }
-    }
-
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",
             Self::Json => "json",
             Self::Jsonl => "jsonl",
             Self::Markdown => "markdown",
-            Self::Csv => "csv",
-            Self::Raw => "raw",
         }
     }
 }
@@ -426,6 +420,13 @@ pub(crate) struct ShowTelemetry {
     pub(crate) provider_lookup: bool,
     pub(crate) window: Option<CountBucket>,
     pub(crate) events_returned: Option<CountBucket>,
+}
+
+#[derive(Debug)]
+pub(crate) struct LocateTelemetry {
+    pub(crate) target_kind: TargetKind,
+    pub(crate) output_format: RenderFormat,
+    pub(crate) provider_lookup: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -505,36 +506,6 @@ pub(crate) struct SearchTelemetry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SqlInputKind {
-    Inline,
-    Stdin,
-    File,
-    Missing,
-}
-
-impl SqlInputKind {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Inline => "inline",
-            Self::Stdin => "stdin",
-            Self::File => "file",
-            Self::Missing => "missing",
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct SqlTelemetry {
-    pub(crate) input: SqlInputKind,
-    pub(crate) output_format: RenderFormat,
-    pub(crate) returned_rows: Option<CountBucket>,
-    pub(crate) returned_columns: Option<CountBucket>,
-    pub(crate) rows_truncated: Option<bool>,
-    pub(crate) values_truncated: Option<bool>,
-    pub(crate) query_duration: Option<DurationBucket>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DocsOperation {
     List,
     Search,
@@ -562,7 +533,6 @@ pub(crate) enum DocTopicId {
     CliReference,
     Docs,
     Search,
-    Sql,
     Mcp,
     McpIntegrations,
     Upgrade,
@@ -590,7 +560,6 @@ impl DocTopicId {
             "cli-reference" => Self::CliReference,
             "docs" => Self::Docs,
             "search" => Self::Search,
-            "sql" => Self::Sql,
             "mcp" => Self::Mcp,
             "mcp-integrations" => Self::McpIntegrations,
             "upgrade" => Self::Upgrade,
@@ -619,7 +588,6 @@ impl DocTopicId {
             Self::CliReference => "cli-reference",
             Self::Docs => "docs",
             Self::Search => "search",
-            Self::Sql => "sql",
             Self::Mcp => "mcp",
             Self::McpIntegrations => "mcp-integrations",
             Self::Upgrade => "upgrade",

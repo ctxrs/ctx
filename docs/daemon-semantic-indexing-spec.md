@@ -20,7 +20,7 @@ The public retrieval modes are:
 | --- | --- |
 | `hybrid` | Default when semantic search is enabled. Query lexical and semantic indexes together, then fuse/rerank candidates. |
 | `semantic` | Semantic vector retrieval only. Useful for conceptual recall and debugging. |
-| `lexical` | Default while semantic search is disabled. SQLite FTS/path/token retrieval only. Useful for exact strings, ids, paths, flags, and symbols. |
+| `lexical` | Default while semantic search is disabled. Core/Tantivy lexical and indexed path/token retrieval. Useful for exact strings, ids, paths, flags, and symbols. |
 
 There is no public `auto` retrieval mode. `auto` made lexical and semantic feel
 like fallback tiers. The desired model is not "try lexical, then maybe rescue

@@ -1,13 +1,14 @@
 # Threat Model
 
-The current CLI protects locally imported Core history and its derived search
-and metadata projections.
+The current CLI protects provider-owned source history, ctx-owned search state,
+local usage aggregates, and optional Local Pro data.
 
 ## Assets
 
 - provider transcripts in provider-owned homes;
-- ctx-owned lexical and semantic generations plus the SQLite metadata
-  projection;
+- ctx-owned Core/Tantivy lexical generations and optional flat-F32 semantic
+  generations;
+- the content-free `usage.sqlite` sidecar and optional encrypted Local Pro graph;
 - configuration and import cursors;
 - logs and diagnostic output;
 - JSON and Markdown command output.
@@ -17,15 +18,16 @@ and metadata projections.
 The default-enabled persistent daemon and explicit provider-source import route
 write Core generations and derived state only under the configured ctx data
 root. Search and MCP may send a bounded, content-free daemon wake, but query
-processes do not become foreground history writers. Show, sources, SQL, and
+processes do not become foreground history writers. Show, locate, sources, and
 doctor do not write provider data or repositories. `ctx status` does not mutate
 Core history or local Pro graph data and does not initialize or migrate local
 storage; Pro entitlement authorization may advance nonsecret
 anti-clock-rollback security metadata. `ctx show session --out` writes only the
 explicit output path requested by the user.
 
-Show reads policy-selected normalized content from the active Core generation.
-It does not scan for replacement transcripts or use a network fallback.
+Show reads complete policy-selected normalized records from the active verified
+Core/Tantivy generation. It does not reopen provider history, scan for
+replacement transcripts, or use a network fallback.
 
 Source repositories and provider homes remain outside ctx ownership. Provider
 files are read as import sources, not modified.
@@ -60,7 +62,7 @@ and orphan credentials or graph keys.
 - copied JSON output may leave the machine;
 - unsupported provider formats may be parsed incorrectly if adapters are too
   permissive;
-- compatibility JSON fields may expose more local store detail than an agent
+- compatibility JSON fields may expose more local data-root detail than an agent
   needs.
 - transcript output may contain secrets, and MCP hosts may
   retain or forward it;
@@ -70,11 +72,11 @@ and orphan credentials or graph keys.
 
 - keep imports explicit and repeatable;
 - reject unknown provider formats;
-- persist policy-selected normalized content in Core and keep the relational
-  projection metadata-only;
+- keep policy-selected searchable content and source locators in immutable
+  Core/Tantivy generations;
 - preserve stable ctx citations and provider session identity;
 - keep setup local and side-effect-limited;
-- document that SQLite and stable SQL views are metadata-only and
-  cannot return event payloads;
+- open provider-native SQLite histories only through short read-only logical
+  snapshots without checkpoints or writes;
 - treat JSON output as private until reviewed.
 - require bounded Core body/output sizes and all-or-nothing show results.

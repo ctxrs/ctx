@@ -21,8 +21,7 @@ pub(super) enum ImportCoreRefreshRequest<'a> {
 /// Applies import-specific policy around the one Core refresh control path.
 ///
 /// Import may start the daemon and waits only for authoritative Core publication.
-/// Relational, Pro, and semantic projections follow independently under daemon
-/// scheduling.
+/// Pro and semantic derived consumers follow independently under daemon scheduling.
 pub(super) fn wait_for_import_core_refresh(
     data_root: &Path,
     config: &AppConfig,
@@ -70,8 +69,6 @@ mod tests {
             ["SourceBackedRefresh", "Executor"].concat(),
             ["VerifiedIndex", "::open"].concat(),
             ["Store", "::open"].concat(),
-            ["converge_source_backed_", "relational_generation"].concat(),
-            ["run_relational_", "after_core_publication"].concat(),
         ] {
             assert!(
                 !source.contains(&forbidden),

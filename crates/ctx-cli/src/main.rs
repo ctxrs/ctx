@@ -55,7 +55,6 @@ mod release_build_identity;
 mod search_filters;
 mod semantic;
 mod skill;
-mod source_sql;
 mod transcript;
 #[allow(dead_code, unused_imports)]
 mod ui;
@@ -68,11 +67,11 @@ mod parser_prop_tests;
 pub(crate) use cli::{
     Cli, DaemonArgs, DaemonCommand, DaemonDisableArgs, DaemonRunArgs, DaemonStartModeArg,
     DaemonTriggerCommandArg, DoctorArgs, FormatArgs, ImportArgs, SearchArgs, SearchBackendArg,
-    SetupArgs, ShowArgs, ShowTarget, SourcesArgs, SqlArgs, StatsArgs, StatusArgs, UsageStatusMode,
+    SetupArgs, ShowArgs, ShowTarget, SourcesArgs, StatsArgs, StatusArgs, UsageStatusMode,
     MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
 };
+pub(crate) use commands::locate::LocateTarget;
 pub(crate) use commands::search::RefreshArg;
-pub(crate) use commands::sql::raw_sql_result_json;
 pub(crate) use output::compact_json;
 pub(crate) use provider_args::{cli_supported_provider, parse_provider_arg, ProviderArg};
 pub(crate) use provider_sources::{discovered_plugin_sources_json, sources_json};

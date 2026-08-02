@@ -436,20 +436,12 @@ fn insert_client_operation_properties(
             insert_optional_count(properties, "window_bucket", value.window);
             insert_optional_count(properties, "events_returned_bucket", value.events_returned);
         }
-        ClientOperationV1::Search(value) => insert_search_properties(properties, value),
-        ClientOperationV1::Sql(value) => {
-            insert_str(properties, "input", value.input.as_str());
+        ClientOperationV1::Locate(value) => {
+            insert_str(properties, "target_kind", value.target_kind.as_str());
             insert_str(properties, "output_format", value.output_format.as_str());
-            insert_optional_count(properties, "returned_rows_bucket", value.returned_rows);
-            insert_optional_count(
-                properties,
-                "returned_columns_bucket",
-                value.returned_columns,
-            );
-            insert_optional_bool(properties, "rows_truncated", value.rows_truncated);
-            insert_optional_bool(properties, "values_truncated", value.values_truncated);
-            insert_optional_duration(properties, "query_duration_bucket", value.query_duration);
+            insert_bool(properties, "provider_lookup", value.provider_lookup);
         }
+        ClientOperationV1::Search(value) => insert_search_properties(properties, value),
         ClientOperationV1::Docs(value) => {
             insert_optional_str(
                 properties,

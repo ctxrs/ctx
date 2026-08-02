@@ -181,10 +181,6 @@ pub(crate) fn write_stderr_line(arguments: fmt::Arguments<'_>) {
     write_stream(StreamKind::Stderr, arguments, true);
 }
 
-pub(crate) fn stdout_writer() -> impl Write {
-    MeasuredWriter::current(io::stdout(), StreamKind::Stdout)
-}
-
 pub(crate) fn stderr_writer() -> impl Write {
     MeasuredWriter::current(io::stderr(), StreamKind::Stderr)
 }
@@ -207,14 +203,6 @@ impl JsonOutputFormat {
     pub(crate) const fn is_json(self) -> bool {
         matches!(self, Self::Json)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum SqlFormat {
-    Table,
-    Json,
-    Csv,
-    Raw,
 }
 
 impl OutputFormat {

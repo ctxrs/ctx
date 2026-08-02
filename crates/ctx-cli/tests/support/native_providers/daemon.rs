@@ -98,63 +98,11 @@ pub(super) fn start_isolated_provider_daemon(temp: &TempDir) -> SourceRefreshDae
     }
 }
 
-pub(super) fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let packet = loop {
-        let output = ctx(temp)
-            .args(["sql", sql, "--format=json"])
-            .output()
-            .unwrap();
-        if output.status.success() {
-            let packet = serde_json::from_slice::<Value>(&output.stdout).unwrap();
-            if packet["snapshot"]["stale"] == true && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(25));
-                continue;
-            }
-            assert_ne!(
-                packet["snapshot"]["stale"], true,
-                "source-backed SQL projection stayed stale for `{sql}`: {packet:#}"
-            );
-            break packet;
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if (stderr.contains("Core SQL projection")
-            || stderr.contains("source-backed SQL projection")
-            || stderr.contains("source-backed relational projection")
-            || stderr.contains("no such table: source_backed_relational_state"))
-            && Instant::now() < deadline
-        {
-            if let Ok(job) = fs::read(data_root(temp).join("daemon/jobs/relational-catch-up.json"))
-                .and_then(|bytes| {
-                    serde_json::from_slice::<Value>(&bytes).map_err(std::io::Error::other)
-                })
-            {
-                if job["status"] == "error" {
-                    panic!(
-                        "source-backed SQL projection failed for `{sql}` ({}): {}",
-                        job["error_code"].as_str().unwrap_or("unknown_error"),
-                        job["last_error"]
-                            .as_str()
-                            .unwrap_or("unknown projection error")
-                    );
-                }
-            }
-            std::thread::sleep(Duration::from_millis(25));
-            continue;
-        }
-        panic!("source-backed SQL failed for `{sql}`: {stderr}");
-    };
-    packet["rows"][0][0]
-        .as_i64()
-        .unwrap_or_else(|| panic!("expected integer SQL scalar in {packet:#}"))
-}
-
-pub(super) fn wait_for_imported_projections(temp: &TempDir, packet: &Value) {
+pub(super) fn wait_for_imported_core(temp: &TempDir, packet: &Value) {
     let generation = packet["sources"][0]["published_generation"]
         .as_str()
         .unwrap_or_else(|| panic!("import packet omitted published generation: {packet:#}"));
     wait_for_test_lexical_projection(temp, generation);
-    wait_for_test_relational_projection(temp, generation);
 }
 
 pub(super) fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {

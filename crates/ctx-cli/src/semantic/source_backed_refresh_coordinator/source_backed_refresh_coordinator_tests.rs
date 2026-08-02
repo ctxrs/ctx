@@ -960,58 +960,6 @@ fn verified_publication_atomically_installs_pinned_core_receipt() {
 }
 
 #[test]
-fn one_post_commit_open_supplies_core_pin_to_relational_catch_up() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let receipt = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?
-            .commit(|_| true)?;
-            Ok(empty_test_publication(receipt.generation_id))
-        },
-    ));
-    coordinator.enqueue_periodic(&data_root).unwrap();
-
-    let ((run, relational), verified_opens) = count_verified_index_opens(|| {
-        let run = coordinator.run_next(&data_root).expect("queued refresh");
-        let generation = run.job["published_generation"]
-            .as_str()
-            .expect("published generation")
-            .to_owned();
-        let relational =
-            crate::semantic::source_backed_relational_catch_up::run_after_core_publication(
-                &data_root,
-                &generation,
-            )
-            .unwrap();
-        (run, relational)
-    });
-
-    assert_eq!(verified_opens, 1, "the committed Core pin must be reused");
-    assert!(!run.failed);
-    assert_eq!(relational.status["status"], "completed");
-    assert!(run.job["timings_us"]["publication_probe"]
-        .as_u64()
-        .is_some_and(|duration| duration > 0));
-    assert!(relational.status["last_attempt_duration_us"]
-        .as_u64()
-        .is_some_and(|duration| duration > 0));
-    let pinned = coordinator
-        .pinned_core_publication()
-        .expect("pinned Core publication");
-    assert_eq!(
-        pinned
-            .verified_index()
-            .expect("verified Core index")
-            .generation_id(),
-        pinned.generation_id()
-    );
-}
-
-#[test]
 fn failed_post_commit_probe_is_not_reopened_in_the_same_cycle() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = CoreRefreshEngine::with_executor(Arc::new(TestExecutor {
