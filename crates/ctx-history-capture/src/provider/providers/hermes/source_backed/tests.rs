@@ -1,10 +1,18 @@
 use std::{fs, path::Path};
 
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{CaptureProvider, SourceAnchor};
+use ctx_history_index::WriterOptions;
 use rusqlite::Connection;
 
 use super::*;
-use crate::provider_sources::provider_source_for_path;
+use crate::{
+    provider::source_backed::{
+        refresh_source_backed_generation, refresh_source_backed_generation_with_progress,
+        SourceBackedProviderRegistry,
+    },
+    provider_sources::provider_source_for_path,
+    register_hermes_explicit_source_backed_route,
+};
 
 #[test]
 fn direct_core_projection_is_complete_and_self_contained() {
@@ -145,4 +153,165 @@ fn online_backup_stays_stable_across_later_wal_commit_and_next_open_sees_it() {
         vec!["admitted message", "later message"]
     );
     snapshot.finish().unwrap();
+}
+
+fn create_refresh_fixture(path: &Path, message_count: u64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "create table sessions (
+                 id text primary key,
+                 source text not null,
+                 parent_session_id text,
+                 started_at real not null
+             );
+             create table messages (
+                 id integer primary key autoincrement,
+                 session_id text not null,
+                 role text not null,
+                 content text,
+                 timestamp real not null
+             );
+             insert into sessions values ('session-1', 'acp', null, 1782259200.0);",
+        )
+        .unwrap();
+    let mut insert = connection
+        .prepare(
+            "insert into messages (session_id, role, content, timestamp)
+             values ('session-1', 'assistant', ?1, ?2)",
+        )
+        .unwrap();
+    for ordinal in 0..message_count {
+        insert
+            .execute((
+                format!("fixture message {ordinal:05}"),
+                1_782_259_201_f64 + ordinal as f64,
+            ))
+            .unwrap();
+    }
+}
+
+fn fixture_registry(data_root: &Path, database: &Path) -> SourceBackedProviderRegistry {
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_hermes_explicit_source_backed_route(
+        &mut registry,
+        provider_source_for_path(CaptureProvider::Hermes, database.to_path_buf()),
+        data_root,
+        SourceAnchor::CatalogLineage([0x48; 32]),
+    )
+    .unwrap();
+    registry
+}
+
+fn fixture_writer_options() -> WriterOptions {
+    WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    }
+}
+
+#[test]
+fn cold_and_noop_refresh_use_one_visible_logical_row_traversal() {
+    const MESSAGES: u64 = 512;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let database = temp.path().join("source/state.db");
+    create_refresh_fixture(&database, MESSAGES);
+    let registry = fixture_registry(&data_root, &database);
+    let source_names = provider_directory_names(&database);
+    let source_bytes = provider_family_bytes(&database);
+
+    reset_logical_row_traversals();
+    let mut progress = Vec::new();
+    let cold = refresh_source_backed_generation_with_progress(
+        &index_root,
+        &registry,
+        fixture_writer_options(),
+        |update| {
+            progress.push(update);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(logical_row_traversals(), 1);
+    assert_eq!(cold.sources[0].counts().complete_records, MESSAGES + 1);
+    assert!(cold.sources[0].frontier().is_none());
+    assert!(progress.iter().any(|update| {
+        update.phase == "refreshing"
+            && update.current_source.as_deref() == database.to_str()
+            && update.completed_records == Some(0)
+            && update.completed_bytes.is_some_and(|bytes| bytes > 0)
+    }));
+    let route_terminal = progress
+        .iter()
+        .rev()
+        .find(|update| update.current_source.as_deref() == database.to_str())
+        .expect("terminal Hermes route progress");
+    assert_eq!(route_terminal.completed_records, Some(MESSAGES));
+    assert_eq!(
+        route_terminal.completed_bytes,
+        Some(cold.sources[0].counts().certified_bytes)
+    );
+    let terminal = progress.last().expect("terminal Hermes progress");
+    assert_eq!(terminal.phase, "committed");
+    assert!(terminal.current_source.is_none());
+    assert!(terminal.completed_records.is_none());
+    assert!(terminal.completed_bytes.is_none());
+    assert_eq!(provider_directory_names(&database), source_names);
+    assert_eq!(provider_family_bytes(&database), source_bytes);
+
+    reset_logical_row_traversals();
+    let unchanged =
+        refresh_source_backed_generation(&index_root, &registry, fixture_writer_options()).unwrap();
+    assert_eq!(logical_row_traversals(), 1);
+    assert_eq!(unchanged.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(unchanged.sources, cold.sources);
+    assert_eq!(provider_directory_names(&database), source_names);
+    assert_eq!(provider_family_bytes(&database), source_bytes);
+
+    let connection = Connection::open(&database).unwrap();
+    connection.execute_batch("vacuum").unwrap();
+    drop(connection);
+    let vacuumed_names = provider_directory_names(&database);
+    let vacuumed_bytes = provider_family_bytes(&database);
+    reset_logical_row_traversals();
+    let physically_changed =
+        refresh_source_backed_generation(&index_root, &registry, fixture_writer_options()).unwrap();
+    assert_eq!(logical_row_traversals(), 1);
+    assert_eq!(
+        physically_changed.commit.generation_id,
+        cold.commit.generation_id
+    );
+    assert_eq!(physically_changed.sources, cold.sources);
+    assert_eq!(provider_directory_names(&database), vacuumed_names);
+    assert_eq!(provider_family_bytes(&database), vacuumed_bytes);
+
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "insert into messages (session_id, role, content, timestamp)
+             values ('session-1', 'assistant', 'changed message', 1782264200.0)",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    reset_logical_row_traversals();
+    let changed =
+        refresh_source_backed_generation(&index_root, &registry, fixture_writer_options()).unwrap();
+    assert_eq!(logical_row_traversals(), 1);
+    assert_ne!(changed.commit.generation_id, cold.commit.generation_id);
+    assert_ne!(changed.sources, cold.sources);
+    assert_eq!(changed.sources[0].counts().complete_records, MESSAGES + 2);
+
+    reset_logical_row_traversals();
+    let changed_noop =
+        refresh_source_backed_generation(&index_root, &registry, fixture_writer_options()).unwrap();
+    assert_eq!(logical_row_traversals(), 1);
+    assert_eq!(
+        changed_noop.commit.generation_id,
+        changed.commit.generation_id
+    );
+    assert_eq!(changed_noop.sources, changed.sources);
 }

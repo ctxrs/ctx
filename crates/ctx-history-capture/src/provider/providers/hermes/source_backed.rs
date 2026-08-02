@@ -52,7 +52,7 @@ const HERMES_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v1";
 const HERMES_SESSION_METADATA_MAX_CHARS: usize = 8 * 1024;
 const HERMES_PARENT_CHAIN_MAX_DEPTH: usize = 256;
 const HERMES_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-snapshot-v1\0";
-const HERMES_LOGICAL_FINGERPRINT_DOMAIN: &[u8] = b"ctx-hermes-logical-fingerprint-v1\0";
+const HERMES_TREE_FINGERPRINT_DOMAIN: &[u8] = b"ctx-hermes-source-inventory-v1\0";
 const HERMES_SESSION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-session-v1\0";
 const HERMES_REJECTION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-rejection-v1\0";
 
@@ -98,6 +98,7 @@ fn project_hermes_snapshot(
             let mut counts = ScannedSourceCounts::default();
             let mut page_records = Vec::new();
             let mut page_owned_bytes = 0_usize;
+            let mut page_completed_bytes = 0_u64;
             let mut decoded_rows = 0_u64;
             let mut emitted_pages = 0_u64;
             let mut peak_buffered_records = 0_u64;
@@ -168,11 +169,16 @@ fn project_hermes_snapshot(
                             u64::try_from(records.len())
                                 .map_err(|_| HermesSourceBackedError::CountOverflow)?,
                         );
-                        emit(HermesSourceBackedPage { records })?;
+                        emit(HermesSourceBackedPage {
+                            records,
+                            completed_bytes: page_completed_bytes,
+                        })?;
                         emitted_pages = checked_add(emitted_pages, 1)?;
                         page_owned_bytes = 0;
+                        page_completed_bytes = 0;
                     }
                     page_owned_bytes = page_owned_bytes.saturating_add(owned_bytes);
+                    page_completed_bytes = checked_add(page_completed_bytes, observed_bytes)?;
                     page_records.push(record);
                     if page_records.len() == NATIVE_INGESTION_PAGE_MAX_UNITS {
                         let records = std::mem::take(&mut page_records);
@@ -180,9 +186,13 @@ fn project_hermes_snapshot(
                             u64::try_from(records.len())
                                 .map_err(|_| HermesSourceBackedError::CountOverflow)?,
                         );
-                        emit(HermesSourceBackedPage { records })?;
+                        emit(HermesSourceBackedPage {
+                            records,
+                            completed_bytes: page_completed_bytes,
+                        })?;
                         emitted_pages = checked_add(emitted_pages, 1)?;
                         page_owned_bytes = 0;
+                        page_completed_bytes = 0;
                     }
                 }
             }
@@ -193,6 +203,7 @@ fn project_hermes_snapshot(
                 );
                 emit(HermesSourceBackedPage {
                     records: page_records,
+                    completed_bytes: page_completed_bytes,
                 })?;
                 emitted_pages = checked_add(emitted_pages, 1)?;
             }
@@ -215,6 +226,8 @@ fn project_hermes_snapshot(
         counts,
     )
     .certify(candidate.source.clone())?;
+    #[cfg(test)]
+    record_logical_row_traversal();
     Ok(HermesSnapshotProjection {
         certificate,
         decoded_rows,
@@ -282,50 +295,33 @@ fn hermes_schema_evidence(sqlite_user_version: i64, schema_fingerprint: &str) ->
     .into_bytes()
 }
 
-fn observe_hermes_logical_snapshot(
-    conn: &rusqlite::Connection,
-) -> HermesSourceBackedResult<[u8; 32]> {
-    let sqlite_user_version = conn
-        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-        .map_err(CaptureError::from)?;
-    let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
-    let schema = HermesSchema::detect(conn)?;
-    let schema_evidence = hermes_schema_evidence(sqlite_user_version, &schema_fingerprint);
-    let mut reader = HermesRowReader::new(conn, &schema)?;
-    let mut frontier = super::sqlite::HermesFrontier::initial();
+fn hermes_tree_fingerprint(source: &SourceKey) -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(HERMES_LOGICAL_FINGERPRINT_DOMAIN);
-    digest.update((HERMES_SOURCE_PARSER_REVISION.len() as u64).to_be_bytes());
-    digest.update(HERMES_SOURCE_PARSER_REVISION.as_bytes());
-    digest.update((schema_evidence.len() as u64).to_be_bytes());
-    digest.update(schema_evidence);
-    let mut rows = 0_u64;
-    loop {
-        let page = reader.next_page(frontier)?;
-        if page.is_empty() {
-            break;
-        }
-        frontier = page
-            .last()
-            .map(|native| native.next_frontier)
-            .unwrap_or(frontier);
-        for native in page {
-            rows = checked_add(rows, 1)?;
-            digest.update([match native.locator.phase {
-                HermesPhase::Sessions => 1,
-                HermesPhase::Messages => 2,
-            }]);
-            digest.update(native.ordinal.to_be_bytes());
-            digest.update(
-                u64::try_from(native.observed_bytes)
-                    .map_err(|_| HermesSourceBackedError::CountOverflow)?
-                    .to_be_bytes(),
-            );
-            digest.update(native_record_digest(&native)?);
-        }
-    }
-    digest.update(rows.to_be_bytes());
-    Ok(digest.finalize().into())
+    digest.update(HERMES_TREE_FINGERPRINT_DOMAIN);
+    digest.update(source.exact_descriptor_digest());
+    digest.finalize().into()
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static HERMES_LOGICAL_ROW_TRAVERSALS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_logical_row_traversals() {
+    HERMES_LOGICAL_ROW_TRAVERSALS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn logical_row_traversals() -> u64 {
+    HERMES_LOGICAL_ROW_TRAVERSALS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_logical_row_traversal() {
+    HERMES_LOGICAL_ROW_TRAVERSALS.with(|count| {
+        count.set(count.get().saturating_add(1));
+    });
 }
 
 #[derive(Debug, Clone)]

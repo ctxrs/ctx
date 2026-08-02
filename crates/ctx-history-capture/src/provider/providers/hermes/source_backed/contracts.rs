@@ -125,4 +125,5 @@ pub(crate) enum HermesSourceBackedRecord {
 #[derive(Debug, Clone)]
 pub(crate) struct HermesSourceBackedPage {
     pub(crate) records: Vec<HermesSourceBackedRecord>,
+    pub(crate) completed_bytes: u64,
 }

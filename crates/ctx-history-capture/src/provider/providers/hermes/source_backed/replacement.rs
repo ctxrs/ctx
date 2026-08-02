@@ -44,14 +44,15 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
         let (sqlite_authority, snapshot) =
             open_root_authorized_snapshot(&self.data_root, self.path()).map_err(route_error)?;
         let opening_evidence = snapshot.evidence().clone();
-        let fingerprint =
-            observe_hermes_logical_snapshot(snapshot.connection().map_err(route_error)?)
-                .map_err(route_error)?;
         snapshot.revalidate().map_err(route_error)?;
-        let fingerprint = DocumentLeafFingerprint::new(fingerprint);
+        let fingerprint = DocumentLeafFingerprint::new(*opening_evidence.revision());
         Ok(CompleteDocumentTree::new(
-            fingerprint.as_bytes(),
-            vec![ObservedDocumentLeaf::new(fingerprint, self.source.clone())],
+            hermes_tree_fingerprint(&self.source),
+            vec![ObservedDocumentLeaf::with_durable_replay(
+                fingerprint,
+                self.source.clone(),
+                false,
+            )],
             HermesTreeAuthority {
                 opening_evidence,
                 _sqlite_authority: sqlite_authority,
@@ -79,6 +80,13 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
             self,
             snapshot.connection().map_err(route_error)?,
             &mut |page| {
+                if let Err(error) = sink.report_completed_bytes(page.completed_bytes) {
+                    let detail = error.to_string();
+                    sink_error = Some(error);
+                    return Err(HermesSourceBackedError::Capture(
+                        CaptureError::InvalidPayload(detail),
+                    ));
+                }
                 for record in page.records {
                     if let HermesSourceBackedRecord::Event(document) = record {
                         if let Err(error) = sink.emit_core_record(document) {
