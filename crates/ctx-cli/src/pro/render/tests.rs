@@ -97,20 +97,13 @@ fn commit_blame_result(evidence_count: u32) -> BlameResult {
 }
 
 fn preview(
-    result: &BlameResult,
+    _result: &BlameResult,
     numbers: Vec<u32>,
     kind: RepositoryFileObservationKind,
     excerpt: impl Into<String>,
 ) -> EvidencePreview {
-    let citation = result
-        .evidence
-        .iter()
-        .find(|evidence| Some(evidence.number) == numbers.first().copied())
-        .unwrap();
     EvidencePreview {
         evidence_numbers: numbers,
-        event_id: citation.citation.event_id,
-        event_sequence: citation.citation.event_sequence,
         file_kind: kind,
         excerpt: excerpt.into(),
     }
@@ -136,13 +129,7 @@ fn single_preview_excerpt_fragments(rendered: &str) -> Vec<&str> {
         .iter()
         .position(|line| line.contains("file evidence"))
         .unwrap();
-    let command = lines
-        .iter()
-        .skip(heading + 1)
-        .position(|line| line.trim_start().starts_with("ctx show event "))
-        .map(|index| heading + 1 + index)
-        .unwrap();
-    lines[heading + 1..command]
+    lines[heading + 1..]
         .iter()
         .map(|line| line.strip_prefix("    ").unwrap())
         .collect()
@@ -808,7 +795,7 @@ fn opted_in_file_preview_follows_its_numbered_evidence() {
     let event_command = format!("ctx show event {}", result.evidence[0].citation.event_id);
     assert_eq!(
         rendered[preview..].matches(&event_command).count(),
-        1,
+        0,
         "{rendered}"
     );
     assert!(rendered.contains("  [1] Modified file evidence\n"));
@@ -1018,16 +1005,12 @@ fn multibyte_excerpt_limit_is_enforced_in_original_utf8_bytes() {
                 "{bytes}: {rendered}"
             );
             assert!(
-                rendered
-                    .split("\nEvidence preview ")
-                    .nth(1)
-                    .unwrap()
-                    .contains("ctx show event "),
+                rendered.contains("Modified file evidence"),
                 "{bytes}: {rendered}"
             );
         } else {
             assert!(
-                rendered.contains("requested but is unavailable"),
+                rendered.contains("safe preview") && rendered.contains("unavailable"),
                 "{bytes}: {rendered}"
             );
             assert!(
@@ -1074,7 +1057,7 @@ fn requested_but_unavailable_preview_is_content_free_and_default_output_is_uncha
     assert!(!default.contains("Evidence preview"));
     assert!(requested.starts_with(default.trim_end()), "{requested}");
     assert!(requested.contains("Evidence preview (local history content; explicitly requested)"));
-    assert!(requested.contains("Exact cited local-history evidence was requested"));
+    assert!(requested.contains("A safe preview of cited local-history evidence"));
     assert!(requested.contains("unavailable"));
     assert!(requested.contains("result."));
     assert!(!requested.contains("generation"));
@@ -1134,7 +1117,7 @@ fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_trun
     let plain = section.render_plain();
 
     assert!(styled.len() <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES);
-    assert_eq!(plain.matches("ctx show event ").count(), 3);
+    assert_eq!(plain.matches("Modified file evidence").count(), 3);
     assert!(
         plain.contains("  [1] [2]\n    Modified file evidence\n"),
         "{plain}"
@@ -1151,7 +1134,7 @@ fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_trun
 }
 
 #[test]
-fn ultra_narrow_contexts_preserve_grouped_references_and_full_event_command_atoms() {
+fn ultra_narrow_contexts_preserve_grouped_references_and_exact_excerpt_atoms() {
     let result = file_preview_result(3);
     let model = EvidencePreviewModel {
         previews: vec![preview(
@@ -1161,11 +1144,6 @@ fn ultra_narrow_contexts_preserve_grouped_references_and_full_event_command_atom
             "exact unit",
         )],
     };
-    let event_command = format!(
-        "    ctx show event {}",
-        result.evidence[0].citation.event_id
-    );
-
     for width in [1, 2, 8, 16] {
         for color in [ColorMode::Never, ColorMode::Always] {
             let context =
@@ -1186,7 +1164,7 @@ fn ultra_narrow_contexts_preserve_grouped_references_and_full_event_command_atom
                 stripped.contains("  [1] [2] [3]\n    Modified file evidence\n"),
                 "{width}/{color:?}: {stripped}"
             );
-            assert_eq!(stripped.matches(&event_command).count(), 1);
+            assert!(!stripped.contains("ctx show event "));
             for reference in ["[1]", "[2]", "[3]"] {
                 assert_eq!(stripped.matches(reference).count(), 1);
             }
@@ -1223,15 +1201,13 @@ fn actual_and_canonical_render_budgets_omit_only_complete_preview_items() {
                 rendered.len()
             );
             let stripped = strip_ansi(&rendered);
-            let admitted = stripped.matches("ctx show event ").count();
+            let admitted = stripped.matches("Modified file evidence").count();
             assert_eq!(
                 stripped.matches('Z').count(),
                 admitted * MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
                 "partial excerpt at {width}/{color:?}: {stripped}"
             );
             for evidence in &result.evidence {
-                let command = format!("ctx show event {}", evidence.citation.event_id);
-                assert!(stripped.matches(&command).count() <= 1);
                 let reference = format!("[{}]", evidence.number);
                 assert!(stripped.matches(&reference).count() <= 1);
             }
@@ -1266,7 +1242,7 @@ fn sanitizer_expansion_omits_the_complete_item_instead_of_truncating_it() {
     let rendered = render_preview_plain(&result, &model, 80);
 
     assert!(
-        rendered.contains("requested but is unavailable"),
+        rendered.contains("safe preview") && rendered.contains("unavailable"),
         "{rendered}"
     );
     assert!(
@@ -1320,19 +1296,10 @@ fn preview_is_safe_and_stable_at_supported_widths_and_across_color() {
         }
         assert!(!plain.contains('\u{202e}'));
         assert!(!plain.contains('\u{1b}'));
-        let event_id = result.evidence[0].citation.event_id.to_string();
-        let event_command = format!("ctx show event {event_id}");
         let preview_section = plain.split("\nEvidence preview ").nth(1).unwrap();
-        assert_eq!(
-            preview_section.matches(&event_command).count(),
-            1,
-            "width {width}"
-        );
+        assert!(!preview_section.contains("ctx show event "));
         for line in preview_section.lines() {
-            assert!(
-                line.width() < width || line.contains(&event_id),
-                "width {width} overflow: {line:?}"
-            );
+            assert!(line.width() < width, "width {width} overflow: {line:?}");
         }
     }
 }

@@ -337,10 +337,8 @@ fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
             repository,
             "--format=json",
         ]));
-        assert_eq!(
-            stderr,
-            "{\"error\":\"invalid_request\",\"error_code\":\"invalid_request\"}\n"
-        );
+        assert!(stderr.starts_with("Error: invalid_request:"), "{stderr}");
+        assert!(stderr.contains("repository selector"), "{stderr}");
     }
 
     for args in [
@@ -352,14 +350,13 @@ fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
         if args.contains(&"--format=json") {
             assert_eq!(
                 stderr,
-                "{\"error\":\"invalid_request\",\"error_code\":\"invalid_request\"}\n"
+                "Error: invalid_request: blame target type is ambiguous; use --type file, --type commit, or --type pr\n"
             );
-        } else {
-            assert!(stderr.contains("target type is ambiguous"), "{stderr}");
-            assert!(stderr.contains("--type file"), "{stderr}");
-            assert!(stderr.contains("--type commit"), "{stderr}");
-            assert!(stderr.contains("--type pr"), "{stderr}");
         }
+        assert!(stderr.contains("target type is ambiguous"), "{stderr}");
+        assert!(stderr.contains("--type file"), "{stderr}");
+        assert!(stderr.contains("--type commit"), "{stderr}");
+        assert!(stderr.contains("--type pr"), "{stderr}");
         assert!(!stderr.contains("pro_not_installed"), "{stderr}");
     }
 

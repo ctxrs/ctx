@@ -496,8 +496,7 @@ retain subcommand precedence as the first token; for example, use
 
 `--evidence-preview` is off by default, human-only, and must be requested for
 each file-blame invocation. It adds up to three bounded exact Codex file
-excerpts from cited local history plus a `ctx show event <ctx-event-id>`
-follow-up for the complete cited record. Unsupported, stale, or ambiguous file
+excerpts from cited local history. Unsupported, stale, or ambiguous file
 evidence may be omitted from the preview without changing attribution or the
 underlying `BlameResult`. A commit or PR target combined with
 `--evidence-preview` is rejected with actionable `invalid_request` before Pro

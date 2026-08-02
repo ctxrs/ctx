@@ -915,7 +915,7 @@ fn parser_body_and_line_ceilings_are_checked_before_projection() {
 }
 
 #[test]
-fn evidence_is_number_ordered_limited_and_deduplicated_by_event_and_excerpt() {
+fn evidence_is_number_ordered_limited_and_deduplicated_by_exact_replay_content() {
     let shared = file_record(
         60,
         1,
@@ -927,9 +927,9 @@ fn evidence_is_number_ordered_limited_and_deduplicated_by_event_and_excerpt() {
     let second = file_record(
         61,
         2,
-        "*** Update File: src/lib.rs\nsecond adjacent",
+        "*** Delete File: src/lib.rs\nsecond adjacent",
         "src/lib.rs",
-        RepositoryFileObservationKind::Modified,
+        RepositoryFileObservationKind::Deleted,
         None,
     );
     let fourth = file_record(
@@ -940,15 +940,24 @@ fn evidence_is_number_ordered_limited_and_deduplicated_by_event_and_excerpt() {
         RepositoryFileObservationKind::Modified,
         None,
     );
+    let replay = file_record(
+        63,
+        4,
+        "*** Update File: src/lib.rs",
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
+    );
+    assert_ne!(shared.event_id, replay.event_id);
     let evidence = [
         numbered(&shared, 1),
-        numbered(&shared, 2),
+        numbered(&replay, 2),
         numbered(&second, 3),
         numbered(&fourth, 4),
     ];
     let proofs = [
         verified(&evidence[2], &second),
-        verified(&evidence[1], &shared),
+        verified(&evidence[1], &replay),
         verified(&evidence[3], &fourth),
         verified(&evidence[0], &shared),
     ];
@@ -961,7 +970,7 @@ fn evidence_is_number_ordered_limited_and_deduplicated_by_event_and_excerpt() {
     assert!(model
         .previews
         .iter()
-        .all(|preview| preview.event_id != fourth.event_id));
+        .all(|preview| !preview.evidence_numbers.contains(&4)));
 }
 
 #[test]

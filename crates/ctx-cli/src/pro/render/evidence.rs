@@ -20,7 +20,7 @@ pub(super) const MAX_EVIDENCE_PREVIEW_RENDERED_BYTES: usize = 4_096;
 const EVIDENCE_PREVIEW_DISCLOSURE: &str =
     "Evidence preview (local history content; explicitly requested)";
 const EVIDENCE_PREVIEW_UNAVAILABLE: &str =
-    "Exact cited local-history evidence was requested but is unavailable for this result.";
+    "A safe preview of cited local-history evidence is unavailable for this result.";
 
 pub(super) fn render_previews(
     document: &mut Document,
@@ -136,12 +136,6 @@ fn preview_item(
     for line in excerpt_lines {
         push_literal_excerpt_line(&mut document, context, 4, line, Token::Text);
     }
-    push_atomic(
-        &mut document,
-        4,
-        &format!("ctx show event {}", preview.event_id),
-        Token::Command,
-    );
     Some(document)
 }
 

@@ -1,5 +1,5 @@
 use ctx_history_core::{
-    RepositoryBinding, RepositoryFileObservationKind, StableEntityId, CORE_CONTENT_POLICY_REVISION,
+    RepositoryBinding, RepositoryFileObservationKind, CORE_CONTENT_POLICY_REVISION,
     CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
 };
 use ctx_history_index::CoreEventRecord;
@@ -64,8 +64,6 @@ pub(crate) struct EvidencePreviewModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EvidencePreview {
     pub(crate) evidence_numbers: Vec<u32>,
-    pub(crate) event_id: StableEntityId,
-    pub(crate) event_sequence: u64,
     pub(crate) file_kind: RepositoryFileObservationKind,
     /// An exact, complete UTF-8 unit copied from `CoreContent::normalized_body`.
     pub(crate) excerpt: String,
@@ -106,16 +104,17 @@ pub(crate) fn project_evidence_previews(
             continue;
         };
 
-        if let Some(existing) = previews.iter_mut().find(|preview| {
-            preview.event_id == candidate.record.event_id && preview.excerpt == excerpt
-        }) {
+        // Replayed provider events can have distinct stable IDs while carrying the same exact
+        // target-bearing unit. Keep one visible unit and preserve every citation number.
+        if let Some(existing) = previews
+            .iter_mut()
+            .find(|preview| preview.file_kind == file_kind && preview.excerpt == excerpt)
+        {
             existing.evidence_numbers.push(numbered.number);
             continue;
         }
         previews.push(EvidencePreview {
             evidence_numbers: vec![numbered.number],
-            event_id: candidate.record.event_id,
-            event_sequence: candidate.record.event_sequence,
             file_kind,
             excerpt: excerpt.to_owned(),
         });

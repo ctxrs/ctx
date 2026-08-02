@@ -233,13 +233,12 @@ fn one_strict_bounded_batch_deduplicates_ids_and_caps_citations() {
     );
 
     assert_eq!(calls.get(), 1);
-    assert_eq!(model.previews.len(), 2);
-    assert_eq!(model.previews[0].evidence_numbers, vec![1, 2]);
-    assert_eq!(model.previews[1].evidence_numbers, vec![3]);
+    assert_eq!(model.previews.len(), 1);
+    assert_eq!(model.previews[0].evidence_numbers, vec![1, 2, 3]);
     assert!(model
         .previews
         .iter()
-        .all(|preview| preview.event_id != fourth.event_id));
+        .all(|preview| !preview.evidence_numbers.contains(&4)));
 }
 
 #[test]

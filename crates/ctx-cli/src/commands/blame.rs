@@ -92,6 +92,15 @@ impl BlameArgs {
         }
     }
 
+    pub(crate) const fn evidence_preview_requested(&self) -> bool {
+        match &self.explicit_target {
+            Some(BlameTargetArgs::File(args)) => args.evidence_preview,
+            Some(BlameTargetArgs::Commit(args)) => args.evidence_preview,
+            Some(BlameTargetArgs::PullRequest(args)) => args.evidence_preview,
+            None => self.evidence_preview,
+        }
+    }
+
     fn into_query(self) -> Result<(BlameTarget, u32, Option<String>, bool, bool)> {
         if let Some(target) = self.explicit_target {
             return validated_query(explicit_query(target));

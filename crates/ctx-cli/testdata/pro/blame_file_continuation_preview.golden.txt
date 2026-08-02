@@ -21,5 +21,5 @@ Evidence
     ctx show event 8cd765ac-68a3-8a2c-ae04-669a08be6370 · Core aaaaaaaaaaaa · source 0f989cc2-fb1b-8eaf-8403-078d7622424b · sequence 1
 
 Evidence preview (local history content; explicitly requested)
-  Exact cited local-history evidence was requested but is unavailable for this
+  A safe preview of cited local-history evidence is unavailable for this
   result.
