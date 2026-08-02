@@ -32,7 +32,10 @@ impl ProviderIdentityResolution {
                     return false;
                 };
                 outcome.pull_request.as_ref().is_some_and(|pull_request| {
-                    binding.aliases.contains(&pull_request.forge_repository)
+                    binding
+                        .aliases
+                        .iter()
+                        .any(|alias| alias_identity_matches(alias, &pull_request.forge_repository))
                 })
             })
     }
@@ -120,11 +123,32 @@ pub(super) fn reconcile_provider_identity(
         ProviderIdentityResolution::Abstained => return,
         ProviderIdentityResolution::Binding(provider) => provider,
     };
-    let mut matched = false;
-    for certificate in certified.iter_mut().filter(|certificate| {
-        certificate.binding.logical_repository_id == provider.logical_repository_id
-    }) {
-        matched = true;
+    let matching = certified
+        .iter()
+        .enumerate()
+        .filter(|(_, certificate)| {
+            certificate.binding.logical_repository_id == provider.logical_repository_id
+                || certificate.binding.aliases.iter().any(|local| {
+                    provider
+                        .aliases
+                        .iter()
+                        .any(|native| alias_identity_matches(local, native))
+                })
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if matching.len() > 1 {
+        push_abstention(
+            annotation,
+            RepositoryEvidenceKind::ProviderNativeProject,
+            RepositoryAbstentionReason::ConflictingIdentity,
+            "provider_native_identity_matches_multiple_local_certificates",
+        );
+        annotation.repository_bindings.push(*provider);
+        return;
+    }
+    if let Some(index) = matching.first().copied() {
+        let certificate = &mut certified[index];
         for alias in &provider.aliases {
             if !certificate.binding.aliases.contains(alias) {
                 certificate.binding.aliases.push(alias.clone());
@@ -135,8 +159,6 @@ pub(super) fn reconcile_provider_identity(
                 certificate.binding.evidence.push(evidence.clone());
             }
         }
-    }
-    if matched {
         return;
     }
     if !certified.is_empty() {
@@ -153,6 +175,12 @@ pub(super) fn reconcile_provider_identity(
         return;
     }
     annotation.repository_bindings.push(*provider);
+}
+
+fn alias_identity_matches(left: &RepositoryAlias, right: &RepositoryAlias) -> bool {
+    left.host.eq_ignore_ascii_case(&right.host)
+        && left.namespace == right.namespace
+        && left.name == right.name
 }
 
 fn logical_only_binding(

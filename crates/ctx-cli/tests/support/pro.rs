@@ -174,7 +174,7 @@ fn initialize_provider_neutral_core_projection(data_root: &Path) -> String {
         "repository_candidate_evidence": {
             "repository_observation_revision": 2,
             "bounded_shell_subset_revision": 1,
-            "association_policy_revision": 3,
+            "association_policy_revision": 4,
             "outcome_capture_revision": 2,
             "candidates": [
                 {"kind": "session_cwd", "path": "/fixture/repository"},
