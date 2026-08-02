@@ -270,6 +270,7 @@ fn blame_help_explains_launch_targets_and_bounds() {
             .stdout
             .clone();
         let help = String::from_utf8(output).unwrap();
+        let normalized_help = help.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             help.to_ascii_lowercase()
                 .contains("logical repository identity"),
@@ -286,7 +287,13 @@ fn blame_help_explains_launch_targets_and_bounds() {
         assert!(help.contains("--cursor <CURSOR>"));
         assert!(help.contains("--evidence-preview"), "{args:?}:\n{help}");
         assert!(
-            help.contains("exact cited local-history evidence"),
+            normalized_help.contains(
+                "Request exact cited local-history evidence for eligible file or commit results"
+            ),
+            "{args:?}:\n{help}"
+        );
+        assert!(
+            normalized_help.contains("pull request evidence is not eligible"),
             "{args:?}:\n{help}"
         );
         for secret in ["generation", "project", "heuristic", "Codex"] {

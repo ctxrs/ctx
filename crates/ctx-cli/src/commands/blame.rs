@@ -77,7 +77,7 @@ pub(crate) struct BlameArgs {
     #[arg(
         long,
         requires = "target",
-        help = "Include exact cited local-history evidence in human output for this invocation"
+        help = "Request exact cited local-history evidence for eligible file or commit results in human output; pull request evidence is not eligible"
     )]
     pub(crate) evidence_preview: bool,
 }
@@ -187,7 +187,7 @@ pub(crate) struct FileBlameArgs {
     pub(crate) format: JsonOutputFormat,
     #[arg(
         long,
-        help = "Include exact cited local-history evidence in human output for this invocation"
+        help = "Request exact cited local-history evidence for eligible file or commit results in human output; pull request evidence is not eligible"
     )]
     pub(crate) evidence_preview: bool,
 }
@@ -218,7 +218,7 @@ pub(crate) struct CommitBlameArgs {
     pub(crate) format: JsonOutputFormat,
     #[arg(
         long,
-        help = "Include exact cited local-history evidence in human output for this invocation"
+        help = "Request exact cited local-history evidence for eligible file or commit results in human output; pull request evidence is not eligible"
     )]
     pub(crate) evidence_preview: bool,
 }
@@ -249,7 +249,7 @@ pub(crate) struct PullRequestBlameArgs {
     pub(crate) format: JsonOutputFormat,
     #[arg(
         long,
-        help = "Include exact cited local-history evidence in human output for this invocation"
+        help = "Request exact cited local-history evidence for eligible file or commit results in human output; pull request evidence is not eligible"
     )]
     pub(crate) evidence_preview: bool,
 }
