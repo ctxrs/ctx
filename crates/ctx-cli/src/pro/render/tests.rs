@@ -23,10 +23,9 @@ use super::{
     render_blame_document_with_evidence_preview,
 };
 use crate::pro::evidence_preview::{
-    EvidencePreview, EvidencePreviewKind, EvidencePreviewModel,
-    MAX_EVIDENCE_PREVIEW_AGGREGATE_BYTES, MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
+    EvidencePreview, EvidencePreviewKind, EvidencePreviewModel, MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
 };
-use crate::ui::{ColorMode, Document, RenderContext, StreamKind, TestContext, Token};
+use crate::ui::{ColorMode, Document, Line, RenderContext, StreamKind, TestContext, Token};
 
 fn context(width: usize) -> RenderContext {
     RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never))
@@ -749,22 +748,135 @@ fn opted_in_file_and_commit_previews_follow_their_numbered_evidence() {
         };
         let rendered = render_preview_plain(&result, &model, 80);
         let evidence = rendered.find("\nEvidence\n").unwrap();
-        let preview = rendered.find("\nEvidence preview\n").unwrap();
+        let preview = rendered
+            .find("\nEvidence preview (local history content; explicitly requested)\n")
+            .unwrap();
 
         assert!(evidence < preview, "{rendered}");
-        assert!(rendered.contains("explicitly requested"), "{rendered}");
-        assert!(rendered.contains("Evidence citations above"), "{rendered}");
-        assert!(rendered.contains("  [1]\n"), "{rendered}");
         assert!(
-            rendered.contains("      exact target-bearing unit"),
+            rendered.contains("Evidence preview (local history content; explicitly requested)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("    exact target-bearing unit"),
+            "{rendered}"
+        );
+        let event_command = format!("ctx show event {}", result.evidence[0].citation.event_id);
+        assert_eq!(
+            rendered[preview..].matches(&event_command).count(),
+            1,
             "{rendered}"
         );
         if file {
-            assert!(rendered.contains("Exact cited file evidence (modified)"));
+            assert!(rendered.contains("  [1] Modified file evidence\n"));
         } else {
-            assert!(rendered.contains("Exact cited commit evidence"));
+            assert!(rendered.contains("  [1] Commit evidence\n"));
         }
     }
+}
+
+#[test]
+fn multiline_rename_and_commit_excerpts_preserve_indented_logical_lines() {
+    let file_result = preview_result(true, 1);
+    let file_model = EvidencePreviewModel {
+        previews: vec![preview(
+            &file_result,
+            vec![1],
+            EvidencePreviewKind::File(RepositoryFileObservationKind::Renamed),
+            "*** Update File: src/old.rs\n*** Move to: src/lib.rs",
+        )],
+    };
+    let file = render_preview_plain(&file_result, &file_model, 80);
+    assert!(file.contains("  [1] Renamed file evidence\n"), "{file}");
+    assert!(
+        file.contains("    *** Update File: src/old.rs\n    *** Move to: src/lib.rs\n"),
+        "{file}"
+    );
+    assert!(!file.contains("old.rs\\n***"), "{file}");
+
+    let commit_result = preview_result(false, 1);
+    let commit_model = EvidencePreviewModel {
+        previews: vec![preview(
+            &commit_result,
+            vec![1],
+            EvidencePreviewKind::Commit,
+            "commit 0123456789abcdef\nAuthor: Example Agent\n\u{202e}subject",
+        )],
+    };
+    let commit = render_preview_plain(&commit_result, &commit_model, 80);
+    assert!(commit.contains("  [1] Commit evidence\n"), "{commit}");
+    assert!(
+        commit.contains(
+            "    commit 0123456789abcdef\n    Author: Example Agent\n    \\u{202e}subject\n"
+        ),
+        "{commit}"
+    );
+    assert!(!commit.contains('\u{202e}'));
+}
+
+#[test]
+fn multibyte_excerpt_limit_is_enforced_in_original_utf8_bytes() {
+    let result = preview_result(true, 1);
+    for bytes in [511usize, 512, 513] {
+        let mut excerpt = "é".repeat(bytes / 2);
+        if bytes % 2 == 1 {
+            excerpt.push('x');
+        }
+        assert_eq!(excerpt.len(), bytes);
+        let model = EvidencePreviewModel {
+            previews: vec![preview(
+                &result,
+                vec![1],
+                EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+                excerpt,
+            )],
+        };
+        let rendered = render_preview_plain(&result, &model, 80);
+        if bytes <= MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES {
+            assert_eq!(
+                rendered.matches('é').count(),
+                bytes / 2,
+                "{bytes}: {rendered}"
+            );
+            assert!(
+                rendered
+                    .split("\nEvidence preview ")
+                    .nth(1)
+                    .unwrap()
+                    .contains("ctx show event "),
+                "{bytes}: {rendered}"
+            );
+        } else {
+            assert!(
+                rendered.contains("requested but is unavailable"),
+                "{bytes}: {rendered}"
+            );
+            assert!(
+                !rendered
+                    .split("\nEvidence preview ")
+                    .nth(1)
+                    .unwrap()
+                    .contains("ctx show event "),
+                "{bytes}: {rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rendered_preview_budget_accepts_4096_bytes_and_rejects_4097() {
+    let context = context(80);
+    let at_limit = Document::from_line(Line::text("x".repeat(4_095)));
+    let over_limit = Document::from_line(Line::text("x".repeat(4_096)));
+    assert_eq!(at_limit.render(&context).len(), 4_096);
+    assert_eq!(over_limit.render(&context).len(), 4_097);
+    assert!(super::evidence::within_rendered_preview_budget(
+        &at_limit, &context
+    ));
+    assert!(!super::evidence::within_rendered_preview_budget(
+        &over_limit,
+        &context
+    ));
 }
 
 #[test]
@@ -781,11 +893,38 @@ fn requested_but_unavailable_preview_is_content_free_and_default_output_is_uncha
 
     assert!(!default.contains("Evidence preview"));
     assert!(requested.starts_with(default.trim_end()), "{requested}");
+    assert!(requested.contains("Evidence preview (local history content; explicitly requested)"));
     assert!(requested.contains("Exact cited local-history evidence was requested"));
     assert!(requested.contains("unavailable"));
     assert!(requested.contains("result."));
     assert!(!requested.contains("generation"));
     assert!(!requested.contains("digest"));
+}
+
+#[test]
+fn default_opt_out_bytes_are_identical_for_every_target_and_supported_width() {
+    let results = [
+        preview_result(true, 1),
+        preview_result(false, 1),
+        paginated_pr_result(true),
+    ];
+    for result in &results {
+        for width in [32, 48, 80, 120] {
+            for color in [ColorMode::Never, ColorMode::Always] {
+                let context = RenderContext::for_test(
+                    TestContext::tty(StreamKind::Stdout, width).color(color),
+                );
+                let default = render_blame_document(result, &context);
+                let opt_out = render_blame_document_with_evidence_preview(result, &context, None);
+                assert_eq!(
+                    default.render(&context),
+                    opt_out.render(&context),
+                    "target {:?}, width {width}, color {color:?}",
+                    result.target
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -814,15 +953,21 @@ fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_trun
     let styled = section.render(&styled_context);
     let plain = section.render_plain();
 
-    assert!(styled.len() <= MAX_EVIDENCE_PREVIEW_AGGREGATE_BYTES);
-    assert_eq!(plain.matches("    Event\n").count(), 3);
-    assert!(plain.contains("  [1] [2]\n"), "{plain}");
+    assert!(styled.len() <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES);
+    assert_eq!(plain.matches("ctx show event ").count(), 3);
+    assert!(
+        plain.contains("  [1] [2] Modified file evidence\n"),
+        "{plain}"
+    );
     assert_eq!(
         plain.chars().filter(|character| *character == 'Z').count(),
         3 * MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
         "one or more exact 512-byte excerpts were truncated"
     );
-    assert!(!plain.contains("  [5]\n"), "fourth preview was rendered");
+    assert!(
+        !plain.contains("  [5] Modified file evidence\n"),
+        "fourth preview was rendered"
+    );
 }
 
 #[test]
@@ -842,7 +987,14 @@ fn sanitizer_expansion_omits_the_complete_item_instead_of_truncating_it() {
         rendered.contains("requested but is unavailable"),
         "{rendered}"
     );
-    assert!(!rendered.contains("    Event\n"), "{rendered}");
+    assert!(
+        !rendered
+            .split("\nEvidence preview ")
+            .nth(1)
+            .unwrap()
+            .contains("ctx show event "),
+        "{rendered}"
+    );
     assert!(!rendered.contains("\\u{0000}"), "{rendered}");
 }
 
@@ -887,7 +1039,13 @@ fn preview_is_safe_and_stable_at_supported_widths_and_across_color() {
         assert!(!plain.contains('\u{202e}'));
         assert!(!plain.contains('\u{1b}'));
         let event_id = result.evidence[0].citation.event_id.to_string();
-        let preview_section = plain.split("\nEvidence preview\n").nth(1).unwrap();
+        let event_command = format!("ctx show event {event_id}");
+        let preview_section = plain.split("\nEvidence preview ").nth(1).unwrap();
+        assert_eq!(
+            preview_section.matches(&event_command).count(),
+            1,
+            "width {width}"
+        );
         for line in preview_section.lines() {
             assert!(
                 line.width() < width || line.contains(&event_id),

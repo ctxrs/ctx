@@ -837,6 +837,24 @@ mod tests {
     fn evidence_preview_is_explicit_and_available_on_universal_and_nested_targets() {
         for arguments in [
             &["ctx", "blame", "src/lib.rs", "--evidence-preview"][..],
+            &[
+                "ctx",
+                "blame",
+                "abc1234",
+                "--type",
+                "commit",
+                "--evidence-preview",
+            ],
+            &[
+                "ctx",
+                "blame",
+                "42",
+                "--type",
+                "pr",
+                "--repository",
+                "forge:github.com/ctxrs/ctx",
+                "--evidence-preview",
+            ],
             &["ctx", "blame", "file", "src/lib.rs", "--evidence-preview"],
             &["ctx", "blame", "commit", "abc1234", "--evidence-preview"],
             &[
@@ -1100,6 +1118,47 @@ mod tests {
         assert_eq!(observations[0].1, observations[1].1);
         assert_eq!(observations[0].1, observations[0].0.len() as u64);
         assert!(observations[1].0.contains("\u{1b}["));
+    }
+
+    #[test]
+    fn opted_in_preview_bytes_are_included_in_local_usage_accounting() {
+        let resource = |id: &str, kind| ResourceRef {
+            id: id.to_owned(),
+            kind,
+            display: id.to_owned(),
+        };
+        let result = BlameResult {
+            target: ResolvedBlameTarget::Commit {
+                commit: resource("commit:abc1234", ResourceKind::Commit),
+                repository: resource("repository:ctx", ResourceKind::Repository),
+            },
+            git_snapshot: None,
+            matches: Vec::new(),
+            evidence: Vec::new(),
+            next: None,
+        };
+        let previews = crate::pro::evidence_preview::EvidencePreviewModel {
+            previews: Vec::new(),
+        };
+        let cli =
+            crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234", "--evidence-preview"])
+                .unwrap();
+        let mut expected_ui = sink_ui();
+        let expected =
+            print_blame_result_with_evidence_preview(&result, false, &previews, &mut expected_ui)
+                .unwrap();
+        let mut default_ui = sink_ui();
+        let default = print_blame_result(&result, false, &mut default_ui).unwrap();
+        assert!(expected > default);
+
+        let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
+        let mut ui = sink_ui();
+        emit_blame_result(&result, false, &mut usage, &mut ui, |result, json, ui| {
+            print_blame_result_with_evidence_preview(result, json, &previews, ui)
+        })
+        .unwrap();
+        let completed = usage.completed(true, std::time::Duration::ZERO).unwrap();
+        assert_eq!(completed.delivered_output_bytes_for_test(), expected as u64);
     }
 
     #[test]

@@ -362,6 +362,28 @@ fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
 }
 
 #[test]
+fn evidence_preview_json_conflict_rejects_before_process_level_pro_or_index_access() {
+    let temp = tempdir();
+    let root = data_root(&temp);
+    let stderr = failure_stderr(ctx(&temp).args([
+        "blame",
+        "src/lib.rs",
+        "--evidence-preview",
+        "--format=json",
+    ]));
+
+    assert!(stderr.contains("invalid_request"), "{stderr}");
+    assert!(stderr.contains("--evidence-preview"), "{stderr}");
+    assert!(stderr.contains("--format text"), "{stderr}");
+    assert!(!stderr.contains("pro_not_installed"), "{stderr}");
+    assert!(
+        !root.exists(),
+        "rejected command created {}",
+        root.display()
+    );
+}
+
+#[test]
 fn provider_help_and_errors_do_not_dump_full_provider_list() {
     let temp = tempdir();
     let help = ctx(&temp)

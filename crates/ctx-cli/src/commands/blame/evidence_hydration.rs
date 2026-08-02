@@ -3,7 +3,6 @@ use std::path::Path;
 use anyhow::Result;
 use ctx_history_index::{CoreEventPageBudget, CoreEventRecord, VerifiedIndex};
 use ctx_pro_host_protocol::{BlameResult, NumberedEvidence, ResolvedBlameTarget};
-use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::pro::evidence_preview::{
@@ -125,9 +124,7 @@ fn verified_record<'a>(
         .iter()
         .position(|event_id| *event_id == numbered.citation.event_id.as_uuid())?;
     let record = records.get(position)?;
-    let encoded = record.core_record.encode_stored().ok()?;
-    let digest = format!("{:x}", Sha256::digest(encoded));
-    VerifiedEvidenceRecord::new(numbered, generation_id, &digest, record)
+    VerifiedEvidenceRecord::new(numbered, generation_id, record)
 }
 
 fn is_lower_sha256(value: &str) -> bool {

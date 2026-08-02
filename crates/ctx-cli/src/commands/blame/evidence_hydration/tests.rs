@@ -25,7 +25,7 @@ fn source(seed: u8) -> SourceKey {
     SourceKey::derive(
         "codex",
         "codex_session_jsonl",
-        "fixture-v1",
+        "codex-nativepath-jsonl-v0",
         1,
         SourceAnchor::CatalogLineage([seed; 32]),
     )
@@ -61,7 +61,7 @@ fn core_record(seed: u8, sequence: u64, body: impl Into<String>) -> CoreRecord {
     let event_id = derive_event_id(EventIdentityInput {
         source: &source,
         session_id,
-        logical_item_kind: "tool_result",
+        logical_item_kind: "tool_call",
         native_item_key: &NativeItemKey::native_id("event", TypedKey::U64(sequence)).unwrap(),
         subrecord_selector: None,
     })
@@ -72,10 +72,10 @@ fn core_record(seed: u8, sequence: u64, body: impl Into<String>) -> CoreRecord {
         session_id,
         source,
         sequence,
-        "tool_result",
-        "codex",
+        "tool_call",
+        "primary",
         true,
-        "fixture-v1",
+        "codex-nativepath-core-record-v7",
         body,
     )
     .unwrap();
@@ -145,7 +145,7 @@ fn result(evidence: Vec<NumberedEvidence>) -> BlameResult {
             repository: ResourceRef {
                 id: "repository:ctxrs-ctx".to_owned(),
                 kind: ResourceKind::Repository,
-                display: "ctxrs/ctx".to_owned(),
+                display: "forge:github.com/ctxrs/ctx".to_owned(),
             },
             requested_lines: None,
         },
@@ -160,11 +160,16 @@ fn result(evidence: Vec<NumberedEvidence>) -> BlameResult {
 }
 
 fn certificate(source: &SourceKey, revision: u8) -> CertifiedSource {
-    let observation = SourceObservation::new(source.clone(), "fixture-v1", vec![revision]).unwrap();
+    let observation = SourceObservation::new(
+        source.clone(),
+        "codex-nativepath-core-record-v7",
+        vec![revision],
+    )
+    .unwrap();
     CertifiedSource::certify(
         observation.clone(),
         observation,
-        "fixture-v1",
+        "codex-nativepath-core-record-v7",
         [revision; 32],
         ScannedSourceCounts {
             complete_records: 1,

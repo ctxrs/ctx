@@ -6,16 +6,18 @@ use crate::ui::{sanitize_untrusted_history_body_for_terminal, ColorMode, StreamK
 use crate::ui::{Document, Line, RenderContext, Span, Token};
 
 use super::layout::{
-    display_width, enum_text, line_range_text, push_atomic, push_authored, push_heading, FIELD_GAP,
+    display_width, enum_heading, line_range_text, push_atomic, push_authored, push_heading,
+    FIELD_GAP,
 };
 use crate::pro::evidence_preview::{
-    EvidencePreview, EvidencePreviewKind, EvidencePreviewModel,
-    MAX_EVIDENCE_PREVIEW_AGGREGATE_BYTES, MAX_EVIDENCE_PREVIEW_CITATIONS,
+    EvidencePreview, EvidencePreviewKind, EvidencePreviewModel, MAX_EVIDENCE_PREVIEW_CITATIONS,
     MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
 };
 
 const EVIDENCE_PREVIEW_BUDGET_WIDTH: usize = 32;
-const EVIDENCE_PREVIEW_DISCLOSURE: &str = "Exact cited local-history evidence, explicitly requested. References match the Evidence citations above.";
+pub(super) const MAX_EVIDENCE_PREVIEW_RENDERED_BYTES: usize = 4_096;
+const EVIDENCE_PREVIEW_DISCLOSURE: &str =
+    "Evidence preview (local history content; explicitly requested)";
 const EVIDENCE_PREVIEW_UNAVAILABLE: &str =
     "Exact cited local-history evidence was requested but is unavailable for this result.";
 
@@ -40,17 +42,21 @@ pub(super) fn render_previews(
         if preview.excerpt.len() > MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES {
             continue;
         }
-        let excerpt = sanitize_untrusted_history_body_for_terminal(&preview.excerpt);
-        let Some(budget_item) = preview_item(&budget_context, preview, &excerpt) else {
+        let excerpt_lines = preview
+            .excerpt
+            .split('\n')
+            .map(sanitize_untrusted_history_body_for_terminal)
+            .collect::<Vec<_>>();
+        let Some(budget_item) = preview_item(&budget_context, preview, &excerpt_lines) else {
             continue;
         };
         let mut candidate = rendered.clone();
         candidate.append(budget_item);
-        if candidate.render(&budget_context).len() > MAX_EVIDENCE_PREVIEW_AGGREGATE_BYTES {
+        if !within_rendered_preview_budget(&candidate, &budget_context) {
             continue;
         }
         rendered = candidate;
-        if let Some(item) = preview_item(context, preview, &excerpt) {
+        if let Some(item) = preview_item(context, preview, &excerpt_lines) {
             actual.append(item);
             admitted += 1;
         }
@@ -59,7 +65,7 @@ pub(super) fn render_previews(
     if admitted == 0 {
         let mut unavailable = Document::new();
         unavailable.push_blank();
-        push_heading(&mut unavailable, 0, "Evidence preview");
+        unavailable.append(preview_header(context));
         push_authored(
             &mut unavailable,
             context,
@@ -75,13 +81,12 @@ pub(super) fn render_previews(
 
 fn preview_header(context: &RenderContext) -> Document {
     let mut document = Document::new();
-    push_heading(&mut document, 0, "Evidence preview");
     push_authored(
         &mut document,
         context,
-        2,
+        0,
         EVIDENCE_PREVIEW_DISCLOSURE,
-        Token::Text,
+        Token::Heading,
     );
     document
 }
@@ -89,40 +94,43 @@ fn preview_header(context: &RenderContext) -> Document {
 fn preview_item(
     context: &RenderContext,
     preview: &EvidencePreview,
-    excerpt: &str,
+    excerpt_lines: &[String],
 ) -> Option<Document> {
     if preview.evidence_numbers.is_empty()
         || preview.evidence_numbers.len() > MAX_EVIDENCE_PREVIEW_CITATIONS
+        || preview.evidence_numbers.contains(&0)
     {
         return None;
     }
     let mut document = Document::new();
-    let references = preview
-        .evidence_numbers
-        .iter()
-        .map(|number| format!("[{number}]"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    push_atomic(&mut document, 2, &references, Token::Reference);
     let kind = match preview.kind {
-        EvidencePreviewKind::File(kind) => {
-            format!("Exact cited file evidence ({})", enum_text(kind))
-        }
-        EvidencePreviewKind::Commit => "Exact cited commit evidence".to_owned(),
+        EvidencePreviewKind::File(kind) => format!("{} file evidence", enum_heading(kind)),
+        EvidencePreviewKind::Commit => "Commit evidence".to_owned(),
     };
-    push_authored(&mut document, context, 4, &kind, Token::Label);
-    push_atomic(&mut document, 4, "Event", Token::Label);
-    push_atomic(&mut document, 6, &preview.event_id.to_string(), Token::Text);
-    push_atomic(&mut document, 4, "Sequence", Token::Label);
+    let mut heading = Line::new().with(Span::text("  "));
+    for (index, number) in preview.evidence_numbers.iter().enumerate() {
+        if index > 0 {
+            heading.push(Span::text(" "));
+        }
+        heading.push(Span::new(format!("[{number}]"), Token::Reference));
+    }
+    heading.push(Span::text(" "));
+    heading.push(Span::new(kind, Token::Label));
+    document.push_line(heading);
+    for line in excerpt_lines {
+        push_authored(&mut document, context, 4, line, Token::Text);
+    }
     push_atomic(
         &mut document,
-        6,
-        &preview.event_sequence.to_string(),
-        Token::Text,
+        4,
+        &format!("ctx show event {}", preview.event_id),
+        Token::Command,
     );
-    push_atomic(&mut document, 4, "Excerpt", Token::Label);
-    push_authored(&mut document, context, 6, excerpt, Token::Text);
     Some(document)
+}
+
+pub(super) fn within_rendered_preview_budget(document: &Document, context: &RenderContext) -> bool {
+    document.render(context).len() <= MAX_EVIDENCE_PREVIEW_RENDERED_BYTES
 }
 
 pub(super) fn render_list(document: &mut Document, context: &RenderContext, result: &BlameResult) {
