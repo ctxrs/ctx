@@ -1027,6 +1027,100 @@ fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_trun
 }
 
 #[test]
+fn ultra_narrow_contexts_preserve_grouped_references_and_full_event_command_atoms() {
+    let result = preview_result(true, 3);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1, 2, 3],
+            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+            "exact unit",
+        )],
+    };
+    let event_command = format!(
+        "    ctx show event {}",
+        result.evidence[0].citation.event_id
+    );
+
+    for width in [1, 2, 8, 16] {
+        for color in [ColorMode::Never, ColorMode::Always] {
+            let context =
+                RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color));
+            let mut section = Document::new();
+            super::evidence::render_previews(&mut section, &context, &model);
+            let rendered = section.render(&context);
+            assert!(
+                rendered.len() <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES,
+                "{width}/{color:?}: {}",
+                rendered.len()
+            );
+            let mut stripped = anstream::StripStream::new(Vec::new());
+            stripped.write_all(rendered.as_bytes()).unwrap();
+            let stripped = String::from_utf8(stripped.into_inner()).unwrap();
+            assert_eq!(stripped, section.render_plain());
+            assert!(
+                stripped.contains("  [1] [2] [3]\n    Modified file evidence\n"),
+                "{width}/{color:?}: {stripped}"
+            );
+            assert_eq!(stripped.matches(&event_command).count(), 1);
+            for reference in ["[1]", "[2]", "[3]"] {
+                assert_eq!(stripped.matches(reference).count(), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn ultra_narrow_actual_render_budget_omits_only_complete_preview_items() {
+    let result = preview_result(true, 3);
+    let model = EvidencePreviewModel {
+        previews: (1..=3)
+            .map(|number| {
+                preview(
+                    &result,
+                    vec![number],
+                    EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+                    "Z".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES),
+                )
+            })
+            .collect(),
+    };
+
+    for width in [1, 2, 8, 16] {
+        for color in [ColorMode::Never, ColorMode::Always] {
+            let context =
+                RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color));
+            let mut section = Document::new();
+            super::evidence::render_previews(&mut section, &context, &model);
+            let rendered = section.render(&context);
+            assert!(
+                rendered.len() <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES,
+                "{width}/{color:?}: {}",
+                rendered.len()
+            );
+            let mut stripped = anstream::StripStream::new(Vec::new());
+            stripped.write_all(rendered.as_bytes()).unwrap();
+            let stripped = String::from_utf8(stripped.into_inner()).unwrap();
+            let admitted = stripped.matches("ctx show event ").count();
+            assert_eq!(
+                stripped.matches('Z').count(),
+                admitted * MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
+                "partial excerpt at {width}/{color:?}: {stripped}"
+            );
+            for evidence in &result.evidence {
+                let command = format!("ctx show event {}", evidence.citation.event_id);
+                assert!(stripped.matches(&command).count() <= 1);
+                let reference = format!("[{}]", evidence.number);
+                assert!(stripped.matches(&reference).count() <= 1);
+            }
+            if width == 1 && color == ColorMode::Always {
+                assert!(admitted < model.previews.len(), "{stripped}");
+            }
+        }
+    }
+}
+
+#[test]
 fn sanitizer_expansion_omits_the_complete_item_instead_of_truncating_it() {
     let result = preview_result(true, 1);
     let model = EvidencePreviewModel {

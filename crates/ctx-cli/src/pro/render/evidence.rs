@@ -55,11 +55,17 @@ pub(super) fn render_previews(
         if !within_rendered_preview_budget(&candidate, &budget_context) {
             continue;
         }
-        rendered = candidate;
-        if let Some(item) = preview_item(context, preview, &excerpt_lines) {
-            actual.append(item);
-            admitted += 1;
+        let Some(actual_item) = preview_item(context, preview, &excerpt_lines) else {
+            continue;
+        };
+        let mut actual_candidate = actual.clone();
+        actual_candidate.append(actual_item);
+        if !within_rendered_preview_budget(&actual_candidate, context) {
+            continue;
         }
+        rendered = candidate;
+        actual = actual_candidate;
+        admitted += 1;
     }
 
     if admitted == 0 {
