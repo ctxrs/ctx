@@ -780,6 +780,12 @@ impl SemanticVectorStore {
         let transaction = self.conn.transaction()?;
         commit_frontier_after_flat(&transaction, frontier, Some(&finalization.publication))?;
         transaction.commit()?;
+        #[cfg(test)]
+        if self.flat.take_source_publication_commit_failure() {
+            return Err(anyhow!(
+                "injected failure after published semantic source frontier commit before staging acknowledgement"
+            ));
+        }
         self.flat
             .acknowledge_source_staging(&finalization.publication.token())
             .map_err(anyhow::Error::new)?;
@@ -833,6 +839,12 @@ impl SemanticVectorStore {
         let transaction = self.conn.transaction()?;
         commit_frontier_after_flat(&transaction, frontier, Some(&finalization.publication))?;
         transaction.commit()?;
+        #[cfg(test)]
+        if self.flat.take_source_publication_commit_failure() {
+            return Err(anyhow!(
+                "injected failure after published semantic source frontier commit before staging acknowledgement"
+            ));
+        }
         self.flat
             .acknowledge_source_staging(&finalization.publication.token())
             .map_err(anyhow::Error::new)?;

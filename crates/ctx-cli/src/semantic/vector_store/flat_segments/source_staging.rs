@@ -528,24 +528,75 @@ impl FlatSegmentStore {
         &self,
         publication: &FlatPublicationToken,
     ) -> FlatResult<()> {
+        self.require_writable()?;
+        let in_memory = {
+            let stage = self.source_stage.lock().map_err(|_| {
+                FlatStoreError::Corrupt("flat source stage lock is poisoned".to_owned())
+            })?;
+            stage
+                .as_ref()
+                .map(|stage| {
+                    stage.finalized.clone().ok_or_else(|| {
+                        FlatStoreError::Corrupt(
+                            "source acknowledgement has no finalized staging record".to_owned(),
+                        )
+                    })
+                })
+                .transpose()?
+        };
+        let directory = source_stage_directory(&self.root);
+        let durable = read_source_stage_final(&directory)?;
+        if in_memory
+            .as_ref()
+            .is_some_and(|finalized| durable.as_ref() != Some(finalized))
+        {
+            return Err(FlatStoreError::Corrupt(
+                "durable source finalization disagrees with in-memory staging".to_owned(),
+            ));
+        }
+        let Some(finalized) = durable else {
+            return Ok(());
+        };
+        let (active, manifest) = self.source_generation_manifest()?;
+        if publication != &active || finalized.candidate_publication != active {
+            return Err(FlatStoreError::Corrupt(
+                "source acknowledgement candidate disagrees with active Flat authority".to_owned(),
+            ));
+        }
+        validate_retained_candidate(
+            &finalized,
+            &finalized.source,
+            &finalized.baseline_publication,
+            &active,
+            manifest.as_ref(),
+        )?;
+
         let mut stage = self.source_stage.lock().map_err(|_| {
             FlatStoreError::Corrupt("flat source stage lock is poisoned".to_owned())
         })?;
-        let Some(current) = stage.as_ref() else {
-            return Ok(());
-        };
-        if current
-            .finalized
+        if stage
             .as_ref()
-            .is_none_or(|finalized| &finalized.candidate_publication != publication)
+            .is_some_and(|stage| stage.finalized.as_ref() != Some(&finalized))
         {
             return Err(FlatStoreError::Corrupt(
-                "source acknowledgement does not match its Flat candidate".to_owned(),
+                "source staging changed during acknowledgement".to_owned(),
             ));
         }
         *stage = None;
         drop(stage);
-        reset_source_stage_directory(&source_stage_directory(&self.root))
+        reset_source_stage_directory(&directory)
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn fail_after_source_publication_commit_once(&self) {
+        self.fail_after_source_publication_commit
+            .store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn take_source_publication_commit_failure(&self) -> bool {
+        self.fail_after_source_publication_commit
+            .swap(false, Ordering::Relaxed)
     }
 
     pub(in crate::semantic) fn retained_source_candidate(
@@ -888,6 +939,17 @@ fn validate_retained_candidate(
     if receipt != finalized.receipt.as_ref() {
         return Err(FlatStoreError::Corrupt(
             "retained Flat candidate receipt disagrees with its staging record".to_owned(),
+        ));
+    }
+    if !manifest
+        .envelope
+        .manifest
+        .segments
+        .iter()
+        .any(|descriptor| descriptor == &finalized.catalog)
+    {
+        return Err(FlatStoreError::Corrupt(
+            "retained Flat candidate catalog disagrees with its staging record".to_owned(),
         ));
     }
     Ok(())

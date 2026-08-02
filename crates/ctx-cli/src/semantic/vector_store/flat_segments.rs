@@ -338,6 +338,8 @@ pub(in crate::semantic) struct FlatSegmentStore {
     #[cfg(test)]
     fail_after_source_finalization: std::sync::atomic::AtomicBool,
     #[cfg(test)]
+    fail_after_source_publication_commit: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
     fail_after_source_acknowledgement: std::sync::atomic::AtomicBool,
 }
 
@@ -462,6 +464,8 @@ impl FlatSegmentStore {
             #[cfg(test)]
             fail_after_source_finalization: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
+            fail_after_source_publication_commit: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
             fail_after_source_acknowledgement: std::sync::atomic::AtomicBool::new(false),
         };
         let recovery = store.recover_internal()?;
@@ -519,6 +523,8 @@ impl FlatSegmentStore {
             fail_after_source_frontier_commit: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_after_source_finalization: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_after_source_publication_commit: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_after_source_acknowledgement: std::sync::atomic::AtomicBool::new(false),
         };

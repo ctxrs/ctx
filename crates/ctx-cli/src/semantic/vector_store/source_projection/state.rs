@@ -97,7 +97,13 @@ impl SemanticVectorStore {
                         .into());
                     }
                 }
-                std::cmp::Ordering::Equal => {}
+                std::cmp::Ordering::Equal => {
+                    if frontier.active_source_identity_digest.is_none() {
+                        self.flat
+                            .acknowledge_source_staging(&current)
+                            .map_err(anyhow::Error::new)?;
+                    }
+                }
             }
             return Ok(());
         }

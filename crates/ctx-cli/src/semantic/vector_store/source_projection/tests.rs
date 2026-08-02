@@ -12,6 +12,7 @@ use super::*;
 use crate::semantic::vector_store_search::scan_exact_generation;
 
 mod content;
+mod recovery;
 
 const TAIL_TOKEN: &str = "semantic-tail-token-7f0d";
 
