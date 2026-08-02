@@ -24,9 +24,12 @@ pub(super) enum PendingSourceMode {
 }
 
 impl GenerationWriter {
-    /// Retains one source after a full logical rescan reproduced its exact
-    /// certified base. This records current-source coverage without opening
-    /// Tantivy or requiring an append frontier.
+    /// Retains one source's indexed Core records after a full logical rescan
+    /// reproduced them exactly.
+    ///
+    /// The current certificate may advance only its replay frontier. This
+    /// records current-source coverage without restaging documents while
+    /// still letting a durable physical-change hint move forward.
     pub fn retain_source(&mut self, certificate: CertifiedSource) -> Result<()> {
         certificate.validate_contract()?;
         let source = certificate.observation().source();
@@ -51,7 +54,7 @@ impl GenerationWriter {
                 })
                 .cloned()
                 .ok_or_else(|| IndexError::SourceNotAppendable(source.identity().to_string()))?;
-        if base != certificate {
+        if !retained_core_records_match(&base, &certificate) {
             return Err(IndexError::SourceCertificateMismatch);
         }
         self.deletions.remove(source);
@@ -71,6 +74,13 @@ impl GenerationWriter {
         );
         Ok(())
     }
+}
+
+fn retained_core_records_match(base: &CertifiedSource, current: &CertifiedSource) -> bool {
+    base.observation() == current.observation()
+        && base.parser_revision() == current.parser_revision()
+        && base.content_digest() == current.content_digest()
+        && base.counts() == current.counts()
 }
 
 pub(super) fn core_record_leaf(

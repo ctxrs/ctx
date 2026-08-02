@@ -395,6 +395,59 @@ fn logical_rescan_retains_nonappendable_source_without_tantivy_artifacts() {
 }
 
 #[test]
+fn logical_rescan_advances_only_replay_frontier_without_rewriting_documents() {
+    let temp = tempdir().unwrap();
+    let source = source("logical-frontier.sqlite");
+    let base = appendable_certificate(&source, 1, 1, 10);
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "retained logical row"))
+        .unwrap();
+    initial.certify_source(base.clone()).unwrap();
+    let initial_receipt = initial.commit(|_| true).unwrap();
+    let initial_path = active_generation_path(temp.path());
+
+    let observation = base.observation().clone();
+    let current = CertifiedSource::certify_with_frontier(
+        observation.clone(),
+        observation,
+        base.parser_revision(),
+        *base.content_digest(),
+        base.counts(),
+        Some(
+            SourceFrontier::new(
+                "jsonl-byte-offset",
+                TypedKey::U64(11),
+                base.counts().certified_bytes,
+                *base.content_digest(),
+            )
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+    let mut retained = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let constructions = Arc::clone(&retained.index_writer_constructions);
+    retained.retain_source(current.clone()).unwrap();
+    let receipt = retained
+        .commit(|target| matches!(target, RevalidationTarget::Source(source) if source == &current))
+        .unwrap();
+
+    assert_eq!(constructions.load(Ordering::SeqCst), 1);
+    assert_ne!(receipt.generation_id, initial_receipt.generation_id);
+    assert_eq!(receipt.manifest().sources, vec![current]);
+    assert_eq!(
+        receipt.manifest().core_record_aggregates,
+        initial_receipt.manifest().core_record_aggregates
+    );
+    let published_path = active_generation_path(temp.path());
+    assert_ne!(published_path, initial_path);
+    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(verified.document_count(), 1);
+    assert_eq!(verified.count_term("retained").unwrap(), 1);
+}
+
+#[test]
 fn logically_identical_one_pass_replacement_is_discarded_without_publication() {
     let temp = tempdir().unwrap();
     let source = source("logical-snapshot.sqlite");

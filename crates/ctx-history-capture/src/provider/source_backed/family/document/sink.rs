@@ -447,18 +447,22 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
                 "document terminal indexed count did not match forwarded Core records",
             ));
         }
+        let logical_base = self
+            .logical_base
+            .clone()
+            .or_else(|| match &mut self.target {
+                ChangedDocumentTarget::Generation(sink) => {
+                    sink.base_source(&terminal.source).cloned()
+                }
+                ChangedDocumentTarget::Parallel(_) => None,
+            });
+        let retain_core_records = self.deferred.is_some()
+            && logical_base
+                .as_ref()
+                .is_some_and(|base| terminal_matches_base(base, &terminal));
         let certificate = terminal.certify(replay_fingerprint)?;
-        let exact_base = match &mut self.target {
-            ChangedDocumentTarget::Generation(sink) => sink
-                .base_source(certificate.observation().source())
-                .filter(|base| *base == &certificate)
-                .cloned(),
-            ChangedDocumentTarget::Parallel(_) => {
-                self.logical_base.take().filter(|base| base == &certificate)
-            }
-        };
         if let Some(deferred) = self.deferred.take() {
-            if exact_base.is_some() {
+            if retain_core_records {
                 match &mut self.target {
                     ChangedDocumentTarget::Generation(sink) => sink
                         .retain_source(certificate.clone())
@@ -521,6 +525,14 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
         }
         Ok(certificate)
     }
+}
+
+fn terminal_matches_base(base: &CertifiedSource, terminal: &DocumentSourceTerminal) -> bool {
+    base.observation() == &terminal.opening
+        && terminal.opening == terminal.closing
+        && base.parser_revision() == terminal.parser_revision
+        && base.content_digest() == &terminal.content_digest
+        && base.counts() == terminal.counts
 }
 
 #[cfg(test)]

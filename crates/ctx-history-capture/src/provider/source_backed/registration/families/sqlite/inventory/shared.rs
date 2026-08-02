@@ -50,7 +50,7 @@ pub(super) fn sqlite_inventory_leaf_execution_policy(
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct SqliteInventorySnapshotCounters {
     pub(super) immutable_snapshot_opens: u64,
     pub(super) copied_snapshot_opens: u64,
@@ -183,6 +183,9 @@ where
             // descriptors. Active scan workers reacquire the same no-follow
             // authority, bounding descriptors by worker count.
             let retained = RetainedSqliteInventoryLeaf::retain(&self.data_root, &leaf.path)?;
+            let replay_fingerprint = retained.replay_fingerprint(catalog_leaf)?;
+            #[cfg(test)]
+            let counter_authority = retained.authority.clone();
             drop(retained);
             #[cfg(test)]
             let base_certificate =
@@ -191,20 +194,23 @@ where
             catalog_leaves.push(catalog_leaf);
             fingerprints.push(catalog_leaf);
             observed.push(ObservedDocumentLeaf::with_durable_replay(
-                DocumentLeafFingerprint::new(catalog_leaf),
+                DocumentLeafFingerprint::new(replay_fingerprint),
                 SqliteInventoryDocumentLeaf {
                     index,
                     source: leaf.source,
                     path: leaf.path,
                     catalog_fingerprint: catalog_leaf,
+                    replay_fingerprint,
                     #[cfg(test)]
                     base_certificate,
                     provider_leaf: leaf.provider_leaf,
                     terminal_revalidate: Mutex::new(None),
                     #[cfg(test)]
-                    snapshot_counters: Mutex::new(None),
+                    snapshot_counters: Mutex::new(Some(Box::new(move || {
+                        counter_authority.snapshot_counters()
+                    }))),
                 },
-                false,
+                true,
             ));
         }
         let tree_fingerprint =
@@ -225,6 +231,7 @@ pub(super) struct SqliteInventoryDocumentLeaf<L> {
     source: SourceKey,
     path: PathBuf,
     catalog_fingerprint: [u8; 32],
+    replay_fingerprint: [u8; 32],
     #[cfg(test)]
     base_certificate: Option<CertifiedSource>,
     provider_leaf: L,
@@ -280,6 +287,20 @@ impl RetainedSqliteInventoryLeaf {
             .map_err(route_error)?;
         Ok(snapshot)
     }
+
+    fn replay_fingerprint(
+        &self,
+        catalog_fingerprint: [u8; 32],
+    ) -> SourceBackedRouteResult<[u8; 32]> {
+        let revision = self
+            .authority
+            .observe_physical_revision(&self.database_name)
+            .map_err(route_error)?;
+        Ok(sqlite_inventory_replay_fingerprint(
+            catalog_fingerprint,
+            revision,
+        ))
+    }
 }
 
 #[derive(Debug)]
@@ -309,6 +330,10 @@ where
             return policy;
         }
         sqlite_inventory_leaf_execution_policy(self.provider)
+    }
+
+    fn defer_changed_leaf_staging(&self) -> bool {
+        true
     }
 
     fn independent_leaf_source(
@@ -368,7 +393,7 @@ where
                 certificate.counts().indexed_documents,
                 leaf.base_certificate
                     .as_ref()
-                    .is_some_and(|base| base == &certificate),
+                    .is_some_and(|base| sqlite_logical_certificate_eq(base, &certificate)),
             )
             .map_err(route_error)?;
         {
@@ -428,11 +453,22 @@ where
             let terminal = leaf.terminal_revalidate.lock().map_err(|_| {
                 sqlite_inventory_internal("SQLite terminal witness lock was poisoned")
             })?;
-            if !terminal.as_ref().is_some_and(|revalidate| revalidate()) {
-                return Err(sqlite_inventory_changed(
-                    "SQLite terminal witness no longer matches its source family",
-                ));
+            if let Some(revalidate) = terminal.as_ref() {
+                if !revalidate() {
+                    return Err(sqlite_inventory_changed(
+                        "SQLite terminal witness no longer matches its source family",
+                    ));
+                }
+            } else {
+                let retained = RetainedSqliteInventoryLeaf::retain(&self.data_root, &leaf.path)?;
+                if retained.replay_fingerprint(leaf.catalog_fingerprint)? != leaf.replay_fingerprint
+                {
+                    return Err(sqlite_inventory_changed(
+                        "SQLite replay revision changed during staging",
+                    ));
+                }
             }
+            drop(terminal);
             #[cfg(test)]
             {
                 let counters = leaf
@@ -491,6 +527,25 @@ fn sqlite_catalog_leaf_fingerprint(source: &SourceKey, path: &Path) -> [u8; 32] 
     digest.update((path.len() as u64).to_be_bytes());
     digest.update(path);
     digest.finalize().into()
+}
+
+fn sqlite_inventory_replay_fingerprint(
+    catalog_fingerprint: [u8; 32],
+    physical_revision: [u8; 32],
+) -> [u8; 32] {
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"ctx.sqlite-inventory-durable-replay-v1\0");
+    digest.update(catalog_fingerprint);
+    digest.update(physical_revision);
+    digest.finalize().into()
+}
+
+#[cfg(test)]
+fn sqlite_logical_certificate_eq(left: &CertifiedSource, right: &CertifiedSource) -> bool {
+    left.observation() == right.observation()
+        && left.parser_revision() == right.parser_revision()
+        && left.content_digest() == right.content_digest()
+        && left.counts() == right.counts()
 }
 
 #[cfg(test)]

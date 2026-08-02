@@ -212,6 +212,42 @@ impl SqliteSourceFamily {
         Ok(())
     }
 
+    /// Revalidates the exact bounded DB/WAL revision used to admit a durable
+    /// no-op replay. SHM bytes remain excluded because SQLite mutates reader
+    /// coordination there, but its object identity and size bound remain
+    /// certified.
+    pub(super) fn revalidate_revision(
+        &self,
+        expected: &SqliteFamilyEvidence,
+    ) -> SqliteSourceAccessResult<()> {
+        self.authority.revalidate()?;
+        if self.authority.identity != expected.parent_identity {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        self.database
+            .revalidate(&self.authority, &expected.database)?;
+        self.revalidate_wal(expected)?;
+        revalidate_optional_member_identity(
+            &self.authority,
+            self.shared_memory.as_ref(),
+            expected.shared_memory.as_ref(),
+            &self.shared_memory_name,
+            &self.shared_memory_path,
+            Some(SQLITE_SHM_MAX_BYTES),
+        )?;
+        if SqliteFamilyMember::open_optional(
+            &self.authority,
+            self.journal_name.clone(),
+            self.journal_path.clone(),
+        )
+        .map_err(map_revalidation_error)?
+        .is_some()
+        {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        Ok(())
+    }
+
     /// Revalidates only the durable source identity after a private logical
     /// backup has been certified. WAL/SHM creation, checkpoint removal, and
     /// recreation are normal writer lifecycle after that point and cannot

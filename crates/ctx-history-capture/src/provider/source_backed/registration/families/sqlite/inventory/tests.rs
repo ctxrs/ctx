@@ -388,15 +388,29 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
         serial_cold.commit.generation_id
     );
     assert_eq!(parallel_cold.sources, serial_cold.sources);
-    assert_inventory_work(&serial_provider, DATABASES, 1, 2, 1, DATABASES, DATABASES);
+    assert_inventory_work(
+        &serial_provider,
+        ExpectedInventoryWork {
+            projections: DATABASES,
+            peak_scans: 1,
+            discoveries: 2,
+            terminal_callbacks: 1,
+            snapshot_observations: DATABASES,
+            snapshot_scans: DATABASES,
+            logical_replacements: DATABASES,
+        },
+    );
     assert_inventory_work(
         &parallel_provider,
-        DATABASES,
-        parallel_worker_count,
-        2,
-        1,
-        DATABASES,
-        DATABASES,
+        ExpectedInventoryWork {
+            projections: DATABASES,
+            peak_scans: parallel_worker_count,
+            discoveries: 2,
+            terminal_callbacks: 1,
+            snapshot_observations: DATABASES,
+            snapshot_scans: DATABASES,
+            logical_replacements: DATABASES,
+        },
     );
     assert_eq!(
         parallel_provider.state.lock().unwrap().peak_scans,
@@ -419,21 +433,27 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     assert_eq!(parallel_noop.sources, serial_noop.sources);
     assert_inventory_work(
         &serial_provider,
-        DATABASES * 2,
-        1,
-        4,
-        2,
-        DATABASES * 2,
-        DATABASES,
+        ExpectedInventoryWork {
+            projections: DATABASES,
+            peak_scans: 0,
+            discoveries: 4,
+            terminal_callbacks: 2,
+            snapshot_observations: DATABASES * 2,
+            snapshot_scans: DATABASES,
+            logical_replacements: DATABASES,
+        },
     );
     assert_inventory_work(
         &parallel_provider,
-        DATABASES * 2,
-        parallel_worker_count,
-        4,
-        2,
-        DATABASES * 2,
-        DATABASES,
+        ExpectedInventoryWork {
+            projections: DATABASES,
+            peak_scans: 0,
+            discoveries: 4,
+            terminal_callbacks: 2,
+            snapshot_observations: DATABASES * 2,
+            snapshot_scans: DATABASES,
+            logical_replacements: DATABASES,
+        },
     );
 
     writers[3]
@@ -457,21 +477,27 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     assert_eq!(parallel_changed.sources, serial_changed.sources);
     assert_inventory_work(
         &serial_provider,
-        DATABASES * 3,
-        1,
-        6,
-        3,
-        DATABASES * 3,
-        DATABASES + 1,
+        ExpectedInventoryWork {
+            projections: DATABASES + 1,
+            peak_scans: 1,
+            discoveries: 6,
+            terminal_callbacks: 3,
+            snapshot_observations: DATABASES * 3,
+            snapshot_scans: DATABASES + 1,
+            logical_replacements: DATABASES + 1,
+        },
     );
     assert_inventory_work(
         &parallel_provider,
-        DATABASES * 3,
-        parallel_worker_count,
-        6,
-        3,
-        DATABASES * 3,
-        DATABASES + 1,
+        ExpectedInventoryWork {
+            projections: DATABASES + 1,
+            peak_scans: 1,
+            discoveries: 6,
+            terminal_callbacks: 3,
+            snapshot_observations: DATABASES * 3,
+            snapshot_scans: DATABASES + 1,
+            logical_replacements: DATABASES + 1,
+        },
     );
 
     let deleted_source = catalog.lock().unwrap().pop().unwrap().source;
@@ -561,7 +587,7 @@ fn one_logical_snapshot_distinguishes_noop_insert_update_delete_and_rewrite() {
     let noop = publish(&index_root, &registry);
     assert_eq!(noop.commit.generation_id, cold.commit.generation_id);
     assert_eq!(directory_file_bytes(&provider_dir), before);
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[1], 1, true);
+    assert_zero_snapshot_replay(provider.state.lock().unwrap().counters[1]);
 
     writer
         .execute_batch(
@@ -570,32 +596,39 @@ fn one_logical_snapshot_distinguishes_noop_insert_update_delete_and_rewrite() {
         )
         .unwrap();
     let irrelevant_wal_growth = publish(&index_root, &registry);
-    assert_eq!(
+    assert_ne!(
         irrelevant_wal_growth.commit.generation_id,
         cold.commit.generation_id
     );
+    assert!(!irrelevant_wal_growth.successful_route_outcomes[0].changed);
     assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[2], 1, true);
+    let irrelevant_settled = publish(&index_root, &registry);
+    assert_eq!(
+        irrelevant_settled.commit.generation_id,
+        irrelevant_wal_growth.commit.generation_id
+    );
+    assert_zero_snapshot_replay(provider.state.lock().unwrap().counters[3]);
 
     writer
         .execute("insert into messages (id, body) values (2, 'inserted')", [])
         .unwrap();
     let inserted = publish(&index_root, &registry);
     assert_ne!(inserted.commit.generation_id, cold.commit.generation_id);
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[3], 2, false);
+    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[4], 2, false);
 
     writer
         .execute("update messages set body = 'updated' where id = 1", [])
         .unwrap();
     let updated = publish(&index_root, &registry);
     assert_ne!(updated.commit.generation_id, inserted.commit.generation_id);
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[4], 2, false);
+    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[5], 2, false);
 
     writer
         .execute("delete from messages where id = 2", [])
         .unwrap();
     let deleted = publish(&index_root, &registry);
     assert_ne!(deleted.commit.generation_id, updated.commit.generation_id);
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[5], 1, false);
+    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[6], 1, false);
 
     writer
         .execute_batch(
@@ -605,18 +638,25 @@ fn one_logical_snapshot_distinguishes_noop_insert_update_delete_and_rewrite() {
         .unwrap();
     let rewritten = publish(&index_root, &registry);
     assert_ne!(rewritten.commit.generation_id, deleted.commit.generation_id);
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[6], 1, false);
+    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[7], 1, false);
 
     writer
         .execute_batch("pragma wal_checkpoint(truncate)")
         .unwrap();
     let checkpoint_only = publish(&index_root, &registry);
-    assert_eq!(
+    assert_ne!(
         checkpoint_only.commit.generation_id,
         rewritten.commit.generation_id
     );
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[7], 1, true);
-    assert_eq!(provider.state.lock().unwrap().projections, 8);
+    assert!(!checkpoint_only.successful_route_outcomes[0].changed);
+    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[8], 1, true);
+    let checkpoint_settled = publish(&index_root, &registry);
+    assert_eq!(
+        checkpoint_settled.commit.generation_id,
+        checkpoint_only.commit.generation_id
+    );
+    assert_zero_snapshot_replay(provider.state.lock().unwrap().counters[9]);
+    assert_eq!(provider.state.lock().unwrap().projections, 7);
     assert_no_snapshot_temp_leak(&data_root);
 }
 
@@ -658,8 +698,8 @@ fn active_wal_logical_noop_works_from_a_read_only_provider_tree() {
     let exact = publish(&index_root, &restarted);
     assert_eq!(exact.commit.generation_id, cold.commit.generation_id);
     assert_eq!(directory_file_bytes(&provider_dir), before);
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[1], 1, true);
-    assert_eq!(provider.state.lock().unwrap().projections, 2);
+    assert_zero_snapshot_replay(provider.state.lock().unwrap().counters[1]);
+    assert_eq!(provider.state.lock().unwrap().projections, 1);
 
     fs::set_permissions(&provider_dir, fs::Permissions::from_mode(0o755)).unwrap();
     for path in [&database, &wal, &shared_memory] {
@@ -973,35 +1013,56 @@ fn directory_file_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
         .collect()
 }
 
-fn assert_inventory_work(
-    provider: &TestProvider,
+struct ExpectedInventoryWork {
     projections: usize,
-    maximum_peak_scans: usize,
+    peak_scans: usize,
     discoveries: usize,
     terminal_callbacks: usize,
     snapshot_observations: usize,
+    snapshot_scans: usize,
     logical_replacements: usize,
-) {
+}
+
+fn assert_inventory_work(provider: &TestProvider, expected: ExpectedInventoryWork) {
     let state = provider.state.lock().unwrap();
-    assert_eq!(state.projections, projections);
-    assert!((1..=maximum_peak_scans).contains(&state.peak_scans));
-    assert_eq!(state.discoveries, discoveries);
-    assert_eq!(state.terminal_callbacks, terminal_callbacks);
+    assert_eq!(state.projections, expected.projections);
+    assert_eq!(state.peak_scans, expected.peak_scans);
+    assert_eq!(state.discoveries, expected.discoveries);
+    assert_eq!(state.terminal_callbacks, expected.terminal_callbacks);
     assert_eq!(state.active_scans, 0);
     assert!(state.active_scans_by_path.is_empty());
-    assert_eq!(state.max_active_scans_per_path, 1);
-    assert_eq!(state.counters.len(), snapshot_observations);
+    assert_eq!(
+        state.max_active_scans_per_path,
+        usize::from(expected.peak_scans > 0)
+    );
+    assert_eq!(state.counters.len(), expected.snapshot_observations);
+    assert_eq!(
+        state
+            .counters
+            .iter()
+            .filter(|counters| counters.copied_snapshot_opens == 1)
+            .count(),
+        expected.snapshot_scans
+    );
     assert_eq!(
         state
             .counters
             .iter()
             .filter(|counters| counters.logical_replacements == 1)
             .count(),
-        logical_replacements
+        expected.logical_replacements
     );
     for counters in &state.counters {
-        assert_one_active_wal_logical_snapshot(*counters, 1, counters.logical_noops == 1);
+        if counters.copied_snapshot_opens == 0 {
+            assert_zero_snapshot_replay(*counters);
+        } else {
+            assert_one_active_wal_logical_snapshot(*counters, 1, counters.logical_noops == 1);
+        }
     }
+}
+
+fn assert_zero_snapshot_replay(counters: SqliteInventorySnapshotCounters) {
+    assert_eq!(counters, SqliteInventorySnapshotCounters::default());
 }
 
 fn assert_one_active_wal_logical_snapshot(

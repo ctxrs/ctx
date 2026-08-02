@@ -550,6 +550,19 @@ impl SqliteSourceDirectoryAuthority {
         self.snapshot_context.snapshot()
     }
 
+    /// Observes one bounded physical DB/WAL family revision without copying or
+    /// opening a logical SQLite snapshot. The returned token is valid only for
+    /// exact replay and must be observed again during terminal revalidation.
+    pub(crate) fn observe_physical_revision(
+        &self,
+        database_name: &OsStr,
+    ) -> SqliteSourceAccessResult<[u8; 32]> {
+        let family = SqliteSourceFamily::open(self, database_name, || {})?;
+        let evidence = family.capture_revision_evidence()?;
+        family.revalidate_revision(&evidence)?;
+        Ok(evidence.revision_token())
+    }
+
     #[cfg(test)]
     pub(crate) fn open_logical_online_backup_snapshot(
         &self,

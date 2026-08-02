@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(first.lexical.schema_revision, 16);
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "8ec6b4a79c1740ef21be4bf39a888d8206c759e65270ae334f18bfa5986c868f"
+            "7cf28f766df7732d4a2d23afd9341349bd1c3a76926c1c82b6f8e5e5494915a8"
         );
     }
 

@@ -58,9 +58,9 @@ impl<L> ObservedDocumentLeaf<L> {
 
     /// Selects whether the physical fingerprint is durable replay identity.
     ///
-    /// Ordinary files use `true`. Logical snapshots such as SQLite use
-    /// `false`: they scan once, then identical logical staging is discarded
-    /// without publishing a new generation.
+    /// Ordinary files and sources with a bounded, terminally revalidated
+    /// physical revision use `true`. Sources without such an authority use
+    /// `false` and must rescan before an identical staging result is discarded.
     pub(crate) fn with_durable_replay(
         physical_fingerprint: DocumentLeafFingerprint,
         provider_leaf: L,
@@ -261,6 +261,11 @@ pub(crate) trait ReplacementDocumentTree: Send + Sync + 'static {
     fn owns_source(&self, source: &SourceKey) -> bool;
     fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
         DocumentLeafExecutionPolicy::Serial
+    }
+    /// Defers records from a physically changed leaf until its completed
+    /// logical certificate can be compared with the retained source.
+    fn defer_changed_leaf_staging(&self) -> bool {
+        false
     }
     fn independent_leaf_source(
         &self,
@@ -577,11 +582,12 @@ where
             stage_exact_document_replay(sink, &base)?;
             base
         } else {
-            let mut changed = if observed.replay_from_frontier {
-                ChangedDocumentSink::new(sink)
-            } else {
-                ChangedDocumentSink::logical(sink)?
-            };
+            let mut changed =
+                if adapter.defer_changed_leaf_staging() || !observed.replay_from_frontier {
+                    ChangedDocumentSink::logical(sink)?
+                } else {
+                    ChangedDocumentSink::new(sink)
+                };
             let terminal =
                 adapter.scan_changed(&tree.authority, &observed.provider_leaf, &mut changed)?;
             if terminal.parser_revision != adapter.parser_revision() {
@@ -668,7 +674,8 @@ where
                     adapter.independent_leaf_source(&tree.authority, &observed.provider_leaf)?
                 }
             };
-            let logical_base = (!observed.replay_from_frontier)
+            let logical_base = (adapter.defer_changed_leaf_staging()
+                || !observed.replay_from_frontier)
                 .then(|| base_by_source.get(&source.identity().digest()).cloned())
                 .flatten()
                 .filter(|base| base.observation().source().exact_descriptor_eq(&source))
@@ -733,11 +740,12 @@ where
     A: ReplacementDocumentTree,
 {
     let scan_result = {
-        let mut changed = if observed.replay_from_frontier {
-            ChangedDocumentSink::parallel(emitter)
-        } else {
+        let mut changed = if adapter.defer_changed_leaf_staging() || !observed.replay_from_frontier
+        {
             ChangedDocumentSink::parallel_logical(emitter, logical_base.cloned())
                 .map_err(ParallelLeafScanWorkerError::provider)?
+        } else {
+            ChangedDocumentSink::parallel(emitter)
         };
         (|| {
             let terminal =

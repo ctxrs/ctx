@@ -85,6 +85,8 @@ pub enum CrushSourceBackedErrorV0 {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("Crush root-bound SQLite source changed during capture")]
+    SqliteSourceChanged,
     #[error("Crush root-bound SQLite source access failed: {0}")]
     SqliteSourceAccess(String),
     #[error(
@@ -115,7 +117,10 @@ pub type CrushSourceBackedResultV0<T> = Result<T, CrushSourceBackedErrorV0>;
 
 impl From<SqliteSourceAccessError> for CrushSourceBackedErrorV0 {
     fn from(error: SqliteSourceAccessError) -> Self {
-        Self::SqliteSourceAccess(error.to_string())
+        match error {
+            SqliteSourceAccessError::SourceChanged => Self::SqliteSourceChanged,
+            other => Self::SqliteSourceAccess(other.to_string()),
+        }
     }
 }
 
