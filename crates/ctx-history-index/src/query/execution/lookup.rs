@@ -252,6 +252,11 @@ impl VerifiedIndex {
     /// Returns a complete requested-order Core batch only when every record
     /// fits the aggregate byte ceilings. Unlike paged presentation reads, an
     /// oversized singleton is declined instead of being admitted for progress.
+    /// Strict reads validate and order the complete FAST-only candidate set
+    /// before loading stored documents. Because encoded size is available only
+    /// in the stored field, a nonzero insufficient remainder may still require
+    /// one globally bounded raw-field allocation, which is dropped before Core
+    /// decode.
     pub fn core_events_by_ids_with_strict_budget(
         &self,
         event_ids: &[Uuid],
@@ -301,29 +306,50 @@ impl VerifiedIndex {
                 .collect::<Vec<_>>(),
         );
         let addresses = self.searcher.search(&query, &DocSetCollector)?;
-        let mut records = BTreeMap::new();
-        let mut stored_core_bytes = 0_usize;
-        let mut content_bytes = 0_usize;
-        for address in addresses {
-            let fast_preflight = if budget_mode.preflights_before_decode() {
+        let candidates = if budget_mode.preflights_before_decode() {
+            let mut by_event_id = BTreeMap::new();
+            for address in addresses {
                 let (event_id, record_content_bytes) =
                     core_event_fast_preflight(&self.searcher, address)?;
                 if !requested.contains(&event_id) {
                     return Err(IndexError::InvalidStoredDocumentField("event_id"));
                 }
-                if records.contains_key(&event_id) {
+                if by_event_id
+                    .insert(event_id, (address, record_content_bytes))
+                    .is_some()
+                {
                     return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
                 }
+            }
+            if by_event_id.len() != requested.len() {
+                return Ok(None);
+            }
+            let mut ordered = Vec::with_capacity(event_ids.len());
+            for event_id in event_ids {
+                let Some((address, record_content_bytes)) = by_event_id.remove(event_id) else {
+                    return Ok(None);
+                };
+                ordered.push((address, Some((*event_id, record_content_bytes))));
+            }
+            ordered
+        } else {
+            addresses
+                .into_iter()
+                .map(|address| (address, None))
+                .collect()
+        };
+        let mut records = BTreeMap::new();
+        let mut stored_core_bytes = 0_usize;
+        let mut content_bytes = 0_usize;
+        for (address, fast_preflight) in candidates {
+            if let Some((_, record_content_bytes)) = fast_preflight {
                 if content_bytes
                     .checked_add(record_content_bytes)
                     .is_none_or(|next| next > maximum_content_bytes)
                 {
                     return Ok(None);
                 }
-                Some((event_id, record_content_bytes))
-            } else {
-                None
-            };
+            }
 
             let (record, record_stored_core_bytes) = if budget_mode.preflights_before_decode() {
                 let Some(remaining_encoded_core_bytes) =

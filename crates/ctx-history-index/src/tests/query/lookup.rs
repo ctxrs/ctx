@@ -903,6 +903,39 @@ fn strict_core_event_batch_aggregate_overflow_skips_the_second_stored_document_a
 }
 
 #[test]
+fn strict_core_event_batch_nonzero_encoded_remainder_materializes_one_raw_without_decode() {
+    let temp = tempdir().unwrap();
+    let source = source("strict-nonzero-encoded-remainder.jsonl");
+    let first = document(&source, 1, "first retained body");
+    let second = document(&source, 2, "second raw-only body");
+    let first_encoded_bytes = first.encode_stored().unwrap().len();
+    let second_encoded_bytes = second.encode_stored().unwrap().len();
+    let encoded_budget = first_encoded_bytes + second_encoded_bytes - 1;
+    let content_budget =
+        core_content_bytes(&first.content).unwrap() + core_content_bytes(&second.content).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(first.clone()).unwrap();
+    writer.add_core_record(second.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 2)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    crate::query::reset_stored_core_event_record_materializations();
+    crate::query::reset_core_record_decodes();
+    assert!(index
+        .core_events_by_ids_with_strict_budget(
+            &[first.event_id.as_uuid(), second.event_id.as_uuid()],
+            2,
+            CoreEventPageBudget::new(encoded_budget, content_budget),
+        )
+        .unwrap()
+        .is_none());
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 2);
+    assert_eq!(crate::query::core_record_decodes(), 1);
+}
+
+#[test]
 fn strict_core_event_batch_returns_three_exact_records_in_requested_order() {
     let temp = tempdir().unwrap();
     let source = source("strict-exact-order.jsonl");
