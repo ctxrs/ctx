@@ -931,9 +931,11 @@ pub(super) fn run_daemon_inner(
                     .record_watch_routes(wake.source_watch.routes, source_route_ledger_now_ms());
             }
             if (wake.filesystem || safety_due)
-                && file_watcher
-                    .as_mut()
-                    .is_some_and(|watcher| watcher.reconcile_roots().is_err())
+                && file_watcher.as_mut().is_some_and(|watcher| {
+                    watcher
+                        .reconcile_roots(safety_due || wake.source_watch.rearm)
+                        .is_err()
+                })
             {
                 // Keep the last good exact catalog. A backend error event will
                 // seed it while the bounded registration reconciliation keeps
