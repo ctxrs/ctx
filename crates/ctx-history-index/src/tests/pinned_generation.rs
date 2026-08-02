@@ -339,3 +339,72 @@ fn pinned_generation_real_publication_evicts_previous_and_fails_closed_with_vali
     assert_eq!(first_reader.count_term("second").unwrap(), 0);
     assert_eq!(first_reader.count_term("third").unwrap(), 0);
 }
+
+#[test]
+fn open_previous_generation_decodes_core_body_after_real_reclamation() {
+    const BODY: &str = "complete generation-owned body survives real reclamation";
+
+    let temp = tempdir().unwrap();
+    let source = source("pinned-real-reclaimed-core.jsonl");
+    let expected = document(&source, 1, BODY);
+    let first = publish_pinned_test_generation(temp.path(), &source, 1, BODY);
+    #[cfg(not(windows))]
+    let first_path = active_generation_path(temp.path());
+    let first_reader =
+        VerifiedIndex::open_pinned_generation(temp.path(), &first.generation_id).unwrap();
+
+    let second = publish_pinned_test_generation(temp.path(), &source, 2, "second body");
+    let pointer_with_first_retained = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pointer_with_first_retained
+            .previous()
+            .unwrap()
+            .generation_id(),
+        first.generation_id
+    );
+
+    let third = publish_pinned_test_generation(temp.path(), &source, 3, "third body");
+    let pointer_after_reclamation = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pointer_after_reclamation.active().generation_id(),
+        third.generation_id
+    );
+    assert_eq!(
+        pointer_after_reclamation
+            .previous()
+            .unwrap()
+            .generation_id(),
+        second.generation_id
+    );
+    #[cfg(not(windows))]
+    assert!(
+        !first_path.exists(),
+        "the evicted generation directory was not reclaimed"
+    );
+
+    let decoded = first_reader
+        .core_event_by_id(expected.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(decoded.core_record.event_id, expected.event_id);
+    assert_eq!(
+        decoded.core_record.content.normalized_body.as_deref(),
+        Some(BODY)
+    );
+
+    let error = pinned_generation_open_error(temp.path(), &first.generation_id);
+    assert!(matches!(
+        error,
+        IndexError::PinnedGenerationNotRetained {
+            expected_generation_id,
+            active_generation_id,
+            previous_generation_id: Some(previous_generation_id),
+        } if expected_generation_id == first.generation_id
+            && active_generation_id == third.generation_id
+            && previous_generation_id == second.generation_id
+    ));
+}
