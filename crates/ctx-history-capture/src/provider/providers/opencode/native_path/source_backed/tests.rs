@@ -15,8 +15,9 @@ use super::*;
 use crate::{
     provider::source_backed::{
         refresh_source_backed_generation, refresh_source_backed_generation_with_detailed_progress,
-        SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
-        SourceBackedProviderRegistry, SourceBackedRouteSelection,
+        SourceBackedCoordinatorError, SourceBackedCurrentSourceProgress,
+        SourceBackedCurrentSourceProgressStage, SourceBackedProviderRegistry,
+        SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
     },
     provider_sources::provider_source_for_path,
 };
@@ -661,6 +662,51 @@ fn kilo_and_mimocode_progress_uses_one_online_backup_and_streaming_pass() {
             "{provider:?}"
         );
     }
+}
+
+#[test]
+fn opencode_progress_callback_failure_stays_systemic_internal() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_synthetic_fixture(&database, 1);
+    let source = provider_source_for_path(CaptureProvider::OpenCode, database);
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        &temp.path().join("data-root"),
+    )
+    .unwrap();
+
+    let error = refresh_source_backed_generation_with_detailed_progress(
+        temp.path().join("index"),
+        &registry,
+        WriterOptions::default(),
+        |update| {
+            if update.current_source_progress.is_some() {
+                Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Unavailable,
+                    "injected OpenCode progress failure",
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::RouteScan {
+            source: SourceBackedRouteError {
+                kind: SourceBackedRouteErrorKind::Internal,
+                detail,
+            },
+            ..
+        } if detail.contains("progress callback failed")
+            && detail.contains("injected OpenCode progress failure")
+    ));
 }
 
 fn create_metadata_and_message_part_fixture(path: &Path) {

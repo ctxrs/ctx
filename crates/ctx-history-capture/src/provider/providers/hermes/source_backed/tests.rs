@@ -8,8 +8,9 @@ use super::*;
 use crate::{
     provider::source_backed::{
         refresh_source_backed_generation_with_detailed_progress,
-        register_hermes_explicit_source_backed_route, SourceBackedCurrentSourceProgressStage,
-        SourceBackedProviderRegistry,
+        register_hermes_explicit_source_backed_route, SourceBackedCoordinatorError,
+        SourceBackedCurrentSourceProgressStage, SourceBackedProviderRegistry,
+        SourceBackedRouteError, SourceBackedRouteErrorKind,
     },
     provider_sources::provider_source_for_path,
 };
@@ -241,4 +242,73 @@ fn detailed_progress_separates_backup_fingerprint_and_projection_scan() {
         }));
         assert_eq!(stage_progress.last().unwrap().logical_rows_scanned, Some(2));
     }
+}
+
+#[test]
+fn hermes_progress_callback_failure_stays_systemic_internal() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let data_root = temp.path().join("data-root");
+    let path = temp.path().join("profile/state.db");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "create table sessions (
+                 id text primary key,
+                 source text not null,
+                 parent_session_id text,
+                 started_at real not null
+             );
+             create table messages (
+                 id integer primary key autoincrement,
+                 session_id text not null,
+                 role text not null,
+                 content text,
+                 timestamp real not null
+             );
+             insert into sessions values ('session-1', 'acp', null, 1782259200.0);
+             insert into messages (session_id, role, content, timestamp)
+                 values ('session-1', 'assistant', 'progress message', 1782259201.0);",
+        )
+        .unwrap();
+    drop(connection);
+
+    let source = provider_source_for_path(CaptureProvider::Hermes, path);
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_hermes_explicit_source_backed_route(
+        &mut registry,
+        source,
+        &data_root,
+        SourceAnchor::CatalogLineage([32; 32]),
+    )
+    .unwrap();
+
+    let error = refresh_source_backed_generation_with_detailed_progress(
+        temp.path().join("index"),
+        &registry,
+        WriterOptions::default(),
+        |update| {
+            if update.current_source_progress.is_some() {
+                Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Unavailable,
+                    "injected Hermes progress failure",
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::RouteScan {
+            source: SourceBackedRouteError {
+                kind: SourceBackedRouteErrorKind::Internal,
+                detail,
+            },
+            ..
+        } if detail.contains("progress callback failed")
+            && detail.contains("injected Hermes progress failure")
+    ));
 }
