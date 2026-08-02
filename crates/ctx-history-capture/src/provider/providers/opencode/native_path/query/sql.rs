@@ -94,7 +94,7 @@ fn row_event_source_sql(
 }
 
 fn part_event_source_sql(schema: &OpenCodeNativeSchema) -> String {
-    part_event_source_sql_with_payload(schema, schema.message_part_indexed_streaming)
+    part_event_source_sql_with_payload(schema, schema.message_part_indexed_streaming, false)
 }
 
 pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema) -> String {
@@ -151,7 +151,9 @@ pub(super) fn source_backed_fallback_events_by_rowids_sql(
         .collect::<Vec<_>>()
         .join(", ");
     let mut sql = match schema.family {
-        OpenCodeNativeSchemaFamily::MessagePart => part_event_source_sql_with_payload(schema, true),
+        OpenCodeNativeSchemaFamily::MessagePart => {
+            part_event_source_sql_with_payload(schema, true, true)
+        }
         _ => source_backed_event_source_sql(schema),
     };
     let alias = if schema.family == OpenCodeNativeSchemaFamily::MessagePart {
@@ -166,10 +168,11 @@ pub(super) fn source_backed_fallback_events_by_rowids_sql(
 fn part_event_source_sql_with_payload(
     schema: &OpenCodeNativeSchema,
     include_payload: bool,
+    hydrate_by_rowid: bool,
 ) -> String {
     let type_column = type_expression(schema.event_has_type, "p");
     let (source, source_locator, source_data, parent_source_data) =
-        if schema.message_part_indexed_streaming {
+        if schema.message_part_indexed_streaming && !hydrate_by_rowid {
             (
                 "from message m
                  cross join part p on p.message_id = m.id

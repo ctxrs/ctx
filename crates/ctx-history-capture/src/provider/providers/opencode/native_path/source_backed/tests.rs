@@ -1159,6 +1159,12 @@ fn indexed_message_part_cold_scan_preserves_chronology_with_bounded_message_sort
             .all(|step| { !step.contains("CORRELATED") && !step.contains("VIRTUAL TABLE") }),
         "indexed current-schema query repeated JSON-tree traversal in SQLite: {sort_key_plan:?} {hydration_plan:?}"
     );
+    assert!(
+        hydration_plan
+            .iter()
+            .any(|step| step.contains("SEARCH p USING INTEGER PRIMARY KEY")),
+        "indexed current-schema hydration was not driven by requested part rowids: {hydration_plan:?}"
+    );
     drop(connection);
 
     let data_root = temp.path().join("data-root");
