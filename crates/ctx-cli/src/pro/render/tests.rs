@@ -15,6 +15,7 @@ use ctx_pro_host_protocol::{
     PullRequestCommit, PullRequestCommitRelationship, ResolvedBlameTarget, ResourceKind,
     ResourceRef, WorktreeStatus,
 };
+use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
 use super::{
@@ -121,6 +122,30 @@ fn render_preview_plain(
     width: usize,
 ) -> String {
     render_blame_document_with_evidence_preview(result, &context(width), Some(model)).render_plain()
+}
+
+fn strip_ansi(rendered: &str) -> String {
+    let mut stripped = anstream::StripStream::new(Vec::new());
+    stripped.write_all(rendered.as_bytes()).unwrap();
+    String::from_utf8(stripped.into_inner()).unwrap()
+}
+
+fn single_preview_excerpt_fragments(rendered: &str) -> Vec<&str> {
+    let lines = rendered.lines().collect::<Vec<_>>();
+    let heading = lines
+        .iter()
+        .position(|line| line.contains("file evidence") || line.contains("Commit evidence"))
+        .unwrap();
+    let command = lines
+        .iter()
+        .skip(heading + 1)
+        .position(|line| line.trim_start().starts_with("ctx show event "))
+        .map(|index| heading + 1 + index)
+        .unwrap();
+    lines[heading + 1..command]
+        .iter()
+        .map(|line| line.strip_prefix("    ").unwrap())
+        .collect()
 }
 
 fn resource(id: &str, kind: ResourceKind, display: &str) -> ResourceRef {
@@ -870,6 +895,80 @@ fn multiline_rename_and_commit_excerpts_preserve_indented_logical_lines() {
 }
 
 #[test]
+fn preview_preserves_sanitized_whitespace_and_control_escapes_exactly() {
+    let result = preview_result(true, 1);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+            "modified: src/a  b.rs\n 2 files changed, 3 insertions(+), 1 deletion(-)  \n\tstatus:\0  keep\tgap\u{202e}\u{1b}  ",
+        )],
+    };
+    let rendered = render_preview_plain(&result, &model, 120);
+
+    assert_eq!(
+        single_preview_excerpt_fragments(&rendered),
+        [
+            "modified: src/a  b.rs",
+            " 2 files changed, 3 insertions(+), 1 deletion(-)  ",
+            "\\tstatus:\\u{0000}  keep\\tgap\\u{202e}\\x1b  ",
+        ]
+    );
+    assert!(!rendered.contains('\0'));
+    assert!(!rendered.contains('\u{202e}'));
+    assert!(!rendered.contains('\u{1b}'));
+}
+
+#[test]
+fn preview_wraps_long_family_emoji_path_only_at_grapheme_boundaries() {
+    let result = preview_result(true, 1);
+    let family = "👨‍👩‍👧‍👦";
+    let combining = "e\u{0301}";
+    let excerpt = format!("src/{}  /{}.rs", family.repeat(16), combining.repeat(12));
+    assert!(excerpt.len() <= MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+            &excerpt,
+        )],
+    };
+    let mut grapheme_boundaries = excerpt
+        .grapheme_indices(true)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    grapheme_boundaries.push(excerpt.len());
+
+    for width in [1, 2, 8, 16, 32, 48, 80, 120] {
+        for color in [ColorMode::Never, ColorMode::Always] {
+            let context =
+                RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color));
+            let mut section = Document::new();
+            super::evidence::render_previews(&mut section, &context, &model);
+            let rendered = section.render(&context);
+            assert!(
+                rendered.len() <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES,
+                "{width}/{color:?}: {}",
+                rendered.len()
+            );
+            let stripped = strip_ansi(&rendered);
+            let fragments = single_preview_excerpt_fragments(&stripped);
+            assert_eq!(fragments.concat(), excerpt, "{width}/{color:?}");
+            let mut consumed = 0usize;
+            for fragment in fragments {
+                consumed = consumed.saturating_add(fragment.len());
+                assert!(
+                    grapheme_boundaries.contains(&consumed),
+                    "split grapheme at byte {consumed} for {width}/{color:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn multibyte_excerpt_limit_is_enforced_in_original_utf8_bytes() {
     let result = preview_result(true, 1);
     for bytes in [511usize, 512, 513] {
@@ -1071,7 +1170,7 @@ fn ultra_narrow_contexts_preserve_grouped_references_and_full_event_command_atom
 }
 
 #[test]
-fn ultra_narrow_actual_render_budget_omits_only_complete_preview_items() {
+fn actual_and_canonical_render_budgets_omit_only_complete_preview_items() {
     let result = preview_result(true, 3);
     let model = EvidencePreviewModel {
         previews: (1..=3)
@@ -1086,7 +1185,7 @@ fn ultra_narrow_actual_render_budget_omits_only_complete_preview_items() {
             .collect(),
     };
 
-    for width in [1, 2, 8, 16] {
+    for width in [1, 2, 8, 16, 32, 48, 80, 120] {
         for color in [ColorMode::Never, ColorMode::Always] {
             let context =
                 RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color));
@@ -1098,9 +1197,7 @@ fn ultra_narrow_actual_render_budget_omits_only_complete_preview_items() {
                 "{width}/{color:?}: {}",
                 rendered.len()
             );
-            let mut stripped = anstream::StripStream::new(Vec::new());
-            stripped.write_all(rendered.as_bytes()).unwrap();
-            let stripped = String::from_utf8(stripped.into_inner()).unwrap();
+            let stripped = strip_ansi(&rendered);
             let admitted = stripped.matches("ctx show event ").count();
             assert_eq!(
                 stripped.matches('Z').count(),
@@ -1118,6 +1215,16 @@ fn ultra_narrow_actual_render_budget_omits_only_complete_preview_items() {
             }
         }
     }
+
+    let canonical_bytes = crate::ui::canonical_human_output_bytes(|context| {
+        let mut section = Document::new();
+        super::evidence::render_previews(&mut section, context, &model);
+        section
+    });
+    assert!(
+        canonical_bytes <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES,
+        "canonical: {canonical_bytes}"
+    );
 }
 
 #[test]

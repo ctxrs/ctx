@@ -1,6 +1,7 @@
 use ctx_pro_host_protocol::{
     BlameMatch, BlameResult, ContinuationReason, EvidenceCitation, LineRange, ResolvedBlameTarget,
 };
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::ui::{sanitize_untrusted_history_body_for_terminal, ColorMode, StreamKind, TestContext};
 use crate::ui::{Document, Line, RenderContext, Span, Token};
@@ -136,7 +137,7 @@ fn preview_item(
         push_atomic(&mut document, 4, &kind, Token::Label);
     }
     for line in excerpt_lines {
-        push_authored(&mut document, context, 4, line, Token::Text);
+        push_literal_excerpt_line(&mut document, context, 4, line, Token::Text);
     }
     push_atomic(
         &mut document,
@@ -145,6 +146,47 @@ fn preview_item(
         Token::Command,
     );
     Some(document)
+}
+
+fn push_literal_excerpt_line(
+    document: &mut Document,
+    context: &RenderContext,
+    indent: usize,
+    text: &str,
+    token: Token,
+) {
+    let Some(width) = context
+        .content_width()
+        .map(|width| width.saturating_sub(indent).max(1))
+    else {
+        push_atomic(document, indent, text, token);
+        return;
+    };
+    let mut fragment = String::new();
+    let mut fragment_width = 0usize;
+    let mut whitespace_break = None;
+    for grapheme in text.graphemes(true) {
+        let grapheme_width = display_width(grapheme);
+        if !fragment.is_empty() && fragment_width.saturating_add(grapheme_width) > width {
+            if let Some(index) = whitespace_break.take() {
+                let remainder = fragment.split_off(index);
+                push_atomic(document, indent, &fragment, token);
+                fragment = remainder;
+                fragment_width = display_width(&fragment);
+            }
+            if !fragment.is_empty() && fragment_width.saturating_add(grapheme_width) > width {
+                push_atomic(document, indent, &fragment, token);
+                fragment.clear();
+                fragment_width = 0;
+            }
+        }
+        fragment.push_str(grapheme);
+        fragment_width = fragment_width.saturating_add(grapheme_width);
+        if grapheme.chars().next().is_some_and(char::is_whitespace) {
+            whitespace_break = Some(fragment.len());
+        }
+    }
+    push_atomic(document, indent, &fragment, token);
 }
 
 fn preview_reference_line(numbers: &[u32]) -> Line {
