@@ -26,17 +26,11 @@ pub(super) fn source_state(lineage: u8, revision: u8, event_count: u64) -> CoreS
 }
 
 pub(super) fn source_removal() -> CoreSourceRemoval {
-    CoreSourceRemoval {
-        source: source(2),
-        removal_revision_sha256: "d".repeat(64),
-    }
+    CoreSourceRemoval { source: source(2) }
 }
 
 pub(super) fn source_deltas() -> Vec<CoreSourceDelta> {
-    let mut deltas = vec![
-        CoreSourceDelta::Present(source_state(1, 1, 1)),
-        CoreSourceDelta::Removed(source_removal()),
-    ];
+    let mut deltas = vec![CoreSourceDelta::Present(source_state(1, 1, 1))];
     deltas.sort_by_key(|delta| delta.source().identity().digest());
     deltas
 }
@@ -153,6 +147,7 @@ pub(super) fn record() -> CoreRecord {
 
 pub(super) fn reconciliation() -> CoreSourceReconciliation {
     CoreSourceReconciliation {
+        materialize_index: 0,
         delta: CoreSourceDelta::Present(source_state(1, 1, 1)),
     }
 }

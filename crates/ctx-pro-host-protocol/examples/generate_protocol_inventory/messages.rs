@@ -99,12 +99,20 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
 
 fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
     let page = delta_page();
-    let reconciliations = page
+    let mut reconciliations = page
         .deltas
         .iter()
         .cloned()
-        .map(|delta| CoreSourceReconciliation { delta })
-        .collect();
+        .enumerate()
+        .map(|(materialize_index, delta)| CoreSourceReconciliation {
+            materialize_index: u32::try_from(materialize_index).unwrap_or(u32::MAX),
+            delta,
+        })
+        .collect::<Vec<_>>();
+    reconciliations.push(CoreSourceReconciliation {
+        materialize_index: 1,
+        delta: CoreSourceDelta::Removed(source_removal()),
+    });
     let state_page = event_state_page();
     let delta_page = event_delta_page();
     vec![

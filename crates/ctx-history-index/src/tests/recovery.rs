@@ -288,20 +288,15 @@ fn deletion_requires_final_inventory_revalidation() {
     accepted.delete_source(deletion, inventory).unwrap();
     let accepted_receipt = accepted.commit(|_| true).unwrap();
     assert!(accepted_receipt.manifest().sources.is_empty());
-    assert_eq!(accepted_receipt.manifest().removals.len(), 1);
-    assert_eq!(accepted_receipt.manifest().removals[0].source(), &source);
+    assert!(accepted_receipt.manifest().source_routes().is_empty());
     let current = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(current.count_term("retained").unwrap(), 0);
     assert!(current.manifest().sources.is_empty());
-    assert_eq!(current.manifest().removals.len(), 1);
-    assert_eq!(current.manifest().removals[0].source(), &source);
-    assert!(current.manifest().removals[0]
-        .deletion()
-        .verifies(current.manifest().removals[0].inventory()));
+    assert!(current.manifest().source_routes().is_empty());
 }
 
 #[test]
-fn generation_removals_persist_until_the_exact_lineage_returns() {
+fn generation_manifests_retain_only_current_sources() {
     let temp = tempdir().unwrap();
     let removed = source("removed.jsonl");
     let retained = source("retained.jsonl");
@@ -328,9 +323,7 @@ fn generation_removals_persist_until_the_exact_lineage_returns() {
         deleted.manifest().sources[0].observation().source(),
         &retained
     );
-    assert_eq!(deleted.manifest().removals.len(), 1);
-    let durable_removal = deleted.manifest().removals[0].clone();
-    assert_eq!(durable_removal.source(), &removed);
+    assert_eq!(deleted.manifest().source_routes().len(), 1);
 
     let mut unrelated = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     unrelated.begin_source(retained.clone()).unwrap();
@@ -346,7 +339,8 @@ fn generation_removals_persist_until_the_exact_lineage_returns() {
         deleted_receipt.generation_id,
         unrelated_receipt.generation_id
     );
-    assert_eq!(carried.manifest().removals, vec![durable_removal]);
+    assert_eq!(carried.manifest().sources.len(), 1);
+    assert_eq!(carried.manifest().source_routes().len(), 1);
 
     let returning = source_for_provider("codex", "codex_prompt_history_jsonl", "removed.jsonl");
     assert_eq!(returning, removed);
@@ -362,7 +356,7 @@ fn generation_removals_persist_until_the_exact_lineage_returns() {
     republishing.commit(|_| true).unwrap();
 
     let returned = VerifiedIndex::open(temp.path()).unwrap();
-    assert!(returned.manifest().removals.is_empty());
+    assert_eq!(returned.manifest().source_routes().len(), 2);
     assert!(returned.manifest().sources.iter().any(|source| source
         .observation()
         .source()
@@ -370,56 +364,27 @@ fn generation_removals_persist_until_the_exact_lineage_returns() {
 }
 
 #[test]
-fn generation_removal_validation_binds_inventory_order_and_membership() {
+fn generation_route_validation_binds_exact_current_membership() {
     let first = source("first-removed.jsonl");
-    let second = source("second-removed.jsonl");
-    let (first_deletion, first_inventory) = deletion_evidence(&first, 1);
-    let (_, wrong_inventory) = deletion_evidence(&first, 2);
+    let route_id = SourceRouteIdentity::from_sha256("11".repeat(32)).unwrap();
+    let route = SourceRouteSnapshot::present(route_id.clone(), vec![first.clone()]).unwrap();
+    let canonical =
+        GenerationManifest::from_parts(vec![certificate(&first, 1, 0)], vec![route.clone()])
+            .unwrap();
+    assert_eq!(canonical.source_routes(), &[route.clone()]);
+
     assert!(matches!(
-        GenerationRemoval::new(first_deletion.clone(), wrong_inventory),
-        Err(IndexError::InvalidGenerationRemoval(_))
+        GenerationManifest::from_parts(vec![certificate(&first, 1, 0)], vec![route.clone(), route],),
+        Err(IndexError::NonCanonicalSourceRoutes)
     ));
 
-    let first_removal = GenerationRemoval::new(first_deletion, first_inventory).unwrap();
-    let (second_deletion, second_inventory) = deletion_evidence(&second, 3);
-    let second_removal = GenerationRemoval::new(second_deletion, second_inventory).unwrap();
-    let canonical = GenerationManifest::from_parts(
-        Vec::new(),
-        vec![second_removal.clone(), first_removal.clone()],
-    )
-    .unwrap();
-    assert!(canonical
-        .removals
-        .windows(2)
-        .all(|pair| { source_sort_key(pair[0].source()) < source_sort_key(pair[1].source()) }));
-    assert_ne!(
-        GenerationManifest::from_sources(Vec::new())
-            .unwrap()
-            .generation_id()
-            .unwrap(),
-        canonical.generation_id().unwrap()
-    );
-
-    let mut duplicate = canonical.clone();
-    duplicate.removals.push(duplicate.removals[0].clone());
-    duplicate
-        .removals
-        .sort_by_key(|removal| source_sort_key(removal.source()));
+    let unretained = source("unretained.jsonl");
     assert!(matches!(
-        duplicate.validate_contract(),
-        Err(IndexError::NonCanonicalManifestRemovals)
-    ));
-
-    let mut out_of_order = canonical.clone();
-    out_of_order.removals.reverse();
-    assert!(matches!(
-        out_of_order.validate_contract(),
-        Err(IndexError::NonCanonicalManifestRemovals)
-    ));
-
-    assert!(matches!(
-        GenerationManifest::from_parts(vec![certificate(&first, 1, 0)], vec![first_removal]),
-        Err(IndexError::ManifestSourceRemovalOverlap(_))
+        GenerationManifest::from_parts(
+            vec![certificate(&first, 1, 0)],
+            vec![SourceRouteSnapshot::present(route_id, vec![unretained]).unwrap()],
+        ),
+        Err(IndexError::SourceRouteMemberNotRetained { .. })
     ));
 }
 

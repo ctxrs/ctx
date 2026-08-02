@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceDeletion,
@@ -117,7 +117,10 @@ type EventStates = BTreeMap<[u8; 32], BTreeMap<[u8; 32], CoreEventState>>;
 struct Consumer {
     revision: String,
     known_accumulators: BTreeMap<[u8; 32], String>,
+    known_sources: BTreeMap<[u8; 32], SourceKey>,
     known_events: EventStates,
+    seen_sources: BTreeSet<[u8; 32]>,
+    next_materialize_index: u32,
     replay_begin: bool,
     replay_pages: bool,
     wrong_delta_generation: bool,
@@ -149,6 +152,10 @@ impl CoreMaterializationConsumer for Consumer {
         &mut self,
         request: BeginCoreMaterializationRequest,
     ) -> Result<CoreMaterializationBegan> {
+        if !self.replay_begin {
+            self.seen_sources.clear();
+            self.next_materialize_index = 0;
+        }
         Ok(CoreMaterializationBegan {
             materialization_id: ctx_pro_host_protocol::core_materialization_id(
                 &request,
@@ -174,6 +181,8 @@ impl CoreMaterializationConsumer for Consumer {
             let identity = delta.source().identity().digest();
             let reconcile = match delta {
                 CoreSourceDelta::Present(state) => {
+                    self.seen_sources.insert(identity);
+                    self.known_sources.insert(identity, state.source.clone());
                     let changed = self.known_accumulators.get(&identity)
                         != Some(&state.core_record_accumulator);
                     self.known_accumulators
@@ -184,18 +193,32 @@ impl CoreMaterializationConsumer for Consumer {
                     changed
                 }
                 CoreSourceDelta::Removed(_) => {
-                    let existed = self.known_accumulators.remove(&identity).is_some()
-                        || self.known_events.contains_key(&identity);
-                    if existed {
-                        removed_sources = removed_sources.saturating_add(1);
-                    }
-                    existed
+                    panic!("host source snapshots cannot carry removals")
                 }
             };
             if reconcile {
                 reconcile_sources.push(CoreSourceReconciliation {
+                    materialize_index: self.next_materialize_index,
                     delta: delta.clone(),
                 });
+                self.next_materialize_index = self.next_materialize_index.saturating_add(1);
+            }
+        }
+        if page.terminal {
+            let unseen = self
+                .known_sources
+                .iter()
+                .filter(|(identity, _)| !self.seen_sources.contains(*identity))
+                .map(|(identity, source)| (*identity, source.clone()))
+                .collect::<Vec<_>>();
+            for (identity, source) in unseen {
+                self.known_accumulators.remove(&identity);
+                reconcile_sources.push(CoreSourceReconciliation {
+                    materialize_index: self.next_materialize_index,
+                    delta: CoreSourceDelta::Removed(CoreSourceRemoval { source }),
+                });
+                self.next_materialize_index = self.next_materialize_index.saturating_add(1);
+                removed_sources = removed_sources.saturating_add(1);
             }
         }
         let response = CoreSourceDeltaPageApplied {
@@ -292,6 +315,7 @@ impl CoreMaterializationConsumer for Consumer {
         }
         if page.terminal && matches!(page.reconciliation.delta, CoreSourceDelta::Removed(_)) {
             self.known_events.remove(&source.identity().digest());
+            self.known_sources.remove(&source.identity().digest());
         }
         let response = CoreEventDeltaPageApplied {
             materialization_id: page.materialization_id.clone(),
@@ -348,7 +372,7 @@ fn same_certificate_and_count_with_changed_core_record_is_reconciled() {
     );
     writer.commit(|_| true).unwrap();
     let first = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let first_certificate_sha256 = canonical_sha256(&first.manifest().sources[0]).unwrap();
+    let first_certificate = first.manifest().sources[0].clone();
     let first_accumulator = first.manifest().core_record_aggregates[0]
         .core_record_accumulator()
         .to_owned();
@@ -371,10 +395,7 @@ fn same_certificate_and_count_with_changed_core_record_is_reconciled() {
     );
     writer.commit(|_| true).unwrap();
     let second = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    assert_eq!(
-        canonical_sha256(&second.manifest().sources[0]).unwrap(),
-        first_certificate_sha256
-    );
+    assert_eq!(second.manifest().sources[0], first_certificate);
     assert_ne!(
         second.manifest().core_record_aggregates[0].core_record_accumulator(),
         first_accumulator

@@ -16,7 +16,6 @@ use crate::{
     provider::source_backed::{
         refresh_source_backed_generation, source_backed_leaf_worker_budget,
         SourceBackedCoordinatorError, SourceBackedProviderRegistry,
-        AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES,
     },
     ProviderCatalogSupport, ProviderImportSupport, ProviderSourceKind, ProviderSourceStatus,
     AUGGIE_SESSION_JSON_SOURCE_FORMAT,
@@ -631,38 +630,6 @@ fn independent_leaf_runner_has_one_vs_four_parity_and_bounded_peak_work() {
         .retain(|leaf| leaf.logical_id != 0);
     serial_runner.reset_scan_counts();
     parallel_runner.reset_scan_counts();
-    for expected_missing in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
-        let serial_grace = publish(&serial_root, &serial_registry);
-        let parallel_grace = publish(&parallel_root, &parallel_registry);
-        assert!(serial_grace.removals.is_empty());
-        assert!(parallel_grace.removals.is_empty());
-        assert_eq!(serial_grace.sources.len(), 8);
-        assert_eq!(parallel_grace.sources.len(), 8);
-        assert_eq!(
-            serial_grace
-                .commit
-                .manifest()
-                .source_catalog()
-                .missing_source(&deleted_source)
-                .unwrap()
-                .consecutive_missing()
-                .get(),
-            expected_missing
-        );
-        assert_eq!(
-            parallel_grace
-                .commit
-                .manifest()
-                .source_catalog()
-                .missing_source(&deleted_source)
-                .unwrap()
-                .consecutive_missing()
-                .get(),
-            expected_missing
-        );
-    }
-    serial_runner.reset_scan_counts();
-    parallel_runner.reset_scan_counts();
     let serial_deleted = publish(&serial_root, &serial_registry);
     let parallel_deleted = publish(&parallel_root, &parallel_registry);
     assert_eq!(
@@ -670,6 +637,7 @@ fn independent_leaf_runner_has_one_vs_four_parity_and_bounded_peak_work() {
         serial_deleted.commit.generation_id
     );
     assert_eq!(parallel_deleted.sources, serial_deleted.sources);
+    assert_eq!(serial_deleted.sources.len(), 7);
     assert_eq!(parallel_deleted.removals, serial_deleted.removals);
     assert!(parallel_deleted.removals.iter().any(|removal| removal
         .deletion
@@ -910,32 +878,6 @@ fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
         .leaves
         .retain(|leaf| leaf.logical_id != 1);
     adapter.reset_scan_counts();
-    for expected_missing in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
-        let grace = publish(&index_root, &registry);
-        assert_eq!(grace.sources.len(), 3);
-        assert!(grace.removals.is_empty());
-        assert_eq!(
-            grace
-                .commit
-                .manifest()
-                .source_catalog()
-                .missing_source(&deleted_source)
-                .unwrap()
-                .consecutive_missing()
-                .get(),
-            expected_missing
-        );
-        assert_eq!(
-            VerifiedIndex::open(&index_root)
-                .unwrap()
-                .source_event_page(&deleted_source, None, 8)
-                .unwrap()
-                .items
-                .len(),
-            1
-        );
-    }
-    adapter.reset_scan_counts();
     let deleted = publish(&index_root, &registry);
     assert_eq!(deleted.sources.len(), 2);
     assert!(deleted.removals.iter().any(|removal| removal
@@ -974,7 +916,7 @@ fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
 }
 
 #[test]
-fn automatic_document_missing_grace_survives_route_reopen_and_reappearance() {
+fn automatic_document_leaf_deletion_and_reappearance_are_immediate() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let index_root = temp.path().join("index");
     let selected_root = temp.path().join("selected");
@@ -990,48 +932,39 @@ fn automatic_document_missing_grace_survives_route_reopen_and_reappearance() {
     let cold = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
     let noop = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
     assert_eq!(noop.commit.generation_id, cold.commit.generation_id);
-    assert!(noop.commit.manifest().source_catalog().is_empty());
+    assert!(noop
+        .commit
+        .manifest()
+        .source_routes()
+        .iter()
+        .all(|route| route.missing_state().is_none()));
 
     adapter.state.lock().unwrap().leaves.clear();
-    for expected_missing in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
-        let grace = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
-        assert_eq!(grace.sources.len(), 1);
-        assert!(grace.removals.is_empty());
-        assert_eq!(
-            grace
-                .commit
-                .manifest()
-                .source_catalog()
-                .missing_source(&source)
-                .unwrap()
-                .consecutive_missing()
-                .get(),
-            expected_missing
-        );
-        assert_eq!(
-            VerifiedIndex::open(&index_root).unwrap().document_count(),
-            1
-        );
-    }
+    let deleted = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
+    assert!(deleted.sources.is_empty());
+    assert_eq!(deleted.removals.len(), 1);
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        0
+    );
 
     adapter.state.lock().unwrap().leaves.push(leaf.clone());
     let reappeared = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
     assert_eq!(reappeared.sources.len(), 1);
     assert!(reappeared.removals.is_empty());
-    assert!(reappeared.commit.manifest().source_catalog().is_empty());
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().document_count(),
         1
     );
 
     adapter.state.lock().unwrap().leaves.clear();
-    for _ in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
-        let grace = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
-        assert!(grace.removals.is_empty());
-        assert_eq!(grace.sources.len(), 1);
-    }
     let deleted = publish_with_reopened_route(&index_root, &selected_root, adapter);
-    assert!(deleted.commit.manifest().source_catalog().is_empty());
+    assert!(deleted
+        .commit
+        .manifest()
+        .source_routes()
+        .iter()
+        .all(|route| route.sources().is_empty()));
     assert_eq!(deleted.sources.len(), 0);
     assert_eq!(deleted.removals.len(), 1);
     assert!(deleted.removals[0]

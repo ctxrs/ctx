@@ -499,13 +499,6 @@ fn register_explicit_source_catalog_snapshot_routes(
                 .sources
                 .iter()
                 .map(|source| source.observation().source().clone())
-                .chain(
-                    index
-                        .manifest()
-                        .removals
-                        .iter()
-                        .map(|removal| removal.source().clone()),
-                )
                 .collect()
         } else {
             Vec::new()

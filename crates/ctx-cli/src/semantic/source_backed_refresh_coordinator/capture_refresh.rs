@@ -134,8 +134,7 @@ pub(super) fn refresh_all_provider_sources(
     let receipt = executor
         .refresh(index_root, report_progress)
         .context("run capture-owned all-provider source-backed refresh")?;
-    let current =
-        SourceBackedRefreshCurrent::from_sources(&receipt.sources, receipt.removals.len())?;
+    let current = SourceBackedRefreshCurrent::from_sources(&receipt.sources, 0)?;
     if current.source_count != receipt.certified_source_count
         || current.certified_source_bytes != receipt.certified_source_bytes
         || current.indexed_documents != receipt.commit.indexed_documents

@@ -58,7 +58,7 @@ pub(super) enum ResolverGroup {
 /// inspection failures remain [`Unknown`](Self::Unknown), so a winner selector
 /// cannot silently unlock a stale fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PathPresence {
+pub(crate) enum PathPresence {
     Missing,
     Present,
     Unsupported,
@@ -71,7 +71,7 @@ impl PathPresence {
     }
 }
 
-pub(super) fn path_presence(path: &Path) -> PathPresence {
+pub(crate) fn path_presence(path: &Path) -> PathPresence {
     match source_path_kind(path) {
         Ok(_) => PathPresence::Present,
         Err(SourcePathError::Missing) => PathPresence::Missing,

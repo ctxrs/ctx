@@ -134,6 +134,9 @@ pub(super) fn manifest_record_aggregates(
     for removal in generation.deletions.values() {
         base_aggregates.remove(&source_token(removal.source()));
     }
+    for source in &generation.route_deletions {
+        base_aggregates.remove(&source_token(source));
+    }
 
     for pending in generation.pending.values() {
         let certificate = pending
@@ -247,10 +250,15 @@ where
         }
     }
     for removal in generation.deletions.values() {
-        if !revalidate(RevalidationTarget::Deletion(removal.deletion())) {
+        if !revalidate(RevalidationTarget::Deletion(&removal.proof)) {
             return Err(IndexError::SourceInvalidated(
                 removal.source().identity().to_string(),
             ));
+        }
+    }
+    for (route, revalidate_missing) in &generation.missing_route_revalidations {
+        if !revalidate_missing() {
+            return Err(IndexError::SourceInvalidated(route.as_str().to_owned()));
         }
     }
     for inventory in &generation.complete_inventories {

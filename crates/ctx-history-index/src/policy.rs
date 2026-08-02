@@ -8,7 +8,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 7;
+pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 8;
+pub const SOURCE_ROUTE_SNAPSHOT_REVISION: u32 = 1;
+pub const AUTOMATIC_ROUTE_DELETION_GRACE_OBSERVATIONS: u32 = 3;
 pub const LEXICAL_SCHEMA_REVISION: u32 = 15;
 pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
 pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 3;
@@ -29,8 +31,16 @@ pub const SEMANTIC_EMBEDDING_NORMALIZATION: &str = "l2";
 #[serde(deny_unknown_fields)]
 pub struct SourceGenerationPolicy {
     pub policy_version: u32,
+    pub source_lifecycle: SourceLifecyclePolicy,
     pub lexical: LexicalGenerationPolicy,
     pub semantic: SemanticGenerationPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceLifecyclePolicy {
+    pub route_snapshot_revision: u32,
+    pub automatic_route_deletion_grace_observations: u32,
 }
 
 impl SourceGenerationPolicy {
@@ -139,6 +149,11 @@ pub enum SourceEventRole {
 pub fn current_source_generation_policy() -> SourceGenerationPolicy {
     SourceGenerationPolicy {
         policy_version: SOURCE_GENERATION_POLICY_VERSION,
+        source_lifecycle: SourceLifecyclePolicy {
+            route_snapshot_revision: SOURCE_ROUTE_SNAPSHOT_REVISION,
+            automatic_route_deletion_grace_observations:
+                AUTOMATIC_ROUTE_DELETION_GRACE_OBSERVATIONS,
+        },
         lexical: LexicalGenerationPolicy {
             event_projector_revision: SOURCE_EVENT_PROJECTOR_REVISION,
             core_record_version: ctx_history_core::CORE_RECORD_VERSION,
@@ -229,7 +244,7 @@ mod tests {
             .contains_key("core_repository_association_policy_revision"));
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "2d38fba57353d0a3dc0227619b1008a0928677a7b4e208a01193157880541f5f"
+            "536e79da2bfd3eceec652e83810a3bd6ec68d8224fbed62d06561b38795c651e"
         );
     }
 

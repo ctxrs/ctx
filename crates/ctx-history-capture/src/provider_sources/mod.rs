@@ -39,8 +39,9 @@ pub use lingma::{
 pub(crate) use ordinary_file::forbid_ordinary_file_content_open;
 pub(crate) use ordinary_file::open_ordinary_file_without_following;
 pub use ordinary_file::{observe_ordinary_file, OrdinaryFileObservation};
+pub(crate) use resolvers::PathPresence;
 pub(crate) use resolvers::{
-    CrushDiscoveredProjectInventory, CrushProjectInventorySelector,
+    path_presence, CrushDiscoveredProjectInventory, CrushProjectInventorySelector,
     CrushProjectInventorySelectorError,
 };
 pub use specs::{provider_source_spec, provider_source_specs};

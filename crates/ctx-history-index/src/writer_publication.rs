@@ -106,6 +106,11 @@ impl GenerationWriter {
                     });
                 }
             }
+            for (route, revalidate_missing) in &self.missing_route_revalidations {
+                if !revalidate_missing() {
+                    return Err(IndexError::SourceInvalidated(route.as_str().to_owned()));
+                }
+            }
             return CommitReceipt::from_manifest(self.base_opstamp, witness.base.clone());
         }
 
@@ -153,10 +158,17 @@ impl GenerationWriter {
             }
         }
         for removal in self.deletions.values() {
-            if !revalidate(RevalidationTarget::Deletion(removal.deletion())) {
+            if !revalidate(RevalidationTarget::Deletion(&removal.proof)) {
                 let source = removal.source().identity().to_string();
                 prepared.abort()?;
                 return Err(IndexError::SourceInvalidated(source));
+            }
+        }
+        for (route, revalidate_missing) in &self.missing_route_revalidations {
+            if !revalidate_missing() {
+                let route = route.as_str().to_owned();
+                prepared.abort()?;
+                return Err(IndexError::SourceInvalidated(route));
             }
         }
         for inventory in &self.complete_inventories {
@@ -386,42 +398,32 @@ impl GenerationWriter {
 
     fn next_manifest(&self) -> Result<GenerationManifest> {
         let mut sources = HashMap::<SourceKey, CertifiedSource>::new();
-        let mut removals = HashMap::<SourceKey, GenerationRemoval>::new();
-        let mut missing_sources = HashMap::<SourceKey, SourceCatalogMissingState>::new();
         if let Some(base) = &self.base_manifest {
             for source in &base.sources {
                 sources.insert(source.observation().source().clone(), source.clone());
             }
-            for removal in &base.removals {
-                removals.insert(removal.source().clone(), removal.clone());
-            }
-            for missing in base.source_catalog().missing_sources() {
-                missing_sources.insert(missing.source().clone(), missing.clone());
-            }
         }
-        for (source, removal) in &self.deletions {
+        for source in self.deletions.keys().chain(&self.route_deletions) {
             sources.remove(source);
-            removals.insert(source.clone(), removal.clone());
-            missing_sources.remove(source);
         }
         for pending in self.pending.values() {
             let certificate = pending.certificate.as_ref().ok_or_else(|| {
                 IndexError::SourceNotCertified(pending.source.identity().to_string())
             })?;
             sources.insert(pending.source.clone(), certificate.clone());
-            removals.remove(&pending.source);
-            missing_sources.remove(&pending.source);
-        }
-        for (source, missing) in &self.observed_missing {
-            missing_sources.insert(source.clone(), missing.clone());
         }
         let sources = sources.into_values().collect::<Vec<_>>();
         let record_aggregates = staging::manifest_record_aggregates(self, &sources)?;
-        GenerationManifest::from_catalog_parts_with_record_aggregates(
+        let mut source_routes = if let Some(routes) = &self.present_source_routes {
+            routes.clone()
+        } else {
+            contracts::implicit_source_routes(&sources)?
+        };
+        source_routes.extend(self.observed_missing_routes.values().cloned());
+        GenerationManifest::from_parts_with_record_aggregates(
             sources,
             record_aggregates,
-            removals.into_values().collect(),
-            SourceCatalogCheckpoint::from_missing_sources(missing_sources.into_values().collect())?,
+            source_routes,
         )
     }
 }

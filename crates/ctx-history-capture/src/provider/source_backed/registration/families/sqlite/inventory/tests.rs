@@ -17,7 +17,6 @@ use sha2::{Digest, Sha256};
 use crate::{
     provider::source_backed::{
         family::document::DocumentLeafExecutionPolicy, source_backed_leaf_worker_budget,
-        AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES,
     },
     provider_sources::ProviderCatalogSupport,
 };
@@ -478,38 +477,6 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     let deleted_source = catalog.lock().unwrap().pop().unwrap().source;
     serial_provider.reset_scan_activity();
     parallel_provider.reset_scan_activity();
-    for expected_missing in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
-        let serial_grace = publish(&serial_index_root, &serial_registry);
-        let parallel_grace = publish(&parallel_index_root, &parallel_registry);
-        assert!(serial_grace.removals.is_empty());
-        assert!(parallel_grace.removals.is_empty());
-        assert_eq!(serial_grace.sources.len(), DATABASES);
-        assert_eq!(parallel_grace.sources.len(), DATABASES);
-        assert_eq!(
-            serial_grace
-                .commit
-                .manifest()
-                .source_catalog()
-                .missing_source(&deleted_source)
-                .unwrap()
-                .consecutive_missing()
-                .get(),
-            expected_missing
-        );
-        assert_eq!(
-            parallel_grace
-                .commit
-                .manifest()
-                .source_catalog()
-                .missing_source(&deleted_source)
-                .unwrap()
-                .consecutive_missing()
-                .get(),
-            expected_missing
-        );
-    }
-    serial_provider.reset_scan_activity();
-    parallel_provider.reset_scan_activity();
     let serial_deleted = publish(&serial_index_root, &serial_registry);
     let parallel_deleted = publish(&parallel_index_root, &parallel_registry);
     assert_eq!(
@@ -517,29 +484,12 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
         serial_deleted.commit.generation_id
     );
     assert_eq!(parallel_deleted.sources, serial_deleted.sources);
+    assert_eq!(serial_deleted.sources.len(), DATABASES - 1);
     assert_eq!(parallel_deleted.removals, serial_deleted.removals);
     assert!(parallel_deleted.removals.iter().any(|removal| removal
         .deletion
         .source()
         .exact_descriptor_eq(&deleted_source)));
-    assert_inventory_work(
-        &serial_provider,
-        DATABASES * 3 + (DATABASES - 1) * 3,
-        1,
-        12,
-        6,
-        DATABASES * 3 + (DATABASES - 1) * 3,
-        DATABASES + 1,
-    );
-    assert_inventory_work(
-        &parallel_provider,
-        DATABASES * 3 + (DATABASES - 1) * 3,
-        parallel_worker_count,
-        12,
-        6,
-        DATABASES * 3 + (DATABASES - 1) * 3,
-        DATABASES + 1,
-    );
 
     writers[0]
         .execute(

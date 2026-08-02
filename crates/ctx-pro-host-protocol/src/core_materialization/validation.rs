@@ -66,7 +66,6 @@ pub(super) fn core_source_delta_exact_eq(left: &CoreSourceDelta, right: &CoreSou
         }
         (CoreSourceDelta::Removed(left), CoreSourceDelta::Removed(right)) => {
             left.source.exact_descriptor_eq(&right.source)
-                && left.removal_revision_sha256 == right.removal_revision_sha256
         }
         _ => false,
     }

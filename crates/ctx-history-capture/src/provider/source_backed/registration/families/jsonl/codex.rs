@@ -223,14 +223,6 @@ fn register_codex_session_tree_route_with_indexer_threads(
                         current.remember(source);
                     }
                 }
-                if let Some(manifest) = sink.writer.base_manifest() {
-                    for removal in &manifest.removals {
-                        let source = removal.source();
-                        if managed_codex_session_source(source) {
-                            current.remember(source);
-                        }
-                    }
-                }
                 let mut owned = capture_ownership.lock().map_err(|_| {
                     SourceBackedRouteError::new(
                         SourceBackedRouteErrorKind::Internal,
@@ -240,7 +232,8 @@ fn register_codex_session_tree_route_with_indexer_threads(
                 *owned = current;
             }
             for (_, source_key, _) in &opening.sources {
-                sink.claim(source_key).map_err(route_coordinator_error)?;
+                sink.claim_present(source_key)
+                    .map_err(route_coordinator_error)?;
             }
             let mut revalidation = HashMap::new();
             let mut timings = CodexSourceBackedPhaseTimingsV0::default();
@@ -473,7 +466,7 @@ pub(super) fn register_codex_explicit_session_route(
                     "explicit Codex session changed its exact source identity",
                 ));
             }
-            sink.claim(&claimed_source)
+            sink.claim_present(&claimed_source)
                 .map_err(route_coordinator_error)?;
             let base_sources = base
                 .into_iter()

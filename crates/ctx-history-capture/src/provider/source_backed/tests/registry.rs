@@ -43,6 +43,122 @@ fn heterogeneous_routes_publish_one_core_generation() {
 }
 
 #[test]
+fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
+    let temp = tempdir().unwrap();
+    let provider = CaptureProvider::Gemini;
+    let format = GEMINI_CLI_SOURCE_FORMAT;
+
+    let mut present = SourceBackedProviderRegistry::new();
+    present.register(fixture_route(provider, format, 61));
+    let initial =
+        refresh_source_backed_generation(temp.path(), &present, WriterOptions::default()).unwrap();
+    let route_id = initial.commit.manifest().source_routes()[0]
+        .route_identity()
+        .clone();
+
+    let missing_registry = || {
+        let mut source = fixture_provider_source(provider, format, ProviderImportSupport::Native);
+        source.status = ProviderSourceStatus::Missing;
+        source.exists = false;
+        let mut registry = SourceBackedProviderRegistry::new();
+        registry.register(
+            SourceBackedRoute::certified_missing(
+                source,
+                SourceBackedSelectorAuthority::DiscoveredWinner,
+            )
+            .unwrap(),
+        );
+        registry
+    };
+
+    for expected in 1..AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS {
+        let missing = refresh_source_backed_generation(
+            temp.path(),
+            &missing_registry(),
+            WriterOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(missing.sources.len(), 1);
+        assert_eq!(
+            missing
+                .commit
+                .manifest()
+                .source_route(&route_id)
+                .unwrap()
+                .missing_state()
+                .unwrap()
+                .consecutive_missing()
+                .get(),
+            expected
+        );
+    }
+
+    let retained_generation = VerifiedIndex::open(temp.path())
+        .unwrap()
+        .generation_id()
+        .to_owned();
+    let mut unknown_source =
+        fixture_provider_source(provider, format, ProviderImportSupport::Native);
+    unknown_source.status = ProviderSourceStatus::Unknown;
+    let mut unknown = SourceBackedProviderRegistry::new();
+    unknown.register(SourceBackedRoute::unsupported(
+        unknown_source,
+        "unknown test route",
+    ));
+    assert!(matches!(
+        refresh_source_backed_generation(temp.path(), &unknown, WriterOptions::default()),
+        Err(SourceBackedCoordinatorError::UnavailableRoute { .. })
+    ));
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        retained_generation
+    );
+
+    let reappeared =
+        refresh_source_backed_generation(temp.path(), &present, WriterOptions::default()).unwrap();
+    assert!(reappeared
+        .commit
+        .manifest()
+        .source_route(&route_id)
+        .unwrap()
+        .missing_state()
+        .is_none());
+
+    for expected in 1..AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS {
+        let missing = refresh_source_backed_generation(
+            temp.path(),
+            &missing_registry(),
+            WriterOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            missing
+                .commit
+                .manifest()
+                .source_route(&route_id)
+                .unwrap()
+                .missing_state()
+                .unwrap()
+                .consecutive_missing()
+                .get(),
+            expected
+        );
+    }
+    let deleted = refresh_source_backed_generation(
+        temp.path(),
+        &missing_registry(),
+        WriterOptions::default(),
+    )
+    .unwrap();
+    assert!(deleted.sources.is_empty());
+    assert!(deleted.commit.manifest().source_routes().is_empty());
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().document_count(),
+        0
+    );
+}
+
+#[test]
 fn mutating_refresh_rejects_an_unclaimed_base_source_from_the_same_family() {
     let mut initial_registry = SourceBackedProviderRegistry::new();
     initial_registry.register(fixture_route(
@@ -83,16 +199,15 @@ fn mutating_refresh_rejects_an_unclaimed_base_source_from_the_same_family() {
 #[test]
 fn cross_route_duplicate_source_ownership_remains_rejected() {
     let mut registry = SourceBackedProviderRegistry::new();
-    registry.register(fixture_route(
-        CaptureProvider::Gemini,
-        GEMINI_CLI_SOURCE_FORMAT,
-        42,
-    ));
-    registry.register(fixture_route(
-        CaptureProvider::Gemini,
-        GEMINI_CLI_SOURCE_FORMAT,
-        42,
-    ));
+    let automatic = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 42);
+    let explicit = SourceBackedRoute::explicit_manual(
+        automatic.metadata.source.clone(),
+        SourceBackedSelectorAuthority::ExplicitPath,
+        automatic.driver.clone().unwrap(),
+    )
+    .unwrap();
+    registry.register(automatic);
+    registry.register(explicit);
     let temp = tempdir().unwrap();
 
     assert!(matches!(
@@ -426,7 +541,7 @@ fn inventory_replay_registry(
 }
 
 #[test]
-fn delete_b_then_discover_c_recertifies_replay_and_restart() {
+fn delete_b_then_discover_c_keeps_receipts_and_manifests_current() {
     let source_a = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 101);
     let source_b = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 102);
     let source_c = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 103);
@@ -440,70 +555,26 @@ fn delete_b_then_discover_c_recertifies_replay_and_restart() {
     assert!(initial.removals.is_empty());
 
     *current.lock().unwrap() = vec![source_a.clone()];
-    let first_missing =
-        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    assert!(first_missing.removals.is_empty());
-    assert_eq!(first_missing.sources.len(), 2);
-    assert_eq!(
-        first_missing
-            .commit
-            .manifest()
-            .source_catalog()
-            .missing_source(&source_b)
-            .unwrap()
-            .consecutive_missing()
-            .get(),
-        1
-    );
-
-    drop(registry);
-    let registry = inventory_replay_registry(Arc::clone(&current));
-    let second_missing =
-        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    assert!(second_missing.removals.is_empty());
-    assert_eq!(second_missing.sources.len(), 2);
-    assert_eq!(
-        second_missing
-            .commit
-            .manifest()
-            .source_catalog()
-            .missing_source(&source_b)
-            .unwrap()
-            .consecutive_missing()
-            .get(),
-        2
-    );
-
     let deleted =
         refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    let deleted_b = deleted
-        .removals
-        .iter()
-        .find(|removal| removal.deletion.source().exact_descriptor_eq(&source_b))
-        .expect("B deletion");
-    assert!(deleted_b.deletion.verifies(&deleted_b.inventory));
+    assert_eq!(deleted.sources.len(), 1);
+    assert_eq!(deleted.removals.len(), 1);
+    assert!(deleted.removals[0]
+        .deletion
+        .source()
+        .exact_descriptor_eq(&source_b));
 
     *current.lock().unwrap() = vec![source_a, source_c];
     let discovered =
         refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    let recertified_b = discovered
-        .removals
-        .iter()
-        .find(|removal| removal.deletion.source().exact_descriptor_eq(&source_b))
-        .expect("recertified B deletion");
-    assert!(recertified_b.deletion.verifies(&recertified_b.inventory));
-    assert_eq!(recertified_b.inventory.observed_sources(), 2);
-    assert_ne!(
-        deleted_b.inventory.inventory_digest(),
-        recertified_b.inventory.inventory_digest()
-    );
+    assert_eq!(discovered.sources.len(), 2);
+    assert!(discovered.removals.is_empty());
+    assert_eq!(discovered.commit.manifest().sources.len(), 2);
 
     let replay =
         refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
     assert_eq!(replay.commit.generation_id, discovered.commit.generation_id);
-    assert!(replay.removals[0]
-        .deletion
-        .verifies(&replay.removals[0].inventory));
+    assert!(replay.removals.is_empty());
 
     drop(registry);
     let restarted_registry = inventory_replay_registry(Arc::clone(&current));
@@ -517,9 +588,7 @@ fn delete_b_then_discover_c_recertifies_replay_and_restart() {
         restarted.commit.generation_id,
         discovered.commit.generation_id
     );
-    assert!(restarted.removals[0]
-        .deletion
-        .verifies(&restarted.removals[0].inventory));
+    assert!(restarted.removals.is_empty());
 }
 
 #[test]

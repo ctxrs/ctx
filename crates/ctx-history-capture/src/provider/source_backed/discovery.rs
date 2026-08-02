@@ -141,14 +141,13 @@ pub(in crate::provider::source_backed) fn build_automatic_source_backed_registry
             retain_unsupported_automatic_format(&mut registry, &mut issues, source, detail);
             continue;
         }
-        if !matches!(
-            source.status,
-            ProviderSourceStatus::Available | ProviderSourceStatus::Empty
-        ) {
-            issues.push(SourceBackedAutomaticRegistryIssue::Unavailable {
-                reason: SourceBackedAutomaticUnavailableReason::SourceStatus(source.status),
-                source,
-            });
+        if source.status == ProviderSourceStatus::Unknown {
+            let reason = SourceBackedAutomaticUnavailableReason::SourceStatus(source.status);
+            registry.register(SourceBackedRoute::unsupported(
+                source.clone(),
+                automatic_unavailable_detail(&reason),
+            ));
+            issues.push(SourceBackedAutomaticRegistryIssue::Unavailable { reason, source });
             continue;
         }
 
@@ -172,6 +171,39 @@ pub(in crate::provider::source_backed) fn build_automatic_source_backed_registry
         }
         if let Some(reason) = format_route.unsupported_reason {
             retain_unsupported_automatic_format(&mut registry, &mut issues, source, reason);
+            continue;
+        }
+
+        if source.status == ProviderSourceStatus::Missing {
+            match SourceBackedRoute::certified_missing(
+                source.clone(),
+                format_route.selector_authority,
+            ) {
+                Ok(route) => registry.register(route),
+                Err(error) => {
+                    let reason = SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+                        detail: error.to_string(),
+                    };
+                    registry.register(SourceBackedRoute::unsupported(
+                        source.clone(),
+                        automatic_unavailable_detail(&reason),
+                    ));
+                    issues.push(SourceBackedAutomaticRegistryIssue::Unavailable { source, reason });
+                }
+            }
+            continue;
+        }
+
+        if !matches!(
+            source.status,
+            ProviderSourceStatus::Available | ProviderSourceStatus::Empty
+        ) {
+            let reason = SourceBackedAutomaticUnavailableReason::SourceStatus(source.status);
+            registry.register(SourceBackedRoute::unsupported(
+                source.clone(),
+                automatic_unavailable_detail(&reason),
+            ));
+            issues.push(SourceBackedAutomaticRegistryIssue::Unavailable { source, reason });
             continue;
         }
 

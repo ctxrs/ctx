@@ -434,7 +434,7 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
     assert_eq!(first.published_explicit_source_catalog, empty_catalog);
     let verified = VerifiedIndex::open(&index_root).unwrap();
     assert!(verified.manifest().sources.is_empty());
-    assert!(verified.manifest().removals.is_empty());
+    assert!(verified.manifest().source_routes().is_empty());
     drop(verified);
 
     let replay = refresh_all_provider_sources(

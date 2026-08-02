@@ -364,7 +364,7 @@ fn automatic_builder_executes_typed_warp_crush_and_lingma_authorities() {
     );
     assert_eq!(build.executable_route_count(), 7);
     assert_eq!(build.unsupported_route_count(), 1);
-    assert_eq!(build.issues.len(), 2);
+    assert_eq!(build.issues.len(), 1);
     for provider in [
         CaptureProvider::Codex,
         CaptureProvider::Warp,
@@ -474,15 +474,18 @@ fn automatic_registry_keeps_present_empty_roots_executable_and_other_statuses_ty
     );
 
     assert_eq!(unavailable_build.executable_route_count(), 0);
-    assert_eq!(unavailable_build.unsupported_route_count(), 1);
-    assert!(unavailable_build.issues.iter().any(|issue| matches!(
+    assert_eq!(unavailable_build.unsupported_route_count(), 2);
+    assert!(unavailable_build.registry.routes().any(|route| {
+        route.source.status == ProviderSourceStatus::Missing
+            && !route.source.exists
+            && route.source.path == sessions
+            && route.selection == Some(SourceBackedRouteSelection::Automatic)
+            && route.unsupported_reason.is_none()
+    }));
+    assert!(!unavailable_build.issues.iter().any(|issue| matches!(
         issue,
-        SourceBackedAutomaticRegistryIssue::Unavailable {
-            source,
-            reason: SourceBackedAutomaticUnavailableReason::SourceStatus(
-                ProviderSourceStatus::Missing
-            ),
-        } if !source.exists && source.path == sessions
+        SourceBackedAutomaticRegistryIssue::Unavailable { source, .. }
+            if source.status == ProviderSourceStatus::Missing
     )));
     assert!(unavailable_build.issues.iter().any(|issue| matches!(
         issue,

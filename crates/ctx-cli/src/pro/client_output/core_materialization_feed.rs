@@ -5,6 +5,8 @@ use ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES;
 use ctx_history_index::{
     CoreEventPageBudget, GenerationManifest, SourceEventCursor, VerifiedIndex,
 };
+#[cfg(test)]
+use ctx_pro_host_protocol::CoreSourceRemoval;
 use ctx_pro_host_protocol::{
     core_record_sha256, ApplyCoreEventDeltaPageRequest, ApplyCoreSourceDeltaPageRequest,
     BeginCoreMaterializationRequest, Capability, CoreEventDelta, CoreEventDeltaPage,
@@ -12,12 +14,11 @@ use ctx_pro_host_protocol::{
     CoreEventStatePage, CoreEventStatePageRequest, CoreEventTombstone, CoreGenerationHead,
     CoreMaterializationBegan, CoreMaterializationFinished, CoreMaterializationReceipt,
     CoreMaterializationReceiptIdentity, CoreSourceDelta, CoreSourceDeltaPage,
-    CoreSourceDeltaPageApplied, CoreSourceReconciliation, CoreSourceRemoval, CoreSourceState,
+    CoreSourceDeltaPageApplied, CoreSourceReconciliation, CoreSourceState,
     FinishCoreMaterializationRequest, HelperMessage, HostMessage, StatusRequest,
     MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES, MAX_CORE_EVENT_DELTA_PAGE_ITEMS,
     MAX_CORE_EVENT_STATE_PAGE_ITEMS, MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
 };
-use sha2::{Digest, Sha256};
 
 use super::*;
 
@@ -198,7 +199,7 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
     let mut event_delta_pages = 0_u64;
 
     if !began.replayed {
-        let deltas = core_snapshot_deltas(index.manifest(), &sources)?;
+        let deltas = core_snapshot_deltas(&sources);
         let delta_pages =
             build_delta_pages(&began.materialization_id, index.generation_id(), deltas)?;
         source_delta_pages = u32::try_from(delta_pages.len())
@@ -220,12 +221,31 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
             reconcile_sources.extend(applied.reconcile_sources);
         }
 
-        reconcile_sources.sort_by_key(|item| item.delta.source().identity().digest());
-        for pair in reconcile_sources.windows(2) {
-            if pair[0].delta.source().identity().digest()
-                >= pair[1].delta.source().identity().digest()
-            {
-                bail!("invalid_response: Core reconciliations are not strictly ordered");
+        reconcile_sources.sort_by_key(|item| item.materialize_index);
+        let mut reconciled_source_ids = BTreeSet::new();
+        for (expected_index, reconciliation) in reconcile_sources.iter().enumerate() {
+            if usize::try_from(reconciliation.materialize_index).ok() != Some(expected_index) {
+                bail!("invalid_response: Core reconciliation indices are not contiguous");
+            }
+            let source_id = reconciliation.delta.source().identity().digest();
+            if !reconciled_source_ids.insert(source_id) {
+                bail!("invalid_response: Core reconciliations repeat a stable source identity");
+            }
+            match &reconciliation.delta {
+                CoreSourceDelta::Present(state) => {
+                    if !sources.iter().any(|current| current == state) {
+                        bail!(
+                            "invalid_response: Core reconciliation carries a stale current source"
+                        );
+                    }
+                }
+                CoreSourceDelta::Removed(removal) => {
+                    if sources.iter().any(|current| {
+                        current.source.identity().digest() == removal.source.identity().digest()
+                    }) {
+                        bail!("invalid_response: Core reconciliation removes a current source");
+                    }
+                }
             }
         }
         for reconciliation in reconcile_sources {
@@ -321,28 +341,12 @@ fn core_generation_head(
     .map_err(|error| anyhow!("invalid_request: {}", error.message))
 }
 
-fn core_snapshot_deltas(
-    manifest: &GenerationManifest,
-    sources: &[CoreSourceState],
-) -> Result<Vec<CoreSourceDelta>> {
-    let mut deltas = sources
+fn core_snapshot_deltas(sources: &[CoreSourceState]) -> Vec<CoreSourceDelta> {
+    sources
         .iter()
         .cloned()
         .map(CoreSourceDelta::Present)
-        .collect::<Vec<_>>();
-    for removal in &manifest.removals {
-        deltas.push(CoreSourceDelta::Removed(CoreSourceRemoval {
-            source: removal.source().clone(),
-            removal_revision_sha256: canonical_sha256(removal)?,
-        }));
-    }
-    deltas.sort_by_key(|delta| delta.source().identity().digest());
-    for pair in deltas.windows(2) {
-        if pair[0].source().identity().digest() >= pair[1].source().identity().digest() {
-            bail!("invalid_request: Core snapshot retains and removes the same source");
-        }
-    }
-    Ok(deltas)
+        .collect()
 }
 
 fn build_delta_pages(
@@ -351,7 +355,9 @@ fn build_delta_pages(
     deltas: Vec<CoreSourceDelta>,
 ) -> Result<Vec<CoreSourceDeltaPage>> {
     if deltas.is_empty() {
-        return Ok(Vec::new());
+        return CoreSourceDeltaPage::new(materialization_id, generation_id, 0, true, Vec::new())
+            .map(|page| vec![page])
+            .map_err(|error| anyhow!("invalid_request: {}", error.message));
     }
     let mut chunks = Vec::<Vec<CoreSourceDelta>>::new();
     let mut current = Vec::new();
@@ -591,12 +597,6 @@ fn send_event_delta_page<C: CoreMaterializationConsumer>(
     response
         .validate_for_identity(&acknowledgement_identity)
         .map_err(|error| anyhow!("invalid_response: {}", error.message))
-}
-
-fn canonical_sha256(value: &impl serde::Serialize) -> Result<String> {
-    let encoded = serde_json::to_vec(value)?;
-    let digest = Sha256::digest(encoded);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 #[cfg(test)]

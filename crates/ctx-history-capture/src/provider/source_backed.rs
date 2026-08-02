@@ -20,9 +20,10 @@ use ctx_history_core::{
     SourceKey, TypedKey,
 };
 use ctx_history_index::{
-    CommitReceipt, GenerationRemoval, GenerationWriter, IndexError, RevalidationTarget,
-    WriterOptions,
+    CommitReceipt, GenerationWriter, IndexError, RevalidationTarget, SourceRouteIdentity,
+    SourceRouteSnapshot, WriterOptions,
 };
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::codex::nativepath::{
@@ -96,9 +97,9 @@ use super::providers::{
     },
 };
 use crate::provider_sources::{
-    resolve_warp_discovery_authority, CrushDiscoveredProjectInventory,
+    path_presence, resolve_warp_discovery_authority, CrushDiscoveredProjectInventory,
     CrushProjectInventorySelector, CrushProjectInventorySelectorError, LingmaDiscoveryUnavailable,
-    LingmaInventorySelector, WarpDiscoveryUnavailable,
+    LingmaInventorySelector, PathPresence, WarpDiscoveryUnavailable,
 };
 use crate::{
     discover_provider_sources_with_context, provider_source_spec,
@@ -135,15 +136,6 @@ pub(crate) fn source_backed_base_sources(
                 .cloned()
                 .collect()
         })
-        .unwrap_or_default()
-}
-
-pub(crate) fn source_backed_base_removals(
-    sink: &SourceBackedGenerationSink<'_>,
-) -> Vec<GenerationRemoval> {
-    sink.writer
-        .base_manifest()
-        .map(|manifest| manifest.removals.clone())
         .unwrap_or_default()
 }
 

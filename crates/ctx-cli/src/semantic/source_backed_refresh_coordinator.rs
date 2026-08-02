@@ -227,8 +227,7 @@ fn verify_source_backed_publication(
         );
     }
     let manifest = verified.manifest();
-    let verified_current =
-        SourceBackedRefreshCurrent::from_sources(&manifest.sources, manifest.removals.len())?;
+    let verified_current = SourceBackedRefreshCurrent::from_sources(&manifest.sources, 0)?;
     if verified_current != publication.current
         || publication.certified_source_count != verified_current.source_count
         || publication.certified_source_bytes != verified_current.certified_source_bytes
@@ -706,8 +705,7 @@ fn published_refresh_receipt(
     }
 
     let manifest = pin.index.manifest();
-    let verified_current =
-        SourceBackedRefreshCurrent::from_sources(&manifest.sources, manifest.removals.len())?;
+    let verified_current = SourceBackedRefreshCurrent::from_sources(&manifest.sources, 0)?;
     if current != verified_current
         || current.source_count
             != required_usize_from_value(

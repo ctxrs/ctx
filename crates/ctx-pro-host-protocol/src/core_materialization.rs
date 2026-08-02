@@ -19,9 +19,11 @@ use validation::{
     validate_source_states,
 };
 
-pub const CORE_MATERIALIZATION_CONTRACT_VERSION: u16 = 1;
+pub const CORE_MATERIALIZATION_CONTRACT_VERSION: u16 = 2;
 pub const MAX_CORE_SOURCE_STATES: usize = 16_384;
 pub const MAX_CORE_SOURCE_DELTA_PAGE_ITEMS: usize = 256;
+pub const MAX_CORE_TERMINAL_SOURCE_RECONCILIATIONS: usize =
+    MAX_CORE_SOURCE_STATES + MAX_CORE_SOURCE_DELTA_PAGE_ITEMS;
 pub const MAX_CORE_EVENT_STATE_PAGE_ITEMS: usize = 256;
 pub const MAX_CORE_EVENT_DELTA_PAGE_ITEMS: usize = 256;
 pub const MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES: usize = 16 * 1024 * 1024;
@@ -55,7 +57,6 @@ impl CoreSourceState {
 #[serde(deny_unknown_fields)]
 pub struct CoreSourceRemoval {
     pub source: SourceKey,
-    pub removal_revision_sha256: String,
 }
 
 impl CoreSourceRemoval {
@@ -63,10 +64,7 @@ impl CoreSourceRemoval {
         self.source
             .validate_contract()
             .map_err(|error| invalid_contract("removed Core source identity", error))?;
-        validate_sha256(
-            &self.removal_revision_sha256,
-            "Core source removal revision",
-        )
+        Ok(())
     }
 }
 
@@ -435,7 +433,9 @@ impl CoreSourceDeltaPage {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         validate_sha256(&self.materialization_id, "Core materialization ID")?;
         validate_sha256(&self.core_generation_id, "Core generation ID")?;
-        if self.deltas.is_empty() || self.deltas.len() > MAX_CORE_SOURCE_DELTA_PAGE_ITEMS {
+        if (!self.terminal && self.deltas.is_empty())
+            || self.deltas.len() > MAX_CORE_SOURCE_DELTA_PAGE_ITEMS
+        {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,
                 "Core source delta page exceeds its item bound",
@@ -444,6 +444,12 @@ impl CoreSourceDeltaPage {
         let mut prior = None;
         for delta in &self.deltas {
             delta.validate()?;
+            if matches!(delta, CoreSourceDelta::Removed(_)) {
+                return Err(ProtocolError::new(
+                    ErrorClass::InvalidRequest,
+                    "Core source pages are current snapshots and cannot carry removals",
+                ));
+            }
             let current = delta.source().identity().digest();
             if prior.is_some_and(|prior| prior >= current) {
                 return Err(ProtocolError::new(
@@ -470,6 +476,7 @@ impl CoreSourceDeltaPage {
             materialization_id: self.materialization_id.clone(),
             core_generation_id: self.core_generation_id.clone(),
             page_index: self.page_index,
+            terminal: self.terminal,
             deltas: self.deltas.clone(),
         }
     }
@@ -480,6 +487,7 @@ pub struct CoreSourceDeltaPageAcknowledgementIdentity {
     materialization_id: String,
     core_generation_id: String,
     page_index: u32,
+    terminal: bool,
     deltas: Vec<CoreSourceDelta>,
 }
 
@@ -519,39 +527,51 @@ impl CoreSourceDeltaPageApplied {
     ) -> Result<(), ProtocolError> {
         validate_sha256(&self.materialization_id, "Core materialization ID")?;
         validate_sha256(&self.core_generation_id, "Core generation ID")?;
-        if self.reconcile_sources.len() > MAX_CORE_SOURCE_DELTA_PAGE_ITEMS {
+        let maximum_reconciliations = if identity.terminal {
+            MAX_CORE_TERMINAL_SOURCE_RECONCILIATIONS
+        } else {
+            MAX_CORE_SOURCE_DELTA_PAGE_ITEMS
+        };
+        if self.reconcile_sources.len() > maximum_reconciliations {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,
                 "Core source delta acknowledgement exceeds its reconciliation item bound",
             ));
         }
-        let mut prior = None;
+        let mut prior_index = None;
         let mut present = 0_usize;
         let mut removed = 0_usize;
         for requested in &self.reconcile_sources {
             requested.validate()?;
-            let current = requested.delta.source().identity().digest();
-            if prior.is_some_and(|prior| prior >= current) {
+            if prior_index.is_some_and(|prior| prior >= requested.materialize_index) {
                 return Err(ProtocolError::new(
                     ErrorClass::Sequence,
-                    "requested Core materialization sources must be strictly ordered",
-                ));
-            }
-            let exact_delta = identity
-                .deltas
-                .iter()
-                .any(|delta| core_source_delta_exact_eq(delta, &requested.delta));
-            if !exact_delta {
-                return Err(ProtocolError::new(
-                    ErrorClass::Sequence,
-                    "Core source delta acknowledgement requested an absent or stale reconciliation",
+                    "requested Core materialization indices must be strictly ordered",
                 ));
             }
             match &requested.delta {
-                CoreSourceDelta::Present(_) => present += 1,
-                CoreSourceDelta::Removed(_) => removed += 1,
+                CoreSourceDelta::Present(_) => {
+                    let exact_delta = identity
+                        .deltas
+                        .iter()
+                        .any(|delta| core_source_delta_exact_eq(delta, &requested.delta));
+                    if !exact_delta {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Sequence,
+                            "Core source acknowledgement requested an absent or stale current source",
+                        ));
+                    }
+                    present += 1;
+                }
+                CoreSourceDelta::Removed(_) if identity.terminal => removed += 1,
+                CoreSourceDelta::Removed(_) => {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "stored-minus-snapshot removals are valid only on the terminal source page",
+                    ));
+                }
             }
-            prior = Some(current);
+            prior_index = Some(requested.materialize_index);
         }
         if self.materialization_id != identity.materialization_id
             || self.core_generation_id != identity.core_generation_id
@@ -571,6 +591,7 @@ impl CoreSourceDeltaPageApplied {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoreSourceReconciliation {
+    pub materialize_index: u32,
     pub delta: CoreSourceDelta,
 }
 
