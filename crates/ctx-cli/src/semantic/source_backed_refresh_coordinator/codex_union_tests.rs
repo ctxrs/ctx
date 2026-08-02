@@ -45,6 +45,7 @@ fn automatic_and_explicit_codex_roots_publish_through_one_union_route() {
         &data_root,
         &index_root,
         Some(&upsert.authority),
+        SourceBackedRefreshScope::All,
         &mut progress,
     )
     .unwrap();
@@ -76,6 +77,7 @@ fn automatic_and_explicit_codex_roots_publish_through_one_union_route() {
         &data_root,
         &index_root,
         Some(&upsert.authority),
+        SourceBackedRefreshScope::All,
         &mut progress,
     )
     .unwrap();

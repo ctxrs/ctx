@@ -3,6 +3,7 @@ use std::sync::{
     mpsc, Arc, Barrier,
 };
 
+use crate::semantic::dirty_source_routes::EventWatermark;
 use ctx_history_capture::{
     provider_source_for_path, DiscoveryPlatform, DiscoveryPlatformDirs, ProviderCatalogSupport,
     ProviderImportSupport, ProviderSource, ProviderSourceKind, SourceBackedFailedRoute,
@@ -86,6 +87,17 @@ fn request_id(response: &Value) -> String {
         .to_owned()
 }
 
+fn route_identity(byte: u8) -> SourceRouteIdentity {
+    SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap()
+}
+
+fn ledger_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
 struct RunningRefreshGate {
     started: mpsc::Receiver<()>,
     release: Option<mpsc::SyncSender<()>>,
@@ -130,6 +142,175 @@ fn test_catalog_authority(revision: u64, digest_byte: u8) -> ExplicitSourceCatal
         },
     }))
     .unwrap()
+}
+
+#[test]
+fn exact_route_event_during_execution_creates_one_successor_and_noop_ack_cleans_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = route_identity(0x51);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_calls = Arc::clone(&calls);
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let executor_route = route.clone();
+    let executor: Arc<dyn SourceBackedRefreshExecutor> =
+        Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+            assert_eq!(
+                execution.scope,
+                SourceBackedRefreshScope::exact([executor_route.clone()])
+            );
+            let call = executor_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                executor_entered.wait();
+                executor_release.wait();
+            }
+            let commit = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                WriterOptions::default(),
+            )?
+            .commit(|_| true)?;
+            let mut publication = empty_test_publication(commit.generation_id);
+            publication.published_explicit_source_catalog = execution
+                .explicit_source_catalog
+                .cloned()
+                .expect("exact refresh catalog authority");
+            publication.scanned_routes = 1;
+            publication.selected_route_ids = vec![executor_route.as_str().to_owned()];
+            publication.successful_route_ids = vec![executor_route.as_str().to_owned()];
+            Ok(publication)
+        });
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(executor));
+    let observed_at_ms = ledger_now_ms().saturating_sub(1_000);
+    coordinator.reconcile_watch_routes([route.clone()], EventWatermark::new(1, 0), observed_at_ms);
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+
+    std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_data_root = data_root.clone();
+        scope.spawn(move || {
+            let run = runner
+                .run_next(&runner_data_root)
+                .expect("first exact route run");
+            assert!(!run.failed);
+            assert!(matches!(run.scope, SourceBackedRefreshScope::Exact(_)));
+        });
+        entered.wait();
+        coordinator
+            .record_watch_routes([(route.clone(), EventWatermark::new(1, 1))], observed_at_ms);
+        release.wait();
+    });
+
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let successor = coordinator
+        .run_next(&data_root)
+        .expect("successor exact route run");
+    assert!(!successor.failed);
+    assert!(!successor.did_work, "unchanged exact route must be a no-op");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(!coordinator.has_scheduled_route_work());
+    assert!(!coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+}
+
+fn route_failure_executor(
+    route: SourceRouteIdentity,
+    class: &'static str,
+) -> Arc<dyn SourceBackedRefreshExecutor> {
+    Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+        let commit = ctx_history_index::GenerationWriter::open(
+            execution.index_root,
+            WriterOptions::default(),
+        )?
+        .commit(|_| true)?;
+        let mut publication = empty_test_publication(commit.generation_id);
+        publication.published_explicit_source_catalog = execution
+            .explicit_source_catalog
+            .cloned()
+            .expect("exact refresh catalog authority");
+        publication.scanned_routes = 1;
+        publication.selected_route_ids = vec![route.as_str().to_owned()];
+        publication.source_failures = vec![SourceBackedRefreshSourceFailure {
+            route_identity: route.as_str().to_owned(),
+            source_identity: "content-free-source".to_owned(),
+            provider: "fixture".to_owned(),
+            class: class.to_owned(),
+            carried_forward: true,
+        }];
+        Ok(publication)
+    })
+}
+
+#[test]
+fn exact_route_receipt_failures_back_off_or_block_until_a_new_event() {
+    let route = route_identity(0x61);
+    let observed_at_ms = ledger_now_ms().saturating_sub(1_000);
+
+    let retry_temp = tempfile::tempdir().unwrap();
+    let retry_root = retry_temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&retry_root).unwrap();
+    let retry =
+        CoreRefreshEngine::with_executor(route_failure_executor(route.clone(), "unavailable"));
+    retry.reconcile_watch_routes([route.clone()], EventWatermark::new(1, 0), observed_at_ms);
+    assert!(retry
+        .enqueue_next_dirty_route(&retry_root, ledger_now_ms())
+        .unwrap());
+    assert!(!retry.run_next(&retry_root).unwrap().failed);
+    let retry_after = retry
+        .next_dirty_route_due_in_ms(ledger_now_ms())
+        .expect("retryable route remains scheduled");
+    assert!(retry_after <= 10_000 && retry_after > 0);
+    assert!(!retry
+        .enqueue_next_dirty_route(&retry_root, ledger_now_ms())
+        .unwrap());
+
+    let blocked_temp = tempfile::tempdir().unwrap();
+    let blocked_root = blocked_temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&blocked_root).unwrap();
+    let blocked =
+        CoreRefreshEngine::with_executor(route_failure_executor(route.clone(), "incompatible"));
+    blocked.reconcile_watch_routes([route.clone()], EventWatermark::new(2, 0), observed_at_ms);
+    assert!(blocked
+        .enqueue_next_dirty_route(&blocked_root, ledger_now_ms())
+        .unwrap());
+    assert!(!blocked.run_next(&blocked_root).unwrap().failed);
+    assert!(!blocked.has_scheduled_route_work());
+    blocked.record_watch_routes([(route.clone(), EventWatermark::new(2, 0))], observed_at_ms);
+    assert!(!blocked.has_scheduled_route_work());
+    blocked.record_watch_routes([(route, EventWatermark::new(2, 1))], observed_at_ms);
+    assert!(blocked.has_scheduled_route_work());
+}
+
+#[test]
+fn systemic_exact_publication_failure_leaves_the_route_dirty_with_backoff() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = route_identity(0x71);
+    let executor: Arc<dyn SourceBackedRefreshExecutor> =
+        Arc::new(|_: SourceBackedRefreshExecution<'_>| Err(anyhow!("systemic fixture failure")));
+    let coordinator = CoreRefreshEngine::with_executor(executor);
+    coordinator.reconcile_watch_routes(
+        [route],
+        EventWatermark::new(3, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    assert!(coordinator.run_next(&data_root).unwrap().failed);
+    let retry_after = coordinator
+        .next_dirty_route_due_in_ms(ledger_now_ms())
+        .expect("systemic failure remains dirty");
+    assert!(retry_after <= 10_000 && retry_after > 0);
 }
 
 #[path = "source_backed_refresh_coordinator_tests_receipt.rs"]
@@ -362,6 +543,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
         index_root: &index_root,
         request_id: "all-provider-request",
         explicit_source_catalog: None,
+        scope: SourceBackedRefreshScope::All,
         report_progress: &report_progress,
     };
     let mut provider_wide_calls = 0;
@@ -375,6 +557,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
          observed_data_root,
          observed_index_root,
          observed_explicit_source_catalog,
+         observed_scope,
          progress| {
             provider_wide_calls += 1;
             assert_eq!(observed_discovery.home(), discovery.home());
@@ -389,6 +572,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
             assert_eq!(observed_data_root, data_root);
             assert_eq!(observed_index_root, index_root);
             assert!(observed_explicit_source_catalog.is_none());
+            assert_eq!(observed_scope, SourceBackedRefreshScope::All);
             progress(CaptureSourceBackedRefreshProgress {
                 phase: "discovering",
                 completed_sources: 0,
@@ -482,6 +666,7 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
         &data_root,
         &index_root,
         None,
+        SourceBackedRefreshScope::All,
         &mut progress,
     )
     .unwrap();
@@ -502,6 +687,7 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
         &data_root,
         &index_root,
         None,
+        SourceBackedRefreshScope::All,
         &mut progress,
     )
     .unwrap();
@@ -575,6 +761,7 @@ fn automatic_refresh_replaces_a_zstd_settings_generation() {
         &data_root,
         &index_root,
         None,
+        SourceBackedRefreshScope::All,
         &mut progress,
     )
     .unwrap();
@@ -610,6 +797,7 @@ fn automatic_refresh_replaces_a_zstd_settings_generation() {
                     &data_root,
                     &index_root,
                     None,
+                    SourceBackedRefreshScope::All,
                     &mut progress,
                 )
             },

@@ -116,12 +116,14 @@ pub(crate) mod family;
 mod inventory;
 mod publication;
 mod registration;
+mod watch;
 
 pub use discovery::*;
 pub use driver::*;
 pub use inventory::*;
 pub use publication::*;
 pub use registration::*;
+pub use watch::*;
 
 pub(crate) fn source_backed_base_sources(
     sink: &SourceBackedGenerationSink<'_>,

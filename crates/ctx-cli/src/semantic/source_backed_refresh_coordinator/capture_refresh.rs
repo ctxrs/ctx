@@ -6,6 +6,7 @@ pub(super) fn execute_source_backed_refresh(
     request_id: &str,
     coordinator: &CoreRefreshEngine,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    scope: SourceBackedRefreshScope,
 ) -> Result<SourceBackedRefreshPublication> {
     let index_root = source_backed_index_root(data_root);
     let report_progress = |update: SourceBackedRefreshProgressUpdate| {
@@ -24,6 +25,7 @@ pub(super) fn execute_source_backed_refresh(
         index_root: &index_root,
         request_id,
         explicit_source_catalog,
+        scope,
         report_progress: &report_progress,
     })
 }
@@ -48,6 +50,7 @@ where
         &Path,
         &Path,
         Option<&ExplicitSourceCatalogAuthority>,
+        SourceBackedRefreshScope,
         &mut dyn FnMut(CaptureSourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
     ) -> Result<SourceBackedRefreshPublication>,
 {
@@ -91,49 +94,43 @@ where
         execution.data_root,
         execution.index_root,
         execution.explicit_source_catalog,
+        execution.scope.clone(),
         &mut report_progress,
     )
 }
 
 pub(super) fn refresh_all_provider_sources(
     discovery: &DiscoveryContext,
-    mut report: DiscoveryReport,
+    report: DiscoveryReport,
     discovery_duration: StdDuration,
     data_root: &Path,
     index_root: &Path,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    scope: SourceBackedRefreshScope,
     report_progress: &mut dyn FnMut(
         CaptureSourceBackedRefreshProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> Result<SourceBackedRefreshPublication> {
-    let loaded_catalog;
-    let catalog = if let Some(authority) = explicit_source_catalog {
-        authority
-    } else {
-        loaded_catalog = load_explicit_source_catalog_authority(data_root)?;
-        &loaded_catalog
-    };
-    catalog.prepare_discovery_report(data_root, &mut report)?;
-    let mut build =
-        build_automatic_source_backed_registry_from_report(discovery, data_root, report);
-    build.discovery_duration = discovery_duration;
-    let retained_generation = open_published_generation(data_root)?;
-    catalog.register_routes_after_discovery_merge(
-        data_root,
-        retained_generation.as_ref(),
-        &mut build,
-    )?;
-    let published_explicit_source_catalog = catalog.clone();
+    let (build, published_explicit_source_catalog, retained_generation) =
+        build_merged_source_backed_registry(
+            discovery,
+            report,
+            discovery_duration,
+            data_root,
+            explicit_source_catalog,
+        )?;
     let retained_sources = retained_generation
         .as_ref()
         .map(|index| index.manifest().sources.clone())
         .unwrap_or_default();
-    reject_blocking_automatic_registry_issues(&build.issues)?;
-    reject_unowned_retained_source_families(&build.registry, &retained_sources)?;
+    if matches!(scope, SourceBackedRefreshScope::All) {
+        reject_blocking_automatic_registry_issues(&build.issues)?;
+        reject_unowned_retained_source_families(&build.registry, &retained_sources)?;
+    }
     let (executor, _issues) = build.into_refresh_executor(WriterOptions::default());
     let receipt = executor
-        .refresh(index_root, report_progress)
-        .context("run capture-owned all-provider source-backed refresh")?;
+        .refresh_scope(index_root, scope, report_progress)
+        .context("run capture-owned source-backed refresh")?;
     let current = SourceBackedRefreshCurrent::from_sources(&receipt.sources, 0)?;
     if current.source_count != receipt.certified_source_count
         || current.certified_source_bytes != receipt.certified_source_bytes
@@ -178,6 +175,57 @@ pub(super) fn refresh_all_provider_sources(
             commit_us: nonzero_duration_micros(receipt.commit_duration),
         },
     })
+}
+
+pub(super) fn source_backed_watch_catalog(data_root: &Path) -> Result<SourceBackedWatchCatalog> {
+    let discovery = source_backed_discovery_context()?.with_data_root(data_root);
+    let work_budget = source_backed_refresh_work_budget(WriterOptions::default().indexer_threads);
+    let discovery_started = StdInstant::now();
+    let report = discover_provider_sources_with_context_and_work_budget(&discovery, work_budget);
+    let discovery_duration = discovery_started.elapsed();
+    validate_provider_source_roots_outside_data_root(data_root, report.sources.iter())
+        .context("validate provider roots before deriving source watch catalog")?;
+    validate_explicit_source_catalog_roots(data_root)
+        .context("validate explicit provider roots before deriving source watch catalog")?;
+    let (build, _, _) = build_merged_source_backed_registry(
+        &discovery,
+        report,
+        discovery_duration,
+        data_root,
+        None,
+    )?;
+    Ok(build.registry.watch_catalog())
+}
+
+fn build_merged_source_backed_registry(
+    discovery: &DiscoveryContext,
+    mut report: DiscoveryReport,
+    discovery_duration: StdDuration,
+    data_root: &Path,
+    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+) -> Result<(
+    ctx_history_capture::SourceBackedAutomaticRegistryBuild,
+    ExplicitSourceCatalogAuthority,
+    Option<VerifiedIndex>,
+)> {
+    let loaded_catalog;
+    let catalog = if let Some(authority) = explicit_source_catalog {
+        authority
+    } else {
+        loaded_catalog = load_explicit_source_catalog_authority(data_root)?;
+        &loaded_catalog
+    };
+    catalog.prepare_discovery_report(data_root, &mut report)?;
+    let mut build =
+        build_automatic_source_backed_registry_from_report(discovery, data_root, report);
+    build.discovery_duration = discovery_duration;
+    let retained_generation = open_published_generation(data_root)?;
+    catalog.register_routes_after_discovery_merge(
+        data_root,
+        retained_generation.as_ref(),
+        &mut build,
+    )?;
+    Ok((build, catalog.clone(), retained_generation))
 }
 
 fn source_backed_discovery_context() -> Result<DiscoveryContext> {

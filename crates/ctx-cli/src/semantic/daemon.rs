@@ -25,7 +25,6 @@ use crate::{
 #[cfg(test)]
 use crate::analytics::DaemonRuntimeObservationV1;
 
-#[cfg(test)]
 use super::source_backed_refresh_coordinator::CoreRefreshEngine;
 
 use super::{
@@ -46,6 +45,7 @@ use super::{
     },
     daemon_wakeup::{write_degraded_wakeup_receipt, DaemonFileWatcher, DaemonWakeup},
     daemon_worker::write_daemon_lifecycle_status_with_runtime,
+    dirty_source_routes::EventWatermark,
     health_search::semantic_env_flag,
     model_runtime::SharedSemanticRuntime,
     paths_status::{
@@ -60,6 +60,7 @@ use super::{
         DaemonQueryService,
     },
     runtime_limits::DAEMON_BACKGROUND_CHILD_ENV,
+    source_backed_refresh_coordinator::source_backed_watch_catalog,
 };
 use crate::ui::Ui;
 
@@ -602,13 +603,38 @@ pub(super) fn run_daemon_inner(
             daemon_semantic_runtime_active(&runtime, query_service.as_ref()),
             &config_reload.to_json(),
         )?;
-        let mut file_watcher = match DaemonFileWatcher::start(data_root, Arc::clone(&wakeup)) {
+        let initial_watch_catalog = match source_backed_watch_catalog(data_root) {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                write_degraded_wakeup_receipt(data_root, &error)?;
+                Default::default()
+            }
+        };
+        let mut file_watcher = match DaemonFileWatcher::start(
+            data_root,
+            Arc::clone(&wakeup),
+            initial_watch_catalog.clone(),
+        ) {
             Ok(watcher) => Some(watcher),
             Err(error) => {
                 write_degraded_wakeup_receipt(data_root, &error)?;
                 None
             }
         };
+        if let Some(source_refresh) = refresh_service
+            .as_ref()
+            .map(|service| service.source_refresh.as_ref())
+        {
+            let watermark = file_watcher
+                .as_ref()
+                .map(DaemonFileWatcher::startup_watermark)
+                .unwrap_or_else(|| EventWatermark::new(0, 0));
+            source_refresh.reconcile_watch_routes(
+                initial_watch_catalog.route_ids().cloned(),
+                watermark,
+                source_route_ledger_now_ms(),
+            );
+        }
         // The daemon is ready only after every fallible lifecycle and runtime
         // initialization step has succeeded. Publish that status before
         // acknowledging any durable restart request so every parent observes
@@ -671,6 +697,36 @@ pub(super) fn run_daemon_inner(
                 // future full-mode daemon without applying it here.
                 prepared_auto_upgrade = None;
             }
+            if let Some(source_refresh) = refresh_service
+                .as_ref()
+                .map(|service| service.source_refresh.as_ref())
+                .filter(|refresh| !refresh.watch_routes_initialized())
+            {
+                let catalog = match source_backed_watch_catalog(data_root).or_else(|error| {
+                    file_watcher
+                        .as_ref()
+                        .map(DaemonFileWatcher::catalog)
+                        .ok_or(error)
+                }) {
+                    Ok(catalog) => catalog,
+                    Err(error) => {
+                        let _ = write_degraded_wakeup_receipt(data_root, &error);
+                        Default::default()
+                    }
+                };
+                let watermark = file_watcher
+                    .as_ref()
+                    .map(DaemonFileWatcher::startup_watermark)
+                    .unwrap_or_else(|| EventWatermark::new(0, 0));
+                source_refresh.reconcile_watch_routes(
+                    catalog.route_ids().cloned(),
+                    watermark,
+                    source_route_ledger_now_ms(),
+                );
+                if let Some(watcher) = file_watcher.as_mut() {
+                    let _ = watcher.replace_catalog(catalog);
+                }
+            }
             write_daemon_lifecycle_status_with_runtime(
                 data_root,
                 &args,
@@ -720,9 +776,10 @@ pub(super) fn run_daemon_inner(
             send_daemon_events(data_root, &events);
             let retry_due = !runtime.config.daemon.mode.runs_only_source_refresh()
                 && daemon_retry_due(&runtime);
-            let source_refresh_pending = refresh_service
-                .as_ref()
-                .is_some_and(|service| service.source_refresh.has_pending_request());
+            let source_refresh_pending = refresh_service.as_ref().is_some_and(|service| {
+                service.source_refresh.has_pending_request()
+                    || service.source_refresh.has_scheduled_route_work()
+            });
             // Retry and queued-refresh state describe future scheduler work,
             // not work currently executing. An explicit finite daemon must
             // still attempt shutdown once its idle lifetime expires; the
@@ -816,8 +873,16 @@ pub(super) fn run_daemon_inner(
                 idle_since = Some(Instant::now());
             }
             let now = Instant::now();
-            let wait_for =
-                daemon_wait_duration(&runtime, next_safety_reconcile, idle_since, idle_exit, now);
+            let wait_for = daemon_wait_duration(
+                &runtime,
+                refresh_service
+                    .as_ref()
+                    .map(|service| service.source_refresh.as_ref()),
+                next_safety_reconcile,
+                idle_since,
+                idle_exit,
+                now,
+            );
             let wake = wakeup.wait(wait_for);
             if wake.shutdown {
                 break;
@@ -833,22 +898,46 @@ pub(super) fn run_daemon_inner(
             if safety_due {
                 next_safety_reconcile = Instant::now() + safety_interval;
             }
-            if wake.filesystem || safety_due || source_retry_due {
-                if let Some(source_refresh) = refresh_service
-                    .as_ref()
-                    .map(|service| service.source_refresh.as_ref())
-                {
-                    let _ = source_refresh.enqueue_periodic(data_root);
+            let source_refresh = refresh_service
+                .as_ref()
+                .map(|service| service.source_refresh.as_ref());
+            if let (Some(watermark), Some(source_refresh)) =
+                (wake.source_watch.reconcile, source_refresh)
+            {
+                let reconciled = source_backed_watch_catalog(data_root).or_else(|error| {
+                    if let Some(watcher) = file_watcher.as_ref() {
+                        return Ok(watcher.catalog());
+                    }
+                    Err(error)
+                });
+                match reconciled {
+                    Ok(catalog) => {
+                        source_refresh.reconcile_watch_routes(
+                            catalog.route_ids().cloned(),
+                            watermark,
+                            source_route_ledger_now_ms(),
+                        );
+                        if let Some(watcher) = file_watcher.as_mut() {
+                            let _ = watcher.replace_catalog(catalog);
+                        }
+                    }
+                    Err(error) => {
+                        let _ = write_degraded_wakeup_receipt(data_root, &error);
+                    }
                 }
+            }
+            if let Some(source_refresh) = source_refresh {
+                source_refresh
+                    .record_watch_routes(wake.source_watch.routes, source_route_ledger_now_ms());
             }
             if (wake.filesystem || safety_due)
                 && file_watcher
                     .as_mut()
-                    .is_some_and(|watcher| watcher.reconcile().is_err())
+                    .is_some_and(|watcher| watcher.reconcile_roots().is_err())
             {
-                // A native watch can become temporarily inaccessible. Keep
-                // the last good watch set and let the bounded safety
-                // reconciliation retry it.
+                // Keep the last good exact catalog. A backend error event will
+                // seed it while the bounded registration reconciliation keeps
+                // attempting to restore native watches.
             }
             if let Some(watcher) = file_watcher.as_ref() {
                 let _ =
@@ -952,6 +1041,7 @@ pub(super) fn run_daemon_inner(
 
 fn daemon_wait_duration(
     runtime: &DaemonRuntime,
+    source_refresh: Option<&CoreRefreshEngine>,
     next_safety_reconcile: Instant,
     idle_since: Option<Instant>,
     idle_exit: Option<StdDuration>,
@@ -974,7 +1064,19 @@ fn daemon_wait_duration(
     if let (Some(idle), Some(limit)) = (idle_since, idle_exit) {
         wait_for = wait_for.min(limit.saturating_sub(now.saturating_duration_since(idle)));
     }
+    if let Some(route_due_ms) = source_refresh
+        .and_then(|refresh| refresh.next_dirty_route_due_in_ms(source_route_ledger_now_ms()))
+    {
+        wait_for = wait_for.min(StdDuration::from_millis(route_due_ms));
+    }
     wait_for
+}
+
+fn source_route_ledger_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

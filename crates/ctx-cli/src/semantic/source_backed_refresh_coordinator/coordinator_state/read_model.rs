@@ -141,6 +141,7 @@ pub(super) struct SourceBackedRefreshAttempt {
     pub(super) finished_at_ms: Option<i64>,
     pub(super) previous_generation: Option<String>,
     pub(super) published_generation: Option<String>,
+    pub(super) refresh_scope: SourceBackedRefreshScope,
     pub(super) requested_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     pub(super) published_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     pub(super) coalesced_requests: u64,

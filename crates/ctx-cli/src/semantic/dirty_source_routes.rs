@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ctx_history_index::SourceRouteIdentity;
 
@@ -120,6 +120,19 @@ impl DirtySourceRoutes {
         self.dirty.len()
     }
 
+    pub(super) fn retain_exact_routes(&mut self, routes: &BTreeSet<SourceRouteIdentity>) {
+        self.watermarks.retain(|route, _| routes.contains(route));
+        self.dirty.retain(|route, _| routes.contains(route));
+    }
+
+    pub(super) fn seed_watermark(&self) -> EventWatermark {
+        self.watermarks
+            .values()
+            .copied()
+            .max()
+            .unwrap_or_else(|| EventWatermark::new(self.current_watcher_epoch.unwrap_or(0), 0))
+    }
+
     /// Records one exact-route watcher event if its watermark is strictly new.
     pub(super) fn record_event(
         &mut self,
@@ -190,13 +203,8 @@ impl DirtySourceRoutes {
             .min()
     }
 
-    /// Admits one eligible route, preferring the oldest dirty route first.
-    pub(super) fn admit_next(&mut self, now_ms: u64) -> Option<DirtySourceRouteAdmission> {
-        if self.dirty.is_empty() {
-            return None;
-        }
-        let route = self
-            .dirty
+    pub(super) fn next_due_route(&self, now_ms: u64) -> Option<SourceRouteIdentity> {
+        self.dirty
             .iter()
             .filter(|(_, state)| {
                 !state.permanently_blocked
@@ -204,21 +212,74 @@ impl DirtySourceRoutes {
                     && state.due_at_ms() <= now_ms
             })
             .min_by_key(|(route, state)| (state.first_event_at_ms, state.dirty_order, *route))
-            .map(|(route, _)| route.clone())?;
+            .map(|(route, _)| route.clone())
+    }
+
+    /// Admits one eligible route, preferring the oldest dirty route first.
+    pub(super) fn admit_next(&mut self, now_ms: u64) -> Option<DirtySourceRouteAdmission> {
+        if self.dirty.is_empty() {
+            return None;
+        }
+        let route = self.next_due_route(now_ms)?;
+        self.admit_exact(&route, now_ms)
+    }
+
+    pub(super) fn admit_exact(
+        &mut self,
+        route: &SourceRouteIdentity,
+        now_ms: u64,
+    ) -> Option<DirtySourceRouteAdmission> {
         let watermark = self.watermarks.get(&route).copied()?;
         let admission_id = self.allocate_admission_id();
         let state = self.dirty.get_mut(&route)?;
+        if state.permanently_blocked || state.in_flight.is_some() || state.due_at_ms() > now_ms {
+            return None;
+        }
         let dirty_revision = state.dirty_revision;
         state.in_flight = Some(InFlightAdmission {
             dirty_revision,
             admission_id,
         });
         Some(DirtySourceRouteAdmission {
-            route,
+            route: route.clone(),
             watermark,
             dirty_revision,
             admission_id,
         })
+    }
+
+    /// Admits every dirty route for an explicit all-route authority request.
+    /// Unlike watcher admission this deliberately bypasses debounce/backoff;
+    /// the caller has explicitly requested fresh global work.
+    pub(super) fn admit_all(&mut self) -> Vec<DirtySourceRouteAdmission> {
+        let routes = self
+            .dirty
+            .iter()
+            .filter(|(_, state)| state.in_flight.is_none())
+            .map(|(route, _)| route.clone())
+            .collect::<Vec<_>>();
+        let mut admissions = Vec::with_capacity(routes.len());
+        for route in routes {
+            let Some(watermark) = self.watermarks.get(&route).copied() else {
+                continue;
+            };
+            let admission_id = self.allocate_admission_id();
+            let Some(state) = self.dirty.get_mut(&route) else {
+                continue;
+            };
+            let dirty_revision = state.dirty_revision;
+            state.in_flight = Some(InFlightAdmission {
+                dirty_revision,
+                admission_id,
+            });
+            admissions.push(DirtySourceRouteAdmission {
+                route,
+                watermark,
+                dirty_revision,
+                admission_id,
+            });
+        }
+        admissions
     }
 
     /// Acknowledges the admitted watermark after publication or no-op proof.

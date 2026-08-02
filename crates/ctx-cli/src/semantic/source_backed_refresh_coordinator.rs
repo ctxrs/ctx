@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -18,14 +18,16 @@ use ctx_history_capture::{
     DiscoveryReport, ProviderSourceStatus, SourceBackedAutomaticRegistryIssue,
     SourceBackedAutomaticUnavailableReason, SourceBackedCoordinatorError,
     SourceBackedProviderRegistry,
-    SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress, SourceBackedRouteError,
-    SourceBackedRouteErrorKind, SourceBackedRouteResult, SourceBackedSourceFailureClass,
+    SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress, SourceBackedRefreshScope,
+    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+    SourceBackedSourceFailureClass, SourceBackedWatchCatalog,
 };
 #[cfg(test)]
 use ctx_history_core::CaptureProvider;
 use ctx_history_core::{utc_now, CertifiedSource, ScannedSourceCounts};
 use ctx_history_index::{
-    generation_incompatibility_requires_rebuild, IndexError, VerifiedIndex, WriterOptions,
+    generation_incompatibility_requires_rebuild, IndexError, SourceRouteIdentity, VerifiedIndex,
+    WriterOptions,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -180,6 +182,10 @@ pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) selected_route_ids: Vec<String>,
     pub(crate) successful_route_ids: Vec<String>,
     pub(crate) source_failures: Vec<SourceBackedRefreshSourceFailure>,
+}
+
+pub(super) fn source_backed_watch_catalog(data_root: &Path) -> Result<SourceBackedWatchCatalog> {
+    capture_refresh::source_backed_watch_catalog(data_root)
 }
 
 pub(super) fn source_backed_index_root(data_root: &Path) -> PathBuf {

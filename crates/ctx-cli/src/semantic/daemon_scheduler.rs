@@ -55,11 +55,10 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
         if let Some(activity) = query_activity {
             activity.cancel_idle_wakeup();
         }
-        return Ok(
-            run_pending_core_refresh(data_root, runtime, source_refresh)?.unwrap_or_else(|| {
-                DaemonIteration::new(false, false, DaemonCycleStateV1::unknown())
-            }),
-        );
+        if let Some(iteration) = run_pending_core_refresh(data_root, runtime, source_refresh)? {
+            return Ok(iteration);
+        }
+        return run_dirty_core_refresh(data_root, runtime, source_refresh);
     }
     let query_generation = query_activity.map(|activity| activity.snapshot().1);
     if source_refresh_requested {
@@ -131,7 +130,10 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
             DaemonCycleStateV1::unknown(),
         ));
     }
-    run_core_refresh(data_root, runtime, source_refresh, true)
+    if runtime.history_retry.consecutive_failures > 0 {
+        return run_core_refresh(data_root, runtime, source_refresh, true);
+    }
+    run_dirty_core_refresh(data_root, runtime, source_refresh)
 }
 
 fn run_pending_core_semantic_catch_up(
@@ -279,6 +281,55 @@ fn run_pending_core_refresh(
         run.failed,
         DaemonCycleStateV1::unknown(),
     )))
+}
+
+fn run_dirty_core_refresh(
+    data_root: &Path,
+    runtime: &mut DaemonRuntime,
+    source_refresh: Option<&CoreRefreshEngine>,
+) -> Result<DaemonIteration> {
+    let Some(source_refresh) = source_refresh else {
+        return Ok(DaemonIteration::new(
+            false,
+            false,
+            DaemonCycleStateV1::unknown(),
+        ));
+    };
+    if !source_refresh.enqueue_next_dirty_route(data_root, source_route_ledger_now_ms())? {
+        return Ok(DaemonIteration::new(
+            false,
+            false,
+            DaemonCycleStateV1::unknown(),
+        ));
+    }
+    let Some(run) = source_refresh.run_next(data_root) else {
+        return Ok(DaemonIteration::new(
+            false,
+            false,
+            DaemonCycleStateV1::unknown(),
+        ));
+    };
+    debug_assert!(matches!(run.scope, SourceBackedRefreshScope::Exact(_)));
+    write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &run.job)?;
+    let published_generation = (!run.failed
+        && run.job.get("status").and_then(Value::as_str) == Some("completed")
+        && run
+            .job
+            .get("post_publication_error")
+            .is_none_or(Value::is_null))
+    .then(|| {
+        run.job
+            .get("published_generation")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+    .flatten();
+    let iteration = DaemonIteration::new(run.did_work, false, daemon_core_cycle_state(&run.job));
+    if let Some(generation) = published_generation {
+        runtime.sidecar_drain.generation = Some(generation);
+        return Ok(immediate_follow_up(iteration));
+    }
+    Ok(iteration)
 }
 
 fn run_core_refresh(
@@ -657,6 +708,13 @@ fn daemon_semantic_job_did_work(value: &Value) -> bool {
             .is_some_and(|records| records > 0)
 }
 
+fn source_route_ledger_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
 fn write_daemon_job_status_unless_deadline_skip(path: &Path, value: &Value) -> Result<()> {
     if value.get("status").and_then(Value::as_str) == Some("skipped")
         && value.get("reason").and_then(Value::as_str) == Some("daemon_deadline")
@@ -683,6 +741,7 @@ use std::{
 };
 
 use anyhow::Result;
+use ctx_history_capture::SourceBackedRefreshScope;
 use ctx_history_core::utc_now;
 use ctx_pro_host_protocol::ProFilesystemLayout;
 use serde_json::{json, Value};

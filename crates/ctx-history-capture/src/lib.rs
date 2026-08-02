@@ -130,5 +130,6 @@ pub use provider::source_backed::{
     SourceBackedRoute, SourceBackedRouteConstructor, SourceBackedRouteDriver,
     SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteMetadata,
     SourceBackedRouteResult, SourceBackedRouteSelection, SourceBackedSelectorAuthority,
-    SourceBackedSourceFailureClass, LANDED_SOURCE_BACKED_ROUTES,
+    SourceBackedSourceFailureClass, SourceBackedWatchCatalog, SourceBackedWatchTargetKind,
+    LANDED_SOURCE_BACKED_ROUTES,
 };

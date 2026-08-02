@@ -1,4 +1,7 @@
 use super::*;
+use crate::semantic::dirty_source_routes::{
+    DirtySourceRouteAdmission, DirtySourceRoutes, EventWatermark,
+};
 
 mod generation_authority;
 mod generation_observation;
@@ -34,6 +37,7 @@ pub(crate) struct SourceBackedRefreshExecution<'a> {
     pub(crate) index_root: &'a Path,
     pub(crate) request_id: &'a str,
     pub(crate) explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
+    pub(crate) scope: SourceBackedRefreshScope,
     pub(super) report_progress: &'a dyn Fn(SourceBackedRefreshProgressUpdate) -> Result<()>,
 }
 
@@ -99,6 +103,10 @@ pub(super) struct CoreRefreshEngineState {
     attempts: VecDeque<SourceBackedRefreshAttempt>,
     pinned_core_publication: Option<Arc<PinnedCorePublication>>,
     current_published_generation: Option<String>,
+    dirty_routes: DirtySourceRoutes,
+    known_route_ids: BTreeSet<SourceRouteIdentity>,
+    route_admissions: BTreeMap<String, Vec<DirtySourceRouteAdmission>>,
+    watch_routes_initialized: bool,
 }
 
 pub(in crate::semantic) struct CoreRefreshEngine {
@@ -110,6 +118,7 @@ pub(in crate::semantic) struct SourceBackedRefreshRun {
     pub(in crate::semantic) job: Value,
     pub(in crate::semantic) did_work: bool,
     pub(in crate::semantic) failed: bool,
+    pub(in crate::semantic) scope: SourceBackedRefreshScope,
 }
 
 #[derive(Debug)]
@@ -176,6 +185,10 @@ impl CoreRefreshEngine {
                 attempts: VecDeque::new(),
                 pinned_core_publication: None,
                 current_published_generation: None,
+                dirty_routes: DirtySourceRoutes::default(),
+                known_route_ids: BTreeSet::new(),
+                route_admissions: BTreeMap::new(),
+                watch_routes_initialized: false,
             }),
             executor,
         }
@@ -191,6 +204,83 @@ impl CoreRefreshEngine {
             || state.pending_request_ids.iter().any(|request_id| {
                 find_attempt(&state, request_id).is_some_and(|attempt| attempt.state.is_active())
             })
+    }
+
+    pub(in crate::semantic) fn reconcile_watch_routes(
+        &self,
+        routes: impl IntoIterator<Item = SourceRouteIdentity>,
+        watermark: EventWatermark,
+        observed_at_ms: u64,
+    ) {
+        let routes = routes.into_iter().collect::<BTreeSet<_>>();
+        let mut state = self.lock_state();
+        state.dirty_routes.retain_exact_routes(&routes);
+        state
+            .dirty_routes
+            .seed_exact_routes(routes.iter().cloned(), watermark, observed_at_ms);
+        state.known_route_ids = routes;
+        state.watch_routes_initialized = true;
+    }
+
+    pub(in crate::semantic) fn record_watch_routes(
+        &self,
+        routes: impl IntoIterator<Item = (SourceRouteIdentity, EventWatermark)>,
+        observed_at_ms: u64,
+    ) {
+        let mut state = self.lock_state();
+        for (route, watermark) in routes {
+            if state.known_route_ids.contains(&route) {
+                state
+                    .dirty_routes
+                    .record_event(route, watermark, observed_at_ms);
+            }
+        }
+    }
+
+    pub(in crate::semantic) fn watch_routes_initialized(&self) -> bool {
+        self.lock_state().watch_routes_initialized
+    }
+
+    pub(in crate::semantic) fn next_dirty_route_due_in_ms(&self, now_ms: u64) -> Option<u64> {
+        self.lock_state()
+            .dirty_routes
+            .next_due_at_ms()
+            .map(|due| due.saturating_sub(now_ms))
+    }
+
+    pub(in crate::semantic) fn has_scheduled_route_work(&self) -> bool {
+        self.lock_state().dirty_routes.next_due_at_ms().is_some()
+    }
+
+    pub(in crate::semantic) fn enqueue_next_dirty_route(
+        &self,
+        data_root: &Path,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let observed_generation = self.observed_published_generation(data_root)?;
+        let catalog = load_explicit_source_catalog_authority(data_root)?;
+        let request_id = {
+            let mut state = self.lock_state();
+            if active_attempt_count(&state) != 0 {
+                return Ok(false);
+            }
+            let Some(route) = state.dirty_routes.next_due_route(now_ms) else {
+                return Ok(false);
+            };
+            let attempt = new_refresh_attempt(
+                observed_generation,
+                SourceRefreshRuntimeMetadata::periodic(),
+                Some(catalog),
+                SourceBackedRefreshScope::exact([route]),
+            );
+            let request_id = attempt.request_id.clone();
+            state.active_request_id = Some(request_id.clone());
+            state.attempts.push_back(attempt);
+            trim_terminal_attempt_history(&mut state);
+            request_id
+        };
+        self.persist_job_status(data_root, &request_id)?;
+        Ok(true)
     }
 
     pub(in crate::semantic) fn handle_ipc_request(
@@ -232,6 +322,7 @@ impl CoreRefreshEngine {
                     previous_generation,
                     metadata,
                     Some(requested_catalog),
+                    SourceBackedRefreshScope::All,
                     // Wait controls how the client observes the attempt; it is
                     // not itself a fresh-after-admission barrier.
                     admission,
@@ -273,18 +364,23 @@ impl CoreRefreshEngine {
         let verified_index = RefCell::new(None::<Arc<VerifiedIndex>>);
         let publication_probe_attempted = Cell::new(false);
         let request_id_cell = RefCell::new(None::<String>);
-        let run = self.run_next_with(
+        let mut run = self.run_next_with(
             |request_id, coordinator| {
                 request_id_cell.replace(Some(request_id.to_owned()));
                 let requested_catalog =
                     coordinator.freeze_requested_explicit_source_catalog(data_root, request_id)?;
+                let refresh_scope = coordinator
+                    .refresh_scope(request_id)
+                    .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
                 coordinator.persist_job_status(data_root, request_id)?;
+                coordinator.admit_refresh_scope(request_id, &refresh_scope)?;
                 let publication = execute_source_backed_refresh(
                     executor.as_ref(),
                     data_root,
                     request_id,
                     coordinator,
                     Some(&requested_catalog),
+                    refresh_scope,
                 )?;
                 let probe_started = StdInstant::now();
                 publication_probe_attempted.set(true);
@@ -326,7 +422,8 @@ impl CoreRefreshEngine {
             },
             |_| Ok(()),
         )?;
-        if !run.failed {
+        let mut publication_ready = !run.failed;
+        if publication_ready {
             let pin = verified_index.into_inner();
             let request_id = run.job.get("request_id").and_then(Value::as_str);
             let receipt = request_id.and_then(|request_id| self.receipt_for_request(request_id));
@@ -337,15 +434,13 @@ impl CoreRefreshEngine {
                 )),
             };
             if let Err(error) = binding {
-                let mut job = run.job;
-                job["post_publication_error"] =
+                publication_ready = false;
+                run.job["post_publication_error"] =
                     Value::String(format!("bind exact Core publication receipt: {error:#}"));
-                return Some(SourceBackedRefreshRun {
-                    job,
-                    did_work: run.did_work,
-                    failed: false,
-                });
             }
+        }
+        if let Some(request_id) = run.job.get("request_id").and_then(Value::as_str) {
+            self.finish_route_admissions(request_id, publication_ready);
         }
         Some(run)
     }
@@ -364,6 +459,7 @@ impl CoreRefreshEngine {
             observed_generation,
             SourceRefreshRuntimeMetadata::periodic(),
             Some(catalog),
+            SourceBackedRefreshScope::All,
             SourceRefreshAdmissionRequirement::AttachEquivalent,
         )
     }
@@ -391,6 +487,7 @@ impl CoreRefreshEngine {
             observed_generation,
             metadata,
             None,
+            SourceBackedRefreshScope::All,
             SourceRefreshAdmissionRequirement::AttachEquivalent,
         )
         .expect("requests without catalog authority always coalesce")
@@ -401,6 +498,7 @@ impl CoreRefreshEngine {
         observed_generation: Option<String>,
         metadata: SourceRefreshRuntimeMetadata,
         requested_catalog: Option<ExplicitSourceCatalogAuthority>,
+        refresh_scope: SourceBackedRefreshScope,
         admission: SourceRefreshAdmissionRequirement,
     ) -> Result<Value> {
         let mut state = self.lock_state();
@@ -418,6 +516,7 @@ impl CoreRefreshEngine {
                     }
                     if active.requested_explicit_source_catalog.as_ref()
                         == requested_catalog.as_ref()
+                        && active.refresh_scope == refresh_scope
                     {
                         return Ok(coalesce_attempt(active, metadata));
                     }
@@ -436,6 +535,7 @@ impl CoreRefreshEngine {
                         attempt.state.is_active()
                             && attempt.requested_explicit_source_catalog.as_ref()
                                 == requested_catalog.as_ref()
+                            && attempt.refresh_scope == refresh_scope
                     })
                     .map(|attempt| attempt.request_id.clone())
             });
@@ -454,32 +554,12 @@ impl CoreRefreshEngine {
             .into());
         }
 
-        let attempt = SourceBackedRefreshAttempt {
-            request_id: Uuid::now_v7().to_string(),
-            state: SourceBackedRefreshState::Queued,
-            requested_at_ms: utc_now().timestamp_millis(),
-            started_at_ms: None,
-            finished_at_ms: None,
-            previous_generation: observed_generation.clone(),
-            published_generation: observed_generation,
-            requested_explicit_source_catalog: requested_catalog,
-            published_explicit_source_catalog: None,
-            coalesced_requests: 0,
-            progress: SourceBackedRefreshProgress::default(),
-            scanned_routes: None,
-            unsupported_routes: None,
-            certified_source_count: None,
-            certified_source_bytes: None,
-            receipt: None,
-            timings: None,
-            publication_probe_us: 0,
-            daemon_mode: metadata.daemon_mode,
-            trigger: metadata.trigger,
-            trigger_provenance: metadata.trigger_provenance,
-            failure_type: None,
-            last_error: None,
-            post_publication_error: None,
-        };
+        let attempt = new_refresh_attempt(
+            observed_generation,
+            metadata,
+            requested_catalog,
+            refresh_scope,
+        );
         let response = attempt.to_json();
         if state
             .active_request_id
@@ -510,6 +590,52 @@ impl CoreRefreshEngine {
         let state = self.lock_state();
         find_attempt(&state, request_id)
             .and_then(|attempt| attempt.requested_explicit_source_catalog.clone())
+    }
+
+    fn refresh_scope(&self, request_id: &str) -> Option<SourceBackedRefreshScope> {
+        let state = self.lock_state();
+        find_attempt(&state, request_id).map(|attempt| attempt.refresh_scope.clone())
+    }
+
+    fn admit_refresh_scope(
+        &self,
+        request_id: &str,
+        scope: &SourceBackedRefreshScope,
+    ) -> Result<()> {
+        let now_ms = source_route_ledger_now_ms();
+        let mut state = self.lock_state();
+        let admissions = match scope {
+            SourceBackedRefreshScope::All => {
+                let watermark = state.dirty_routes.seed_watermark();
+                let routes = state.known_route_ids.iter().cloned().collect::<Vec<_>>();
+                state
+                    .dirty_routes
+                    .seed_exact_routes(routes, watermark, now_ms);
+                state.dirty_routes.admit_all()
+            }
+            SourceBackedRefreshScope::Exact(routes) => {
+                if routes.len() != 1 {
+                    bail!("daemon exact source refresh must admit exactly one route");
+                }
+                let route = routes
+                    .iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("daemon exact source refresh has no route"))?;
+                vec![state
+                    .dirty_routes
+                    .admit_exact(route, now_ms)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "exact source route {} is no longer due for admission",
+                            route.as_str()
+                        )
+                    })?]
+            }
+        };
+        state
+            .route_admissions
+            .insert(request_id.to_owned(), admissions);
+        Ok(())
     }
 
     fn freeze_requested_explicit_source_catalog(
@@ -586,7 +712,7 @@ impl CoreRefreshEngine {
         Published: FnOnce(&str) -> Result<()>,
         Failed: FnOnce(&str) -> Result<()>,
     {
-        let (request_id, previous_generation, requested_catalog) = {
+        let (request_id, previous_generation, requested_catalog, refresh_scope) = {
             let mut state = self.lock_state();
             let request_id = state.active_request_id.clone()?;
             let attempt = find_attempt_mut(&mut state, &request_id)?;
@@ -600,6 +726,7 @@ impl CoreRefreshEngine {
                 request_id,
                 attempt.previous_generation.clone(),
                 attempt.requested_explicit_source_catalog.clone(),
+                attempt.refresh_scope.clone(),
             )
         };
 
@@ -735,7 +862,59 @@ impl CoreRefreshEngine {
             job,
             did_work,
             failed: failed_run,
+            scope: refresh_scope,
         })
+    }
+
+    fn finish_route_admissions(&self, request_id: &str, publication_ready: bool) {
+        let now_ms = source_route_ledger_now_ms();
+        let mut state = self.lock_state();
+        let Some(admissions) = state.route_admissions.remove(request_id) else {
+            return;
+        };
+        let attempt = find_attempt(&state, request_id).cloned();
+        for admission in admissions {
+            let retry = !publication_ready
+                || attempt
+                    .as_ref()
+                    .is_none_or(|attempt| attempt.state != SourceBackedRefreshState::Published);
+            if retry {
+                state.dirty_routes.retryable_failure(&admission, now_ms);
+                continue;
+            }
+            let Some(receipt) = attempt
+                .as_ref()
+                .and_then(|attempt| attempt.receipt.as_ref())
+            else {
+                state.dirty_routes.retryable_failure(&admission, now_ms);
+                continue;
+            };
+            if let Some(failure) = receipt
+                .source_failures
+                .iter()
+                .find(|failure| failure.route_identity == admission.route().as_str())
+            {
+                match failure.class.as_str() {
+                    "unavailable" | "source_changed" => {
+                        state.dirty_routes.retryable_failure(&admission, now_ms);
+                    }
+                    "unreadable" | "incompatible" => {
+                        state.dirty_routes.permanent_failure(&admission);
+                    }
+                    _ => {
+                        state.dirty_routes.retryable_failure(&admission, now_ms);
+                    }
+                }
+            } else if receipt
+                .successful_route_ids
+                .iter()
+                .any(|route| route == admission.route().as_str())
+            {
+                state.dirty_routes.acknowledge(&admission);
+            } else {
+                state.dirty_routes.retryable_failure(&admission, now_ms);
+            }
+        }
     }
 
     pub(super) fn lock_state(&self) -> std::sync::MutexGuard<'_, CoreRefreshEngineState> {
@@ -804,6 +983,41 @@ fn coalesce_attempt(
     attempt.to_json()
 }
 
+fn new_refresh_attempt(
+    observed_generation: Option<String>,
+    metadata: SourceRefreshRuntimeMetadata,
+    requested_catalog: Option<ExplicitSourceCatalogAuthority>,
+    refresh_scope: SourceBackedRefreshScope,
+) -> SourceBackedRefreshAttempt {
+    SourceBackedRefreshAttempt {
+        request_id: Uuid::now_v7().to_string(),
+        state: SourceBackedRefreshState::Queued,
+        requested_at_ms: utc_now().timestamp_millis(),
+        started_at_ms: None,
+        finished_at_ms: None,
+        previous_generation: observed_generation.clone(),
+        published_generation: observed_generation,
+        refresh_scope,
+        requested_explicit_source_catalog: requested_catalog,
+        published_explicit_source_catalog: None,
+        coalesced_requests: 0,
+        progress: SourceBackedRefreshProgress::default(),
+        scanned_routes: None,
+        unsupported_routes: None,
+        certified_source_count: None,
+        certified_source_bytes: None,
+        receipt: None,
+        timings: None,
+        publication_probe_us: 0,
+        daemon_mode: metadata.daemon_mode,
+        trigger: metadata.trigger,
+        trigger_provenance: metadata.trigger_provenance,
+        failure_type: None,
+        last_error: None,
+        post_publication_error: None,
+    }
+}
+
 fn active_attempt_count(state: &CoreRefreshEngineState) -> usize {
     state
         .attempts
@@ -829,4 +1043,11 @@ fn trim_terminal_attempt_history(state: &mut CoreRefreshEngineState) {
         state.attempts.remove(oldest_terminal);
         terminal_count = terminal_count.saturating_sub(1);
     }
+}
+
+fn source_route_ledger_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
 }

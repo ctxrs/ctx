@@ -193,8 +193,14 @@ fn due_consumer_retry_wait_loop_blocks_and_wakes_when_query_becomes_idle() -> Re
     assert_eq!(runtime.pro_retry.retry_after_ms(), Some(0));
 
     let now = Instant::now();
-    let wait_for =
-        daemon_wait_duration(&runtime, now + StdDuration::from_secs(30), None, None, now);
+    let wait_for = daemon_wait_duration(
+        &runtime,
+        None,
+        now + StdDuration::from_secs(30),
+        None,
+        None,
+        now,
+    );
     assert!(wait_for > StdDuration::ZERO);
     assert!(wait_for <= super::super::daemon_scheduler::DAEMON_CONSUMER_RETRY_QUERY_GRACE);
 
@@ -258,6 +264,7 @@ fn continuous_query_wait_loop_reaches_consumer_retry_fairness_deadline() -> Resu
     runtime.consumer_retry_deferral.retry_at = Some(deadline);
     let wait_for = daemon_wait_duration(
         &runtime,
+        None,
         deadline + StdDuration::from_secs(30),
         None,
         None,

@@ -1,25 +1,28 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, Condvar, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc, Condvar, Mutex, RwLock,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
-use ctx_history_capture::{
-    discover_provider_sources, validate_provider_source_roots_outside_data_root,
-};
+use ctx_history_capture::SourceBackedWatchCatalog;
+use ctx_history_index::SourceRouteIdentity;
 use notify::{
     event::{AccessKind, AccessMode, MetadataKind, ModifyKind},
     Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
 use serde_json::{json, Value};
 
-use crate::{compact_json, config::CONFIG_FILE, identity};
+use crate::{compact_json, config::CONFIG_FILE};
 
 use super::{
+    dirty_source_routes::EventWatermark,
     health_search::create_private_dir_all,
     paths_status::{daemon_root_path, write_private_json_file},
 };
@@ -31,6 +34,34 @@ const WATCH_RECEIPT_FILE: &str = "wakeup.json";
 const WAKE_FILESYSTEM: u8 = 1;
 const WAKE_IPC: u8 = 1 << 1;
 const WAKE_SHUTDOWN: u8 = 1 << 2;
+static NEXT_WATCHER_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct SourceWatchBatch {
+    pub(super) routes: BTreeMap<SourceRouteIdentity, EventWatermark>,
+    pub(super) reconcile: Option<EventWatermark>,
+}
+
+impl SourceWatchBatch {
+    fn is_empty(&self) -> bool {
+        self.routes.is_empty() && self.reconcile.is_none()
+    }
+
+    fn merge(&mut self, other: Self) {
+        for (route, watermark) in other.routes {
+            self.routes
+                .entry(route)
+                .and_modify(|current| *current = (*current).max(watermark))
+                .or_insert(watermark);
+        }
+        if let Some(watermark) = other.reconcile {
+            self.reconcile = Some(
+                self.reconcile
+                    .map_or(watermark, |current| current.max(watermark)),
+            );
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 struct DaemonWakeupState {
@@ -43,13 +74,15 @@ struct DaemonWakeupState {
     scheduled_retry_wakeups: u64,
     work_cycles: u64,
     no_work_cycles: u64,
+    source_watch_batches: VecDeque<SourceWatchBatch>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct DaemonWake {
     pub(super) filesystem: bool,
     pub(super) shutdown: bool,
     pub(super) timed_out: bool,
+    pub(super) source_watch: SourceWatchBatch,
 }
 
 #[derive(Debug, Default)]
@@ -59,8 +92,20 @@ pub(super) struct DaemonWakeup {
 }
 
 impl DaemonWakeup {
+    #[cfg(test)]
     pub(super) fn signal_filesystem(&self) {
         self.signal(WAKE_FILESYSTEM);
+    }
+
+    fn signal_source_watch(&self, batch: SourceWatchBatch) {
+        if batch.is_empty() {
+            return;
+        }
+        let mut state = self.lock_state();
+        state.pending |= WAKE_FILESYSTEM;
+        state.filesystem_signals = state.filesystem_signals.saturating_add(1);
+        state.source_watch_batches.push_back(batch);
+        self.changed.notify_one();
     }
 
     pub(super) fn signal_ipc(&self) {
@@ -101,10 +146,15 @@ impl DaemonWakeup {
             state.timeout_wakeups = state.timeout_wakeups.saturating_add(1);
         }
         let pending = std::mem::take(&mut state.pending);
+        let mut source_watch = SourceWatchBatch::default();
+        while let Some(batch) = state.source_watch_batches.pop_front() {
+            source_watch.merge(batch);
+        }
         DaemonWake {
             filesystem: pending & WAKE_FILESYSTEM != 0,
             shutdown: pending & WAKE_SHUTDOWN != 0,
             timed_out,
+            source_watch,
         }
     }
 
@@ -162,22 +212,52 @@ struct WatchCounters {
     last_relevant_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+struct WatchAuthority {
+    routes: SourceBackedWatchCatalog,
+    controls: BTreeSet<PathBuf>,
+}
+
+impl WatchAuthority {
+    fn new(data_root: &Path, routes: SourceBackedWatchCatalog) -> Self {
+        Self {
+            routes,
+            controls: BTreeSet::from([
+                data_root.join(CONFIG_FILE),
+                data_root.join("catalogs").join("explicit-sources"),
+            ]),
+        }
+    }
+
+    fn target_paths(&self) -> impl Iterator<Item = &Path> {
+        self.controls
+            .iter()
+            .map(PathBuf::as_path)
+            .chain(self.routes.target_paths())
+    }
+}
+
 pub(super) struct DaemonFileWatcher {
     data_root: PathBuf,
     wakeup: Arc<DaemonWakeup>,
     watcher: RecommendedWatcher,
     watched: BTreeMap<PathBuf, bool>,
-    targets: Arc<RwLock<Vec<PathBuf>>>,
+    authority: Arc<RwLock<WatchAuthority>>,
     counters: Arc<Mutex<WatchCounters>>,
     sender: mpsc::Sender<WatchMessage>,
     thread: Option<thread::JoinHandle<()>>,
     last_error: Option<String>,
+    watcher_epoch: u64,
 }
 
 impl DaemonFileWatcher {
-    pub(super) fn start(data_root: &Path, wakeup: Arc<DaemonWakeup>) -> Result<Self> {
+    pub(super) fn start(
+        data_root: &Path,
+        wakeup: Arc<DaemonWakeup>,
+        catalog: SourceBackedWatchCatalog,
+    ) -> Result<Self> {
         let (sender, receiver) = mpsc::channel();
-        let targets = Arc::new(RwLock::new(Vec::new()));
+        let authority = Arc::new(RwLock::new(WatchAuthority::new(data_root, catalog)));
         let counters = Arc::new(Mutex::new(WatchCounters::default()));
         let callback_sender = sender.clone();
         let callback_counters = Arc::clone(&counters);
@@ -194,21 +274,23 @@ impl DaemonFileWatcher {
             Config::default(),
         )
         .context("start native daemon filesystem watcher")?;
-        let thread_targets = Arc::clone(&targets);
+        let thread_authority = Arc::clone(&authority);
         let thread_counters = Arc::clone(&counters);
         let thread_wakeup = Arc::clone(&wakeup);
         let thread_data_root = data_root.to_path_buf();
         let thread_daemon_root = daemon_root_path(data_root);
+        let watcher_epoch = NEXT_WATCHER_EPOCH.fetch_add(1, Ordering::Relaxed);
         let thread = thread::Builder::new()
             .name("ctx-daemon-watch".to_owned())
             .spawn(move || {
                 watch_event_loop(
                     receiver,
-                    thread_targets,
+                    thread_authority,
                     thread_counters,
                     thread_wakeup,
                     thread_data_root,
                     thread_daemon_root,
+                    watcher_epoch,
                 );
             })
             .context("start daemon filesystem debounce worker")?;
@@ -217,20 +299,46 @@ impl DaemonFileWatcher {
             wakeup,
             watcher,
             watched: BTreeMap::new(),
-            targets,
+            authority,
             counters,
             sender,
             thread: Some(thread),
             last_error: None,
+            watcher_epoch,
         };
-        service.reconcile()?;
+        service.reconcile_roots()?;
         service.write_receipt("active")?;
         Ok(service)
     }
 
-    pub(super) fn reconcile(&mut self) -> Result<()> {
-        let targets = daemon_watch_targets(&self.data_root)?;
-        let desired = watch_roots(&targets);
+    pub(super) fn startup_watermark(&self) -> EventWatermark {
+        EventWatermark::new(self.watcher_epoch, 0)
+    }
+
+    pub(super) fn catalog(&self) -> SourceBackedWatchCatalog {
+        self.authority
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .routes
+            .clone()
+    }
+
+    pub(super) fn replace_catalog(&mut self, catalog: SourceBackedWatchCatalog) -> Result<()> {
+        *self
+            .authority
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            WatchAuthority::new(&self.data_root, catalog);
+        self.reconcile_roots()
+    }
+
+    pub(super) fn reconcile_roots(&mut self) -> Result<()> {
+        let authority = self
+            .authority
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let desired = watch_roots(authority.target_paths());
         let stale = self
             .watched
             .keys()
@@ -261,10 +369,6 @@ impl DaemonFileWatcher {
                 }
             }
         }
-        *self
-            .targets
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = targets;
         {
             let mut counters = self.lock_counters();
             counters.reconciliations = counters.reconciliations.saturating_add(1);
@@ -285,6 +389,9 @@ impl DaemonFileWatcher {
             "backend": "notify_recommended",
             "idle_strategy": "blocking",
             "watched_roots": self.watched.len(),
+            "catalog_routes": self.authority.read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .routes.route_ids().len(),
             "raw_events": counters.raw_events,
             "ignored_access_events": counters.ignored_access_events,
             "ignored_catalog_lock_events": counters.ignored_catalog_lock_events,
@@ -341,19 +448,29 @@ fn forward_watch_event(
 
 fn watch_event_loop(
     receiver: mpsc::Receiver<WatchMessage>,
-    targets: Arc<RwLock<Vec<PathBuf>>>,
+    authority: Arc<RwLock<WatchAuthority>>,
     counters: Arc<Mutex<WatchCounters>>,
     wakeup: Arc<DaemonWakeup>,
     data_root: PathBuf,
     daemon_root: PathBuf,
+    watcher_epoch: u64,
 ) {
+    let mut sequence = 0_u64;
     loop {
         let first = match receiver.recv() {
             Ok(WatchMessage::Event(event)) => event,
             Ok(WatchMessage::Stop) | Err(_) => return,
         };
         let started = Instant::now();
-        let mut relevant = record_watch_event(&targets, &counters, &data_root, &daemon_root, first);
+        sequence = sequence.saturating_add(1);
+        let mut relevant = record_watch_event(
+            &authority,
+            &counters,
+            &data_root,
+            &daemon_root,
+            first,
+            EventWatermark::new(watcher_epoch, sequence),
+        );
         loop {
             let elapsed = started.elapsed();
             if elapsed >= WATCH_DEBOUNCE_MAX {
@@ -362,31 +479,39 @@ fn watch_event_loop(
             let timeout = WATCH_DEBOUNCE_QUIET.min(WATCH_DEBOUNCE_MAX - elapsed);
             match receiver.recv_timeout(timeout) {
                 Ok(WatchMessage::Event(event)) => {
-                    relevant |=
-                        record_watch_event(&targets, &counters, &data_root, &daemon_root, event);
+                    sequence = sequence.saturating_add(1);
+                    relevant.merge(record_watch_event(
+                        &authority,
+                        &counters,
+                        &data_root,
+                        &daemon_root,
+                        event,
+                        EventWatermark::new(watcher_epoch, sequence),
+                    ));
                 }
                 Ok(WatchMessage::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
             }
         }
-        if relevant {
+        if !relevant.is_empty() {
             let mut counters = counters
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             counters.coalesced_wakeups = counters.coalesced_wakeups.saturating_add(1);
             drop(counters);
-            wakeup.signal_filesystem();
+            wakeup.signal_source_watch(relevant);
         }
     }
 }
 
 fn record_watch_event(
-    targets: &RwLock<Vec<PathBuf>>,
+    authority: &RwLock<WatchAuthority>,
     counters: &Mutex<WatchCounters>,
     data_root: &Path,
     daemon_root: &Path,
     event: notify::Result<Event>,
-) -> bool {
+    watermark: EventWatermark,
+) -> SourceWatchBatch {
     let event = match event {
         Ok(event) => event,
         Err(_) => {
@@ -394,39 +519,55 @@ fn record_watch_event(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             counters.backend_errors = counters.backend_errors.saturating_add(1);
-            return true;
+            return SourceWatchBatch {
+                reconcile: Some(watermark),
+                ..SourceWatchBatch::default()
+            };
         }
     };
     if let Some(kind) = ignored_watch_event(data_root, &event) {
         record_ignored_watch_event(counters, &event, kind);
-        return false;
+        return SourceWatchBatch::default();
     }
-    let targets = targets
+    let authority = authority
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let relevant_path = event.paths.iter().find(|event_path| {
+    let mut batch = SourceWatchBatch::default();
+    let mut relevant_path = None;
+    for event_path in &event.paths {
         if event_path.as_path() == data_root || event_path.starts_with(daemon_root) {
-            return false;
+            continue;
         }
-        targets
+        if authority
+            .controls
             .iter()
-            .any(|target| paths_overlap(target, event_path))
-    });
-    let relevant = event.paths.is_empty() || relevant_path.is_some();
-    drop(targets);
-    if relevant {
+            .any(|target| declared_control_paths_overlap(target, event_path))
+        {
+            batch.reconcile = Some(watermark);
+            relevant_path.get_or_insert_with(|| event_path.clone());
+        }
+        for route in authority.routes.routes_overlapping_path(event_path) {
+            batch.routes.insert(route, watermark);
+            relevant_path.get_or_insert_with(|| event_path.clone());
+        }
+    }
+    if event.paths.is_empty() {
+        batch.reconcile = Some(watermark);
+    }
+    drop(authority);
+    if !batch.is_empty() {
         let mut counters = counters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         counters.raw_events = counters.raw_events.saturating_add(1);
-        counters.last_relevant_path = relevant_path.cloned();
+        counters.last_relevant_path = relevant_path;
     } else {
         let mut counters = counters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         counters.ignored_other_events = counters.ignored_other_events.saturating_add(1);
     }
-    relevant
+    batch
 }
 
 #[derive(Clone, Copy)]
@@ -484,51 +625,28 @@ fn record_ignored_watch_event(
     }
 }
 
-fn paths_overlap(target: &Path, event: &Path) -> bool {
-    if target == event || target.starts_with(event) || event.starts_with(target) {
-        return true;
-    }
-    let Some(target_name) = target.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    let Some(event_name) = event.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    target.parent() == event.parent()
-        && (event_name == format!("{target_name}-wal")
-            || event_name == format!("{target_name}-shm")
-            || event_name == format!("{target_name}-journal"))
+fn declared_control_paths_overlap(target: &Path, event: &Path) -> bool {
+    target == event || target.starts_with(event) || event.starts_with(target)
 }
 
-fn daemon_watch_targets(data_root: &Path) -> Result<Vec<PathBuf>> {
-    let home = identity::home_dir().context("resolve user home for daemon filesystem watcher")?;
-    let mut targets = BTreeSet::new();
-    targets.insert(data_root.join(CONFIG_FILE));
-    targets.insert(data_root.join("catalogs").join("explicit-sources"));
-    let sources = discover_provider_sources(&home);
-    validate_provider_source_roots_outside_data_root(data_root, sources.iter())
-        .context("validate provider roots before daemon watch registration")?;
-    for source in sources {
-        targets.insert(source.path);
-    }
-    Ok(targets.into_iter().collect())
-}
-
-fn watch_roots(targets: &[PathBuf]) -> BTreeMap<PathBuf, bool> {
+fn watch_roots<'a>(targets: impl IntoIterator<Item = &'a Path>) -> BTreeMap<PathBuf, bool> {
     let mut roots = BTreeMap::new();
     for target in targets {
         if target.is_dir() {
-            roots.insert(target.clone(), true);
+            roots
+                .entry(target.to_path_buf())
+                .and_modify(|recursive| *recursive = true)
+                .or_insert(true);
             continue;
         }
         if target.is_file() {
             if let Some(parent) = target.parent() {
-                roots.insert(parent.to_path_buf(), false);
+                roots.entry(parent.to_path_buf()).or_insert(false);
             }
             continue;
         }
         if let Some(existing) = nearest_existing_ancestor(target) {
-            roots.insert(existing, false);
+            roots.entry(existing).or_insert(false);
         }
     }
     roots
@@ -573,6 +691,45 @@ pub(super) fn daemon_wakeup_report(data_root: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ctx_history_capture::{
+        ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+        ProviderSourceStatus, SourceBackedProviderRegistry, SourceBackedRoute,
+        SourceBackedRouteDriver, SourceBackedSelectorAuthority,
+    };
+    use ctx_history_core::CaptureProvider;
+
+    fn catalog_route(
+        provider: CaptureProvider,
+        path: PathBuf,
+        source_format: &'static str,
+    ) -> SourceBackedRoute {
+        SourceBackedRoute::automatic(
+            ProviderSource {
+                provider,
+                path,
+                exists: true,
+                source_format,
+                source_kind: ProviderSourceKind::NativeHistory,
+                import_support: ProviderImportSupport::Native,
+                catalog_support: ProviderCatalogSupport::None,
+                status: ProviderSourceStatus::Available,
+                unsupported_reason: None,
+            },
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            SourceBackedRouteDriver::new(|_| Ok(()), |_| false, |_| true),
+        )
+        .unwrap()
+    }
+
+    fn watch_catalog(
+        routes: impl IntoIterator<Item = SourceBackedRoute>,
+    ) -> SourceBackedWatchCatalog {
+        let mut registry = SourceBackedProviderRegistry::new();
+        for route in routes {
+            registry.register(route);
+        }
+        registry.watch_catalog()
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -594,10 +751,14 @@ mod tests {
         fs::write(catalog_root.join("catalog.lock"), b"").expect("write catalog lock");
         fs::write(&provider_file, b"{\"event\":1}\n").expect("write provider fixture");
 
-        let targets = Arc::new(RwLock::new(vec![
-            catalog_root.clone(),
-            provider_file.clone(),
-        ]));
+        let targets = Arc::new(RwLock::new(WatchAuthority::new(
+            &data_root,
+            watch_catalog([catalog_route(
+                CaptureProvider::Codex,
+                provider_file.clone(),
+                "codex_history_jsonl",
+            )]),
+        )));
         let counters = Arc::new(Mutex::new(WatchCounters::default()));
         let wakeup = Arc::new(DaemonWakeup::default());
         let (sender, receiver) = mpsc::channel();
@@ -636,6 +797,7 @@ mod tests {
                 thread_wakeup,
                 thread_data_root,
                 thread_daemon_root,
+                1,
             );
         });
 
@@ -674,6 +836,8 @@ mod tests {
         let wake = wakeup.wait(Duration::from_secs(2));
         assert!(wake.filesystem, "provider append did not wake the daemon");
         assert!(!wake.timed_out, "provider append exceeded two seconds");
+        assert_eq!(wake.source_watch.routes.len(), 1);
+        assert!(wake.source_watch.reconcile.is_none());
 
         sender.send(WatchMessage::Stop).expect("stop watch thread");
         watch_thread.join().expect("join watch thread");
@@ -693,24 +857,73 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_companion_files_overlap_the_database_target() {
-        let target = Path::new("/tmp/history.sqlite");
-        assert!(paths_overlap(target, Path::new("/tmp/history.sqlite-wal")));
-        assert!(paths_overlap(target, Path::new("/tmp/history.sqlite-shm")));
-        assert!(!paths_overlap(
-            target,
-            Path::new("/tmp/unrelated.sqlite-wal")
-        ));
+    fn sqlite_companion_files_are_exact_catalog_targets() {
+        let catalog = watch_catalog([catalog_route(
+            CaptureProvider::OpenCode,
+            PathBuf::from("/tmp/history.sqlite"),
+            "opencode_sqlite",
+        )]);
+        assert_eq!(
+            catalog
+                .routes_overlapping_path(Path::new("/tmp/history.sqlite-wal"))
+                .len(),
+            1
+        );
+        assert_eq!(
+            catalog
+                .routes_overlapping_path(Path::new("/tmp/history.sqlite-shm"))
+                .len(),
+            1
+        );
+        assert!(catalog
+            .routes_overlapping_path(Path::new("/tmp/unrelated.sqlite-wal"))
+            .is_empty());
+    }
+
+    #[test]
+    fn missing_target_uses_exact_nearest_ancestor_without_sibling_matching() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp
+            .path()
+            .join("missing")
+            .join("nested")
+            .join("history.jsonl");
+        let catalog = watch_catalog([catalog_route(
+            CaptureProvider::Codex,
+            missing.clone(),
+            "codex_history_jsonl",
+        )]);
+        let roots = watch_roots(catalog.target_paths());
+        assert_eq!(roots, BTreeMap::from([(temp.path().to_path_buf(), false)]));
+        assert_eq!(
+            catalog
+                .routes_overlapping_path(&temp.path().join("missing"))
+                .len(),
+            1
+        );
+        assert!(catalog
+            .routes_overlapping_path(
+                &temp
+                    .path()
+                    .join("unrelated")
+                    .join("nested")
+                    .join("history.jsonl"),
+            )
+            .is_empty());
     }
 
     #[test]
     fn core_owned_writes_do_not_retrigger_provider_refresh_or_increment_work_counters() {
         let data_root = Path::new("/tmp/ctx-data");
         let daemon_root = data_root.join("daemon");
-        let targets = RwLock::new(vec![
-            data_root.join("config.toml"),
-            data_root.join(".codex/sessions"),
-        ]);
+        let targets = RwLock::new(WatchAuthority::new(
+            data_root,
+            watch_catalog([catalog_route(
+                CaptureProvider::Codex,
+                PathBuf::from("/tmp/provider/session.jsonl"),
+                "codex_history_jsonl",
+            )]),
+        ));
         let counters = Mutex::new(WatchCounters::default());
         let event = |path: &Path| {
             let mut event = Event::new(notify::EventKind::Any);
@@ -718,39 +931,47 @@ mod tests {
             event
         };
 
-        assert!(!record_watch_event(
+        assert!(record_watch_event(
             &targets,
             &counters,
             data_root,
             &daemon_root,
             Ok(event(&daemon_root.join("wakeup.json"))),
-        ));
-        assert!(!record_watch_event(
+            EventWatermark::new(1, 1),
+        )
+        .is_empty());
+        assert!(record_watch_event(
             &targets,
             &counters,
             data_root,
             &daemon_root,
             Ok(event(data_root)),
-        ));
+            EventWatermark::new(1, 2),
+        )
+        .is_empty());
         let mut access = event(&data_root.join("config.toml"));
         access.kind = EventKind::Access(AccessKind::Read);
-        assert!(!record_watch_event(
+        assert!(record_watch_event(
             &targets,
             &counters,
             data_root,
             &daemon_root,
             Ok(access),
-        ));
+            EventWatermark::new(1, 3),
+        )
+        .is_empty());
         assert_eq!(counters.lock().unwrap().raw_events, 0);
         let mut access_time = event(&data_root.join("config.toml"));
         access_time.kind = EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime));
-        assert!(!record_watch_event(
+        assert!(record_watch_event(
             &targets,
             &counters,
             data_root,
             &daemon_root,
             Ok(access_time),
-        ));
+            EventWatermark::new(1, 4),
+        )
+        .is_empty());
         let mut catalog_lock = event(
             &data_root
                 .join("catalogs")
@@ -758,29 +979,35 @@ mod tests {
                 .join("catalog.lock"),
         );
         catalog_lock.kind = EventKind::Access(AccessKind::Close(AccessMode::Write));
-        assert!(!record_watch_event(
+        assert!(record_watch_event(
             &targets,
             &counters,
             data_root,
             &daemon_root,
             Ok(catalog_lock),
-        ));
+            EventWatermark::new(1, 5),
+        )
+        .is_empty());
         let mut close_write = event(&data_root.join("config.toml"));
         close_write.kind = EventKind::Access(AccessKind::Close(AccessMode::Write));
-        assert!(record_watch_event(
+        assert!(!record_watch_event(
             &targets,
             &counters,
             data_root,
             &daemon_root,
             Ok(close_write),
-        ));
-        assert!(record_watch_event(
+            EventWatermark::new(1, 6),
+        )
+        .is_empty());
+        assert!(!record_watch_event(
             &targets,
             &counters,
             data_root,
             &daemon_root,
             Ok(event(&data_root.join("config.toml"))),
-        ));
+            EventWatermark::new(1, 7),
+        )
+        .is_empty());
         assert_eq!(counters.lock().unwrap().raw_events, 2);
     }
 
@@ -794,20 +1021,39 @@ mod tests {
         let sqlite = PathBuf::from("/tmp/provider/history.sqlite");
         let dynamic_source = PathBuf::from("/tmp/home/.codex/sessions");
         let catalog_root = data_root.join("catalogs").join("explicit-sources");
-        let targets = RwLock::new(vec![
-            data_root.join("config.toml"),
-            catalog_root.clone(),
-            provider_file.clone(),
-            sqlite.clone(),
-            dynamic_source,
-        ]);
+        let targets = RwLock::new(WatchAuthority::new(
+            data_root,
+            watch_catalog([
+                catalog_route(
+                    CaptureProvider::Codex,
+                    provider_file.clone(),
+                    "codex_history_jsonl",
+                ),
+                catalog_route(CaptureProvider::OpenCode, sqlite.clone(), "opencode_sqlite"),
+                catalog_route(
+                    CaptureProvider::Codex,
+                    dynamic_source,
+                    "codex_session_jsonl_tree",
+                ),
+            ]),
+        ));
         let counters = Mutex::new(WatchCounters::default());
+        let sequence = std::cell::Cell::new(0_u64);
         let relevant = |kind, paths: &[&Path]| {
             let mut event = Event::new(kind);
             event
                 .paths
                 .extend(paths.iter().map(|path| path.to_path_buf()));
-            record_watch_event(&targets, &counters, data_root, &daemon_root, Ok(event))
+            sequence.set(sequence.get().saturating_add(1));
+            !record_watch_event(
+                &targets,
+                &counters,
+                data_root,
+                &daemon_root,
+                Ok(event),
+                EventWatermark::new(1, sequence.get()),
+            )
+            .is_empty()
         };
 
         assert!(relevant(
@@ -834,12 +1080,14 @@ mod tests {
             EventKind::Modify(ModifyKind::Data(DataChange::Content)),
             &[Path::new("/tmp/provider/history.sqlite-wal")],
         ));
-        assert!(record_watch_event(
+        assert!(!record_watch_event(
             &targets,
             &counters,
             data_root,
             &daemon_root,
             Err(notify::Error::generic("overflow")),
-        ));
+            EventWatermark::new(1, 99),
+        )
+        .is_empty());
     }
 }

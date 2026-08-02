@@ -97,6 +97,7 @@ pub struct SourceBackedRouteMetadata {
     pub selector_authority: SourceBackedSelectorAuthority,
     pub unsupported_reason: Option<String>,
     pub route_identity: Option<SourceRouteIdentity>,
+    pub watch_target_kind: SourceBackedWatchTargetKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,6 +445,7 @@ impl SourceBackedRoute {
                 selector_authority,
                 unsupported_reason: None,
                 route_identity: Some(route_identity),
+                watch_target_kind: known.watch_target_kind,
             },
             driver: Some(driver),
             certified_missing_paths: Vec::new(),
@@ -474,6 +476,7 @@ impl SourceBackedRoute {
                 selector_authority,
                 unsupported_reason: None,
                 route_identity: Some(route_identity),
+                watch_target_kind: known.watch_target_kind,
             },
             driver: Some(driver),
             certified_missing_paths: Vec::new(),
@@ -504,6 +507,7 @@ impl SourceBackedRoute {
                 selector_authority,
                 unsupported_reason: None,
                 route_identity: Some(route_identity),
+                watch_target_kind: known.watch_target_kind,
             },
             driver: None,
             certified_missing_paths: vec![path],
@@ -521,6 +525,7 @@ impl SourceBackedRoute {
                 selector_authority: SourceBackedSelectorAuthority::ExplicitPath,
                 unsupported_reason: Some(reason.into()),
                 route_identity: None,
+                watch_target_kind: SourceBackedWatchTargetKind::Path,
             },
             driver: None,
             certified_missing_paths: Vec::new(),

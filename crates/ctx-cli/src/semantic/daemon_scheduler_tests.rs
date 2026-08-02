@@ -318,6 +318,7 @@ fn core_publication_is_ready_and_searchable_before_consumer_receipts() {
             Ok(publication)
         },
     ));
+    coordinator.enqueue_for_test(None);
     let mut runtime = DaemonRuntime::default();
     let core = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
@@ -380,6 +381,37 @@ fn core_publication_is_ready_and_searchable_before_consumer_receipts() {
     );
 }
 
+#[test]
+fn healthy_idle_scheduler_performs_zero_source_refresh_scans() {
+    let temp = tempfile::tempdir().unwrap();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executor_calls = std::sync::Arc::clone(&calls);
+    let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
+        move |_: SourceBackedRefreshExecution<'_>| {
+            executor_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow::anyhow!("idle executor must not run"))
+        },
+    ));
+    let mut runtime = DaemonRuntime::default();
+
+    let idle = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+
+    assert!(!idle.did_work);
+    assert!(!idle.failed);
+    assert!(!idle.continue_immediately);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(!daemon_core_refresh_job_path(temp.path()).exists());
+}
+
 fn install_jobs(
     calls: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
     semantic_index: Option<Value>,
@@ -398,6 +430,7 @@ fn one_core_cycle_then_scheduler_drains_optional_consumers() {
             Ok(publish_empty_authoritative_generation(execution.index_root))
         },
     ));
+    coordinator.enqueue_for_test(None);
     let mut runtime = DaemonRuntime::default();
     let core = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
@@ -609,6 +642,7 @@ fn nonretryable_pro_attempt_is_generation_guarded() {
             Ok(publish_empty_authoritative_generation(execution.index_root))
         },
     ));
+    coordinator.enqueue_for_test(None);
     let mut runtime = DaemonRuntime::default();
 
     let core = run_daemon_scheduler_cycle_with_activity(
@@ -677,6 +711,7 @@ fn local_completed_pro_status_cannot_suppress_scheduler_validation() {
             Ok(publish_empty_authoritative_generation(execution.index_root))
         },
     ));
+    coordinator.enqueue_for_test(None);
     let mut runtime = DaemonRuntime::default();
     let core = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
