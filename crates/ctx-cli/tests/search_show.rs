@@ -100,7 +100,6 @@ fn start_source_refresh_daemon_with_env(
             status["daemon"]["running"] == true
                 && status["daemon"]["core_refresh_endpoint"]["available"] == true
         }) {
-            wait_for_test_daemon_source_refresh(temp);
             return daemon;
         }
         assert!(

@@ -20,8 +20,6 @@ fn human_search_reports_no_results() {
             "{stderr}"
         );
     }
-    wait_for_test_daemon_source_refresh(&temp);
-
     let fixture = provider_history_fixture("codex-sessions");
     ctx(&temp)
         .args([

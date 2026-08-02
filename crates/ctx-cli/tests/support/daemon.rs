@@ -68,26 +68,6 @@ pub(crate) fn daemon_test_root() -> DaemonTestRoot {
     DaemonTestRoot::new()
 }
 
-pub(crate) fn wait_for_test_daemon_source_refresh(temp: &TempDir) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let path = data_root(temp).join("daemon/jobs/core-refresh.json");
-    loop {
-        if let Ok(bytes) = fs::read(&path) {
-            let job: Value = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-                panic!("parse source refresh job {}: {error}", path.display())
-            });
-            if !matches!(job["request_state"].as_str(), Some("queued" | "running")) {
-                return;
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for test daemon source refresh to become terminal"
-        );
-        thread::sleep(DAEMON_STOP_POLL_INTERVAL);
-    }
-}
-
 pub(crate) fn wait_for_test_lexical_projection(temp: &TempDir, generation: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
