@@ -36,6 +36,10 @@ impl ImportTotals {
         self.imported_sources > 0 || self.current_source_count.unwrap_or_default() > 0
     }
 
+    pub(crate) fn reported_source_failures(&self) -> usize {
+        self.failed_sources
+    }
+
     pub(crate) fn add(&mut self, summary: &ProviderImportSummary, stats: &SourceStats) {
         self.per_run_counts_available = true;
         self.source_files += stats.files;

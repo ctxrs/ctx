@@ -79,6 +79,14 @@ fn import_totals_json(totals: &ImportTotals) -> Value {
             unreachable!("per-run import totals are always an object")
         };
         output.extend(per_run);
+    } else if totals.reported_source_failures() > 0 {
+        let Value::Object(output) = &mut value else {
+            unreachable!("import totals are always an object")
+        };
+        output.insert(
+            "failed_sources".to_owned(),
+            json!(totals.reported_source_failures()),
+        );
     }
     value
 }
@@ -134,6 +142,19 @@ fn render_import_report_human(context: &RenderContext, report: &ImportReport) ->
         ));
     }
 
+    let source_failures = source_failure_fields(report);
+    if !source_failures.is_empty() {
+        let source_failure_fields = source_failures
+            .iter()
+            .map(|(label, value)| Field::new(label, value))
+            .collect::<Vec<_>>();
+        document.push_blank();
+        document.append(section(
+            "Source failures",
+            fields(context, &source_failure_fields),
+        ));
+    }
+
     if totals.failed_sources > 0 || rejected_records > 0 {
         document.push_blank();
         let fully_failed = !totals.has_usable_source_result() && totals.failed_sources > 0;
@@ -151,6 +172,89 @@ fn render_import_report_human(context: &RenderContext, report: &ImportReport) ->
         document.append(hint(context, Hint { text }, Some(Action { command })));
     }
     document
+}
+
+const MAX_HUMAN_SOURCE_FAILURES: usize = 3;
+
+fn source_failure_fields(report: &ImportReport) -> Vec<(String, String)> {
+    let failures = report
+        .sources
+        .iter()
+        .filter(|source| {
+            source.get("status").and_then(Value::as_str) == Some("failure")
+                && source.get("failure_scope").and_then(Value::as_str) == Some("source")
+                && source
+                    .get("source_identity")
+                    .and_then(Value::as_str)
+                    .is_some()
+        })
+        .collect::<Vec<_>>();
+    let mut fields = failures
+        .iter()
+        .take(MAX_HUMAN_SOURCE_FAILURES)
+        .enumerate()
+        .map(|(index, source)| {
+            let selector = source
+                .get("source_selector")
+                .and_then(Value::as_str)
+                .or_else(|| source.get("source_identity").and_then(Value::as_str))
+                .unwrap_or("unknown source");
+            let provider = source
+                .get("provider")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown provider");
+            let class = source
+                .get("source_failure_class")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let retained = if source
+                .get("carried_forward")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                ", retained prior data"
+            } else {
+                ""
+            };
+            let detail = source
+                .get("detail")
+                .and_then(Value::as_str)
+                .or_else(|| source.get("error").and_then(Value::as_str))
+                .unwrap_or("no detail reported");
+            (
+                format!("Source {}", index.saturating_add(1)),
+                format!("{selector} ({provider}, {class}{retained}): {detail}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let displayed = fields.len();
+    let summary_omitted = report
+        .sources
+        .iter()
+        .find_map(|source| {
+            source
+                .get("source_failures_omitted")
+                .and_then(Value::as_u64)
+        })
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or_default();
+    let omitted = report
+        .totals
+        .reported_source_failures()
+        .saturating_sub(displayed)
+        .max(failures.len().saturating_sub(displayed))
+        .max(summary_omitted);
+    if omitted > 0 {
+        fields.push((
+            "Additional".to_owned(),
+            counted_failure(
+                u64::try_from(omitted).unwrap_or(u64::MAX),
+                "source failure was omitted",
+                "source failures were omitted",
+            ),
+        ));
+    }
+    fields
 }
 
 fn import_outcome_copy(totals: &ImportTotals) -> (OutcomeState, &'static str, String) {
@@ -526,32 +630,57 @@ mod tests {
     }
 
     #[test]
-    fn retained_usable_generation_keeps_source_failures_partial() {
+    fn retained_usable_generation_reports_bounded_schema_v2_source_failures() {
         let report = ImportReport {
             resume: false,
             totals: ImportTotals {
-                per_run_counts_available: true,
-                failed_sources: 1,
+                failed_sources: 5,
                 current_source_count: Some(2),
                 current_indexed_documents: Some(7),
                 work_result: ProviderImportWorkResult::NoOp,
                 ..ImportTotals::default()
             },
-            sources: vec![json!({
-                "status": "failed",
-                "route_identity": "ab".repeat(32),
-                "class": "source_changed",
-                "carried_forward": true,
-            })],
+            sources: (0..4)
+                .map(|index| {
+                    json!({
+                        "status": "failure",
+                        "failure_scope": "source",
+                        "failure_type": "other",
+                        "source_identity": format!("source-{index}"),
+                        "provider": "codex",
+                        "source_failure_class": "source_changed",
+                        "carried_forward": true,
+                        "source_selector": format!("/history/{index}.jsonl"),
+                        "detail": "source changed during refresh",
+                        "error": "source changed during refresh",
+                    })
+                })
+                .collect(),
         };
 
         let json = import_report_json(&report);
         assert_eq!(json["outcome"], "completed_with_source_failures");
         assert_eq!(json["failure_scope"], "source");
+        assert_eq!(json["totals"]["failed_sources"], 5);
+        for unsupported in [
+            "source_files",
+            "source_bytes",
+            "imported_sources",
+            "imported_sessions",
+            "imported_events",
+            "imported_edges",
+        ] {
+            assert!(json["totals"].get(unsupported).is_none(), "{json:#}");
+        }
         let rendered =
             render_import_report_human(&context(80, ColorMode::Never), &report).render_plain();
         assert!(rendered.starts_with("! History import completed with source failures\n"));
-        assert!(rendered.contains("1 source failed; imported history remains available."));
+        assert!(rendered.contains("5 sources failed; imported history remains available."));
+        assert!(rendered.contains("Source failures\n"));
+        assert!(rendered.contains("/history/0.jsonl"));
+        assert!(rendered.contains("/history/2.jsonl"));
+        assert!(!rendered.contains("/history/3.jsonl"));
+        assert!(rendered.contains("2 source failures were omitted"));
     }
 
     #[test]

@@ -1,11 +1,14 @@
 use std::{
-    io::IsTerminal,
+    io::{self, IsTerminal, Write},
     sync::{Arc, Mutex},
     time::{Duration as StdDuration, Instant},
 };
 
 use clap::ValueEnum;
 use serde_json::json;
+
+const MAX_PROGRESS_MESSAGE_BYTES: usize = 512;
+const MAX_PROGRESS_PHASE_BYTES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ProgressArg {
@@ -63,13 +66,17 @@ impl ProgressReporter {
         self.mode != ProgressRenderMode::None
     }
 
-    pub(crate) fn message(&self, phase: &'static str, message: impl Into<String>) {
+    pub(crate) fn message(
+        &self,
+        phase: &'static str,
+        message: impl Into<String>,
+    ) -> io::Result<()> {
         if !self.is_enabled() {
-            return;
+            return Ok(());
         }
-        let message = message.into();
+        let message = bounded_progress_text(&message.into(), MAX_PROGRESS_MESSAGE_BYTES);
         self.emit_status(ProgressLine {
-            phase,
+            phase: bounded_progress_text(phase, MAX_PROGRESS_PHASE_BYTES),
             message,
             completed_bytes: 0,
             total_bytes: self.total_bytes,
@@ -77,7 +84,7 @@ impl ProgressReporter {
             total_files: None,
             imported_events: None,
             done: false,
-        });
+        })
     }
 
     pub(crate) fn done(
@@ -85,43 +92,42 @@ impl ProgressReporter {
         phase: &'static str,
         message: impl Into<String>,
         completed_bytes: u64,
-    ) {
+    ) -> io::Result<()> {
         if !self.is_enabled() {
-            return;
+            return Ok(());
         }
         self.emit_status(ProgressLine {
-            phase,
-            message: message.into(),
+            phase: bounded_progress_text(phase, MAX_PROGRESS_PHASE_BYTES),
+            message: bounded_progress_text(&message.into(), MAX_PROGRESS_MESSAGE_BYTES),
             completed_bytes,
             total_bytes: self.total_bytes.max(completed_bytes),
             completed_files: None,
             total_files: None,
             imported_events: None,
             done: true,
-        });
+        })
     }
 
-    pub(crate) fn finish_line(&self) {}
+    pub(crate) fn finish_line(&self) -> io::Result<()> {
+        Ok(())
+    }
 
-    fn emit_status(&self, line: ProgressLine) {
-        match self.mode {
-            ProgressRenderMode::None => {}
-            ProgressRenderMode::Json => {
-                let elapsed = self
-                    .state
-                    .lock()
-                    .expect("progress state poisoned")
-                    .started
-                    .elapsed();
-                eprintln!("{}", progress_json(self.operation, &line, elapsed));
-            }
-            ProgressRenderMode::Plain => eprintln!("{}", line.message),
-        }
+    fn emit_status(&self, line: ProgressLine) -> io::Result<()> {
+        let elapsed = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("progress state lock was poisoned"))?
+            .started
+            .elapsed();
+        let stderr = io::stderr();
+        let mut writer = stderr.lock();
+        write_progress(&mut writer, self.mode, self.operation, &line, elapsed)?;
+        writer.flush()
     }
 }
 
 struct ProgressLine {
-    phase: &'static str,
+    phase: String,
     message: String,
     completed_bytes: u64,
     total_bytes: u64,
@@ -129,6 +135,20 @@ struct ProgressLine {
     total_files: Option<usize>,
     imported_events: Option<usize>,
     done: bool,
+}
+
+fn write_progress(
+    writer: &mut impl Write,
+    mode: ProgressRenderMode,
+    operation: &'static str,
+    line: &ProgressLine,
+    elapsed: StdDuration,
+) -> io::Result<()> {
+    match mode {
+        ProgressRenderMode::None => Ok(()),
+        ProgressRenderMode::Plain => writeln!(writer, "{}", line.message),
+        ProgressRenderMode::Json => writeln!(writer, "{}", progress_json(operation, line, elapsed)),
+    }
 }
 
 fn progress_json(operation: &'static str, line: &ProgressLine, elapsed: StdDuration) -> String {
@@ -197,6 +217,30 @@ fn eta_seconds(completed: u64, total: u64, elapsed: StdDuration) -> Option<f64> 
     Some((total - completed) as f64 / rate)
 }
 
+fn bounded_progress_text(value: &str, max_bytes: usize) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    if sanitized.len() <= max_bytes {
+        return sanitized;
+    }
+    const SUFFIX: &str = "...";
+    let mut end = max_bytes.saturating_sub(SUFFIX.len()).min(sanitized.len());
+    while end > 0 && !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut bounded = sanitized[..end].to_owned();
+    bounded.push_str(SUFFIX);
+    bounded
+}
+
 pub(crate) fn format_bytes(bytes: u64) -> String {
     let (value, unit) = scaled_bytes(bytes);
     if unit == "B" {
@@ -241,7 +285,7 @@ mod tests {
     #[test]
     fn done_progress_json_forces_complete_bytes_with_incomplete_bytes() {
         let line = ProgressLine {
-            phase: "finalizing",
+            phase: "finalizing".to_owned(),
             message: "done".to_owned(),
             completed_bytes: 0,
             total_bytes: 4 * 1024,
@@ -265,7 +309,7 @@ mod tests {
     #[test]
     fn progress_json_remains_exact_and_ansi_free() {
         let line = ProgressLine {
-            phase: "cataloging",
+            phase: "cataloging".to_owned(),
             message: "cataloging".to_owned(),
             completed_bytes: 1024,
             total_bytes: 4096,
@@ -293,7 +337,7 @@ mod tests {
     #[test]
     fn plain_and_json_progress_keep_explicit_stream_contracts() {
         let line = ProgressLine {
-            phase: "indexing",
+            phase: "indexing".to_owned(),
             message: "Indexed 2 sources".to_owned(),
             completed_bytes: 2,
             total_bytes: 4,
@@ -319,5 +363,70 @@ mod tests {
         );
         assert!(!plain.contains('\u{1b}'));
         assert!(!json.contains('\u{1b}'));
+    }
+
+    #[derive(Clone, Copy)]
+    enum WriterFailure {
+        Write,
+        Flush,
+    }
+
+    struct FailingWriter(WriterFailure);
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            match self.0 {
+                WriterFailure::Write => Err(io::Error::other("injected progress write failure")),
+                WriterFailure::Flush => Ok(buffer.len()),
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            match self.0 {
+                WriterFailure::Write => Ok(()),
+                WriterFailure::Flush => Err(io::Error::other("injected progress flush failure")),
+            }
+        }
+    }
+
+    #[test]
+    fn progress_write_and_flush_failures_remain_errors() {
+        let line = ProgressLine {
+            phase: "logical_scan".to_owned(),
+            message: "Scanning SQLite history".to_owned(),
+            completed_bytes: 0,
+            total_bytes: 0,
+            completed_files: None,
+            total_files: None,
+            imported_events: None,
+            done: false,
+        };
+        for (failure, expected) in [
+            (WriterFailure::Write, "injected progress write failure"),
+            (WriterFailure::Flush, "injected progress flush failure"),
+        ] {
+            let mut writer = FailingWriter(failure);
+            let result = write_progress(
+                &mut writer,
+                ProgressRenderMode::Json,
+                "import",
+                &line,
+                StdDuration::ZERO,
+            )
+            .and_then(|()| writer.flush());
+            assert!(result
+                .expect_err("progress output failure must propagate")
+                .to_string()
+                .contains(expected));
+        }
+    }
+
+    #[test]
+    fn progress_text_is_control_safe_utf8_and_bounded() {
+        let text = format!("{}\n{}", "é".repeat(400), "x".repeat(400));
+        let bounded = bounded_progress_text(&text, MAX_PROGRESS_MESSAGE_BYTES);
+        assert!(bounded.len() <= MAX_PROGRESS_MESSAGE_BYTES);
+        assert!(!bounded.contains('\n'));
+        assert!(bounded.ends_with("..."));
     }
 }

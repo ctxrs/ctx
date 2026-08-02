@@ -21,6 +21,8 @@ use super::{
     ImportReport, ImportRunOptions, ImportTotals, ProviderRefreshCollector,
 };
 
+const MAX_REPORTED_SOURCE_FAILURES: usize = 3;
+
 pub(super) struct AutomaticSourceRefreshImportContext<'a> {
     pub(super) args: &'a ImportArgs,
     pub(super) data_root: PathBuf,
@@ -48,7 +50,7 @@ pub(super) fn run_automatic_source_refresh_import(
     progress.message(
         "refreshing",
         "Refreshing the provider-authoritative source index through the ctx daemon.",
-    );
+    )?;
     let home = crate::identity::home_dir()
         .context("resolve user home for provider-root safety preflight")?;
     let sources = discover_provider_sources(&home);
@@ -76,7 +78,8 @@ pub(super) fn run_automatic_source_refresh_import(
         // Core receipts describe the committed current generation, not
         // synthetic per-run session/event/file totals.
         per_run_counts_available: false,
-        imported_sources: receipt.successful_route_ids.len(),
+        // Route-result counts are reported separately from per-run import
+        // counts because the receipt certifies a whole Core generation.
         failed_sources: receipt.source_failures.len(),
         current_source_count: Some(current.source_count),
         current_indexed_documents: Some(current.indexed_documents),
@@ -106,8 +109,8 @@ pub(super) fn run_automatic_source_refresh_import(
     } else {
         "Finished refreshing local history.".to_owned()
     };
-    progress.finish_line();
-    progress.done("published", completion, current.certified_source_bytes);
+    progress.finish_line()?;
+    progress.done("published", completion, current.certified_source_bytes)?;
 
     let mut report_sources = vec![compact_json(json!({
         "status": "published",
@@ -121,7 +124,13 @@ pub(super) fn run_automatic_source_refresh_import(
         "previous_generation": receipt.previous_generation,
         "published_generation": receipt.published_generation,
         "generation_changed": receipt.generation_changed,
-        "successful_route_ids": receipt.successful_route_ids,
+        "scanned_routes": receipt.selected_route_ids.len(),
+        "successful_routes": receipt.successful_route_ids.len(),
+        "source_failure_total": receipt.source_failures.len(),
+        "source_failures_omitted": receipt
+            .source_failures
+            .len()
+            .saturating_sub(MAX_REPORTED_SOURCE_FAILURES),
         "current_source_count": current.source_count,
         "current_indexed_documents": current.indexed_documents,
         "current_complete_records": current.complete_records,
@@ -142,23 +151,69 @@ pub(super) fn run_automatic_source_refresh_import(
             "trigger_provenance": "automatic_provider_refresh",
         },
     }))];
-    report_sources.extend(receipt.source_failures.iter().map(|failure| {
-        compact_json(json!({
-            "status": "failed",
-            "failure_type": "source",
-            "route_identity": failure.route_identity,
-            "source_identity": failure.source_identity,
-            "provider": failure.provider,
-            "class": failure.class,
-            "carried_forward": failure.carried_forward,
-        }))
-    }));
+    report_sources.extend(
+        receipt
+            .source_failures
+            .iter()
+            .take(MAX_REPORTED_SOURCE_FAILURES)
+            .map(|failure| {
+                source_failure_report_row(
+                    &failure.source_identity,
+                    &failure.provider,
+                    &failure.class,
+                    failure.carried_forward,
+                )
+            }),
+    );
 
     Ok(ImportReport {
         resume: context.args.resume,
         totals,
         sources: report_sources,
     })
+}
+
+fn source_failure_report_row(
+    source_identity: &str,
+    provider: &str,
+    class: &str,
+    carried_forward: bool,
+) -> serde_json::Value {
+    let failure_type = if class == "incompatible" {
+        "unsupported_schema"
+    } else {
+        "other"
+    };
+    let detail = match class {
+        "unavailable" => format!("{provider} source was unavailable during refresh"),
+        "source_changed" => format!("{provider} source changed while it was being refreshed"),
+        "unreadable" => format!("{provider} source could not be read"),
+        "incompatible" => format!("{provider} source schema is not supported"),
+        _ => format!("{provider} source refresh failed ({class})"),
+    };
+    compact_json(json!({
+        "status": "failure",
+        "failure_scope": "source",
+        "failure_type": failure_type,
+        "source_identity": source_identity,
+        "provider": provider,
+        "source_failure_class": class,
+        "carried_forward": carried_forward,
+        "source_selector": source_identity,
+        "detail": detail,
+        "error": detail,
+        "source_files": 0,
+        "source_bytes": 0,
+        "imported_sessions": 0,
+        "imported_events": 0,
+        "imported_edges": 0,
+        "skipped_sessions": 0,
+        "skipped_events": 0,
+        "skipped_edges": 0,
+        "skipped": 0,
+        "rejected_records": 0,
+        "rejections": [],
+    }))
 }
 
 fn validate_selected_provider(args: &ImportArgs) -> Result<()> {
@@ -204,6 +259,8 @@ fn validate_selected_provider(args: &ImportArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn automatic_import_has_no_legacy_history_store_dependency() {
         let source = include_str!("automatic_source_refresh.rs");
@@ -218,5 +275,20 @@ mod tests {
                 "automatic source refresh contains forbidden legacy dependency `{forbidden}`"
             );
         }
+    }
+
+    #[test]
+    fn source_failure_rows_follow_schema_v2_and_are_bounded() {
+        let source_identity = "22".repeat(32);
+        let row = source_failure_report_row(&source_identity, "codex", "source_changed", true);
+        assert_eq!(row["status"], "failure");
+        assert_eq!(row["failure_scope"], "source");
+        assert_eq!(row["failure_type"], "other");
+        assert_eq!(row["source_failure_class"], "source_changed");
+        assert_eq!(row["source_selector"], "22".repeat(32));
+        assert_eq!(row["detail"], row["error"]);
+        assert_eq!(row["imported_events"], 0);
+        assert_eq!(row["rejections"], json!([]));
+        assert_eq!(MAX_REPORTED_SOURCE_FAILURES, 3);
     }
 }
