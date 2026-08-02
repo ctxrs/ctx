@@ -418,6 +418,11 @@ fn multi_page_reconciliation_constructs_one_flat_view() -> Result<()> {
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
+    let segments_before = store
+        .flat_pin_generation()?
+        .ok_or_else(|| anyhow!("initial reconciliation did not publish a flat generation"))?
+        .stats()
+        .segment_count;
 
     store.reset_flat_active_event_snapshot_count();
     let outcome = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
@@ -429,13 +434,19 @@ fn multi_page_reconciliation_constructs_one_flat_view() -> Result<()> {
         .ok_or_else(|| anyhow!("multi-page reconciliation did not publish a flat generation"))?;
     assert_eq!(pin.stats().active_events, record_count);
     assert!(
-        pin.stats().segment_count < 16,
-        "bounded compaction must keep the segment set below its threshold"
+        pin.stats().segment_count
+            <= segments_before + record_count.div_ceil(MAX_SOURCE_EVENT_PAGE_ITEMS),
+        "one reconciliation may retain at most one durable delta per bounded Core page"
     );
     assert_eq!(
         store.flat_active_event_snapshot_count(),
         1,
         "two changed Core pages must share one generation-bound flat view"
+    );
+    assert_eq!(
+        store.flat.active_generation_load_count(),
+        1,
+        "multi-page publication must load current stats only at its terminal boundary"
     );
     Ok(())
 }
@@ -460,6 +471,11 @@ fn multi_page_restart_reconstructs_one_view_for_remaining_pages() -> Result<()> 
     }
 
     let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let segments_before_resume = restarted
+        .flat_pin_generation()?
+        .ok_or_else(|| anyhow!("partial reconciliation did not publish a flat generation"))?
+        .stats()
+        .segment_count;
     restarted.reset_flat_active_event_snapshot_count();
     let resumed = reconcile_all(&mut restarted, &index, &mut builder, &mut embedder)?;
     assert_eq!(resumed.records_read, 4);
@@ -469,6 +485,20 @@ fn multi_page_restart_reconstructs_one_view_for_remaining_pages() -> Result<()> 
         restarted.flat_active_event_snapshot_count(),
         1,
         "restart must reconstruct one view for all remaining pages"
+    );
+    assert_eq!(
+        restarted.flat.active_generation_load_count(),
+        1,
+        "restart must perform one terminal current-generation load"
+    );
+    assert!(
+        restarted
+            .flat_pin_generation()?
+            .ok_or_else(|| anyhow!("resumed reconciliation lost its flat generation"))?
+            .stats()
+            .segment_count
+            <= segments_before_resume + 1,
+        "the resumed bounded page may add at most one durable delta"
     );
     Ok(())
 }
@@ -759,21 +789,41 @@ fn control_reset_retires_unowned_flat_vectors_before_rebuild() -> Result<()> {
     control.pragma_update(None, "user_version", 2)?;
     drop(control);
     let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
-    store.reset_flat_active_event_snapshot_count();
     builder.calls.clear();
+    let first_drain = store.reconcile_source_backed_index(&target, &mut builder, &mut embedder)?;
+    assert_eq!(first_drain.deleted_chunks, MAX_SOURCE_EVENT_PAGE_ITEMS);
+    assert!(first_drain.work_remaining);
+
+    drop(store);
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    store.reset_flat_active_event_snapshot_count();
     let rebuilt = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
     assert_eq!(rebuilt.records_read, 3);
     assert_eq!(rebuilt.records_embedded, 3);
-    assert_eq!(rebuilt.deleted_chunks, record_count);
+    assert_eq!(
+        first_drain.deleted_chunks + rebuilt.deleted_chunks,
+        record_count
+    );
     assert_eq!(
         store.flat_active_event_snapshot_count(),
         2,
         "two-page reset drain and replacement each retain one flat view"
     );
+    assert_eq!(
+        store.flat.active_generation_load_count(),
+        3,
+        "full rebuild and source terminals load once each, plus the compacted authority pin"
+    );
     assert_eq!(active_events(&store)?, 3);
-    assert!(store
+    let final_pin = store
         .flat_pin_generation()?
-        .unwrap()
+        .ok_or_else(|| anyhow!("rebuilt projection lost its flat generation"))?;
+    assert_eq!(
+        final_pin.stats().segment_count,
+        1,
+        "terminal threshold compaction must collapse the restarted rebuild deltas"
+    );
+    assert!(final_pin
         .active_events()
         .iter()
         .all(|event| event.event_id != removed_event));

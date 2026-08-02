@@ -15,8 +15,6 @@ use super::{
     vector_store_schema::{semantic_owned_sidecar_result, SemanticVectorStoreError},
 };
 
-const COMPACT_SEGMENT_THRESHOLD: usize = 16;
-
 impl SemanticVectorStore {
     pub(super) fn flat_active_event_lookup(&self) -> Result<FlatActiveEventLookup> {
         semantic_owned_sidecar_result(self.flat.active_event_lookup().map_err(anyhow::Error::new))
@@ -112,14 +110,17 @@ impl SemanticVectorStore {
     }
 
     fn flat_compact_if_needed(&mut self) -> Result<()> {
-        let stats = self.flat.active_stats().map_err(anyhow::Error::new)?;
-        if stats.segment_count >= COMPACT_SEGMENT_THRESHOLD
-            || (stats.active_chunks > 0
-                && stats.stored_chunks > (stats.active_chunks as u64).saturating_mul(2))
+        if self
+            .flat
+            .reconciliation_active()
+            .map_err(anyhow::Error::new)?
         {
-            self.flat.compact().map_err(anyhow::Error::new)?;
+            // One immutable delta is published per bounded reconciliation
+            // page. The retained view performs exact stats and threshold
+            // compaction once when that persisted reconciliation terminates.
+            return Ok(());
         }
-        Ok(())
+        self.flat.compact_if_needed().map_err(anyhow::Error::new)
     }
 }
 

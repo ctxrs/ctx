@@ -33,6 +33,8 @@ use validation::*;
 
 pub(in crate::semantic) type FlatResult<T> = std::result::Result<T, FlatStoreError>;
 
+const COMPACT_SEGMENT_THRESHOLD: usize = 16;
+
 #[derive(Debug, Error)]
 pub(in crate::semantic) enum FlatStoreError {
     #[error("{operation} {path}: {source}")]
@@ -184,6 +186,8 @@ pub(in crate::semantic) struct FlatSegmentStore {
     recovery: FlatRecoveryReport,
     #[cfg(test)]
     active_event_snapshot_count: AtomicU64,
+    #[cfg(test)]
+    active_generation_load_count: AtomicU64,
 }
 
 struct FlatReconciliationView {
@@ -224,6 +228,8 @@ impl FlatSegmentStore {
             recovery: FlatRecoveryReport::default(),
             #[cfg(test)]
             active_event_snapshot_count: AtomicU64::new(0),
+            #[cfg(test)]
+            active_generation_load_count: AtomicU64::new(0),
         };
         let recovery = store.recover_internal()?;
         #[cfg(test)]
@@ -256,6 +262,8 @@ impl FlatSegmentStore {
             recovery: FlatRecoveryReport::default(),
             #[cfg(test)]
             active_event_snapshot_count: AtomicU64::new(0),
+            #[cfg(test)]
+            active_generation_load_count: AtomicU64::new(0),
         };
         let _guard = store.lock_shared()?;
         if let Some(selected) = select_manifest(&store.root, &store.contract)? {
@@ -299,6 +307,11 @@ impl FlatSegmentStore {
     }
 
     /// Retains one immutable flat generation for a complete reconciliation.
+    ///
+    /// The source projection publishes at most one delta per bounded Core
+    /// page and persists its frontier after each page. Consequently a crash
+    /// or restart can retain no more durable deltas than the pages in that one
+    /// reconciliation; releasing the view runs exact threshold compaction.
     pub(in crate::semantic) fn begin_reconciliation_view(&self, id: &str) -> FlatResult<()> {
         if id.is_empty() {
             return Err(FlatStoreError::InvalidInput(
@@ -382,13 +395,43 @@ impl FlatSegmentStore {
     }
 
     pub(in crate::semantic) fn finish_reconciliation_view(&self) -> FlatResult<()> {
-        let mut current = self.reconciliation_view.lock().map_err(|_| {
+        let retained = {
+            let mut current = self.reconciliation_view.lock().map_err(|_| {
+                FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
+            })?;
+            current.take()
+        };
+        let Some(retained) = retained else {
+            return Ok(());
+        };
+        if let Err(error) = self.compact_if_needed() {
+            let mut current = self.reconciliation_view.lock().map_err(|_| {
+                FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
+            })?;
+            if current.is_none() {
+                *current = Some(retained);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(in crate::semantic) fn compact_if_needed(&self) -> FlatResult<()> {
+        let stats = self.active_stats()?;
+        if stats.segment_count >= COMPACT_SEGMENT_THRESHOLD
+            || (stats.active_chunks > 0
+                && stats.stored_chunks > (stats.active_chunks as u64).saturating_mul(2))
+        {
+            let _ = self.compact()?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::semantic) fn reconciliation_active(&self) -> FlatResult<bool> {
+        let view = self.reconciliation_view.lock().map_err(|_| {
             FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
         })?;
-        // A generation can be superseded after its receipts are durable
-        // without opening a page for the replacement generation.
-        *current = None;
-        Ok(())
+        Ok(view.is_some())
     }
 
     fn reconciliation_lookup(&self) -> FlatResult<Option<FlatActiveEventLookup>> {
@@ -408,11 +451,18 @@ impl FlatSegmentStore {
     #[cfg(test)]
     pub(in crate::semantic) fn reset_active_event_snapshot_count(&self) {
         self.active_event_snapshot_count.store(0, Ordering::Relaxed);
+        self.active_generation_load_count
+            .store(0, Ordering::Relaxed);
     }
 
     #[cfg(test)]
     pub(in crate::semantic) fn active_event_snapshot_count(&self) -> u64 {
         self.active_event_snapshot_count.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn active_generation_load_count(&self) -> u64 {
+        self.active_generation_load_count.load(Ordering::Relaxed)
     }
 
     pub(in crate::semantic) fn publish_replacement_event_chunks(
@@ -481,6 +531,9 @@ impl FlatSegmentStore {
                 return Ok(pinned.clone());
             }
         }
+        #[cfg(test)]
+        self.active_generation_load_count
+            .fetch_add(1, Ordering::Relaxed);
         let pinned = load_pinned_generation(&self.root, selected)?;
         self.remember_validated(selected)?;
         let mut guard = self.pinned.lock().map_err(|_| {
