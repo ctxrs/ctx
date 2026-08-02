@@ -317,7 +317,11 @@ fn idle_safety_rechecks_delete_only_the_pending_missing_route() {
     assert_eq!(
         harness
             .coordinator
-            .schedule_pending_missing_route_rechecks(&harness.data_root, 0)
+            .schedule_pending_missing_route_rechecks(
+                &harness.data_root,
+                EventWatermark::new(1, 0),
+                0,
+            )
             .unwrap(),
         0
     );
@@ -329,7 +333,11 @@ fn idle_safety_rechecks_delete_only_the_pending_missing_route() {
         assert_eq!(
             harness
                 .coordinator
-                .schedule_pending_missing_route_rechecks(&harness.data_root, 0)
+                .schedule_pending_missing_route_rechecks(
+                    &harness.data_root,
+                    EventWatermark::new(1, 0),
+                    0,
+                )
                 .unwrap(),
             1
         );
@@ -348,7 +356,11 @@ fn idle_safety_rechecks_delete_only_the_pending_missing_route() {
     assert_eq!(
         harness
             .coordinator
-            .schedule_pending_missing_route_rechecks(&harness.data_root, 0)
+            .schedule_pending_missing_route_rechecks(
+                &harness.data_root,
+                EventWatermark::new(1, 0),
+                0,
+            )
             .unwrap(),
         0
     );
@@ -371,33 +383,34 @@ fn safety_recheck_recovers_pending_missing_state_after_engine_restart() {
         Arc::clone(&harness.entered),
         Arc::clone(&harness.release),
     ));
-    restarted.reconcile_watch_routes(
+    restarted.initialize_watch_route_authority(
         harness.fixtures.iter().map(|fixture| fixture.route.clone()),
-        EventWatermark::new(2, 0),
-        0,
     );
 
     assert!(restarted.pinned_core_publication().is_none());
-    // Restart authority reconciliation already seeds one exact check for each
-    // watched route. Drain that bounded startup work first; the missing route
-    // advances, while the healthy route is observed only for restart.
     assert_eq!(
         restarted
-            .schedule_pending_missing_route_rechecks(&harness.data_root, 0)
+            .schedule_pending_missing_route_rechecks(
+                &harness.data_root,
+                EventWatermark::new(2, 0),
+                0,
+            )
             .unwrap(),
-        0
+        1
     );
-    while restarted
+    assert!(restarted
         .enqueue_next_dirty_route(&harness.data_root, u64::MAX)
-        .unwrap()
-    {
-        let run = restarted.run_next(&harness.data_root).unwrap();
-        assert!(!run.failed, "{:#}", run.job);
-    }
+        .unwrap());
+    let run = restarted.run_next(&harness.data_root).unwrap();
+    assert!(!run.failed, "{:#}", run.job);
     assert_eq!(harness.missing_count(), Some(2));
     assert_eq!(
         restarted
-            .schedule_pending_missing_route_rechecks(&harness.data_root, 0)
+            .schedule_pending_missing_route_rechecks(
+                &harness.data_root,
+                EventWatermark::new(2, 0),
+                0,
+            )
             .unwrap(),
         1
     );
@@ -409,7 +422,7 @@ fn safety_recheck_recovers_pending_missing_state_after_engine_restart() {
     assert_eq!(harness.missing_count(), None);
     assert_eq!(
         harness.scans.lock().unwrap().get(&harness.healthy().route),
-        Some(&1)
+        None
     );
 }
 
@@ -422,7 +435,11 @@ fn pending_missing_route_reappearance_resets_grace_before_threshold() {
     assert_eq!(
         harness
             .coordinator
-            .schedule_pending_missing_route_rechecks(&harness.data_root, 0)
+            .schedule_pending_missing_route_rechecks(
+                &harness.data_root,
+                EventWatermark::new(1, 0),
+                0,
+            )
             .unwrap(),
         1
     );
@@ -433,7 +450,11 @@ fn pending_missing_route_reappearance_resets_grace_before_threshold() {
     assert_eq!(
         harness
             .coordinator
-            .schedule_pending_missing_route_rechecks(&harness.data_root, 0)
+            .schedule_pending_missing_route_rechecks(
+                &harness.data_root,
+                EventWatermark::new(1, 0),
+                0,
+            )
             .unwrap(),
         0
     );
@@ -452,7 +473,11 @@ fn watcher_and_manual_race_cannot_overadvance_or_delete_a_live_route() {
     assert_eq!(
         harness
             .coordinator
-            .schedule_pending_missing_route_rechecks(&harness.data_root, 0)
+            .schedule_pending_missing_route_rechecks(
+                &harness.data_root,
+                EventWatermark::new(1, 0),
+                0,
+            )
             .unwrap(),
         1
     );

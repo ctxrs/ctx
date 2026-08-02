@@ -127,7 +127,7 @@ fn safety_reconciliation_recovers_a_failed_startup_catalog_without_empty_authori
     let wakeup = Arc::new(DaemonWakeup::default());
     let mut watch_runtime = DaemonWatchRuntime::new(Arc::clone(&wakeup));
 
-    watch_runtime.reconcile_catalog_and_seed_routes_with(
+    watch_runtime.reconcile_catalog_and_route_authority_with(
         &data_root,
         Some(&coordinator),
         WatchCatalogReconcileTrigger::Startup,
@@ -145,7 +145,7 @@ fn safety_reconciliation_recovers_a_failed_startup_catalog_without_empty_authori
         "degraded"
     );
 
-    watch_runtime.reconcile_catalog_and_seed_routes_with(
+    watch_runtime.reconcile_catalog_and_route_authority_with(
         &data_root,
         Some(&coordinator),
         WatchCatalogReconcileTrigger::SafetyTimeout,
@@ -162,7 +162,7 @@ fn safety_reconciliation_recovers_a_failed_startup_catalog_without_empty_authori
         .expect("safety reconciliation publishes catalog authority");
     assert_eq!(recovered.route_ids().next(), Some(&route));
     assert!(coordinator.watch_routes_initialized());
-    assert!(coordinator.has_scheduled_route_work());
+    assert!(!coordinator.has_scheduled_route_work());
     assert_eq!(
         super::super::daemon_wakeup::daemon_wakeup_report(&data_root)["status"],
         "active"
@@ -187,7 +187,7 @@ fn safety_reconciliation_recreates_a_failed_startup_watcher_without_healthy_cata
     let catalog_attempts = Cell::new(0_u64);
     let watcher_attempts = Cell::new(0_u64);
 
-    watch_runtime.reconcile_catalog_and_seed_routes_with(
+    watch_runtime.reconcile_catalog_and_route_authority_with(
         &data_root,
         Some(&coordinator),
         WatchCatalogReconcileTrigger::Startup,
@@ -207,8 +207,9 @@ fn safety_reconciliation_recreates_a_failed_startup_watcher_without_healthy_cata
     assert!(watch_runtime.file_watcher.is_none());
     assert!(watch_runtime.catalog.snapshot().is_some());
     assert!(coordinator.watch_routes_initialized());
+    assert!(!coordinator.has_scheduled_route_work());
 
-    watch_runtime.reconcile_catalog_and_seed_routes_with(
+    watch_runtime.reconcile_catalog_and_route_authority_with(
         &data_root,
         Some(&coordinator),
         WatchCatalogReconcileTrigger::SafetyTimeout,
@@ -226,8 +227,9 @@ fn safety_reconciliation_recreates_a_failed_startup_watcher_without_healthy_cata
     assert_eq!(catalog_attempts.get(), 2);
     assert_eq!(watcher_attempts.get(), 2);
     assert!(watch_runtime.file_watcher.is_some());
+    assert!(!coordinator.has_scheduled_route_work());
 
-    watch_runtime.reconcile_catalog_and_seed_routes_with(
+    watch_runtime.reconcile_catalog_and_route_authority_with(
         &data_root,
         Some(&coordinator),
         WatchCatalogReconcileTrigger::SafetyTimeout,
@@ -259,7 +261,7 @@ fn forced_watcher_recovery_seeds_a_route_mutated_inside_the_rearm_gap() -> Resul
     let coordinator = CoreRefreshEngine::new();
     let wakeup = Arc::new(DaemonWakeup::default());
     let mut watch_runtime = DaemonWatchRuntime::new(Arc::clone(&wakeup));
-    watch_runtime.reconcile_catalog_and_seed_routes_with(
+    watch_runtime.reconcile_catalog_and_route_authority_with(
         &data_root,
         None,
         WatchCatalogReconcileTrigger::Startup,
@@ -267,6 +269,8 @@ fn forced_watcher_recovery_seeds_a_route_mutated_inside_the_rearm_gap() -> Resul
         |_| Ok(catalog.clone()),
         DaemonFileWatcher::start,
     );
+    coordinator.initialize_watch_route_authority(catalog.route_ids().cloned());
+    assert!(!coordinator.has_scheduled_route_work());
     let watcher = watch_runtime
         .file_watcher
         .as_mut()
@@ -282,7 +286,7 @@ fn forced_watcher_recovery_seeds_a_route_mutated_inside_the_rearm_gap() -> Resul
         }
     });
 
-    watch_runtime.reconcile_catalog_and_seed_routes_with(
+    watch_runtime.reconcile_catalog_and_route_authority_with(
         &data_root,
         Some(&coordinator),
         WatchCatalogReconcileTrigger::WatcherRecovery,

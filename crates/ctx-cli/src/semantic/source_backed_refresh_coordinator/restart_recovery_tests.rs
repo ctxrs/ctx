@@ -1,4 +1,9 @@
-use super::client::{source_refresh_request_is_unknown, wait_for_published_generation};
+use super::client::{
+    recover_typed_unknown_request_with, source_refresh_request_is_unknown,
+    validate_source_refresh_status_response_authority, wait_for_published_generation,
+    SourceRefreshRequestRecoveryFailed, SourceRefreshRequestRecoveryFailureReason,
+    TypedUnknownRequestRecovery,
+};
 use super::*;
 
 use crate::semantic::{
@@ -7,6 +12,91 @@ use crate::semantic::{
         daemon_source_refresh_request, start_daemon_source_refresh_service_with_request_timeout,
     },
 };
+
+#[test]
+fn every_normal_status_state_requires_exact_response_authority() {
+    for state in ["queued", "running", "failed", "published"] {
+        let response = compact_json(json!({
+            "ok": true,
+            "schema_version": 1,
+            "owner": "daemon",
+            "request_id": "expected-request",
+            "request_state": state,
+        }));
+        validate_source_refresh_status_response_authority(&response, "expected-request").unwrap();
+
+        for (field, value) in [
+            ("schema_version", json!(2)),
+            ("owner", json!("different-owner")),
+            ("request_id", json!("different-request")),
+        ] {
+            let mut mismatched = response.clone();
+            mismatched[field] = value;
+            assert!(validate_source_refresh_status_response_authority(
+                &mismatched,
+                "expected-request"
+            )
+            .is_err());
+        }
+    }
+}
+
+#[test]
+fn persistent_typed_unknown_loss_is_bounded_with_backoff_and_typed_failure() {
+    let mut recovery = TypedUnknownRequestRecovery::new("lost-0");
+    let mut request_id = "lost-0".to_owned();
+    let mut backoffs = Vec::new();
+    for next in ["lost-1", "lost-2", "lost-3"] {
+        request_id = recover_typed_unknown_request_with(
+            &mut recovery,
+            &request_id,
+            |backoff| backoffs.push(backoff),
+            || Ok(next.to_owned()),
+        )
+        .unwrap();
+    }
+
+    let error = recover_typed_unknown_request_with(
+        &mut recovery,
+        &request_id,
+        |_| panic!("exhausted recovery must not sleep"),
+        || panic!("exhausted recovery must not enqueue another request"),
+    )
+    .unwrap_err();
+    let typed = error
+        .downcast_ref::<SourceRefreshRequestRecoveryFailed>()
+        .expect("persistent loss returns a typed recovery failure");
+    assert_eq!(typed.request_id, "lost-3");
+    assert_eq!(typed.recovery_attempts, 3);
+    assert_eq!(
+        typed.reason,
+        SourceRefreshRequestRecoveryFailureReason::AttemptsExhausted
+    );
+    assert_eq!(
+        backoffs,
+        vec![
+            StdDuration::from_millis(25),
+            StdDuration::from_millis(50),
+            StdDuration::from_millis(100),
+        ]
+    );
+}
+
+#[test]
+fn typed_unknown_recovery_requires_request_id_progress() {
+    let mut recovery = TypedUnknownRequestRecovery::new("lost");
+    let error =
+        recover_typed_unknown_request_with(&mut recovery, "lost", |_| {}, || Ok("lost".to_owned()))
+            .unwrap_err();
+    let typed = error
+        .downcast_ref::<SourceRefreshRequestRecoveryFailed>()
+        .expect("stalled recovery returns a typed failure");
+    assert_eq!(typed.recovery_attempts, 1);
+    assert_eq!(
+        typed.reason,
+        SourceRefreshRequestRecoveryFailureReason::NoRequestIdProgress
+    );
+}
 
 #[cfg(any(unix, windows))]
 #[test]

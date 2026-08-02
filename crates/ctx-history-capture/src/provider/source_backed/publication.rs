@@ -9,6 +9,36 @@ use ownership::{
     revalidate_staged_source_route,
 };
 
+#[cfg(test)]
+thread_local! {
+    static BEFORE_SOURCE_BACKED_COMMIT_HOOK: std::cell::RefCell<
+        Option<Box<dyn FnOnce()>>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn install_before_source_backed_commit_hook_for_test(hook: impl FnOnce() + 'static) {
+    BEFORE_SOURCE_BACKED_COMMIT_HOOK.with(|slot| {
+        let previous = slot.replace(Some(Box::new(hook)));
+        assert!(
+            previous.is_none(),
+            "source-backed precommit test hooks must not be nested"
+        );
+    });
+}
+
+#[cfg(test)]
+fn run_before_source_backed_commit_hook() {
+    BEFORE_SOURCE_BACKED_COMMIT_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_before_source_backed_commit_hook() {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceBackedRefreshProgress {
     pub phase: &'static str,
@@ -613,7 +643,11 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 route_identity.clone(),
                 automatic_missing_observed_at_unix_ms,
                 AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS,
-                move || true,
+                move || {
+                    paths
+                        .iter()
+                        .all(|path| path_presence(path) == PathPresence::Missing)
+                },
             )?;
             writer.finish_source_route_stage(route_identity)?;
             successful_this_attempt.insert(route_identity.clone());
@@ -670,6 +704,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         }
 
         let commit_started = Instant::now();
+        run_before_source_backed_commit_hook();
         let commit = writer.commit_with_complete_inventory_revalidation(
             |target| {
                 let source = match target {

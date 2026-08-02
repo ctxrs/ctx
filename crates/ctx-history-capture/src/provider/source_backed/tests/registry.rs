@@ -774,6 +774,78 @@ fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
 }
 
 #[test]
+fn certified_missing_route_reappearance_at_precommit_cannot_delete_the_route() {
+    let temp = tempdir().unwrap();
+    let provider = CaptureProvider::Gemini;
+    let format = GEMINI_CLI_SOURCE_FORMAT;
+    let reappearing_path = temp.path().join("reappearing-history.jsonl");
+
+    let mut present = SourceBackedProviderRegistry::new();
+    present.register(fixture_route(provider, format, 62));
+    let initial =
+        refresh_source_backed_generation(temp.path(), &present, WriterOptions::default()).unwrap();
+    let initial_generation = initial.commit.generation_id.clone();
+    let route_id = initial.commit.manifest().source_routes()[0]
+        .route_identity()
+        .clone();
+
+    let missing_registry = || {
+        let mut source = fixture_provider_source_at(
+            provider,
+            format,
+            ProviderImportSupport::Native,
+            reappearing_path.clone(),
+        );
+        source.status = ProviderSourceStatus::Missing;
+        source.exists = false;
+        let mut registry = SourceBackedProviderRegistry::new();
+        registry.register(
+            SourceBackedRoute::certified_missing(
+                source,
+                SourceBackedSelectorAuthority::DiscoveredWinner,
+            )
+            .unwrap(),
+        );
+        registry
+    };
+
+    for _ in 1..AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS {
+        refresh_source_backed_generation(
+            temp.path(),
+            &missing_registry(),
+            WriterOptions::default(),
+        )
+        .unwrap();
+    }
+    let retained_generation = VerifiedIndex::open(temp.path())
+        .unwrap()
+        .generation_id()
+        .to_owned();
+    assert_ne!(retained_generation, initial_generation);
+
+    let hook_path = reappearing_path.clone();
+    install_before_source_backed_commit_hook_for_test(move || {
+        fs::write(hook_path, b"reappeared before commit\n").unwrap();
+    });
+    let error = refresh_source_backed_generation(
+        temp.path(),
+        &missing_registry(),
+        WriterOptions::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::Index(IndexError::SourceInvalidated(ref invalidated))
+            if invalidated == route_id.as_str()
+    ));
+
+    let retained = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(retained.generation_id(), retained_generation);
+    assert!(retained.manifest().source_route(&route_id).is_some());
+    assert_eq!(retained.document_count(), 1);
+}
+
+#[test]
 fn mutating_refresh_rejects_an_unclaimed_base_source_from_the_same_family() {
     let mut initial_registry = SourceBackedProviderRegistry::new();
     initial_registry.register(fixture_route(

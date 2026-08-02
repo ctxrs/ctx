@@ -249,18 +249,13 @@ impl CoreRefreshEngine {
             })
     }
 
-    pub(in crate::semantic) fn reconcile_watch_routes(
+    pub(in crate::semantic) fn initialize_watch_route_authority(
         &self,
         routes: impl IntoIterator<Item = SourceRouteIdentity>,
-        watermark: EventWatermark,
-        observed_at_ms: u64,
     ) {
         let routes = routes.into_iter().collect::<BTreeSet<_>>();
         let mut state = self.lock_state();
         state.dirty_routes.retain_exact_routes(&routes);
-        state
-            .dirty_routes
-            .seed_exact_routes(routes.iter().cloned(), watermark, observed_at_ms);
         for continuation in state.manual_all_continuations.values_mut() {
             for route in &routes {
                 continuation.invalidate_route(route);
@@ -268,6 +263,20 @@ impl CoreRefreshEngine {
         }
         state.known_route_ids = routes;
         state.watch_routes_initialized = true;
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn reconcile_watch_routes(
+        &self,
+        routes: impl IntoIterator<Item = SourceRouteIdentity>,
+        watermark: EventWatermark,
+        observed_at_ms: u64,
+    ) {
+        let routes = routes.into_iter().collect::<BTreeSet<_>>();
+        self.initialize_watch_route_authority(routes.iter().cloned());
+        self.lock_state()
+            .dirty_routes
+            .seed_exact_routes(routes, watermark, observed_at_ms);
     }
 
     pub(in crate::semantic) fn record_watch_routes(
@@ -311,6 +320,7 @@ impl CoreRefreshEngine {
     pub(in crate::semantic) fn schedule_pending_missing_route_rechecks(
         &self,
         data_root: &Path,
+        watcher_watermark: EventWatermark,
         observed_at_ms: u64,
     ) -> Result<usize> {
         let Some(index) = open_published_generation(data_root)? else {
@@ -342,7 +352,7 @@ impl CoreRefreshEngine {
             .into_iter()
             .filter(|route| state.known_route_ids.contains(route))
             .collect::<Vec<_>>();
-        let watermark = state.dirty_routes.seed_watermark();
+        let watermark = state.dirty_routes.seed_watermark().max(watcher_watermark);
         Ok(state
             .dirty_routes
             .seed_clean_exact_routes(pending, watermark, observed_at_ms))

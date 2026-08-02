@@ -42,6 +42,108 @@ enum SourceRefreshProtocolState {
     Failed,
 }
 
+const TYPED_UNKNOWN_RECOVERY_ATTEMPT_LIMIT: usize = 3;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum SourceRefreshRequestRecoveryFailureReason {
+    AttemptsExhausted,
+    NoRequestIdProgress,
+}
+
+#[derive(Debug)]
+pub(super) struct SourceRefreshRequestRecoveryFailed {
+    pub(super) request_id: String,
+    pub(super) recovery_attempts: usize,
+    pub(super) reason: SourceRefreshRequestRecoveryFailureReason,
+}
+
+impl fmt::Display for SourceRefreshRequestRecoveryFailed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let reason = match self.reason {
+            SourceRefreshRequestRecoveryFailureReason::AttemptsExhausted => {
+                "typed unknown-request recovery attempts were exhausted"
+            }
+            SourceRefreshRequestRecoveryFailureReason::NoRequestIdProgress => {
+                "typed unknown-request recovery repeated a prior request ID"
+            }
+        };
+        write!(
+            formatter,
+            "daemon source refresh request {} was lost after {} recovery attempts: {reason}",
+            self.request_id, self.recovery_attempts
+        )
+    }
+}
+
+impl std::error::Error for SourceRefreshRequestRecoveryFailed {}
+
+#[derive(Debug)]
+pub(super) struct TypedUnknownRequestRecovery {
+    attempts: usize,
+    seen_request_ids: BTreeSet<String>,
+}
+
+impl TypedUnknownRequestRecovery {
+    pub(super) fn new(initial_request_id: &str) -> Self {
+        Self {
+            attempts: 0,
+            seen_request_ids: BTreeSet::from([initial_request_id.to_owned()]),
+        }
+    }
+
+    fn begin_attempt(&mut self, request_id: &str) -> Result<StdDuration> {
+        if self.attempts >= TYPED_UNKNOWN_RECOVERY_ATTEMPT_LIMIT {
+            return Err(SourceRefreshRequestRecoveryFailed {
+                request_id: request_id.to_owned(),
+                recovery_attempts: self.attempts,
+                reason: SourceRefreshRequestRecoveryFailureReason::AttemptsExhausted,
+            }
+            .into());
+        }
+        let backoff = match self.attempts {
+            0 => StdDuration::from_millis(25),
+            1 => StdDuration::from_millis(50),
+            _ => StdDuration::from_millis(100),
+        };
+        self.attempts = self.attempts.saturating_add(1);
+        Ok(backoff)
+    }
+
+    fn accept_recovered_request_id(
+        &mut self,
+        previous_request_id: &str,
+        recovered_request_id: String,
+    ) -> Result<String> {
+        if recovered_request_id == previous_request_id
+            || !self.seen_request_ids.insert(recovered_request_id.clone())
+        {
+            return Err(SourceRefreshRequestRecoveryFailed {
+                request_id: recovered_request_id,
+                recovery_attempts: self.attempts,
+                reason: SourceRefreshRequestRecoveryFailureReason::NoRequestIdProgress,
+            }
+            .into());
+        }
+        Ok(recovered_request_id)
+    }
+}
+
+pub(super) fn recover_typed_unknown_request_with<S, R>(
+    recovery: &mut TypedUnknownRequestRecovery,
+    request_id: &str,
+    sleep: S,
+    reenqueue: R,
+) -> Result<String>
+where
+    S: FnOnce(StdDuration),
+    R: FnOnce() -> Result<String>,
+{
+    let backoff = recovery.begin_attempt(request_id)?;
+    sleep(backoff);
+    let recovered_request_id = reenqueue()?;
+    recovery.accept_recovered_request_id(request_id, recovered_request_id)
+}
+
 /// Coordinates source-backed refresh without ever falling back to a foreground
 /// writer. The returned reader is already pinned to one verified generation.
 pub(crate) fn coordinate_source_backed_refresh(
@@ -121,6 +223,8 @@ fn coordinate_source_backed_refresh_with_catalog(
     };
     validate_daemon_refresh_response(&response)?;
     let request_id = response_request_id(&response, "daemon source refresh response")?;
+    validate_source_refresh_status_response_authority(&response, &request_id)?;
+    source_refresh_protocol_state(&response)?;
 
     if mode == SourceBackedRefreshMode::Background {
         let pin = pin_published_generation(data_root)?.ok_or_else(|| {
@@ -161,6 +265,7 @@ pub(super) fn wait_for_published_generation(
     allow_daemon_autostart: bool,
     fail_on_source_failure: bool,
 ) -> Result<SourceBackedRefreshObservation> {
+    let mut unknown_request_recovery = TypedUnknownRequestRecovery::new(&request_id);
     loop {
         let response = match daemon_source_refresh_request(
             data_root,
@@ -208,18 +313,27 @@ pub(super) fn wait_for_published_generation(
             }
         };
         if source_refresh_request_is_unknown(&response, &request_id)? {
-            request_id = enqueue_equivalent_wait_refresh_request(
-                data_root,
-                expected_catalog,
-                fail_on_source_failure,
+            let lost_request_id = request_id.clone();
+            request_id = recover_typed_unknown_request_with(
+                &mut unknown_request_recovery,
+                &lost_request_id,
+                std::thread::sleep,
+                || {
+                    enqueue_equivalent_wait_refresh_request(
+                        data_root,
+                        expected_catalog,
+                        fail_on_source_failure,
+                    )
+                },
             )
             .with_context(|| {
                 format!(
-                    "reattach unknown daemon source refresh request {request_id} using caller authority"
+                    "reattach unknown daemon source refresh request {lost_request_id} using caller authority"
                 )
             })?;
             continue;
         }
+        validate_source_refresh_status_response_authority(&response, &request_id)?;
         validate_daemon_refresh_response(&response)?;
         match source_refresh_protocol_state(&response)? {
             SourceRefreshProtocolState::Published => {
@@ -341,7 +455,10 @@ fn enqueue_equivalent_wait_refresh_request(
         ))
     })?;
     validate_daemon_refresh_response(&response)?;
-    response_request_id(&response, "recovered daemon source refresh response")
+    let request_id = response_request_id(&response, "recovered daemon source refresh response")?;
+    validate_source_refresh_status_response_authority(&response, &request_id)?;
+    source_refresh_protocol_state(&response)?;
+    Ok(request_id)
 }
 
 fn send_wait_authority_request(
@@ -386,6 +503,22 @@ fn source_refresh_protocol_state(response: &Value) -> Result<SourceRefreshProtoc
         None => Err(anyhow!(
             "daemon source refresh response has no request state"
         )),
+    }
+}
+
+pub(super) fn validate_source_refresh_status_response_authority(
+    response: &Value,
+    expected_request_id: &str,
+) -> Result<()> {
+    let exact = response.get("schema_version").and_then(Value::as_u64) == Some(1)
+        && response.get("owner").and_then(Value::as_str) == Some("daemon")
+        && response.get("request_id").and_then(Value::as_str) == Some(expected_request_id);
+    if exact {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "daemon source refresh status response does not match the polled request authority"
+        ))
     }
 }
 
