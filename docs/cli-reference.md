@@ -471,12 +471,12 @@ ctx data root preserves that identity and its selected backend; copying
 The public Pro query surface is:
 
 ```bash
-ctx blame <target> [--type file|commit|pr] [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
+ctx blame <target> [--type file|commit|pr] [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--evidence-preview] [--format json]
 
 # Explicit compatibility forms
-ctx blame file <path> [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
-ctx blame commit <sha> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
-ctx blame pr <positive-number-or-canonical-url> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
+ctx blame file <path> [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--evidence-preview] [--format json]
+ctx blame commit <sha> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--evidence-preview] [--format json]
+ctx blame pr <positive-number-or-canonical-url> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--evidence-preview] [--format json]
 ```
 
 Without `--type`, shorthand classification is deterministic and conservative:
@@ -493,6 +493,16 @@ The `file`, `commit`, and `pr` subcommands remain supported compatibility forms
 with their existing arguments and output behavior. Those three words therefore
 retain subcommand precedence as the first token; for example, use
 `ctx blame file file` to query a file literally named `file`.
+
+`--evidence-preview` is off by default, human-only, and must be requested for
+each invocation. It adds bounded exact excerpts from cited local history plus a
+`ctx show event <ctx-event-id>` follow-up for the complete cited record. Current
+eligible previews are conservative Codex file and commit evidence; other
+evidence may show the preview as unavailable. Unsupported, stale, or ambiguous
+evidence may be omitted from the preview without changing attribution or the
+underlying `BlameResult`. Combining `--evidence-preview` with `--format json` is
+rejected with `invalid_request`. JSON and MCP have no evidence-preview surface,
+and their schemas remain unchanged.
 
 There are no Pro `show`, `timeline`, `facts`, or `related` compatibility
 aliases. OSS `ctx show session|event` remains unchanged. The CLI blame limit defaults to 20
