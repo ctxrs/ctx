@@ -322,20 +322,66 @@ fn forced_rearm_observes_a_recreated_recursive_root() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn forced_rearm_conservatively_dirties_a_route_mutated_in_the_registration_gap() {
+fn clean_forced_rearm_emits_no_catalog_routes() {
+    let temp = tempfile::tempdir().expect("create watcher fixture");
+    let data_root = temp.path().join("data");
+    let provider_root = temp.path().join("provider");
+    fs::create_dir_all(&data_root).expect("create data root");
+    fs::create_dir_all(&provider_root).expect("create provider root");
+    fs::write(provider_root.join("history.jsonl"), b"{\"event\":1}\n")
+        .expect("write initial source");
+    let catalog = watch_catalog([catalog_route(
+        CaptureProvider::Codex,
+        provider_root,
+        "codex_session_jsonl_tree",
+    )]);
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let mut watcher = DaemonFileWatcher::start(&data_root, wakeup, catalog_owner(catalog))
+        .expect("start watcher");
+
+    let (affected, registration) = watcher.reconcile_roots(true);
+    registration.expect("force native watcher re-registration");
+
+    assert!(affected.routes.is_empty());
+    assert!(affected.reconcile.is_none());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_rearm_emits_only_the_route_mutated_during_registration_overlap() {
     let temp = tempfile::tempdir().expect("create watcher fixture");
     let data_root = temp.path().join("data");
     let provider_root = temp.path().join("provider");
     let provider_file = provider_root.join("history.jsonl");
+    let healthy_root = temp.path().join("healthy");
+    let healthy_file = healthy_root.join("history.jsonl");
     fs::create_dir_all(&data_root).expect("create data root");
     fs::create_dir_all(&provider_root).expect("create provider root");
+    fs::create_dir_all(&healthy_root).expect("create healthy root");
     fs::write(&provider_file, b"{\"event\":1}\n").expect("write initial source");
-    let catalog = watch_catalog([catalog_route(
-        CaptureProvider::Codex,
-        provider_root.clone(),
-        "codex_session_jsonl_tree",
-    )]);
-    let route = catalog.route_ids().next().unwrap().clone();
+    fs::write(&healthy_file, b"{\"event\":1}\n").expect("write healthy source");
+    let catalog = watch_catalog([
+        catalog_route(
+            CaptureProvider::Codex,
+            provider_root.clone(),
+            "codex_session_jsonl_tree",
+        ),
+        catalog_route(
+            CaptureProvider::Claude,
+            healthy_root,
+            "claude_projects_jsonl_tree",
+        ),
+    ]);
+    let route = catalog
+        .routes_overlapping_path(&provider_file)
+        .into_iter()
+        .next()
+        .expect("mutated route");
+    let healthy_route = catalog
+        .routes_overlapping_path(&healthy_file)
+        .into_iter()
+        .next()
+        .expect("healthy route");
     let wakeup = Arc::new(DaemonWakeup::default());
     let mut watcher =
         DaemonFileWatcher::start(&data_root, Arc::clone(&wakeup), catalog_owner(catalog))
@@ -344,10 +390,10 @@ fn forced_rearm_conservatively_dirties_a_route_mutated_in_the_registration_gap()
     let hook_observed = Arc::clone(&mutation_observed);
     let hook_root = provider_root.clone();
     let hook_file = provider_file.clone();
-    watcher.install_rearm_gap_hook(move |unwatched| {
-        if unwatched == hook_root && !hook_observed.swap(true, Ordering::SeqCst) {
+    watcher.install_rearm_overlap_hook(move |watched| {
+        if watched == hook_root && !hook_observed.swap(true, Ordering::SeqCst) {
             fs::write(&hook_file, b"{\"event\":2}\n")
-                .expect("mutate source inside forced-rearm gap");
+                .expect("mutate source during forced-rearm overlap");
         }
     });
 
@@ -359,8 +405,11 @@ fn forced_rearm_conservatively_dirties_a_route_mutated_in_the_registration_gap()
         fs::read(&provider_file).expect("read gap mutation"),
         b"{\"event\":2}\n"
     );
-    assert_eq!(affected.routes.len(), 1);
-    assert!(affected.routes.contains_key(&route));
+    assert!(affected.routes.is_empty());
+    let observed = wakeup.wait(Duration::from_secs(3));
+    assert!(observed.filesystem, "overlap mutation did not wake watcher");
+    assert!(observed.source_watch.routes.contains_key(&route));
+    assert!(!observed.source_watch.routes.contains_key(&healthy_route));
 }
 
 #[test]

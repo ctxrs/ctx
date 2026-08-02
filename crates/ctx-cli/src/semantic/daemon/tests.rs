@@ -249,7 +249,50 @@ fn safety_reconciliation_recreates_a_failed_startup_watcher_without_healthy_cata
 
 #[cfg(target_os = "linux")]
 #[test]
-fn forced_watcher_recovery_seeds_a_route_mutated_inside_the_rearm_gap() -> Result<()> {
+fn clean_forced_watcher_recovery_schedules_zero_healthy_route_scans() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let data_root = temp.path().join("data");
+    let provider_root = temp.path().join("provider");
+    let provider_file = provider_root.join("history.jsonl");
+    fs::create_dir_all(&data_root)?;
+    fs::create_dir_all(&provider_root)?;
+    fs::write(&provider_file, b"{\"event\":1}\n")?;
+    let catalog = daemon_watch_test_catalog(provider_file);
+    let coordinator = CoreRefreshEngine::new();
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let mut watch_runtime = DaemonWatchRuntime::new(Arc::clone(&wakeup));
+    watch_runtime.reconcile_catalog_and_route_authority_with(
+        &data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::Startup,
+        false,
+        |_| Ok(catalog.clone()),
+        DaemonFileWatcher::start,
+    );
+    assert!(coordinator.watch_routes_initialized());
+    assert!(!coordinator.has_scheduled_route_work());
+
+    watch_runtime.reconcile_catalog_and_route_authority_with(
+        &data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::WatcherRecovery,
+        true,
+        |_| -> Result<SourceBackedWatchCatalog> {
+            panic!("watcher rearm must use the shared catalog snapshot")
+        },
+        |_, _, _| -> Result<DaemonFileWatcher> {
+            panic!("forced rearm must retain the current watcher owner")
+        },
+    );
+
+    assert!(!coordinator.has_scheduled_route_work());
+    assert!(!coordinator.enqueue_next_dirty_route(&data_root, u64::MAX)?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_watcher_recovery_emits_a_route_mutated_during_rearm_overlap() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let data_root = temp.path().join("data");
     let provider_root = temp.path().join("provider");
@@ -279,10 +322,10 @@ fn forced_watcher_recovery_seeds_a_route_mutated_inside_the_rearm_gap() -> Resul
     let hook_observed = Arc::clone(&mutation_observed);
     let hook_root = provider_root.clone();
     let hook_file = provider_file.clone();
-    watcher.install_rearm_gap_hook(move |unwatched| {
-        if unwatched == hook_root && !hook_observed.swap(true, Ordering::SeqCst) {
+    watcher.install_rearm_overlap_hook(move |watched| {
+        if watched == hook_root && !hook_observed.swap(true, Ordering::SeqCst) {
             fs::write(&hook_file, b"{\"event\":2}\n")
-                .expect("mutate provider source inside forced-rearm gap");
+                .expect("mutate provider source during forced-rearm overlap");
         }
     });
 
@@ -302,6 +345,11 @@ fn forced_watcher_recovery_seeds_a_route_mutated_inside_the_rearm_gap() -> Resul
     assert!(mutation_observed.load(Ordering::SeqCst));
     assert_eq!(fs::read(provider_file)?, b"{\"event\":2}\n");
     assert!(coordinator.watch_routes_initialized());
+    assert!(!coordinator.has_scheduled_route_work());
+    let observed = wakeup.wait(StdDuration::from_secs(3));
+    assert!(observed.filesystem, "overlap mutation did not wake watcher");
+    assert_eq!(observed.source_watch.routes.len(), 1);
+    coordinator.record_watch_routes(observed.source_watch.routes, source_route_ledger_now_ms());
     assert!(coordinator.has_scheduled_route_work());
     Ok(())
 }

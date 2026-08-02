@@ -287,7 +287,7 @@ impl WatchAuthority {
 }
 
 #[cfg(test)]
-type RearmGapHook = Box<dyn FnMut(&Path)>;
+type RearmOverlapHook = Box<dyn FnMut(&Path)>;
 
 pub(super) struct DaemonFileWatcher {
     data_root: PathBuf,
@@ -300,10 +300,44 @@ pub(super) struct DaemonFileWatcher {
     accepting_events: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
     last_error: Option<String>,
+    rearm_pending: bool,
     watcher_epoch: u64,
     callback_sequence: Arc<AtomicU64>,
     #[cfg(test)]
-    rearm_gap_hook: Option<RearmGapHook>,
+    rearm_overlap_hook: Option<RearmOverlapHook>,
+}
+
+fn native_file_watcher(
+    data_root: &Path,
+    sender: &mpsc::SyncSender<WatchMessage>,
+    counters: &Arc<Mutex<WatchCounters>>,
+    wakeup: &Arc<DaemonWakeup>,
+    accepting_events: &Arc<AtomicBool>,
+    watcher_epoch: u64,
+    callback_sequence: &Arc<AtomicU64>,
+) -> Result<RecommendedWatcher> {
+    let callback_data_root = data_root.to_path_buf();
+    let callback_sender = sender.clone();
+    let callback_counters = Arc::clone(counters);
+    let callback_wakeup = Arc::clone(wakeup);
+    let callback_accepting_events = Arc::clone(accepting_events);
+    let callback_sequence = Arc::clone(callback_sequence);
+    RecommendedWatcher::new(
+        move |event: notify::Result<Event>| {
+            forward_watch_event(
+                &callback_data_root,
+                &callback_counters,
+                &callback_sender,
+                &callback_wakeup,
+                &callback_accepting_events,
+                watcher_epoch,
+                &callback_sequence,
+                event,
+            );
+        },
+        Config::default(),
+    )
+    .context("start native daemon filesystem watcher")
 }
 
 impl DaemonFileWatcher {
@@ -318,28 +352,15 @@ impl DaemonFileWatcher {
         let accepting_events = Arc::new(AtomicBool::new(true));
         let watcher_epoch = NEXT_WATCHER_EPOCH.fetch_add(1, Ordering::Relaxed);
         let callback_sequence = Arc::new(AtomicU64::new(0));
-        let callback_sender = sender.clone();
-        let callback_counters = Arc::clone(&counters);
-        let callback_wakeup = Arc::clone(&wakeup);
-        let callback_accepting_events = Arc::clone(&accepting_events);
-        let callback_sequence_for_callback = Arc::clone(&callback_sequence);
-        let callback_data_root = data_root.to_path_buf();
-        let watcher = RecommendedWatcher::new(
-            move |event: notify::Result<Event>| {
-                forward_watch_event(
-                    &callback_data_root,
-                    &callback_counters,
-                    &callback_sender,
-                    &callback_wakeup,
-                    &callback_accepting_events,
-                    watcher_epoch,
-                    &callback_sequence_for_callback,
-                    event,
-                );
-            },
-            Config::default(),
-        )
-        .context("start native daemon filesystem watcher")?;
+        let watcher = native_file_watcher(
+            data_root,
+            &sender,
+            &counters,
+            &wakeup,
+            &accepting_events,
+            watcher_epoch,
+            &callback_sequence,
+        )?;
         let thread_authority = Arc::clone(&authority);
         let thread_counters = Arc::clone(&counters);
         let thread_wakeup = Arc::clone(&wakeup);
@@ -369,10 +390,11 @@ impl DaemonFileWatcher {
             accepting_events,
             thread: Some(thread),
             last_error: None,
+            rearm_pending: false,
             watcher_epoch,
             callback_sequence,
             #[cfg(test)]
-            rearm_gap_hook: None,
+            rearm_overlap_hook: None,
         };
         let (_, registration) = service.reconcile_roots(false);
         registration?;
@@ -392,10 +414,12 @@ impl DaemonFileWatcher {
         let catalog = authority.catalog.snapshot();
         let desired_paths = authority.target_paths();
         let desired = watch_roots(desired_paths.iter().map(PathBuf::as_path));
+        self.rearm_pending |= force_rearm;
+        let replace_native_watcher = self.rearm_pending;
         let registration_needed = desired.iter().any(|(path, recursive)| {
-            force_rearm || self.watched.get(path).copied() != Some(*recursive)
+            replace_native_watcher || self.watched.get(path).copied() != Some(*recursive)
         });
-        let affected = if registration_needed {
+        let affected = if registration_needed && !replace_native_watcher {
             catalog
                 .as_ref()
                 .map(|catalog| {
@@ -416,52 +440,88 @@ impl DaemonFileWatcher {
         self.last_error = catalog
             .is_none()
             .then(|| "watch catalog authority is unavailable".to_owned());
-        // A forced pass deliberately discards the in-memory registration
-        // cache. This repairs watches tied to deleted inodes or silently lost
-        // by the native backend even when the desired paths are unchanged.
-        let stale = self
-            .watched
-            .keys()
-            .filter(|path| !desired.contains_key(*path))
-            .cloned()
-            .collect::<Vec<_>>();
-        for path in stale {
-            if let Err(error) = self.watcher.unwatch(&path) {
-                self.last_error = Some(format!("unwatch {}: {error}", path.display()));
-            }
-            self.watched.remove(&path);
-        }
         let mut registration_attempts = 0_u64;
-        for (path, recursive) in &desired {
-            let current = self.watched.get(path).copied();
-            if !force_rearm && current == Some(*recursive) {
-                continue;
-            }
-            // Rearm one exact root at a time so unrelated roots remain live
-            // throughout a safety pass. This also removes an old registration
-            // before changing its recursive mode.
-            if current.is_some() {
-                if let Err(error) = self.watcher.unwatch(path) {
-                    self.last_error = Some(format!("unwatch {}: {error}", path.display()));
-                }
-                self.watched.remove(path);
-                #[cfg(test)]
-                if let Some(hook) = self.rearm_gap_hook.as_mut() {
-                    hook(path);
-                }
-            }
-            let mode = if *recursive {
-                RecursiveMode::Recursive
-            } else {
-                RecursiveMode::NonRecursive
-            };
-            registration_attempts = registration_attempts.saturating_add(1);
-            match self.watcher.watch(path, mode) {
-                Ok(()) => {
-                    self.watched.insert(path.clone(), *recursive);
+        if replace_native_watcher {
+            match native_file_watcher(
+                &self.data_root,
+                &self.sender,
+                &self.counters,
+                &self.wakeup,
+                &self.accepting_events,
+                self.watcher_epoch,
+                &self.callback_sequence,
+            ) {
+                Ok(mut replacement) => {
+                    let mut replacement_ready = true;
+                    for (path, recursive) in &desired {
+                        registration_attempts = registration_attempts.saturating_add(1);
+                        let mode = if *recursive {
+                            RecursiveMode::Recursive
+                        } else {
+                            RecursiveMode::NonRecursive
+                        };
+                        if let Err(error) = replacement.watch(path, mode) {
+                            replacement_ready = false;
+                            self.last_error = Some(format!("watch {}: {error}", path.display()));
+                        }
+                    }
+                    if replacement_ready {
+                        // Both native watchers are live during this hook. Any
+                        // mutation in the handoff is delivered through the
+                        // normal exact-route callback path, so a clean rearm
+                        // does not need to manufacture an all-routes batch.
+                        #[cfg(test)]
+                        for path in desired.keys() {
+                            if let Some(hook) = self.rearm_overlap_hook.as_mut() {
+                                hook(path);
+                            }
+                        }
+                        self.watcher = replacement;
+                        self.watched = desired;
+                        self.rearm_pending = false;
+                    }
                 }
                 Err(error) => {
-                    self.last_error = Some(format!("watch {}: {error}", path.display()));
+                    self.last_error = Some(error.to_string());
+                }
+            }
+        } else {
+            let stale = self
+                .watched
+                .keys()
+                .filter(|path| !desired.contains_key(*path))
+                .cloned()
+                .collect::<Vec<_>>();
+            for path in stale {
+                if let Err(error) = self.watcher.unwatch(&path) {
+                    self.last_error = Some(format!("unwatch {}: {error}", path.display()));
+                }
+                self.watched.remove(&path);
+            }
+            for (path, recursive) in &desired {
+                let current = self.watched.get(path).copied();
+                if current == Some(*recursive) {
+                    continue;
+                }
+                if current.is_some() {
+                    if let Err(error) = self.watcher.unwatch(path) {
+                        self.last_error = Some(format!("unwatch {}: {error}", path.display()));
+                    }
+                    self.watched.remove(path);
+                }
+                let mode = if *recursive {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                };
+                registration_attempts = registration_attempts.saturating_add(1);
+                match self.watcher.watch(path, mode) {
+                    Ok(()) => {
+                        self.watched.insert(path.clone(), *recursive);
+                    }
+                    Err(error) => {
+                        self.last_error = Some(format!("watch {}: {error}", path.display()));
+                    }
                 }
             }
         }
@@ -496,8 +556,8 @@ impl DaemonFileWatcher {
     }
 
     #[cfg(test)]
-    pub(super) fn install_rearm_gap_hook(&mut self, hook: impl FnMut(&Path) + 'static) {
-        self.rearm_gap_hook = Some(Box::new(hook));
+    pub(super) fn install_rearm_overlap_hook(&mut self, hook: impl FnMut(&Path) + 'static) {
+        self.rearm_overlap_hook = Some(Box::new(hook));
     }
 
     pub(super) fn write_receipt(&self, status: &str) -> Result<()> {
