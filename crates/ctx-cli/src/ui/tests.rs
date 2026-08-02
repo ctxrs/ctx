@@ -513,6 +513,55 @@ fn component_values_cannot_inject_ansi_or_terminal_controls() {
     assert!(direct.contains("\\x1b[2A"));
 }
 
+#[test]
+fn unicode_spoofing_controls_are_visible_safe_and_deterministic() {
+    const FORBIDDEN: &[char] = &[
+        '\u{061c}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}',
+        '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2060}', '\u{2066}', '\u{2067}',
+        '\u{2068}', '\u{2069}', '\u{206a}', '\u{206b}', '\u{206c}', '\u{206d}', '\u{206e}',
+        '\u{206f}', '\u{feff}',
+    ];
+    let controls = FORBIDDEN.iter().collect::<String>();
+    let benign = "café e\u{0301} 🧪👍🏽 🇺🇳 Καλημέρα 日本語";
+    let input = format!("before\u{1b}[2J{controls}after | {benign}");
+    let expected = concat!(
+        "before\\x1b[2J",
+        "\\u{061c}",
+        "\\u{200b}\\u{200c}\\u{200d}\\u{200e}\\u{200f}",
+        "\\u{202a}\\u{202b}\\u{202c}\\u{202d}\\u{202e}",
+        "\\u{2060}",
+        "\\u{2066}\\u{2067}\\u{2068}\\u{2069}",
+        "\\u{206a}\\u{206b}\\u{206c}\\u{206d}\\u{206e}\\u{206f}",
+        "\\u{feff}",
+        "after | café e\u{0301} 🧪👍🏽 🇺🇳 Καλημέρα 日本語\n",
+    );
+    let document = Document::from_line(Line::styled(input, Token::Heading));
+    let context =
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 120).color(ColorMode::Always));
+
+    let plain = document.render_plain();
+    let styled = document.render(&context);
+    assert_eq!(plain, expected);
+    assert_eq!(document.render_plain(), plain);
+    assert_eq!(document.render(&context), styled);
+    assert_eq!(strip_ansi(&styled), plain);
+    assert_eq!(
+        canonical_human_output_bytes(|_| document.clone()),
+        expected.len()
+    );
+    assert!(!plain.contains('\u{1b}'));
+    assert!(!styled.contains("\u{1b}[2J"));
+    assert!(plain.contains(benign));
+    assert_eq!(Span::text(benign).content(), benign);
+    for forbidden in FORBIDDEN {
+        assert!(!plain.contains(*forbidden), "plain retained {forbidden:?}");
+        assert!(
+            !styled.contains(*forbidden),
+            "styled retained {forbidden:?}"
+        );
+    }
+}
+
 #[derive(Clone, Default)]
 struct SharedWriter {
     bytes: Arc<Mutex<Vec<u8>>>,

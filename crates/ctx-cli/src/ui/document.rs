@@ -40,7 +40,8 @@ pub(super) fn neutralize_controls(text: &str) -> String {
             character
                 if character <= '\u{1f}'
                     || character == '\u{7f}'
-                    || ('\u{80}'..='\u{9f}').contains(&character) =>
+                    || ('\u{80}'..='\u{9f}').contains(&character)
+                    || is_terminal_spoofing_control(character) =>
             {
                 let _ = write!(safe, "\\u{{{:04x}}}", u32::from(character));
             }
@@ -48,6 +49,18 @@ pub(super) fn neutralize_controls(text: &str) -> String {
         }
     }
     safe
+}
+
+fn is_terminal_spoofing_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+    )
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
