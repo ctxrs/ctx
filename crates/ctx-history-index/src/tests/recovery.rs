@@ -226,6 +226,121 @@ fn pinned_generation_fails_closed_after_a_second_pointer_change() {
 }
 
 #[test]
+fn pinned_generation_real_publication_moves_active_to_previous_and_keeps_reads_valid() {
+    let temp = tempdir().unwrap();
+    let source = source("pinned-real-active-race.jsonl");
+    let expected = publish_pinned_test_generation(temp.path(), &source, 1, "first evidence");
+    let first_reader =
+        VerifiedIndex::open_pinned_generation(temp.path(), &expected.generation_id).unwrap();
+    let mut pointer_reads = 0;
+    let mut replacement = None;
+    let mut first_reader_valid_during_publication = false;
+
+    let resolved = VerifiedIndex::open_pinned_generation_with_pointer_loader(
+        temp.path(),
+        &expected.generation_id,
+        |root| {
+            pointer_reads += 1;
+            if pointer_reads == 2 {
+                replacement = Some(publish_pinned_test_generation(
+                    root,
+                    &source,
+                    2,
+                    "second evidence",
+                ));
+                first_reader_valid_during_publication =
+                    first_reader.count_term("first").unwrap() == 1;
+            }
+            load_active_generation_pointer(root)
+        },
+    )
+    .unwrap();
+
+    let replacement = replacement.expect("the publication hook did not commit a replacement");
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pointer_reads, 3,
+        "the real publication was not retried once"
+    );
+    assert_eq!(pointer.active().generation_id(), replacement.generation_id);
+    assert_eq!(
+        pointer.previous().unwrap().generation_id(),
+        expected.generation_id
+    );
+    assert!(first_reader_valid_during_publication);
+    assert_eq!(first_reader.count_term("first").unwrap(), 1);
+    assert_eq!(first_reader.count_term("second").unwrap(), 0);
+    assert_eq!(resolved.generation_id(), expected.generation_id);
+    assert_eq!(resolved.count_term("first").unwrap(), 1);
+    assert_eq!(resolved.count_term("second").unwrap(), 0);
+}
+
+#[test]
+fn pinned_generation_real_publication_evicts_previous_and_fails_closed_with_valid_read() {
+    let temp = tempdir().unwrap();
+    let source = source("pinned-real-eviction-race.jsonl");
+    let expected = publish_pinned_test_generation(temp.path(), &source, 1, "first evidence");
+    #[cfg(not(windows))]
+    let expected_path = active_generation_path(temp.path());
+    let first_reader =
+        VerifiedIndex::open_pinned_generation(temp.path(), &expected.generation_id).unwrap();
+    let previous = publish_pinned_test_generation(temp.path(), &source, 2, "second evidence");
+    let mut pointer_reads = 0;
+    let mut replacement = None;
+    let mut first_reader_valid_during_reclamation = false;
+
+    let result = VerifiedIndex::open_pinned_generation_with_pointer_loader(
+        temp.path(),
+        &expected.generation_id,
+        |root| {
+            pointer_reads += 1;
+            if pointer_reads == 2 {
+                replacement = Some(publish_pinned_test_generation(
+                    root,
+                    &source,
+                    3,
+                    "third evidence",
+                ));
+                first_reader_valid_during_reclamation =
+                    first_reader.count_term("first").unwrap() == 1;
+            }
+            load_active_generation_pointer(root)
+        },
+    );
+
+    let replacement = replacement.expect("the publication hook did not commit a replacement");
+    let error = match result {
+        Ok(_) => panic!("the evicted previous generation unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        IndexError::PinnedGenerationNotRetained {
+            expected_generation_id,
+            active_generation_id,
+            previous_generation_id: Some(previous_generation_id),
+        } if expected_generation_id == expected.generation_id
+            && active_generation_id == replacement.generation_id
+            && previous_generation_id == previous.generation_id
+    ));
+    assert_eq!(
+        pointer_reads, 3,
+        "the eviction race did not stop after one retry"
+    );
+    #[cfg(not(windows))]
+    assert!(
+        !expected_path.exists(),
+        "the evicted generation directory was not reclaimed"
+    );
+    assert!(first_reader_valid_during_reclamation);
+    assert_eq!(first_reader.count_term("first").unwrap(), 1);
+    assert_eq!(first_reader.count_term("second").unwrap(), 0);
+    assert_eq!(first_reader.count_term("third").unwrap(), 0);
+}
+
+#[test]
 fn failed_final_revalidation_keeps_the_previous_generation() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");

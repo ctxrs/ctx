@@ -65,6 +65,12 @@ impl VerifiedIndex {
     /// publication pointer. If that pointer changes while the generation is
     /// being resolved, the complete resolution is retried once against the
     /// new pointer and then fails closed on any second change.
+    ///
+    /// Like [`Self::open_pinned`], this performs reopen-time structural
+    /// verification of the selected manifest, payload, schema/policy contract,
+    /// Tantivy generation pin, and total document count. It does not repeat
+    /// publication-time physical checksums or the O(document-count) stored-Core
+    /// identity and source audit.
     pub fn open_pinned_generation(
         root: impl AsRef<Path>,
         expected_generation_id: &str,
