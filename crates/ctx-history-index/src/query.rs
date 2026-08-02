@@ -7,9 +7,9 @@ mod verification;
 pub use contract::*;
 use filtering::*;
 pub(crate) use records::stored_event_record;
+pub(crate) use records::validate_core_record_encoded_bytes;
 use records::{
-    core_event_fast_preflight, stored_core_event_record,
-    stored_core_event_record_if_encoded_size_at_most, stored_core_event_record_with_size,
+    core_event_fast_preflight, stored_core_event_record, stored_core_event_record_with_size,
     EventAddressCandidate, SessionEventAddressCandidate,
 };
 
@@ -64,6 +64,7 @@ const OCCURRED_AT_UNIX_MS_FIELD: &str = "occurred_at_unix_ms";
 const EVENT_IDENTITY_DIGEST_FIELD: &str = "event_identity_digest";
 const SOURCE_KEY_FIELD: &str = "source_key";
 const CORE_CONTENT_BYTES_FIELD: &str = "core_content_bytes";
+const CORE_RECORD_ENCODED_BYTES_FIELD: &str = "core_record_encoded_bytes";
 const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
 const SESSION_EVENT_ORDER_FIELD: &str = "session_event_order";
 const SEMANTIC_EVENT_ORDER_FIELD: &str = "semantic_event_order";

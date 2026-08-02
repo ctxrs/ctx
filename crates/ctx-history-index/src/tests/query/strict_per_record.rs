@@ -48,7 +48,7 @@ fn mixed_small_and_content_oversized_record_declines_before_any_stored_read_or_d
 }
 
 #[test]
-fn encoded_heavy_record_cannot_borrow_unused_aggregate_capacity_before_decode() {
+fn small_body_large_metadata_record_is_declined_before_materialization_or_decode() {
     let source = source("strict-per-record-encoded.jsonl");
     let mut encoded_heavy = document(&source, 1, "small");
     encoded_heavy.branch = Some("\u{0001}".repeat(16 * 1_024));
@@ -75,7 +75,7 @@ fn encoded_heavy_record_cannot_borrow_unused_aggregate_capacity_before_decode() 
         )
         .unwrap()
         .is_none());
-    assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
     assert_eq!(crate::query::core_record_decodes(), 0);
 }
 

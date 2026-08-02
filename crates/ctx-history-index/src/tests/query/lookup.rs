@@ -660,10 +660,11 @@ fn corrupt_stored_core_fails_closed_during_exhaustive_open() {
     let original: TantivyDocument = searcher.doc(address).unwrap();
     let mut malformed = TantivyDocument::default();
     for (field, value) in original.iter_fields_and_values() {
-        if field != fields.core_record {
+        if field != fields.core_record && field != fields.core_record_encoded_bytes {
             malformed.add_field_value(field, value);
         }
     }
+    malformed.add_u64(fields.core_record_encoded_bytes, 1);
     malformed.add_bytes(fields.core_record, b"{");
     drop(searcher);
 
@@ -831,7 +832,7 @@ fn strict_core_event_batch_rejects_fast_content_overflow_before_stored_materiali
 }
 
 #[test]
-fn strict_core_event_batch_materializes_at_most_one_encoded_heavy_record_before_declining() {
+fn strict_core_event_batch_rejects_encoded_heavy_candidates_before_materialization() {
     let temp = tempdir().unwrap();
     let source = source("strict-encoded-preflight.jsonl");
     let escaped_metadata = "\u{0001}".repeat(16 * 1024);
@@ -867,12 +868,12 @@ fn strict_core_event_batch_materializes_at_most_one_encoded_heavy_record_before_
         )
         .unwrap()
         .is_none());
-    assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
     assert_eq!(crate::query::core_record_decodes(), 0);
 }
 
 #[test]
-fn strict_core_event_batch_aggregate_overflow_skips_the_second_stored_document_and_decode() {
+fn strict_core_event_batch_aggregate_overflow_skips_all_stored_documents_and_decodes() {
     let temp = tempdir().unwrap();
     let source = source("strict-zero-encoded-remainder.jsonl");
     let first = document(&source, 1, "first exact encoded budget");
@@ -898,12 +899,12 @@ fn strict_core_event_batch_aggregate_overflow_skips_the_second_stored_document_a
         )
         .unwrap()
         .is_none());
-    assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
-    assert_eq!(crate::query::core_record_decodes(), 1);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+    assert_eq!(crate::query::core_record_decodes(), 0);
 }
 
 #[test]
-fn strict_core_event_batch_nonzero_encoded_remainder_materializes_one_raw_without_decode() {
+fn strict_core_event_batch_nonzero_encoded_shortfall_skips_all_stored_documents() {
     let temp = tempdir().unwrap();
     let source = source("strict-nonzero-encoded-remainder.jsonl");
     let first = document(&source, 1, "first retained body");
@@ -931,8 +932,8 @@ fn strict_core_event_batch_nonzero_encoded_remainder_materializes_one_raw_withou
         )
         .unwrap()
         .is_none());
-    assert_eq!(crate::query::stored_core_event_record_materializations(), 2);
-    assert_eq!(crate::query::core_record_decodes(), 1);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+    assert_eq!(crate::query::core_record_decodes(), 0);
 }
 
 #[test]
@@ -1048,6 +1049,62 @@ fn strict_core_event_batch_rejects_forged_fast_content_size_after_decode() {
     );
     assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
     assert_eq!(crate::query::core_record_decodes(), 1);
+}
+
+#[test]
+fn strict_core_event_batch_rejects_forged_fast_encoded_size_before_decode() {
+    let temp = tempdir().unwrap();
+    let source = source("strict-forged-encoded-size.jsonl");
+    let record = document(&source, 1, "actual encoded size");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(record.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    let fields = fields_from_schema(searcher.schema()).unwrap();
+    let complete = indexed_document(record.clone());
+    let mut forged = TantivyDocument::default();
+    for (field, value) in complete.field_values() {
+        if field != fields.core_record_encoded_bytes {
+            forged.add_field_value(field, value);
+        }
+    }
+    forged.add_u64(
+        fields.core_record_encoded_bytes,
+        u64::try_from(record.encode_stored().unwrap().len() + 1).unwrap(),
+    );
+    drop(searcher);
+
+    let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
+    let index = Index::open(directory).unwrap();
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        manifest,
+        std::slice::from_ref(&source),
+        vec![forged],
+    );
+    let pinned = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    crate::query::reset_stored_core_event_record_materializations();
+    crate::query::reset_core_record_decodes();
+    let result = pinned.core_events_by_ids_with_strict_budget(
+        &[record.event_id.as_uuid()],
+        1,
+        DEFAULT_CORE_EVENT_PAGE_BUDGET,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(IndexError::InvalidStoredDocumentField(
+                "core_record_encoded_bytes"
+            ))
+        ),
+        "unexpected strict corruption result: {result:?}"
+    );
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
+    assert_eq!(crate::query::core_record_decodes(), 0);
 }
 
 #[test]

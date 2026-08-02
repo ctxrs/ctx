@@ -30,6 +30,7 @@ pub(crate) fn prior_core_record(
             .ok_or(IndexError::EmptyDocumentField {
                 field: "core_record",
             })?;
+        crate::query::validate_core_record_encoded_bytes(searcher, address, bytes.len())?;
         let decoded = CoreRecord::decode_stored(bytes)?;
         if decoded.event_id != identity {
             return Err(IndexError::InvalidStoredDocumentField("core_record"));
