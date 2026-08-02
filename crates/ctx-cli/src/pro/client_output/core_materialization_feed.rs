@@ -19,7 +19,7 @@ use ctx_pro_host_protocol::{
     FinishCoreMaterializationRequest, HelperMessage, HostMessage, StatusRequest,
     MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES, MAX_CORE_EVENT_DELTA_PAGE_ITEMS,
     MAX_CORE_EVENT_STATE_PAGE_ITEMS, MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
-    MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES,
+    MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES, MAX_CORE_SOURCE_STATES,
 };
 use serde::Serialize;
 
@@ -202,53 +202,87 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
     let mut event_delta_pages = 0_u64;
 
     if !began.replayed {
+        let maximum_reconciliations = sources
+            .len()
+            .checked_add(MAX_CORE_SOURCE_STATES)
+            .ok_or_else(|| anyhow!("invalid_response: source reconciliation bound overflowed"))?;
         let deltas = core_snapshot_deltas(&sources);
         let delta_pages =
             build_delta_pages(&began.materialization_id, index.generation_id(), deltas)?;
         source_delta_pages = u32::try_from(delta_pages.len())
             .map_err(|_| anyhow!("invalid_request: Core delta page count overflowed"))?;
+        let mut next_materialize_index = 0_u32;
+        let mut reconciled_source_ids = BTreeSet::new();
         let mut reconcile_sources = Vec::new();
         for page in delta_pages {
-            let acknowledgement_identity = page.acknowledgement_identity();
-            let request = ApplyCoreSourceDeltaPageRequest { page };
-            let applied = consumer.apply_source_delta(request)?;
-            applied
-                .validate_for_identity(&acknowledgement_identity)
-                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-            changed_sources = changed_sources
-                .checked_add(applied.changed_sources)
-                .ok_or_else(|| anyhow!("invalid_response: changed-source count overflowed"))?;
-            removed_sources = removed_sources
-                .checked_add(applied.removed_sources)
-                .ok_or_else(|| anyhow!("invalid_response: removal count overflowed"))?;
-            reconcile_sources.extend(applied.reconcile_sources);
-        }
-
-        reconcile_sources.sort_by_key(|item| item.materialize_index);
-        let mut reconciled_source_ids = BTreeSet::new();
-        for (expected_index, reconciliation) in reconcile_sources.iter().enumerate() {
-            if usize::try_from(reconciliation.materialize_index).ok() != Some(expected_index) {
-                bail!("invalid_response: Core reconciliation indices are not contiguous");
-            }
-            let source_id = reconciliation.delta.source().identity().digest();
-            if !reconciled_source_ids.insert(source_id) {
-                bail!("invalid_response: Core reconciliations repeat a stable source identity");
-            }
-            match &reconciliation.delta {
-                CoreSourceDelta::Present(state) => {
-                    if !sources.iter().any(|current| current == state) {
+            let mut acknowledgement_page_index = 0_u32;
+            loop {
+                let request = ApplyCoreSourceDeltaPageRequest {
+                    page: page.clone(),
+                    acknowledgement_page_index,
+                };
+                request
+                    .validate()
+                    .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+                let acknowledgement_identity = request.acknowledgement_identity();
+                let applied = consumer.apply_source_delta(request)?;
+                applied
+                    .validate_for_identity(&acknowledgement_identity)
+                    .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+                changed_sources = changed_sources
+                    .checked_add(applied.changed_sources)
+                    .ok_or_else(|| anyhow!("invalid_response: changed-source count overflowed"))?;
+                removed_sources = removed_sources
+                    .checked_add(applied.removed_sources)
+                    .ok_or_else(|| anyhow!("invalid_response: removal count overflowed"))?;
+                let acknowledgement_terminal = applied.acknowledgement_terminal;
+                for reconciliation in applied.reconcile_sources {
+                    if reconciliation.materialize_index != next_materialize_index {
+                        bail!("invalid_response: Core reconciliation indices are not contiguous");
+                    }
+                    next_materialize_index =
+                        next_materialize_index.checked_add(1).ok_or_else(|| {
+                            anyhow!("invalid_response: Core reconciliation index overflowed")
+                        })?;
+                    let source_id = reconciliation.delta.source().identity().digest();
+                    if !reconciled_source_ids.insert(source_id) {
                         bail!(
-                            "invalid_response: Core reconciliation carries a stale current source"
+                            "invalid_response: Core reconciliations repeat a stable source identity"
                         );
                     }
-                }
-                CoreSourceDelta::Removed(removal) => {
-                    if sources.iter().any(|current| {
-                        current.source.identity().digest() == removal.source.identity().digest()
-                    }) {
-                        bail!("invalid_response: Core reconciliation removes a current source");
+                    match &reconciliation.delta {
+                        CoreSourceDelta::Present(state) => {
+                            if !sources.iter().any(|current| current == state) {
+                                bail!(
+                                    "invalid_response: Core reconciliation carries a stale current source"
+                                );
+                            }
+                        }
+                        CoreSourceDelta::Removed(removal) => {
+                            if sources.iter().any(|current| {
+                                current.source.identity().digest()
+                                    == removal.source.identity().digest()
+                            }) {
+                                bail!(
+                                    "invalid_response: Core reconciliation removes a current source"
+                                );
+                            }
+                        }
                     }
+                    if reconcile_sources.len() >= maximum_reconciliations {
+                        bail!(
+                            "invalid_response: Core reconciliations exceed current and prior source bounds"
+                        );
+                    }
+                    reconcile_sources.push(reconciliation);
                 }
+                if acknowledgement_terminal {
+                    break;
+                }
+                acknowledgement_page_index =
+                    acknowledgement_page_index.checked_add(1).ok_or_else(|| {
+                        anyhow!("invalid_response: Core acknowledgement page index overflowed")
+                    })?;
             }
         }
         for reconciliation in reconcile_sources {

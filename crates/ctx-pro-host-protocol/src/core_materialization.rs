@@ -19,11 +19,9 @@ use validation::{
     validate_source_states,
 };
 
-pub const CORE_MATERIALIZATION_CONTRACT_VERSION: u16 = 2;
+pub const CORE_MATERIALIZATION_CONTRACT_VERSION: u16 = 3;
 pub const MAX_CORE_SOURCE_STATES: usize = 16_384;
 pub const MAX_CORE_SOURCE_DELTA_PAGE_ITEMS: usize = 256;
-pub const MAX_CORE_TERMINAL_SOURCE_RECONCILIATIONS: usize =
-    MAX_CORE_SOURCE_STATES + MAX_CORE_SOURCE_DELTA_PAGE_ITEMS;
 pub const MAX_CORE_EVENT_STATE_PAGE_ITEMS: usize = 256;
 pub const MAX_CORE_EVENT_DELTA_PAGE_ITEMS: usize = 256;
 pub const MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES: usize = 16 * 1024 * 1024;
@@ -471,13 +469,17 @@ impl CoreSourceDeltaPage {
     /// The page must already have passed [`Self::validate`]. Keeping this
     /// compact identity lets an internal producer move the owned page into the
     /// transport without retaining or re-encoding the complete request.
-    pub fn acknowledgement_identity(&self) -> CoreSourceDeltaPageAcknowledgementIdentity {
+    pub fn acknowledgement_identity(
+        &self,
+        acknowledgement_page_index: u32,
+    ) -> CoreSourceDeltaPageAcknowledgementIdentity {
         CoreSourceDeltaPageAcknowledgementIdentity {
             materialization_id: self.materialization_id.clone(),
             core_generation_id: self.core_generation_id.clone(),
             page_index: self.page_index,
             terminal: self.terminal,
             deltas: self.deltas.clone(),
+            acknowledgement_page_index,
         }
     }
 }
@@ -489,17 +491,31 @@ pub struct CoreSourceDeltaPageAcknowledgementIdentity {
     page_index: u32,
     terminal: bool,
     deltas: Vec<CoreSourceDelta>,
+    acknowledgement_page_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyCoreSourceDeltaPageRequest {
     pub page: CoreSourceDeltaPage,
+    pub acknowledgement_page_index: u32,
 }
 
 impl ApplyCoreSourceDeltaPageRequest {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        self.page.validate()
+        self.page.validate()?;
+        validate_encoded_bound(
+            self,
+            MAX_CORE_CONTROL_WIRE_BYTES,
+            "Core source delta request exceeds its control wire bound",
+        )
+    }
+
+    /// Captures the complete source-page and acknowledgement-page CAS before
+    /// an owned request moves into the transport.
+    pub fn acknowledgement_identity(&self) -> CoreSourceDeltaPageAcknowledgementIdentity {
+        self.page
+            .acknowledgement_identity(self.acknowledgement_page_index)
     }
 }
 
@@ -509,6 +525,8 @@ pub struct CoreSourceDeltaPageApplied {
     pub materialization_id: String,
     pub core_generation_id: String,
     pub page_index: u32,
+    pub acknowledgement_page_index: u32,
+    pub acknowledgement_terminal: bool,
     pub changed_sources: u32,
     pub removed_sources: u32,
     pub reconcile_sources: Vec<CoreSourceReconciliation>,
@@ -516,9 +534,12 @@ pub struct CoreSourceDeltaPageApplied {
 }
 
 impl CoreSourceDeltaPageApplied {
-    pub fn validate_for(&self, page: &CoreSourceDeltaPage) -> Result<(), ProtocolError> {
-        page.validate()?;
-        self.validate_for_identity(&page.acknowledgement_identity())
+    pub fn validate_for(
+        &self,
+        request: &ApplyCoreSourceDeltaPageRequest,
+    ) -> Result<(), ProtocolError> {
+        request.validate()?;
+        self.validate_for_identity(&request.acknowledgement_identity())
     }
 
     pub fn validate_for_identity(
@@ -527,15 +548,22 @@ impl CoreSourceDeltaPageApplied {
     ) -> Result<(), ProtocolError> {
         validate_sha256(&self.materialization_id, "Core materialization ID")?;
         validate_sha256(&self.core_generation_id, "Core generation ID")?;
-        let maximum_reconciliations = if identity.terminal {
-            MAX_CORE_TERMINAL_SOURCE_RECONCILIATIONS
-        } else {
-            MAX_CORE_SOURCE_DELTA_PAGE_ITEMS
-        };
-        if self.reconcile_sources.len() > maximum_reconciliations {
+        if self.reconcile_sources.len() > MAX_CORE_SOURCE_DELTA_PAGE_ITEMS {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,
                 "Core source delta acknowledgement exceeds its reconciliation item bound",
+            ));
+        }
+        if !self.acknowledgement_terminal && self.reconcile_sources.is_empty() {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "Core source delta acknowledgement cannot be empty before terminal",
+            ));
+        }
+        if !identity.terminal && !self.acknowledgement_terminal {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "nonterminal Core source delta pages must complete in one acknowledgement page",
             ));
         }
         let mut prior_index = None;
@@ -551,6 +579,12 @@ impl CoreSourceDeltaPageApplied {
             }
             match &requested.delta {
                 CoreSourceDelta::Present(_) => {
+                    if identity.acknowledgement_page_index != 0 {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Sequence,
+                            "current Core sources are valid only on acknowledgement page zero",
+                        ));
+                    }
                     let exact_delta = identity
                         .deltas
                         .iter()
@@ -576,6 +610,7 @@ impl CoreSourceDeltaPageApplied {
         if self.materialization_id != identity.materialization_id
             || self.core_generation_id != identity.core_generation_id
             || self.page_index != identity.page_index
+            || self.acknowledgement_page_index != identity.acknowledgement_page_index
             || usize::try_from(self.changed_sources).ok() != Some(present)
             || usize::try_from(self.removed_sources).ok() != Some(removed)
         {
@@ -584,7 +619,11 @@ impl CoreSourceDeltaPageApplied {
                 "Core source delta acknowledgement does not match its page CAS",
             ));
         }
-        Ok(())
+        validate_encoded_bound(
+            self,
+            MAX_CORE_CONTROL_WIRE_BYTES,
+            "Core source delta acknowledgement exceeds its control wire bound",
+        )
     }
 }
 

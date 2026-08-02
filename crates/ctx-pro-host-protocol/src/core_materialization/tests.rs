@@ -507,11 +507,17 @@ fn delta_ack_selects_only_exact_changed_revisions_for_record_materialization() {
         ],
     )
     .unwrap();
-    let identity = page.acknowledgement_identity();
+    let request = ApplyCoreSourceDeltaPageRequest {
+        page: page.clone(),
+        acknowledgement_page_index: 0,
+    };
+    let identity = request.acknowledgement_identity();
     CoreSourceDeltaPageApplied {
         materialization_id: page.materialization_id.clone(),
         core_generation_id: page.core_generation_id.clone(),
         page_index: 0,
+        acknowledgement_page_index: 0,
+        acknowledgement_terminal: true,
         changed_sources: 1,
         removed_sources: 0,
         reconcile_sources: vec![CoreSourceReconciliation {
@@ -529,6 +535,8 @@ fn delta_ack_selects_only_exact_changed_revisions_for_record_materialization() {
         materialization_id: page.materialization_id.clone(),
         core_generation_id: page.core_generation_id.clone(),
         page_index: 0,
+        acknowledgement_page_index: 0,
+        acknowledgement_terminal: true,
         changed_sources: 1,
         removed_sources: 0,
         reconcile_sources: vec![CoreSourceReconciliation {
@@ -588,10 +596,16 @@ fn source_pages_are_complete_snapshots_with_empty_terminal_and_derived_removal()
     )
     .is_err());
 
+    let request = ApplyCoreSourceDeltaPageRequest {
+        page: empty.clone(),
+        acknowledgement_page_index: 0,
+    };
     CoreSourceDeltaPageApplied {
         materialization_id: empty.materialization_id.clone(),
         core_generation_id: empty.core_generation_id.clone(),
         page_index: 0,
+        acknowledgement_page_index: 0,
+        acknowledgement_terminal: true,
         changed_sources: 0,
         removed_sources: 1,
         reconcile_sources: vec![CoreSourceReconciliation {
@@ -600,7 +614,7 @@ fn source_pages_are_complete_snapshots_with_empty_terminal_and_derived_removal()
         }],
         replayed: false,
     }
-    .validate_for(&empty)
+    .validate_for(&request)
     .unwrap();
 }
 
@@ -619,10 +633,16 @@ fn source_delta_pages_require_stable_order_and_exact_page_cas() {
         ],
     )
     .unwrap();
+    let request = ApplyCoreSourceDeltaPageRequest {
+        page: page.clone(),
+        acknowledgement_page_index: 0,
+    };
     CoreSourceDeltaPageApplied {
         materialization_id: page.materialization_id.clone(),
         core_generation_id: page.core_generation_id.clone(),
         page_index: 0,
+        acknowledgement_page_index: 0,
+        acknowledgement_terminal: true,
         changed_sources: 2,
         removed_sources: 0,
         reconcile_sources: page
@@ -639,12 +659,137 @@ fn source_delta_pages_require_stable_order_and_exact_page_cas() {
             .collect(),
         replayed: false,
     }
-    .validate_for(&page)
+    .validate_for(&request)
     .unwrap();
 
     let mut reversed = page.deltas.clone();
     reversed.reverse();
     assert!(CoreSourceDeltaPage::new("d".repeat(64), "a".repeat(64), 0, true, reversed,).is_err());
+}
+
+#[test]
+fn source_acknowledgement_pages_are_bounded_and_cursor_pinned() {
+    let page =
+        CoreSourceDeltaPage::new("d".repeat(64), "a".repeat(64), 0, true, Vec::new()).unwrap();
+    let request = ApplyCoreSourceDeltaPageRequest {
+        page,
+        acknowledgement_page_index: 7,
+    };
+    let reconciliations = (0..MAX_CORE_SOURCE_DELTA_PAGE_ITEMS)
+        .map(|materialize_index| CoreSourceReconciliation {
+            materialize_index: u32::try_from(materialize_index).unwrap(),
+            delta: CoreSourceDelta::Removed(CoreSourceRemoval { source: source(9) }),
+        })
+        .collect::<Vec<_>>();
+    let valid = CoreSourceDeltaPageApplied {
+        materialization_id: request.page.materialization_id.clone(),
+        core_generation_id: request.page.core_generation_id.clone(),
+        page_index: request.page.page_index,
+        acknowledgement_page_index: 7,
+        acknowledgement_terminal: false,
+        changed_sources: 0,
+        removed_sources: u32::try_from(reconciliations.len()).unwrap(),
+        reconcile_sources: reconciliations,
+        replayed: false,
+    };
+    valid.validate_for(&request).unwrap();
+
+    let mut wrong_cursor = valid.clone();
+    wrong_cursor.acknowledgement_page_index = 8;
+    assert_eq!(
+        wrong_cursor.validate_for(&request).unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let mut oversized = valid.clone();
+    oversized.reconcile_sources.push(CoreSourceReconciliation {
+        materialize_index: u32::try_from(MAX_CORE_SOURCE_DELTA_PAGE_ITEMS).unwrap(),
+        delta: CoreSourceDelta::Removed(CoreSourceRemoval { source: source(9) }),
+    });
+    oversized.removed_sources = oversized.removed_sources.saturating_add(1);
+    assert_eq!(
+        oversized.validate_for(&request).unwrap_err().class,
+        ErrorClass::Bounds
+    );
+
+    let mut empty_nonterminal = valid;
+    empty_nonterminal.reconcile_sources.clear();
+    empty_nonterminal.removed_sources = 0;
+    let empty_error = empty_nonterminal.validate_for(&request).unwrap_err();
+    assert_eq!(empty_error.class, ErrorClass::Sequence);
+    assert_eq!(
+        empty_error.message,
+        "Core source delta acknowledgement cannot be empty before terminal"
+    );
+
+    let current = state(source(1), 1, 0);
+    let terminal_page = CoreSourceDeltaPage::new(
+        "d".repeat(64),
+        "a".repeat(64),
+        0,
+        true,
+        vec![CoreSourceDelta::Present(current.clone())],
+    )
+    .unwrap();
+    let later_request = ApplyCoreSourceDeltaPageRequest {
+        page: terminal_page,
+        acknowledgement_page_index: 1,
+    };
+    let later_present = CoreSourceDeltaPageApplied {
+        materialization_id: later_request.page.materialization_id.clone(),
+        core_generation_id: later_request.page.core_generation_id.clone(),
+        page_index: 0,
+        acknowledgement_page_index: 1,
+        acknowledgement_terminal: true,
+        changed_sources: 1,
+        removed_sources: 0,
+        reconcile_sources: vec![CoreSourceReconciliation {
+            materialize_index: 0,
+            delta: CoreSourceDelta::Present(current.clone()),
+        }],
+        replayed: false,
+    };
+    let later_error = later_present.validate_for(&later_request).unwrap_err();
+    assert_eq!(later_error.class, ErrorClass::Sequence);
+    assert_eq!(
+        later_error.message,
+        "current Core sources are valid only on acknowledgement page zero"
+    );
+
+    let nonterminal_page = CoreSourceDeltaPage::new(
+        "d".repeat(64),
+        "a".repeat(64),
+        0,
+        false,
+        vec![CoreSourceDelta::Present(current.clone())],
+    )
+    .unwrap();
+    let nonterminal_request = ApplyCoreSourceDeltaPageRequest {
+        page: nonterminal_page,
+        acknowledgement_page_index: 0,
+    };
+    let nonterminal_acknowledgement = CoreSourceDeltaPageApplied {
+        materialization_id: nonterminal_request.page.materialization_id.clone(),
+        core_generation_id: nonterminal_request.page.core_generation_id.clone(),
+        page_index: 0,
+        acknowledgement_page_index: 0,
+        acknowledgement_terminal: false,
+        changed_sources: 1,
+        removed_sources: 0,
+        reconcile_sources: vec![CoreSourceReconciliation {
+            materialize_index: 0,
+            delta: CoreSourceDelta::Present(current),
+        }],
+        replayed: false,
+    };
+    let nonterminal_error = nonterminal_acknowledgement
+        .validate_for(&nonterminal_request)
+        .unwrap_err();
+    assert_eq!(nonterminal_error.class, ErrorClass::Sequence);
+    assert_eq!(
+        nonterminal_error.message,
+        "nonterminal Core source delta pages must complete in one acknowledgement page"
+    );
 }
 
 #[test]

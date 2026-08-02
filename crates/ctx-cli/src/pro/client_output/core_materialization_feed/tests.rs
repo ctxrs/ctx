@@ -7,7 +7,12 @@ use ctx_history_core::{
     SourceObservation, TypedKey,
 };
 use ctx_history_index::{GenerationWriter, WriterOptions};
+use ctx_pro_host_protocol::{
+    write_frame, HelperEnvelope, FRAME_HEADER_BYTES, MAX_CORE_CONTROL_WIRE_BYTES,
+    MAX_FRAME_PAYLOAD_BYTES,
+};
 use tempfile::tempdir;
+use uuid::Uuid;
 
 use super::*;
 
@@ -20,6 +25,14 @@ fn source(name: &str) -> SourceKey {
         SourceAnchor::provider_native("session-file", TypedKey::utf8(name).unwrap()).unwrap(),
     )
     .unwrap()
+}
+
+fn large_native_key_source(index: usize) -> SourceKey {
+    const NATIVE_KEY_BYTES: usize = 48 * 1024;
+    let prefix = format!("removal-{index:04}-");
+    let mut native_key = prefix.clone();
+    native_key.push_str(&"x".repeat(NATIVE_KEY_BYTES - prefix.len()));
+    source(&native_key)
 }
 
 fn certificate(source: &SourceKey, revision: u8, documents: u64) -> CertifiedSource {
@@ -158,6 +171,14 @@ fn ordered_source_deltas(count: usize, anchor_bytes: usize) -> Vec<CoreSourceDel
 
 type EventStates = BTreeMap<[u8; 32], BTreeMap<[u8; 32], CoreEventState>>;
 
+#[derive(Clone, Copy)]
+enum SourceResponseMutation {
+    DuplicateSource,
+    StalePresent,
+    RemoveCurrent,
+    SkipMaterializeIndex,
+}
+
 #[derive(Default)]
 struct Consumer {
     revision: String,
@@ -169,9 +190,16 @@ struct Consumer {
     replay_begin: bool,
     replay_pages: bool,
     wrong_delta_generation: bool,
+    wrong_acknowledgement_page_index: bool,
+    source_response_mutation: Option<SourceResponseMutation>,
     wrong_event_page_index: bool,
+    source_exchanges: u64,
+    source_page_applications: u64,
+    source_feed_terminal: bool,
     event_exchanges: u64,
     state_exchanges: u64,
+    source_acknowledgement_requests: Vec<(u32, u32)>,
+    source_acknowledgements: BTreeMap<u32, Vec<CoreSourceDeltaPageApplied>>,
     delta_pages: Vec<CoreSourceDeltaPage>,
     event_pages: Vec<CoreEventDeltaPage>,
     finish: Option<FinishCoreMaterializationRequest>,
@@ -200,6 +228,10 @@ impl CoreMaterializationConsumer for Consumer {
         if !self.replay_begin {
             self.seen_sources.clear();
             self.next_materialize_index = 0;
+            self.source_feed_terminal = false;
+            self.source_acknowledgement_requests.clear();
+            self.source_acknowledgements.clear();
+            self.delta_pages.clear();
         }
         Ok(CoreMaterializationBegan {
             materialization_id: ctx_pro_host_protocol::core_materialization_id(
@@ -218,11 +250,36 @@ impl CoreMaterializationConsumer for Consumer {
         &mut self,
         request: ApplyCoreSourceDeltaPageRequest,
     ) -> Result<CoreSourceDeltaPageApplied> {
+        request.validate().map_err(|error| anyhow!(error.message))?;
         let page = request.page;
         assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES);
+        let acknowledgement_page_index = request.acknowledgement_page_index;
+        self.source_exchanges = self.source_exchanges.saturating_add(1);
+        self.source_acknowledgement_requests
+            .push((page.page_index, acknowledgement_page_index));
+        if let Some(responses) = self.source_acknowledgements.get(&page.page_index) {
+            let original = self
+                .delta_pages
+                .iter()
+                .find(|original| original.page_index == page.page_index)
+                .ok_or_else(|| anyhow!("cached source page has no original request"))?;
+            if original != &page {
+                bail!("source page replay changed the original request");
+            }
+            let response = responses
+                .get(usize::try_from(acknowledgement_page_index).unwrap_or(usize::MAX))
+                .cloned()
+                .ok_or_else(|| anyhow!("acknowledgement page is beyond terminal"))?;
+            if page.terminal && response.acknowledgement_terminal {
+                self.source_feed_terminal = true;
+            }
+            return Ok(response);
+        }
+        if acknowledgement_page_index != 0 {
+            bail!("first acknowledgement request for a source page must be zero");
+        }
+        self.source_page_applications = self.source_page_applications.saturating_add(1);
         let mut reconcile_sources = Vec::new();
-        let mut changed_sources = 0_u32;
-        let mut removed_sources = 0_u32;
         for delta in &page.deltas {
             let identity = delta.source().identity().digest();
             let reconcile = match delta {
@@ -233,9 +290,6 @@ impl CoreMaterializationConsumer for Consumer {
                         != Some(&state.core_record_accumulator);
                     self.known_accumulators
                         .insert(identity, state.core_record_accumulator.clone());
-                    if changed {
-                        changed_sources = changed_sources.saturating_add(1);
-                    }
                     changed
                 }
                 CoreSourceDelta::Removed(_) => {
@@ -264,27 +318,103 @@ impl CoreMaterializationConsumer for Consumer {
                     delta: CoreSourceDelta::Removed(CoreSourceRemoval { source }),
                 });
                 self.next_materialize_index = self.next_materialize_index.saturating_add(1);
-                removed_sources = removed_sources.saturating_add(1);
             }
         }
-        let response = CoreSourceDeltaPageApplied {
-            materialization_id: page.materialization_id.clone(),
-            core_generation_id: if self.wrong_delta_generation {
-                "f".repeat(64)
-            } else {
-                page.core_generation_id.clone()
-            },
-            page_index: page.page_index,
-            changed_sources,
-            removed_sources,
-            reconcile_sources,
-            replayed: self.replay_pages,
-        };
-        self.delta_pages.push(page);
+        let acknowledgement_page_count = reconcile_sources
+            .len()
+            .div_ceil(MAX_CORE_SOURCE_DELTA_PAGE_ITEMS)
+            .max(1);
+        let mut responses = (0..acknowledgement_page_count)
+            .map(|index| {
+                let start = index.saturating_mul(MAX_CORE_SOURCE_DELTA_PAGE_ITEMS);
+                let end = start
+                    .saturating_add(MAX_CORE_SOURCE_DELTA_PAGE_ITEMS)
+                    .min(reconcile_sources.len());
+                let page_reconciliations = reconcile_sources[start..end].to_vec();
+                let changed_sources = u32::try_from(
+                    page_reconciliations
+                        .iter()
+                        .filter(|item| matches!(item.delta, CoreSourceDelta::Present(_)))
+                        .count(),
+                )
+                .unwrap();
+                let removed_sources = u32::try_from(
+                    page_reconciliations
+                        .iter()
+                        .filter(|item| matches!(item.delta, CoreSourceDelta::Removed(_)))
+                        .count(),
+                )
+                .unwrap();
+                CoreSourceDeltaPageApplied {
+                    materialization_id: page.materialization_id.clone(),
+                    core_generation_id: if self.wrong_delta_generation {
+                        "f".repeat(64)
+                    } else {
+                        page.core_generation_id.clone()
+                    },
+                    page_index: page.page_index,
+                    acknowledgement_page_index: if self.wrong_acknowledgement_page_index {
+                        u32::try_from(index).unwrap().saturating_add(1)
+                    } else {
+                        u32::try_from(index).unwrap()
+                    },
+                    acknowledgement_terminal: index + 1 == acknowledgement_page_count,
+                    changed_sources,
+                    removed_sources,
+                    reconcile_sources: page_reconciliations,
+                    replayed: self.replay_pages,
+                }
+            })
+            .collect::<Vec<_>>();
+        if let Some(mutation) = self.source_response_mutation {
+            let first_response = &mut responses[0];
+            match mutation {
+                SourceResponseMutation::DuplicateSource => {
+                    let mut duplicate = first_response.reconcile_sources[0].clone();
+                    duplicate.materialize_index = duplicate.materialize_index.saturating_add(1);
+                    first_response.reconcile_sources.push(duplicate);
+                    first_response.changed_sources =
+                        first_response.changed_sources.saturating_add(1);
+                }
+                SourceResponseMutation::StalePresent => {
+                    let CoreSourceDelta::Present(state) =
+                        &mut first_response.reconcile_sources[0].delta
+                    else {
+                        panic!("expected present source reconciliation");
+                    };
+                    state.core_record_accumulator = "f".repeat(64);
+                }
+                SourceResponseMutation::RemoveCurrent => {
+                    let current = first_response.reconcile_sources[0].delta.source().clone();
+                    first_response.reconcile_sources[0].delta =
+                        CoreSourceDelta::Removed(CoreSourceRemoval { source: current });
+                    first_response.changed_sources =
+                        first_response.changed_sources.saturating_sub(1);
+                    first_response.removed_sources =
+                        first_response.removed_sources.saturating_add(1);
+                }
+                SourceResponseMutation::SkipMaterializeIndex => {
+                    first_response.reconcile_sources[0].materialize_index = first_response
+                        .reconcile_sources[0]
+                        .materialize_index
+                        .saturating_add(1);
+                }
+            }
+        }
+        let response = responses[0].clone();
+        self.delta_pages.push(page.clone());
+        self.source_acknowledgements
+            .insert(page.page_index, responses);
+        if page.terminal && response.acknowledgement_terminal {
+            self.source_feed_terminal = true;
+        }
         Ok(response)
     }
 
     fn event_states(&mut self, request: CoreEventStatePageRequest) -> Result<CoreEventStatePage> {
+        if !self.source_feed_terminal {
+            bail!("event state requested before terminal source acknowledgement");
+        }
         self.state_exchanges = self.state_exchanges.saturating_add(1);
         let source = request.reconciliation.delta.source();
         let after = request.after_event_id.map(|event| event.digest());
@@ -314,6 +444,9 @@ impl CoreMaterializationConsumer for Consumer {
         &mut self,
         request: ApplyCoreEventDeltaPageRequest,
     ) -> Result<CoreEventDeltaPageApplied> {
+        if !self.source_feed_terminal {
+            bail!("event delta applied before terminal source acknowledgement");
+        }
         self.event_exchanges = self.event_exchanges.saturating_add(1);
         let page = request.page;
         let source = page.reconciliation.delta.source().clone();
@@ -758,6 +891,93 @@ fn source_deletion_is_resumable_tombstone_pages() {
 }
 
 #[test]
+fn large_native_key_removals_without_receipt_drive_all_acknowledgements_idempotently() {
+    const REMOVAL_COUNT: usize = 2_048;
+    let temp = tempdir().unwrap();
+    let writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let mut consumer = Consumer::new();
+    for source_index in 0..REMOVAL_COUNT {
+        let removed = large_native_key_source(source_index);
+        consumer
+            .known_sources
+            .insert(removed.identity().digest(), removed);
+    }
+
+    let report = sync_core_feed(&index, None, &mut consumer).unwrap();
+    let expected_acknowledgement_pages = REMOVAL_COUNT.div_ceil(MAX_CORE_SOURCE_DELTA_PAGE_ITEMS);
+    assert_eq!(report.changed_sources, 0);
+    assert_eq!(
+        report.removed_sources,
+        u64::try_from(REMOVAL_COUNT).unwrap()
+    );
+    assert_eq!(consumer.source_page_applications, 1);
+    assert_eq!(
+        consumer.finish.as_ref().unwrap().removed_sources,
+        u32::try_from(REMOVAL_COUNT).unwrap()
+    );
+    assert_eq!(
+        consumer.source_exchanges,
+        u64::try_from(expected_acknowledgement_pages).unwrap()
+    );
+    assert_eq!(
+        consumer.source_acknowledgement_requests,
+        (0..expected_acknowledgement_pages)
+            .map(|index| (0, u32::try_from(index).unwrap()))
+            .collect::<Vec<_>>()
+    );
+    let responses = consumer.source_acknowledgements.get(&0).unwrap();
+    assert_eq!(responses.len(), expected_acknowledgement_pages);
+    assert_eq!(
+        responses
+            .iter()
+            .map(|response| usize::try_from(response.removed_sources).unwrap())
+            .sum::<usize>(),
+        REMOVAL_COUNT
+    );
+    for (index, response) in responses.iter().enumerate() {
+        assert_eq!(
+            response.acknowledgement_page_index,
+            u32::try_from(index).unwrap()
+        );
+        assert_eq!(
+            response.acknowledgement_terminal,
+            index + 1 == expected_acknowledgement_pages
+        );
+        assert_eq!(
+            response.reconcile_sources.len(),
+            MAX_CORE_SOURCE_DELTA_PAGE_ITEMS
+        );
+        assert!(serde_json::to_vec(response).unwrap().len() <= MAX_CORE_CONTROL_WIRE_BYTES);
+        let mut frame = Vec::new();
+        write_frame(
+            &mut frame,
+            &HelperEnvelope {
+                sequence: u64::try_from(index).unwrap(),
+                request_id: Uuid::from_u128(1),
+                message: HelperMessage::CoreSourceDeltaPageApplied(response.clone()),
+            },
+        )
+        .unwrap();
+        assert!(frame.len() - FRAME_HEADER_BYTES <= MAX_FRAME_PAYLOAD_BYTES);
+    }
+
+    let source_page = consumer.delta_pages[0].clone();
+    let original_responses = responses.clone();
+    for (index, expected) in original_responses.into_iter().enumerate() {
+        let replayed = consumer
+            .apply_source_delta(ApplyCoreSourceDeltaPageRequest {
+                page: source_page.clone(),
+                acknowledgement_page_index: u32::try_from(index).unwrap(),
+            })
+            .unwrap();
+        assert_eq!(replayed, expected);
+    }
+    assert_eq!(consumer.source_page_applications, 1);
+}
+
+#[test]
 fn event_page_cas_mismatch_fails_closed_after_one_exchange() {
     let temp = tempdir().unwrap();
     let source = source("event-cas-mismatch.jsonl");
@@ -812,6 +1032,48 @@ fn generation_mismatched_delta_ack_fails_closed() {
         .unwrap_err()
         .to_string()
         .contains("acknowledgement"));
+}
+
+#[test]
+fn source_acknowledgement_sequence_and_global_identity_fail_closed() {
+    let temp = tempdir().unwrap();
+    let source = source("invalid-source-ack.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+
+    for (mutation, expected) in [
+        (
+            SourceResponseMutation::DuplicateSource,
+            "repeat a stable source identity",
+        ),
+        (SourceResponseMutation::StalePresent, "stale current source"),
+        (
+            SourceResponseMutation::RemoveCurrent,
+            "removes a current source",
+        ),
+        (
+            SourceResponseMutation::SkipMaterializeIndex,
+            "indices are not contiguous",
+        ),
+    ] {
+        let mut consumer = Consumer::new();
+        consumer.source_response_mutation = Some(mutation);
+        let error = sync_core_feed(&index, None, &mut consumer).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error:#}");
+        assert_eq!(consumer.source_exchanges, 1);
+        assert_eq!(consumer.state_exchanges, 0);
+        assert_eq!(consumer.event_exchanges, 0);
+    }
+
+    let mut consumer = Consumer::new();
+    consumer.wrong_acknowledgement_page_index = true;
+    let error = sync_core_feed(&index, None, &mut consumer).unwrap_err();
+    assert!(error.to_string().contains("page CAS"), "{error:#}");
+    assert_eq!(consumer.source_exchanges, 1);
+    assert_eq!(consumer.state_exchanges, 0);
+    assert_eq!(consumer.event_exchanges, 0);
 }
 
 #[test]

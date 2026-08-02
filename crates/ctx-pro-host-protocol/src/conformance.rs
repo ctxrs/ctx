@@ -241,4 +241,22 @@ fn inventory_freezes_reviewed_status_axes_and_incremental_ack_subset() {
         .as_array()
         .unwrap();
     assert!(ack.contains(&serde_json::json!("reconcile_sources")));
+    assert!(ack.contains(&serde_json::json!("acknowledgement_page_index")));
+    assert!(ack.contains(&serde_json::json!("acknowledgement_terminal")));
+    assert_eq!(
+        canonical["dto_fields"]["ApplyCoreSourceDeltaPageRequest"]["required"],
+        serde_json::json!(["page", "acknowledgement_page_index"])
+    );
+    assert_eq!(
+        canonical["bounds"]["core_source_acknowledgement_page_items"],
+        canonical["bounds"]["core_source_delta_page_items"]
+    );
+    assert!(
+        canonical["bounds"]["core_control_wire_bytes"]
+            .as_u64()
+            .unwrap()
+            < canonical["framing"]["maximum_payload_bytes"]
+                .as_u64()
+                .unwrap()
+    );
 }

@@ -56,6 +56,7 @@ pub(super) fn inventory() -> Value {
         "bounds": {
             "core_source_states": MAX_CORE_SOURCE_STATES,
             "core_source_delta_page_items": MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
+            "core_source_acknowledgement_page_items": MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
             "core_event_state_page_items": MAX_CORE_EVENT_STATE_PAGE_ITEMS,
             "core_event_delta_page_items": MAX_CORE_EVENT_DELTA_PAGE_ITEMS,
             "core_event_delta_page_content_bytes": MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
@@ -143,10 +144,12 @@ pub(super) fn inventory() -> Value {
             "CoreSourceDeltaPage": fields(&[
                 "materialization_id", "core_generation_id", "page_index", "terminal", "deltas"
             ], &[]),
-            "ApplyCoreSourceDeltaPageRequest": fields(&["page"], &[]),
+            "ApplyCoreSourceDeltaPageRequest": fields(
+                &["page", "acknowledgement_page_index"], &[]),
             "CoreSourceDeltaPageApplied": fields(&[
-                "materialization_id", "core_generation_id", "page_index", "changed_sources",
-                "removed_sources", "reconcile_sources", "replayed"
+                "materialization_id", "core_generation_id", "page_index",
+                "acknowledgement_page_index", "acknowledgement_terminal",
+                "changed_sources", "removed_sources", "reconcile_sources", "replayed"
             ], &[]),
             "CoreSourceReconciliation": fields(&["delta"], &[]),
             "CoreEventState": fields(
@@ -216,14 +219,15 @@ pub(super) fn inventory() -> Value {
             ],
             "authority": "one_generation_pinned_core_snapshot_delta_feed",
             "initial": "the_helper_reconciles_every_present_source_because_it_has_no_prior_event_state",
-            "incremental": "source_delta_ack_reconcile_sources_is_the_exact_ordered_changed_or_removed_subset_and_event_state_pages_drive_bounded_added_replaced_and_tombstoned_event_delta_pages",
+            "incremental": "each_source_delta_page_drives_zero_through_terminal_bounded_acknowledgement_pages_whose_exact_ordered_changed_or_removed_subset_is_collected_within_current_plus_retained_store_source_bounds_then_event_state_pages_drive_bounded_added_replaced_and_tombstoned_event_delta_pages",
+            "source_acknowledgements": "request_and_response_share_an_explicit_acknowledgement_page_index_present_reconciliations_exist_only_on_page_zero_nonterminal_input_source_pages_complete_in_one_acknowledgement_page_each_response_marks_terminal_changed_removed_counts_cover_only_that_page_and_all_source_acknowledgements_finish_before_any_event_page",
             "removal": "source_removal_is_resumable_as_bounded_event_tombstone_pages_and_deletes_source_control_state only_on_its_terminal_page",
             "replacement": "prior_event_removal_and_replacement_record_insertion_are_atomic_in_one_bounded_event_delta_page",
             "records": "complete_core_records_are_read_only_from_the_pinned_core_source_event_page_api_and_only_added_or_replaced_events_cross_the_protocol",
             "repository_data": "repository_bindings_abstentions_file_and_vcs_observations_exist_only_inside_core_records",
             "publication": "explicit_terminal_counts_at_most_one_prior_receipt_cas_and_a_small_final_control_transaction",
-            "replay": "exact_completed_generation_may_skip_all_delta_and_event pages",
-            "integrity": "strict_page_sequence_content_generation_and_transactional_staging_without_hash_chains"
+            "replay": "source_delta_requests_and_acknowledgement_pages_are_independently_idempotent_and_an_exact_completed_generation_may_skip_all_delta_and_event_pages",
+            "integrity": "strict_source_acknowledgement_and_event_page_sequence_content_generation_and_transactional_staging_without_hash_chains"
         },
         "status_contract": {
             "axes": [

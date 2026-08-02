@@ -77,6 +77,7 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
             "apply_core_source_delta_page",
             HostMessage::ApplyCoreSourceDeltaPage(ApplyCoreSourceDeltaPageRequest {
                 page: delta_page(),
+                acknowledgement_page_index: 0,
             }),
         ),
         (
@@ -178,6 +179,8 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
                 materialization_id: page.materialization_id,
                 core_generation_id: page.core_generation_id,
                 page_index: page.page_index,
+                acknowledgement_page_index: 0,
+                acknowledgement_terminal: true,
                 changed_sources: 1,
                 removed_sources: 1,
                 reconcile_sources: reconciliations,
