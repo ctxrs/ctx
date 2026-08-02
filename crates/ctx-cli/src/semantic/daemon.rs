@@ -114,7 +114,6 @@ pub(super) struct DaemonRuntime {
     pub(super) semantic_runtime: SharedSemanticRuntime,
     pub(super) history_retry: DaemonRetryBackoff,
     pub(super) pro_retry: DaemonRetryBackoff,
-    pub(super) relational_retry: DaemonRetryBackoff,
     pub(super) semantic_retry: DaemonRetryBackoff,
     pub(super) semantic_blocked_job: Option<Value>,
     pub(super) sidecar_drain: DaemonSidecarDrain,
@@ -125,9 +124,7 @@ pub(super) struct DaemonRuntime {
 #[derive(Clone)]
 pub(super) struct DaemonTestJobHooks {
     pub(super) calls: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
-    pub(super) relational_projection: Option<Value>,
     pub(super) semantic_index: Option<Value>,
-    pub(super) relational_blocker: Option<std::rc::Rc<dyn Fn()>>,
 }
 
 #[cfg(test)]
@@ -166,13 +163,7 @@ pub(super) fn daemon_test_job(job: &'static str) -> Option<Value> {
         let hooks = slot.borrow();
         let hooks = hooks.as_ref()?;
         hooks.calls.borrow_mut().push(job);
-        if job == "relational_projection" {
-            if let Some(blocker) = hooks.relational_blocker.as_ref() {
-                blocker();
-            }
-        }
         match job {
-            "relational_projection" => hooks.relational_projection.clone(),
             "semantic_index" => hooks.semantic_index.clone(),
             _ => None,
         }
@@ -829,9 +820,6 @@ pub(super) fn run_daemon_inner(
                 wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
             }
             if let Some(retry_after_ms) = runtime.semantic_retry.retry_after_ms() {
-                wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
-            }
-            if let Some(retry_after_ms) = runtime.relational_retry.retry_after_ms() {
                 wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
             }
             if let Some(retry_after_ms) = runtime.pro_retry.retry_after_ms() {

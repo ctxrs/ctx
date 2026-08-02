@@ -111,48 +111,6 @@ fn start_source_refresh_daemon_with_env(
     }
 }
 
-fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let packet = loop {
-        let output = ctx(temp)
-            .args(["sql", sql, "--format=json"])
-            .output()
-            .unwrap();
-        if output.status.success() {
-            break serde_json::from_slice::<Value>(&output.stdout).unwrap();
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if (stderr.contains("Core SQL projection")
-            || stderr.contains("source-backed SQL projection")
-            || stderr.contains("source-backed relational projection")
-            || stderr.contains("no such table: source_backed_relational_state"))
-            && Instant::now() < deadline
-        {
-            if let Ok(job) = fs::read(data_root(temp).join("daemon/jobs/relational-catch-up.json"))
-                .and_then(|bytes| {
-                    serde_json::from_slice::<Value>(&bytes).map_err(std::io::Error::other)
-                })
-            {
-                if job["status"] == "error" {
-                    panic!(
-                        "source-backed SQL projection failed for `{sql}` ({}): {}",
-                        job["error_code"].as_str().unwrap_or("unknown_error"),
-                        job["last_error"]
-                            .as_str()
-                            .unwrap_or("unknown projection error")
-                    );
-                }
-            }
-            std::thread::sleep(Duration::from_millis(25));
-            continue;
-        }
-        panic!("source-backed SQL failed for `{sql}`: {stderr}");
-    };
-    packet["rows"][0][0]
-        .as_i64()
-        .unwrap_or_else(|| panic!("expected integer SQL scalar in {packet:#}"))
-}
-
 fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
     assert_eq!(search["schema_version"], 1, "{search:#}");
     assert_eq!(search["query"], query, "{search:#}");
@@ -280,7 +238,7 @@ fn measured_json_output(command: &mut Command) -> (Value, usize) {
     (value, output_bytes)
 }
 
-#[path = "support/search_show_locate_sql/import_paths.rs"]
+#[path = "support/search_show/import_paths.rs"]
 mod import_paths;
 
 #[test]
@@ -370,231 +328,15 @@ fn search_excludes_active_codex_session_by_default_when_available() {
 }
 
 #[test]
-fn sql_reads_generation_only_projection_and_supports_formats_and_input_sources() {
-    let temp = tempdir();
-    let generation_id = initialize_generation_only_sql_projection(&data_root(&temp));
-    assert!(!temp.path().join("work.sqlite").exists());
-
-    let json =
-        json_output(ctx(&temp).args(["sql", "SELECT 1 AS one, 'two' AS two", "--format=json"]));
-    assert_eq!(json["schema_version"], 2);
-    assert_eq!(json["payload_type"], "sql_result");
-    assert_eq!(json["read_only"], true);
-    assert_eq!(json["share_safe"], false);
-    assert_eq!(json["columns"], json!(["one", "two"]));
-    assert_eq!(json["rows"], json!([[1, "two"]]));
-    assert_eq!(json["returned_rows"], 1);
-    assert_eq!(
-        json["snapshot"],
-        json!({
-            "observed_core_generation_id": generation_id.clone(),
-            "projection_status": "ready",
-            "relational_build_generation": 1,
-            "relational_core_generation_id": generation_id.clone(),
-            "stale": false,
-        })
-    );
-
-    let narrow_join = json_output(ctx(&temp).args([
-        "sql",
-        "SELECT e.ctx_event_id, s.root_ctx_session_id FROM ctx_events AS e LEFT JOIN ctx_sessions AS s ON s.ctx_session_id = e.ctx_session_id LIMIT 1",
-        "--max-columns",
-        "2",
-        "--format=json",
-    ]));
-    assert_eq!(
-        narrow_join["columns"],
-        json!(["ctx_event_id", "root_ctx_session_id"])
-    );
-    assert_eq!(narrow_join["rows"], json!([]));
-
-    let metadata = json_output(ctx(&temp).args([
-        "sql",
-        "SELECT core_generation_id, status FROM ctx_projection_metadata",
-        "--format=json",
-    ]));
-    assert_eq!(metadata["rows"], json!([[generation_id, "ready"]]));
-
-    let query_file = temp.path().join("query.sql");
-    fs::write(&query_file, "SELECT 'a,b' AS value, 2 AS n").unwrap();
-    let csv_output = ctx(&temp)
-        .arg("sql")
-        .arg("--file")
-        .arg(&query_file)
-        .args(["--format", "csv"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    assert_eq!(
-        String::from_utf8(csv_output).unwrap(),
-        "value,n\n\"a,b\",2\n"
-    );
-
-    let oversized_file_stderr = failure_stderr(
-        ctx(&temp)
-            .arg("sql")
-            .arg("--file")
-            .arg(&query_file)
-            .args(["--max-sql-bytes", "4"]),
-    );
-    assert!(
-        oversized_file_stderr.contains("exceeds max_sql_bytes (4)"),
-        "{oversized_file_stderr}"
-    );
-
-    let oversized_stdin_stderr = ctx(&temp)
-        .args(["sql", "-", "--max-sql-bytes", "4"])
-        .write_stdin("SELECT 1")
-        .assert()
-        .failure()
-        .get_output()
-        .stderr
-        .clone();
-    let oversized_stdin_stderr = String::from_utf8(oversized_stdin_stderr).unwrap();
-    assert!(
-        oversized_stdin_stderr.contains("exceeds max_sql_bytes (4)"),
-        "{oversized_stdin_stderr}"
-    );
-
-    let raw_output = ctx(&temp)
-        .args(["sql", "-", "--format", "raw"])
-        .write_stdin("SELECT 'abc' AS value")
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    assert_eq!(String::from_utf8(raw_output).unwrap(), "abc\n");
-
-    let unsupported = failure_stderr(ctx(&temp).args(["sql", "SELECT * FROM events"]));
-    assert!(
-        unsupported.contains("no such table: events"),
-        "{unsupported}"
-    );
-    assert!(!temp.path().join("work.sqlite").exists());
-}
-
-#[test]
-fn fresh_sql_is_read_only_and_initializes_no_legacy_store() {
-    let temp = tempdir();
-    let json = json_output(ctx(&temp).args(["sql", "SELECT 1 AS one", "--format=json"]));
-    assert_eq!(json["rows"], json!([[1]]));
-    assert!(!temp.path().join("work.sqlite").exists());
-    assert!(data_root(&temp).join("relational.sqlite").is_file());
-
-    let stderr = failure_stderr(ctx(&temp).args(["sql", "CREATE TABLE nope(x INTEGER)"]));
-    assert!(stderr.contains("SQL query must be read-only"));
-    let conn = Connection::open(data_root(&temp).join("relational.sqlite")).unwrap();
-    assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'nope'"
-        ),
-        0
-    );
-    assert!(!temp.path().join("work.sqlite").exists());
-
-    let stderr = failure_stderr(ctx(&temp).args(["sql", "SELECT 1; SELECT 2"]));
-    assert_eq!(
-        stderr,
-        concat!(
-            "✗ One read-only SQL statement required\n",
-            "ctx sql accepts one read-only statement per command. Run each statement separately.\n",
-            "\n",
-            "Hint: Resolve the issue and retry\n",
-            "\n",
-            "Next\n",
-            "  ctx sql 'SELECT 1'\n",
-        )
-    );
-
-    let ansi = failure_stderr(ctx(&temp).args(["--color=always", "sql", "SELECT 1; SELECT 2"]));
-    assert!(ansi.as_bytes().contains(&0x1b));
-    let mut stripped = anstream::StripStream::new(Vec::new());
-    stripped.write_all(ansi.as_bytes()).unwrap();
-    assert_eq!(String::from_utf8(stripped.into_inner()).unwrap(), stderr);
-
-    for format in ["raw", "csv", "json"] {
-        let machine_stderr = failure_stderr(ctx(&temp).args([
-            "--color=always",
-            "sql",
-            "SELECT 1; SELECT 2",
-            "--format",
-            format,
-        ]));
-        assert_eq!(machine_stderr, "Error: Multiple statements provided\n");
-    }
-}
-
-#[test]
-fn bounded_sql_preview_has_copyable_human_recovery_and_unchanged_raw_controls() {
-    let temp = tempdir();
-    let sql = "SELECT 'abcdefgh' AS value UNION ALL SELECT 'ijklmnop'";
-    let args = ["sql", sql, "--max-rows", "1", "--max-value-bytes", "4"];
-
-    let plain = ctx(&temp)
-        .args(args)
-        .assert()
-        .success()
-        .get_output()
-        .clone();
-    assert_eq!(
-        String::from_utf8(plain.stdout).unwrap(),
-        "✓ 1 row returned\n\nResults\nvalue\nabcd...\n"
-    );
-    let plain_stderr = String::from_utf8(plain.stderr).unwrap();
-    let recovery =
-        "  ctx sql 'SELECT '\\''abcdefgh'\\'' AS value UNION ALL SELECT '\\''ijklmnop'\\'''";
-    assert!(plain_stderr.contains(&format!("Next\n{recovery}\n")));
-    assert_eq!(unicode_width::UnicodeWidthStr::width(recovery), 78);
-    assert!(!plain_stderr.contains("--max-rows 2"));
-    assert!(!plain_stderr.contains("--max-value-bytes 8"));
-
-    let ansi = ctx(&temp)
-        .arg("--color=always")
-        .args(args)
-        .assert()
-        .success()
-        .get_output()
-        .clone();
-    assert!(ansi.stderr.contains(&0x1b));
-    let mut stripped = anstream::StripStream::new(Vec::new());
-    stripped.write_all(&ansi.stderr).unwrap();
-    assert_eq!(
-        String::from_utf8(stripped.into_inner()).unwrap(),
-        plain_stderr
-    );
-
-    let raw = ctx(&temp)
-        .arg("--color=always")
-        .args(args)
-        .args(["--format", "raw"])
-        .assert()
-        .success()
-        .get_output()
-        .clone();
-    assert_eq!(raw.stdout, b"abcd\n");
-    assert_eq!(
-        raw.stderr,
-        concat!(
-            "warning: rows truncated at 1; rerun with --max-rows for more\n",
-            "warning: values truncated at 4 bytes; rerun with --max-value-bytes for more\n",
-        )
-        .as_bytes()
-    );
-}
-
-#[test]
-fn show_does_not_initialize_store() {
+fn show_does_not_initialize_core_storage() {
     let temp = tempdir();
     let stderr = failure_stderr(ctx(&temp).args(["show", "event", "deadbeef"]));
     assert!(stderr.contains("the Core index does not exist; retry with daemon refresh enabled"));
     assert!(!temp.path().join("work.sqlite").exists());
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 }
 
-include!("support/search_show_locate_sql/search_flows.rs");
+include!("support/search_show/search_flows.rs");
 
 #[test]
 fn search_backend_defaults_and_supported_semantic_config_are_reported() {
@@ -794,20 +536,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
     assert_eq!(first["resume"], false);
     assert_eq!(first["resume_mode"], "normal_scan");
     wait_for_test_lexical_projection(&temp, &first_generation);
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'codex'"
-        ),
-        2
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex'"
-        ),
-        8
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "codex"), (2, 8));
 
     let primary_default =
         json_output(ctx(&temp).args(["search", "subagent", "--refresh", "off", "--format=json"]));
@@ -847,13 +576,18 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         .unwrap()
         .contains("codex-session-child"));
 
-    let child_session_lookup = json_output(ctx(&temp).args([
-        "sql",
-        "SELECT ctx_session_id FROM ctx_sessions WHERE provider_session_id = 'codex-session-child'",
+    let child_session = json_output(ctx(&temp).args([
+        "show",
+        "session",
+        "--provider",
+        "codex",
+        "--provider-session",
+        "codex-session-child",
         "--format",
         "json",
     ]));
-    let child_session_id = child_session_lookup["rows"][0][0].as_str().unwrap();
+    assert_eq!(child_session["provider_session_id"], "codex-session-child");
+    let child_session_id = child_session["ctx_session_id"].as_str().unwrap();
     let explicit_child_session = json_output(ctx(&temp).args([
         "search",
         "subagent",
@@ -902,6 +636,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
     assert_eq!(second["totals"]["current_rejected_records"], 0);
     assert_noop_publication(&second);
     assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 }
 
 #[test]
@@ -958,6 +693,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
     assert_eq!(status["indexed_events"], 8);
     assert_eq!(status["indexed_sources"], 2);
     assert_eq!(status["lexical"]["status"], "ready");
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 
     let second = json_output(ctx(&temp).args([
         "import",
@@ -978,6 +714,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
         second["sources"][0]["published_generation"], first_generation,
         "{second:#}"
     );
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 }
 
 #[test]
@@ -1021,80 +758,58 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
     ]));
     assert_source_backed_search(&search, "codex", query);
 
+    let records = provider_core_records(&data_root(&temp), "codex");
+    assert_eq!(provider_core_counts(&data_root(&temp), "codex"), (3, 15));
     assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'codex'"
-        ),
+        records
+            .iter()
+            .filter(
+                |record| record.event_type == "message" && record.role.as_deref() == Some("user")
+            )
+            .count(),
         3
     );
     assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex'"
-        ),
-        15
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'message' AND role = 'user'"
-        ),
-        3
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'message' AND role = 'assistant'"
-        ),
+        records
+            .iter()
+            .filter(|record| record.event_type == "message"
+                && record.role.as_deref() == Some("assistant"))
+            .count(),
         2
     );
     assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'tool_call'"
-        ),
+        records
+            .iter()
+            .filter(|record| record.event_type == "tool_call")
+            .count(),
         4
     );
     assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'tool_output'"
-        ),
+        records
+            .iter()
+            .filter(|record| record.event_type == "tool_output")
+            .count(),
         1
     );
     assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'codex' AND event_type = 'command_output'"
-        ),
+        records
+            .iter()
+            .filter(|record| record.event_type == "command_output")
+            .count(),
         2
     );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM pragma_table_info('ctx_events') WHERE name = 'payload_json'"
-        ),
-        0,
-        "the metadata-only relational projection must expose no payload column"
-    );
-    assert_eq!(
-        source_backed_count(&temp, "SELECT COUNT(*) FROM ctx_files_touched"),
-        0,
+    assert!(
+        records
+            .iter()
+            .all(|record| record.repository_file_observations.is_empty()),
         "unscoped fixture paths must not cross the Core repository boundary"
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_projection_metadata WHERE status = 'ready'"
-        ),
-        1
     );
     assert!(
         !temp.path().join("work.sqlite").exists(),
-        "Codex acceptance must use the Core generation and relational projection"
+        "Codex acceptance must use the Core generation"
     );
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 }
 
-include!("support/search_show_locate_sql/pi_flow.rs");
-include!("support/search_show_locate_sql/search_filters.rs");
+include!("support/search_show/pi_flow.rs");
+include!("support/search_show/search_filters.rs");

@@ -44,7 +44,6 @@ impl CoreRefreshEngine {
 
     pub(super) fn bind_core_publication(
         &self,
-        data_root: &Path,
         receipt: SourceBackedRefreshReceipt,
         verified_index: Arc<VerifiedIndex>,
     ) -> Result<()> {
@@ -55,7 +54,6 @@ impl CoreRefreshEngine {
                 receipt.published_generation
             );
         }
-        retain_daemon_cycle_verified_index(&source_backed_index_root(data_root), &verified_index);
         self.lock_state().pinned_core_publication = Some(Arc::new(PinnedCorePublication {
             receipt,
             verified_index,

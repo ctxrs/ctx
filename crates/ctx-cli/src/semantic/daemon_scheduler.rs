@@ -2,7 +2,6 @@
 pub(super) struct DaemonSidecarDrain {
     pub(super) generation: Option<String>,
     pub(super) pro_attempted_generation: Option<String>,
-    pub(super) relational_attempted_generation: Option<String>,
     pub(super) semantic_attempted_generation: Option<String>,
 }
 
@@ -42,9 +41,6 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
     if source_refresh_requested {
         return run_core_refresh(data_root, runtime, source_refresh, false);
     }
-    if let Some(iteration) = run_pending_core_relational_catch_up(data_root, runtime)? {
-        return Ok(iteration);
-    }
     if let Some(iteration) = run_pending_core_pro_catch_up(data_root, runtime, source_refresh)? {
         return Ok(iteration);
     }
@@ -74,44 +70,6 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
         ));
     }
     run_core_refresh(data_root, runtime, source_refresh, true)
-}
-
-fn run_pending_core_relational_catch_up(
-    data_root: &Path,
-    runtime: &mut DaemonRuntime,
-) -> Result<Option<DaemonIteration>> {
-    if !daemon_mode_runs_core_relational_catch_up(runtime.config.daemon.mode) {
-        return Ok(None);
-    }
-    let Some(generation) = pin_published_generation(data_root)? else {
-        return Ok(None);
-    };
-    let generation_id = generation.generation_id();
-    if runtime.sidecar_drain.generation.as_deref() == Some(generation_id)
-        && runtime
-            .sidecar_drain
-            .relational_attempted_generation
-            .as_deref()
-            == Some(generation_id)
-    {
-        return Ok(None);
-    }
-    if !relational_generation_needs_catch_up(data_root, generation_id) {
-        runtime.relational_retry.reset();
-        return Ok(None);
-    }
-    prepare_relational_retry_for_generation(runtime, data_root, generation_id);
-    if !runtime.relational_retry.ready() {
-        return Ok(None);
-    }
-    let run = run_relational_catch_up_with_retry(data_root, runtime, generation_id)?;
-    runtime.sidecar_drain.relational_attempted_generation = Some(generation_id.to_owned());
-    runtime.sidecar_drain.generation = Some(generation_id.to_owned());
-    Ok(Some(immediate_follow_up(DaemonIteration::new(
-        run.did_work,
-        false,
-        DaemonCycleStateV1::unknown(),
-    ))))
 }
 
 fn run_pending_core_semantic_catch_up(
@@ -268,79 +226,6 @@ fn run_core_refresh(
     finish_core_refresh(data_root, runtime, run.job, run.did_work)
 }
 
-fn run_relational_catch_up_with_retry(
-    data_root: &Path,
-    runtime: &mut DaemonRuntime,
-    core_generation_id: &str,
-) -> Result<SourceBackedRelationalCatchUpRun> {
-    prepare_relational_retry_for_generation(runtime, data_root, core_generation_id);
-    if !runtime.relational_retry.ready() {
-        let mut status = read_relational_status(data_root)
-            .unwrap_or_else(|| relational_failure_status(core_generation_id, None));
-        status["reason"] = Value::String("retry_backoff".to_owned());
-        preserve_daemon_retry_state(&mut status, &runtime.relational_retry);
-        return Ok(SourceBackedRelationalCatchUpRun {
-            status,
-            did_work: false,
-        });
-    }
-
-    #[cfg(test)]
-    let run = daemon_test_job("relational_projection")
-        .map(|status| SourceBackedRelationalCatchUpRun {
-            did_work: status
-                .get("did_work")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            status,
-        })
-        .map(Ok)
-        .unwrap_or_else(|| run_relational_after_core_publication(data_root, core_generation_id));
-    #[cfg(not(test))]
-    let run = run_relational_after_core_publication(data_root, core_generation_id);
-
-    let run = run.unwrap_or_else(|error| SourceBackedRelationalCatchUpRun {
-        status: relational_failure_status(core_generation_id, Some(format!("{error:#}"))),
-        did_work: false,
-    });
-    let status = record_daemon_job_retry(&mut runtime.relational_retry, run.status);
-    persist_relational_status(data_root, &status)?;
-    Ok(SourceBackedRelationalCatchUpRun {
-        status,
-        did_work: run.did_work,
-    })
-}
-
-fn relational_failure_status(core_generation_id: &str, error: Option<String>) -> Value {
-    compact_json(json!({
-        "schema_version": 1,
-        "owner": "daemon",
-        "kind": "source_backed_relational_catch_up",
-        "status": "error",
-        "pending": true,
-        "retryable": true,
-        "core_generation_id": core_generation_id,
-        "active_core_generation_id": null,
-        "receipt_core_generation_id": null,
-        "projection_status": null,
-        "build_generation": null,
-        "attempts": 0,
-        "last_attempt_at_ms": utc_now().timestamp_millis(),
-        "error_code": "source_relational_status_unavailable",
-        "last_error": error.unwrap_or_else(|| "relational catch-up is awaiting retry".to_owned()),
-    }))
-}
-
-fn prepare_relational_retry_for_generation(
-    runtime: &mut DaemonRuntime,
-    data_root: &Path,
-    core_generation_id: &str,
-) {
-    if relational_status_generation(data_root).as_deref() != Some(core_generation_id) {
-        runtime.relational_retry.reset();
-    }
-}
-
 fn run_pro_catch_up_with_retry(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
@@ -387,10 +272,6 @@ fn prepare_pro_retry_for_generation(
 }
 
 fn daemon_mode_runs_core_pro_catch_up(mode: crate::config::DaemonMode) -> bool {
-    !mode.runs_only_source_refresh()
-}
-
-fn daemon_mode_runs_core_relational_catch_up(mode: crate::config::DaemonMode) -> bool {
     !mode.runs_only_source_refresh()
 }
 
@@ -482,8 +363,6 @@ pub(super) fn restore_daemon_source_refresh_retry(runtime: &mut DaemonRuntime, d
 pub(super) fn restore_daemon_consumer_retries(runtime: &mut DaemonRuntime, data_root: &Path) {
     let pro = read_pro_status(data_root);
     runtime.pro_retry.restore(pro.as_ref());
-    let relational = read_relational_status(data_root);
-    runtime.relational_retry.restore(relational.as_ref());
     let semantic = read_daemon_job_status(&daemon_semantic_job_path(data_root));
     runtime.semantic_retry.restore(semantic.as_ref());
 }
@@ -491,7 +370,6 @@ pub(super) fn restore_daemon_consumer_retries(runtime: &mut DaemonRuntime, data_
 pub(super) fn daemon_retry_due(runtime: &DaemonRuntime) -> bool {
     (runtime.history_retry.consecutive_failures > 0 && runtime.history_retry.ready())
         || (runtime.pro_retry.consecutive_failures > 0 && runtime.pro_retry.ready())
-        || (runtime.relational_retry.consecutive_failures > 0 && runtime.relational_retry.ready())
         || (runtime.semantic_retry.consecutive_failures > 0 && runtime.semantic_retry.ready())
 }
 
@@ -720,17 +598,7 @@ use super::{
     source_backed_refresh_coordinator::{
         pin_published_generation, CoreRefreshEngine, PinnedCorePublication,
     },
-    source_backed_relational_catch_up::{
-        generation_needs_catch_up as relational_generation_needs_catch_up,
-        persist_status_json as persist_relational_status,
-        read_status_json as read_relational_status,
-        run_after_core_publication as run_relational_after_core_publication,
-        status_generation as relational_status_generation, SourceBackedRelationalCatchUpRun,
-    },
 };
-
-#[cfg(test)]
-use super::daemon::daemon_test_job;
 
 #[cfg(test)]
 #[path = "daemon_scheduler_tests.rs"]

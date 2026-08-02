@@ -102,7 +102,6 @@ pub(crate) fn run_setup(
         "refresh": source.report["refresh"].clone(),
         "refresh_request": refresh_request,
         "semantic": source.report["semantic"].clone(),
-        "relational": source.report["relational"].clone(),
         "pro_projection": source.report["pro_projection"].clone(),
         "daemon": source.report["daemon"].clone(),
         "daemon_autostart": daemon_autostart_json(

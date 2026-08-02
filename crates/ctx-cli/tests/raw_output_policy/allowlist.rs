@@ -51,11 +51,6 @@ const INDEX: TestOwner = TestOwner::behavioral(
     &["src/commands/index.rs"],
     &["render_dashboard", "strip_ansi", "render_plain"],
 );
-const SEARCH_SQL: TestOwner = TestOwner::behavioral(
-    "src/commands/sql.rs::csv_and_raw_cells_keep_their_machine_contracts",
-    &["src/commands/sql.rs"],
-    &["csv_escape", "sql_csv_cell", "sql_raw_cell"],
-);
 const SOURCE_INDEX_MACHINE_ERROR: TestOwner = TestOwner::behavioral(
     "src/commands/source_index/tests/recovery.rs::show_and_search_generation_races_use_the_stable_retryable_json_envelope",
     &["src/commands/source_index/shared.rs"],
@@ -165,7 +160,6 @@ const DEBUG_DIAGNOSTIC: &str =
 const TERMINAL_PROBE: &str = "terminal capability probe; emits no bytes";
 const RAW_INFRASTRUCTURE: &str = "central raw-output infrastructure seam";
 const UI_INFRASTRUCTURE: &str = "central Ui/Document rendering infrastructure seam";
-const PLAIN_FALLBACK: &str = "plain-human fallback used before or outside Ui setup";
 const SPECIALIZED_STREAM: &str = "specialized streaming renderer owns framing and writes";
 const INTERACTIVE_PICKER: &str =
     "TTY-only interactive picker with explicit prompt framing and behavioral coverage";
@@ -175,7 +169,6 @@ const BUILD: &str = "build.rs";
 const ANALYTICS_SENDER: &str = "src/analytics/sender.rs";
 const BLAME: &str = "src/commands/blame.rs";
 const INDEX_COMMAND: &str = "src/commands/index.rs";
-const SQL: &str = "src/commands/sql.rs";
 const SOURCE_INDEX_SHOW: &str = "src/commands/source_index/show.rs";
 const SOURCE_INDEX_SHARED: &str = "src/commands/source_index/shared.rs";
 const STATS_COMMAND: &str = "src/commands/stats.rs";
@@ -399,30 +392,6 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         INDEX
     ),
     allow!(
-        SQL,
-        "print_sql_truncation_notice#1@ea873e086cbe48d0",
-        PrintMacro,
-        JustifiedPlainHuman,
-        PLAIN_FALLBACK,
-        SEARCH_SQL
-    ),
-    allow!(
-        SQL,
-        "print_sql_truncation_notice#2@55248d4418defa0d",
-        PrintMacro,
-        JustifiedPlainHuman,
-        PLAIN_FALLBACK,
-        SEARCH_SQL
-    ),
-    allow!(
-        SQL,
-        "write_sql_stdout#1@6390ed6c2dce4746",
-        OutputRawHelper,
-        MachineProtocol,
-        MACHINE_BODY,
-        SEARCH_SQL
-    ),
-    allow!(
         SOURCE_INDEX_SHOW,
         "stream_cli_session#1@1b29ac2997edb0f6",
         UiRawWriter,
@@ -445,14 +414,6 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         MachineProtocol,
         JSON_PROTOCOL,
         SOURCE_INDEX_MACHINE_ERROR
-    ),
-    allow!(
-        SQL,
-        "write_sql_stdout#1@6390ed6c2dce4746",
-        DirectWrite,
-        MachineProtocol,
-        MACHINE_BODY,
-        SEARCH_SQL
     ),
     allow!(
         STATS_COMMAND,
@@ -736,15 +697,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         OUTPUT,
-        "<module>#4@80fd13410179b5e2",
-        OutputRawHelper,
-        Infrastructure,
-        RAW_INFRASTRUCTURE,
-        UNIT
-    ),
-    allow!(
-        OUTPUT,
-        "<module>#5@270a7b6cfa1ef559",
+        "<module>#4@270a7b6cfa1ef559",
         OutputRawHelper,
         Infrastructure,
         RAW_INFRASTRUCTURE,
@@ -802,14 +755,6 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         OUTPUT,
         "write_stream#4@1e41b5c64a14aad7",
         DirectWrite,
-        Infrastructure,
-        RAW_INFRASTRUCTURE,
-        UNIT
-    ),
-    allow!(
-        OUTPUT,
-        "stdout_writer#1@eb95a1f704d28b0f",
-        StdoutConstructor,
         Infrastructure,
         RAW_INFRASTRUCTURE,
         UNIT

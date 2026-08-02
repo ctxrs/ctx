@@ -79,7 +79,6 @@ PUBLIC_COVERAGE_PATHS = {
     "crates/ctx-cli/tests/support/search_refresh/core_behaviors.rs",
     "crates/ctx-cli/tests/support/search_refresh/generation_lifecycle.rs",
     "crates/ctx-cli/tests/support/native_providers/workspace_sources.rs",
-    "crates/ctx-cli/tests/search_show_locate_sql.rs",
     "crates/ctx-cli/tests/setup_sources_import.rs",
     "crates/ctx-history-capture/src/lib.rs",
 }

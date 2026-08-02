@@ -2,6 +2,10 @@
 fn fresh_home_search_mvp_flow() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-sessions");
+    let obsolete_relational = data_root(&temp).join("relational.sqlite");
+    let obsolete_relational_bytes = b"obsolete relational projection must remain inert";
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(&obsolete_relational, obsolete_relational_bytes).unwrap();
 
     let setup_stdout = ctx(&temp)
         .arg("setup")
@@ -84,11 +88,53 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(first_result["result_scope"], "session");
     let ctx_event_id = first_result["ctx_event_id"].as_str().unwrap().to_owned();
     let ctx_session_id = first_result["ctx_session_id"].as_str().unwrap().to_owned();
-    assert!(first_result["provider_session_id"].is_string());
+    let provider_session_id = first_result["provider_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(first_result.get("source_path").is_none());
     assert_session_suggested_next_commands(first_result);
     assert!(first_result["citations"][0]["ctx_event_id"].is_string());
     assert!(first_result["citations"][0]["ctx_session_id"].is_string());
+
+    let shown_by_provider_id = json_output(ctx(&temp).args([
+        "show",
+        "session",
+        "--provider",
+        "codex",
+        "--provider-session",
+        &provider_session_id,
+        "--format=json",
+    ]));
+    assert_eq!(shown_by_provider_id["ctx_session_id"], ctx_session_id);
+    assert_eq!(
+        shown_by_provider_id["provider_session_id"],
+        provider_session_id
+    );
+
+    let located_by_provider_id = json_output(ctx(&temp).args([
+        "locate",
+        "session",
+        "--provider",
+        "codex",
+        "--provider-session",
+        &provider_session_id,
+        "--format=json",
+    ]));
+    assert_eq!(located_by_provider_id["ctx_session_id"], ctx_session_id);
+    assert_eq!(
+        located_by_provider_id["provider_session_id"],
+        provider_session_id
+    );
+    assert_eq!(
+        located_by_provider_id["source"]["source_format"],
+        "codex_session_jsonl"
+    );
+
+    let located_event =
+        json_output(ctx(&temp).args(["locate", "event", &ctx_event_id, "--format=json"]));
+    assert_eq!(located_event["ctx_event_id"], ctx_event_id);
+    assert_eq!(located_event["ctx_session_id"], ctx_session_id);
 
     let term_search = json_output(ctx(&temp).args([
         "search",
@@ -242,6 +288,11 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(doctor["daemon"]["enabled"], true);
     assert_eq!(doctor["source_epoch"]["lexical"]["status"], "ready");
     assert_eq!(doctor["pro"]["error_code"], "pro_not_installed");
+    assert_eq!(
+        fs::read(&obsolete_relational).unwrap(),
+        obsolete_relational_bytes,
+        "current commands must neither open for mutation nor clean up obsolete relational state"
+    );
 }
 
 #[test]
@@ -320,14 +371,6 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
             .args(["sources", "--format=json"]),
     );
     assert!(!sources["sources"].as_array().unwrap().is_empty());
-
-    let (sql, sql_output_bytes) =
-        measured_json_output(ctx(&temp).env_remove("CTX_LOCAL_USAGE_ENABLED").args([
-            "sql",
-            "SELECT 1 AS value UNION ALL SELECT 2",
-            "--format=json",
-        ]));
-    assert_eq!(sql["returned_rows"], 2);
 
     let blocked_parent = temp.path().join("blocked-show-output");
     fs::write(&blocked_parent, "not a directory").unwrap();
@@ -420,10 +463,6 @@ fn foreground_core_observations_are_truthful_and_recorded_once_after_output() {
     assert_eq!(
         totals("sources", "success", "not_applicable"),
         (1, 0, 0, sources_output_bytes as i64, 0, 0)
-    );
-    assert_eq!(
-        totals("sql", "success", "not_applicable"),
-        (1, 0, 0, sql_output_bytes as i64, 0, 0)
     );
     assert_eq!(
         totals("show_session", "failure", "not_applicable"),

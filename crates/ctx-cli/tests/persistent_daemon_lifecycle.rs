@@ -268,7 +268,7 @@ mod native {
             "{initial_status:#}"
         );
         let initial_pid = live_pid(&initial_status);
-        wait_for_relational_generation(&harness, &initial_generation);
+        wait_for_core_generation(&harness, &initial_generation);
 
         let quiet_before = wait_for_stable_quiet_snapshot(&harness);
         let wakeup_before: Value = serde_json::from_slice(&quiet_before.wakeup.bytes).unwrap();
@@ -765,7 +765,7 @@ mod native {
         let harness = Harness::new();
         write_codex_session(harness.home(), "linux daemon idle soak oracle");
         let generation = harness.setup_wait();
-        wait_for_relational_generation(&harness, &generation);
+        wait_for_core_generation(&harness, &generation);
         let daemon = wait_for_daemon(&harness, None);
         let pid = live_pid(&daemon);
         let quiet_before = wait_for_stable_quiet_snapshot(&harness);
@@ -958,18 +958,19 @@ mod native {
         }
     }
 
-    fn wait_for_relational_generation(harness: &Harness, generation: &str) {
+    fn wait_for_core_generation(harness: &Harness, generation: &str) {
         let deadline = Instant::now() + OBSERVATION_TIMEOUT;
         loop {
             let last = harness.json(&["status", "--format=json"]);
-            if last["relational"]["status"] == "ready"
-                && last["relational"]["active_core_generation_id"] == generation
+            if last["history_epoch"]["status"] == "ready"
+                && last["lexical"]["status"] == "ready"
+                && last["lexical"]["generation_id"] == generation
             {
                 return;
             }
             assert!(
                 Instant::now() < deadline,
-                "relational projection did not reach generation {generation}: {last:#}"
+                "Core did not reach generation {generation}: {last:#}"
             );
             thread::sleep(Duration::from_millis(25));
         }

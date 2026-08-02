@@ -55,9 +55,7 @@ fn install_test_daemon_jobs(
 ) -> DaemonTestJobHookGuard {
     install_daemon_test_job_hooks(DaemonTestJobHooks {
         calls,
-        relational_projection: None,
         semantic_index,
-        relational_blocker: None,
     })
 }
 

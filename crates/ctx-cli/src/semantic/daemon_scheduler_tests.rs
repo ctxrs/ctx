@@ -1,4 +1,4 @@
-use std::{path::Path, sync::mpsc, thread, time::Duration};
+use std::path::Path;
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
@@ -25,8 +25,7 @@ use crate::{
 
 use super::{
     daemon_core_refresh_job_path, daemon_job_should_backoff, daemon_mode_runs_core_pro_catch_up,
-    daemon_mode_runs_core_relational_catch_up, daemon_mode_runs_core_semantic_projection,
-    daemon_semantic_job_path, persist_pro_status, persist_relational_status,
+    daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path, persist_pro_status,
     prepare_pro_retry_for_generation, read_daemon_job_status, read_pro_status,
     record_daemon_job_retry, restore_daemon_consumer_retries,
     run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
@@ -292,26 +291,6 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
     }
 }
 
-fn pending_relational_status(generation: &str) -> Value {
-    json!({
-        "schema_version": 1,
-        "owner": "daemon",
-        "kind": "source_backed_relational_catch_up",
-        "status": "pending",
-        "pending": true,
-        "retryable": true,
-        "core_generation_id": generation,
-        "active_core_generation_id": null,
-        "receipt_core_generation_id": null,
-        "projection_status": null,
-        "build_generation": null,
-        "attempts": 1,
-        "last_attempt_at_ms": 1,
-        "error_code": null,
-        "last_error": null,
-    })
-}
-
 fn pinned_generation(data_root: &Path) -> String {
     coordinate_source_backed_refresh(data_root, SourceBackedRefreshMode::Off)
         .unwrap()
@@ -320,104 +299,31 @@ fn pinned_generation(data_root: &Path) -> String {
         .to_owned()
 }
 
-fn relational_status(generation: &str, status: &str) -> Value {
-    let completed = status == "completed";
-    json!({
-        "schema_version": 1,
-        "owner": "daemon",
-        "kind": "source_backed_relational_catch_up",
-        "status": status,
-        "pending": !completed,
-        "retryable": !completed,
-        "core_generation_id": generation,
-        "active_core_generation_id": completed.then_some(generation),
-        "receipt_core_generation_id": completed.then_some(generation),
-        "projection_status": completed.then_some("ready"),
-        "build_generation": completed.then_some(1),
-        "attempts": 1,
-        "last_attempt_at_ms": 1,
-        "error_code": (!completed).then_some("injected_failure"),
-        "last_error": (!completed).then_some("injected relational failure"),
-    })
-}
-
 #[test]
-fn core_publication_is_ready_and_searchable_while_relational_receipt_is_pending() {
+fn core_publication_is_ready_and_searchable_before_consumer_receipts() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().to_path_buf();
-    let worker_root = data_root.clone();
-    let (started_sender, started_receiver) = mpsc::sync_channel(1);
-    let (release_sender, release_receiver) = mpsc::channel();
-
-    let worker = thread::spawn(move || {
-        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let _hooks = install_daemon_test_job_hooks(DaemonTestJobHooks {
-            calls: calls.clone(),
-            relational_projection: Some(json!({
-                "status": "completed",
-                "pending": false,
-                "retryable": false,
-                "did_work": true,
-            })),
-            semantic_index: None,
-            relational_blocker: Some(std::rc::Rc::new(move || {
-                started_sender
-                    .send(())
-                    .expect("report blocked relational test job");
-                release_receiver
-                    .recv_timeout(Duration::from_secs(10))
-                    .expect("release blocked relational test job");
-            })),
-        });
-        let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
-            move |execution: SourceBackedRefreshExecution<'_>| {
-                let publication = publish_readiness_generation(execution.index_root);
-                execution.report_progress("committed", 1, 1, None)?;
-                persist_relational_status(
-                    execution.data_root,
-                    &pending_relational_status(&publication.generation_id),
-                )?;
-                Ok(publication)
-            },
-        ));
-        let mut runtime = DaemonRuntime::default();
-        let core = run_daemon_scheduler_cycle_with_activity(
-            &daemon_args(),
-            &worker_root,
-            &mut runtime,
-            None,
-            false,
-            None,
-            Some(&coordinator),
-        )
-        .unwrap();
-        let sidecar = run_daemon_scheduler_cycle_with_activity(
-            &daemon_args(),
-            &worker_root,
-            &mut runtime,
-            None,
-            false,
-            None,
-            Some(&coordinator),
-        )
-        .unwrap();
-        let calls = calls.borrow().clone();
-        (
-            core,
-            sidecar,
-            calls,
-            runtime.sidecar_drain.generation.clone(),
-        )
-    });
-
-    started_receiver
-        .recv_timeout(Duration::from_secs(10))
-        .expect("relational catch-up did not reach the deterministic blocker");
+    let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let publication = publish_readiness_generation(execution.index_root);
+            execution.report_progress("committed", 1, 1, None)?;
+            Ok(publication)
+        },
+    ));
+    let mut runtime = DaemonRuntime::default();
+    let core = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        &data_root,
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
 
     let core_job = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root))
         .expect("Core terminal receipt");
-    let relational_job =
-        super::read_relational_status(&data_root).expect("relational pending receipt");
     let refresh_off =
         coordinate_source_backed_refresh(&data_root, SourceBackedRefreshMode::Off).unwrap();
     let pinned_generation = refresh_off.pin.generation_id().to_owned();
@@ -428,12 +334,6 @@ fn core_publication_is_ready_and_searchable_while_relational_receipt_is_pending(
         .unwrap();
     let status = source_epoch_status_report(&data_root, &AppConfig::default()).unwrap();
 
-    release_sender
-        .send(())
-        .expect("release relational catch-up");
-    let (core, sidecar, calls, drain_generation) =
-        worker.join().expect("join blocked relational worker");
-
     let published_generation = core_job["published_generation"]
         .as_str()
         .expect("published generation");
@@ -442,16 +342,8 @@ fn core_publication_is_ready_and_searchable_while_relational_receipt_is_pending(
     assert_eq!(core_job["progress"]["phase"], "published", "{core_job:#}");
     assert_eq!(core_job["progress"]["completed_sources"], 1);
     assert_eq!(core_job["progress"]["total_sources"], 1);
-    assert!(core_job.get("relational_projection").is_none());
     assert!(core_job.get("pro_projection").is_none());
     assert!(core_job.get("semantic_projection").is_none());
-
-    assert_eq!(relational_job["status"], "pending", "{relational_job:#}");
-    assert_eq!(relational_job["attempts"], 1);
-    assert_eq!(
-        relational_job["core_generation_id"], published_generation,
-        "{relational_job:#}"
-    );
     assert_eq!(pinned_generation, published_generation);
     assert_eq!(hits.len(), 1);
     assert_eq!(
@@ -470,37 +362,28 @@ fn core_publication_is_ready_and_searchable_while_relational_receipt_is_pending(
     );
     assert_eq!(status.report["refresh"]["status"], "ready");
     assert_eq!(status.report["refresh"]["request_state"], "published");
-    assert_eq!(status.report["relational"]["status"], "pending");
-    assert_eq!(status.report["relational"]["catch_up"]["status"], "pending");
-    assert_eq!(
-        status.report["relational"]["catch_up"]["core_generation_id"],
-        published_generation
-    );
 
     assert!(core.did_work);
     assert!(!core.failed);
     assert!(core.continue_immediately);
-    assert!(!sidecar.failed);
-    assert!(sidecar.continue_immediately);
-    assert_eq!(calls, vec!["relational_projection"]);
-    assert_eq!(drain_generation.as_deref(), Some(published_generation));
+    assert_eq!(
+        runtime.sidecar_drain.generation.as_deref(),
+        Some(published_generation)
+    );
 }
 
 fn install_jobs(
     calls: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
-    relational_projection: Option<Value>,
     semantic_index: Option<Value>,
 ) -> super::super::daemon::DaemonTestJobHookGuard {
     install_daemon_test_job_hooks(DaemonTestJobHooks {
         calls,
-        relational_projection,
         semantic_index,
-        relational_blocker: None,
     })
 }
 
 #[test]
-fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
+fn one_core_cycle_then_scheduler_drains_optional_consumers() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
@@ -529,24 +412,15 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
         Some(generation.as_str())
     );
     assert!(!coordinator.has_pending_request());
-    assert!(super::relational_generation_needs_catch_up(
-        temp.path(),
-        &generation
-    ));
     assert!(super::semantic_generation_needs_catch_up(
         temp.path(),
         &generation
     ));
-    assert!(runtime
-        .sidecar_drain
-        .relational_attempted_generation
-        .is_none());
     assert!(runtime.sidecar_drain.pro_attempted_generation.is_none());
     assert!(runtime
         .sidecar_drain
         .semantic_attempted_generation
         .is_none());
-    assert!(super::read_relational_status(temp.path()).is_none());
     assert!(read_pro_status(temp.path()).is_none());
     assert!(!daemon_semantic_job_path(temp.path()).exists());
     assert_eq!(pinned_generation(temp.path()), generation);
@@ -554,37 +428,12 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
     let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let _hooks = install_jobs(
         calls.clone(),
-        Some(relational_status(&generation, "error")),
         Some(json!({
             "status": "ready",
             "source_generation_ready": true,
             "source_work_remaining": false,
         })),
     );
-
-    let relational = run_daemon_scheduler_cycle_with_activity(
-        &daemon_args(),
-        temp.path(),
-        &mut runtime,
-        None,
-        true,
-        None,
-        Some(&coordinator),
-    )
-    .unwrap();
-    assert!(relational.continue_immediately);
-    assert_eq!(&*calls.borrow(), &["relational_projection"]);
-    assert!(read_pro_status(temp.path()).is_none());
-    assert!(!daemon_semantic_job_path(temp.path()).exists());
-    assert_eq!(runtime.relational_retry.consecutive_failures, 1);
-    assert_eq!(
-        runtime
-            .sidecar_drain
-            .relational_attempted_generation
-            .as_deref(),
-        Some(generation.as_str())
-    );
-    assert_eq!(pinned_generation(temp.path()), generation);
 
     let pro = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
@@ -597,7 +446,7 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
     )
     .unwrap();
     assert!(!pro.continue_immediately);
-    assert_eq!(&*calls.borrow(), &["relational_projection"]);
+    assert!(calls.borrow().is_empty());
     let pro_status = read_pro_status(temp.path()).expect("Pro attempt receipt");
     assert_eq!(pro_status["status"], "error", "{pro_status:#}");
     assert_eq!(pro_status["retryable"], false, "{pro_status:#}");
@@ -621,10 +470,7 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
     )
     .unwrap();
     assert!(semantic.continue_immediately);
-    assert_eq!(
-        &*calls.borrow(),
-        &["relational_projection", "semantic_index"]
-    );
+    assert_eq!(&*calls.borrow(), &["semantic_index"]);
     let semantic_status = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
     assert_eq!(semantic_status["status"], "ready");
     assert_eq!(semantic_status["core_generation_id"], generation);
@@ -635,7 +481,6 @@ fn one_core_cycle_then_scheduler_drains_relational_before_optional_sidecars() {
             .as_deref(),
         Some(generation.as_str())
     );
-    assert_eq!(runtime.relational_retry.consecutive_failures, 1);
     assert_eq!(runtime.pro_retry.consecutive_failures, 0);
     assert_eq!(runtime.semantic_retry.consecutive_failures, 0);
     assert_eq!(pinned_generation(temp.path()), generation);
@@ -669,12 +514,10 @@ fn idle_semantic_catch_up_continues_past_one_page_and_drains_to_terminal() {
     let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut runtime = DaemonRuntime::default();
     runtime.sidecar_drain.generation = Some(generation.clone());
-    runtime.sidecar_drain.relational_attempted_generation = Some(generation.clone());
 
     {
         let _jobs = install_jobs(
             calls.clone(),
-            None,
             Some(json!({
                 "status": "budget_exhausted",
                 "source_records_scanned": MAX_SEMANTIC_EVENT_PAGE_ITEMS,
@@ -706,7 +549,6 @@ fn idle_semantic_catch_up_continues_past_one_page_and_drains_to_terminal() {
     {
         let _jobs = install_jobs(
             calls.clone(),
-            None,
             Some(json!({
                 "status": "ready",
                 "source_records_scanned": 1,
@@ -751,7 +593,7 @@ fn idle_semantic_catch_up_continues_past_one_page_and_drains_to_terminal() {
 }
 
 #[test]
-fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() {
+fn nonretryable_pro_attempt_is_generation_guarded() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
@@ -776,30 +618,6 @@ fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() 
         .unwrap()
         .to_owned();
     assert!(core.continue_immediately);
-
-    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let _hooks = install_jobs(
-        calls.clone(),
-        Some(relational_status(&generation, "completed")),
-        None,
-    );
-    let relational = run_daemon_scheduler_cycle_with_activity(
-        &daemon_args(),
-        temp.path(),
-        &mut runtime,
-        None,
-        false,
-        None,
-        Some(&coordinator),
-    )
-    .unwrap();
-    assert!(relational.continue_immediately);
-    assert_eq!(&*calls.borrow(), &["relational_projection"]);
-    assert!(read_pro_status(temp.path()).is_none());
-    let relational_status = super::read_relational_status(temp.path()).unwrap();
-    assert_eq!(relational_status["status"], "completed");
-    assert_eq!(relational_status["core_generation_id"], generation);
-    assert_eq!(relational_status["receipt_core_generation_id"], generation);
 
     let pro = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
@@ -839,7 +657,6 @@ fn nonretryable_pro_attempt_is_generation_guarded_without_starving_relational() 
         first_pro_status,
         "the same Core drain must not submit a second terminal Pro attempt"
     );
-    assert_eq!(&*calls.borrow(), &["relational_projection"]);
     assert_eq!(pinned_generation(temp.path()), generation);
 }
 
@@ -925,14 +742,6 @@ fn source_refresh_only_mode_excludes_source_backed_pro_catch_up() {
 }
 
 #[test]
-fn source_refresh_only_mode_excludes_source_backed_relational_catch_up() {
-    assert!(daemon_mode_runs_core_relational_catch_up(DaemonMode::Full));
-    assert!(!daemon_mode_runs_core_relational_catch_up(
-        DaemonMode::SourceRefreshOnly
-    ));
-}
-
-#[test]
 fn source_refresh_only_mode_excludes_source_backed_semantic_projection() {
     assert!(daemon_mode_runs_core_semantic_projection(DaemonMode::Full));
     assert!(!daemon_mode_runs_core_semantic_projection(
@@ -975,10 +784,6 @@ fn source_refresh_only_tick_creates_no_consumer_catch_up_status() {
     assert!(!iteration.did_work);
     assert!(!iteration.failed);
     assert!(!temp.path().join("daemon/jobs/pro-catch-up.json").exists());
-    assert!(!temp
-        .path()
-        .join("daemon/jobs/relational-catch-up.json")
-        .exists());
     assert!(!super::daemon_semantic_job_path(temp.path()).exists());
 }
 
@@ -1101,111 +906,9 @@ fn successful_pro_retry_resets_only_pro_state() {
 }
 
 #[test]
-fn relational_projection_error_never_puts_core_refresh_into_backoff() {
-    let core_job = json!({
-        "status": "completed",
-        "published_generation": "a".repeat(64),
-        "relational_projection": {
-            "status": "error",
-            "pending": true,
-            "retryable": true,
-            "error_code": "source_relational_projection_unavailable",
-        },
-    });
-    let mut backoff = DaemonRetryBackoff::default();
-
-    assert!(!daemon_job_should_backoff(&core_job));
-    let recorded = record_daemon_job_retry(&mut backoff, core_job);
-
-    assert_eq!(recorded["status"], "completed");
-    assert_eq!(recorded["relational_projection"]["status"], "error");
-    assert_eq!(backoff.consecutive_failures, 0);
-}
-
-#[test]
-fn relational_retry_runs_across_core_noop_backoff_and_recovers_independently() {
+fn semantic_retry_runs_across_core_backoff_and_recovers_independently() {
     let temp = tempfile::tempdir().unwrap();
     let generation = publish_empty_core_generation(temp.path());
-    write_daemon_job_status(
-        &daemon_core_refresh_job_path(temp.path()),
-        &json!({
-            "status": "completed",
-            "reason": "unchanged",
-            "published_generation": generation,
-        }),
-    )
-    .unwrap();
-    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let mut first = DaemonRuntime::default();
-    first.history_retry.record_failure();
-    let history_failures = first.history_retry.consecutive_failures;
-    {
-        let _hooks = install_jobs(
-            calls.clone(),
-            Some(relational_status(&generation, "error")),
-            None,
-        );
-        let iteration = run_daemon_scheduler_cycle_with_activity(
-            &daemon_args(),
-            temp.path(),
-            &mut first,
-            None,
-            false,
-            None,
-            None,
-        )
-        .unwrap();
-        assert!(!iteration.failed, "derived failure cannot revoke Core");
-    }
-    assert_eq!(&*calls.borrow(), &["relational_projection"]);
-    assert_eq!(first.relational_retry.consecutive_failures, 1);
-    assert_eq!(first.history_retry.consecutive_failures, history_failures);
-    assert_eq!(first.semantic_retry.consecutive_failures, 0);
-
-    let mut restarted = DaemonRuntime::default();
-    restarted.history_retry.record_failure();
-    restore_daemon_consumer_retries(&mut restarted, temp.path());
-    assert!(!restarted.relational_retry.ready());
-    restarted.relational_retry.retry_not_before = None;
-    restarted.relational_retry.retry_not_before_at_ms = None;
-    calls.borrow_mut().clear();
-    {
-        let _hooks = install_jobs(
-            calls.clone(),
-            Some(relational_status(&generation, "completed")),
-            None,
-        );
-        let iteration = run_daemon_scheduler_cycle_with_activity(
-            &daemon_args(),
-            temp.path(),
-            &mut restarted,
-            None,
-            false,
-            None,
-            None,
-        )
-        .unwrap();
-        assert!(!iteration.failed);
-    }
-    assert_eq!(&*calls.borrow(), &["relational_projection"]);
-    assert_eq!(restarted.relational_retry.consecutive_failures, 0);
-    assert_eq!(restarted.history_retry.consecutive_failures, 1);
-    assert_eq!(
-        read_daemon_job_status(&daemon_core_refresh_job_path(temp.path())).unwrap()["status"],
-        "completed"
-    );
-}
-
-#[test]
-fn semantic_retry_runs_across_core_backoff_while_relational_waits_and_recovers_alone() {
-    let temp = tempfile::tempdir().unwrap();
-    let generation = publish_empty_core_generation(temp.path());
-    let mut relational_retry = DaemonRetryBackoff::default();
-    let relational = record_daemon_job_retry(
-        &mut relational_retry,
-        relational_status(&generation, "error"),
-    );
-    persist_relational_status(temp.path(), &relational).unwrap();
     write_daemon_job_status(
         &daemon_core_refresh_job_path(temp.path()),
         &json!({
@@ -1219,11 +922,9 @@ fn semantic_retry_runs_across_core_backoff_while_relational_waits_and_recovers_a
     let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut first = DaemonRuntime::default();
     first.history_retry.record_failure();
-    first.relational_retry.restore(Some(&relational));
     {
         let _hooks = install_jobs(
             calls.clone(),
-            None,
             Some(json!({
                 "status": "failed",
                 "failure_class": "retryable",
@@ -1245,13 +946,11 @@ fn semantic_retry_runs_across_core_backoff_while_relational_waits_and_recovers_a
     }
     assert_eq!(&*calls.borrow(), &["semantic_index"]);
     assert_eq!(first.semantic_retry.consecutive_failures, 1);
-    assert_eq!(first.relational_retry.consecutive_failures, 1);
     assert_eq!(first.history_retry.consecutive_failures, 1);
 
     let mut restarted = DaemonRuntime::default();
     restarted.history_retry.record_failure();
     restore_daemon_consumer_retries(&mut restarted, temp.path());
-    assert!(!restarted.relational_retry.ready());
     assert!(!restarted.semantic_retry.ready());
     restarted.semantic_retry.retry_not_before = None;
     restarted.semantic_retry.retry_not_before_at_ms = None;
@@ -1259,7 +958,6 @@ fn semantic_retry_runs_across_core_backoff_while_relational_waits_and_recovers_a
     {
         let _hooks = install_jobs(
             calls.clone(),
-            None,
             Some(json!({
                 "status": "ready",
                 "source_generation_ready": true,
@@ -1280,7 +978,6 @@ fn semantic_retry_runs_across_core_backoff_while_relational_waits_and_recovers_a
     }
     assert_eq!(&*calls.borrow(), &["semantic_index"]);
     assert_eq!(restarted.semantic_retry.consecutive_failures, 0);
-    assert_eq!(restarted.relational_retry.consecutive_failures, 1);
     assert_eq!(restarted.history_retry.consecutive_failures, 1);
     let semantic = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
     assert_eq!(semantic["status"], "ready");

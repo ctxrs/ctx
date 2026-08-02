@@ -229,48 +229,6 @@ fn stats_are_literal_read_only_and_do_not_count_themselves() {
 }
 
 #[test]
-fn cli_non_search_results_are_not_reclassified_as_value_or_context() {
-    let temp = tempdir();
-    let sql = json_output(enabled(ctx(&temp).args([
-        "sql",
-        "SELECT 1 AS one",
-        "--format=json",
-    ])));
-    assert_eq!(sql["rows"], serde_json::json!([[1]]));
-
-    let connection = Connection::open(usage_db_path(&temp)).unwrap();
-    let row: (i64, String, String, i64, i64, i64) = connection
-        .query_row(
-            "SELECT definition_version, value_class, context_coverage, result_count, \
-                    delivered_context_bytes, matched_normalized_session_bytes \
-             FROM daily_usage WHERE surface = 'cli' AND operation = 'sql'",
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        row,
-        (
-            2,
-            "not_applicable".to_owned(),
-            "not_applicable".to_owned(),
-            0,
-            0,
-            0,
-        )
-    );
-}
-
-#[test]
 fn parsed_cli_failure_records_once_and_recording_failure_is_best_effort() {
     let temp = tempdir();
     create_owner_private_data_root(&data_root(&temp));

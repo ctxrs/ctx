@@ -1,20 +1,16 @@
-use std::{path::PathBuf, time::Duration as StdDuration};
+use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use ctx_history_relational::{
-    RAW_SQL_DEFAULT_MAX_COLUMNS, RAW_SQL_DEFAULT_MAX_ROWS, RAW_SQL_DEFAULT_MAX_SQL_BYTES,
-    RAW_SQL_DEFAULT_MAX_VALUE_BYTES,
-};
 
 use crate::{
     commands,
     commands::{
+        locate::LocateArgs,
         search::RefreshArg,
         show::{ShowEventArgs, ShowSessionArgs},
-        sql::parse_sql_timeout,
     },
     docs, integrations, mcp,
-    output::{JsonOutputFormat, SqlFormat},
+    output::JsonOutputFormat,
     pro,
     progress::ProgressArg,
     provider_args::{
@@ -101,6 +97,8 @@ pub(crate) enum CommandRoot {
     Import(ImportArgs),
     #[command(about = "Show an indexed session or event")]
     Show(ShowArgs),
+    #[command(about = "Locate Core source identity for an indexed session or event")]
+    Locate(LocateArgs),
     #[command(about = "Search indexed agent history")]
     Search(SearchArgs),
     #[command(
@@ -116,8 +114,6 @@ pub(crate) enum CommandRoot {
     Referral(pro::ReferralArgs),
     #[command(about = "Show cited agent provenance for committed code or a pull request")]
     Blame(commands::blame::BlameArgs),
-    #[command(about = "Run read-only SQL against the local ctx index")]
-    Sql(SqlArgs),
     #[command(about = "Read embedded ctx documentation")]
     Docs(docs::DocsArgs),
     #[command(about = "Install or inspect ctx integrations")]
@@ -515,34 +511,6 @@ impl DaemonTriggerCommandArg {
             Self::Import => "import",
             Self::Search => "search",
         }
-    }
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct SqlArgs {
-    #[arg(help = "Read-only SQL statement to run; pass '-' to read SQL from stdin")]
-    pub(crate) sql: Option<String>,
-    #[arg(long, conflicts_with = "sql", help = "Read SQL from a file")]
-    pub(crate) file: Option<PathBuf>,
-    #[arg(long, value_enum, default_value_t = SqlFormat::Table)]
-    pub(crate) format: SqlFormat,
-    #[arg(long, default_value_t = RAW_SQL_DEFAULT_MAX_ROWS)]
-    pub(crate) max_rows: usize,
-    #[arg(long, default_value_t = RAW_SQL_DEFAULT_MAX_COLUMNS)]
-    pub(crate) max_columns: usize,
-    #[arg(long, default_value_t = RAW_SQL_DEFAULT_MAX_VALUE_BYTES)]
-    pub(crate) max_value_bytes: usize,
-    #[arg(long, default_value_t = RAW_SQL_DEFAULT_MAX_SQL_BYTES)]
-    pub(crate) max_sql_bytes: usize,
-    #[arg(long, default_value = "10s", value_parser = parse_sql_timeout)]
-    pub(crate) timeout: StdDuration,
-    #[arg(long, help = "Omit the header row for CSV output")]
-    pub(crate) no_header: bool,
-}
-
-impl SqlArgs {
-    pub(crate) fn output_format(&self) -> SqlFormat {
-        self.format
     }
 }
 

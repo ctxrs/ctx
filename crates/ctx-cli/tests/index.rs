@@ -15,7 +15,7 @@ fn import_ready_history(temp: &TempDir) {
     let generation = imported["sources"][0]["published_generation"]
         .as_str()
         .expect("import should publish a Core generation");
-    wait_for_test_relational_projection(temp, generation);
+    wait_for_test_lexical_projection(temp, generation);
 }
 
 fn strip_ansi(rendered: &[u8]) -> Vec<u8> {

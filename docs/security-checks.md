@@ -6,12 +6,13 @@ the local retrieval product.
 ## Required Invariants
 
 - `ctx setup` reads supported provider history and writes only under the
-  configured ctx data root: Core generations, derived projections, config data,
-  and optional daemon lock/status/job state when daemon autostart runs.
+  configured ctx data root: Core/Tantivy generations, optional semantic data,
+  config data, and optional daemon lock/status/job state when daemon autostart
+  runs.
 - `ctx sources` writes nothing in local-only security mode.
 - `ctx import` writes only under the configured ctx data root: Core generations,
-  derived projections, config data, and optional daemon lock/status/job state
-  when daemon autostart runs.
+  optional semantic and Pro-derived state, config data, and optional daemon
+  lock/status/job state when daemon autostart runs.
 - `ctx search` may request a bounded daemon-owned refresh of discovered native
   provider history before querying the active Core generation. The query process
   does not write Core generations or projections. Without semantic opt-in,
@@ -20,15 +21,8 @@ the local retrieval product.
   `ctx show session --out` writes only the explicit path when one is provided.
 - `ctx status` does not mutate canonical history or local Pro graph data:
   missing stores stay missing, and existing stores are not migrated, repaired,
-  or used to create search projections. Pro entitlement authorization may
+  or used to create search generations. Pro entitlement authorization may
   advance nonsecret anti-clock-rollback security metadata.
-- On a completely fresh data root, `ctx sql` may initialize only an empty
-  relational metadata projection. It does not create Core or import provider
-  history. Otherwise it admits only a ready projection bound to the active Core
-  generation, or the canonical empty projection when Core is absent; stale
-  populated or generation-bound projections fail closed. SQL rejects write
-  statements and multiple statements and does not run background upgrade
-  checks.
 - In local-only security mode, setup/import/default search do not use network
   access or API keys. Explicit semantic use still must not call hosted model
   APIs, and search must not download the local embedding model when the required
@@ -60,11 +54,13 @@ the local retrieval product.
   Network model acquisition is allowed only for the local embedding model when
   semantic search is explicitly enabled.
 - Provider files are read as sources and not modified.
+- Provider-native SQLite histories are opened as short read-only logical
+  snapshots; ctx does not checkpoint, migrate, or write those databases.
 - Provider transcript imports reject symlinked JSONL files by default.
 - JSON output is private by default.
-- Search/show JSON and SQLite search projections preserve local
-  transcript text by default, including absolute paths and secret-shaped
-  strings. They must be treated as private local data.
+- Search/show JSON preserves local transcript text by default, including
+  absolute paths and secret-shaped strings. It must be treated as private local
+  data.
 - The public provider support matrix contains only supported providers and uses
   only the `supported` status. Unsupported-provider rationale is outside the
   public support matrix.
@@ -93,15 +89,15 @@ scripts/bazelw test //:docs_check --config=ci
 
 ## Bazel Security Gates
 
-Run the public local transcript oracle through Bazel:
+Run the affected public integration selection after search/show/locate changes:
 
 ```bash
-scripts/bazelw test //crates/ctx-cli:search_show_locate_sql_tests --config=ci
+scripts/bazel-affected.sh origin/main
 ```
 
-`//crates/ctx-cli:search_show_locate_sql_tests` imports a synthetic provider
-history with fake secret-shaped values, then checks `search`, `show`, and SQLite
-search projections preserve local transcript text.
+The owning search/show/locate oracle imports synthetic provider history with
+fake secret-shaped values and checks that those commands preserve the
+documented private local-data boundary.
 
 ## Mode Placement
 

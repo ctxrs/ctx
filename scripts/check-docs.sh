@@ -18,7 +18,6 @@ required_paths=(
   docs/provider-support.md
   docs/provider-support-matrix.json
   docs/search.md
-  docs/sql.md
   docs/slash-command-integrations.md
   docs/limitations.md
   docs/security-checks.md
@@ -47,7 +46,6 @@ if command -v jq >/dev/null 2>&1; then
   jq empty docs/provider-support-matrix.json
 fi
 python3 scripts/check-provider-support-matrix.py
-python3 scripts/check-sql-docs.py
 
 public_docs=(
   README.md

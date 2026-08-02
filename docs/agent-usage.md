@@ -4,17 +4,19 @@ Agents should query ctx before repeating investigation work.
 
 ## Recommended Flow
 
-1. Run `ctx status --format json` to confirm the local store is readable.
+1. Run `ctx status --format json` to confirm local Core/search state is readable.
 2. Run `ctx sources --format json` to see which local provider paths currently exist.
 3. Search narrowly with provider, workspace, file, or date filters.
 4. Use `ctx show event` for the best matching result before changing code.
-5. Cite ctx material in notes or final answers when it influenced the work.
+5. Use `ctx locate event` or `ctx locate session` when source identity matters.
+6. Cite ctx material in notes or final answers when it influenced the work.
 
 Example:
 
 ```bash
-ctx search "sqlite migration failed" --workspace ctx
+ctx search "schema migration failed" --workspace ctx
 ctx show event <ctx-event-id> --window 5
+ctx locate event <ctx-event-id>
 ```
 
 Normal `ctx search` uses `--refresh background`, which serves the active Core
@@ -23,10 +25,10 @@ Semantic coverage remains disabled unless explicitly enabled.
 Rerun the same search with `--refresh off` when the task requires a strictly
 read-only query over the active Core generation.
 
-Use `ctx sql` only when normal search does not express the question, such as
-exact counts, joins, audits, or scripting over stable `ctx_*` views. It is
-read-only and does not refresh or import provider history. See
-`ctx docs show sql` for stable view schemas and examples.
+When one query is not enough, vary the wording, add `--term`, narrow by
+workspace/provider/file/session, or use `--events` and `--include-subagents`.
+Search windows are bounded, so do not infer exact corpus-wide counts from the
+number of returned hits.
 
 When ctx runs inside Codex and `CODEX_THREAD_ID` is available, search excludes
 the active Codex session tree by default to avoid returning the current prompt
@@ -54,6 +56,8 @@ ctx search "<topic>" --term "<related term>" --term "<error text>" --refresh off
 ctx search "<topic>" --session <ctx-session-id> --refresh off
 ctx show event <ctx-event-id> --window 5
 ctx show session <ctx-session-id>
+ctx locate event <ctx-event-id>
+ctx locate session <ctx-session-id>
 ```
 
 Start with broad `ctx search` queries when the topic may span multiple sessions,

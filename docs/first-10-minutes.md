@@ -33,8 +33,9 @@ ctx status --format json
 
 `ctx setup` creates local storage, discovers supported provider history,
 inventories local history sources, imports discovered native provider sources,
-and publishes a self-contained Core generation with its derived projections. It
-does not execute history-source plugin commands. The default root is `~/.ctx`.
+and publishes an immutable Core/Tantivy search generation. Optional semantic
+indexing and independent Pro materialization advance separately. It does not
+execute history-source plugin commands. The default root is `~/.ctx`.
 Use a temporary root for trials:
 
 ```bash

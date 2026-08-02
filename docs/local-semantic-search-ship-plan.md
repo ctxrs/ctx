@@ -268,9 +268,9 @@ and private relevance evals justify flipping the default.
   standalone semantic documents. They may remain discoverable lexically.
 - Semantic snippets should come from the lite-turn text range so result
   previews explain why the vector matched.
-- Maintain a normal `event_search_lookup` projection for semantic document
-  assembly. FTS remains the lexical index; semantic by-id/recency work must not
-  join FTS by unindexed columns.
+- Maintain deterministic event-to-document lookup bound to the active Core
+  generation for semantic assembly. Tantivy remains the lexical authority;
+  semantic by-id/recency work reads generation metadata directly.
 - Tests:
   - one user + multiple assistant messages before next user becomes one doc
     containing only the user and final assistant message;
@@ -367,7 +367,7 @@ and private relevance evals justify flipping the default.
   - explicit semantic search fails when the daemon query service is unavailable.
 - Remaining after v1:
   - consider moving vector scan/result-assembly/ranking into the daemon if process
-    startup or per-command sqlite opening becomes the bottleneck;
+    startup or per-command semantic-sidecar opening becomes the bottleneck;
   - add a refill loop for post-vector filters so candidate count can drop below
     the conservative 1,000 soft-filter window without under-filling results.
 

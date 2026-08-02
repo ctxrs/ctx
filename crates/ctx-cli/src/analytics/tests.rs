@@ -276,7 +276,7 @@ fn selected_telemetry_contract_inventory_hashes_match_the_running_public_source(
     assert_eq!(provenance["repository"], "ctxrs/ctx");
     assert_eq!(
         provenance["base_commit"],
-        "53dcec94d0e4c0aa6be22bce95b3daffd0c537dc"
+        "985f06e8e14cbdb6cb19106ec5ad658a305f7eaa"
     );
     assert_eq!(provenance["provenance_kind"], "content_addressed_candidate");
     assert_eq!(

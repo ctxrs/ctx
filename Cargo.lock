@@ -741,7 +741,6 @@ dependencies = [
  "ctx-history-capture",
  "ctx-history-core",
  "ctx-history-index",
- "ctx-history-relational",
  "ctx-pro-host-protocol",
  "ed25519-dalek",
  "fastembed",
@@ -844,19 +843,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tantivy",
- "tempfile",
- "thiserror 1.0.69",
- "uuid",
-]
-
-[[package]]
-name = "ctx-history-relational"
-version = "0.26.0"
-dependencies = [
- "ctx-history-core",
- "rusqlite",
- "serde",
- "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "uuid",

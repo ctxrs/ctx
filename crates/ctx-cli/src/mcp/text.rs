@@ -6,8 +6,6 @@ use pro::{is_blame_result, render_blame_text};
 
 const MCP_TEXT_MAX_SEARCH_RESULTS: usize = 5;
 const MCP_TEXT_MAX_SOURCES: usize = 12;
-const MCP_TEXT_MAX_SQL_ROWS: usize = 8;
-const MCP_TEXT_MAX_SQL_COLUMNS: usize = 6;
 const MCP_TEXT_MAX_EVENTS: usize = 8;
 const MCP_TEXT_MAX_SNIPPET_CHARS: usize = 320;
 const MCP_TEXT_MAX_EVENT_CHARS: usize = 500;
@@ -20,7 +18,6 @@ pub(super) fn render_tool_text(value: &Value) -> String {
 
     let payload_type = value.get("payload_type").and_then(Value::as_str);
     match payload_type {
-        Some("sql_result") => render_sql_text(value),
         Some("session_transcript") => render_session_text(value),
         Some("event_window") => render_event_window_text(value),
         Some("search_results") => render_search_text(value),
@@ -66,15 +63,6 @@ fn render_status_text(value: &Value) -> String {
                 ("certified_bytes", "certified_source_bytes"),
                 ("timings_us", "timings_us"),
             ],
-        );
-    }
-    if let Some(relational) = value.get("relational") {
-        push_component_summary(&mut out, "relational", Some(relational));
-        push_key_value(&mut out, "relational_path", relational.get("path"));
-        push_key_value(
-            &mut out,
-            "relational_generation",
-            relational.get("active_core_generation_id"),
         );
     }
     if let Some(pro_projection) = value.get("pro_projection") {
@@ -441,68 +429,6 @@ fn push_filter_summary(out: &mut String, filters: Option<&Value>) {
     }
 }
 
-fn render_sql_text(value: &Value) -> String {
-    let columns = value
-        .get("columns")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let rows = value
-        .get("rows")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-
-    let mut out = String::from("ctx sql\n");
-    push_key_value(&mut out, "returned_rows", value.get("returned_rows"));
-    if let Some(truncated) = value.get("truncated") {
-        let rows_truncated = value_field(truncated, "rows").unwrap_or_else(|| "false".to_owned());
-        let values_truncated =
-            value_field(truncated, "values").unwrap_or_else(|| "false".to_owned());
-        out.push_str(&format!(
-            "truncated: rows={rows_truncated}, values={values_truncated}\n"
-        ));
-    }
-    push_key_value(&mut out, "elapsed_ms", value.get("elapsed_ms"));
-    if columns.is_empty() {
-        out.push_str("columns: 0\n");
-        return out;
-    }
-
-    let visible_column_count = columns.len().min(MCP_TEXT_MAX_SQL_COLUMNS);
-    let headers = columns
-        .iter()
-        .take(visible_column_count)
-        .map(|column| table_cell(&scalar_text(column), MCP_TEXT_MAX_CELL_CHARS))
-        .collect::<Vec<_>>();
-    out.push_str("\n| ");
-    out.push_str(&headers.join(" | "));
-    out.push_str(" |\n| ");
-    out.push_str(
-        &(0..visible_column_count)
-            .map(|_| "---")
-            .collect::<Vec<_>>()
-            .join(" | "),
-    );
-    out.push_str(" |\n");
-    for row in rows.iter().take(MCP_TEXT_MAX_SQL_ROWS) {
-        let cells = row
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-            .iter()
-            .take(visible_column_count)
-            .map(sql_cell_text)
-            .collect::<Vec<_>>();
-        out.push_str("| ");
-        out.push_str(&cells.join(" | "));
-        out.push_str(" |\n");
-    }
-    push_omitted_line(&mut out, rows.len(), MCP_TEXT_MAX_SQL_ROWS, "rows");
-    push_omitted_line(&mut out, columns.len(), MCP_TEXT_MAX_SQL_COLUMNS, "columns");
-    out
-}
-
 fn render_session_text(value: &Value) -> String {
     let events = value
         .get("events")
@@ -690,44 +616,6 @@ fn render_generic_text(value: &Value) -> String {
         _ => push_key_value(&mut out, "value", Some(value)),
     }
     out
-}
-
-fn sql_cell_text(value: &Value) -> String {
-    let text = match value {
-        Value::Object(object) => match object.get("type").and_then(Value::as_str) {
-            Some("text") => {
-                let mut text = object
-                    .get("value")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-                if object.get("truncated").and_then(Value::as_bool) == Some(true) {
-                    text.push_str("... (truncated)");
-                }
-                text
-            }
-            Some("blob") => {
-                let bytes = object
-                    .get("bytes")
-                    .and_then(Value::as_u64)
-                    .map(|bytes| bytes.to_string())
-                    .unwrap_or_else(|| "?".to_owned());
-                let preview = object
-                    .get("preview_hex")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let suffix = if object.get("truncated").and_then(Value::as_bool) == Some(true) {
-                    " truncated"
-                } else {
-                    ""
-                };
-                format!("blob {bytes} bytes {preview}{suffix}")
-            }
-            _ => scalar_text(value),
-        },
-        _ => scalar_text(value),
-    };
-    table_cell(&text, MCP_TEXT_MAX_CELL_CHARS)
 }
 
 fn table_cell(text: &str, max_chars: usize) -> String {

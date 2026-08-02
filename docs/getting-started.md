@@ -68,9 +68,10 @@ ctx setup
 ctx status
 ```
 
-Setup creates the configured ctx data root, prepares the self-contained Core
-generation, starts or health-checks the enabled persistent daemon, requests a
-provider-source refresh, and prints next steps. It does not write `config.toml`
+Setup creates the configured ctx data root, prepares an immutable Core/Tantivy
+generation with complete policy-selected records and source identities, starts or health-checks the
+enabled persistent daemon, requests a provider-source refresh, and prints next
+steps. It does not write `config.toml`
 for implicit defaults and does not execute history-source plugin commands. The
 default data root is `~/.ctx`. Use `ctx daemon disable` for a durable opt-out or
 `ctx setup --no-daemon` for a one-run opt-out. Existing configurations that
@@ -149,7 +150,7 @@ Native provider `--path` imports require `--provider`. Custom JSONL imports use
 
 ```bash
 ctx search "failed migration"
-ctx search "failed migration" --term sqlite --term rollback
+ctx search "failed migration" --term schema --term rollback
 ctx show event <ctx-event-id> --window 3
 ctx show session <ctx-session-id>
 ```

@@ -31,31 +31,6 @@ fn source_refresh_failure(command: &mut Command) -> String {
     String::from_utf8(output.stderr).unwrap()
 }
 
-fn source_backed_count(temp: &TempDir, sql: &str) -> i64 {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let packet = loop {
-        let output = ctx(temp)
-            .args(["sql", sql, "--format=json"])
-            .output()
-            .unwrap();
-        if output.status.success() {
-            break serde_json::from_slice::<Value>(&output.stdout).unwrap();
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if (stderr.contains("Core SQL projection")
-            || stderr.contains("source-backed SQL projection"))
-            && Instant::now() < deadline
-        {
-            std::thread::sleep(Duration::from_millis(25));
-            continue;
-        }
-        panic!("source-backed SQL failed: {stderr}");
-    };
-    packet["rows"][0][0]
-        .as_i64()
-        .unwrap_or_else(|| panic!("expected integer SQL scalar in {packet:#}"))
-}
-
 #[test]
 fn antigravity_cli_import_skips_malformed_file_among_valid_files() {
     let temp = finite_daemon_test_root();
@@ -274,14 +249,11 @@ fn firebender_replay_preserves_mixed_and_all_invalid_outcomes() {
         !invalid_temp.path().join("work.sqlite").exists(),
         "an all-invalid provider source must not create the previous-epoch Store"
     );
-    for view in ["ctx_sources", "ctx_sessions", "ctx_events"] {
-        let expected = i64::from(view == "ctx_sources");
-        assert_eq!(
-            source_backed_count(&invalid_temp, &format!("select count(*) from {view}")),
-            expected,
-            "unexpected all-invalid source-backed rows in {view}"
-        );
-    }
+    assert!(
+        provider_core_records(&data_root(&invalid_temp), "firebender").is_empty(),
+        "an all-invalid source must publish no Core records"
+    );
+    assert!(!data_root(&invalid_temp).join("relational.sqlite").exists());
 }
 
 #[test]
@@ -482,14 +454,11 @@ fn complete_oversize_only_codex_session_reports_source_backed_rejection() {
         !temp.path().join("work.sqlite").exists(),
         "an all-rejected provider source must not create the previous-epoch Store"
     );
-    for view in ["ctx_sources", "ctx_sessions", "ctx_events"] {
-        let expected = i64::from(view == "ctx_sources");
-        assert_eq!(
-            source_backed_count(&temp, &format!("SELECT COUNT(*) FROM {view}")),
-            expected,
-            "unexpected all-rejected source-backed rows in {view}"
-        );
-    }
+    assert!(
+        provider_core_records(&data_root(&temp), "codex").is_empty(),
+        "an all-rejected source must publish no Core records"
+    );
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
 }
 
 #[test]

@@ -307,7 +307,7 @@ fn core_publication_is_ready_in_json_and_human_status() {
         json_status["refresh"]["published_generation"],
         generation_id
     );
-    assert_eq!(json_status["relational"]["status"], "pending");
+    assert!(json_status.get("relational").is_none());
 
     let stdout = SharedWriter::default();
     let stdout_copy = stdout.clone();
@@ -338,7 +338,7 @@ fn core_publication_is_ready_in_json_and_human_status() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(rendered.contains("Search ready"), "{rendered}");
-    assert!(rendered.contains("Session view pending"), "{rendered}");
+    assert!(!rendered.contains("Session view"), "{rendered}");
     assert!(!rendered.contains("Catalog pending"), "{rendered}");
     assert!(!rendered.contains("source refresh pending"), "{rendered}");
 }

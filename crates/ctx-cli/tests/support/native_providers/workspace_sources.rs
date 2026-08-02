@@ -27,20 +27,7 @@ fn trae_cli_imports_explicit_workspace_storage_without_default_discovery() {
     ]));
     assert_explicit_source_publication(&imported, "trae", "trae_state_vscdb");
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'trae'"
-        ),
-        1
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'trae'"
-        ),
-        2
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "trae"), (1, 2));
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -240,20 +227,7 @@ fn astrbot_native_default_discovery_is_included_in_import_all() {
         json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
     assert_authoritative_provider_publication(&imported);
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_sessions WHERE provider = 'astrbot'"
-        ),
-        1
-    );
-    assert_eq!(
-        source_backed_count(
-            &temp,
-            "SELECT COUNT(*) FROM ctx_events WHERE provider = 'astrbot'"
-        ),
-        3
-    );
+    assert_eq!(provider_core_counts(&data_root(&temp), "astrbot"), (1, 3));
 
     let search = json_output(ctx(&temp).args([
         "search",

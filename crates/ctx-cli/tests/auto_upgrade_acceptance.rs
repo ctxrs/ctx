@@ -389,13 +389,13 @@ mod unix {
     fn initialize_source_backed_epoch(temp: &tempfile::TempDir) {
         seed_authoritative_codex_source(temp.path());
         let data_root = data_root(temp);
-        let generation_id = initialize_generation_only_sql_projection(&data_root);
+        let generation_id = initialize_generation_only_core(&data_root);
         assert!(!generation_id.is_empty());
         assert_source_backed_epoch_remained_fresh(&data_root);
     }
 
     fn assert_source_backed_epoch_remained_fresh(data_root: &Path) {
-        assert!(data_root.join("relational.sqlite").is_file());
+        assert!(!data_root.join("relational.sqlite").exists());
         assert!(data_root.join("search/lexical").is_dir());
         assert!(
             !data_root.join("work.sqlite").exists(),

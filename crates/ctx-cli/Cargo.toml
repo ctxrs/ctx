@@ -9,7 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 categories = ["command-line-utilities", "development-tools"]
-keywords = ["agent", "cli", "search", "sqlite"]
+keywords = ["agent", "cli", "search"]
 
 [[bin]]
 name = "ctx"
@@ -51,7 +51,6 @@ zstd.workspace = true
 ctx-history-capture = { path = "../ctx-history-capture" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-index = { path = "../ctx-history-index" }
-ctx-history-relational = { path = "../ctx-history-relational" }
 ctx-pro-host-protocol = { path = "../ctx-pro-host-protocol" }
 
 [target.'cfg(unix)'.dependencies]

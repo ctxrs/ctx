@@ -97,19 +97,16 @@ fn mcp_server_json_rpc_initialize_and_tools_list_are_usable() {
         false
     );
     let tools = responses[1]["result"]["tools"].as_array().unwrap();
-    for expected in [
-        "status",
-        "sources",
-        "search",
-        "sql",
-        "show_session",
-        "show_event",
-    ] {
+    for expected in ["status", "sources", "search", "show_session", "show_event"] {
         assert!(
             tools.iter().any(|tool| tool["name"] == expected),
             "missing MCP tool {expected} in {tools:#?}"
         );
     }
+    assert!(
+        tools.iter().all(|tool| tool["name"] != "sql"),
+        "removed MCP SQL tool remained advertised in {tools:#?}"
+    );
 }
 
 #[test]

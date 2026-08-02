@@ -58,10 +58,10 @@ fn help_exposes_session_retrieval_commands() {
         "sources",
         "import",
         "show",
+        "locate",
         "search",
         "docs",
         "mcp",
-        "sql",
         "integrations",
         "daemon",
         "upgrade",
@@ -97,7 +97,7 @@ fn help_exposes_session_retrieval_commands() {
         "update",
         "uninstall",
         "skill",
-        "locate",
+        "sql",
     ] {
         assert!(
             !commands.lines().any(|line| {
@@ -345,6 +345,7 @@ fn removed_commands_are_rejected() {
         "context",
         "update",
         "uninstall",
+        "sql",
     ] {
         ctx(&temp)
             .arg(command)
@@ -488,16 +489,6 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             ],
         ),
         (
-            "sql",
-            vec![
-                "Usage: ctx sql",
-                "--format <FORMAT>",
-                "--file <FILE>",
-                "--max-rows <MAX_ROWS>",
-                "Run read-only SQL against the local ctx index",
-            ],
-        ),
-        (
             "daemon",
             vec![
                 "Usage: ctx daemon",
@@ -601,7 +592,6 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
         &["blame", "file", "--help"],
         &["blame", "commit", "--help"],
         &["blame", "pr", "--help"],
-        &["sql", "--help"],
         &["docs", "list", "--help"],
         &["docs", "search", "--help"],
         &["docs", "show", "--help"],
@@ -758,7 +748,7 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
         .unwrap()
         .iter()
         .any(|topic| topic["id"] == "cli-reference"));
-    for topic_id in ["docs", "mcp", "sql", "upgrade"] {
+    for topic_id in ["docs", "mcp", "upgrade"] {
         assert!(list["topics"]
             .as_array()
             .unwrap()
@@ -770,9 +760,6 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     assert_eq!(search["schema_version"], 1);
     assert_eq!(search["query"], "upgrade");
     assert!(!search["results"].as_array().unwrap().is_empty());
-
-    let sql_search = json_output(ctx(&temp).args(["docs", "search", "sql", "--format=json"]));
-    assert_eq!(sql_search["results"][0]["id"], "sql");
 
     let mcp_search = json_output(ctx(&temp).args(["docs", "search", "mcp", "--format=json"]));
     let mcp_result_ids = mcp_search["results"]
@@ -1054,7 +1041,6 @@ fn removed_public_commands_are_rejected() {
         "related",
         "timeline",
         "facts",
-        "locate",
     ] {
         assert!(
             !commands.contains(removed),
@@ -1071,7 +1057,6 @@ fn removed_public_commands_are_rejected() {
         vec!["related", "commit", "abc"],
         vec!["timeline", "commit", "abc"],
         vec!["facts", "commit", "abc"],
-        vec!["locate", "event", "00000000-0000-0000-0000-000000000000"],
     ] {
         ctx(&temp).args(args.clone()).assert().failure().stderr(
             predicate::str::contains("unrecognized subcommand")

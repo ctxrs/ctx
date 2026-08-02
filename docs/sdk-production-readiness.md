@@ -13,7 +13,8 @@ be boringly reliable before external consumers build on them.
 - Use language-native enum/newtype patterns for known strings, while allowing
   additive future values where ctx can grow.
 - Keep local adapter details out of the public product contract. CLI JSON,
-  SQLite paths, migrations, and release tooling are adapter internals.
+  provider-native storage paths/schemas, migrations, and release tooling are
+  adapter internals.
 - Local mode must not perform network calls, provider API calls, or transcript
   upload.
 - Hosted mode may be configurable, but until a hosted service exists operations

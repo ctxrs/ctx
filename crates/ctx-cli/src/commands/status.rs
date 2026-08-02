@@ -394,20 +394,13 @@ mod tests {
         String::from_utf8(stream.into_inner()).unwrap()
     }
 
-    fn status_report(
-        initialized: bool,
-        lexical: &str,
-        catalog: &str,
-        refresh: &str,
-        relational: &str,
-    ) -> Value {
+    fn status_report(initialized: bool, lexical: &str, catalog: &str, refresh: &str) -> Value {
         json!({
             "initialized": initialized,
             "history_epoch": {"status": lexical},
             "lexical": {"status": lexical},
             "catalog": {"status": catalog},
             "refresh": {"status": refresh},
-            "relational": {"status": relational},
             "semantic": {"status": "disabled"},
             "daemon": {"status": "running", "running": true},
             "indexed_sources": 1,
@@ -459,7 +452,7 @@ mod tests {
 
     #[test]
     fn healthy_status_is_concise_and_hides_routine_internal_paths() {
-        let report = status_report(true, "ready", "ready", "ready", "ready");
+        let report = status_report(true, "ready", "ready", "ready");
         for width in [32, 48, 80, 120] {
             let context = context(width, ColorMode::Never);
             let document = render_report(&context, &report);
@@ -488,7 +481,7 @@ mod tests {
 
     #[test]
     fn status_surfaces_only_actionable_auxiliary_service_errors() {
-        let report = status_report(true, "ready", "ready", "ready", "ready");
+        let report = status_report(true, "ready", "ready", "ready");
         let upgrade = json!({
             "auto": "apply",
             "install": {
@@ -527,7 +520,7 @@ mod tests {
 
     #[test]
     fn actionable_daemon_or_semantic_state_prevents_a_healthy_headline() {
-        let mut daemon_failed = status_report(true, "ready", "ready", "ready", "ready");
+        let mut daemon_failed = status_report(true, "ready", "ready", "ready");
         daemon_failed["daemon"] = json!({
             "status": "failed",
             "enabled": true,
@@ -544,7 +537,7 @@ mod tests {
         assert!(rendered.contains("failed"), "{rendered}");
         assert!(rendered.contains("Next\n  ctx doctor\n"), "{rendered}");
 
-        let mut semantic_pending = status_report(true, "ready", "ready", "ready", "ready");
+        let mut semantic_pending = status_report(true, "ready", "ready", "ready");
         semantic_pending["semantic"] = json!({
             "status": "pending",
             "enabled": true,
@@ -564,7 +557,7 @@ mod tests {
 
     #[test]
     fn normal_status_always_reports_local_usage_enablement_and_store_health() {
-        let report = status_report(true, "ready", "ready", "ready", "ready");
+        let report = status_report(true, "ready", "ready", "ready");
         let context = context(80, ColorMode::Never);
         for (usage, expected) in [
             (
@@ -599,7 +592,7 @@ mod tests {
 
     #[test]
     fn partial_status_keeps_searchable_counts_and_points_to_index_watch() {
-        let report = status_report(true, "ready", "pending", "pending", "ready");
+        let report = status_report(true, "ready", "pending", "pending");
         for width in [32, 48, 80, 120] {
             let context = context(width, ColorMode::Never);
             let document = render_report(&context, &report);
@@ -621,13 +614,7 @@ mod tests {
 
     #[test]
     fn failed_status_exposes_actionable_paths_and_doctor_recovery() {
-        let mut report = status_report(
-            false,
-            "unavailable",
-            "unavailable",
-            "unavailable",
-            "unavailable",
-        );
+        let mut report = status_report(false, "unavailable", "unavailable", "unavailable");
         report["lexical"]["reason"] = json!("generation_verification_failed");
         report["daemon"] = json!({
             "status": "failed",
@@ -651,13 +638,7 @@ mod tests {
 
     #[test]
     fn status_without_a_published_generation_points_to_setup() {
-        let mut report = status_report(
-            false,
-            "unavailable",
-            "pending",
-            "unavailable",
-            "unavailable",
-        );
+        let mut report = status_report(false, "unavailable", "pending", "unavailable");
         report["lexical"]["reason"] = json!("generation_not_published");
         let context = context(80, ColorMode::Never);
         let rendered = render_report(&context, &report).render_plain();
@@ -666,7 +647,7 @@ mod tests {
 
     #[test]
     fn installed_pro_status_is_grouped_without_internal_deadlines() {
-        let report = status_report(true, "ready", "ready", "ready", "ready");
+        let report = status_report(true, "ready", "ready", "ready");
         let pro = json!({
             "installed": true,
             "state": "ready",
@@ -704,7 +685,7 @@ mod tests {
 
     #[test]
     fn status_plain_output_equals_ansi_stripped_styled_output() {
-        let report = status_report(true, "ready", "ready", "ready", "ready");
+        let report = status_report(true, "ready", "ready", "ready");
         let context = context(80, ColorMode::Always);
         let document = render_report(&context, &report);
         assert_eq!(

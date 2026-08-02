@@ -5,7 +5,7 @@ It is for agents or MCP hosts that prefer tool discovery over shell commands.
 The CLI remains the primary interface. MCP startup performs a bounded,
 content-free health-check/wake and recovers the default-enabled persistent
 daemon when needed. The MCP process never becomes a provider-history or
-projection writer.
+derived-state writer.
 
 ```bash
 ctx mcp serve
@@ -23,11 +23,11 @@ fixed documented count. Core tools include:
 - `status`, the same structured source, upgrade, Pro, and compact local-usage
   status as `ctx status --format json`;
 - `sources`, discovered local agent history sources;
-- `search`, search the existing index;
-- `sql`, run one read-only SQL statement against the existing index;
-- `show_session`, return a Core-backed session transcript by ctx session ID;
-- `show_event`, return a Core-backed event and optional surrounding window by ctx
-  event ID.
+- `search`, search the active Core/Tantivy generation and optional compatible
+  semantic generation;
+- `show_session`, read a stored Core session transcript by ctx session ID;
+- `show_event`, read a stored Core event and optional surrounding window
+  by ctx event ID.
 
 `show_session` accepts an optional transcript mode plus resumable `limit` and
 `cursor` inputs. Mode is applied before the page limit. `limit` defaults to 200
@@ -52,8 +52,9 @@ from the first page after `cursor_stale`; do not retry a mismatched or malformed
 cursor unchanged.
 
 `show_event` accepts bounded before, after, or symmetric window sizes. Both show
-tools read policy-selected normalized content from the active verified Core
-generation. MCP `show_session` may return fewer than `limit` events with
+tools read complete policy-selected records from the active verified
+Core/Tantivy generation without reopening provider history. MCP `show_session`
+may return fewer than `limit` events with
 `has_more: true` to stay within the response budget. After combining exact
 `structuredContent` with the text fallback, every show response remains subject
 to the 1 MiB MCP aggregate limit; an individually unrepresentable page fails
@@ -148,8 +149,7 @@ queries committed generations. It follows the CLI lexical, semantic, and
 hybrid contracts, including lexical fallback for unavailable hybrid semantic
 state, typed failure for semantic-only unavailability, and no vector work when
 the semantic weight is zero. The MCP process does not import provider history,
-initialize storage, or write provider data. MCP SQL remains an existing
-metadata-projection-only read and does not read transcript bodies.
+initialize storage, or write provider data.
 
 The `sources` tool returns the same bounded provider discovery `issues` as
 `ctx sources --format json`, including stable issue codes and truncation markers.
@@ -161,10 +161,6 @@ test output, or failure traces from subagent sessions are relevant. When
 by default; pass `include_current_session: true` when the active session tree is
 the target.
 
-The MCP `sql` tool uses the same read-only stable views and result limits as
-`ctx sql --format json`. Prefer stable `ctx_*` views for scripts and agent workflows.
-Run `ctx docs show sql` for the view schemas and examples.
-
 Malformed tool arguments return `isError: true` with the existing diagnostic
 `error` and stable `error_code: "invalid_request"` in `structuredContent`.
 Malformed JSON-RPC framing or envelopes continue to use protocol-level parse
@@ -172,8 +168,8 @@ and invalid-params errors.
 
 Tool results include MCP text content plus `structuredContent` JSON. Treat all
 MCP output as private local history: it may include absolute paths, source
-metadata, snippets, transcript text, and raw SQL result fields, and the MCP host
-may log or forward tool output.
+metadata, snippets, and transcript text, and the MCP host may log or forward
+tool output.
 
 Pro query text is selected by the authoritative `payload_type`, not merely by
 the presence of a `results` array. Each Pro view keeps its distinct heading and

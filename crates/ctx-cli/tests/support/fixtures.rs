@@ -1,11 +1,7 @@
-use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
-use ctx_history_relational::{
-    CommittedCoreGeneration, RelationalSourceHealth, RelationalSourceMetadata,
-    SourceBackedRelationalProjection,
-};
+use ctx_history_index::{CoreRecord, GenerationWriter, VerifiedIndex, WriterOptions};
 use rusqlite::Connection;
-use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -73,7 +69,7 @@ pub(crate) fn write_sqlite_fixture_from_sql(sql_fixture: &str, db_path: &Path) {
     conn.execute_batch(&sql).unwrap();
 }
 
-pub(crate) fn initialize_generation_only_sql_projection(data_root: &Path) -> String {
+pub(crate) fn initialize_generation_only_core(data_root: &Path) -> String {
     let index_root = data_root.join("search").join("lexical");
     let writer = GenerationWriter::open(
         &index_root,
@@ -86,37 +82,44 @@ pub(crate) fn initialize_generation_only_sql_projection(data_root: &Path) -> Str
     let core_receipt = writer.commit(|_| true).unwrap();
     let verified = VerifiedIndex::open(index_root).unwrap();
     assert_eq!(verified.generation_id(), core_receipt.generation_id);
+    core_receipt.generation_id
+}
 
-    let manifest = verified.manifest();
-    let sources = manifest
+pub(crate) fn provider_core_records(data_root: &Path, provider: &str) -> Vec<CoreRecord> {
+    let index = VerifiedIndex::open(data_root.join("search/lexical")).unwrap();
+    let sources = index
+        .manifest()
         .sources
         .iter()
-        .map(|certificate| RelationalSourceMetadata {
-            source: certificate.observation().source().clone(),
-            parser_revision: certificate.parser_revision().to_owned(),
-            revision_digest: Sha256::digest(serde_json::to_vec(certificate).unwrap()).into(),
-            indexed_event_count: certificate.counts().indexed_documents,
-            health: RelationalSourceHealth::Ready,
-        })
-        .collect();
-    let generation = CommittedCoreGeneration {
-        generation_id: verified.generation_id().to_owned(),
-        manifest_version: manifest.manifest_version,
-        core_record_version: manifest.core_record_version,
-        core_record_contract_fingerprint: manifest.core_record_contract_fingerprint.clone(),
-        lexical_schema_version: manifest.lexical_schema_version,
-        policy_schema_hash: manifest.policy_schema_hash.clone(),
-        indexed_documents: manifest.indexed_documents,
-        sources,
-    };
-    let mut projection =
-        SourceBackedRelationalProjection::open(data_root.join("relational.sqlite")).unwrap();
-    let relational_receipt = projection.rebuild(&generation, std::iter::empty()).unwrap();
-    assert_eq!(
-        relational_receipt.core_generation_id,
-        core_receipt.generation_id
-    );
-    core_receipt.generation_id
+        .map(|certificate| certificate.observation().source())
+        .filter(|source| source.provider() == provider)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut records = Vec::new();
+    for source in sources {
+        let mut cursor = None;
+        loop {
+            let page = index
+                .core_source_event_page(&source, cursor.as_ref(), 4_096)
+                .unwrap();
+            records.extend(page.items.into_iter().map(|item| item.core_record));
+            if page.terminal {
+                break;
+            }
+            cursor = page.next_cursor;
+        }
+    }
+    records
+}
+
+pub(crate) fn provider_core_counts(data_root: &Path, provider: &str) -> (usize, usize) {
+    let records = provider_core_records(data_root, provider);
+    let sessions = records
+        .iter()
+        .map(|record| record.session_id.as_uuid())
+        .collect::<BTreeSet<_>>()
+        .len();
+    (sessions, records.len())
 }
 
 pub(crate) fn copy_dir_all(from: &Path, to: &Path) {

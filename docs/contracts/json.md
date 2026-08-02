@@ -5,8 +5,8 @@ arguments, typed result identifiers, and local paths. Treat it as private until
 a user reviews it.
 
 Command result JSON uses `schema_version: 1` except for
-`ctx setup --format json`, `ctx stats --format json`,
-`ctx import --format json`, and `ctx sql --format json`.
+`ctx setup --format json`, `ctx stats --format json`, and
+`ctx import --format json`.
 The Pro status object embedded by `ctx status --format json` and exposed through MCP
 uses its own version 2 contract, described below. Progress-event JSON is stderr
 progress output and does not include `schema_version`.
@@ -30,7 +30,6 @@ Writes local storage and returns schema version 2:
 - `refresh`;
 - `refresh_request`;
 - `semantic`;
-- `relational`;
 - `pro_projection`;
 - `daemon`;
 - `daemon_autostart`;
@@ -436,12 +435,13 @@ ctx show session <ctx-session-id> --format jsonl
 ctx show event <ctx-event-id> --format json
 ```
 
-Show reads only the active verified Core generation. Session presentation walks
-bounded internal Core pages and writes each selected event as it is rendered;
-it does not retain the complete session. The CLI has no public session cursor
-or page limit. Without `--max-events`, `ctx show session` streams every event
-selected by the requested mode in deterministic order, so large transcripts
-are complete rather than silently capped.
+Show resolves identities and complete policy-selected normalized records from
+the active verified Core/Tantivy generation. Session presentation writes each
+selected stored event as it is rendered; it does not retain the complete
+session. The CLI has no public session cursor or page limit. Without
+`--max-events`, `ctx show session` streams every event selected by the requested
+mode in deterministic order, so large transcripts are complete rather than
+silently capped.
 
 Session JSON is one `session_transcript` object containing:
 
@@ -477,13 +477,14 @@ Event JSON remains one `event_window` object with `target: "event"`, `format`,
 `provider_session_id` when known. For Codex, `provider_session_id` is the resume
 UUID. `event` and `events[]` rows include `ctx_event_id`, `record_type`,
 `ctx_session_id`, `provider`, `provider_session_id`, `source_format`,
-`sequence`, `event_type`, `role`, `occurred_at`, and complete normalized `text`
+`sequence`, `event_type`, `role`, `occurred_at`, and exact normalized `text`
 or `structured_content` when policy permits. Each rendered event also includes
 `content.complete`, `content.policy_status`, and an optional
 `content.policy_reason`.
 
-Show does not reopen provider transcript files at query time and does not return
-provider source paths, existence checks, or source cursors. With `--out`, a
+Show reads the active Core/Tantivy generation without reopening provider
+history. It does not return provider source paths, existence checks, or source
+cursors. With `--out`, a
 session transcript is staged and atomically installed only after the complete
 stream succeeds; a failed stream does not replace an existing destination.
 
@@ -498,6 +499,35 @@ with `error: "generation_changed/active_generation_race"`,
 `error_code: "generation_changed"`,
 `failure_kind: "active_generation_race"`, and `retryable: true`. Clients may
 retry the same command; this race is not returned as a successful result.
+
+## Locate
+
+```bash
+ctx locate session <ctx-session-id> --format json
+ctx locate session --provider codex --provider-session <provider-session-id> --format json
+ctx locate event <ctx-event-id> --format json
+```
+
+Locate reads only the active verified Core/Tantivy generation. It does not
+reopen provider history or return a provider path.
+
+Session JSON is one `session_location` object containing:
+
+- `schema_version: 1`, `target: "session"`, and
+  `payload_type: "session_location"`;
+- `ctx_session_id`, `provider`, and `provider_session_id` when known;
+- nullable `parent_ctx_session_id`, `root_ctx_session_id`, and `started_at`;
+- `source` with `ctx_source_id`, `source_format`, `schema_variant`, and
+  `provider_identity_version`.
+
+Event JSON is one `event_location` object containing:
+
+- `schema_version: 1`, `target: "event"`, and
+  `payload_type: "event_location"`;
+- `ctx_event_id`, `ctx_session_id`, `provider`, `provider_session_id`, and
+  `provider_event_id` when known;
+- `sequence`, `event_type`, `role`, and `occurred_at`;
+- the same bounded `source` identity object as session locate.
 
 ## Transcript Artifacts
 
@@ -611,7 +641,7 @@ by search. It never means that the query process became a foreground writer:
 
 Background mode health-checks and may recover the default-enabled persistent
 daemon, then returns the latest committed generation without waiting for
-relational, semantic, or Pro catch-up. Wait mode waits for the requested source
+semantic or Pro catch-up. Wait mode waits for the requested source
 frontier and lexical receipt or fails; it never falls back to a foreground
 importer. Off mode sends no maintenance wake.
 
@@ -676,73 +706,13 @@ When ctx can identify the active Codex provider session through
 that active session tree by default. Passing `--include-current-session` removes
 that filter.
 
-## SQL
-
-```bash
-ctx sql "SELECT COUNT(*) AS sessions FROM ctx_sessions" --format json
-ctx sql --file query.sql --format json
-```
-
-Runs one read-only SQL statement against the existing local SQLite metadata
-projection and returns:
-
-- `schema_version`;
-- `payload_type: "sql_result"`;
-- `read_only: true`;
-- `share_safe: false`;
-- `snapshot.relational_core_generation_id`;
-- `snapshot.relational_build_generation`;
-- `snapshot.observed_core_generation_id`;
-- `snapshot.projection_status` (`empty`, `ready`, or `behind`);
-- `snapshot.stale`;
-- `columns[]`, ordered selected column names;
-- `rows[]`, ordered arrays matching `columns[]`;
-- `returned_rows`;
-- `truncated.rows`;
-- `truncated.values`;
-- `limits.max_rows`;
-- `limits.max_columns`;
-- `limits.max_value_bytes`;
-- `limits.max_sql_bytes`;
-- `limits.timeout_ms`;
-- `elapsed_ms`.
-
-Scalar SQL values are encoded as JSON nulls, numbers, or strings when they fit
-the configured value cap. Truncated text values are encoded as objects with
-`type: "text"`, `value`, `bytes`, and `truncated: true`. Blob values are
-encoded as objects with `type: "blob"`, `bytes`, `preview_hex`, and
-`truncated`.
-
-Schema-version-2 SQL results add the required `snapshot` object. The last
-coherent relational projection remains readable when its generation is older
-than the observed active Core generation; that case reports `stale: true`.
-`projection_status: "behind"` means catch-up failed after that coherent
-generation was published, not that partially updated rows are visible. The
-canonical empty projection with no active Core generation reports
-`stale: false`; generation-ID fields are omitted when no generation exists.
-Each result binds rows and relational generation metadata to one SQLite read
-transaction; separate invocations may observe different coherent generations.
-
-`share_safe` is required and is always `false` for SQL results. `read_only:
-true` describes database mutation only. The relational
-projection and its stable/internal views are metadata-only: they do not
-contain event bodies, previews, command/result payloads, or transcript text,
-and SQL does not fetch those bodies. Selected metadata can still contain
-private paths and identifiers, so clients must not infer that SQL output is
-safe to share.
-
-Use stable `ctx_*` views for scripts when possible: `ctx_sessions`,
-`ctx_events`, `ctx_files_touched`, and `ctx_sources`. Internal tables remain
-queryable for advanced local inspection but are not the preferred compatibility
-surface.
-
 ## MCP Tool Results
 
-`ctx mcp serve` exposes MCP tools over stdio for status, sources, search, SQL,
+`ctx mcp serve` exposes MCP tools over stdio for status, sources, search,
 showing sessions and events, and Pro status/blame. Startup health-checks and may
 recover the default-enabled persistent daemon. Search and blame can send
 bounded, content-free maintenance wakes; the MCP process never becomes an
-importer or projection writer and never writes provider history or
+importer or derived-state writer and never writes provider history or
 repositories. Tool results include
 `structuredContent` JSON using the same private local fields as CLI JSON. MCP
 output may include absolute paths, source metadata, snippets, and transcript
@@ -758,13 +728,6 @@ by default when `CODEX_THREAD_ID` is set; pass
 
 The MCP `sources` tool includes the same bounded `issues` and
 `issues_truncated` fields as `ctx sources --format json`.
-
-The MCP `sql` tool uses the same `sql_result` JSON contract as `ctx sql
---format json`, always read-only. Its `structuredContent` must include the same
-required `read_only: true` and `share_safe: false` fields and preserve the CLI
-column, row, truncation, and limit semantics. CLI and MCP consumers must treat
-a missing or non-false `share_safe` value as incompatible SQL-result output,
-not as permission to share it.
 
 Tool-level argument validation failures set `isError: true`, preserve the
 diagnostic `error`, and add stable `error_code: "invalid_request"` in
@@ -834,7 +797,7 @@ Each result uses the topic fields above and adds `score`.
 - `body`, containing the embedded markdown source.
 
 Docs JSON is generated from embedded static docs and does not read provider
-history or SQLite.
+history or ctx data-root state.
 
 ## Upgrade
 
@@ -1124,9 +1087,10 @@ Reads local storage and returns findings:
 - `progress`;
 - `findings`.
 
-Doctor checks the main SQLite store, read-only semantic sidecar health, and an
-installed Pro helper. Its JSON includes `daemon` and `pro` status. It
-does not initialize embedding models or write sidecar data. Semantic or hybrid
+Doctor checks Core/Tantivy generation health, read-only semantic sidecar health,
+source/daemon state, compact local-usage health, and an installed Pro helper.
+Its JSON includes `daemon` and `pro` status. It does not initialize embedding
+models or write sidecar data. Semantic or hybrid
 search may ask the daemon query service to embed the query from an
 already-cached local model; search does not download models or write sidecar
 data from the search path.

@@ -105,8 +105,10 @@ An accepted import has one acquisition and publication path:
 Cold imports, appends, rewrites, replacements, and no-ops all use the shared
 custom JSONL source-family path. There is no fallback to the old Store database,
 synthetic `NativePath` body, command-output snapshot, or local content pack.
-`ctx show` reads normalized imported event content from the active Core
-generation and does not depend on the provider-owned file remaining available.
+`ctx show` resolves the active Core/Tantivy identity back to exact records in the
+provider-owned JSONL file. If that source is unavailable or no longer matches
+the certified locator, show reports typed unavailability instead of returning
+an indexed preview as complete.
 
 After import, `--history-source` uses the canonical
 `provider_key/source_id` route identity:

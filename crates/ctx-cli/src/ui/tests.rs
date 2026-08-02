@@ -154,12 +154,6 @@ fn bootstrap_conservatively_recognizes_explicit_machine_output() {
     ])));
     assert!(scan_machine_output_hint(&args(&[
         "ctx",
-        "sql",
-        "SELECT 1",
-        "--format=csv"
-    ])));
-    assert!(scan_machine_output_hint(&args(&[
-        "ctx",
         "setup",
         "--progress",
         "json"
@@ -243,10 +237,10 @@ fn bootstrap_colors_clap_help_and_parse_errors_before_dispatch() {
         ][..],
         &[
             "--color=always",
-            "sql",
-            "SELECT 1",
-            "--format",
-            "csv",
+            "show",
+            "session",
+            "bad",
+            "--format=json",
             "--not-a-real-option",
         ][..],
         &[

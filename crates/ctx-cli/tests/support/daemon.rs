@@ -105,23 +105,6 @@ pub(crate) fn wait_for_test_lexical_projection(temp: &TempDir, generation: &str)
     }
 }
 
-pub(crate) fn wait_for_test_relational_projection(temp: &TempDir, generation: &str) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let status = json_output(ctx(temp).args(["status", "--format=json"]));
-        if status["relational"]["status"] == "ready"
-            && status["relational"]["active_core_generation_id"] == generation
-        {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for relational projection at generation {generation}: {status:#}"
-        );
-        thread::sleep(DAEMON_STOP_POLL_INTERVAL);
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DaemonIdentity {
     pid: u32,

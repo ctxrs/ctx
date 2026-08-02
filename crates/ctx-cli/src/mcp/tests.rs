@@ -67,50 +67,39 @@ impl Drop for LocalUsageEnvGuard {
 }
 
 #[test]
-fn sql_tool_leaves_a_pristine_data_root_empty() {
+fn sql_is_neither_advertised_nor_handled_as_an_mcp_tool() {
     let temp = tempfile::tempdir().unwrap();
-    let (handled, _) = handle_tools_call(
+    let tool_names = tool_definitions()
+        .into_iter()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert!(
+        !tool_names.iter().any(|name| name == "sql"),
+        "{tool_names:?}"
+    );
+
+    let (handled, usage) = handle_tools_call(
         json!({
             "name": "sql",
             "arguments": {"sql": "SELECT 1 AS one"},
         }),
         temp.path(),
     );
-    let result = handled.unwrap().value;
+    let error = match handled {
+        Ok(_) => panic!("removed SQL tool must be rejected"),
+        Err(error) => error,
+    };
 
-    assert_eq!(result["isError"], true);
-    assert!(result["structuredContent"]["error"]
+    assert_eq!(error["code"], -32602);
+    assert!(error["data"]["error"]
         .as_str()
         .unwrap()
-        .contains("Core SQL projection is missing"));
+        .contains("unknown tool sql"));
+    assert!(usage.is_none());
     assert!(
         std::fs::read_dir(temp.path()).unwrap().next().is_none(),
-        "MCP SQL must leave a pristine data root empty"
+        "an unknown MCP tool must not initialize the data root"
     );
-}
-
-#[test]
-fn sql_tool_queries_an_existing_projection() {
-    let temp = tempfile::tempdir().unwrap();
-    let projection = ctx_history_relational::SourceBackedRelationalProjection::open(
-        temp.path().join("relational.sqlite"),
-    )
-    .unwrap();
-    drop(projection);
-
-    let (handled, _) = handle_tools_call(
-        json!({
-            "name": "sql",
-            "arguments": {"sql": "SELECT COUNT(*) AS sessions FROM ctx_sessions"},
-        }),
-        temp.path(),
-    );
-    let result = handled.unwrap().value;
-
-    assert!(result["isError"].is_null());
-    assert_eq!(result["structuredContent"]["payload_type"], "sql_result");
-    assert_eq!(result["structuredContent"]["read_only"], true);
-    assert_eq!(result["structuredContent"]["rows"], json!([[0]]));
 }
 
 fn run_one_status_response(

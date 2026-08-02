@@ -67,7 +67,7 @@ mod tests {
         let context = RenderContext::for_test(
             TestContext::tty(StreamKind::Stderr, 24).color(ColorMode::Never),
         );
-        let command = "ctx sql --max-rows 200 'SELECT * FROM ctx_events'";
+        let command = "ctx search 'provider session lookup with a deliberately long query'";
         let rendered = hint(
             &context,
             Hint {

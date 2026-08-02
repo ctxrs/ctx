@@ -103,18 +103,19 @@ fn start_source_refresh_daemon(temp: &TempDir, mode: &str) -> SourceRefreshDaemo
     }
 }
 
-pub(super) fn wait_for_relational_projection(temp: &TempDir, generation: &str) -> Value {
+pub(super) fn wait_for_core_generation(temp: &TempDir, generation: &str) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let status = json_output(ctx(temp).args(["status", "--format=json"]));
-        if status["relational"]["status"] == "ready"
-            && status["relational"]["active_core_generation_id"] == generation
+        if status["history_epoch"]["status"] == "ready"
+            && status["lexical"]["status"] == "ready"
+            && status["lexical"]["generation_id"] == generation
         {
             return status;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for relational projection at generation {generation}: {status:#}"
+            "timed out waiting for Core generation {generation}: {status:#}"
         );
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -205,9 +206,8 @@ pub(super) fn write_large_hermes_setup_db(temp: &TempDir, messages: usize, paylo
         INSERT INTO sessions VALUES ('hermes-setup-current', 'acp', 1782259200.0);",
     )
     .unwrap();
-    let payload = "provider import relational recovery bounded checkpoint ".repeat(
-        payload_bytes / "provider import relational recovery bounded checkpoint ".len() + 1,
-    );
+    let payload = "provider import Core recovery bounded checkpoint "
+        .repeat(payload_bytes / "provider import Core recovery bounded checkpoint ".len() + 1);
     let transaction = conn.transaction().unwrap();
     for index in 0..messages {
         transaction

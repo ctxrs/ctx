@@ -6,6 +6,54 @@ mod search;
 mod sessions;
 
 impl VerifiedIndex {
+    /// Counts distinct live session identities from the merged Tantivy term
+    /// dictionaries without reading stored event bodies.
+    pub fn session_count(&self) -> Result<u64> {
+        let session_id = fields_from_schema(self.searcher.schema())?.session_id;
+        let segments = self.searcher.segment_readers();
+        let inverted_indexes = segments
+            .iter()
+            .map(|segment| segment.inverted_index(session_id))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let streams = inverted_indexes
+            .iter()
+            .map(|inverted| inverted.terms().stream())
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let mut merged = TermMerger::new(streams);
+        let mut count = 0_u64;
+        while merged.advance() {
+            let mut has_live_posting = false;
+            for (segment_ord, term_info) in merged.current_segment_ords_and_term_infos() {
+                let inverted = inverted_indexes.get(segment_ord).ok_or(
+                    IndexError::InvalidStoredDocumentField(SESSION_ID_HIGH_FIELD),
+                )?;
+                let segment =
+                    segments
+                        .get(segment_ord)
+                        .ok_or(IndexError::InvalidStoredDocumentField(
+                            SESSION_ID_HIGH_FIELD,
+                        ))?;
+                let mut postings =
+                    inverted.read_postings_from_terminfo(&term_info, IndexRecordOption::Basic)?;
+                let mut doc_id = postings.doc();
+                while doc_id != TERMINATED {
+                    if !segment.is_deleted(doc_id) {
+                        has_live_posting = true;
+                        break;
+                    }
+                    doc_id = postings.advance();
+                }
+                if has_live_posting {
+                    break;
+                }
+            }
+            if has_live_posting {
+                count = count.checked_add(1).ok_or(IndexError::CountOverflow)?;
+            }
+        }
+        Ok(count)
+    }
+
     fn body_query_terms(&self, natural_texts: &[&str], fields: Fields) -> Result<Vec<Term>> {
         let mut analyzer = self
             .searcher

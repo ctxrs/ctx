@@ -238,6 +238,8 @@ fn common_row_is_valid(
         } else {
             value_class == "not_applicable"
         }
+    // `sql` is accepted only while reading usage rows emitted before the
+    // command/tool was removed; no current CLI or MCP producer emits it.
     } else if matches!(
         operation,
         "sources" | "search" | "sql" | "show_session" | "show_event" | "blame"
@@ -279,6 +281,8 @@ fn valid_ctx_version(value: &str) -> bool {
 }
 
 fn valid_operation(definition_version: i64, surface: &str, operation: &str) -> bool {
+    // Keep historical `sql` rows reportable in existing usage.sqlite files.
+    // This validator is not a command or tool inventory.
     match surface {
         "cli" => {
             let common = matches!(
