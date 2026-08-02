@@ -115,6 +115,20 @@ struct SourceBackedRefreshQueueFull {
     active_pending_requests: usize,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SourceRefreshAdmissionRequirement {
+    /// Observe the terminal result of equivalent work already admitted.
+    AttachEquivalent,
+    /// Require work whose admission occurs after the currently running attempt.
+    FreshAfterAdmittedSnapshot,
+}
+
+impl SourceRefreshAdmissionRequirement {
+    fn requires_successor(self, state: SourceBackedRefreshState) -> bool {
+        self == Self::FreshAfterAdmittedSnapshot && state == SourceBackedRefreshState::Running
+    }
+}
+
 impl SourceBackedRefreshQueueFull {
     fn to_json(&self) -> Value {
         compact_json(json!({
@@ -188,12 +202,26 @@ impl CoreRefreshEngine {
                 if !matches!(mode, "background" | "wait") {
                     return Err(anyhow!("invalid daemon source refresh mode `{mode}`"));
                 }
-                let requested_catalog = request
-                    .get("explicit_source_catalog")
+                let explicit_catalog = request.get("explicit_source_catalog");
+                let requested_catalog = explicit_catalog
                     .map(ExplicitSourceCatalogAuthority::from_json)
-                    .transpose()?;
+                    .transpose()?
+                    .map_or_else(|| load_explicit_source_catalog_authority(data_root), Ok)?;
+                let admission = match request.get("fresh_after_admitted_snapshot") {
+                    None | Some(Value::Bool(false)) => {
+                        SourceRefreshAdmissionRequirement::AttachEquivalent
+                    }
+                    Some(Value::Bool(true)) => {
+                        SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot
+                    }
+                    Some(_) => {
+                        return Err(anyhow!(
+                            "daemon source refresh fresh-after-admitted-snapshot requirement must be boolean"
+                        ))
+                    }
+                };
                 let previous_generation = self.observed_published_generation(data_root)?;
-                let metadata = if requested_catalog.is_some() {
+                let metadata = if explicit_catalog.is_some() {
                     source_catalog_refresh_runtime_metadata(data_root)
                 } else {
                     source_refresh_runtime_metadata(data_root)
@@ -201,8 +229,10 @@ impl CoreRefreshEngine {
                 let response = match self.enqueue_with_catalog_metadata(
                     previous_generation,
                     metadata,
-                    requested_catalog,
-                    mode == "wait",
+                    Some(requested_catalog),
+                    // Wait controls how the client observes the attempt; it is
+                    // not itself a fresh-after-admission barrier.
+                    admission,
                 ) {
                     Ok(response) => response,
                     Err(error) => {
@@ -218,12 +248,7 @@ impl CoreRefreshEngine {
                     .get("request_id")
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow!("queued source refresh has no request ID"))?;
-                if let Some(job) = self.job_status(request_id) {
-                    write_daemon_job_status(
-                        &daemon_source_backed_refresh_job_path(data_root),
-                        &job,
-                    )?;
-                }
+                self.persist_job_status(data_root, request_id)?;
                 Ok(Some(response))
             }
             Some(SOURCE_REFRESH_STATUS_OP) => {
@@ -251,13 +276,7 @@ impl CoreRefreshEngine {
                 request_id_cell.replace(Some(request_id.to_owned()));
                 let requested_catalog =
                     coordinator.freeze_requested_explicit_source_catalog(data_root, request_id)?;
-                let running_job = coordinator
-                    .job_status(request_id)
-                    .ok_or_else(|| anyhow!("running source refresh has no job state"))?;
-                write_daemon_job_status(
-                    &daemon_source_backed_refresh_job_path(data_root),
-                    &running_job,
-                )?;
+                coordinator.persist_job_status(data_root, request_id)?;
                 let publication = execute_source_backed_refresh(
                     executor.as_ref(),
                     data_root,
@@ -301,16 +320,7 @@ impl CoreRefreshEngine {
                     .borrow()
                     .as_deref()
                     .ok_or_else(|| anyhow!("published source refresh has no request ID"))
-                    .and_then(|request_id| {
-                        self.job_status(request_id)
-                            .ok_or_else(|| anyhow!("published source refresh has no job state"))
-                    })
-                    .and_then(|job| {
-                        write_daemon_job_status(
-                            &daemon_source_backed_refresh_job_path(data_root),
-                            &job,
-                        )
-                    })
+                    .and_then(|request_id| self.persist_job_status(data_root, request_id))
             },
             |_| Ok(()),
         )?;
@@ -352,7 +362,7 @@ impl CoreRefreshEngine {
             observed_generation,
             SourceRefreshRuntimeMetadata::periodic(),
             Some(catalog),
-            false,
+            SourceRefreshAdmissionRequirement::AttachEquivalent,
         )
     }
 
@@ -375,8 +385,13 @@ impl CoreRefreshEngine {
         observed_generation: Option<String>,
         metadata: SourceRefreshRuntimeMetadata,
     ) -> Value {
-        self.enqueue_with_catalog_metadata(observed_generation, metadata, None, false)
-            .expect("requests without catalog authority always coalesce")
+        self.enqueue_with_catalog_metadata(
+            observed_generation,
+            metadata,
+            None,
+            SourceRefreshAdmissionRequirement::AttachEquivalent,
+        )
+        .expect("requests without catalog authority always coalesce")
     }
 
     fn enqueue_with_catalog_metadata(
@@ -384,17 +399,12 @@ impl CoreRefreshEngine {
         observed_generation: Option<String>,
         metadata: SourceRefreshRuntimeMetadata,
         requested_catalog: Option<ExplicitSourceCatalogAuthority>,
-        fresh_after_running: bool,
+        admission: SourceRefreshAdmissionRequirement,
     ) -> Result<Value> {
         let mut state = self.lock_state();
         if let Some(active_request_id) = state.active_request_id.clone() {
             if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
-                if active.state.is_active()
-                    && !(fresh_after_running && active.state == SourceBackedRefreshState::Running)
-                {
-                    if requested_catalog.is_none() {
-                        return Ok(coalesce_attempt(active, metadata));
-                    }
+                if active.state.is_active() && !admission.requires_successor(active.state) {
                     if let Some(requested_catalog) = requested_catalog.as_ref() {
                         let upgrades_queued_automatic =
                             active.requested_explicit_source_catalog.is_none()
@@ -403,19 +413,21 @@ impl CoreRefreshEngine {
                             active.requested_explicit_source_catalog =
                                 Some(requested_catalog.clone());
                         }
-                        if active.requested_explicit_source_catalog.as_ref()
-                            == Some(requested_catalog)
-                        {
-                            return Ok(coalesce_attempt(active, metadata));
-                        }
-                        // A running refresh is immutable. Preserve both catalog
-                        // authorities by serializing the newer one as a successor.
                     }
+                    if active.requested_explicit_source_catalog.as_ref()
+                        == requested_catalog.as_ref()
+                    {
+                        return Ok(coalesce_attempt(active, metadata));
+                    }
+                    // A running refresh is immutable. Preserve both catalog
+                    // authorities by serializing the newer one as a successor.
                 }
             }
         }
 
-        if fresh_after_running || requested_catalog.is_some() {
+        if admission == SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot
+            || requested_catalog.is_some()
+        {
             let coalesced_request_id = state.pending_request_ids.iter().find_map(|request_id| {
                 find_attempt(&state, request_id)
                     .filter(|attempt| {
@@ -520,6 +532,16 @@ impl CoreRefreshEngine {
     fn job_status(&self, request_id: &str) -> Option<Value> {
         let state = self.lock_state();
         find_attempt(&state, request_id).map(SourceBackedRefreshAttempt::job_json)
+    }
+
+    fn persist_job_status(&self, data_root: &Path, request_id: &str) -> Result<()> {
+        let state = self.lock_state();
+        let job = find_attempt(&state, request_id)
+            .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?
+            .job_json();
+        // Keep the state lock through publication so an admission snapshot
+        // cannot overwrite a later terminal snapshot during waiter races.
+        write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)
     }
 
     fn receipt_for_request(&self, request_id: &str) -> Option<SourceBackedRefreshReceipt> {
