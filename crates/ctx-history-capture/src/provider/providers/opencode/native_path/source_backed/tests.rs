@@ -786,7 +786,7 @@ fn message_part_v5_order_is_independent_of_index_presence() {
         .unwrap();
     drop(connection);
 
-    let (_, _, indexed) = scan_current_schema(&database);
+    let (_, indexed_scan, indexed) = scan_current_schema(&database);
     let indexed_order = indexed
         .iter()
         .map(|record| {
@@ -811,7 +811,7 @@ fn message_part_v5_order_is_independent_of_index_presence() {
         .execute("drop index part_message_id_id_idx", [])
         .unwrap();
     drop(connection);
-    let (_, _, unindexed) = scan_current_schema(&database);
+    let (_, unindexed_scan, unindexed) = scan_current_schema(&database);
     let unindexed_order = unindexed
         .iter()
         .map(|record| {
@@ -822,6 +822,63 @@ fn message_part_v5_order_is_independent_of_index_presence() {
         })
         .collect::<Vec<_>>();
     assert_eq!(unindexed_order, indexed_order);
+    assert_eq!(unindexed_scan.source, indexed_scan.source);
+    assert_eq!(
+        unindexed_scan.certificate.counts(),
+        indexed_scan.certificate.counts()
+    );
+    assert_eq!(
+        unindexed_scan.certificate.content_digest(),
+        indexed_scan.certificate.content_digest()
+    );
+}
+
+#[test]
+fn relationship_mismatch_disables_indexed_streaming_without_changing_generation_evidence() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("opencode.sqlite");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "text", "text": "assistant part"}),
+    );
+    connection
+        .execute(
+            "insert into session values (
+                 'other-session', 'project-1', null, null, 'other-session', ?1,
+                 'Other session', '1.18.11', 'build', 1782259200000, 1782259202000
+             )",
+            [temp.path().to_string_lossy().as_ref()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "update part set session_id = 'other-session' where id = 'current-part'",
+            [],
+        )
+        .unwrap();
+    let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+    let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
+    assert!(!schema.message_part_indexed_streaming);
+    drop(connection);
+
+    let (_, indexed_scan, indexed_records) = scan_current_schema(&database);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute("drop index part_message_id_id_idx", [])
+        .unwrap();
+    drop(connection);
+    let (_, unindexed_scan, unindexed_records) = scan_current_schema(&database);
+
+    assert_eq!(unindexed_records, indexed_records);
+    assert_eq!(
+        unindexed_scan.certificate.counts(),
+        indexed_scan.certificate.counts()
+    );
+    assert_eq!(
+        unindexed_scan.certificate.content_digest(),
+        indexed_scan.certificate.content_digest()
+    );
 }
 
 #[test]

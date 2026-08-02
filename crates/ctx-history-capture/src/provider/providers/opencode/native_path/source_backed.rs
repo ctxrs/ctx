@@ -324,7 +324,8 @@ fn stream_logical_rows(
     let mut statement = connection.prepare(&sql)?;
     let mut rows = statement.query([])?;
     let mut counts = ScannedSourceCounts::default();
-    let mut next_session_sequences = BTreeMap::<String, u64>::new();
+    let mut sequence_session = None::<String>;
+    let mut next_session_sequence = 0_u64;
     let mut previous_explicit_order = None::<(String, i64)>;
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
 
@@ -372,9 +373,20 @@ fn stream_logical_rows(
         let session = sessions.get(&event.session_identity).ok_or_else(|| {
             OpenCodeSourceBackedError::MissingSession(event.session_identity.clone())
         })?;
-        let next_session_sequence = next_session_sequences
-            .entry(event.session_identity.clone())
-            .or_default();
+        if sequence_session.as_deref() != Some(event.session_identity.as_str()) {
+            if sequence_session
+                .as_deref()
+                .is_some_and(|previous| previous.as_bytes() >= event.session_identity.as_bytes())
+            {
+                return Err(OpenCodeSourceBackedError::Capture(
+                    CaptureError::SystemInvariant(
+                        "OpenCode source-backed rows are not ordered by session identity",
+                    ),
+                ));
+            }
+            sequence_session = Some(event.session_identity.clone());
+            next_session_sequence = 0;
+        }
         let document = core_record(
             source,
             schema.family,
@@ -382,7 +394,7 @@ fn stream_logical_rows(
             session,
             event,
             retained,
-            next_session_sequence,
+            &mut next_session_sequence,
             &mut repository_attributor,
         )?;
         emit(OpenCodeScanOutput::Document(document))?;

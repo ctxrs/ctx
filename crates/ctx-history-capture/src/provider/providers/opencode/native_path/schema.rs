@@ -139,7 +139,7 @@ impl OpenCodeNativeSchema {
         let mut event_validation_traversals = 0;
         let message_part_indexed_streaming = if indexed_message_part_candidate {
             event_validation_traversals += 1;
-            !message_part_has_orphans(conn)?
+            !message_part_has_unsafe_relationships(conn)?
         } else {
             false
         };
@@ -152,8 +152,7 @@ impl OpenCodeNativeSchema {
         };
         let user_version = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let schema_version = conn.pragma_query_value(None, "schema_version", |row| row.get(0))?;
-        let capability_digest =
-            capability_digest(conn, user_version, family, message_part_indexed_streaming)?;
+        let capability_digest = capability_digest(conn, user_version, family)?;
         Ok(Self {
             family,
             capability_digest,
@@ -534,12 +533,13 @@ fn validate_message_parent_rows(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn message_part_has_orphans(conn: &Connection) -> Result<bool> {
+fn message_part_has_unsafe_relationships(conn: &Connection) -> Result<bool> {
     Ok(conn.query_row(
         "select exists(
              select 1 from part p
              left join message m on m.id = p.message_id
              where m.id is null
+                or cast(m.session_id as text) <> cast(p.session_id as text)
              limit 1
          )",
         [],
@@ -561,7 +561,6 @@ fn capability_digest(
     conn: &Connection,
     user_version: i64,
     selected_family: OpenCodeNativeSchemaFamily,
-    message_part_indexed_streaming: bool,
 ) -> Result<String> {
     let table_names = sqlite_tables(conn)?;
     let mut tables = BTreeMap::new();
@@ -597,7 +596,6 @@ fn capability_digest(
     let capabilities = json!({
         "candidate_families": candidate_families,
         "message_part_join": message_part_join,
-        "message_part_indexed_streaming": message_part_indexed_streaming,
         "populated": populated,
         "selected_family": selected_family.label(),
         "session_message_seq": tables
