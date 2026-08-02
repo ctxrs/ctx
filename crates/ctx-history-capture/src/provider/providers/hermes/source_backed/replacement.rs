@@ -112,6 +112,21 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
             || scan.native_candidate_query_batches == 0
             || scan.native_hydration_query_batches > scan.native_candidate_query_batches
             || scan.max_native_rows_per_set > 64
+            || scan.direct_context_query_batches > scan.native_candidate_query_batches
+            || scan.ancestry_query_batches
+                > scan
+                    .direct_context_query_batches
+                    .saturating_mul(NATIVE_INGESTION_PAGE_MAX_UNITS as u64)
+            || scan.max_context_query_batches_per_page
+                > (NATIVE_INGESTION_PAGE_MAX_UNITS + 1) as u64
+            || scan.max_direct_context_rows_per_query > 64
+            || scan.max_ancestry_rows_per_query > ancestry::HERMES_ANCESTRY_QUERY_MAX_ROWS as u64
+            || scan.max_direct_context_bytes_per_query
+                > ancestry::HERMES_DIRECT_CONTEXT_RESIDENT_MAX_BYTES as u64
+            || scan.max_ancestry_bytes_per_query
+                > ancestry::HERMES_ANCESTRY_RESIDENT_MAX_BYTES as u64
+            || scan.peak_context_cache_rows > ancestry::HERMES_CONTEXT_CACHE_MAX_ROWS as u64
+            || scan.peak_context_cache_bytes > ancestry::HERMES_CONTEXT_CACHE_MAX_BYTES as u64
         {
             return Err(hermes_internal(
                 "Hermes scan violated its one-pass bounded-page receipt",

@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{collections::BTreeSet, fs, path::Path};
 
 use ctx_history_core::{CaptureProvider, SourceAnchor};
 use ctx_history_index::WriterOptions;
@@ -75,6 +75,368 @@ fn projected_event_bodies(
     })
     .unwrap();
     bodies
+}
+
+fn create_context_fixture(path: &Path) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    Connection::open(path)
+        .unwrap()
+        .execute_batch(
+            "create table sessions (
+                 id text primary key,
+                 source text not null,
+                 parent_session_id text,
+                 model_config text,
+                 started_at real not null,
+                 cwd text,
+                 git_branch text,
+                 git_repo_root text,
+                 title text
+             );
+             create table messages (
+                 id integer primary key autoincrement,
+                 session_id text not null,
+                 role text not null,
+                 content text,
+                 timestamp real not null
+             );",
+        )
+        .unwrap();
+}
+
+#[test]
+fn ordinary_parent_and_project_context_matches_direct_projection() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let data_root = temp.path().join("data-root");
+    let path = temp.path().join("profile/state.db");
+    create_context_fixture(&path);
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "insert into sessions
+             (id, source, parent_session_id, started_at, cwd, git_branch, git_repo_root)
+             values ('root', 'acp', null, 1782259200.0, '/repo/root', 'main', '/repo')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into sessions
+             (id, source, parent_session_id, started_at, cwd, git_branch, git_repo_root)
+             values ('child', 'acp', 'root', 1782259201.0, '/repo/child', 'feature', '/repo')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into messages (session_id, role, content, timestamp)
+             values ('root', 'assistant', 'root message', 1782259202.0),
+                    ('child', 'assistant', 'child message', 1782259203.0)",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let before = fs::read(&path).unwrap();
+    let candidate = HermesSourceCandidate::automatic(
+        &data_root,
+        provider_source_for_path(CaptureProvider::Hermes, path.clone()),
+    )
+    .unwrap();
+    let (_authority, snapshot) = open_root_authorized_snapshot(&data_root, &path).unwrap();
+    let mut events = Vec::new();
+    let scan = project_hermes_snapshot(&candidate, snapshot.connection().unwrap(), &mut |page| {
+        events.extend(page.records.into_iter().filter_map(|record| match record {
+            HermesSourceBackedRecord::Event(event) => Some(event),
+            HermesSourceBackedRecord::Session(_) | HermesSourceBackedRecord::Rejected(_) => None,
+        }));
+        Ok(())
+    })
+    .unwrap();
+    snapshot.finish().unwrap();
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(events.len(), 2);
+    let root = events
+        .iter()
+        .find(|event| event.provider_session_id.as_deref() == Some("root"))
+        .unwrap();
+    let child = events
+        .iter()
+        .find(|event| event.provider_session_id.as_deref() == Some("child"))
+        .unwrap();
+    assert_eq!(root.root_session_id, root.session_id);
+    assert_eq!(root.parent_session_id, None);
+    assert!(root.is_primary);
+    assert_eq!(root.branch.as_deref(), Some("main"));
+    assert_eq!(root.workspace.as_deref(), Some("/repo"));
+    assert_eq!(root.cwd.as_deref(), Some("/repo/root"));
+    assert_eq!(child.root_session_id, root.session_id);
+    assert_eq!(child.parent_session_id, Some(root.session_id));
+    assert!(!child.is_primary);
+    assert_eq!(child.branch.as_deref(), Some("feature"));
+    assert_eq!(child.workspace.as_deref(), Some("/repo"));
+    assert_eq!(child.cwd.as_deref(), Some("/repo/child"));
+    assert!(scan.max_context_query_batches_per_page <= 2);
+    assert!(scan.max_ancestry_rows_per_query <= ancestry::HERMES_ANCESTRY_QUERY_MAX_ROWS as u64);
+    assert!(scan.peak_context_cache_rows <= ancestry::HERMES_CONTEXT_CACHE_MAX_ROWS as u64);
+    assert!(scan.peak_context_cache_bytes <= ancestry::HERMES_CONTEXT_CACHE_MAX_BYTES as u64);
+}
+
+fn insert_context_session(
+    statement: &mut rusqlite::Statement<'_>,
+    id: &str,
+    parent: Option<&str>,
+    direct_metadata: Option<&str>,
+    opaque_metadata: &str,
+) {
+    statement
+        .execute(rusqlite::params![
+            id,
+            parent,
+            opaque_metadata,
+            direct_metadata,
+            direct_metadata,
+            direct_metadata,
+            opaque_metadata,
+        ])
+        .unwrap();
+}
+
+#[test]
+fn disjoint_and_deep_ancestry_streams_with_bounded_memory_and_queries() {
+    const DISJOINT_CHAINS: usize = 128;
+    const DISJOINT_DEPTH: usize = 5;
+    const CACHE_ROOTS: usize = 300;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("profile/state.db");
+    create_context_fixture(&path);
+    let mut connection = Connection::open(&path).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let large_opaque_metadata = "opaque".repeat(2_731);
+    let large_direct_metadata = "context".repeat(2_341);
+    let large_ancestry_key_tail = "k".repeat(ancestry::HERMES_SESSION_KEY_MAX_BYTES / 2);
+    {
+        let mut insert = transaction
+            .prepare(
+                "insert into sessions
+                 (id, source, parent_session_id, model_config, started_at, cwd,
+                  git_branch, git_repo_root, title)
+                 values (?1, 'acp', ?2, ?3, 1782259200.0, ?4, ?5, ?6, ?7)",
+            )
+            .unwrap();
+        let mut parent = None;
+        for depth in 0..ancestry::HERMES_PARENT_CHAIN_MAX_DEPTH {
+            let id = format!("deep-{depth:03}");
+            insert_context_session(
+                &mut insert,
+                &id,
+                parent.as_deref(),
+                None,
+                &large_opaque_metadata,
+            );
+            parent = Some(id);
+        }
+        insert_context_session(
+            &mut insert,
+            "deep-leaf",
+            parent.as_deref(),
+            Some(&large_direct_metadata),
+            &large_opaque_metadata,
+        );
+        let mut parent = None;
+        for depth in 0..=ancestry::HERMES_PARENT_CHAIN_MAX_DEPTH {
+            let id = format!("overdeep-{depth:03}");
+            insert_context_session(
+                &mut insert,
+                &id,
+                parent.as_deref(),
+                None,
+                &large_opaque_metadata,
+            );
+            parent = Some(id);
+        }
+        insert_context_session(
+            &mut insert,
+            "overdeep-leaf",
+            parent.as_deref(),
+            Some(&large_direct_metadata),
+            &large_opaque_metadata,
+        );
+        let mut parent = None;
+        for depth in 0..140 {
+            let id = format!("byte-{depth:03}-{large_ancestry_key_tail}");
+            insert_context_session(&mut insert, &id, parent.as_deref(), None, "");
+            parent = Some(id);
+        }
+        insert_context_session(
+            &mut insert,
+            "byte-leaf",
+            parent.as_deref(),
+            Some(&large_direct_metadata),
+            &large_opaque_metadata,
+        );
+        for chain in 0..DISJOINT_CHAINS {
+            let mut parent = None;
+            for depth in 0..DISJOINT_DEPTH {
+                let id = format!("wide-{chain:03}-{depth}");
+                insert_context_session(
+                    &mut insert,
+                    &id,
+                    parent.as_deref(),
+                    None,
+                    &large_opaque_metadata,
+                );
+                parent = Some(id);
+            }
+            insert_context_session(
+                &mut insert,
+                &format!("wide-leaf-{chain:03}"),
+                parent.as_deref(),
+                Some(&large_direct_metadata),
+                &large_opaque_metadata,
+            );
+        }
+        for root in 0..CACHE_ROOTS {
+            insert_context_session(
+                &mut insert,
+                &format!("cache-root-{root:03}"),
+                None,
+                None,
+                "",
+            );
+        }
+    }
+    transaction
+        .execute_batch(
+            "insert into sessions
+             (id, source, parent_session_id, started_at, cwd)
+             values ('projection-bad-parent', 'acp', null, 1782259200.0, x'ff');
+             insert into sessions
+             (id, source, parent_session_id, started_at, cwd)
+             values ('projection-child', 'acp', 'projection-bad-parent', 1782259200.0, '/repo');",
+        )
+        .unwrap();
+    transaction.commit().unwrap();
+    drop(connection);
+    let source_bytes = fs::read(&path).unwrap();
+    let connection = crate::provider::sqlite::open_provider_sqlite_readonly(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+    )
+    .unwrap();
+    let schema = HermesSchema::detect(&connection).unwrap();
+    let source = provider_source_for_path(CaptureProvider::Hermes, path.clone());
+    let candidate =
+        HermesSourceCandidate::automatic(crate::test_provider_sqlite_data_root(), source).unwrap();
+    let mut memo = HermesSessionContextMemo::new(&connection, &schema, &candidate.source);
+
+    let projection_page = BTreeSet::from([
+        "projection-bad-parent".to_owned(),
+        "projection-child".to_owned(),
+    ]);
+    let projection_resolutions = memo.resolve_page(&projection_page).unwrap();
+    assert!(matches!(
+        projection_resolutions.get("projection-bad-parent"),
+        Some(HermesSessionResolution::Rejected(reason)) if reason.contains("cwd")
+    ));
+    let projection_root = match projection_resolutions.get("projection-child") {
+        Some(HermesSessionResolution::Context(context)) => context.root_session_id,
+        resolution => panic!("child lost independent ancestry evidence: {resolution:?}"),
+    };
+
+    let byte_resolution = memo
+        .resolve_page(&BTreeSet::from(["byte-leaf".to_owned()]))
+        .unwrap();
+    assert!(matches!(
+        byte_resolution.get("byte-leaf"),
+        Some(HermesSessionResolution::Rejected(reason)) if reason.contains("byte per-session")
+    ));
+
+    let deep = BTreeSet::from(["deep-leaf".to_owned()]);
+    let deep_resolution = memo.resolve_page(&deep).unwrap();
+    assert!(
+        matches!(
+            deep_resolution.get("deep-leaf"),
+            Some(HermesSessionResolution::Context(_))
+        ),
+        "{deep_resolution:?}"
+    );
+
+    let mixed_page = BTreeSet::from(["cache-root-000".to_owned(), "overdeep-leaf".to_owned()]);
+    let mixed_resolutions = memo.resolve_page(&mixed_page).unwrap();
+    assert!(matches!(
+        mixed_resolutions.get("cache-root-000"),
+        Some(HermesSessionResolution::Context(_))
+    ));
+    assert!(matches!(
+        mixed_resolutions.get("overdeep-leaf"),
+        Some(HermesSessionResolution::Rejected(reason)) if reason.contains("256-row")
+    ));
+
+    for page in 0..2 {
+        let leaves = (page * 64..(page + 1) * 64)
+            .map(|chain| format!("wide-leaf-{chain:03}"))
+            .collect::<BTreeSet<_>>();
+        let resolutions = memo.resolve_page(&leaves).unwrap();
+        assert_eq!(resolutions.len(), 64);
+        assert!(resolutions
+            .values()
+            .all(|resolution| matches!(resolution, HermesSessionResolution::Context(_))));
+    }
+
+    for page in 0..5 {
+        let roots = (page * 60..(page + 1) * 60)
+            .map(|root| format!("cache-root-{root:03}"))
+            .collect::<BTreeSet<_>>();
+        let resolutions = memo.resolve_page(&roots).unwrap();
+        assert!(resolutions
+            .values()
+            .all(|resolution| matches!(resolution, HermesSessionResolution::Context(_))));
+    }
+    let queries_before_revisit = memo.counters();
+    let projection_revisit = memo
+        .resolve_page(&BTreeSet::from(["projection-child".to_owned()]))
+        .unwrap();
+    assert!(matches!(
+        projection_revisit.get("projection-child"),
+        Some(HermesSessionResolution::Context(context))
+            if context.root_session_id == projection_root
+    ));
+    let counters = memo.counters();
+    assert_eq!(
+        counters.direct_query_batches,
+        queries_before_revisit.direct_query_batches + 1
+    );
+    assert_eq!(
+        counters.ancestry_query_batches,
+        queries_before_revisit.ancestry_query_batches + 1
+    );
+    assert_eq!(counters.direct_query_batches, 12);
+    assert_eq!(counters.ancestry_query_batches, 133);
+    assert_eq!(counters.max_query_batches_per_page, 65);
+    assert_eq!(
+        counters.max_ancestry_rows_per_query,
+        ancestry::HERMES_ANCESTRY_QUERY_MAX_ROWS as u64
+    );
+    assert!(counters.max_direct_rows_per_query <= 64);
+    assert!(
+        counters.max_direct_bytes_per_query
+            <= ancestry::HERMES_DIRECT_CONTEXT_RESIDENT_MAX_BYTES as u64
+    );
+    assert!(
+        counters.max_ancestry_bytes_per_query > ancestry::HERMES_ANCESTRY_WORKSET_MAX_BYTES as u64
+    );
+    assert!(
+        counters.max_ancestry_bytes_per_query
+            <= ancestry::HERMES_ANCESTRY_RESIDENT_MAX_BYTES as u64
+    );
+    assert_eq!(
+        counters.peak_cache_rows,
+        ancestry::HERMES_CONTEXT_CACHE_MAX_ROWS as u64
+    );
+    assert!(counters.peak_cache_bytes <= ancestry::HERMES_CONTEXT_CACHE_MAX_BYTES as u64);
+    drop(memo);
+    drop(connection);
+    assert_eq!(fs::read(path).unwrap(), source_bytes);
 }
 
 #[test]
