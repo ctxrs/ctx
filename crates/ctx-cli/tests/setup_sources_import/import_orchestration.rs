@@ -642,19 +642,19 @@ fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
         (
             "missing",
             b"",
-            "custom (unreadable)",
+            "missing manifest record for ctx-history-jsonl-v1",
             "invalid capture payload",
         ),
         (
             "unsupported",
             b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v999\"}\n",
-            "custom (incompatible)",
+            "unsupported custom history schema version `ctx-history-jsonl-v999`",
             "unsupported provider schema",
         ),
         (
             "duplicate",
             b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n",
-            "custom (unreadable)",
+            "duplicate manifest record at line 2",
             "invalid capture payload",
         ),
     ];
@@ -775,7 +775,10 @@ fn explicit_import_reports_requested_route_failure_when_another_cold_route_publi
     );
     assert_eq!(report["failure_scope"], "source", "{report:#}");
     assert_eq!(report["failure_type"], "source_failure", "{report:#}");
-    assert_eq!(report["totals"]["imported_sources"], 0, "{report:#}");
+    assert!(
+        report["totals"].get("imported_sources").is_none(),
+        "{report:#}"
+    );
     assert_eq!(report["totals"]["failed_sources"], 1, "{report:#}");
     assert!(report["totals"]["current_indexed_documents"]
         .as_u64()
@@ -848,7 +851,10 @@ fn explicit_import_reports_warm_carried_route_failure() {
     );
     assert_eq!(carried["failure_scope"], "source", "{carried:#}");
     assert_eq!(carried["failure_type"], "source_failure", "{carried:#}");
-    assert_eq!(carried["totals"]["imported_sources"], 0, "{carried:#}");
+    assert!(
+        carried["totals"].get("imported_sources").is_none(),
+        "{carried:#}"
+    );
     assert_eq!(carried["totals"]["failed_sources"], 1, "{carried:#}");
     assert_eq!(
         carried["totals"]["current_indexed_documents"], 1,
@@ -1129,9 +1135,10 @@ fn failed_import_attempt_does_not_count_as_indexed_history() {
         .args(["import", "--all", "--format=json", "--progress", "none"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "failed routes: opencode (unreadable)",
-        ));
+        .stderr(
+            predicate::str::contains("source-backed scan failed for opencode")
+                .and(predicate::str::contains("file is not a database")),
+        );
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert!(
