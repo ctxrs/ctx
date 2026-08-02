@@ -193,6 +193,13 @@ pub(in super::super) struct SourceOwner {
     pub(in super::super) route_index: usize,
     pub(in super::super) source: SourceKey,
     pub(in super::super) present: bool,
+    pub(in super::super) revalidation: Option<SourceBackedRouteRevalidation>,
+}
+
+#[derive(Clone)]
+pub(in super::super) enum SourceBackedRouteRevalidation {
+    Source(CertifiedSource),
+    Deletion(CertifiedSourceDeletion),
 }
 
 #[derive(Clone)]
@@ -237,7 +244,9 @@ impl SourceBackedGenerationSink<'_> {
         &mut self,
         certificate: CertifiedSource,
     ) -> SourceBackedCoordinatorResult<()> {
-        self.writer.certify_source(certificate)?;
+        let source = certificate.observation().source().clone();
+        self.writer.certify_source(certificate.clone())?;
+        self.record_revalidation(&source, SourceBackedRouteRevalidation::Source(certificate))?;
         Ok(())
     }
 
@@ -245,7 +254,10 @@ impl SourceBackedGenerationSink<'_> {
         &mut self,
         append: CertifiedSourceAppend,
     ) -> SourceBackedCoordinatorResult<()> {
+        let certificate = append.current().clone();
+        let source = certificate.observation().source().clone();
         self.writer.certify_source_append(append)?;
+        self.record_revalidation(&source, SourceBackedRouteRevalidation::Source(certificate))?;
         Ok(())
     }
 
@@ -254,7 +266,9 @@ impl SourceBackedGenerationSink<'_> {
         certificate: CertifiedSource,
     ) -> SourceBackedCoordinatorResult<()> {
         self.claim_present(certificate.observation().source())?;
-        self.writer.retain_source(certificate)?;
+        let source = certificate.observation().source().clone();
+        self.writer.retain_source(certificate.clone())?;
+        self.record_revalidation(&source, SourceBackedRouteRevalidation::Source(certificate))?;
         Ok(())
     }
 
@@ -281,6 +295,10 @@ impl SourceBackedGenerationSink<'_> {
         self.claim_absent(deletion.source())?;
         self.writer
             .delete_source(deletion.clone(), inventory.clone())?;
+        self.record_revalidation(
+            deletion.source(),
+            SourceBackedRouteRevalidation::Deletion(deletion.clone()),
+        )?;
         self.applied_removals.push(SourceBackedCertifiedRemoval {
             deletion,
             inventory,
@@ -338,10 +356,31 @@ impl SourceBackedGenerationSink<'_> {
                         route_index: self.route_index,
                         source: source.clone(),
                         present,
+                        revalidation: None,
                     },
                 );
             }
         }
+        Ok(())
+    }
+
+    fn record_revalidation(
+        &mut self,
+        source: &SourceKey,
+        revalidation: SourceBackedRouteRevalidation,
+    ) -> SourceBackedCoordinatorResult<()> {
+        let owner = self
+            .owners
+            .get_mut(&source.identity().digest())
+            .filter(|owner| {
+                owner.route_index == self.route_index
+                    && owner.source.exact_descriptor_eq(source)
+                    && owner.revalidation.is_none()
+            })
+            .ok_or(IndexError::WriterInvariant(
+                "source certification lost its route-local owner",
+            ))?;
+        owner.revalidation = Some(revalidation);
         Ok(())
     }
 }

@@ -76,14 +76,16 @@ fn fail_route_before_scan(
 }
 
 fn fail_route_at_final_revalidation(mut route: SourceBackedRoute) -> SourceBackedRoute {
-    let original = route.driver.take().unwrap();
-    let scan = Arc::clone(&original.scan);
-    let owns = Arc::clone(&original.owns_source);
-    route.driver = Some(SourceBackedRouteDriver::new(
-        move |sink| scan(sink),
-        move |source| owns(source),
-        |_| false,
-    ));
+    let mut driver = route.driver.take().unwrap();
+    driver.revalidate = Arc::new(|_| false);
+    route.driver = Some(driver);
+    route
+}
+
+fn fail_route_at_final_inventory_revalidation(mut route: SourceBackedRoute) -> SourceBackedRoute {
+    let mut driver = route.driver.take().unwrap();
+    driver.revalidate_complete_inventory = Some(Arc::new(|_| false));
+    route.driver = Some(driver);
     route
 }
 
@@ -91,18 +93,13 @@ fn count_route_scans(
     mut route: SourceBackedRoute,
     scans: Arc<std::sync::atomic::AtomicUsize>,
 ) -> SourceBackedRoute {
-    let original = route.driver.take().unwrap();
-    let scan = Arc::clone(&original.scan);
-    let owns = Arc::clone(&original.owns_source);
-    let revalidate = Arc::clone(&original.revalidate);
-    route.driver = Some(SourceBackedRouteDriver::new(
-        move |sink| {
-            scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            scan(sink)
-        },
-        move |source| owns(source),
-        move |target| revalidate(target),
-    ));
+    let mut driver = route.driver.take().unwrap();
+    let scan = Arc::clone(&driver.scan);
+    driver.scan = Arc::new(move |sink| {
+        scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        scan(sink)
+    });
+    route.driver = Some(driver);
     route
 }
 
@@ -231,7 +228,11 @@ fn warm_success_advances_while_failed_route_is_carried_exactly() {
 
 #[test]
 fn internal_route_failure_aborts_the_whole_cold_refresh() {
-    let first = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 11);
+    let first_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = count_route_scans(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 11),
+        Arc::clone(&first_scans),
+    );
     let second_source = fixture_source(CaptureProvider::Hermes, "hermes_state_sqlite", 12);
     let second = fail_route_with_systemic_writer_error(
         fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 12),
@@ -256,33 +257,188 @@ fn internal_route_failure_aborts_the_whole_cold_refresh() {
         VerifiedIndex::open(temp.path()),
         Err(IndexError::MissingActiveGenerationPointer)
     ));
+    assert_eq!(
+        first_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a systemic abort must not restart already completed route work"
+    );
 }
 
 #[test]
-fn final_revalidation_failure_retries_without_the_changed_route() {
-    let first = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 13);
-    let second = fail_route_at_final_revalidation(fixture_route(
-        CaptureProvider::Hermes,
-        "hermes_state_sqlite",
-        14,
-    ));
+fn cold_final_revalidation_failures_scan_each_route_once_and_publish_only_successes() {
+    let first_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let second_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let third_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = count_route_scans(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 13),
+        Arc::clone(&first_scans),
+    );
+    let second = count_route_scans(
+        fail_route_at_final_revalidation(fixture_route(
+            CaptureProvider::Hermes,
+            "hermes_state_sqlite",
+            14,
+        )),
+        Arc::clone(&second_scans),
+    );
+    let third = count_route_scans(
+        fail_route_at_final_revalidation(fixture_route(
+            CaptureProvider::Tabnine,
+            "tabnine_cli_chat_recording_jsonl",
+            15,
+        )),
+        Arc::clone(&third_scans),
+    );
     let first_id = first.metadata.route_identity.clone().unwrap();
     let second_id = second.metadata.route_identity.clone().unwrap();
+    let third_id = third.metadata.route_identity.clone().unwrap();
     let mut registry = SourceBackedProviderRegistry::new();
     registry.register(first);
     registry.register(second);
+    registry.register(third);
     let temp = tempdir().unwrap();
 
     let receipt =
         refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    assert_eq!(receipt.successful_route_ids, vec![first_id]);
+    assert_eq!(receipt.successful_route_ids, vec![first_id.clone()]);
+    assert_eq!(receipt.failed_routes.len(), 2);
+    assert_eq!(
+        receipt
+            .failed_routes
+            .iter()
+            .map(|failure| failure.route_identity.clone())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([second_id.clone(), third_id.clone()])
+    );
+    assert!(receipt.failed_routes.iter().all(|failure| {
+        failure.class == SourceBackedSourceFailureClass::SourceChanged && !failure.carried_forward
+    }));
+    assert!(receipt.commit.manifest().source_route(&first_id).is_some());
+    assert!(receipt.commit.manifest().source_route(&second_id).is_none());
+    assert!(receipt.commit.manifest().source_route(&third_id).is_none());
+    assert_eq!(receipt.commit.indexed_documents, 1);
+    assert_eq!(
+        first_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "successive final failures must not rescan a successful route"
+    );
+    assert_eq!(
+        second_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a terminally failed route must not be scanned again"
+    );
+    assert_eq!(
+        third_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a terminally failed route must not be scanned again"
+    );
+}
+
+#[test]
+fn final_inventory_failure_scans_each_route_once_and_stays_route_local() {
+    let successful_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let failed_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let successful = count_route_scans(
+        fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 16),
+        Arc::clone(&successful_scans),
+    );
+    let successful_id = successful.metadata.route_identity.clone().unwrap();
+    let source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 17);
+    let mut inventory_registry = inventory_replay_registry(Arc::new(Mutex::new(vec![source])));
+    let failed = count_route_scans(
+        fail_route_at_final_inventory_revalidation(inventory_registry.routes.pop().unwrap()),
+        Arc::clone(&failed_scans),
+    );
+    let failed_id = failed.metadata.route_identity.clone().unwrap();
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(successful);
+    registry.register(failed);
+    let temp = tempdir().unwrap();
+
+    let receipt =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    assert_eq!(receipt.successful_route_ids, vec![successful_id.clone()]);
     assert_eq!(receipt.failed_routes.len(), 1);
-    assert_eq!(receipt.failed_routes[0].route_identity, second_id.clone());
+    assert_eq!(receipt.failed_routes[0].route_identity, failed_id.clone());
     assert_eq!(
         receipt.failed_routes[0].class,
         SourceBackedSourceFailureClass::SourceChanged
     );
-    assert!(receipt.commit.manifest().source_route(&second_id).is_none());
+    assert!(!receipt.failed_routes[0].carried_forward);
+    assert!(receipt
+        .commit
+        .manifest()
+        .source_route(&successful_id)
+        .is_some());
+    assert!(receipt.commit.manifest().source_route(&failed_id).is_none());
+    assert_eq!(receipt.commit.indexed_documents, 1);
+    assert_eq!(
+        successful_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(failed_scans.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn warm_final_revalidation_failure_scans_once_and_carries_the_exact_route() {
+    let (first_v1, _) = revisioned_receipt_route(1);
+    let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 16);
+    let second_id = second.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(first_v1);
+    initial_registry.register(second.clone());
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+    let retained_second = initial
+        .commit
+        .manifest()
+        .source_route(&second_id)
+        .unwrap()
+        .clone();
+
+    let first_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let second_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (first_v2, first_v2_certificate) = revisioned_receipt_route(2);
+    let first_v2 = count_route_scans(first_v2, Arc::clone(&first_scans));
+    let first_id = first_v2.metadata.route_identity.clone().unwrap();
+    let second = count_route_scans(
+        fail_route_at_final_revalidation(second),
+        Arc::clone(&second_scans),
+    );
+    let mut warm_registry = SourceBackedProviderRegistry::new();
+    warm_registry.register(first_v2);
+    warm_registry.register(second);
+
+    let warm =
+        refresh_source_backed_generation(temp.path(), &warm_registry, WriterOptions::default())
+            .unwrap();
+    assert_eq!(warm.successful_route_ids, vec![first_id]);
+    assert_eq!(warm.failed_routes.len(), 1);
+    assert_eq!(warm.failed_routes[0].route_identity, second_id.clone());
+    assert_eq!(
+        warm.failed_routes[0].class,
+        SourceBackedSourceFailureClass::SourceChanged
+    );
+    assert!(warm.failed_routes[0].carried_forward);
+    assert_eq!(warm.carried_failed_route_ids, vec![second_id.clone()]);
+    assert_eq!(
+        warm.commit.manifest().source_route(&second_id),
+        Some(&retained_second)
+    );
+    assert!(warm.sources.contains(&first_v2_certificate));
+    assert_eq!(warm.commit.indexed_documents, 2);
+    assert_eq!(
+        first_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a warm successful route must retain its one staged scan"
+    );
+    assert_eq!(
+        second_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a warm failed route must be excluded from its existing stage"
+    );
 }
 
 #[test]

@@ -285,9 +285,8 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
     let index_root = index_root.as_ref();
     let mut failed_routes = BTreeMap::<SourceRouteIdentity, SourceBackedFailedRoute>::new();
     let mut carried_unselected_route_ids = BTreeSet::new();
-    let mut total_commit_duration = Duration::ZERO;
 
-    let (commit, applied_removals) = loop {
+    let (commit, applied_removals, commit_duration) = {
         let mut writer = GenerationWriter::open(index_root, writer_options.clone())?;
         let base_route_ids = writer
             .base_manifest()
@@ -307,18 +306,8 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 .cloned()
                 .collect();
         }
-        let attempt_selected = selected_route_ids
-            .iter()
-            .filter(|identity| !failed_routes.contains_key(*identity))
-            .cloned()
-            .collect::<BTreeSet<_>>();
+        let attempt_selected = selected_route_ids.clone();
         let mut attempt_carried = carried_unselected_route_ids.clone();
-        attempt_carried.extend(
-            failed_routes
-                .keys()
-                .filter(|identity| base_route_ids.contains(*identity))
-                .cloned(),
-        );
         writer.set_source_route_plan(attempt_selected.clone(), attempt_carried.clone())?;
 
         let automatic_missing_observed_at_unix_ms = source_missing_observation_time();
@@ -354,32 +343,33 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             let current_source = route.metadata.source.path.display().to_string();
             let mut record_progress = SourceRecordProgress::default();
             let mut progress_failure = None::<SourceBackedRouteError>;
-            let mut report_accepted_record = || {
-                if let Some(error) = progress_failure.as_ref() {
-                    return Err(SourceBackedCoordinatorError::Progress(error.clone()));
-                }
-                let Some(completed_records) = record_progress.accepted_at(Instant::now()) else {
-                    return Ok(());
-                };
-                match report_progress(SourceBackedRefreshProgress {
-                    phase: "refreshing",
-                    completed_sources: completed_routes,
-                    total_sources: scanned_routes,
-                    current_source: Some(current_source.clone()),
-                    completed_records: Some(completed_records),
-                    stage_duration: scan_started.elapsed(),
-                    elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
-                    certified_source_count: None,
-                    certified_source_bytes: None,
-                }) {
-                    Ok(()) => Ok(()),
-                    Err(error) => {
-                        progress_failure = Some(error.clone());
-                        Err(SourceBackedCoordinatorError::Progress(error))
-                    }
-                }
-            };
             let scan_result = {
+                let mut report_accepted_record = || {
+                    if let Some(error) = progress_failure.as_ref() {
+                        return Err(SourceBackedCoordinatorError::Progress(error.clone()));
+                    }
+                    let Some(completed_records) = record_progress.accepted_at(Instant::now())
+                    else {
+                        return Ok(());
+                    };
+                    match report_progress(SourceBackedRefreshProgress {
+                        phase: "refreshing",
+                        completed_sources: completed_routes,
+                        total_sources: scanned_routes,
+                        current_source: Some(current_source.clone()),
+                        completed_records: Some(completed_records),
+                        stage_duration: scan_started.elapsed(),
+                        elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
+                        certified_source_count: None,
+                        certified_source_bytes: None,
+                    }) {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            progress_failure = Some(error.clone());
+                            Err(SourceBackedCoordinatorError::Progress(error))
+                        }
+                    }
+                };
                 let mut sink = SourceBackedGenerationSink {
                     writer: &mut writer,
                     owners: &mut owners,
@@ -391,7 +381,6 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 };
                 (driver.scan)(&mut sink)
             };
-            drop(report_accepted_record);
             if let Some(error) = progress_failure {
                 return Err(SourceBackedCoordinatorError::Progress(error));
             }
@@ -411,8 +400,48 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             }
             match scan_result {
                 Ok(()) => {
-                    writer.finish_source_route_stage(route_identity)?;
-                    successful_this_attempt.insert(route_identity.clone());
+                    capture_staged_source_route_revalidation_receipts(
+                        &writer,
+                        route_index,
+                        &mut owners,
+                    )?;
+                    report_progress(SourceBackedRefreshProgress {
+                        phase: "verifying",
+                        completed_sources: completed_routes,
+                        total_sources: scanned_routes,
+                        current_source: None,
+                        completed_records: None,
+                        stage_duration: scan_started.elapsed(),
+                        elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
+                        certified_source_count: None,
+                        certified_source_bytes: None,
+                    })
+                    .map_err(SourceBackedCoordinatorError::Progress)?;
+                    if revalidate_staged_source_route(
+                        route_index,
+                        driver,
+                        &owners,
+                        &complete_inventory_owners,
+                    )? {
+                        writer.finish_source_route_stage(route_identity)?;
+                        successful_this_attempt.insert(route_identity.clone());
+                    } else {
+                        writer.rollback_source_route_stage(route_identity)?;
+                        owners.retain(|_, owner| owner.route_index != route_index);
+                        complete_inventory_owners.retain(|owner| owner.route_index != route_index);
+                        applied_removals.truncate(removal_checkpoint);
+                        let carried_forward =
+                            writer.carry_failed_source_route_from_base(route_identity)?;
+                        attempt_carried.insert(route_identity.clone());
+                        failed_routes.insert(
+                            route_identity.clone(),
+                            SourceBackedFailedRoute::from_route(
+                                route,
+                                SourceBackedSourceFailureClass::SourceChanged,
+                                carried_forward,
+                            )?,
+                        );
+                    }
                 }
                 Err(source) => {
                     let Some(class) = source.kind.source_failure_class() else {
@@ -454,16 +483,41 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 continue;
             }
             writer.begin_source_route_stage(route_identity.clone())?;
+            report_progress(SourceBackedRefreshProgress {
+                phase: "verifying",
+                completed_sources: completed_routes,
+                total_sources: scanned_routes,
+                current_source: None,
+                completed_records: None,
+                stage_duration: scan_started.elapsed(),
+                elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
+                certified_source_count: None,
+                certified_source_bytes: None,
+            })
+            .map_err(SourceBackedCoordinatorError::Progress)?;
             let paths = route.certified_missing_paths.clone();
+            if !paths
+                .iter()
+                .all(|path| path_presence(path) == PathPresence::Missing)
+            {
+                writer.rollback_source_route_stage(route_identity)?;
+                let carried_forward = writer.carry_failed_source_route_from_base(route_identity)?;
+                attempt_carried.insert(route_identity.clone());
+                failed_routes.insert(
+                    route_identity.clone(),
+                    SourceBackedFailedRoute::from_route(
+                        route,
+                        SourceBackedSourceFailureClass::SourceChanged,
+                        carried_forward,
+                    )?,
+                );
+                continue;
+            }
             writer.observe_certified_missing_route(
                 route_identity.clone(),
                 automatic_missing_observed_at_unix_ms,
                 AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS,
-                move || {
-                    paths
-                        .iter()
-                        .all(|path| path_presence(path) == PathPresence::Missing)
-                },
+                move || true,
             )?;
             writer.finish_source_route_stage(route_identity)?;
             successful_this_attempt.insert(route_identity.clone());
@@ -489,18 +543,6 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         }
         writer.set_present_source_routes(present_routes)?;
 
-        report_progress(SourceBackedRefreshProgress {
-            phase: "verifying",
-            completed_sources: completed_routes,
-            total_sources: scanned_routes,
-            current_source: None,
-            completed_records: None,
-            stage_duration: scan_started.elapsed(),
-            elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
-            certified_source_count: None,
-            certified_source_bytes: None,
-        })
-        .map_err(SourceBackedCoordinatorError::Progress)?;
         require_complete_base_source_ownership(
             &writer,
             registry,
@@ -531,9 +573,8 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             });
         }
 
-        let terminal_failed_route = RefCell::new(None::<SourceRouteIdentity>);
         let commit_started = Instant::now();
-        let commit_result = writer.commit_with_complete_inventory_revalidation(
+        let commit = writer.commit_with_complete_inventory_revalidation(
             |target| {
                 let source = match target {
                     RevalidationTarget::Source(source) => source.observation().source(),
@@ -542,81 +583,30 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 let Some(owner) = owners.get(&source.identity().digest()) else {
                     return false;
                 };
-                let route = &registry.routes[owner.route_index];
-                let valid = owner.source.exact_descriptor_eq(source)
-                    && route.driver.as_ref().is_some_and(|driver| {
-                        (driver.owns_source)(source)
-                            && match target {
-                                RevalidationTarget::Source(source) => (driver.revalidate)(
-                                    SourceBackedRevalidationTarget::Source(source),
-                                ),
-                                RevalidationTarget::Deletion(deletion) => (driver.revalidate)(
-                                    SourceBackedRevalidationTarget::Deletion(deletion),
-                                ),
-                            }
-                    });
-                if !valid {
-                    *terminal_failed_route.borrow_mut() = route.metadata.route_identity.clone();
+                if !owner.source.exact_descriptor_eq(source) {
+                    return false;
                 }
-                valid
+                matches!(
+                    (&owner.revalidation, target),
+                    (
+                        Some(SourceBackedRouteRevalidation::Source(expected)),
+                        RevalidationTarget::Source(actual)
+                    ) if *expected == *actual
+                ) || matches!(
+                    (&owner.revalidation, target),
+                    (
+                        Some(SourceBackedRouteRevalidation::Deletion(expected)),
+                        RevalidationTarget::Deletion(actual)
+                    ) if *expected == *actual
+                )
             },
             |inventory| {
-                let Some(owner) = complete_inventory_owners
+                complete_inventory_owners
                     .iter()
-                    .find(|owner| owner.inventory == *inventory)
-                else {
-                    return false;
-                };
-                let route = &registry.routes[owner.route_index];
-                let valid = route
-                    .driver
-                    .as_ref()
-                    .and_then(|driver| driver.revalidate_complete_inventory.as_ref())
-                    .is_some_and(|revalidate| revalidate(inventory));
-                if !valid {
-                    *terminal_failed_route.borrow_mut() = route.metadata.route_identity.clone();
-                }
-                valid
+                    .any(|owner| owner.inventory == *inventory)
             },
-        );
-        total_commit_duration = total_commit_duration.saturating_add(commit_started.elapsed());
-        match commit_result {
-            Ok(commit) => break (commit, applied_removals),
-            Err(error) => {
-                let failed_identity = terminal_failed_route.into_inner().or_else(|| {
-                    if let IndexError::SourceInvalidated(identity) = &error {
-                        attempt_selected
-                            .iter()
-                            .find(|candidate| candidate.as_str() == identity)
-                            .cloned()
-                    } else {
-                        None
-                    }
-                });
-                let Some(failed_identity) = failed_identity else {
-                    return Err(error.into());
-                };
-                let route = registry
-                    .routes
-                    .iter()
-                    .find(|route| route.metadata.route_identity.as_ref() == Some(&failed_identity))
-                    .ok_or_else(|| SourceBackedCoordinatorError::InvalidRefreshScope {
-                        route_id: failed_identity.as_str().to_owned(),
-                    })?;
-                failed_routes.insert(
-                    failed_identity,
-                    SourceBackedFailedRoute::from_route(
-                        route,
-                        SourceBackedSourceFailureClass::SourceChanged,
-                        base_route_ids.contains(route.metadata.route_identity.as_ref().ok_or(
-                            IndexError::WriterInvariant(
-                                "terminally failed route has no route identity",
-                            ),
-                        )?),
-                    )?,
-                );
-            }
-        }
+        )?;
+        (commit, applied_removals, commit_started.elapsed())
     };
 
     let successful_route_ids = selected_route_ids
@@ -653,7 +643,6 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         }
     }
     let scan_stage_duration = scan_started.elapsed();
-    let commit_duration = total_commit_duration;
     let _ = report_progress(SourceBackedRefreshProgress {
         phase: "committed",
         completed_sources: successful_scanned_routes,
@@ -689,6 +678,113 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             .collect(),
         failed_routes: failed_routes.into_values().collect(),
     })
+}
+
+fn capture_staged_source_route_revalidation_receipts(
+    writer: &GenerationWriter,
+    route_index: usize,
+    owners: &mut HashMap<[u8; 32], SourceOwner>,
+) -> SourceBackedCoordinatorResult<()> {
+    for target in writer.active_source_route_revalidation_targets()? {
+        let (source, receipt) = match target {
+            RevalidationTarget::Source(certificate) => (
+                certificate.observation().source(),
+                SourceBackedRouteRevalidation::Source(certificate.clone()),
+            ),
+            RevalidationTarget::Deletion(deletion) => (
+                deletion.source(),
+                SourceBackedRouteRevalidation::Deletion(deletion.clone()),
+            ),
+        };
+        let owner = owners
+            .get_mut(&source.identity().digest())
+            .filter(|owner| {
+                owner.route_index == route_index && owner.source.exact_descriptor_eq(source)
+            })
+            .ok_or(IndexError::WriterInvariant(
+                "active route certificate has no matching source owner",
+            ))?;
+        match (&owner.revalidation, &receipt) {
+            (None, _) => owner.revalidation = Some(receipt),
+            (
+                Some(SourceBackedRouteRevalidation::Source(expected)),
+                SourceBackedRouteRevalidation::Source(actual),
+            ) if expected == actual => {}
+            (
+                Some(SourceBackedRouteRevalidation::Deletion(expected)),
+                SourceBackedRouteRevalidation::Deletion(actual),
+            ) if expected == actual => {}
+            _ => {
+                return Err(IndexError::WriterInvariant(
+                    "active route certificate disagrees with its staged receipt",
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn revalidate_staged_source_route(
+    route_index: usize,
+    driver: &SourceBackedRouteDriver,
+    owners: &HashMap<[u8; 32], SourceOwner>,
+    complete_inventory_owners: &[CompleteInventoryOwner],
+) -> SourceBackedCoordinatorResult<bool> {
+    // Keep the route savepoint active until its complete source authority has
+    // passed once. Accepted compact receipts are checked structurally at the
+    // global commit, so a later failed route can roll back without rescanning
+    // or revalidating any earlier successful route. Source churn after this
+    // route-local fence belongs to a future refresh; it does not reopen work
+    // already completed and certified by this refresh.
+    for owner in owners
+        .values()
+        .filter(|owner| owner.route_index == route_index)
+    {
+        let revalidation = owner
+            .revalidation
+            .as_ref()
+            .ok_or(IndexError::WriterInvariant(
+                "completed source route has no route-local revalidation receipt",
+            ))?;
+        let valid = match revalidation {
+            SourceBackedRouteRevalidation::Source(certificate) if owner.present => {
+                let source = certificate.observation().source();
+                owner.source.exact_descriptor_eq(source)
+                    && (driver.owns_source)(source)
+                    && (driver.revalidate)(SourceBackedRevalidationTarget::Source(certificate))
+            }
+            SourceBackedRouteRevalidation::Deletion(deletion) if !owner.present => {
+                let source = deletion.source();
+                owner.source.exact_descriptor_eq(source)
+                    && (driver.owns_source)(source)
+                    && (driver.revalidate)(SourceBackedRevalidationTarget::Deletion(deletion))
+            }
+            _ => {
+                return Err(IndexError::WriterInvariant(
+                    "source route revalidation receipt disagrees with staged ownership",
+                )
+                .into());
+            }
+        };
+        if !valid {
+            return Ok(false);
+        }
+    }
+
+    for owner in complete_inventory_owners
+        .iter()
+        .filter(|owner| owner.route_index == route_index)
+    {
+        let valid = driver
+            .revalidate_complete_inventory
+            .as_ref()
+            .is_some_and(|revalidate| revalidate(&owner.inventory));
+        if !valid {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn require_complete_base_source_ownership(
@@ -817,6 +913,7 @@ mod ownership_tests {
             route_index: 3,
             source: descriptor_a.clone(),
             present: true,
+            revalidation: None,
         };
         assert!(source_owner_covers_base_source(
             &descriptor_a,
@@ -828,6 +925,7 @@ mod ownership_tests {
             route_index: 3,
             source: descriptor_b.clone(),
             present: true,
+            revalidation: None,
         };
         let inventory = inventory_owner(3, 1, vec![descriptor_b]);
         assert!(source_owner_covers_base_source(
@@ -845,6 +943,7 @@ mod ownership_tests {
             route_index: 3,
             source: descriptor_b.clone(),
             present: true,
+            revalidation: None,
         };
 
         assert!(!source_owner_covers_base_source(
@@ -870,6 +969,7 @@ mod ownership_tests {
             route_index: 3,
             source: descriptor("schema-b", 2),
             present: true,
+            revalidation: None,
         };
         assert!(!source_owner_covers_base_source(
             &descriptor_a,

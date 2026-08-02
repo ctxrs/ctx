@@ -499,6 +499,36 @@ impl GenerationWriter {
         Ok(())
     }
 
+    /// Returns the complete source/deletion certificates added by the active
+    /// route since its savepoint was opened.
+    ///
+    /// This lets a coordinator perform one route-local terminal authority
+    /// check while the route can still be rolled back. The returned targets
+    /// borrow the writer and cannot outlive or mutate the active stage.
+    pub fn active_source_route_revalidation_targets(&self) -> Result<Vec<RevalidationTarget<'_>>> {
+        let checkpoint = self.active_source_route_stage.as_ref().ok_or_else(|| {
+            IndexError::InvalidSourceRoutePlan(
+                "route revalidation requires an active source route stage".to_owned(),
+            )
+        })?;
+        let mut targets = Vec::new();
+        for (token, pending) in &self.pending {
+            if checkpoint.pending.contains_key(token) {
+                continue;
+            }
+            let certificate = pending.certificate.as_ref().ok_or_else(|| {
+                IndexError::SourceNotCertified(pending.source.identity().to_string())
+            })?;
+            targets.push(RevalidationTarget::Source(certificate));
+        }
+        for (source, deletion) in &self.deletions {
+            if !checkpoint.deletions.contains_key(source) {
+                targets.push(RevalidationTarget::Deletion(&deletion.proof));
+            }
+        }
+        Ok(targets)
+    }
+
     /// Makes the active route's staged operations the rollback point for the
     /// next route, without publishing the candidate generation.
     pub fn finish_source_route_stage(
