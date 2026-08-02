@@ -397,10 +397,12 @@ pub(crate) struct SqliteSourceEvidence {
 }
 
 impl SqliteSourceEvidence {
+    #[cfg(test)]
     pub(crate) fn identity(&self) -> &[u8; 32] {
         &self.identity
     }
 
+    #[cfg(test)]
     pub(crate) fn length(&self) -> u64 {
         self.length
     }

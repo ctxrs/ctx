@@ -82,7 +82,6 @@ pub(crate) enum ImportFailureType {
     SourceFailure,
     RecordRejectionAndSourceFailure,
     InvalidRequest,
-    Store,
     Io,
     Other,
 }
@@ -95,19 +94,10 @@ impl ImportFailureType {
             Self::SourceFailure => "source_failure",
             Self::RecordRejectionAndSourceFailure => "record_rejection_and_source_failure",
             Self::InvalidRequest => "invalid_request",
-            Self::Store => "store",
             Self::Io => "io",
             Self::Other => "other",
         }
     }
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct StoreTelemetry {
-    pub(crate) indexed_sessions: Option<CountBucket>,
-    pub(crate) indexed_events: Option<CountBucket>,
-    pub(crate) indexed_items: Option<CountBucket>,
-    pub(crate) db_size: Option<BytesBucket>,
 }
 
 #[derive(Debug)]
@@ -220,7 +210,6 @@ pub(crate) struct SetupTelemetry {
     pub(crate) catalog_source_bytes: Option<BytesBucket>,
     pub(crate) inventory_source_bytes: Option<BytesBucket>,
     pub(crate) has_indexed_content: Option<bool>,
-    pub(crate) store: StoreTelemetry,
     pub(crate) import: ImportTelemetry,
 }
 
@@ -474,14 +463,10 @@ pub(crate) struct SearchTelemetry {
     pub(crate) include_current_session: bool,
     pub(crate) limit: CountBucket,
     pub(crate) provider_filter: Option<CaptureProvider>,
-    pub(crate) had_existing_store: Option<bool>,
-    pub(crate) indexed_content_before_known: Option<bool>,
-    pub(crate) had_indexed_content_before: Option<bool>,
     pub(crate) refresh_duration: Option<DurationBucket>,
     pub(crate) refresh_mode: Option<crate::RefreshArg>,
     pub(crate) refresh_status: Option<RefreshStatus>,
     pub(crate) refresh_source_count: Option<CountBucket>,
-    pub(crate) store_created: Option<bool>,
     pub(crate) has_indexed_content_after: Option<bool>,
     pub(crate) query_length: Option<TextLengthBucket>,
     pub(crate) query_term_count: Option<CountBucket>,
@@ -492,7 +477,6 @@ pub(crate) struct SearchTelemetry {
     pub(crate) citation_count: Option<CountBucket>,
     pub(crate) zero_result: Option<bool>,
     pub(crate) render_duration: Option<DurationBucket>,
-    pub(crate) store: StoreTelemetry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

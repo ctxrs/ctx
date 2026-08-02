@@ -11,18 +11,6 @@ pub(super) fn crush_source_key(project_key: TypedKey) -> CrushSourceBackedResult
     )?)
 }
 
-pub(super) fn crush_source_revision(
-    evidence: &SqliteSourceEvidence,
-    schema_fingerprint: &str,
-) -> String {
-    format!(
-        "crush-sqlite-snapshot-v1:capture={CRUSH_CAPTURE_REVISION};policy={CRUSH_POLICY_REVISION};schema={schema_fingerprint};identity={};length={};revision={}",
-        hex_bytes(evidence.identity()),
-        evidence.length(),
-        hex_bytes(evidence.revision()),
-    )
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SessionLineage {
     pub(super) parent_session_id: Option<StableEntityId>,
@@ -90,8 +78,4 @@ pub(super) fn crush_session_id(
         logical_session_kind: CRUSH_LOGICAL_SESSION_KIND,
         native_session_key: &session_key,
     })?)
-}
-
-fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

@@ -96,7 +96,6 @@ mod daemon_retry;
 mod daemon_status;
 mod daemon_supervisor;
 mod daemon_wakeup;
-#[allow(dead_code)] // Pure daemon-owned route ledger; integration lands separately.
 mod dirty_source_routes;
 #[cfg(test)]
 use daemon_retry::*;
@@ -134,7 +133,6 @@ mod health_search;
 pub(crate) use health_search::semantic_worker_cache_dir;
 #[cfg(test)]
 use health_search::*;
-#[allow(dead_code)] // Signed provisioning consumes this seam in a separate integration lane.
 pub(crate) fn semantic_runtime_cache_dir(data_root: &std::path::Path) -> std::path::PathBuf {
     let model_cache_dir = semantic_worker_cache_dir(data_root);
     semantic_runtime_cache_dir_for_model_cache(&model_cache_dir)

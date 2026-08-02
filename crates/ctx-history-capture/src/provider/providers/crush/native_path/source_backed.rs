@@ -8,14 +8,16 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
     path::{Path, PathBuf},
-    sync::Arc,
 };
+
+#[cfg(test)]
+use std::sync::Arc;
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource, CoreRecord,
     CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey,
-    SourceObservation, StableEntityId, TypedKey,
+    StableEntityId, TypedKey,
 };
 use rusqlite::{limits::Limit, Connection};
 use serde_json::json;
@@ -38,9 +40,8 @@ use crate::{
     },
     provider::source_backed::{family::document::ChangedDocumentSink, SourceBackedRouteError},
     provider_sources::{
-        open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceDirectoryAuthority,
-        SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        retain_sqlite_source_directory_authority, SqliteLogicalSnapshot, SqliteSourceAccessError,
+        SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
     },
     CaptureError, CRUSH_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -48,20 +49,19 @@ use crate::{
 use super::super::{
     capture::message_record_digest_bytes,
     projection::{project_message, CrushMessageProjection, CrushRecordProjection, CrushSessionRow},
-    CRUSH_CAPTURE_REVISION, CRUSH_POLICY_REVISION,
 };
 
 #[path = "source_backed_identity.rs"]
 mod identity;
-use identity::{crush_session_id, crush_source_key, crush_source_revision, session_lineage};
+use identity::{crush_session_id, crush_source_key, session_lineage};
+
+#[cfg(test)]
+use crate::provider_sources::open_root_handle_sqlite_source_snapshot;
 
 const CRUSH_SOURCE_ANCHOR_NAMESPACE: &str = "crush.project-database";
 const CRUSH_INVENTORY_AUTHORITY_NAMESPACE: &str = "crush.project-inventory";
 const CRUSH_INVENTORY_REVISION_KIND: &str = "crush-selected-registered-projects-v0";
-pub(crate) const CRUSH_DISCOVERY_REVISION: &str = "crush-project-inventory-source-backed-v0";
 pub(crate) const CRUSH_SOURCE_SCHEMA_VARIANT: &str = "crush-project-sqlite-v0";
-const CRUSH_SOURCE_REVISION_KIND: &str = "crush-sqlite-snapshot-v1";
-pub(crate) const CRUSH_FRONTIER_KIND: &str = "crush-sqlite-exact-snapshot-v0";
 pub(crate) const CRUSH_PARSER_REVISION: &str = "crush-sqlite-source-backed-v1";
 const CRUSH_NATIVE_SESSION_NAMESPACE: &str = "crush.session";
 const CRUSH_NATIVE_MESSAGE_NAMESPACE: &str = "crush.message";
@@ -228,7 +228,9 @@ pub(crate) struct BoundDatabase {
     pub(crate) source_key: SourceKey,
     pub(crate) canonical_path: PathBuf,
     source_root: ProviderSourceRoot,
+    #[cfg(test)]
     sqlite_authority: Arc<SqliteSourceDirectoryAuthority>,
+    #[cfg(test)]
     database_name: OsString,
 }
 
@@ -242,7 +244,6 @@ pub(crate) struct OpenedSource {
     pub(crate) database: BoundDatabase,
     read_snapshot: SqliteSourceReadSnapshot,
     schema: CrushNativeSchema,
-    pub(crate) observation: SourceObservation,
 }
 
 impl OpenedSource {
@@ -304,7 +305,7 @@ pub(crate) fn bind_inventory(
             ));
         }
         let canonical_path = std::fs::canonicalize(&database.path)?;
-        let (source_root, sqlite_authority, database_name) =
+        let (source_root, _sqlite_authority, _database_name) =
             retain_crush_sqlite_authority(data_root, &canonical_path)?;
         let source_key = crush_source_key(database.project_key)?;
         if !source_ids.insert(source_key.identity().digest()) {
@@ -317,8 +318,10 @@ pub(crate) fn bind_inventory(
             source_key,
             canonical_path,
             source_root,
-            sqlite_authority: Arc::new(sqlite_authority),
-            database_name,
+            #[cfg(test)]
+            sqlite_authority: Arc::new(_sqlite_authority),
+            #[cfg(test)]
+            database_name: _database_name,
         });
     }
     databases.sort_by_key(|database| database.source_key.identity().digest());
@@ -328,6 +331,7 @@ pub(crate) fn bind_inventory(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn open_source(database: BoundDatabase) -> CrushSourceBackedResultV0<OpenedSource> {
     let read_snapshot = open_root_handle_sqlite_source_snapshot(
         &database.sqlite_authority,
@@ -340,7 +344,6 @@ pub(crate) fn open_source_snapshot(
     database: BoundDatabase,
     read_snapshot: SqliteSourceReadSnapshot,
 ) -> CrushSourceBackedResultV0<OpenedSource> {
-    let family_snapshot = read_snapshot.evidence().clone();
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| CrushSourceBackedErrorV0::CountOverflow)?;
     read_snapshot
@@ -351,17 +354,10 @@ pub(crate) fn open_source_snapshot(
         .busy_timeout(std::time::Duration::from_secs(5))?;
     let schema = read_native_schema(read_snapshot.connection()?)?;
     database.source_root.revalidate()?;
-    let revision = crush_source_revision(&family_snapshot, &schema.schema_fingerprint).into_bytes();
-    let observation = SourceObservation::new(
-        database.source_key.clone(),
-        CRUSH_SOURCE_REVISION_KIND,
-        revision,
-    )?;
     Ok(OpenedSource {
         database,
         read_snapshot,
         schema,
-        observation,
     })
 }
 
@@ -414,26 +410,6 @@ fn retain_crush_sqlite_authority(
         retain_sqlite_source_directory_authority(data_root, &authority_handle, parent)?;
     source_root.revalidate()?;
     Ok((source_root, sqlite_authority, database_name))
-}
-
-pub(crate) fn exact_replay_matches(base: &CertifiedSource, source: &OpenedSource) -> bool {
-    base.parser_revision() == CRUSH_PARSER_REVISION
-        && base.observation() == &source.observation
-        && base.frontier().is_some_and(|frontier| {
-            frontier.checkpoint_kind() == CRUSH_FRONTIER_KIND
-                && frontier.checkpoint() == &TypedKey::Bytes(source.observation.revision().to_vec())
-        })
-}
-
-pub(crate) fn closing_observation(
-    source: &OpenedSource,
-) -> CrushSourceBackedResultV0<SourceObservation> {
-    source.database.source_root.revalidate()?;
-    Ok(SourceObservation::new(
-        source.database.source_key.clone(),
-        CRUSH_SOURCE_REVISION_KIND,
-        source.observation.revision().to_vec(),
-    )?)
 }
 
 pub(crate) fn scan_source(

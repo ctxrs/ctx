@@ -44,6 +44,7 @@ impl DirtySourceRouteAdmission {
         &self.route
     }
 
+    #[cfg(test)]
     pub(super) fn watermark(&self) -> EventWatermark {
         self.watermark
     }
@@ -112,10 +113,12 @@ pub(super) struct DirtySourceRoutes {
 }
 
 impl DirtySourceRoutes {
+    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.dirty.is_empty()
     }
 
+    #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.dirty.len()
     }
@@ -216,6 +219,7 @@ impl DirtySourceRoutes {
     }
 
     /// Admits one eligible route, preferring the oldest dirty route first.
+    #[cfg(test)]
     pub(super) fn admit_next(&mut self, now_ms: u64) -> Option<DirtySourceRouteAdmission> {
         if self.dirty.is_empty() {
             return None;
@@ -229,9 +233,9 @@ impl DirtySourceRoutes {
         route: &SourceRouteIdentity,
         now_ms: u64,
     ) -> Option<DirtySourceRouteAdmission> {
-        let watermark = self.watermarks.get(&route).copied()?;
+        let watermark = self.watermarks.get(route).copied()?;
         let admission_id = self.allocate_admission_id();
-        let state = self.dirty.get_mut(&route)?;
+        let state = self.dirty.get_mut(route)?;
         if state.permanently_blocked || state.in_flight.is_some() || state.due_at_ms() > now_ms {
             return None;
         }

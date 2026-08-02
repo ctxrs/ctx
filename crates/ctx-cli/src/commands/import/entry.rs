@@ -116,7 +116,6 @@ pub(crate) fn insert_import_error_analytics(
     });
     telemetry.failure_type = Some(match import_failure_type(error).as_str() {
         "invalid_request" => AnalyticsImportFailureType::InvalidRequest,
-        "store" => AnalyticsImportFailureType::Store,
         "io" => AnalyticsImportFailureType::Io,
         _ => AnalyticsImportFailureType::Other,
     });

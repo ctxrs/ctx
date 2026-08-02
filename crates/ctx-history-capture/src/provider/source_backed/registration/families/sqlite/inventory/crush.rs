@@ -95,14 +95,6 @@ pub fn register_crush_source_backed_route<I>(
 where
     I: CrushProjectInventorySourceV0 + Send + Sync + 'static,
 {
-    let _legacy_compatibility = (
-        crush_exact_replay_matches,
-        closing_crush_observation,
-        open_crush_source,
-        CRUSH_DISCOVERY_REVISION,
-        CRUSH_FRONTIER_KIND,
-        CRUSH_SOURCE_SCHEMA_VARIANT,
-    );
     SqliteInventoryDocumentAdapter::register_replacement_document_tree_route_with_authority(
         registry,
         source,
