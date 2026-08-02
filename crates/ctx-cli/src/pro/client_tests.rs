@@ -2,8 +2,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use ctx_pro_host_protocol::{
-    CoreMaterializationReceipt, CoreProjectionCurrentness, MaterializedCoverage, ProAccessState,
-    ProAccessStatus, ProOperation, RepositoryCoverage,
+    BlameResult, CoreMaterializationReceipt, CoreProjectionCurrentness, MaterializedCoverage,
+    ProAccessState, ProAccessStatus, ProOperation, QuerySnapshotExpectation, RepositoryCoverage,
+    ResolvedBlameTarget, ResourceKind, ResourceRef,
 };
 
 fn receipt(generation: char) -> CoreMaterializationReceipt {
@@ -58,6 +59,28 @@ fn status(coverage: MaterializedCoverage) -> StatusResult {
     }
 }
 
+fn empty_commit_result(snapshot: QuerySnapshotExpectation) -> BlameResult {
+    BlameResult {
+        snapshot,
+        target: ResolvedBlameTarget::Commit {
+            commit: ResourceRef {
+                id: "commit:0123456789abcdef".to_owned(),
+                kind: ResourceKind::Commit,
+                display: "0123456789abcdef".to_owned(),
+            },
+            repository: ResourceRef {
+                id: "repository:fixture".to_owned(),
+                kind: ResourceKind::Repository,
+                display: "fixture/repository".to_owned(),
+            },
+        },
+        git_snapshot: None,
+        matches: Vec::new(),
+        evidence: Vec::new(),
+        next: None,
+    }
+}
+
 #[test]
 fn blame_capabilities_require_git_only_for_file_targets() {
     assert_eq!(
@@ -94,6 +117,33 @@ fn blame_request_is_bound_to_the_exact_core_receipt() {
     let ctx_pro_host_protocol::QuerySnapshotExpectation::Core { receipt } =
         request.expected_snapshot;
     assert_eq!(receipt.core_generation_id, "a".repeat(64));
+}
+
+#[test]
+fn client_rejects_an_empty_result_from_another_materializer_revision_before_rendering() {
+    let status = status(MaterializedCoverage::Complete);
+    let request = support::current_blame_request(
+        BlameTarget::Commit {
+            oid: "0123456789abcdef".to_owned(),
+            repository: None,
+        },
+        10,
+        None,
+        &status,
+        &"a".repeat(64),
+    )
+    .unwrap();
+    let matching = empty_commit_result(request.expected_snapshot.clone());
+    validate_blame_response(&request, &matching).unwrap();
+
+    let mut mismatched = matching;
+    let QuerySnapshotExpectation::Core { receipt } = &mut mismatched.snapshot;
+    receipt.materializer_revision = "materializer-v2".to_owned();
+    let error = validate_blame_response(&request, &mismatched).unwrap_err();
+    assert_eq!(stable_error_code(&error), Some("invalid_response"));
+    assert!(error
+        .to_string()
+        .contains("blame result snapshot does not match the requested Core snapshot"));
 }
 
 #[test]

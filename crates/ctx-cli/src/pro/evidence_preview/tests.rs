@@ -24,6 +24,15 @@ const OID: &str = "0123456789abcdef0123456789abcdef01234567";
 const REPOSITORY_ID: &str = "forge:github.com/ctxrs/ctx";
 const REPOSITORY_RESOURCE_ID: &str = "repository:opaque-derived-graph-id";
 
+fn protocol_snapshot() -> ctx_pro_host_protocol::QuerySnapshotExpectation {
+    ctx_pro_host_protocol::QuerySnapshotExpectation::Core {
+        receipt: ctx_pro_host_protocol::CoreMaterializationReceiptIdentity {
+            core_generation_id: GENERATION.to_owned(),
+            materializer_revision: "materializer-v1".to_owned(),
+        },
+    }
+}
+
 fn resource(id: &str, kind: ResourceKind, display: &str) -> ResourceRef {
     ResourceRef {
         id: id.to_owned(),
@@ -237,6 +246,7 @@ fn numbered(record: &CoreEventRecord, number: u32) -> NumberedEvidence {
 
 fn file_result(path: &str, evidence: Vec<NumberedEvidence>) -> BlameResult {
     BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::File {
             path: path.to_owned(),
             repository: repository(),
@@ -1063,6 +1073,7 @@ fn non_file_targets_non_codex_and_unverified_records_are_normal_omissions() {
         },
     ] {
         let result = BlameResult {
+            snapshot: protocol_snapshot(),
             target,
             git_snapshot: None,
             matches: Vec::new(),

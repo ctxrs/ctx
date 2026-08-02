@@ -213,6 +213,26 @@ fn every_generated_frame_round_trips_and_names_match_typed_kinds() {
 }
 
 #[test]
+fn inventory_freezes_the_blame_result_snapshot_binding() {
+    let value = inventory();
+    let canonical = &value["canonical_inventory"];
+    let envelope = read_frame::<_, HelperEnvelope>(&mut Cursor::new(unhex(
+        value["golden_vectors"]["helper_frames"]["blame"]
+            .as_str()
+            .expect("blame response frame"),
+    )))
+    .expect("blame response");
+    let HelperMessage::Blame(result) = envelope.message else {
+        panic!("blame response kind");
+    };
+    assert_inventory_fields_match_actual(
+        canonical,
+        "BlameResult",
+        &serde_json::to_value(result).expect("blame response JSON"),
+    );
+}
+
+#[test]
 fn inventory_freezes_reviewed_status_axes_and_incremental_ack_subset() {
     let canonical = &inventory()["canonical_inventory"];
     assert_eq!(

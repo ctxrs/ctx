@@ -179,6 +179,9 @@ pub(super) fn inventory() -> Value {
             ], &[]),
             "CoreMaterializationFinished": fields(&["receipt", "replayed"], &[]),
             "QuerySnapshotExpectation.core": fields(&["kind", "receipt"], &[]),
+            "BlameResult": fields(&[
+                "snapshot", "target", "git_snapshot", "matches", "evidence", "next"
+            ], &[]),
             "EvidenceCitation": fields(&[
                 "core_generation_id", "source", "session_id", "event_id", "event_sequence",
                 "byte_range", "evidence_sha256"

@@ -187,6 +187,11 @@ fn blame_commit_negotiates_the_exact_protocol_and_returns_typed_json() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["snapshot"]["kind"], "core");
+    assert_eq!(
+        value["snapshot"]["receipt"]["materializer_revision"],
+        "pro-query-fixture-v1"
+    );
     assert_eq!(value["target"]["kind"], "commit");
     assert_eq!(value["matches"][0]["kind"], "commit");
     assert_eq!(value["matches"][0]["value"]["predicate"], "produced_by");

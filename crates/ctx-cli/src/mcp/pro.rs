@@ -350,6 +350,15 @@ mod tests {
 
     use super::*;
 
+    fn protocol_snapshot() -> ctx_pro_host_protocol::QuerySnapshotExpectation {
+        ctx_pro_host_protocol::QuerySnapshotExpectation::Core {
+            receipt: ctx_pro_host_protocol::CoreMaterializationReceiptIdentity {
+                core_generation_id: "a".repeat(64),
+                materializer_revision: "materializer-v1".to_owned(),
+            },
+        }
+    }
+
     fn private_tempdir() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         ctx_history_core::platform_security::restrict_private_directory(root.path()).unwrap();
@@ -444,6 +453,7 @@ mod tests {
             display: "abc1234".to_owned(),
         };
         let result = BlameResult {
+            snapshot: protocol_snapshot(),
             target: ResolvedBlameTarget::Commit {
                 commit,
                 repository: ResourceRef {
@@ -466,7 +476,14 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(
             result_fields,
-            BTreeSet::from(["evidence", "git_snapshot", "matches", "next", "target"])
+            BTreeSet::from([
+                "evidence",
+                "git_snapshot",
+                "matches",
+                "next",
+                "snapshot",
+                "target",
+            ])
         );
         assert!(encoded.get("evidence_preview").is_none());
         assert!(encoded.get("previews").is_none());

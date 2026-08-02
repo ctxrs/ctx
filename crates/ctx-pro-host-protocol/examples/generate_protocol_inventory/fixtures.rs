@@ -252,6 +252,7 @@ pub(super) fn blame_request() -> BlameRequest {
 
 pub(super) fn blame_result() -> BlameResult {
     BlameResult {
+        snapshot: blame_request().expected_snapshot,
         target: ResolvedBlameTarget::Commit {
             commit: ResourceRef {
                 id: "commit:golden".to_owned(),

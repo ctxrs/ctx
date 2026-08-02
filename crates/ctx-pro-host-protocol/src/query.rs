@@ -375,6 +375,7 @@ pub struct NumberedEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlameResult {
+    pub snapshot: QuerySnapshotExpectation,
     pub target: ResolvedBlameTarget,
     pub git_snapshot: Option<GitSnapshot>,
     pub matches: Vec<BlameMatch>,
@@ -385,6 +386,7 @@ pub struct BlameResult {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BlameResultWire {
+    snapshot: QuerySnapshotExpectation,
     target: ResolvedBlameTarget,
     git_snapshot: Option<GitSnapshot>,
     matches: Vec<BlameMatch>,
@@ -399,6 +401,7 @@ impl<'de> Deserialize<'de> for BlameResult {
     {
         let wire = BlameResultWire::deserialize(deserializer)?;
         let result = Self {
+            snapshot: wire.snapshot,
             target: wire.target,
             git_snapshot: wire.git_snapshot,
             matches: wire.matches,
@@ -414,6 +417,7 @@ impl<'de> Deserialize<'de> for BlameResult {
 
 impl BlameResult {
     pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.snapshot.validate()?;
         if self.matches.len() > MAX_BLAME_RESULTS as usize {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,
@@ -485,6 +489,12 @@ impl BlameResult {
     pub fn validate_for_request(&self, request: &BlameRequest) -> Result<(), ProtocolError> {
         request.validate()?;
         self.validate()?;
+        if self.snapshot != request.expected_snapshot {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "blame result snapshot does not match the requested Core snapshot",
+            ));
+        }
         let expected_core_generation_id = match &request.expected_snapshot {
             QuerySnapshotExpectation::Core { receipt } => &receipt.core_generation_id,
         };
