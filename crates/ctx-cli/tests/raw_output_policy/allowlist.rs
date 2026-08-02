@@ -47,7 +47,7 @@ const ANALYTICS: TestOwner = TestOwner::behavioral(
     &["post_event_chunks", "failure_on_post", "is_ok"],
 );
 const INDEX: TestOwner = TestOwner::behavioral(
-    "src/commands/index_dashboard.rs::styled_rendering_strips_to_the_exact_plain_bytes",
+    "src/commands/index_dashboard.rs::styled_rendering_strips_to_plain_bytes",
     &["src/commands/index.rs"],
     &["render_dashboard", "strip_ansi", "render_plain"],
 );

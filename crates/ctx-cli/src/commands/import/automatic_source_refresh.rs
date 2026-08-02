@@ -73,7 +73,9 @@ pub(super) fn run_automatic_source_refresh_import(
     let manifest = index.manifest();
     let current = receipt.current;
     let totals = ImportTotals {
-        per_run_counts_available: true,
+        // Core receipts describe the committed current generation, not
+        // synthetic per-run session/event/file totals.
+        per_run_counts_available: false,
         imported_sources: receipt.successful_route_ids.len(),
         failed_sources: receipt.source_failures.len(),
         current_source_count: Some(current.source_count),
