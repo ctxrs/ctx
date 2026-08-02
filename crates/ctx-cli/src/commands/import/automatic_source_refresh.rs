@@ -203,15 +203,6 @@ fn source_failure_report_row(
         "error": detail,
         "source_files": 0,
         "source_bytes": 0,
-        "imported_sessions": 0,
-        "imported_events": 0,
-        "imported_edges": 0,
-        "skipped_sessions": 0,
-        "skipped_events": 0,
-        "skipped_edges": 0,
-        "skipped": 0,
-        "rejected_records": 0,
-        "rejections": [],
     }))
 }
 
@@ -293,8 +284,9 @@ mod tests {
         assert_eq!(row["source_failure_class"], "source_changed");
         assert_eq!(row["source_selector"], "/tmp/codex-history");
         assert_eq!(row["detail"], row["error"]);
-        assert_eq!(row["imported_events"], 0);
-        assert_eq!(row["rejections"], json!([]));
+        for unsupported in ["imported_sessions", "imported_events", "rejections"] {
+            assert!(row.get(unsupported).is_none(), "{row:#}");
+        }
         assert_eq!(MAX_REPORTED_SOURCE_FAILURES, 3);
     }
 }

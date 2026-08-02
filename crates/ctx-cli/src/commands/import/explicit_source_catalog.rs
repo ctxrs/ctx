@@ -1,4 +1,5 @@
 mod codex_union;
+mod source_helpers;
 mod storage;
 
 use std::{
@@ -36,6 +37,7 @@ use uuid::Uuid;
 
 use crate::{provider_args::ImportFormatArg, ImportArgs};
 
+use source_helpers::{custom_provider_source, goose_platform_root};
 use storage::{
     authority_for, catalog_root, decode_digest, encode_hex, load_catalog,
     load_catalog_for_authority, load_catalog_unlocked, open_catalog_lock, random_catalog_lineage,
@@ -975,49 +977,6 @@ fn source_from_catalog_entry(
         catalog_support: ProviderCatalogSupport::None,
         status: ProviderSourceStatus::Missing,
         unsupported_reason: None,
-    })
-}
-
-fn custom_provider_source(path: PathBuf, exists: bool) -> Result<ProviderSource> {
-    if exists {
-        let metadata = fs::metadata(&path)
-            .with_context(|| format!("inspect Custom History source {}", path.display()))?;
-        if !metadata.is_file() {
-            bail!(
-                "Custom History source must be one regular JSONL file: {}",
-                path.display()
-            );
-        }
-    }
-    Ok(ProviderSource {
-        provider: CaptureProvider::Custom,
-        path,
-        exists,
-        source_format: CUSTOM_SOURCE_FORMAT,
-        source_kind: ProviderSourceKind::NativeHistory,
-        import_support: ProviderImportSupport::Explicit,
-        catalog_support: ProviderCatalogSupport::None,
-        status: if exists {
-            ProviderSourceStatus::Available
-        } else {
-            ProviderSourceStatus::Missing
-        },
-        unsupported_reason: None,
-    })
-}
-
-fn goose_platform_root(database: &Path) -> Result<PathBuf> {
-    let sessions = database.parent().ok_or_else(|| {
-        anyhow!(
-            "Goose database has no sessions directory: {}",
-            database.display()
-        )
-    })?;
-    sessions.parent().map(Path::to_path_buf).ok_or_else(|| {
-        anyhow!(
-            "Goose database has no platform root: {}",
-            database.display()
-        )
     })
 }
 

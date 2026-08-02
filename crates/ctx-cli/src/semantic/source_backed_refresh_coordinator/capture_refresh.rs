@@ -326,6 +326,10 @@ fn refresh_all_provider_sources_route_local(
             .iter()
             .map(|identity| identity.as_str().to_owned())
             .collect(),
+        successful_route_changes: successful_route_changes
+            .into_iter()
+            .map(|(identity, changed)| (identity.to_owned(), changed))
+            .collect(),
         failed_route_outcomes,
         catalog_route_outcomes,
         source_failures: source_failures

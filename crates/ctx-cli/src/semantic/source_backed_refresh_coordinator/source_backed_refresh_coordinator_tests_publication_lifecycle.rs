@@ -99,10 +99,8 @@ fn all_cold_route_failures_keep_their_typed_daemon_classification() {
         assert!(run.failed);
         assert_eq!(run.job["failure_type"], expected, "{:#?}", run.job);
         let last_error = run.job["last_error"].as_str().unwrap();
-        assert!(
-            last_error.contains(&format!("codex ({})", class.as_str())),
-            "{last_error}"
-        );
+        assert!(last_error.contains("codex"), "{last_error}");
+        assert!(last_error.contains("fixture failure"), "{last_error}");
         assert!(!last_error.contains(&"11".repeat(32)), "{last_error}");
     }
 }

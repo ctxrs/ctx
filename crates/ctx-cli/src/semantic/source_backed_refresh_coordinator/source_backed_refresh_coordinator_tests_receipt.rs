@@ -220,6 +220,7 @@ fn terminal_response_is_transport_bounded_and_preserves_exact_catalog_outcome() 
                 timings: SourceBackedRefreshTimings::default(),
                 selected_route_ids: route_ids.clone(),
                 successful_route_ids: Vec::new(),
+                successful_route_changes: Default::default(),
                 failed_route_outcomes,
                 catalog_route_outcomes: route_ids
                     .iter()

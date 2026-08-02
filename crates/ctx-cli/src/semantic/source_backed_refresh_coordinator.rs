@@ -182,6 +182,7 @@ pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) timings: SourceBackedRefreshTimings,
     pub(crate) selected_route_ids: Vec<String>,
     pub(crate) successful_route_ids: Vec<String>,
+    pub(crate) successful_route_changes: BTreeMap<String, bool>,
     pub(crate) failed_route_outcomes: Vec<SourceBackedRefreshRouteFailure>,
     pub(crate) catalog_route_outcomes: Vec<SourceBackedRefreshCatalogRouteOutcome>,
     pub(crate) source_failures: Vec<SourceBackedRefreshSourceFailure>,
@@ -392,6 +393,15 @@ fn published_refresh_receipt(
         .filter(|outcome| outcome.outcome == "failed")
         .map(|outcome| outcome.route_identity.as_str())
         .collect::<BTreeSet<_>>();
+    let successful_route_changes = catalog_route_outcomes
+        .iter()
+        .filter_map(|outcome| {
+            (outcome.outcome == "succeeded")
+                .then_some(outcome.changed)
+                .flatten()
+                .map(|changed| (outcome.route_identity.clone(), changed))
+        })
+        .collect();
     let diagnostic_route_ids = source_failures
         .iter()
         .map(|failure| failure.route_identity.clone())
@@ -468,6 +478,7 @@ fn published_refresh_receipt(
         current,
         selected_route_ids: Vec::new(),
         successful_route_ids: Vec::new(),
+        successful_route_changes,
         selected_route_total,
         successful_route_total,
         failed_route_outcomes: Vec::new(),

@@ -21,6 +21,9 @@ use rusqlite::Connection;
 
 use super::*;
 
+#[path = "source_backed_refresh_coordinator_tests/registry_policy.rs"]
+mod registry_policy;
+
 struct TestExecutor {
     calls: Arc<AtomicUsize>,
     generation_id: String,
@@ -58,6 +61,7 @@ fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPubl
     SourceBackedRefreshPublication {
         selected_route_ids: Vec::new(),
         successful_route_ids: Vec::new(),
+        successful_route_changes: BTreeMap::new(),
         failed_route_outcomes: Vec::new(),
         catalog_route_outcomes: Vec::new(),
         source_failures: Vec::new(),
@@ -207,6 +211,12 @@ fn publish_selected_routes(
             detail: "fixture failure".to_owned(),
         }];
     }
+    publication.successful_route_changes = publication
+        .successful_route_ids
+        .iter()
+        .cloned()
+        .map(|route| (route, true))
+        .collect();
     Ok(publication)
 }
 
@@ -1439,215 +1449,6 @@ fn automatic_refresh_replaces_a_zstd_settings_generation() {
             .generation_id(),
         baseline.generation_id
     );
-}
-
-fn registry_policy_warp_source(path: PathBuf, exists: bool) -> ProviderSource {
-    ProviderSource {
-        provider: CaptureProvider::Warp,
-        path,
-        exists,
-        source_format: "warp_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::Native,
-        status: if exists {
-            ProviderSourceStatus::Available
-        } else {
-            ProviderSourceStatus::Missing
-        },
-        unsupported_reason: None,
-    }
-}
-
-#[test]
-fn only_unscopable_registry_safety_issues_block_globally() {
-    let missing_source =
-        registry_policy_warp_source(PathBuf::from("/unavailable/warp.sqlite"), false);
-    let missing = SourceBackedAutomaticRegistryIssue::Unavailable {
-        source: missing_source,
-        reason: SourceBackedAutomaticUnavailableReason::SourceStatus(ProviderSourceStatus::Missing),
-    };
-    assert!(reject_blocking_automatic_registry_issues(&[missing]).is_ok());
-
-    let selector_source = registry_policy_warp_source(PathBuf::from("/detected/warp.sqlite"), true);
-    let selector_gap = SourceBackedAutomaticRegistryIssue::Unavailable {
-        source: selector_source.clone(),
-        reason: SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
-            detail: "injected selector gap",
-        },
-    };
-    assert!(reject_blocking_automatic_registry_issues(std::slice::from_ref(&selector_gap)).is_ok());
-    let failures = capture_refresh::automatic_registry_route_failures(&[selector_gap]).unwrap();
-    assert_eq!(failures.len(), 1);
-    assert_eq!(
-        failures[0].class,
-        SourceBackedSourceFailureClass::Incompatible
-    );
-    assert!(!failures[0].carried_forward);
-
-    let unsafe_overlap = SourceBackedAutomaticRegistryIssue::Unavailable {
-        source: selector_source,
-        reason: SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap {
-            detail: "injected unsafe root overlap".to_owned(),
-        },
-    };
-    let error = reject_blocking_automatic_registry_issues(&[unsafe_overlap]).unwrap_err();
-    assert!(format!("{error:#}").contains("injected unsafe root overlap"));
-}
-
-#[test]
-fn mixed_valid_and_invalid_registry_routes_publish_with_a_typed_failure() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let index_root = source_backed_index_root(&data_root);
-    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
-    let home = temp.path().join("home");
-    let cwd = temp.path().join("cwd");
-    let codex_root = temp.path().join("codex-sessions");
-    let invalid_warp = temp.path().join("unselected-warp.sqlite");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(&cwd).unwrap();
-    write_registry_policy_codex_rollout(&codex_root);
-    std::fs::write(&invalid_warp, b"not selected by Warp discovery").unwrap();
-    let discovery = DiscoveryContext::new(
-        &home,
-        &cwd,
-        DiscoveryPlatform::Linux,
-        DiscoveryPlatformDirs::default(),
-    );
-    let report = DiscoveryReport {
-        sources: vec![
-            provider_source_for_path(CaptureProvider::Codex, codex_root),
-            registry_policy_warp_source(invalid_warp, true),
-        ],
-        issues: Vec::new(),
-    };
-    let mut progress =
-        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
-
-    let publication = refresh_all_provider_sources(
-        &discovery,
-        report,
-        StdDuration::ZERO,
-        &data_root,
-        &index_root,
-        None,
-        SourceBackedRefreshScope::All,
-        &BTreeSet::new(),
-        &mut progress,
-    )
-    .unwrap();
-
-    assert_eq!(publication.scanned_routes, 1);
-    assert_eq!(publication.unsupported_routes, 1);
-    assert_eq!(publication.certified_source_count, 1);
-    assert_eq!(publication.successful_route_ids.len(), 1);
-    assert_eq!(publication.source_failures.len(), 1);
-    let failure = &publication.source_failures[0];
-    assert_eq!(failure.provider, "warp");
-    assert_eq!(failure.class, "incompatible");
-    assert!(!failure.carried_forward);
-    assert!(is_sha256_identity(&failure.route_identity));
-    assert!(is_sha256_identity(&failure.source_identity));
-    let verified = VerifiedIndex::open(&index_root).unwrap();
-    assert_eq!(verified.manifest().sources.len(), 1);
-    assert_eq!(
-        verified
-            .search_event_candidates("registrypolicyvalidmarker", 10)
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[test]
-fn registry_issue_only_cold_refresh_retains_the_all_fail_guard() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let index_root = source_backed_index_root(&data_root);
-    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
-    let home = temp.path().join("home");
-    let cwd = temp.path().join("cwd");
-    let invalid_warp = temp.path().join("unselected-warp.sqlite");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(&cwd).unwrap();
-    std::fs::write(&invalid_warp, b"not selected by Warp discovery").unwrap();
-    let discovery = DiscoveryContext::new(
-        &home,
-        &cwd,
-        DiscoveryPlatform::Linux,
-        DiscoveryPlatformDirs::default(),
-    );
-    let report = DiscoveryReport {
-        sources: vec![registry_policy_warp_source(invalid_warp, true)],
-        issues: Vec::new(),
-    };
-    let mut progress =
-        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
-
-    let error = refresh_all_provider_sources(
-        &discovery,
-        report,
-        StdDuration::ZERO,
-        &data_root,
-        &index_root,
-        None,
-        SourceBackedRefreshScope::All,
-        &BTreeSet::new(),
-        &mut progress,
-    )
-    .unwrap_err();
-    let failed_routes = error
-        .chain()
-        .find_map(|cause| {
-            let SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes } =
-                cause.downcast_ref::<SourceBackedCoordinatorError>()?
-            else {
-                return None;
-            };
-            Some(failed_routes)
-        })
-        .expect("typed all-fail-cold error");
-    assert_eq!(failed_routes.len(), 1);
-    assert_eq!(
-        failed_routes[0].class,
-        SourceBackedSourceFailureClass::Incompatible
-    );
-    assert!(!index_root.exists());
-}
-
-fn write_registry_policy_codex_rollout(root: &Path) {
-    std::fs::create_dir_all(root).unwrap();
-    let session_meta = json!({
-        "timestamp": "2026-08-02T12:00:00Z",
-        "type": "session_meta",
-        "payload": {
-            "id": "019fb700-0000-7000-8000-000000000001",
-            "timestamp": "2026-08-02T12:00:00Z",
-            "cwd": "/repo/registry-policy",
-            "originator": "codex_cli_rs",
-            "cli_version": "1.0.0",
-            "source": "cli",
-            "model_provider": "openai"
-        }
-    });
-    let message = json!({
-        "timestamp": "2026-08-02T12:00:01Z",
-        "type": "response_item",
-        "payload": {
-            "type": "message",
-            "role": "user",
-            "content": [{
-                "type": "input_text",
-                "text": "registrypolicyvalidmarker"
-            }]
-        }
-    });
-    std::fs::write(
-        root.join("rollout-019fb700-0000-7000-8000-000000000001.jsonl"),
-        format!("{session_meta}\n{message}\n"),
-    )
-    .unwrap();
 }
 
 #[path = "codex_union_tests.rs"]

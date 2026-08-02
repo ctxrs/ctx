@@ -3,12 +3,14 @@ use crate::semantic::dirty_source_routes::{
     DirtySourceRouteAdmission, DirtySourceRoutes, EventWatermark,
 };
 
+mod attempt_helpers;
 mod generation_authority;
 mod generation_observation;
 mod read_model;
 mod request_lifecycle;
 mod route_frontier;
 mod runtime_metadata;
+use attempt_helpers::*;
 use generation_authority::CoreRefreshTerminalSuccess;
 pub(crate) use generation_authority::PinnedCorePublication;
 pub(crate) use read_model::{
@@ -152,6 +154,7 @@ struct ManualAllContinuation {
     predecessor_request_id: String,
     predecessor_finished: bool,
     covered_route_ids: BTreeSet<SourceRouteIdentity>,
+    covered_route_changes: BTreeMap<SourceRouteIdentity, bool>,
     covered_scanned_routes: usize,
     covered_removed_source_count: usize,
     covered_timings: SourceBackedRefreshTimings,
@@ -163,6 +166,7 @@ impl ManualAllContinuation {
             predecessor_request_id,
             predecessor_finished: false,
             covered_route_ids: BTreeSet::new(),
+            covered_route_changes: BTreeMap::new(),
             covered_scanned_routes: 0,
             covered_removed_source_count: 0,
             covered_timings: SourceBackedRefreshTimings::default(),
@@ -170,6 +174,7 @@ impl ManualAllContinuation {
     }
 
     fn invalidate_route(&mut self, route: &SourceRouteIdentity) {
+        self.covered_route_changes.remove(route);
         if self.covered_route_ids.remove(route) && self.covered_route_ids.is_empty() {
             self.covered_scanned_routes = 0;
             self.covered_removed_source_count = 0;
@@ -880,6 +885,10 @@ impl CoreRefreshEngine {
             return;
         };
         let attempt = find_attempt(&state, request_id).cloned();
+        let successful_route_changes = attempt
+            .as_ref()
+            .and_then(|attempt| attempt.receipt.as_ref())
+            .map(|receipt| &receipt.successful_route_changes);
         let mut covered_route_ids = BTreeSet::new();
         for admission in admissions {
             let retry = !publication_ready
@@ -933,9 +942,18 @@ impl CoreRefreshEngine {
             if covered_route_ids.is_empty() {
                 continue;
             }
+            let covered_route_changes = covered_route_ids.iter().filter_map(|route| {
+                successful_route_changes
+                    .and_then(|changes| changes.get(route.as_str()))
+                    .copied()
+                    .map(|changed| (route.clone(), changed))
+            });
+            continuation
+                .covered_route_changes
+                .extend(covered_route_changes);
             continuation
                 .covered_route_ids
-                .extend(covered_route_ids.iter().cloned());
+                .extend(continuation.covered_route_changes.keys().cloned());
             continuation.covered_scanned_routes = attempt
                 .as_ref()
                 .and_then(|attempt| attempt.scanned_routes)
@@ -973,225 +991,6 @@ impl CoreRefreshEngine {
     pub(super) fn lock_state(&self) -> std::sync::MutexGuard<'_, CoreRefreshEngineState> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
-}
-
-fn source_backed_refresh_failure_type(error: &anyhow::Error) -> Option<&'static str> {
-    error.chain().find_map(|cause| {
-        if let Some(route) = cause.downcast_ref::<SourceBackedRouteError>() {
-            return match route.kind {
-                SourceBackedRouteErrorKind::Unsupported => Some("unsupported_schema"),
-                SourceBackedRouteErrorKind::InvalidSource => Some("malformed_source"),
-                SourceBackedRouteErrorKind::Unavailable => Some("source_unavailable"),
-                SourceBackedRouteErrorKind::SourceChanged => Some("source_changed"),
-                SourceBackedRouteErrorKind::Internal => None,
-            };
-        }
-        let SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes } =
-            cause.downcast_ref::<SourceBackedCoordinatorError>()?
-        else {
-            return None;
-        };
-        let classes = [
-            SourceBackedSourceFailureClass::Unavailable,
-            SourceBackedSourceFailureClass::SourceChanged,
-            SourceBackedSourceFailureClass::Unreadable,
-            SourceBackedSourceFailureClass::Incompatible,
-        ];
-        let present = classes
-            .into_iter()
-            .filter(|class| failed_routes.class_total(*class) != 0)
-            .collect::<Vec<_>>();
-        let [first] = present.as_slice() else {
-            return Some("source_failures");
-        };
-        Some(match *first {
-            SourceBackedSourceFailureClass::Unavailable => "source_unavailable",
-            SourceBackedSourceFailureClass::SourceChanged => "source_changed",
-            SourceBackedSourceFailureClass::Unreadable => "malformed_source",
-            SourceBackedSourceFailureClass::Incompatible => "unsupported_schema",
-        })
-    })
-}
-
-fn source_backed_refresh_error_summary(error: &anyhow::Error) -> String {
-    let failed_routes = error.chain().find_map(|cause| {
-        let SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes } =
-            cause.downcast_ref::<SourceBackedCoordinatorError>()?
-        else {
-            return None;
-        };
-        Some(failed_routes)
-    });
-    let Some(failed_routes) = failed_routes else {
-        return format!("{error:#}");
-    };
-    let mut details = failed_routes
-        .iter()
-        .take(3)
-        .map(|failure| format!("{} ({})", failure.provider.as_str(), failure.class.as_str()))
-        .collect::<Vec<_>>();
-    details.sort();
-    details.dedup();
-    let mut totals = [
-        SourceBackedSourceFailureClass::Unavailable,
-        SourceBackedSourceFailureClass::SourceChanged,
-        SourceBackedSourceFailureClass::Unreadable,
-        SourceBackedSourceFailureClass::Incompatible,
-    ]
-    .into_iter()
-    .filter_map(|class| {
-        let total = failed_routes.class_total(class);
-        (total != 0).then(|| format!("{} {total}", class.as_str()))
-    })
-    .collect::<Vec<_>>();
-    totals.sort();
-    totals.dedup();
-    format!(
-        "source-backed refresh retained no usable source; failed routes: {}; class totals: {}",
-        details.join(", "),
-        totals.join(", ")
-    )
-}
-
-fn find_attempt<'a>(
-    state: &'a CoreRefreshEngineState,
-    request_id: &str,
-) -> Option<&'a SourceBackedRefreshAttempt> {
-    state
-        .attempts
-        .iter()
-        .find(|attempt| attempt.request_id == request_id)
-}
-
-fn find_attempt_mut<'a>(
-    state: &'a mut CoreRefreshEngineState,
-    request_id: &str,
-) -> Option<&'a mut SourceBackedRefreshAttempt> {
-    state
-        .attempts
-        .iter_mut()
-        .find(|attempt| attempt.request_id == request_id)
-}
-
-fn coalesce_attempt(
-    attempt: &mut SourceBackedRefreshAttempt,
-    metadata: SourceRefreshRuntimeMetadata,
-) -> Value {
-    if metadata.operation == SourceBackedRefreshOperation::Import {
-        attempt.operation = SourceBackedRefreshOperation::Import;
-        attempt.trigger = metadata.trigger;
-        attempt.trigger_provenance = metadata.trigger_provenance;
-    }
-    attempt.coalesced_requests = attempt.coalesced_requests.saturating_add(1);
-    attempt.to_json()
-}
-
-fn aggregate_manual_all_continuation(
-    publication: &mut SourceBackedRefreshPublication,
-    continuation: &ManualAllContinuation,
-) {
-    if continuation.covered_route_ids.is_empty() {
-        return;
-    }
-    let covered = continuation
-        .covered_route_ids
-        .iter()
-        .map(|route| route.as_str().to_owned());
-    publication.selected_route_ids.extend(covered.clone());
-    publication.successful_route_ids.extend(covered);
-    publication.selected_route_ids.sort();
-    publication.selected_route_ids.dedup();
-    publication.successful_route_ids.sort();
-    publication.successful_route_ids.dedup();
-    publication.scanned_routes = publication
-        .scanned_routes
-        .saturating_add(continuation.covered_scanned_routes);
-    publication.current.removed_source_count = publication
-        .current
-        .removed_source_count
-        .saturating_add(continuation.covered_removed_source_count);
-    publication.timings.discovery_us = publication
-        .timings
-        .discovery_us
-        .saturating_add(continuation.covered_timings.discovery_us);
-    publication.timings.scan_stage_us = publication
-        .timings
-        .scan_stage_us
-        .saturating_add(continuation.covered_timings.scan_stage_us);
-    publication.timings.commit_us = publication
-        .timings
-        .commit_us
-        .saturating_add(continuation.covered_timings.commit_us);
-}
-
-fn new_refresh_attempt(
-    observed_generation: Option<String>,
-    metadata: SourceRefreshRuntimeMetadata,
-    requested_catalog: Option<ExplicitSourceCatalogAuthority>,
-    refresh_scope: SourceBackedRefreshScope,
-) -> SourceBackedRefreshAttempt {
-    SourceBackedRefreshAttempt {
-        request_id: Uuid::now_v7().to_string(),
-        state: SourceBackedRefreshState::Queued,
-        requested_at_ms: utc_now().timestamp_millis(),
-        started_at_ms: None,
-        finished_at_ms: None,
-        previous_generation: observed_generation.clone(),
-        published_generation: observed_generation,
-        refresh_scope,
-        operation: metadata.operation,
-        requested_explicit_source_catalog: requested_catalog,
-        published_explicit_source_catalog: None,
-        coalesced_requests: 0,
-        progress: SourceBackedRefreshProgress::default(),
-        scanned_routes: None,
-        unsupported_routes: None,
-        certified_source_count: None,
-        certified_source_bytes: None,
-        receipt: None,
-        timings: None,
-        publication_probe_us: 0,
-        daemon_mode: metadata.daemon_mode,
-        trigger: metadata.trigger,
-        trigger_provenance: metadata.trigger_provenance,
-        failure_type: None,
-        last_error: None,
-        post_publication_error: None,
-    }
-}
-
-fn active_attempt_count(state: &CoreRefreshEngineState) -> usize {
-    state
-        .attempts
-        .iter()
-        .filter(|attempt| attempt.state.is_active())
-        .count()
-}
-
-fn trim_terminal_attempt_history(state: &mut CoreRefreshEngineState) {
-    let mut terminal_count = state
-        .attempts
-        .iter()
-        .filter(|attempt| !attempt.state.is_active())
-        .count();
-    while terminal_count > SOURCE_REFRESH_ATTEMPT_HISTORY {
-        let Some(oldest_terminal) = state
-            .attempts
-            .iter()
-            .position(|attempt| !attempt.state.is_active())
-        else {
-            break;
-        };
-        state.attempts.remove(oldest_terminal);
-        terminal_count = terminal_count.saturating_sub(1);
-    }
-}
-
-fn source_route_ledger_now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -237,6 +237,7 @@ fn old_wait_request_recovers_typed_across_restart_and_returns_exact_generation()
                         timings: SourceBackedRefreshTimings::default(),
                         selected_route_ids: Vec::new(),
                         successful_route_ids: Vec::new(),
+                        successful_route_changes: Default::default(),
                         failed_route_outcomes: Vec::new(),
                         catalog_route_outcomes: Vec::new(),
                         source_failures: Vec::new(),

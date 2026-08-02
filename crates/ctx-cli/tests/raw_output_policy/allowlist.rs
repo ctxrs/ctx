@@ -857,7 +857,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PRO_RENDER,
-        "print_blame_result_inner#1@8692675e47437164",
+        "print_blame_result_with_context#1@8692675e47437164",
         UiRawWriter,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -865,7 +865,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PRO_RENDER,
-        "print_blame_result_inner#1@8692675e47437164",
+        "print_blame_result_with_context#1@8692675e47437164",
         DirectWrite,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -873,18 +873,26 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PROGRESS,
-        "emit_status#1@42f90c85ef8445c5",
-        PrintMacro,
-        MachineProtocol,
-        JSON_PROTOCOL,
+        "emit_status#1@9d99ae52ba0872ab",
+        StderrConstructor,
+        Infrastructure,
+        SPECIALIZED_STREAM,
         PROGRESS_DELIVERY
     ),
     allow!(
         PROGRESS,
-        "emit_status#2@49803700added34c",
-        PrintMacro,
-        Infrastructure,
+        "write_progress#1@afd18c22c5ce7e22",
+        DirectWrite,
+        JustifiedPlainHuman,
         SPECIALIZED_STREAM,
+        PROGRESS_DELIVERY
+    ),
+    allow!(
+        PROGRESS,
+        "write_progress#2@7238ae0e2f4ab1cf",
+        DirectWrite,
+        MachineProtocol,
+        JSON_PROTOCOL,
         PROGRESS_DELIVERY
     ),
     allow!(

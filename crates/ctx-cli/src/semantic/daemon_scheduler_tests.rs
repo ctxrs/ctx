@@ -80,6 +80,7 @@ fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefr
     SourceBackedRefreshPublication {
         selected_route_ids: Vec::new(),
         successful_route_ids: Vec::new(),
+        successful_route_changes: Default::default(),
         failed_route_outcomes: Vec::new(),
         catalog_route_outcomes: Vec::new(),
         source_failures: Vec::new(),
@@ -288,6 +289,7 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
     SourceBackedRefreshPublication {
         selected_route_ids: Vec::new(),
         successful_route_ids: Vec::new(),
+        successful_route_changes: Default::default(),
         failed_route_outcomes: Vec::new(),
         catalog_route_outcomes: Vec::new(),
         source_failures: Vec::new(),
@@ -474,9 +476,15 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
                 .iter()
                 .map(|route| route.as_str().to_owned())
                 .collect::<Vec<_>>();
+            let successful_route_changes = selected_route_ids
+                .iter()
+                .cloned()
+                .map(|route| (route, true))
+                .collect();
             Ok(SourceBackedRefreshPublication {
                 selected_route_ids: selected_route_ids.clone(),
                 successful_route_ids: selected_route_ids,
+                successful_route_changes,
                 failed_route_outcomes: Vec::new(),
                 catalog_route_outcomes: Vec::new(),
                 source_failures: Vec::new(),

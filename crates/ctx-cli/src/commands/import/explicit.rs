@@ -113,7 +113,9 @@ pub(crate) fn run_explicit_source_catalog_import(
 
     let current = &receipt.current;
     let totals = ImportTotals {
-        per_run_counts_available: true,
+        // Core certifies the current generation and this route's terminal
+        // outcome; it does not expose relational session/event deltas.
+        per_run_counts_available: false,
         source_files: stats.files,
         source_bytes: stats.bytes,
         imported_sources: usize::from(requested_succeeded),
@@ -250,15 +252,6 @@ pub(crate) fn run_explicit_source_catalog_import(
             "carried_forward": requested_failure.is_some_and(|failure| failure.carried_forward),
             "detail": detail,
             "error": detail,
-            "imported_sessions": 0,
-            "imported_events": 0,
-            "imported_edges": 0,
-            "skipped_sessions": 0,
-            "skipped_events": 0,
-            "skipped_edges": 0,
-            "skipped": 0,
-            "rejected_records": 0,
-            "rejections": [],
         });
         let (serde_json::Value::Object(report), serde_json::Value::Object(failure_fields)) =
             (&mut source_report, failure_fields)

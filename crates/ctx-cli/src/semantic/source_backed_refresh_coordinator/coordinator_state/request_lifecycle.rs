@@ -302,6 +302,9 @@ impl CoreRefreshEngine {
                 .collect::<BTreeSet<_>>();
             if retained != continuation.covered_route_ids {
                 continuation.covered_route_ids = retained;
+                continuation
+                    .covered_route_changes
+                    .retain(|route, _| continuation.covered_route_ids.contains(route));
                 if continuation.covered_route_ids.is_empty() {
                     continuation.covered_scanned_routes = 0;
                     continuation.covered_removed_source_count = 0;
@@ -330,6 +333,7 @@ impl CoreRefreshEngine {
                     covered_route_ids.clear();
                     if let Some(continuation) = state.manual_all_continuations.get_mut(request_id) {
                         continuation.covered_route_ids.clear();
+                        continuation.covered_route_changes.clear();
                         continuation.covered_scanned_routes = 0;
                         continuation.covered_removed_source_count = 0;
                         continuation.covered_timings = SourceBackedRefreshTimings::default();
