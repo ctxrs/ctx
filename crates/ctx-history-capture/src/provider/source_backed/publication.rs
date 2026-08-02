@@ -81,6 +81,9 @@ pub struct SourceBackedRefreshReceipt {
     pub commit_duration: Duration,
     pub certified_source_count: usize,
     pub certified_source_bytes: u64,
+    pub outcome: SourceBackedRefreshOutcome,
+    pub successful_routes: usize,
+    pub source_failures: SourceBackedSourceFailures,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,102 +152,246 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         .collect();
 
     let scan_started = Instant::now();
-    let mut writer = GenerationWriter::open(index_root.as_ref(), writer_options)?;
-    let automatic_missing_observed_at_unix_ms = source_missing_observation_time();
-    let mut owners = HashMap::new();
-    let mut complete_inventory_owners = Vec::new();
-    let mut completed_routes = 0;
-    for (route_index, route) in registry.routes.iter().enumerate() {
-        let Some(driver) = &route.driver else {
-            continue;
-        };
+    let mut isolated_failures = HashMap::<usize, SourceBackedSourceFailure>::new();
+    let mut locked_base_generation = None::<Option<String>>;
+    let mut total_commit_duration = Duration::ZERO;
+    let index_root = index_root.as_ref();
+
+    let (commit, successful_route_indices) = loop {
+        let mut writer = GenerationWriter::open(index_root, writer_options.clone())?;
+        let current_base_generation = writer
+            .base_manifest()
+            .map(|manifest| manifest.generation_id())
+            .transpose()?;
+        match &locked_base_generation {
+            Some(expected) if expected != &current_base_generation => {
+                return Err(IndexError::ConcurrentGenerationChange.into());
+            }
+            None => locked_base_generation = Some(current_base_generation),
+            Some(_) => {}
+        }
+        for route_index in isolated_failures.keys().copied().collect::<Vec<_>>() {
+            let driver =
+                registry.routes[route_index]
+                    .driver
+                    .as_ref()
+                    .ok_or(IndexError::WriterInvariant(
+                        "isolated source route lost its driver",
+                    ))?;
+            let carried_forward = carry_failed_route_from_base(&mut writer, driver)?;
+            if carried_forward != isolated_failures[&route_index].carried_forward {
+                return Err(IndexError::WriterInvariant(
+                    "isolated source route changed its locked-base contribution",
+                )
+                .into());
+            }
+        }
+
+        let automatic_missing_observed_at_unix_ms = source_missing_observation_time();
+        let mut owners = HashMap::new();
+        let mut complete_inventory_owners = Vec::new();
+        let mut successful_this_attempt = HashSet::new();
+        let mut completed_routes = isolated_failures.len();
+        for (route_index, route) in registry.routes.iter().enumerate() {
+            let Some(driver) = &route.driver else {
+                continue;
+            };
+            if isolated_failures.contains_key(&route_index) {
+                continue;
+            }
+            report_progress(SourceBackedRefreshProgress {
+                phase: "refreshing",
+                completed_sources: completed_routes,
+                total_sources: scanned_routes,
+                current_source: Some(route.metadata.source.path.display().to_string()),
+                stage_duration: scan_started.elapsed(),
+                elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
+                certified_source_count: None,
+                certified_source_bytes: None,
+            })
+            .map_err(SourceBackedCoordinatorError::Progress)?;
+            writer.begin_source_stage()?;
+            let owners_checkpoint = owners.clone();
+            let complete_inventory_owners_checkpoint = complete_inventory_owners.clone();
+            let scan_result = {
+                let mut sink = SourceBackedGenerationSink {
+                    writer: &mut writer,
+                    owners: &mut owners,
+                    complete_inventories: &mut complete_inventory_owners,
+                    route_index,
+                    leaf_worker_budget: work_budget,
+                    automatic_missing_observed_at_unix_ms: (route.metadata.selection
+                        == Some(SourceBackedRouteSelection::Automatic))
+                    .then_some(automatic_missing_observed_at_unix_ms),
+                };
+                (driver.scan)(&mut sink)
+            };
+
+            let source_failure_class = match scan_result {
+                Ok(()) => {
+                    recertify_retained_deletions_for_route(
+                        &mut writer,
+                        driver,
+                        route_index,
+                        &mut owners,
+                        &complete_inventory_owners,
+                    )?;
+                    validate_route_ownership(
+                        route,
+                        driver,
+                        route_index,
+                        &owners,
+                        &complete_inventory_owners[complete_inventory_owners_checkpoint.len()..],
+                    )?;
+                    // This commit is only an opaque Tantivy rollback boundary.
+                    // Reading provider authority here would duplicate snapshots
+                    // and still would not fence publication; the true terminal
+                    // source and inventory revalidation below owns that job.
+                    writer.finish_source_stage(|_| true, |_| true)?;
+                    successful_this_attempt.insert(route_index);
+                    None
+                }
+                Err(source) => match source.kind.source_failure_class() {
+                    Some(class) => Some((class, source.detail.clone())),
+                    None => {
+                        return Err(SourceBackedCoordinatorError::RouteScan {
+                            provider: route.metadata.source.provider,
+                            source,
+                        });
+                    }
+                },
+            };
+            if let Some((class, detail)) = source_failure_class {
+                writer.rollback_source_stage()?;
+                owners = owners_checkpoint;
+                complete_inventory_owners = complete_inventory_owners_checkpoint;
+                let carried_forward = carry_failed_route_from_base(&mut writer, driver)?;
+                isolated_failures.insert(
+                    route_index,
+                    SourceBackedSourceFailure::from_route(route, class, carried_forward, detail),
+                );
+            }
+            completed_routes += 1;
+        }
+
         report_progress(SourceBackedRefreshProgress {
-            phase: "refreshing",
+            phase: "verifying",
             completed_sources: completed_routes,
             total_sources: scanned_routes,
-            current_source: Some(route.metadata.source.path.display().to_string()),
+            current_source: None,
             stage_duration: scan_started.elapsed(),
             elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
             certified_source_count: None,
             certified_source_bytes: None,
         })
         .map_err(SourceBackedCoordinatorError::Progress)?;
-        let mut sink = SourceBackedGenerationSink {
-            writer: &mut writer,
-            owners: &mut owners,
-            complete_inventories: &mut complete_inventory_owners,
-            route_index,
-            leaf_worker_budget: work_budget,
-            automatic_missing_observed_at_unix_ms: (route.metadata.selection
-                == Some(SourceBackedRouteSelection::Automatic))
-            .then_some(automatic_missing_observed_at_unix_ms),
-        };
-        (driver.scan)(&mut sink).map_err(|source| SourceBackedCoordinatorError::RouteScan {
-            provider: route.metadata.source.provider,
-            source,
-        })?;
-        completed_routes += 1;
-    }
+        require_complete_base_source_ownership(&writer, &owners, &complete_inventory_owners)?;
+        if !isolated_failures.is_empty() && !writer.has_result_certified_sources() {
+            return Err(SourceBackedCoordinatorError::NoUsableSourceRoutes {
+                failures: bounded_source_failures(&isolated_failures),
+            });
+        }
 
-    report_progress(SourceBackedRefreshProgress {
-        phase: "verifying",
-        completed_sources: completed_routes,
-        total_sources: scanned_routes,
-        current_source: None,
-        stage_duration: scan_started.elapsed(),
-        elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
-        certified_source_count: None,
-        certified_source_bytes: None,
-    })
-    .map_err(SourceBackedCoordinatorError::Progress)?;
-    recertify_retained_deletions(
-        &mut writer,
-        registry,
-        &mut owners,
-        &complete_inventory_owners,
-    )?;
-    require_complete_base_source_ownership(&writer, &owners, &complete_inventory_owners)?;
+        let base_contributions = registry
+            .routes
+            .iter()
+            .enumerate()
+            .filter_map(|(route_index, route)| {
+                route.driver.as_ref().map(|driver| {
+                    (
+                        route_index,
+                        failed_route_has_base_contribution(&writer, driver),
+                    )
+                })
+            })
+            .collect::<HashMap<_, _>>();
+        let terminal_failed_route = RefCell::new(None::<usize>);
+        let commit_started = Instant::now();
+        let commit_result = writer.commit_with_complete_inventory_revalidation(
+            |target| {
+                let source = match target {
+                    RevalidationTarget::Source(source) => source.observation().source(),
+                    RevalidationTarget::Deletion(deletion) => deletion.source(),
+                };
+                let Some(owner) = owners.get(&source.identity().digest()) else {
+                    return false;
+                };
+                if !owner.source.exact_descriptor_eq(source)
+                    || !successful_this_attempt.contains(&owner.route_index)
+                {
+                    return false;
+                }
+                let Some(driver) = registry.routes[owner.route_index].driver.as_ref() else {
+                    return false;
+                };
+                let valid = (driver.owns_source)(source)
+                    && match target {
+                        RevalidationTarget::Source(source) => {
+                            (driver.revalidate)(SourceBackedRevalidationTarget::Source(source))
+                        }
+                        RevalidationTarget::Deletion(deletion) => {
+                            (driver.revalidate)(SourceBackedRevalidationTarget::Deletion(deletion))
+                        }
+                    };
+                if !valid {
+                    *terminal_failed_route.borrow_mut() = Some(owner.route_index);
+                }
+                valid
+            },
+            |inventory| {
+                let Some(owner) = complete_inventory_owners
+                    .iter()
+                    .find(|owner| owner.inventory == *inventory)
+                else {
+                    return false;
+                };
+                if !successful_this_attempt.contains(&owner.route_index) {
+                    return false;
+                }
+                let valid = registry.routes[owner.route_index]
+                    .driver
+                    .as_ref()
+                    .and_then(|driver| driver.revalidate_complete_inventory.as_ref())
+                    .is_some_and(|revalidate| revalidate(inventory));
+                if !valid {
+                    *terminal_failed_route.borrow_mut() = Some(owner.route_index);
+                }
+                valid
+            },
+        );
+        total_commit_duration = total_commit_duration.saturating_add(commit_started.elapsed());
+        match commit_result {
+            Ok(commit) => break (commit, successful_this_attempt),
+            Err(
+                error @ (IndexError::SourceInvalidated(_)
+                | IndexError::CompleteInventoryInvalidated { .. }),
+            ) => {
+                let Some(route_index) = terminal_failed_route.into_inner() else {
+                    return Err(error.into());
+                };
+                let route = &registry.routes[route_index];
+                isolated_failures.insert(
+                    route_index,
+                    SourceBackedSourceFailure::from_route(
+                        route,
+                        SourceBackedSourceFailureClass::SourceChanged,
+                        base_contributions
+                            .get(&route_index)
+                            .copied()
+                            .unwrap_or(false),
+                        error.to_string(),
+                    ),
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let source_failures = bounded_source_failures(&isolated_failures);
     let scan_stage_duration = scan_started.elapsed();
-    let commit_started = Instant::now();
-    let commit = writer.commit_with_complete_inventory_revalidation(
-        |target| {
-            let source = match target {
-                RevalidationTarget::Source(source) => source.observation().source(),
-                RevalidationTarget::Deletion(deletion) => deletion.source(),
-            };
-            let Some(owner) = owners.get(&source.identity().digest()) else {
-                return false;
-            };
-            if !owner.source.exact_descriptor_eq(source) {
-                return false;
-            }
-            let Some(driver) = registry.routes[owner.route_index].driver.as_ref() else {
-                return false;
-            };
-            match target {
-                RevalidationTarget::Source(source) => {
-                    (driver.revalidate)(SourceBackedRevalidationTarget::Source(source))
-                }
-                RevalidationTarget::Deletion(deletion) => {
-                    (driver.revalidate)(SourceBackedRevalidationTarget::Deletion(deletion))
-                }
-            }
-        },
-        |inventory| {
-            let Some(owner) = complete_inventory_owners
-                .iter()
-                .find(|owner| owner.inventory == *inventory)
-            else {
-                return false;
-            };
-            registry.routes[owner.route_index]
-                .driver
-                .as_ref()
-                .and_then(|driver| driver.revalidate_complete_inventory.as_ref())
-                .is_some_and(|revalidate| revalidate(inventory))
-        },
-    )?;
-    for route in &registry.routes {
+    for (route_index, route) in registry.routes.iter().enumerate() {
+        if !successful_route_indices.contains(&route_index) {
+            continue;
+        }
         if let Some(after_publication) = route
             .driver
             .as_ref()
@@ -253,10 +400,10 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             after_publication();
         }
     }
-    let commit_duration = commit_started.elapsed();
+    let commit_duration = total_commit_duration;
     let _ = report_progress(SourceBackedRefreshProgress {
         phase: "committed",
-        completed_sources: completed_routes,
+        completed_sources: scanned_routes,
         total_sources: scanned_routes,
         current_source: None,
         stage_duration: commit_duration,
@@ -266,6 +413,12 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
     });
     let certified_source_count = commit.certified_sources;
     let certified_source_bytes = commit.certified_source_bytes;
+    let successful_routes = successful_route_indices.len();
+    let outcome = if source_failures.is_empty() {
+        SourceBackedRefreshOutcome::Completed
+    } else {
+        SourceBackedRefreshOutcome::CompletedWithSourceFailures
+    };
     let sources = commit.manifest().sources.clone();
     let removals = commit
         .manifest()
@@ -287,6 +440,9 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         commit_duration,
         certified_source_count,
         certified_source_bytes,
+        outcome,
+        successful_routes,
+        source_failures,
     })
 }
 
@@ -309,7 +465,7 @@ fn require_complete_base_source_ownership(
             .is_some_and(|owner| {
                 source_owner_covers_base_source(source, owner, complete_inventory_owners)
             });
-        if !claimed {
+        if !claimed && !writer.is_base_source_carried(source) {
             return Err(SourceBackedCoordinatorError::UnclaimedBaseSource {
                 source_id: source.identity().to_string(),
             });
@@ -346,9 +502,95 @@ fn source_missing_observation_time() -> u64 {
         .unwrap_or_default()
 }
 
-fn recertify_retained_deletions(
+fn bounded_source_failures(
+    isolated: &HashMap<usize, SourceBackedSourceFailure>,
+) -> SourceBackedSourceFailures {
+    let mut route_indices = isolated.keys().copied().collect::<Vec<_>>();
+    route_indices.sort_unstable();
+    let mut failures = SourceBackedSourceFailures::default();
+    for route_index in route_indices {
+        if let Some(failure) = isolated.get(&route_index) {
+            failures.record(failure.clone());
+        }
+    }
+    failures
+}
+
+fn failed_route_base_sources(
+    writer: &GenerationWriter,
+    driver: &SourceBackedRouteDriver,
+) -> HashSet<SourceKey> {
+    writer
+        .base_manifest()
+        .map(|manifest| {
+            manifest
+                .sources
+                .iter()
+                .map(|source| source.observation().source())
+                .chain(manifest.removals.iter().map(GenerationRemoval::source))
+                .chain(
+                    manifest
+                        .source_catalog()
+                        .missing_sources()
+                        .iter()
+                        .map(|missing| missing.source()),
+                )
+                .filter(|source| (driver.owns_source)(source))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn failed_route_has_base_contribution(
+    writer: &GenerationWriter,
+    driver: &SourceBackedRouteDriver,
+) -> bool {
+    !failed_route_base_sources(writer, driver).is_empty()
+}
+
+fn carry_failed_route_from_base(
     writer: &mut GenerationWriter,
-    registry: &SourceBackedProviderRegistry,
+    driver: &SourceBackedRouteDriver,
+) -> SourceBackedCoordinatorResult<bool> {
+    let carried = failed_route_base_sources(writer, driver);
+    let carried_forward = !carried.is_empty();
+    for source in carried {
+        writer.carry_base_source(source)?;
+    }
+    Ok(carried_forward)
+}
+
+fn validate_route_ownership(
+    route: &SourceBackedRoute,
+    driver: &SourceBackedRouteDriver,
+    route_index: usize,
+    owners: &HashMap<[u8; 32], SourceOwner>,
+    new_inventories: &[CompleteInventoryOwner],
+) -> SourceBackedCoordinatorResult<()> {
+    if owners
+        .values()
+        .filter(|owner| owner.route_index == route_index)
+        .any(|owner| !(driver.owns_source)(&owner.source))
+    {
+        return Err(SourceBackedCoordinatorError::InvalidRoute {
+            provider: route.metadata.source.provider,
+            detail: "route staged a source outside its ownership predicate".to_owned(),
+        });
+    }
+    if !new_inventories.is_empty() && driver.revalidate_complete_inventory.is_none() {
+        return Err(SourceBackedCoordinatorError::InvalidRoute {
+            provider: route.metadata.source.provider,
+            detail: "route staged a complete inventory without terminal revalidation".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn recertify_retained_deletions_for_route(
+    writer: &mut GenerationWriter,
+    driver: &SourceBackedRouteDriver,
+    route_index: usize,
     owners: &mut HashMap<[u8; 32], SourceOwner>,
     complete_inventory_owners: &[CompleteInventoryOwner],
 ) -> SourceBackedCoordinatorResult<()> {
@@ -358,12 +600,16 @@ fn recertify_retained_deletions(
         .unwrap_or_default();
     for removal in retained {
         let source = removal.source();
+        if !(driver.owns_source)(source) {
+            continue;
+        }
         let prior_authority = removal.deletion().inventory();
         let current = complete_inventory_owners
             .iter()
             .find(|owner| {
                 let current = owner.inventory.observation();
-                current.provider() == prior_authority.provider()
+                owner.route_index == route_index
+                    && current.provider() == prior_authority.provider()
                     && current.authority_namespace() == prior_authority.authority_namespace()
                     && current.authority_key() == prior_authority.authority_key()
             })
@@ -374,26 +620,10 @@ fn recertify_retained_deletions(
                     "the current refresh supplied no complete inventory for its authority",
                 )
             })?;
-        let driver = registry.routes[current.route_index]
-            .driver
-            .as_ref()
-            .ok_or_else(|| {
-                retained_deletion_error(
-                    source,
-                    "the current complete inventory has no executable route",
-                )
-            })?;
-        if !(driver.owns_source)(source) {
-            return Err(retained_deletion_error(
-                source,
-                "the current inventory route does not own the deleted source",
-            ));
-        }
-
         let digest = source.identity().digest();
         if current.inventory.contains(source) {
             let staged = owners.get(&digest).is_some_and(|owner| {
-                owner.route_index == current.route_index && owner.source.exact_descriptor_eq(source)
+                owner.route_index == route_index && owner.source.exact_descriptor_eq(source)
             });
             if !staged {
                 return Err(retained_deletion_error(
@@ -404,7 +634,7 @@ fn recertify_retained_deletions(
             continue;
         }
 
-        claim_retained_deletion(owners, current.route_index, source)?;
+        claim_retained_deletion(owners, route_index, source)?;
         if !removal.deletion().verifies(&current.inventory) {
             let deletion =
                 CertifiedSourceDeletion::from_inventory(source.clone(), &current.inventory)

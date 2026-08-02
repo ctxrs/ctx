@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 
+#[derive(Clone)]
 pub(super) struct PendingSource {
     pub(super) index_fields: IndexSourceFields,
     pub(super) staged: StagedPendingSource,

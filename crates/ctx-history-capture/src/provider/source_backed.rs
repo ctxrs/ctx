@@ -6,6 +6,7 @@
 //! [`GenerationWriter`] and no adapter can publish a generation by itself.
 
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     fmt,
     path::{Path, PathBuf},
@@ -23,6 +24,7 @@ use ctx_history_index::{
     CommitReceipt, GenerationRemoval, GenerationWriter, IndexError, RevalidationTarget,
     WriterOptions,
 };
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::codex::nativepath::{

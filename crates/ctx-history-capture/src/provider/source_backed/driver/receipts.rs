@@ -6,6 +6,106 @@ pub type SourceBackedRouteResult<T> = Result<T, SourceBackedRouteError>;
 /// Three independently committed complete inventories bound transient
 /// automatic-source absence while preserving prompt eventual deletion.
 pub const AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES: u32 = 3;
+pub const MAX_RECORDED_SOURCE_BACKED_FAILURES: usize = 64;
+pub const MAX_SOURCE_BACKED_FAILURE_SELECTOR_BYTES: usize = 512;
+pub const MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBackedRefreshOutcome {
+    Completed,
+    CompletedWithSourceFailures,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBackedSourceFailureClass {
+    Unavailable,
+    SourceChanged,
+    Unreadable,
+    Incompatible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBackedSourceFailure {
+    pub source_identity: String,
+    pub provider: CaptureProvider,
+    pub class: SourceBackedSourceFailureClass,
+    pub carried_forward: bool,
+    pub source_selector: String,
+    pub detail: String,
+}
+
+impl SourceBackedSourceFailure {
+    pub(in super::super) fn from_route(
+        route: &SourceBackedRoute,
+        class: SourceBackedSourceFailureClass,
+        carried_forward: bool,
+        detail: impl AsRef<str>,
+    ) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(b"ctx.source-failure-identity-v1\0");
+        digest.update(route.metadata.source.provider.as_str().as_bytes());
+        digest.update([0]);
+        digest.update(route.metadata.certified_source_format.as_bytes());
+        digest.update([0]);
+        let path = route.metadata.source.path.as_os_str().as_encoded_bytes();
+        digest.update((path.len() as u64).to_be_bytes());
+        digest.update(path);
+        Self {
+            source_identity: format!("{:x}", digest.finalize()),
+            provider: route.metadata.source.provider,
+            class,
+            carried_forward,
+            source_selector: bounded_text(
+                &route.metadata.source.path.display().to_string(),
+                MAX_SOURCE_BACKED_FAILURE_SELECTOR_BYTES,
+            ),
+            detail: bounded_text(detail.as_ref(), MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES),
+        }
+    }
+}
+
+fn bounded_text(value: &str, maximum_bytes: usize) -> String {
+    if value.len() <= maximum_bytes {
+        return value.to_owned();
+    }
+    let mut boundary = maximum_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary = boundary.saturating_sub(1);
+    }
+    value[..boundary].to_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SourceBackedSourceFailures {
+    failures: Vec<SourceBackedSourceFailure>,
+    omitted: usize,
+}
+
+impl SourceBackedSourceFailures {
+    pub fn failures(&self) -> &[SourceBackedSourceFailure] {
+        &self.failures
+    }
+
+    pub fn omitted(&self) -> usize {
+        self.omitted
+    }
+
+    pub fn total(&self) -> usize {
+        self.failures.len().saturating_add(self.omitted)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+
+    pub(in super::super) fn record(&mut self, failure: SourceBackedSourceFailure) {
+        if self.failures.len() < MAX_RECORDED_SOURCE_BACKED_FAILURES {
+            self.failures.push(failure);
+        } else {
+            self.omitted = self.omitted.saturating_add(1);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceBackedDeletionDisposition {
@@ -30,6 +130,18 @@ pub enum SourceBackedRouteErrorKind {
     InvalidSource,
     Unsupported,
     Internal,
+}
+
+impl SourceBackedRouteErrorKind {
+    pub fn source_failure_class(self) -> Option<SourceBackedSourceFailureClass> {
+        match self {
+            Self::Unavailable => Some(SourceBackedSourceFailureClass::Unavailable),
+            Self::SourceChanged => Some(SourceBackedSourceFailureClass::SourceChanged),
+            Self::InvalidSource => Some(SourceBackedSourceFailureClass::Unreadable),
+            Self::Unsupported => Some(SourceBackedSourceFailureClass::Incompatible),
+            Self::Internal => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -73,6 +185,10 @@ pub enum SourceBackedCoordinatorError {
     RetainedDeletionRecertification { source_id: String, detail: String },
     #[error("source-backed refresh progress callback failed: {0}")]
     Progress(SourceBackedRouteError),
+    #[error("source-backed refresh completed with source failures but no usable source route")]
+    NoUsableSourceRoutes {
+        failures: SourceBackedSourceFailures,
+    },
 }
 
 /// The only write surface provider drivers receive. It exposes staging and

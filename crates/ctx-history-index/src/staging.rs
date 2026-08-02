@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 const CORE_RECORD_LEAF_DOMAIN: &[u8] = b"ctx-core-record-leaf-v1\0";
 
+#[derive(Clone)]
 pub(super) struct PendingSource {
     pub(super) source: SourceKey,
     pub(super) mode: PendingSourceMode,
@@ -15,6 +16,7 @@ pub(super) struct PendingSource {
 
 // Keep the append base inline to avoid allocation and indirection.
 #[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
 pub(super) enum PendingSourceMode {
     Replace,
     Append { base: CertifiedSource },
@@ -28,6 +30,7 @@ impl GenerationWriter {
     pub fn retain_source(&mut self, certificate: CertifiedSource) -> Result<()> {
         certificate.validate_contract()?;
         let source = certificate.observation().source();
+        self.reject_carried_base_source_mutation(source)?;
         register_compact_identity(
             &mut self.source_identities,
             source.identity(),
@@ -216,11 +219,11 @@ pub(super) fn manifest_record_aggregates(
 /// Discards a completed one-pass staging run when it reproduced the full
 /// verified base manifest exactly.
 ///
-/// Requiring every retained base source to have a pending certificate prevents
-/// an incomplete route scan from turning a carried source into a false no-op.
-/// The already-created Tantivy writer is rolled back, so physical churn that
-/// leaves the logical corpus unchanged does not publish `meta.json`, advance
-/// the opstamp, or create a generation.
+/// Requiring every retained base source to have a pending certificate or an
+/// explicit locked-base carry marker prevents an incomplete route scan from
+/// turning an omission into a false no-op. The already-created Tantivy writer
+/// is rolled back, so physical churn that leaves the logical corpus unchanged
+/// does not publish `meta.json`, advance the opstamp, or create a generation.
 pub(super) fn finish_identical_staging<F, I>(
     generation: &mut GenerationWriter,
     manifest: &GenerationManifest,
@@ -286,13 +289,12 @@ fn staged_manifest_matches_base(
     let Some(base) = generation.base_manifest.as_ref() else {
         return Ok(false);
     };
-    if generation.pending.len() != base.sources.len()
-        || base.sources.iter().any(|source| {
-            !generation
-                .pending
-                .contains_key(&source_token(source.observation().source()))
-        })
-    {
+    if base.sources.iter().any(|source| {
+        !generation
+            .pending
+            .contains_key(&source_token(source.observation().source()))
+            && !generation.is_base_source_carried(source.observation().source())
+    }) {
         return Ok(false);
     }
     Ok(manifest.generation_id()? == base.generation_id()?)
