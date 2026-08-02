@@ -203,7 +203,14 @@ fn run_pending_core_pro_catch_up(
     }
     let retry_due = runtime.pro_retry.consecutive_failures > 0 && runtime.pro_retry.ready();
     let retained_authority = source_refresh.and_then(CoreRefreshEngine::pinned_core_publication);
-    let durable_authority = if retained_authority.is_none() && retry_due {
+    let installation_requires_recheck = retained_authority.is_none()
+        && runtime.sidecar_drain.pro_attempted_generation.is_some()
+        && pro_installation_requires_recheck(data_root);
+    let durable_check_required = retained_authority.is_none()
+        && (runtime.sidecar_drain.pro_attempted_generation.is_none()
+            || retry_due
+            || installation_requires_recheck);
+    let durable_authority = if durable_check_required {
         pin_published_generation(data_root)?
     } else {
         None
@@ -220,20 +227,28 @@ fn run_pending_core_pro_catch_up(
         return Ok(None);
     };
     let generation = authority.generation_id();
-    if runtime.sidecar_drain.generation.as_deref() == Some(generation)
-        && runtime.sidecar_drain.pro_attempted_generation.as_deref() == Some(generation)
+    if runtime.sidecar_drain.pro_attempted_generation.as_deref() == Some(generation)
         && !retry_due
+        && !installation_requires_recheck
     {
         return Ok(None);
     }
     prepare_pro_retry_for_generation(runtime, data_root, generation);
     if !runtime.pro_retry.ready() {
+        runtime.sidecar_drain.pro_attempted_generation = Some(generation.to_owned());
         return Ok(None);
     }
     let run = run_pro_catch_up_with_retry(data_root, runtime, generation, authority)?;
     runtime.sidecar_drain.pro_attempted_generation = Some(generation.to_owned());
     runtime.sidecar_drain.generation = Some(generation.to_owned());
     Ok(Some(core_pro_catch_up_iteration(run.did_work)))
+}
+
+fn pro_installation_requires_recheck(data_root: &Path) -> bool {
+    read_pro_status(data_root).is_some_and(|status| {
+        status.get("error_code").and_then(Value::as_str) == Some("pro_not_installed")
+            && ProFilesystemLayout::new(data_root).helper_path().exists()
+    })
 }
 
 fn core_pro_catch_up_iteration(did_work: bool) -> DaemonIteration {
@@ -669,6 +684,7 @@ use std::{
 
 use anyhow::Result;
 use ctx_history_core::utc_now;
+use ctx_pro_host_protocol::ProFilesystemLayout;
 use serde_json::{json, Value};
 
 use crate::{

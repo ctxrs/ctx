@@ -160,6 +160,33 @@ pub(crate) fn status_with_helper_resolver(
             };
         }
     };
+    let active_core = match crate::semantic::pin_active_verified_generation(data_root) {
+        Ok(active_core) => active_core,
+        Err(error) => {
+            return ProStatus {
+                schema_version: 1,
+                installed: true,
+                ready: false,
+                materialized: false,
+                helper_path,
+                helper_version: None,
+                protocol_version: PROTOCOL_VERSION,
+                capabilities: Vec::new(),
+                error_code: Some(support::error_code(&error)),
+                projection_currentness: None,
+                materialized_coverage: None,
+                repository_coverage: None,
+                supported_operations: None,
+                available_operations: None,
+                access_state: None,
+                refresh_after_unix: None,
+                access_deadline_unix: None,
+                grace_deadline_unix: None,
+                setup_repairability: ProSetupRepairability::NotNeeded,
+            };
+        }
+    };
+    let active_core_generation_id = active_core.generation_id();
     match ProClient::connect_for_status(data_root, &BTreeSet::from([Capability::Status])) {
         Ok(mut client) => {
             let helper_version = Some(client.helper_version.clone());
@@ -171,14 +198,19 @@ pub(crate) fn status_with_helper_resolver(
             let access = client.public_access_status();
             match client.exchange(
                 HostMessage::Status(StatusRequest {
-                    requested_core_generation_id: None,
+                    requested_core_generation_id: Some(active_core_generation_id.to_owned()),
                 }),
                 HANDSHAKE_TIMEOUT,
             ) {
                 Ok(HelperMessage::Status(result)) => {
-                    let (ready, materialized, error_code) =
-                        status_outcome(&result, client.authorization_state);
-                    let valid_status = result.validate().is_ok().then_some(&result);
+                    let (ready, materialized, error_code) = status_outcome(
+                        &result,
+                        client.authorization_state,
+                        active_core_generation_id,
+                    );
+                    let valid_status = status_authority_error(&result, active_core_generation_id)
+                        .is_none()
+                        .then_some(&result);
                     ProStatus {
                         schema_version: 1,
                         installed: true,
@@ -274,9 +306,10 @@ pub(crate) fn status_with_helper_resolver(
 pub(super) fn status_outcome(
     status: &StatusResult,
     authorization_state: Option<EntitlementAccessState>,
+    active_core_generation_id: &str,
 ) -> (bool, bool, Option<&'static str>) {
-    if status.validate().is_err() {
-        return (false, false, Some("protocol_mismatch"));
+    if let Some(error) = status_authority_error(status, active_core_generation_id) {
+        return (false, false, Some(error));
     }
     let materialized = status.currentness == CoreProjectionCurrentness::Current
         && matches!(
@@ -296,4 +329,29 @@ pub(super) fn status_outcome(
         CoreProjectionCurrentness::Current => None,
     };
     (!status.available_operations.is_empty(), materialized, error)
+}
+
+fn status_authority_error(
+    status: &StatusResult,
+    active_core_generation_id: &str,
+) -> Option<&'static str> {
+    if status.requested_core_generation_id.as_deref() != Some(active_core_generation_id) {
+        return Some("protocol_mismatch");
+    }
+    if status
+        .core_receipt
+        .as_ref()
+        .is_some_and(|receipt| receipt.validate().is_err())
+    {
+        return Some("protocol_mismatch");
+    }
+    if status.currentness == CoreProjectionCurrentness::Current
+        && status
+            .core_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.core_generation_id != active_core_generation_id)
+    {
+        return Some("stale_source");
+    }
+    status.validate().is_err().then_some("protocol_mismatch")
 }

@@ -464,101 +464,108 @@ fn semantic_report(data_root: &Path, config: &AppConfig, index: Option<&Verified
 
 fn pro_projection_report(data_root: &Path, generation_id: Option<&str>) -> Value {
     let lifecycle = crate::pro::lifecycle_status_json(data_root);
-    if lifecycle.get("installed").and_then(Value::as_bool) != Some(true) {
-        return compact_json(json!({
-            "status": "unavailable",
-            "reason": "pro_not_installed",
-            "core_generation_id": generation_id,
-            "authority": "core_generation",
-            "receipt": {
-                "status": "unavailable",
-                "reason": "pro_not_installed",
-                "core_generation_id": Value::Null,
-                "generation_matches": Value::Null,
-            },
-        }));
-    }
+    let helper_generation_matches = lifecycle
+        .get("projection_currentness")
+        .and_then(Value::as_str)
+        == Some("current")
+        && lifecycle.get("materialized").and_then(Value::as_bool) == Some(true)
+        && generation_id.is_some_and(|expected| {
+            super::pin_active_verified_generation(data_root)
+                .is_ok_and(|active| active.generation_id() == expected)
+        });
     let path = daemon_jobs_path(data_root).join(PRO_CATCH_UP_STATUS_FILE);
-    let Some(job) = read_daemon_job_status(&path) else {
-        return compact_json(json!({
-            "status": if generation_id.is_some() { "pending" } else { "unavailable" },
-            "reason": if generation_id.is_some() {
-                "core_receipt_not_observed"
-            } else {
-                "lexical_generation_unavailable"
-            },
-            "core_generation_id": generation_id,
-            "authority": "core_generation",
-            "receipt": {
-                "status": if generation_id.is_some() { "pending" } else { "unavailable" },
-                "reason": if generation_id.is_some() {
-                    "receipt_not_observed"
-                } else {
-                    "lexical_generation_unavailable"
-                },
-                "core_generation_id": Value::Null,
-                "generation_matches": Value::Null,
-            },
-            "status_path": path,
-        }));
-    };
-    pro_projection_report_from_job(generation_id, &job, path)
+    let catch_up = read_daemon_job_status(&path);
+    pro_projection_report_from_status(
+        generation_id,
+        helper_generation_matches,
+        &lifecycle,
+        catch_up.as_ref(),
+        path,
+    )
 }
 
-fn pro_projection_report_from_job(
+fn pro_projection_report_from_status(
     generation_id: Option<&str>,
-    job: &Value,
+    helper_generation_matches: bool,
+    lifecycle: &Value,
+    catch_up: Option<&Value>,
     status_path: impl AsRef<Path>,
 ) -> Value {
-    let job_status = job.get("status").and_then(Value::as_str);
-    let job_generation = job.get("core_generation_id").and_then(Value::as_str);
-    let receipt_generation = job
-        .get("receipt_core_generation_id")
+    let installed = lifecycle.get("installed").and_then(Value::as_bool) == Some(true);
+    let currentness = lifecycle
+        .get("projection_currentness")
         .and_then(Value::as_str);
-    let job_matches = generation_id.is_some() && job_generation == generation_id;
-    let receipt_matches = generation_id.is_some() && receipt_generation == generation_id;
-    let ready = job_status == Some("completed") && job_matches && receipt_matches;
-    let stale = generation_id.is_some()
-        && (job_generation.is_some() && !job_matches
-            || receipt_generation.is_some() && !receipt_matches);
-    let unavailable = generation_id.is_none() || job_status == Some("error");
-    let (status, reason) = if ready {
-        ("ready", Value::Null)
-    } else if stale {
-        ("stale", json!("core_receipt_generation_mismatch"))
+    let materialized = lifecycle.get("materialized").and_then(Value::as_bool) == Some(true);
+    let (status, reason) = if !installed {
+        ("unavailable", json!("pro_not_installed"))
     } else if generation_id.is_none() {
         ("unavailable", json!("lexical_generation_unavailable"))
-    } else if unavailable {
-        (
-            "unavailable",
-            job.get("error_code")
-                .cloned()
-                .unwrap_or_else(|| json!("core_projection_failed")),
-        )
+    } else if currentness == Some("current") && materialized {
+        if helper_generation_matches {
+            ("ready", Value::Null)
+        } else {
+            ("stale", json!("stale_source"))
+        }
     } else {
-        ("pending", json!("core_receipt_pending"))
+        match currentness {
+            Some("stale") => ("stale", json!("stale_source")),
+            Some("not_materialized" | "partial") => (
+                "pending",
+                lifecycle
+                    .get("error_code")
+                    .cloned()
+                    .unwrap_or_else(|| json!("core_receipt_pending")),
+            ),
+            Some("needs_rebuild") => ("unavailable", json!("needs_rebuild")),
+            Some("current") => ("unavailable", json!("invalid_response")),
+            Some(_) | None => (
+                "unavailable",
+                lifecycle
+                    .get("error_code")
+                    .cloned()
+                    .unwrap_or_else(|| json!("pro_status_unavailable")),
+            ),
+        }
     };
+    let receipt_matches = status == "ready";
+    let catch_up = catch_up.map(|job| {
+        compact_json(json!({
+            "status": job.get("status"),
+            "pending": job.get("pending"),
+            "reason": job.get("reason"),
+            "error_code": job.get("error_code"),
+            "core_generation_id": job.get("core_generation_id"),
+            "receipt_core_generation_id": job.get("receipt_core_generation_id"),
+            "attempts": job.get("attempts"),
+            "retryable": job.get("retryable"),
+            "consecutive_failures": job.get("consecutive_failures"),
+            "retry_after_ms": job.get("retry_after_ms"),
+            "retry_not_before_at_ms": job.get("retry_not_before_at_ms"),
+            "last_attempt_at_ms": job.get("last_attempt_at_ms"),
+            "last_attempt_duration_us": job.get("last_attempt_duration_us"),
+            "last_error": job.get("last_error"),
+        }))
+    });
     compact_json(json!({
         "status": status,
         "reason": reason,
         "core_generation_id": generation_id,
-        "authority": "core_generation",
+        "authority": "pro_helper_status",
+        "projection_currentness": lifecycle.get("projection_currentness"),
+        "materialized_coverage": lifecycle.get("materialized_coverage"),
+        "repository_coverage": lifecycle.get("repository_coverage"),
+        "ready": lifecycle.get("ready"),
+        "materialized": lifecycle.get("materialized"),
+        "access_state": lifecycle.get("access_state"),
+        "supported_operations": lifecycle.get("supported_operations"),
+        "available_operations": lifecycle.get("available_operations"),
         "receipt": {
             "status": status,
             "reason": reason,
-            "core_generation_id": receipt_generation,
+            "core_generation_id": if receipt_matches { generation_id } else { None },
             "generation_matches": receipt_matches,
         },
-        "job_core_generation_id": job_generation,
-        "job_generation_matches": job_matches,
-        "attempts": job.get("attempts"),
-        "retryable": job.get("retryable"),
-        "consecutive_failures": job.get("consecutive_failures"),
-        "retry_after_ms": job.get("retry_after_ms"),
-        "retry_not_before_at_ms": job.get("retry_not_before_at_ms"),
-        "last_attempt_at_ms": job.get("last_attempt_at_ms"),
-        "last_error": job.get("last_error"),
-        "job": job,
+        "catch_up": catch_up,
         "status_path": status_path.as_ref(),
     }))
 }

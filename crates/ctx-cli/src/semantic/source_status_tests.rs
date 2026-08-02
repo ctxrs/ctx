@@ -344,23 +344,40 @@ fn core_publication_is_ready_in_json_and_human_status() {
 }
 
 #[test]
-fn pro_core_receipt_is_generation_bound() {
-    let ready_job = json!({
-        "status": "completed",
-        "core_generation_id": "generation-1",
-        "receipt_core_generation_id": "generation-1",
-        "attempts": 1,
+fn pro_helper_status_is_the_only_projection_readiness_authority() {
+    let helper_ready = json!({
+        "installed": true,
+        "ready": false,
+        "materialized": true,
+        "projection_currentness": "current",
+        "materialized_coverage": "empty",
+        "repository_coverage": {},
+        "access_state": "trial",
+        "supported_operations": ["file_blame"],
+        "available_operations": [],
+        "error_code": null,
     });
-    let stale_job = json!({
+    let helper_stale = json!({
+        "installed": true,
+        "ready": false,
+        "materialized": false,
+        "projection_currentness": "stale",
+        "materialized_coverage": "partial",
+        "repository_coverage": {},
+        "access_state": "active",
+        "supported_operations": ["file_blame"],
+        "available_operations": [],
+        "error_code": "stale_source",
+    });
+    let completed_job = json!({
         "status": "completed",
-        "core_generation_id": "generation-0",
-        "receipt_core_generation_id": "generation-0",
+        "pending": false,
         "attempts": 1,
     });
     let retry_job = json!({
         "status": "error",
         "error_code": "helper_crashed",
-        "core_generation_id": "generation-1",
+        "core_generation_id": "generation-0",
         "receipt_core_generation_id": null,
         "attempts": 2,
         "retryable": true,
@@ -369,22 +386,49 @@ fn pro_core_receipt_is_generation_bound() {
         "retry_not_before_at_ms": 1234,
     });
 
-    let ready =
-        pro_projection_report_from_job(Some("generation-1"), &ready_job, "pro-catch-up.json");
-    let stale =
-        pro_projection_report_from_job(Some("generation-1"), &stale_job, "pro-catch-up.json");
-    let retry =
-        pro_projection_report_from_job(Some("generation-1"), &retry_job, "pro-catch-up.json");
+    let ready = pro_projection_report_from_status(
+        Some("generation-1"),
+        true,
+        &helper_ready,
+        Some(&retry_job),
+        "pro-catch-up.json",
+    );
+    let stale = pro_projection_report_from_status(
+        Some("generation-1"),
+        true,
+        &helper_stale,
+        Some(&completed_job),
+        "pro-catch-up.json",
+    );
 
-    assert_eq!(ready["authority"], "core_generation");
+    assert_eq!(ready["authority"], "pro_helper_status");
+    assert_eq!(ready["status"], "ready");
     assert_eq!(ready["receipt"]["status"], "ready");
     assert_eq!(ready["receipt"]["generation_matches"], true);
+    assert_eq!(ready["materialized_coverage"], "empty");
+    assert_eq!(ready["ready"], false);
+    assert_eq!(ready["materialized"], true);
+    assert_eq!(ready["available_operations"], json!([]));
+    assert_eq!(ready["catch_up"]["status"], "error");
+    assert_eq!(ready["catch_up"]["error_code"], "helper_crashed");
+    assert_eq!(ready["catch_up"]["core_generation_id"], "generation-0");
+    assert_eq!(ready["catch_up"]["consecutive_failures"], 2);
+    assert_eq!(ready["catch_up"]["retry_after_ms"], 250);
+    assert_eq!(ready["catch_up"]["retry_not_before_at_ms"], 1234);
     assert_eq!(stale["status"], "stale");
     assert_eq!(stale["receipt"]["status"], "stale");
     assert_eq!(stale["receipt"]["generation_matches"], false);
-    assert_eq!(retry["status"], "unavailable");
-    assert_eq!(retry["reason"], "helper_crashed");
-    assert_eq!(retry["consecutive_failures"], 2);
-    assert_eq!(retry["retry_after_ms"], 250);
-    assert_eq!(retry["retry_not_before_at_ms"], 1234);
+    assert_eq!(stale["catch_up"]["status"], "completed");
+    assert_eq!(stale["reason"], "stale_source");
+
+    let raced = pro_projection_report_from_status(
+        Some("generation-1"),
+        false,
+        &helper_ready,
+        Some(&completed_job),
+        "pro-catch-up.json",
+    );
+    assert_eq!(raced["status"], "stale");
+    assert_eq!(raced["reason"], "stale_source");
+    assert_eq!(raced["receipt"]["generation_matches"], false);
 }

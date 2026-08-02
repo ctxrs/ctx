@@ -6,6 +6,7 @@ use ctx_history_core::{
     SourceFrontier, SourceObservation, TypedKey,
 };
 use ctx_history_index::{GenerationWriter, WriterOptions, MAX_SEMANTIC_EVENT_PAGE_ITEMS};
+use ctx_pro_host_protocol::ProFilesystemLayout;
 use serde_json::{json, Value};
 
 use crate::{
@@ -515,6 +516,7 @@ fn idle_semantic_catch_up_continues_past_one_page_and_drains_to_terminal() {
     let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut runtime = DaemonRuntime::default();
     runtime.sidecar_drain.generation = Some(generation.clone());
+    runtime.sidecar_drain.pro_attempted_generation = Some(generation.clone());
 
     {
         let _jobs = install_jobs(
@@ -908,6 +910,165 @@ fn persisted_due_pro_retry_reopens_durable_core_after_process_restart() {
 }
 
 #[test]
+fn process_restart_checks_durable_core_once_without_a_preexisting_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    let coordinator = CoreRefreshEngine::new();
+    assert!(coordinator.pinned_core_publication().is_none());
+    let mut restarted = DaemonRuntime::default();
+
+    let (first, first_verified_opens) =
+        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
+            run_daemon_scheduler_cycle_with_activity(
+                &daemon_args(),
+                temp.path(),
+                &mut restarted,
+                None,
+                false,
+                None,
+                Some(&coordinator),
+            )
+            .unwrap()
+        });
+    let first_status = read_pro_status(temp.path()).expect("initial durable Pro check");
+
+    let (second, second_verified_opens) =
+        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
+            run_daemon_scheduler_cycle_with_activity(
+                &daemon_args(),
+                temp.path(),
+                &mut restarted,
+                None,
+                false,
+                None,
+                Some(&coordinator),
+            )
+            .unwrap()
+        });
+
+    assert_eq!(first_verified_opens, 1);
+    assert!(!first.failed);
+    assert_eq!(first_status["core_generation_id"], generation);
+    assert_eq!(first_status["attempts"], 1);
+    assert_eq!(
+        second_verified_opens, 0,
+        "steady ticks must not reopen Core"
+    );
+    assert!(!second.failed);
+    assert_eq!(
+        read_pro_status(temp.path()).unwrap(),
+        first_status,
+        "steady ticks must not resubmit Pro catch-up"
+    );
+}
+
+#[test]
+fn prior_not_installed_result_does_not_suppress_first_install_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    persist_pro_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "error",
+            "pending": true,
+            "retryable": false,
+            "core_generation_id": generation,
+            "receipt_core_generation_id": null,
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "error_code": "pro_not_installed",
+            "last_error": "fixture helper was not installed",
+        }),
+    )
+    .unwrap();
+    let coordinator = CoreRefreshEngine::new();
+    let mut after_install = DaemonRuntime::default();
+    restore_daemon_consumer_retries(&mut after_install, temp.path());
+    assert_eq!(after_install.pro_retry.consecutive_failures, 0);
+    after_install.sidecar_drain.pro_attempted_generation = Some(generation.clone());
+    let helper = ProFilesystemLayout::new(temp.path()).helper_path();
+    std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+    std::fs::write(&helper, b"newly installed helper fixture").unwrap();
+
+    let (_, verified_opens) =
+        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
+            run_daemon_scheduler_cycle_with_activity(
+                &daemon_args(),
+                temp.path(),
+                &mut after_install,
+                None,
+                false,
+                None,
+                Some(&coordinator),
+            )
+            .unwrap()
+        });
+
+    assert_eq!(verified_opens, 1);
+    let checked = read_pro_status(temp.path()).expect("post-install Pro check");
+    assert_eq!(checked["core_generation_id"], generation);
+    assert_eq!(checked["attempts"], 2);
+}
+
+#[test]
+fn newly_installed_pro_is_checked_against_durable_core_after_daemon_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    persist_pro_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "error",
+            "pending": true,
+            "retryable": false,
+            "core_generation_id": generation,
+            "receipt_core_generation_id": null,
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "error_code": "pro_not_installed",
+            "last_error": "fixture helper was removed",
+        }),
+    )
+    .unwrap();
+    let helper = ProFilesystemLayout::new(temp.path()).helper_path();
+    std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+    std::fs::write(&helper, b"reinstalled helper fixture").unwrap();
+
+    let coordinator = CoreRefreshEngine::new();
+    let mut restarted = DaemonRuntime::default();
+    restore_daemon_consumer_retries(&mut restarted, temp.path());
+    assert!(restarted.sidecar_drain.pro_attempted_generation.is_none());
+
+    let (_, verified_opens) =
+        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
+            run_daemon_scheduler_cycle_with_activity(
+                &daemon_args(),
+                temp.path(),
+                &mut restarted,
+                None,
+                false,
+                None,
+                Some(&coordinator),
+            )
+            .unwrap()
+        });
+
+    assert_eq!(verified_opens, 1, "restart must reopen durable Core once");
+    let checked = read_pro_status(temp.path()).expect("post-reinstall Pro check");
+    assert_eq!(checked["core_generation_id"], generation);
+    assert_eq!(checked["attempts"], 2);
+    assert_eq!(
+        restarted.sidecar_drain.pro_attempted_generation.as_deref(),
+        Some(generation.as_str())
+    );
+}
+
+#[test]
 fn active_queries_defer_due_consumer_retry_only_until_fairness_deadline() {
     let temp = tempfile::tempdir().unwrap();
     let generation = publish_empty_core_generation(temp.path());
@@ -1028,6 +1189,7 @@ fn semantic_retry_runs_across_core_backoff_and_recovers_independently() {
     let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut first = DaemonRuntime::default();
     first.history_retry.record_failure();
+    first.sidecar_drain.pro_attempted_generation = Some(generation.clone());
     {
         let _hooks = install_jobs(
             calls.clone(),
@@ -1057,6 +1219,7 @@ fn semantic_retry_runs_across_core_backoff_and_recovers_independently() {
     let mut restarted = DaemonRuntime::default();
     restarted.history_retry.record_failure();
     restore_daemon_consumer_retries(&mut restarted, temp.path());
+    restarted.sidecar_drain.pro_attempted_generation = Some(generation.clone());
     assert!(!restarted.semantic_retry.ready());
     restarted.semantic_retry.retry_not_before = None;
     restarted.semantic_retry.retry_not_before_at_ms = None;

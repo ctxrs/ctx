@@ -102,7 +102,7 @@ fn terminal_quiet_status_is_current_materialized_and_not_blame_ready() {
         let status = status(coverage);
         status.validate().unwrap();
         assert_eq!(
-            super::client_status::status_outcome(&status, None),
+            super::client_status::status_outcome(&status, None, &"a".repeat(64)),
             (false, true, None),
             "{coverage:?}"
         );
@@ -126,15 +126,93 @@ fn terminal_quiet_status_is_current_materialized_and_not_blame_ready() {
 }
 
 #[test]
+fn current_helper_receipt_is_ready_for_the_active_core_generation() {
+    let current = status(MaterializedCoverage::Complete);
+
+    assert_eq!(
+        super::client_status::status_outcome(&current, None, &"a".repeat(64)),
+        (true, true, None)
+    );
+}
+
+#[test]
 fn invalid_status_contradiction_fails_closed() {
     let mut contradictory = status(MaterializedCoverage::Complete);
     contradictory.core_receipt = None;
     assert!(contradictory.validate().is_err());
 
     assert_eq!(
-        super::client_status::status_outcome(&contradictory, None),
+        super::client_status::status_outcome(&contradictory, None, &"a".repeat(64)),
         (false, false, Some("protocol_mismatch"))
     );
+}
+
+#[test]
+fn malformed_current_receipt_fails_closed_as_a_protocol_mismatch() {
+    let mut malformed = status(MaterializedCoverage::Complete);
+    malformed.requested_core_generation_id = Some("d".repeat(64));
+    malformed.core_receipt.as_mut().unwrap().core_generation_id = "malformed".to_owned();
+
+    assert_eq!(
+        super::client_status::status_outcome(&malformed, None, &"d".repeat(64)),
+        (false, false, Some("protocol_mismatch"))
+    );
+}
+
+#[test]
+fn status_rejects_a_current_receipt_for_a_stale_core_generation() {
+    let mut stale = status(MaterializedCoverage::Complete);
+    stale.requested_core_generation_id = Some("d".repeat(64));
+
+    assert_eq!(
+        super::client_status::status_outcome(&stale, None, &"d".repeat(64)),
+        (false, false, Some("stale_source"))
+    );
+}
+
+#[test]
+fn status_preserves_explicit_stale_currentness_for_the_pinned_generation() {
+    let mut stale = status(MaterializedCoverage::Complete);
+    stale.currentness = CoreProjectionCurrentness::Stale;
+    stale.requested_core_generation_id = Some("d".repeat(64));
+    stale.coverage = MaterializedCoverage::Partial;
+    stale.repository_coverage = RepositoryCoverage::default();
+    stale.available_operations.clear();
+
+    assert_eq!(
+        super::client_status::status_outcome(&stale, None, &"d".repeat(64)),
+        (false, false, Some("stale_source"))
+    );
+}
+
+#[test]
+fn missing_helper_status_does_not_require_an_active_core_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let status = super::client_status::status_with_helper_resolver(temp.path(), |_| {
+        bail!("pro_not_installed: helper fixture is absent")
+    });
+
+    assert!(!status.installed);
+    assert!(!status.ready);
+    assert!(!status.materialized);
+    assert_eq!(status.error_code.as_deref(), Some("pro_not_installed"));
+}
+
+#[test]
+fn installed_status_fails_closed_when_active_core_cannot_be_pinned() {
+    let temp = tempfile::tempdir().unwrap();
+    let status = super::client_status::status_with_helper_resolver(temp.path(), |_| {
+        Ok(temp.path().join("ctx-pro"))
+    });
+
+    assert!(status.installed);
+    assert!(!status.ready);
+    assert!(!status.materialized);
+    assert_eq!(status.error_code.as_deref(), Some("source_unavailable"));
+    assert!(status.projection_currentness.is_none());
+    assert!(status.materialized_coverage.is_none());
+    assert!(status.supported_operations.is_none());
+    assert!(status.available_operations.is_none());
 }
 
 #[test]
