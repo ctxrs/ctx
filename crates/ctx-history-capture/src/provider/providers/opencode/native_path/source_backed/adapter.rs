@@ -76,6 +76,13 @@ pub(super) struct OpenCodeSqliteWorkCounters {
     pub(super) logical_rows_projected: u64,
     pub(super) documents_staged: u64,
     pub(super) max_buffered_documents: u64,
+    pub(super) session_rows_scanned: u64,
+    pub(super) session_metadata_loads: u64,
+    pub(super) max_buffered_session_metadata: u64,
+    pub(super) max_session_ancestry_depth: u64,
+    pub(super) fallback_payload_hydrations: u64,
+    pub(super) max_buffered_payload_rows: u64,
+    pub(super) fallback_disk_sort: bool,
     pub(super) exact_replays: u64,
     pub(super) terminal_fences: u64,
     pub(super) terminal_revalidations: u64,
@@ -161,6 +168,13 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
             work.documents_staged = scan.certificate.counts().indexed_documents;
             work.max_buffered_documents =
                 u64::from(scan.certificate.counts().indexed_documents != 0);
+            work.session_rows_scanned = scan.bounds.session_rows_scanned;
+            work.session_metadata_loads = scan.bounds.session_metadata_loads;
+            work.max_buffered_session_metadata = scan.bounds.max_buffered_session_metadata;
+            work.max_session_ancestry_depth = scan.bounds.max_session_ancestry_depth;
+            work.fallback_payload_hydrations = scan.bounds.fallback_payload_hydrations;
+            work.max_buffered_payload_rows = scan.bounds.max_buffered_payload_rows;
+            work.fallback_disk_sort = scan.bounds.fallback_disk_sort;
         }
         let observation = scan.certificate.observation().clone();
         Ok(DocumentSourceTerminal {
@@ -396,6 +410,13 @@ fn finalize_work_counters(
         || counters.max_active_snapshots != 1
         || counters.projection_passes + counters.exact_replays != 1
         || counters.max_buffered_documents > 1
+        || counters.max_buffered_session_metadata > 1
+        || counters.max_session_ancestry_depth > 64
+        || counters.max_buffered_payload_rows > 1
+        || counters.session_metadata_loads > counters.session_rows_scanned
+        || (counters.fallback_disk_sort
+            && counters.fallback_payload_hydrations != counters.logical_rows_projected)
+        || (!counters.fallback_disk_sort && counters.fallback_payload_hydrations != 0)
         || (leaf.observation.schema.message_part_indexed_streaming
             && counters.schema_event_validation_traversals != 2)
         || (exact_replay

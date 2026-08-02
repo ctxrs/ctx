@@ -94,15 +94,29 @@ fn row_event_source_sql(
 
 fn part_event_source_sql(schema: &OpenCodeNativeSchema) -> String {
     let type_column = type_expression(schema.event_has_type, "p");
-    let source = if schema.message_part_indexed_streaming {
-        "from message m
-         cross join part p on p.message_id = m.id
-         left join session s on s.id = p.session_id"
-    } else {
-        "from part p
-         left join message m on m.id = p.message_id
-         left join session s on s.id = p.session_id"
-    };
+    let (source, source_locator, source_data, parent_source_data) =
+        if schema.message_part_indexed_streaming {
+            (
+                "from message m
+                 cross join part p on p.message_id = m.id
+                 left join session s on s.id = p.session_id",
+                "p.rowid",
+                "p.data",
+                "m.data",
+            )
+        } else {
+            // The compatibility path can require a full ORDER BY when provider
+            // indexes are absent. Keep payloads out of that sorter and hydrate
+            // the ordered identities through their required primary keys.
+            (
+                "from part p
+                 left join message m on m.id = p.message_id
+                 left join session s on s.id = p.session_id",
+                "0",
+                "null",
+                "null",
+            )
+        };
     format!(
         "select cast(p.id as text), cast(p.message_id as text),
                 cast(p.session_id as text), 3,
@@ -114,7 +128,7 @@ fn part_event_source_sql(schema: &OpenCodeNativeSchema) -> String {
                      then octet_length(p.data) else 0 end,
                 {type_column},
                 0,
-                p.rowid, p.data,
+                {source_locator}, {source_data},
                 case
                     when typeof(p.id) <> 'text' or trim(p.id) = ''
                          or octet_length(p.id) > {MAX_NATIVE_IDENTITY_BYTES}
@@ -137,7 +151,7 @@ fn part_event_source_sql(schema: &OpenCodeNativeSchema) -> String {
                     then 4
                     else 0
                 end,
-                m.data,
+                {parent_source_data},
                 case
                     when m.id is null then 2
                     when s.id is null then 1

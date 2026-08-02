@@ -563,6 +563,90 @@ fn create_indexed_message_part_fixture(path: &Path, rows: i64) {
     transaction.commit().unwrap();
 }
 
+fn create_multisession_message_part_fixture(path: &Path, sessions: i64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "create table session (
+                 id text primary key,
+                 parent_id text,
+                 directory text,
+                 branch text,
+                 agent text,
+                 time_created integer not null,
+                 time_updated integer not null
+             );
+             create table message (
+                 id text primary key,
+                 session_id text not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create table part (
+                 id text primary key,
+                 message_id text not null,
+                 session_id text not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create index message_session_time_created_id_idx
+                 on message(session_id, time_created, id);
+             create index part_message_id_id_idx on part(message_id, id);
+             create index part_session_idx on part(session_id);",
+        )
+        .unwrap();
+    let metadata_padding = "m".repeat(4 * 1024);
+    let payload_padding = "p".repeat(4 * 1024);
+    let transaction = connection.transaction().unwrap();
+    for sequence in 0..sessions {
+        let session_id = format!("session-{sequence:08}");
+        let message_id = format!("message-{sequence:08}");
+        let parent_id = (sequence % 17 != 0).then(|| format!("session-{:08}", sequence - 1));
+        transaction
+            .execute(
+                "insert into session values (?1, ?2, '/tmp/project', 'main', ?3, ?4, ?4)",
+                params![
+                    session_id,
+                    parent_id,
+                    format!("agent-{sequence}-{metadata_padding}"),
+                    sequence
+                ],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "insert into message values (?1, ?2, ?3, ?3, ?4)",
+                params![
+                    message_id,
+                    session_id,
+                    sequence,
+                    json!({"role": "user", "time": {"created": sequence}}).to_string()
+                ],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "insert into part values (?1, ?2, ?3, ?4, ?4, ?5)",
+                params![
+                    format!("part-{sequence:08}"),
+                    message_id,
+                    session_id,
+                    sequence,
+                    json!({
+                        "type": "text",
+                        "text": format!("event-{sequence}-{payload_padding}")
+                    })
+                    .to_string()
+                ],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+}
+
 #[test]
 fn admitted_opencode_backup_stays_stable_across_later_wal_commit_and_next_open_advances() {
     let temp = crate::test_support_paths::tempdir().unwrap();
@@ -815,6 +899,84 @@ fn indexed_message_part_cold_scan_preserves_chronology_with_bounded_message_sort
     assert_eq!(cold.logical_rows_projected, ROWS);
     assert_eq!(cold.documents_staged, ROWS);
     assert_eq!(cold.max_buffered_documents, 1);
+}
+
+#[test]
+fn multisession_missing_index_fallback_is_equivalent_bounded_and_read_only() {
+    const SESSIONS: u64 = 2_048;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_multisession_message_part_fixture(&database, SESSIONS as i64);
+
+    let (_, indexed_scan, indexed_records) = scan_current_schema(&database);
+    assert_eq!(indexed_scan.bounds.session_rows_scanned, SESSIONS);
+    assert_eq!(indexed_scan.bounds.session_metadata_loads, SESSIONS);
+    assert_eq!(indexed_scan.bounds.max_buffered_session_metadata, 1);
+    assert_eq!(indexed_scan.bounds.max_session_ancestry_depth, 16);
+    assert_eq!(indexed_scan.bounds.fallback_payload_hydrations, 0);
+    assert_eq!(indexed_scan.bounds.max_buffered_payload_rows, 0);
+    assert!(!indexed_scan.bounds.fallback_disk_sort);
+
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "drop index message_session_time_created_id_idx;
+             drop index part_message_id_id_idx;
+             drop index part_session_idx;",
+        )
+        .unwrap();
+    let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+    let fallback_schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
+    assert!(!fallback_schema.message_part_indexed_streaming);
+    let mut fallback_sql = source_backed_event_sql(&fallback_schema);
+    fallback_sql.push_str(source_backed_event_order_sql(&fallback_schema));
+    let fallback_plan = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {fallback_sql}"))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        fallback_plan
+            .iter()
+            .any(|step| step.contains("USE TEMP B-TREE FOR ORDER BY")),
+        "missing-index fixture did not exercise the fallback sorter: {fallback_plan:?}"
+    );
+    drop(connection);
+
+    let before_database = fs::read(&database).unwrap();
+    let mut before_siblings = fs::read_dir(database.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    before_siblings.sort();
+    let (_, fallback_scan, fallback_records) = scan_current_schema(&database);
+    let mut after_siblings = fs::read_dir(database.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    after_siblings.sort();
+
+    assert_eq!(fallback_records, indexed_records);
+    assert_eq!(fallback_scan.source, indexed_scan.source);
+    assert_eq!(
+        fallback_scan.certificate.counts(),
+        indexed_scan.certificate.counts()
+    );
+    assert_eq!(
+        fallback_scan.certificate.content_digest(),
+        indexed_scan.certificate.content_digest()
+    );
+    assert_eq!(fallback_scan.bounds.session_rows_scanned, SESSIONS);
+    assert_eq!(fallback_scan.bounds.session_metadata_loads, SESSIONS);
+    assert_eq!(fallback_scan.bounds.max_buffered_session_metadata, 1);
+    assert_eq!(fallback_scan.bounds.max_session_ancestry_depth, 16);
+    assert_eq!(fallback_scan.bounds.fallback_payload_hydrations, SESSIONS);
+    assert_eq!(fallback_scan.bounds.max_buffered_payload_rows, 1);
+    assert!(fallback_scan.bounds.fallback_disk_sort);
+    assert_eq!(fs::read(&database).unwrap(), before_database);
+    assert_eq!(after_siblings, before_siblings);
 }
 
 #[test]

@@ -224,6 +224,14 @@ fn stock_sqlite_reads_active_wal_read_only_and_query_only() {
             .unwrap(),
         1
     );
+    assert_eq!(
+        snapshot
+            .connection()
+            .unwrap()
+            .pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
     assert!(snapshot
         .connection()
         .unwrap()

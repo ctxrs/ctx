@@ -754,8 +754,8 @@ pub(super) fn configure_and_pin_snapshot(connection: &Connection) -> SqliteSourc
         .pragma_update(None, "query_only", true)
         .map_err(|source| sqlite_error("enabling provider query-only mode", source))?;
     connection
-        .pragma_update(None, "temp_store", "MEMORY")
-        .map_err(|source| sqlite_error("forcing in-memory SQLite temporary storage", source))?;
+        .pragma_update(None, "temp_store", "FILE")
+        .map_err(|source| sqlite_error("forcing file-backed SQLite temporary storage", source))?;
     connection
         .pragma_update(None, "mmap_size", 0_i64)
         .map_err(|source| sqlite_error("disabling provider database mmap", source))?;
@@ -764,6 +764,14 @@ pub(super) fn configure_and_pin_snapshot(connection: &Connection) -> SqliteSourc
         .map_err(|source| sqlite_error("verifying provider query-only mode", source))?;
     if query_only != 1 {
         return Err(SqliteSourceAccessError::ConnectionNotQueryOnly);
+    }
+    let temp_store: i64 = connection
+        .pragma_query_value(None, "temp_store", |row| row.get(0))
+        .map_err(|source| sqlite_error("verifying provider temporary storage", source))?;
+    if temp_store != 1 {
+        return Err(SqliteSourceAccessError::SnapshotUnavailable {
+            reason: "provider SQLite temporary storage is not file-backed".to_owned(),
+        });
     }
     connection
         .execute_batch("BEGIN DEFERRED")

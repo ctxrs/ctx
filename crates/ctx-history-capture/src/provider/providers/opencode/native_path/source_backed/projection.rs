@@ -236,6 +236,7 @@ pub(super) fn decode_source_event_row(
     row: &Row<'_>,
     schema: &OpenCodeNativeSchema,
     dialect: &OpenCodeSqliteDialect,
+    hydrated_payload: Option<(SqliteSourceValue, SqliteSourceValue)>,
 ) -> OpenCodeSourceBackedResult<SourceEventRow> {
     match row.get::<_, i64>(13)? {
         0 => {}
@@ -285,8 +286,10 @@ pub(super) fn decode_source_event_row(
         CaptureError::InvalidPayload("OpenCode-family content byte count is negative".to_owned())
     })?;
     let column_type: String = row.get(9)?;
-    let source_data = SqliteSourceValue::from_ref(row.get_ref(12)?);
-    let parent_source_data = SqliteSourceValue::from_ref(row.get_ref(14)?);
+    let (source_data, parent_source_data) = hydrated_payload.unwrap_or((
+        SqliteSourceValue::from_ref(row.get_ref(12)?),
+        SqliteSourceValue::from_ref(row.get_ref(14)?),
+    ));
     let (mut projection, has_explicit_event_time) = project_sqlite_json(
         &source_data,
         &parent_source_data,
