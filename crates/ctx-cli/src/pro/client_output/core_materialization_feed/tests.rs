@@ -826,7 +826,7 @@ fn missing_route_grace_rollover_finishes_without_source_or_event_mutations() {
         .observe_certified_missing_route(route.clone(), 100, DELETE_AFTER, || true)
         .unwrap();
     assert!(!grace.deleted());
-    assert_eq!(grace.retained_sources(), &[source.clone()]);
+    assert_eq!(grace.retained_sources(), std::slice::from_ref(&source));
     writer.commit(|_| true).unwrap();
     let rollover = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_ne!(rollover.generation_id(), prior.core_generation_id);

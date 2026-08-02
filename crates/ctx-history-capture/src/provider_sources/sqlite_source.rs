@@ -39,6 +39,9 @@ use crate::{
         OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderSourceDirectory,
         ProviderSourceRoot,
     },
+    provider::source_backed::{
+        SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
+    },
     CaptureError,
 };
 
@@ -120,6 +123,18 @@ pub(crate) enum SqliteSourceAccessError {
     },
     #[error("SQLite source snapshot transaction is no longer active")]
     SnapshotNotActive,
+}
+
+#[derive(Debug)]
+pub(crate) enum SqliteSourceProgressError<E> {
+    Source(SqliteSourceAccessError),
+    Progress(E),
+}
+
+impl<E> From<SqliteSourceAccessError> for SqliteSourceProgressError<E> {
+    fn from(error: SqliteSourceAccessError) -> Self {
+        Self::Source(error)
+    }
 }
 
 impl SqliteSourceAccessError {
@@ -535,6 +550,7 @@ impl SqliteSourceDirectoryAuthority {
         self.snapshot_context.snapshot()
     }
 
+    #[cfg(test)]
     pub(crate) fn open_logical_online_backup_snapshot(
         &self,
         database_name: &OsStr,
@@ -543,6 +559,18 @@ impl SqliteSourceDirectoryAuthority {
             self,
             database_name,
             SqliteSourceSnapshotPolicy::LogicalOnlineBackup,
+        )
+    }
+
+    pub(crate) fn open_logical_online_backup_snapshot_with_progress<E>(
+        &self,
+        database_name: &OsStr,
+        mut report_progress: impl FnMut(SourceBackedCurrentSourceProgress) -> Result<(), E>,
+    ) -> Result<SqliteSourceReadSnapshot, SqliteSourceProgressError<E>> {
+        open_root_handle_sqlite_source_logical_snapshot_with_progress(
+            self,
+            database_name,
+            &mut report_progress,
         )
     }
 
@@ -860,6 +888,8 @@ use family::{
     SqliteSchemaEvidence, SqliteSnapshotEvidence, SqliteSourceFamily,
 };
 pub(crate) use logical::SqliteLogicalSnapshot;
+use snapshot::open_root_handle_sqlite_source_logical_snapshot_with_progress;
+#[cfg(test)]
 use snapshot::open_root_handle_sqlite_source_snapshot_with_policy;
 #[cfg(test)]
 use snapshot::{

@@ -16,7 +16,7 @@ impl ExplicitSourceCatalogAuthority {
         data_root: &Path,
         base_generation: Option<&VerifiedIndex>,
         build: &mut SourceBackedAutomaticRegistryBuild,
-    ) -> Result<()> {
+    ) -> Result<Vec<ExplicitSourceCatalogRouteBinding>> {
         let snapshot = load_catalog_for_authority(data_root, self)?;
         register_explicit_source_catalog_snapshot_routes(
             data_root,

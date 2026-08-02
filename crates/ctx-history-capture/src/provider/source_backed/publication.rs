@@ -59,6 +59,71 @@ pub struct SourceBackedRefreshProgress {
     pub certified_source_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBackedCurrentSourceProgressStage {
+    SourceFamilyCopy,
+    OnlineBackup,
+    LogicalFingerprint,
+    LogicalScan,
+}
+
+impl SourceBackedCurrentSourceProgressStage {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceFamilyCopy => "source_family_copy",
+            Self::OnlineBackup => "online_backup",
+            Self::LogicalFingerprint => "logical_fingerprint",
+            Self::LogicalScan => "logical_scan",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceBackedCurrentSourceProgress {
+    pub stage: SourceBackedCurrentSourceProgressStage,
+    pub snapshot_pages_completed: Option<u64>,
+    pub snapshot_pages_total: Option<u64>,
+    pub snapshot_bytes_completed: Option<u64>,
+    pub snapshot_bytes_total: Option<u64>,
+    pub logical_rows_scanned: Option<u64>,
+    pub logical_certified_bytes: Option<u64>,
+}
+
+impl SourceBackedCurrentSourceProgress {
+    pub const fn new(stage: SourceBackedCurrentSourceProgressStage) -> Self {
+        Self {
+            stage,
+            snapshot_pages_completed: None,
+            snapshot_pages_total: None,
+            snapshot_bytes_completed: None,
+            snapshot_bytes_total: None,
+            logical_rows_scanned: None,
+            logical_certified_bytes: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBackedDetailedRefreshProgress {
+    pub progress: SourceBackedRefreshProgress,
+    pub current_source_progress: Option<SourceBackedCurrentSourceProgress>,
+}
+
+impl SourceBackedDetailedRefreshProgress {
+    pub fn into_legacy(self) -> SourceBackedRefreshProgress {
+        self.progress
+    }
+}
+
+fn source_level_progress(
+    progress: SourceBackedRefreshProgress,
+) -> SourceBackedDetailedRefreshProgress {
+    SourceBackedDetailedRefreshProgress {
+        progress,
+        current_source_progress: None,
+    }
+}
+
 const SOURCE_RECORD_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Default)]
@@ -138,7 +203,29 @@ impl SourceBackedRefreshExecutor {
         index_root: impl AsRef<Path>,
         report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
     ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
-        refresh_source_backed_generation_with_progress_and_discovery_timing(
+        let mut report_progress = report_progress;
+        refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
+            index_root,
+            &self.registry,
+            self.writer_options.clone(),
+            self.discovery_duration,
+            self.work_budget,
+            SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
+            move |update| {
+                if update.current_source_progress.is_some() {
+                    return Ok(());
+                }
+                report_progress(update.into_legacy())
+            },
+        )
+    }
+
+    pub fn refresh_with_detailed_progress(
+        &self,
+        index_root: impl AsRef<Path>,
+        report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
+    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+        refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             index_root,
             &self.registry,
             self.writer_options.clone(),
@@ -155,7 +242,30 @@ impl SourceBackedRefreshExecutor {
         scope: SourceBackedRefreshScope,
         report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
     ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
-        refresh_source_backed_generation_with_progress_and_discovery_timing(
+        let mut report_progress = report_progress;
+        refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
+            index_root,
+            &self.registry,
+            self.writer_options.clone(),
+            self.discovery_duration,
+            self.work_budget,
+            SourceBackedRefreshPlan::isolate(scope),
+            move |update| {
+                if update.current_source_progress.is_some() {
+                    return Ok(());
+                }
+                report_progress(update.into_legacy())
+            },
+        )
+    }
+
+    pub fn refresh_scope_with_detailed_progress(
+        &self,
+        index_root: impl AsRef<Path>,
+        scope: SourceBackedRefreshScope,
+        report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
+    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+        refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             index_root,
             &self.registry,
             self.writer_options.clone(),
@@ -195,7 +305,8 @@ pub struct SourceBackedRefreshReceipt {
     pub certified_source_bytes: u64,
     pub selected_route_ids: Vec<SourceRouteIdentity>,
     pub successful_route_ids: Vec<SourceRouteIdentity>,
-    pub failed_routes: Vec<SourceBackedFailedRoute>,
+    pub failed_routes: Vec<SourceBackedFailedRouteOutcome>,
+    pub source_failures: SourceBackedSourceFailures,
     pub carried_unselected_route_ids: Vec<SourceRouteIdentity>,
     pub carried_failed_route_ids: Vec<SourceRouteIdentity>,
 }
@@ -240,8 +351,32 @@ pub fn refresh_source_backed_generation_with_progress(
     writer_options: WriterOptions,
     report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
 ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+    let mut report_progress = report_progress;
     let work_budget = source_backed_refresh_work_budget(writer_options.indexer_threads);
-    refresh_source_backed_generation_with_progress_and_discovery_timing(
+    refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
+        index_root,
+        registry,
+        writer_options,
+        Duration::ZERO,
+        work_budget,
+        SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
+        move |update| {
+            if update.current_source_progress.is_some() {
+                return Ok(());
+            }
+            report_progress(update.into_legacy())
+        },
+    )
+}
+
+pub fn refresh_source_backed_generation_with_detailed_progress(
+    index_root: impl AsRef<Path>,
+    registry: &SourceBackedProviderRegistry,
+    writer_options: WriterOptions,
+    report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
+) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+    let work_budget = source_backed_refresh_work_budget(writer_options.indexer_threads);
+    refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         index_root,
         registry,
         writer_options,
@@ -259,7 +394,7 @@ pub fn refresh_source_backed_generation_for_routes(
     route_identities: impl IntoIterator<Item = SourceRouteIdentity>,
 ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
     let work_budget = source_backed_refresh_work_budget(writer_options.indexer_threads);
-    refresh_source_backed_generation_with_progress_and_discovery_timing(
+    refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         index_root,
         registry,
         writer_options,
@@ -270,14 +405,14 @@ pub fn refresh_source_backed_generation_for_routes(
     )
 }
 
-fn refresh_source_backed_generation_with_progress_and_discovery_timing(
+fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
     index_root: impl AsRef<Path>,
     registry: &SourceBackedProviderRegistry,
     writer_options: WriterOptions,
     discovery_duration: Duration,
     work_budget: usize,
     plan: SourceBackedRefreshPlan,
-    mut report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
+    mut report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
 ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
     if matches!(&plan.scope, SourceBackedRefreshScope::All) {
         if let Some(unavailable) = registry.routes.iter().find(|route| {
@@ -325,7 +460,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         })
         .count();
     let refresh_started = Instant::now();
-    report_progress(SourceBackedRefreshProgress {
+    report_progress(source_level_progress(SourceBackedRefreshProgress {
         phase: "discovering",
         completed_sources: 0,
         total_sources: scanned_routes,
@@ -336,7 +471,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         elapsed: discovery_duration,
         certified_source_count: None,
         certified_source_bytes: None,
-    })
+    }))
     .map_err(SourceBackedCoordinatorError::Progress)?;
     let unsupported_routes = registry
         .routes
@@ -390,7 +525,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             let Some(driver) = &route.driver else {
                 continue;
             };
-            report_progress(SourceBackedRefreshProgress {
+            report_progress(source_level_progress(SourceBackedRefreshProgress {
                 phase: "refreshing",
                 completed_sources: completed_routes,
                 total_sources: scanned_routes,
@@ -401,39 +536,69 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
                 certified_source_count: None,
                 certified_source_bytes: None,
-            })
+            }))
             .map_err(SourceBackedCoordinatorError::Progress)?;
             writer.begin_source_route_stage(route_identity.clone())?;
             let removal_checkpoint = applied_removals.len();
             let current_source = route.metadata.source.path.display().to_string();
-            let mut record_progress = SourceRecordProgress::default();
-            let mut progress_failure = None::<SourceBackedRouteError>;
+            let record_progress = std::cell::RefCell::new(SourceRecordProgress::default());
+            let progress_failure = std::cell::RefCell::new(None::<SourceBackedRouteError>);
             let scan_result = {
+                let progress_callback = std::cell::RefCell::new(&mut report_progress);
                 let mut report_record_progress = |delta| {
-                    if let Some(error) = progress_failure.as_ref() {
+                    if let Some(error) = progress_failure.borrow().as_ref() {
                         return Err(SourceBackedCoordinatorError::Progress(error.clone()));
                     }
-                    let Some((completed_records, completed_bytes)) =
-                        record_progress.advanced_at(delta, Instant::now())
+                    let Some((completed_records, completed_bytes)) = record_progress
+                        .borrow_mut()
+                        .advanced_at(delta, Instant::now())
                     else {
                         return Ok(());
                     };
-                    match report_progress(SourceBackedRefreshProgress {
-                        phase: "refreshing",
-                        completed_sources: completed_routes,
-                        total_sources: scanned_routes,
-                        current_source: Some(current_source.clone()),
-                        completed_records: Some(completed_records),
-                        completed_bytes: Some(completed_bytes),
-                        stage_duration: scan_started.elapsed(),
-                        elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
-                        certified_source_count: None,
-                        certified_source_bytes: None,
+                    match progress_callback.borrow_mut()(source_level_progress(
+                        SourceBackedRefreshProgress {
+                            phase: "refreshing",
+                            completed_sources: completed_routes,
+                            total_sources: scanned_routes,
+                            current_source: Some(current_source.clone()),
+                            completed_records: Some(completed_records),
+                            completed_bytes: Some(completed_bytes),
+                            stage_duration: scan_started.elapsed(),
+                            elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
+                            certified_source_count: None,
+                            certified_source_bytes: None,
+                        },
+                    )) {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            progress_failure.replace(Some(error.clone()));
+                            Err(SourceBackedCoordinatorError::Progress(error))
+                        }
+                    }
+                };
+                let mut report_current_source_progress = |current_source_progress| {
+                    if let Some(error) = progress_failure.borrow().as_ref() {
+                        return Err(error.clone());
+                    }
+                    match progress_callback.borrow_mut()(SourceBackedDetailedRefreshProgress {
+                        progress: SourceBackedRefreshProgress {
+                            phase: "refreshing",
+                            completed_sources: completed_routes,
+                            total_sources: scanned_routes,
+                            current_source: Some(current_source.clone()),
+                            completed_records: None,
+                            completed_bytes: None,
+                            stage_duration: scan_started.elapsed(),
+                            elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
+                            certified_source_count: None,
+                            certified_source_bytes: None,
+                        },
+                        current_source_progress: Some(current_source_progress),
                     }) {
                         Ok(()) => Ok(()),
                         Err(error) => {
-                            progress_failure = Some(error.clone());
-                            Err(SourceBackedCoordinatorError::Progress(error))
+                            progress_failure.replace(Some(error.clone()));
+                            Err(error)
                         }
                     }
                 };
@@ -445,16 +610,18 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                     route_index,
                     leaf_worker_budget: work_budget,
                     record_progress: Some(&mut report_record_progress),
+                    current_source_progress: Some(&mut report_current_source_progress),
                 };
                 (driver.scan)(&mut sink)
             };
-            if let Some(error) = progress_failure {
+            let mut record_progress = record_progress.into_inner();
+            if let Some(error) = progress_failure.into_inner() {
                 return Err(SourceBackedCoordinatorError::Progress(error));
             }
             if let Some((completed_records, completed_bytes)) =
                 record_progress.flush_at(Instant::now())
             {
-                report_progress(SourceBackedRefreshProgress {
+                report_progress(source_level_progress(SourceBackedRefreshProgress {
                     phase: "refreshing",
                     completed_sources: completed_routes,
                     total_sources: scanned_routes,
@@ -465,7 +632,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                     elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
                     certified_source_count: None,
                     certified_source_bytes: None,
-                })
+                }))
                 .map_err(SourceBackedCoordinatorError::Progress)?;
             }
             match scan_result {
@@ -475,7 +642,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                         route_index,
                         &mut owners,
                     )?;
-                    report_progress(SourceBackedRefreshProgress {
+                    report_progress(source_level_progress(SourceBackedRefreshProgress {
                         phase: "verifying",
                         completed_sources: completed_routes,
                         total_sources: scanned_routes,
@@ -486,7 +653,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                         elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
                         certified_source_count: None,
                         certified_source_bytes: None,
-                    })
+                    }))
                     .map_err(SourceBackedCoordinatorError::Progress)?;
                     if revalidate_staged_source_route(
                         route_index,
@@ -510,6 +677,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                                 route,
                                 SourceBackedSourceFailureClass::SourceChanged,
                                 carried_forward,
+                                "source route changed during terminal revalidation",
                             )?,
                         );
                     }
@@ -530,7 +698,12 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                     attempt_carried.insert(route_identity.clone());
                     failed_routes.insert(
                         route_identity.clone(),
-                        SourceBackedFailedRoute::from_route(route, class, carried_forward)?,
+                        SourceBackedFailedRoute::from_route(
+                            route,
+                            class,
+                            carried_forward,
+                            &source.detail,
+                        )?,
                     );
                 }
             }
@@ -554,7 +727,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 continue;
             }
             writer.begin_source_route_stage(route_identity.clone())?;
-            report_progress(SourceBackedRefreshProgress {
+            report_progress(source_level_progress(SourceBackedRefreshProgress {
                 phase: "verifying",
                 completed_sources: completed_routes,
                 total_sources: scanned_routes,
@@ -565,7 +738,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
                 certified_source_count: None,
                 certified_source_bytes: None,
-            })
+            }))
             .map_err(SourceBackedCoordinatorError::Progress)?;
             let paths = route.certified_missing_paths.clone();
             if !paths
@@ -581,6 +754,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                         route,
                         SourceBackedSourceFailureClass::SourceChanged,
                         carried_forward,
+                        "certified-missing route changed during terminal verification",
                     )?,
                 );
                 continue;
@@ -645,7 +819,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             && !has_successful_source
         {
             return Err(SourceBackedCoordinatorError::NoUsableSourceRoutes {
-                failed_routes: failed_routes.into_values().collect(),
+                failed_routes: bounded_source_failures(failed_routes.values()),
             });
         }
 
@@ -708,7 +882,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         }
     }
     let scan_stage_duration = scan_started.elapsed();
-    let _ = report_progress(SourceBackedRefreshProgress {
+    let _ = report_progress(source_level_progress(SourceBackedRefreshProgress {
         phase: "committed",
         completed_sources: scanned_routes,
         total_sources: scanned_routes,
@@ -719,10 +893,11 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
         certified_source_count: Some(commit.certified_sources),
         certified_source_bytes: Some(commit.certified_source_bytes),
-    });
+    }));
     let certified_source_count = commit.certified_sources;
     let certified_source_bytes = commit.certified_source_bytes;
     let sources = commit.manifest().sources.clone();
+    let source_failures = bounded_source_failures(failed_routes.values());
     Ok(SourceBackedRefreshReceipt {
         commit,
         sources,
@@ -742,8 +917,18 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             .filter(|failure| failure.carried_forward)
             .map(|failure| failure.route_identity.clone())
             .collect(),
-        failed_routes: failed_routes.into_values().collect(),
+        source_failures,
+        failed_routes: failed_routes
+            .values()
+            .map(SourceBackedFailedRouteOutcome::from)
+            .collect(),
     })
+}
+
+fn bounded_source_failures<'a>(
+    failures: impl IntoIterator<Item = &'a SourceBackedFailedRoute>,
+) -> SourceBackedSourceFailures {
+    SourceBackedSourceFailures::from_failures(failures.into_iter().cloned())
 }
 
 fn source_missing_observation_time() -> u64 {

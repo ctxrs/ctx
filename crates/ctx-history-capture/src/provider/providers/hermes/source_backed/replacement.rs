@@ -6,7 +6,8 @@ use crate::provider::source_backed::{
         ChangedDocumentSink, CompleteDocumentTree, DocumentLeafFingerprint, DocumentSourceTerminal,
         ObservedDocumentLeaf, ReplacementDocumentTree,
     },
-    route_error, SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+    route_error as default_route_error, SourceBackedRouteError, SourceBackedRouteErrorKind,
+    SourceBackedRouteResult,
 };
 
 pub(crate) struct HermesTreeAuthority {
@@ -35,16 +36,30 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
     fn discover_complete(
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
+        self.discover_complete_with_progress(&[], &mut |_| Ok(()))
+    }
+
+    fn discover_complete_with_progress(
+        &self,
+        _base_sources: &[CertifiedSource],
+        report_progress: &mut dyn FnMut(
+            SourceBackedCurrentSourceProgress,
+        ) -> SourceBackedRouteResult<()>,
+    ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
         if std::fs::symlink_metadata(self.path()).is_err() {
             return Err(SourceBackedRouteError::new(
                 SourceBackedRouteErrorKind::Unavailable,
                 "selected Hermes database is unavailable",
             ));
         }
-        let (sqlite_authority, snapshot) =
-            open_root_authorized_snapshot(&self.data_root, self.path()).map_err(route_error)?;
+        let (sqlite_authority, snapshot) = open_root_authorized_snapshot_with_progress(
+            &self.data_root,
+            self.path(),
+            report_progress,
+        )
+        .map_err(hermes_route_error)?;
         let opening_evidence = snapshot.evidence().clone();
-        snapshot.revalidate().map_err(route_error)?;
+        snapshot.revalidate().map_err(default_route_error)?;
         let fingerprint = DocumentLeafFingerprint::new(*opening_evidence.revision());
         Ok(CompleteDocumentTree::new(
             hermes_tree_fingerprint(&self.source),
@@ -76,35 +91,43 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
         let snapshot = take_snapshot(&authority.snapshot)?;
         sink.begin_source(source.clone())?;
         let mut sink_error = None;
-        let scan = project_hermes_snapshot(
+        let scan = project_hermes_snapshot_with_progress(
             self,
-            snapshot.connection().map_err(route_error)?,
-            &mut |page| {
-                if let Err(error) = sink.report_completed_bytes(page.completed_bytes) {
-                    let detail = error.to_string();
-                    sink_error = Some(error);
-                    return Err(HermesSourceBackedError::Capture(
-                        CaptureError::InvalidPayload(detail),
-                    ));
-                }
-                for record in page.records {
-                    if let HermesSourceBackedRecord::Event(document) = record {
-                        if let Err(error) = sink.emit_core_record(document) {
-                            let detail = error.to_string();
-                            sink_error = Some(error);
-                            return Err(HermesSourceBackedError::Capture(
-                                CaptureError::InvalidPayload(detail),
-                            ));
+            snapshot.connection().map_err(default_route_error)?,
+            &mut |output| match output {
+                HermesSnapshotProjectionOutput::Page(page) => {
+                    if let Err(error) = sink.report_completed_bytes(page.completed_bytes) {
+                        let detail = error.to_string();
+                        sink_error = Some(error);
+                        return Err(HermesSourceBackedError::Capture(
+                            CaptureError::InvalidPayload(detail),
+                        ));
+                    }
+                    for record in page.records {
+                        if let HermesSourceBackedRecord::Event(document) = record {
+                            if let Err(error) = sink.emit_core_record(document) {
+                                let detail = error.to_string();
+                                sink_error = Some(error);
+                                return Err(HermesSourceBackedError::Capture(
+                                    CaptureError::InvalidPayload(detail),
+                                ));
+                            }
                         }
                     }
+                    Ok(())
                 }
-                Ok(())
+                HermesSnapshotProjectionOutput::Progress(progress) => sink
+                    .report_current_source_progress(progress)
+                    .map_err(|error| {
+                        sink_error = Some(error.clone());
+                        HermesSourceBackedError::Route(error)
+                    }),
             },
         );
         if let Some(error) = sink_error {
             return Err(error);
         }
-        let scan = scan.map_err(route_error)?;
+        let scan = scan.map_err(hermes_route_error)?;
         let counts = scan.certificate.counts();
         if scan.decoded_rows != counts.complete_records
             || scan.peak_buffered_records > 64
@@ -137,7 +160,7 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
                 "Hermes source changed between physical discovery and logical scan",
             ));
         }
-        snapshot.revalidate().map_err(route_error)?;
+        snapshot.revalidate().map_err(default_route_error)?;
         restore_snapshot(&authority.snapshot, snapshot)?;
         Ok(document_terminal(scan.certificate))
     }
@@ -147,15 +170,22 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
         tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
     ) -> SourceBackedRouteResult<[u8; 32]> {
         let snapshot = take_snapshot(&tree.authority.snapshot)?;
-        let evidence = snapshot.finish().map_err(route_error)?;
+        let evidence = snapshot.finish().map_err(default_route_error)?;
         if evidence != tree.authority.opening_evidence {
             return Err(hermes_changed(format!(
                 "{}: physical source changed before commit",
                 HermesSourceBackedError::SourceChanged
             )));
         }
-        (tree.authority.terminal_revalidate)().map_err(route_error)?;
+        (tree.authority.terminal_revalidate)().map_err(default_route_error)?;
         Ok(tree.tree_fingerprint)
+    }
+}
+
+fn hermes_route_error(error: HermesSourceBackedError) -> SourceBackedRouteError {
+    match error {
+        HermesSourceBackedError::Route(error) => error,
+        error => default_route_error(error),
     }
 }
 

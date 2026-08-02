@@ -80,6 +80,8 @@ fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefr
     SourceBackedRefreshPublication {
         selected_route_ids: Vec::new(),
         successful_route_ids: Vec::new(),
+        failed_route_outcomes: Vec::new(),
+        catalog_route_outcomes: Vec::new(),
         source_failures: Vec::new(),
         generation_id: receipt.generation_id.clone(),
         published_explicit_source_catalog:
@@ -286,6 +288,8 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
     SourceBackedRefreshPublication {
         selected_route_ids: Vec::new(),
         successful_route_ids: Vec::new(),
+        failed_route_outcomes: Vec::new(),
+        catalog_route_outcomes: Vec::new(),
         source_failures: Vec::new(),
         generation_id: receipt.generation_id,
         published_explicit_source_catalog:
@@ -473,6 +477,8 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
             Ok(SourceBackedRefreshPublication {
                 selected_route_ids: selected_route_ids.clone(),
                 successful_route_ids: selected_route_ids,
+                failed_route_outcomes: Vec::new(),
+                catalog_route_outcomes: Vec::new(),
                 source_failures: Vec::new(),
                 generation_id: receipt.generation_id,
                 published_explicit_source_catalog: execution
@@ -530,6 +536,7 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
                     "schema_version": 1,
                     "op": "source_refresh_request",
                     "mode": "wait",
+                    "operation": "import",
                     "explicit_source_catalog": authority.to_json(),
                 }),
             )

@@ -10,6 +10,10 @@ pub(crate) struct SourceBackedRefreshReceipt {
     pub(crate) current: SourceBackedRefreshCurrent,
     pub(crate) selected_route_ids: Vec<String>,
     pub(crate) successful_route_ids: Vec<String>,
+    pub(crate) selected_route_total: usize,
+    pub(crate) successful_route_total: usize,
+    pub(crate) failed_route_outcomes: Vec<SourceBackedRefreshRouteFailure>,
+    pub(crate) catalog_route_outcomes: Vec<SourceBackedRefreshCatalogRouteOutcome>,
     pub(crate) source_failures: Vec<SourceBackedRefreshSourceFailure>,
 }
 
@@ -30,6 +34,10 @@ impl SourceBackedRefreshReceipt {
             current: publication.current,
             selected_route_ids: publication.selected_route_ids.clone(),
             successful_route_ids: publication.successful_route_ids.clone(),
+            selected_route_total: publication.selected_route_ids.len(),
+            successful_route_total: publication.successful_route_ids.len(),
+            failed_route_outcomes: publication.failed_route_outcomes.clone(),
+            catalog_route_outcomes: publication.catalog_route_outcomes.clone(),
             source_failures: publication.source_failures.clone(),
         }
     }
@@ -42,7 +50,37 @@ impl SourceBackedRefreshReceipt {
         }
     }
 
+    pub(crate) fn source_failure_total(&self) -> usize {
+        self.selected_route_total
+            .saturating_sub(self.successful_route_total)
+    }
+
+    pub(crate) fn source_failures_omitted(&self) -> usize {
+        self.source_failure_total()
+            .saturating_sub(self.source_failures.len())
+    }
+
     pub(crate) fn to_json(&self) -> Value {
+        // Leave ample room beneath the 64 KiB IPC limit for the surrounding
+        // attempt envelope. Catalog outcomes and diagnostics share this one
+        // budget instead of independently consuming transport capacity.
+        const RECEIPT_JSON_BUDGET_BYTES: usize = 48 * 1024;
+        let catalog_route_outcomes = self.catalog_route_outcomes_json();
+        let mut source_failures = Vec::new();
+        for failure in &self.source_failures {
+            source_failures.push(failure.to_json());
+            let candidate = self.wire_json(&source_failures, &catalog_route_outcomes);
+            if serde_json::to_vec(&candidate)
+                .map_or(true, |json| json.len() > RECEIPT_JSON_BUDGET_BYTES)
+            {
+                source_failures.pop();
+                break;
+            }
+        }
+        self.wire_json(&source_failures, &catalog_route_outcomes)
+    }
+
+    fn wire_json(&self, source_failures: &[Value], catalog_route_outcomes: &Value) -> Value {
         compact_json(json!({
             "previous_generation": self.previous_generation,
             "published_generation": self.published_generation,
@@ -52,12 +90,63 @@ impl SourceBackedRefreshReceipt {
                 .to_json(),
             "current": self.current.to_json(),
             "outcome": self.terminal_outcome(),
-            "selected_route_ids": self.selected_route_ids,
-            "successful_route_ids": self.successful_route_ids,
-            "source_failures": self.source_failures.iter()
-                .map(SourceBackedRefreshSourceFailure::to_json)
-                .collect::<Vec<_>>(),
+            "selected_route_total": self.selected_route_total,
+            "successful_route_total": self.successful_route_total,
+            "source_failure_total": self.source_failure_total(),
+            "source_failures_omitted": self.source_failure_total()
+                .saturating_sub(source_failures.len()),
+            "source_failures": source_failures,
+            "catalog_route_outcomes": catalog_route_outcomes,
         }))
+    }
+
+    fn catalog_route_outcomes_json(&self) -> Value {
+        let outcomes = self
+            .catalog_route_outcomes
+            .iter()
+            .map(|outcome| (outcome.catalog_lineage.clone(), outcome.compact_json()))
+            .collect::<serde_json::Map<_, _>>();
+        Value::Object(outcomes)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct SourceBackedRefreshRouteFailure {
+    pub(crate) route_identity: String,
+    pub(crate) source_identity: String,
+    pub(crate) provider: String,
+    pub(crate) class: String,
+    pub(crate) carried_forward: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct SourceBackedRefreshCatalogRouteOutcome {
+    pub(crate) catalog_lineage: String,
+    pub(crate) route_identity: String,
+    pub(crate) outcome: String,
+    pub(crate) failure_class: Option<String>,
+}
+
+impl SourceBackedRefreshCatalogRouteOutcome {
+    fn compact_json(&self) -> Value {
+        let outcome = match self.outcome.as_str() {
+            "succeeded" => "s",
+            "failed" => "f",
+            "not_selected" => "n",
+            _ => "?",
+        };
+        let mut fields = vec![json!(self.route_identity), json!(outcome)];
+        if let Some(class) = self.failure_class.as_deref() {
+            let class = match class {
+                "unavailable" => "u",
+                "source_changed" => "c",
+                "unreadable" => "r",
+                "incompatible" => "i",
+                _ => "?",
+            };
+            fields.push(json!(class));
+        }
+        Value::Array(fields)
     }
 }
 
@@ -68,6 +157,8 @@ pub(crate) struct SourceBackedRefreshSourceFailure {
     pub(crate) provider: String,
     pub(crate) class: String,
     pub(crate) carried_forward: bool,
+    pub(crate) source_selector: String,
+    pub(crate) detail: String,
 }
 
 impl SourceBackedRefreshSourceFailure {
@@ -78,6 +169,8 @@ impl SourceBackedRefreshSourceFailure {
             "provider": self.provider,
             "class": self.class,
             "carried_forward": self.carried_forward,
+            "source_selector": self.source_selector,
+            "detail": self.detail,
         })
     }
 }
@@ -90,7 +183,7 @@ pub(crate) struct SourceBackedRefreshTimings {
 }
 
 impl SourceBackedRefreshTimings {
-    fn to_json(self) -> Value {
+    pub(crate) fn to_json(self) -> Value {
         json!({
             "discovery": self.discovery_us,
             "scan_stage": self.scan_stage_us,
@@ -122,14 +215,91 @@ impl SourceBackedRefreshState {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct SourceBackedRefreshProgress {
-    pub(super) phase: String,
-    pub(super) completed_sources: usize,
-    pub(super) total_sources: usize,
-    pub(super) current_source: Option<String>,
-    pub(super) completed_records: Option<u64>,
-    pub(super) completed_bytes: Option<u64>,
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum SourceBackedCurrentSourceProgressStage {
+    SourceFamilyCopy,
+    OnlineBackup,
+    LogicalFingerprint,
+    LogicalScan,
+}
+
+impl SourceBackedCurrentSourceProgressStage {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceFamilyCopy => "source_family_copy",
+            Self::OnlineBackup => "online_backup",
+            Self::LogicalFingerprint => "logical_fingerprint",
+            Self::LogicalScan => "logical_scan",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "source_family_copy" => Some(Self::SourceFamilyCopy),
+            "online_backup" => Some(Self::OnlineBackup),
+            "logical_fingerprint" => Some(Self::LogicalFingerprint),
+            "logical_scan" => Some(Self::LogicalScan),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct SourceBackedCurrentSourceProgress {
+    pub(crate) stage: SourceBackedCurrentSourceProgressStage,
+    pub(crate) snapshot_pages_completed: Option<u64>,
+    pub(crate) snapshot_pages_total: Option<u64>,
+    pub(crate) snapshot_bytes_completed: Option<u64>,
+    pub(crate) snapshot_bytes_total: Option<u64>,
+    pub(crate) logical_rows_scanned: Option<u64>,
+    pub(crate) logical_certified_bytes: Option<u64>,
+}
+
+impl SourceBackedCurrentSourceProgress {
+    pub(crate) fn to_json(self) -> Value {
+        compact_json(json!({
+            "stage": self.stage.as_str(),
+            "snapshot_pages_completed": self.snapshot_pages_completed,
+            "snapshot_pages_total": self.snapshot_pages_total,
+            "snapshot_bytes_completed": self.snapshot_bytes_completed,
+            "snapshot_bytes_total": self.snapshot_bytes_total,
+            "logical_rows_scanned": self.logical_rows_scanned,
+            "logical_certified_bytes": self.logical_certified_bytes,
+        }))
+    }
+
+    fn from_json(value: &Value) -> Result<Self> {
+        let fields = value.as_object().ok_or_else(|| {
+            anyhow!("daemon source refresh current-source progress is not an object")
+        })?;
+        let stage = fields
+            .get("stage")
+            .and_then(Value::as_str)
+            .and_then(SourceBackedCurrentSourceProgressStage::parse)
+            .ok_or_else(|| {
+                anyhow!("daemon source refresh current-source progress has an invalid stage")
+            })?;
+        Ok(Self {
+            stage,
+            snapshot_pages_completed: optional_progress_u64(fields, "snapshot_pages_completed")?,
+            snapshot_pages_total: optional_progress_u64(fields, "snapshot_pages_total")?,
+            snapshot_bytes_completed: optional_progress_u64(fields, "snapshot_bytes_completed")?,
+            snapshot_bytes_total: optional_progress_u64(fields, "snapshot_bytes_total")?,
+            logical_rows_scanned: optional_progress_u64(fields, "logical_rows_scanned")?,
+            logical_certified_bytes: optional_progress_u64(fields, "logical_certified_bytes")?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct SourceBackedRefreshProgress {
+    pub(crate) phase: String,
+    pub(crate) completed_sources: usize,
+    pub(crate) total_sources: usize,
+    pub(crate) current_source: Option<String>,
+    pub(crate) completed_records: Option<u64>,
+    pub(crate) completed_bytes: Option<u64>,
+    pub(crate) current_source_progress: Option<SourceBackedCurrentSourceProgress>,
 }
 
 impl Default for SourceBackedRefreshProgress {
@@ -141,6 +311,7 @@ impl Default for SourceBackedRefreshProgress {
             current_source: None,
             completed_records: None,
             completed_bytes: None,
+            current_source_progress: None,
         }
     }
 }
@@ -154,7 +325,60 @@ impl SourceBackedRefreshProgress {
             "current_source": self.current_source,
             "completed_records": self.completed_records,
             "completed_bytes": self.completed_bytes,
+            "current_source_progress": self.current_source_progress
+                .map(SourceBackedCurrentSourceProgress::to_json),
         }))
+    }
+
+    pub(crate) fn from_status_json(response: &Value) -> Result<Self> {
+        let progress = response
+            .get("progress")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("daemon source refresh status has no progress object"))?;
+        let phase = progress
+            .get("phase")
+            .and_then(Value::as_str)
+            .filter(|phase| !phase.is_empty())
+            .ok_or_else(|| anyhow!("daemon source refresh progress has an invalid phase"))?
+            .to_owned();
+        let current_source = match progress.get("current_source") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(source)) => Some(source.clone()),
+            Some(_) => bail!("daemon source refresh progress has an invalid current_source"),
+        };
+        let current_source_progress = match progress.get("current_source_progress") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(SourceBackedCurrentSourceProgress::from_json(value)?),
+        };
+        Ok(Self {
+            phase,
+            completed_sources: required_progress_usize(progress, "completed_sources")?,
+            total_sources: required_progress_usize(progress, "total_sources")?,
+            current_source,
+            completed_records: optional_progress_u64(progress, "completed_records")?,
+            completed_bytes: optional_progress_u64(progress, "completed_bytes")?,
+            current_source_progress,
+        })
+    }
+}
+
+fn required_progress_usize(fields: &serde_json::Map<String, Value>, field: &str) -> Result<usize> {
+    fields
+        .get(field)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| anyhow!("daemon source refresh progress has an invalid {field}"))
+}
+
+fn optional_progress_u64(
+    fields: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<u64>> {
+    match fields.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or_else(|| {
+            anyhow!("daemon source refresh current-source progress has an invalid {field}")
+        }),
     }
 }
 
@@ -223,13 +447,6 @@ impl SourceBackedRefreshAttempt {
             "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
             "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
             "outcome": self.receipt.as_ref().map(SourceBackedRefreshReceipt::terminal_outcome),
-            "successful_route_ids": self.receipt.as_ref()
-                .map(|receipt| &receipt.successful_route_ids),
-            "source_failures": self.receipt.as_ref().map(|receipt| {
-                receipt.source_failures.iter()
-                    .map(SourceBackedRefreshSourceFailure::to_json)
-                    .collect::<Vec<_>>()
-            }),
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
             "scanned_routes": self.scanned_routes,
@@ -275,13 +492,6 @@ impl SourceBackedRefreshAttempt {
             "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
             "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
             "outcome": self.receipt.as_ref().map(SourceBackedRefreshReceipt::terminal_outcome),
-            "successful_route_ids": self.receipt.as_ref()
-                .map(|receipt| &receipt.successful_route_ids),
-            "source_failures": self.receipt.as_ref().map(|receipt| {
-                receipt.source_failures.iter()
-                    .map(SourceBackedRefreshSourceFailure::to_json)
-                    .collect::<Vec<_>>()
-            }),
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
             "scanned_routes": self.scanned_routes,

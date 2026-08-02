@@ -12,10 +12,11 @@ use super::ordering::{
     OPENCODE_HYDRATION_SINGLETON_MAX_BYTES,
 };
 use super::{
-    observe_logical_source, open_root_authorized_snapshot_retained,
+    observe_logical_source_with_progress, open_root_authorized_snapshot_retained_with_progress,
     opencode_family_source_backed_registrations, scan_pinned_source, OpenCodeLogicalObservation,
     OpenCodeScanOutput, OpenCodeSourceBackedError, OpenCodeSourceBackedRegistration,
-    OpenCodeSourceBackedResult, PARSER_REVISION, SQLITE_SOURCE_INVALID_REASON,
+    OpenCodeSourceBackedResult, SourceBackedCurrentSourceProgress, PARSER_REVISION,
+    SQLITE_SOURCE_INVALID_REASON,
 };
 use crate::{
     common::io::ProviderSourceRoot,
@@ -129,6 +130,22 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
             .map_err(route_error)
     }
 
+    fn discover_complete_with_progress(
+        &self,
+        _base_sources: &[ctx_history_core::CertifiedSource],
+        report_progress: &mut dyn FnMut(
+            SourceBackedCurrentSourceProgress,
+        ) -> SourceBackedRouteResult<()>,
+    ) -> SourceBackedRouteResult<OpenCodeDocumentTree> {
+        discover_document_tree_with_progress(
+            &self.data_root,
+            &self.path,
+            self.registration.dialect,
+            report_progress,
+        )
+        .map_err(route_error)
+    }
+
     fn scan_changed(
         &self,
         authority: &Self::TreeAuthority,
@@ -160,6 +177,9 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
                 OpenCodeScanOutput::Document(document) => {
                     sink.emit_core_record(document).map_err(Into::into)
                 }
+                OpenCodeScanOutput::Progress(progress) => sink
+                    .report_current_source_progress(progress)
+                    .map_err(Into::into),
             },
         )
         .map_err(route_error)?;
@@ -291,20 +311,39 @@ fn discover_document_tree(
     path: &std::path::Path,
     dialect: &'static crate::provider::providers::opencode::OpenCodeSqliteDialect,
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
-    match observe_present_document_tree(data_root, path, dialect) {
+    discover_document_tree_with_progress(data_root, path, dialect, &mut |_| Ok(()))
+}
+
+fn discover_document_tree_with_progress(
+    data_root: &Path,
+    path: &std::path::Path,
+    dialect: &'static crate::provider::providers::opencode::OpenCodeSqliteDialect,
+    report_progress: &mut dyn FnMut(
+        SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()>,
+) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
+    match observe_present_document_tree_with_progress(data_root, path, dialect, report_progress) {
         Ok(tree) => Ok(tree),
         Err(error) if source_missing(&error) => observe_missing_document_tree(path),
         Err(error) => Err(error),
     }
 }
 
-fn observe_present_document_tree(
+fn observe_present_document_tree_with_progress(
     data_root: &Path,
     path: &std::path::Path,
     dialect: &'static crate::provider::providers::opencode::OpenCodeSqliteDialect,
+    report_progress: &mut dyn FnMut(
+        SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
-    let authorized = open_root_authorized_snapshot_retained(data_root, path)?;
-    let observation = observe_logical_source(authorized.sqlite_snapshot.connection()?, dialect)?;
+    let authorized =
+        open_root_authorized_snapshot_retained_with_progress(data_root, path, report_progress)?;
+    let observation = observe_logical_source_with_progress(
+        authorized.sqlite_snapshot.connection()?,
+        dialect,
+        report_progress,
+    )?;
     let terminal_revalidate = authorized.sqlite_snapshot.terminal_revalidator();
     let leaf_fingerprint = DocumentLeafFingerprint::new(admitted_leaf_fingerprint(
         &observation.source,

@@ -7,6 +7,8 @@ pub(crate) enum HermesSourceBackedError {
     #[error(transparent)]
     SqliteSource(#[from] SqliteSourceAccessError),
     #[error(transparent)]
+    Route(#[from] SourceBackedRouteError),
+    #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
     CoreRecord(#[from] CoreRecordError),

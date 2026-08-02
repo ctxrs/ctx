@@ -75,6 +75,7 @@ pub(crate) fn run_history_source_plugin_import(
         context.config,
         context.args.no_daemon,
         ImportCoreRefreshRequest::ExplicitCatalog(&upsert.authority),
+        &progress,
     )?;
     let receipt = refresh
         .receipt

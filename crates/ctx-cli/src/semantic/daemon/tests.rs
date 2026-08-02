@@ -117,6 +117,8 @@ impl DurableFrontierFixture {
                     timings: SourceBackedRefreshTimings::default(),
                     selected_route_ids: vec![refresh_route.as_str().to_owned()],
                     successful_route_ids: vec![refresh_route.as_str().to_owned()],
+                    failed_route_outcomes: Vec::new(),
+                    catalog_route_outcomes: Vec::new(),
                     source_failures: Vec::new(),
                 })
             });
@@ -954,6 +956,8 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                 Ok(SourceBackedRefreshPublication {
                     selected_route_ids: Vec::new(),
                     successful_route_ids: Vec::new(),
+                    failed_route_outcomes: Vec::new(),
+                    catalog_route_outcomes: Vec::new(),
                     source_failures: Vec::new(),
                     generation_id: receipt.generation_id,
                     published_explicit_source_catalog:
@@ -1062,6 +1066,8 @@ fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
             Ok(SourceBackedRefreshPublication {
                 selected_route_ids: vec![executor_route.as_str().to_owned()],
                 successful_route_ids: vec![executor_route.as_str().to_owned()],
+                failed_route_outcomes: Vec::new(),
+                catalog_route_outcomes: Vec::new(),
                 source_failures: Vec::new(),
                 generation_id: receipt.generation_id,
                 published_explicit_source_catalog:

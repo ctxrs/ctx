@@ -22,8 +22,10 @@ use super::ordering::{
 use super::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, refresh_source_backed_generation_with_progress,
-        SourceBackedProviderRegistry, SourceBackedRouteSelection,
+        refresh_source_backed_generation, refresh_source_backed_generation_with_detailed_progress,
+        refresh_source_backed_generation_with_progress, SourceBackedCoordinatorError,
+        SourceBackedCurrentSourceProgressStage, SourceBackedProviderRegistry,
+        SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
     },
     provider_sources::provider_source_for_path,
 };
@@ -436,6 +438,7 @@ fn rejection_heavy_scan_reports_authoritative_completed_bytes_before_finishing()
                 OpenCodeScanOutput::Begin(_) => {}
                 OpenCodeScanOutput::CompletedBytes(bytes) => completed_bytes.push(bytes),
                 OpenCodeScanOutput::Document(_) => accepted = accepted.saturating_add(1),
+                OpenCodeScanOutput::Progress(_) => {}
             }
             Ok(())
         },
@@ -506,6 +509,99 @@ fn rejection_heavy_production_refresh_advances_bytes_and_clears_them_terminally(
     assert!(terminal.current_source.is_none());
     assert!(terminal.completed_records.is_none());
     assert!(terminal.completed_bytes.is_none());
+}
+
+#[test]
+fn detailed_progress_reports_backup_fingerprint_and_one_pass_scan() {
+    const ROWS: i64 = 96;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_synthetic_fixture(&database, ROWS);
+    let source = provider_source_for_path(CaptureProvider::OpenCode, database);
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        &temp.path().join("data-root"),
+    )
+    .unwrap();
+    let mut progress = Vec::new();
+
+    let receipt = refresh_source_backed_generation_with_detailed_progress(
+        temp.path().join("index"),
+        &registry,
+        WriterOptions::default(),
+        |update| {
+            if let Some(progress_update) = update.current_source_progress {
+                progress.push(progress_update);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert!(progress.iter().any(|update| {
+        matches!(
+            update.stage,
+            SourceBackedCurrentSourceProgressStage::OnlineBackup
+                | SourceBackedCurrentSourceProgressStage::SourceFamilyCopy
+        )
+    }));
+    assert!(progress.iter().any(|update| {
+        update.stage == SourceBackedCurrentSourceProgressStage::LogicalFingerprint
+    }));
+    let scan = progress
+        .iter()
+        .filter(|update| update.stage == SourceBackedCurrentSourceProgressStage::LogicalScan)
+        .collect::<Vec<_>>();
+    assert_eq!(scan.first().unwrap().logical_rows_scanned, Some(0));
+    assert_eq!(scan.last().unwrap().logical_rows_scanned, Some(ROWS as u64));
+    assert_eq!(
+        scan.last().unwrap().logical_certified_bytes,
+        Some(receipt.sources[0].counts().certified_bytes)
+    );
+}
+
+#[test]
+fn detailed_progress_callback_failure_remains_systemic() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_synthetic_fixture(&database, 1);
+    let source = provider_source_for_path(CaptureProvider::OpenCode, database);
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        &temp.path().join("data-root"),
+    )
+    .unwrap();
+
+    let error = refresh_source_backed_generation_with_detailed_progress(
+        temp.path().join("index"),
+        &registry,
+        WriterOptions::default(),
+        |update| {
+            if update.current_source_progress.is_some() {
+                Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Unavailable,
+                    "injected OpenCode progress callback failure",
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::Progress(SourceBackedRouteError {
+            kind: SourceBackedRouteErrorKind::Unavailable,
+            detail,
+        }) if detail.contains("injected OpenCode progress callback failure")
+    ));
 }
 
 fn create_indexed_message_part_fixture(path: &Path, rows: i64) {

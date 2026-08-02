@@ -4,8 +4,9 @@ use anyhow::{bail, Context, Result};
 
 use crate::{
     config::AppConfig,
+    progress::ProgressReporter,
     semantic::{
-        autostart_daemon_and_wait, coordinate_import_source_backed_refresh,
+        autostart_daemon_and_wait, coordinate_import_source_backed_refresh_with_progress,
         SourceBackedRefreshMode, SourceBackedRefreshObservation,
     },
     DaemonTriggerCommandArg,
@@ -27,24 +28,32 @@ pub(super) fn wait_for_import_core_refresh(
     config: &AppConfig,
     no_daemon: bool,
     request: ImportCoreRefreshRequest<'_>,
+    progress: &ProgressReporter,
 ) -> Result<SourceBackedRefreshObservation> {
     if !no_daemon {
         autostart_daemon_and_wait(data_root, config, DaemonTriggerCommandArg::Import)?;
     }
 
+    let mut report_progress = |update: &crate::semantic::SourceBackedRefreshProgress| {
+        progress.source_refresh(update).map_err(anyhow::Error::new)
+    };
     let refresh = match request {
-        ImportCoreRefreshRequest::Automatic => coordinate_import_source_backed_refresh(
-            data_root,
-            SourceBackedRefreshMode::Wait,
-            None,
-            !no_daemon,
-        ),
+        ImportCoreRefreshRequest::Automatic => {
+            coordinate_import_source_backed_refresh_with_progress(
+                data_root,
+                SourceBackedRefreshMode::Wait,
+                None,
+                !no_daemon,
+                &mut report_progress,
+            )
+        }
         ImportCoreRefreshRequest::ExplicitCatalog(authority) => {
-            coordinate_import_source_backed_refresh(
+            coordinate_import_source_backed_refresh_with_progress(
                 data_root,
                 SourceBackedRefreshMode::Wait,
                 Some(authority),
                 false,
+                &mut report_progress,
             )
         }
     }

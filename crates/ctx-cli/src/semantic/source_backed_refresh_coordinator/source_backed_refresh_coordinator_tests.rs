@@ -58,6 +58,8 @@ fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPubl
     SourceBackedRefreshPublication {
         selected_route_ids: Vec::new(),
         successful_route_ids: Vec::new(),
+        failed_route_outcomes: Vec::new(),
+        catalog_route_outcomes: Vec::new(),
         source_failures: Vec::new(),
         generation_id: generation_id.into(),
         published_explicit_source_catalog: load_explicit_source_catalog_authority(
@@ -201,6 +203,8 @@ fn publish_selected_routes(
             provider: "fixture".to_owned(),
             class: class.to_owned(),
             carried_forward: true,
+            source_selector: "fixture source".to_owned(),
+            detail: "fixture failure".to_owned(),
         }];
     }
     Ok(publication)
@@ -520,10 +524,9 @@ fn running_startup_exact_continues_manual_all_without_rescanning() {
     assert_eq!(terminal["scanned_routes"], routes.len());
     assert_eq!(terminal["receipt"]["current"]["removed_source_count"], 1);
     assert_eq!(
-        terminal["receipt"]["successful_route_ids"]
-            .as_array()
-            .unwrap()
-            .len(),
+        terminal["receipt"]["successful_route_total"]
+            .as_u64()
+            .unwrap() as usize,
         routes.len()
     );
     assert!(!coordinator.has_scheduled_route_work());
@@ -808,12 +811,21 @@ fn route_failure_executor(
             .expect("exact refresh catalog authority");
         publication.scanned_routes = 1;
         publication.selected_route_ids = vec![route.as_str().to_owned()];
+        publication.failed_route_outcomes = vec![SourceBackedRefreshRouteFailure {
+            route_identity: route.as_str().to_owned(),
+            source_identity: "content-free-source".to_owned(),
+            provider: "fixture".to_owned(),
+            class: class.to_owned(),
+            carried_forward: true,
+        }];
         publication.source_failures = vec![SourceBackedRefreshSourceFailure {
             route_identity: route.as_str().to_owned(),
             source_identity: "content-free-source".to_owned(),
             provider: "fixture".to_owned(),
             class: class.to_owned(),
             carried_forward: true,
+            source_selector: "fixture source".to_owned(),
+            detail: "fixture failure".to_owned(),
         }];
         Ok(publication)
     })
@@ -1155,41 +1167,50 @@ fn default_executor_with_implicit_import_catalog_keeps_automatic_discovery_and_m
             );
             assert_eq!(observed_scope, SourceBackedRefreshScope::All);
             assert!(observed_covered_route_ids.is_empty());
-            progress(CaptureSourceBackedRefreshProgress {
-                phase: "discovering",
-                completed_sources: 0,
-                total_sources: 2,
-                current_source: None,
-                completed_records: None,
-                completed_bytes: None,
-                stage_duration: StdDuration::ZERO,
-                elapsed: StdDuration::ZERO,
-                certified_source_count: None,
-                certified_source_bytes: None,
+            progress(CaptureSourceBackedDetailedRefreshProgress {
+                progress: CaptureSourceBackedRefreshProgress {
+                    phase: "discovering",
+                    completed_sources: 0,
+                    total_sources: 2,
+                    current_source: None,
+                    completed_records: None,
+                    completed_bytes: None,
+                    stage_duration: StdDuration::ZERO,
+                    elapsed: StdDuration::ZERO,
+                    certified_source_count: None,
+                    certified_source_bytes: None,
+                },
+                current_source_progress: None,
             })?;
-            progress(CaptureSourceBackedRefreshProgress {
-                phase: "refreshing",
-                completed_sources: 1,
-                total_sources: 2,
-                current_source: Some("provider-wide-route".to_owned()),
-                completed_records: Some(11),
-                completed_bytes: Some(4_096),
-                stage_duration: StdDuration::ZERO,
-                elapsed: StdDuration::ZERO,
-                certified_source_count: None,
-                certified_source_bytes: None,
+            progress(CaptureSourceBackedDetailedRefreshProgress {
+                progress: CaptureSourceBackedRefreshProgress {
+                    phase: "refreshing",
+                    completed_sources: 1,
+                    total_sources: 2,
+                    current_source: Some("provider-wide-route".to_owned()),
+                    completed_records: Some(11),
+                    completed_bytes: Some(4_096),
+                    stage_duration: StdDuration::ZERO,
+                    elapsed: StdDuration::ZERO,
+                    certified_source_count: None,
+                    certified_source_bytes: None,
+                },
+                current_source_progress: None,
             })?;
-            progress(CaptureSourceBackedRefreshProgress {
-                phase: "verifying",
-                completed_sources: 2,
-                total_sources: 2,
-                current_source: None,
-                completed_records: None,
-                completed_bytes: None,
-                stage_duration: StdDuration::ZERO,
-                elapsed: StdDuration::ZERO,
-                certified_source_count: None,
-                certified_source_bytes: None,
+            progress(CaptureSourceBackedDetailedRefreshProgress {
+                progress: CaptureSourceBackedRefreshProgress {
+                    phase: "verifying",
+                    completed_sources: 2,
+                    total_sources: 2,
+                    current_source: None,
+                    completed_records: None,
+                    completed_bytes: None,
+                    stage_duration: StdDuration::ZERO,
+                    elapsed: StdDuration::ZERO,
+                    certified_source_count: None,
+                    certified_source_bytes: None,
+                },
+                current_source_progress: None,
             })?;
             Ok(test_publication("all-provider-generation"))
         },
@@ -1247,7 +1268,8 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
         }],
         issues: Vec::new(),
     };
-    let mut progress = |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+    let mut progress =
+        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
 
     let first = refresh_all_provider_sources(
         &discovery,
@@ -1345,7 +1367,8 @@ fn automatic_refresh_replaces_a_zstd_settings_generation() {
         }],
         issues: Vec::new(),
     };
-    let mut progress = |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+    let mut progress =
+        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
     let baseline = refresh_all_provider_sources(
         &discovery,
         report.clone(),
@@ -1381,8 +1404,9 @@ fn automatic_refresh_replaces_a_zstd_settings_generation() {
     let run = coordinator
         .run_next_with(
             |_, _| {
-                let mut progress =
-                    |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+                let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| {
+                    Ok::<(), SourceBackedRouteError>(())
+                };
                 refresh_all_provider_sources(
                     &discovery,
                     report,
@@ -1452,7 +1476,7 @@ fn only_unscopable_registry_safety_issues_block_globally() {
             detail: "injected selector gap",
         },
     };
-    assert!(reject_blocking_automatic_registry_issues(&[selector_gap.clone()]).is_ok());
+    assert!(reject_blocking_automatic_registry_issues(std::slice::from_ref(&selector_gap)).is_ok());
     let failures = capture_refresh::automatic_registry_route_failures(&[selector_gap]).unwrap();
     assert_eq!(failures.len(), 1);
     assert_eq!(
@@ -1498,7 +1522,8 @@ fn mixed_valid_and_invalid_registry_routes_publish_with_a_typed_failure() {
         ],
         issues: Vec::new(),
     };
-    let mut progress = |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+    let mut progress =
+        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
 
     let publication = refresh_all_provider_sources(
         &discovery,
@@ -1557,7 +1582,8 @@ fn registry_issue_only_cold_refresh_retains_the_all_fail_guard() {
         sources: vec![registry_policy_warp_source(invalid_warp, true)],
         issues: Vec::new(),
     };
-    let mut progress = |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+    let mut progress =
+        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
 
     let error = refresh_all_provider_sources(
         &discovery,

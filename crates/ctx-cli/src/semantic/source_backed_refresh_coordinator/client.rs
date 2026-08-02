@@ -1,5 +1,10 @@
 use super::*;
 
+type SourceBackedRefreshProgressReporter<'a> =
+    &'a mut dyn FnMut(&SourceBackedRefreshProgress) -> Result<()>;
+
+const SOURCE_REFRESH_PROGRESS_HEARTBEAT: StdDuration = StdDuration::from_secs(5);
+
 #[derive(Debug)]
 pub(crate) struct SourceBackedRefreshDaemonUnavailable {
     detail: Option<String>,
@@ -156,14 +161,32 @@ pub(crate) fn coordinate_source_backed_refresh(
         SourceBackedRefreshOperation::Refresh,
         None,
         true,
+        None,
     )
 }
 
-pub(crate) fn coordinate_import_source_backed_refresh(
+pub(crate) fn coordinate_import_source_backed_refresh_with_progress(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     allow_daemon_autostart: bool,
+    report_progress: &mut dyn FnMut(&SourceBackedRefreshProgress) -> Result<()>,
+) -> Result<SourceBackedRefreshObservation> {
+    coordinate_import_source_backed_refresh_inner(
+        data_root,
+        mode,
+        explicit_source_catalog,
+        allow_daemon_autostart,
+        Some(report_progress),
+    )
+}
+
+fn coordinate_import_source_backed_refresh_inner(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    allow_daemon_autostart: bool,
+    report_progress: Option<SourceBackedRefreshProgressReporter<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
     let implicit_catalog;
     let explicit_source_catalog = if let Some(explicit_source_catalog) = explicit_source_catalog {
@@ -179,6 +202,7 @@ pub(crate) fn coordinate_import_source_backed_refresh(
         SourceBackedRefreshOperation::Import,
         Some(explicit_source_catalog),
         allow_daemon_autostart,
+        report_progress,
     )
 }
 
@@ -188,6 +212,7 @@ fn coordinate_source_backed_refresh_with_catalog(
     operation: SourceBackedRefreshOperation,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     allow_daemon_autostart: bool,
+    report_progress: Option<SourceBackedRefreshProgressReporter<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
     if mode == SourceBackedRefreshMode::Off {
         if operation == SourceBackedRefreshOperation::Import {
@@ -257,25 +282,69 @@ fn coordinate_source_backed_refresh_with_catalog(
         });
     }
 
-    wait_for_published_generation(
+    wait_for_published_generation_with_progress(
         data_root,
         request_id,
         mode,
         operation,
         explicit_source_catalog,
         allow_daemon_autostart,
+        report_progress,
     )
 }
 
+#[cfg(test)]
 pub(super) fn wait_for_published_generation(
+    data_root: &Path,
+    request_id: String,
+    mode: SourceBackedRefreshMode,
+    operation: SourceBackedRefreshOperation,
+    expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    allow_daemon_autostart: bool,
+) -> Result<SourceBackedRefreshObservation> {
+    wait_for_published_generation_inner(
+        data_root,
+        request_id,
+        mode,
+        operation,
+        expected_catalog,
+        allow_daemon_autostart,
+        None,
+    )
+}
+
+fn wait_for_published_generation_with_progress(
+    data_root: &Path,
+    request_id: String,
+    mode: SourceBackedRefreshMode,
+    operation: SourceBackedRefreshOperation,
+    expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    allow_daemon_autostart: bool,
+    report_progress: Option<SourceBackedRefreshProgressReporter<'_>>,
+) -> Result<SourceBackedRefreshObservation> {
+    wait_for_published_generation_inner(
+        data_root,
+        request_id,
+        mode,
+        operation,
+        expected_catalog,
+        allow_daemon_autostart,
+        report_progress,
+    )
+}
+
+fn wait_for_published_generation_inner(
     data_root: &Path,
     mut request_id: String,
     mode: SourceBackedRefreshMode,
     operation: SourceBackedRefreshOperation,
     expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
     allow_daemon_autostart: bool,
+    mut report_progress: Option<SourceBackedRefreshProgressReporter<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
     let mut unknown_request_recovery = TypedUnknownRequestRecovery::new(&request_id);
+    let mut last_reported_progress = None;
+    let mut last_reported_at = None;
     loop {
         let response = match daemon_source_refresh_request(
             data_root,
@@ -345,7 +414,23 @@ pub(super) fn wait_for_published_generation(
         }
         validate_source_refresh_status_response_authority(&response, &request_id)?;
         validate_daemon_refresh_response(&response)?;
-        match source_refresh_protocol_state(&response)? {
+        let protocol_state = source_refresh_protocol_state(&response)?;
+        if let Some(report_progress) = report_progress.as_deref_mut() {
+            let progress = SourceBackedRefreshProgress::from_status_json(&response)?;
+            if should_report_progress(
+                last_reported_progress.as_ref(),
+                last_reported_at,
+                &progress,
+                protocol_state,
+                StdInstant::now(),
+            ) {
+                report_progress(&progress)
+                    .context("render daemon-owned source refresh progress")?;
+                last_reported_progress = Some(progress);
+                last_reported_at = Some(StdInstant::now());
+            }
+        }
+        match protocol_state {
             SourceRefreshProtocolState::Published => {
                 if let Some(expected_catalog) = expected_catalog {
                     let published_catalog = response
@@ -394,6 +479,22 @@ pub(super) fn wait_for_published_generation(
             }
         }
     }
+}
+
+fn should_report_progress(
+    last_progress: Option<&SourceBackedRefreshProgress>,
+    last_reported_at: Option<StdInstant>,
+    progress: &SourceBackedRefreshProgress,
+    protocol_state: SourceRefreshProtocolState,
+    now: StdInstant,
+) -> bool {
+    matches!(
+        protocol_state,
+        SourceRefreshProtocolState::Published | SourceRefreshProtocolState::Failed
+    ) || last_progress != Some(progress)
+        || last_reported_at.is_some_and(|at| {
+            now.saturating_duration_since(at) >= SOURCE_REFRESH_PROGRESS_HEARTBEAT
+        })
 }
 
 fn failed_refresh_response(response: &Value) -> Result<SourceBackedRefreshObservation> {
@@ -604,4 +705,36 @@ fn response_source_count(response: &Value) -> usize {
         .and_then(Value::as_u64)
         .and_then(|count| usize::try_from(count).ok())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod progress_poll_tests {
+    use super::*;
+
+    #[test]
+    fn identical_poll_is_suppressed_until_heartbeat_or_terminal_state() {
+        let progress = SourceBackedRefreshProgress::default();
+        let now = StdInstant::now();
+        assert!(!should_report_progress(
+            Some(&progress),
+            Some(now),
+            &progress,
+            SourceRefreshProtocolState::Running,
+            now,
+        ));
+        assert!(should_report_progress(
+            Some(&progress),
+            Some(now),
+            &progress,
+            SourceRefreshProtocolState::Running,
+            now + SOURCE_REFRESH_PROGRESS_HEARTBEAT,
+        ));
+        assert!(should_report_progress(
+            Some(&progress),
+            Some(now),
+            &progress,
+            SourceRefreshProtocolState::Published,
+            now,
+        ));
+    }
 }

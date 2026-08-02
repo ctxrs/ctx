@@ -593,6 +593,30 @@ fn stock_sqlite_snapshot_finish_precedes_publication_revalidation() {
     assert!(!finish_opened_source(opened).unwrap());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn retained_database_leaf_fence_rejects_exact_path_replacement() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("project.db");
+    let replacement = temp.path().join("replacement.db");
+    write_database(&path, "session", "message", "opening body");
+    write_database(&replacement, "session", "message", "replacement body");
+    let frozen = bind_inventory(
+        crate::test_provider_sqlite_data_root(),
+        inventory(b"leaf-fence", vec![database("project", &path)]),
+    )
+    .unwrap();
+    let database = &frozen.databases[0];
+
+    std::fs::rename(&replacement, &path).unwrap();
+
+    assert!(matches!(
+        database.database_file.revalidate_same_object_leaf(),
+        Err(CaptureError::SourceChangedDuringCapture)
+            | Err(CaptureError::InvalidProviderTranscriptPath { .. })
+    ));
+}
+
 fn inventory(
     revision: &[u8],
     databases: Vec<CrushProjectDatabaseV0>,

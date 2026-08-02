@@ -65,6 +65,7 @@ pub(super) fn run_automatic_source_refresh_import(
         context.config,
         context.args.no_daemon,
         ImportCoreRefreshRequest::Automatic,
+        &progress,
     )?;
     let receipt = refresh
         .receipt
@@ -80,7 +81,7 @@ pub(super) fn run_automatic_source_refresh_import(
         per_run_counts_available: false,
         // Route-result counts are reported separately from per-run import
         // counts because the receipt certifies a whole Core generation.
-        failed_sources: receipt.source_failures.len(),
+        failed_sources: receipt.source_failure_total(),
         current_source_count: Some(current.source_count),
         current_indexed_documents: Some(current.indexed_documents),
         current_complete_records: Some(current.complete_records),
@@ -110,7 +111,10 @@ pub(super) fn run_automatic_source_refresh_import(
         "Finished refreshing local history.".to_owned()
     };
     progress.finish_line()?;
-    progress.done("published", completion, current.certified_source_bytes)?;
+    // The receipt exposes retained corpus bytes, not work performed by this
+    // invocation. Preserve the unknown per-run total instead of inventing a
+    // 100% work-byte result on warm no-op imports.
+    progress.done("published", completion, 0)?;
 
     let mut report_sources = vec![compact_json(json!({
         "status": "published",
@@ -124,13 +128,11 @@ pub(super) fn run_automatic_source_refresh_import(
         "previous_generation": receipt.previous_generation,
         "published_generation": receipt.published_generation,
         "generation_changed": receipt.generation_changed,
-        "scanned_routes": receipt.selected_route_ids.len(),
-        "successful_routes": receipt.successful_route_ids.len(),
-        "source_failure_total": receipt.source_failures.len(),
-        "source_failures_omitted": receipt
-            .source_failures
-            .len()
-            .saturating_sub(MAX_REPORTED_SOURCE_FAILURES),
+        "scanned_routes": receipt.selected_route_total,
+        "successful_routes": receipt.successful_route_total,
+        "source_failure_total": receipt.source_failure_total(),
+        "source_failures_omitted": receipt.source_failures_omitted()
+            .saturating_add(receipt.source_failures.len().saturating_sub(MAX_REPORTED_SOURCE_FAILURES)),
         "current_source_count": current.source_count,
         "current_indexed_documents": current.indexed_documents,
         "current_complete_records": current.complete_records,
@@ -162,6 +164,8 @@ pub(super) fn run_automatic_source_refresh_import(
                     &failure.provider,
                     &failure.class,
                     failure.carried_forward,
+                    &failure.source_selector,
+                    &failure.detail,
                 )
             }),
     );
@@ -178,18 +182,13 @@ fn source_failure_report_row(
     provider: &str,
     class: &str,
     carried_forward: bool,
+    source_selector: &str,
+    detail: &str,
 ) -> serde_json::Value {
     let failure_type = if class == "incompatible" {
         "unsupported_schema"
     } else {
         "other"
-    };
-    let detail = match class {
-        "unavailable" => format!("{provider} source was unavailable during refresh"),
-        "source_changed" => format!("{provider} source changed while it was being refreshed"),
-        "unreadable" => format!("{provider} source could not be read"),
-        "incompatible" => format!("{provider} source schema is not supported"),
-        _ => format!("{provider} source refresh failed ({class})"),
     };
     compact_json(json!({
         "status": "failure",
@@ -199,7 +198,7 @@ fn source_failure_report_row(
         "provider": provider,
         "source_failure_class": class,
         "carried_forward": carried_forward,
-        "source_selector": source_identity,
+        "source_selector": source_selector,
         "detail": detail,
         "error": detail,
         "source_files": 0,
@@ -280,12 +279,19 @@ mod tests {
     #[test]
     fn source_failure_rows_follow_schema_v2_and_are_bounded() {
         let source_identity = "22".repeat(32);
-        let row = source_failure_report_row(&source_identity, "codex", "source_changed", true);
+        let row = source_failure_report_row(
+            &source_identity,
+            "codex",
+            "source_changed",
+            true,
+            "/tmp/codex-history",
+            "source changed during refresh",
+        );
         assert_eq!(row["status"], "failure");
         assert_eq!(row["failure_scope"], "source");
         assert_eq!(row["failure_type"], "other");
         assert_eq!(row["source_failure_class"], "source_changed");
-        assert_eq!(row["source_selector"], "22".repeat(32));
+        assert_eq!(row["source_selector"], "/tmp/codex-history");
         assert_eq!(row["detail"], row["error"]);
         assert_eq!(row["imported_events"], 0);
         assert_eq!(row["rejections"], json!([]));

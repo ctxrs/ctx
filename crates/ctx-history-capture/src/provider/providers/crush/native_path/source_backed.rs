@@ -8,10 +8,8 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
     path::{Path, PathBuf},
+    sync::Arc,
 };
-
-#[cfg(test)]
-use std::sync::Arc;
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource, CoreRecord,
@@ -33,7 +31,7 @@ use super::{
     CRUSH_NATIVE_MAX_EVENT_TOUCHES,
 };
 use crate::{
-    common::io::ProviderSourceRoot,
+    common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     fnv1a64,
     provider::file_touches::{
         event_type_supports_structured_file_touches, visit_provider_file_touch_drafts_with_limit,
@@ -228,6 +226,7 @@ pub(crate) struct BoundDatabase {
     pub(crate) source_key: SourceKey,
     pub(crate) canonical_path: PathBuf,
     source_root: ProviderSourceRoot,
+    database_file: Arc<OpenedProviderSourceFile>,
     #[cfg(test)]
     sqlite_authority: Arc<SqliteSourceDirectoryAuthority>,
     #[cfg(test)]
@@ -307,6 +306,7 @@ pub(crate) fn bind_inventory(
         let canonical_path = std::fs::canonicalize(&database.path)?;
         let (source_root, _sqlite_authority, _database_name) =
             retain_crush_sqlite_authority(data_root, &canonical_path)?;
+        let database_file = Arc::new(source_root.open_file(Path::new(&_database_name))?);
         let source_key = crush_source_key(database.project_key)?;
         if !source_ids.insert(source_key.identity().digest()) {
             return Err(CrushSourceBackedErrorV0::DuplicateProjectKey);
@@ -318,6 +318,7 @@ pub(crate) fn bind_inventory(
             source_key,
             canonical_path,
             source_root,
+            database_file,
             #[cfg(test)]
             sqlite_authority: Arc::new(_sqlite_authority),
             #[cfg(test)]
@@ -369,6 +370,7 @@ fn finish_source(source: OpenedSource) -> CrushSourceBackedResultV0<()> {
     } = source;
     read_snapshot.finish()?;
     before_source_publication_revalidation();
+    database.database_file.revalidate_same_object_leaf()?;
     database.source_root.revalidate()?;
     Ok(())
 }

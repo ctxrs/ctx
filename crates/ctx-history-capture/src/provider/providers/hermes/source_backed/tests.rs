@@ -7,7 +7,8 @@ use rusqlite::Connection;
 use super::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, refresh_source_backed_generation_with_progress,
+        refresh_source_backed_generation, refresh_source_backed_generation_with_detailed_progress,
+        refresh_source_backed_generation_with_progress, SourceBackedCurrentSourceProgressStage,
         SourceBackedProviderRegistry,
     },
     provider_sources::provider_source_for_path,
@@ -613,6 +614,54 @@ fn fixture_writer_options() -> WriterOptions {
         indexer_threads: 1,
         memory_bytes: 15_000_000,
     }
+}
+
+#[test]
+fn detailed_progress_reports_backup_fingerprint_and_logical_scan() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let database = temp.path().join("source/state.db");
+    create_refresh_fixture(&database, 3);
+    let registry = fixture_registry(&data_root, &database);
+    let mut progress = Vec::new();
+
+    let receipt = refresh_source_backed_generation_with_detailed_progress(
+        index_root,
+        &registry,
+        fixture_writer_options(),
+        |update| {
+            if let Some(current) = update.current_source_progress {
+                progress.push(current);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert!(progress.iter().any(|update| {
+        matches!(
+            update.stage,
+            SourceBackedCurrentSourceProgressStage::OnlineBackup
+                | SourceBackedCurrentSourceProgressStage::SourceFamilyCopy
+        )
+    }));
+    assert!(progress.iter().any(|update| {
+        update.stage == SourceBackedCurrentSourceProgressStage::LogicalFingerprint
+    }));
+    let scan = progress
+        .iter()
+        .filter(|update| update.stage == SourceBackedCurrentSourceProgressStage::LogicalScan)
+        .collect::<Vec<_>>();
+    assert_eq!(scan.first().unwrap().logical_rows_scanned, Some(0));
+    assert_eq!(
+        scan.last().unwrap().logical_rows_scanned,
+        Some(receipt.sources[0].counts().complete_records)
+    );
+    assert_eq!(
+        scan.last().unwrap().logical_certified_bytes,
+        Some(receipt.sources[0].counts().certified_bytes)
+    );
 }
 
 #[test]

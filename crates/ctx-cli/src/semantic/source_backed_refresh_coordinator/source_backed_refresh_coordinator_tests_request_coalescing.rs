@@ -132,6 +132,7 @@ fn duplicate_concurrent_requests_launch_one_writer() {
                         current_source: Some("source-a".to_owned()),
                         completed_records: Some(1),
                         completed_bytes: Some(128),
+                        current_source_progress: None,
                     },
                 );
                 Ok(test_publication("generation-2"))

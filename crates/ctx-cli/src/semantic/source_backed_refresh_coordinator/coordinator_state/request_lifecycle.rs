@@ -413,6 +413,7 @@ impl CoreRefreshEngine {
             current_source: update.current_source,
             completed_records: update.completed_records,
             completed_bytes: update.completed_bytes,
+            current_source_progress: update.current_source_progress,
         };
         Some(attempt.job_json())
     }

@@ -22,12 +22,16 @@ use crate::{
     common::io::ProviderSourceRoot,
     provider::{
         native_ingestion::{NATIVE_INGESTION_PAGE_MAX_BYTES, NATIVE_INGESTION_PAGE_MAX_UNITS},
+        source_backed::{
+            SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
+            SourceBackedRouteError, SourceBackedRouteResult,
+        },
         sqlite::sqlite_schema_fingerprint,
     },
     provider_sources::{
         retain_sqlite_source_directory_authority, ProviderSource, SqliteLogicalSnapshot,
         SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
-        SqliteSourceReadSnapshot,
+        SqliteSourceProgressError, SqliteSourceReadSnapshot,
     },
     CaptureError, HERMES_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -81,10 +85,27 @@ struct HermesSnapshotProjection {
     peak_context_cache_bytes: u64,
 }
 
+enum HermesSnapshotProjectionOutput {
+    Page(HermesSourceBackedPage),
+    Progress(SourceBackedCurrentSourceProgress),
+}
+
+#[cfg(test)]
 fn project_hermes_snapshot(
     candidate: &HermesSourceCandidate,
     conn: &rusqlite::Connection,
     emit: &mut dyn FnMut(HermesSourceBackedPage) -> HermesSourceBackedResult<()>,
+) -> HermesSourceBackedResult<HermesSnapshotProjection> {
+    project_hermes_snapshot_with_progress(candidate, conn, &mut |output| match output {
+        HermesSnapshotProjectionOutput::Page(page) => emit(page),
+        HermesSnapshotProjectionOutput::Progress(_) => Ok(()),
+    })
+}
+
+fn project_hermes_snapshot_with_progress(
+    candidate: &HermesSourceCandidate,
+    conn: &rusqlite::Connection,
+    emit: &mut dyn FnMut(HermesSnapshotProjectionOutput) -> HermesSourceBackedResult<()>,
 ) -> HermesSourceBackedResult<HermesSnapshotProjection> {
     candidate.source.validate_contract()?;
     let source_path = candidate
@@ -92,12 +113,26 @@ fn project_hermes_snapshot(
         .to_str()
         .ok_or_else(|| HermesSourceBackedError::InvalidProfilePath(candidate.path.clone()))?
         .to_owned();
+    emit(HermesSnapshotProjectionOutput::Progress(
+        hermes_logical_progress(
+            SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
+            0,
+            0,
+        ),
+    ))?;
     let sqlite_user_version = conn
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
     let schema = HermesSchema::detect(conn)?;
     let schema_evidence = hermes_schema_evidence(sqlite_user_version, &schema_fingerprint);
+    emit(HermesSnapshotProjectionOutput::Progress(
+        hermes_logical_progress(
+            SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
+            0,
+            0,
+        ),
+    ))?;
 
     let mut reader = HermesRowReader::new(conn, &schema)?;
     let mut context_memo = HermesSessionContextMemo::new(conn, &schema, &candidate.source);
@@ -113,6 +148,9 @@ fn project_hermes_snapshot(
             let mut decoded_rows = 0_u64;
             let mut emitted_pages = 0_u64;
             let mut peak_buffered_records = 0_u64;
+            emit(HermesSnapshotProjectionOutput::Progress(
+                hermes_logical_progress(SourceBackedCurrentSourceProgressStage::LogicalScan, 0, 0),
+            ))?;
 
             loop {
                 let native_page = reader.next_page(frontier)?;
@@ -179,10 +217,12 @@ fn project_hermes_snapshot(
                             u64::try_from(records.len())
                                 .map_err(|_| HermesSourceBackedError::CountOverflow)?,
                         );
-                        emit(HermesSourceBackedPage {
-                            records,
-                            completed_bytes: page_completed_bytes,
-                        })?;
+                        emit(HermesSnapshotProjectionOutput::Page(
+                            HermesSourceBackedPage {
+                                records,
+                                completed_bytes: page_completed_bytes,
+                            },
+                        ))?;
                         emitted_pages = checked_add(emitted_pages, 1)?;
                         page_owned_bytes = 0;
                         page_completed_bytes = 0;
@@ -196,27 +236,45 @@ fn project_hermes_snapshot(
                             u64::try_from(records.len())
                                 .map_err(|_| HermesSourceBackedError::CountOverflow)?,
                         );
-                        emit(HermesSourceBackedPage {
-                            records,
-                            completed_bytes: page_completed_bytes,
-                        })?;
+                        emit(HermesSnapshotProjectionOutput::Page(
+                            HermesSourceBackedPage {
+                                records,
+                                completed_bytes: page_completed_bytes,
+                            },
+                        ))?;
                         emitted_pages = checked_add(emitted_pages, 1)?;
                         page_owned_bytes = 0;
                         page_completed_bytes = 0;
                     }
                 }
+                emit(HermesSnapshotProjectionOutput::Progress(
+                    hermes_logical_progress(
+                        SourceBackedCurrentSourceProgressStage::LogicalScan,
+                        counts.complete_records,
+                        counts.certified_bytes,
+                    ),
+                ))?;
             }
             if !page_records.is_empty() {
                 peak_buffered_records = peak_buffered_records.max(
                     u64::try_from(page_records.len())
                         .map_err(|_| HermesSourceBackedError::CountOverflow)?,
                 );
-                emit(HermesSourceBackedPage {
-                    records: page_records,
-                    completed_bytes: page_completed_bytes,
-                })?;
+                emit(HermesSnapshotProjectionOutput::Page(
+                    HermesSourceBackedPage {
+                        records: page_records,
+                        completed_bytes: page_completed_bytes,
+                    },
+                ))?;
                 emitted_pages = checked_add(emitted_pages, 1)?;
             }
+            emit(HermesSnapshotProjectionOutput::Progress(
+                hermes_logical_progress(
+                    SourceBackedCurrentSourceProgressStage::LogicalScan,
+                    counts.complete_records,
+                    counts.certified_bytes,
+                ),
+            ))?;
             Ok((
                 counts,
                 digest.finalize().into(),
@@ -265,17 +323,45 @@ fn checked_add(left: u64, right: u64) -> HermesSourceBackedResult<u64> {
         .ok_or(HermesSourceBackedError::CountOverflow)
 }
 
+#[cfg(test)]
 fn open_root_authorized_snapshot(
     data_root: &Path,
     path: &Path,
 ) -> HermesSourceBackedResult<(SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot)> {
-    open_root_authorized_snapshot_with_hook(data_root, path, || {})
+    open_root_authorized_snapshot_with_hook_and_progress(data_root, path, || {}, &mut |_| Ok(()))
 }
 
+fn open_root_authorized_snapshot_with_progress(
+    data_root: &Path,
+    path: &Path,
+    report_progress: &mut dyn FnMut(
+        SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()>,
+) -> HermesSourceBackedResult<(SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot)> {
+    open_root_authorized_snapshot_with_hook_and_progress(data_root, path, || {}, report_progress)
+}
+
+#[cfg(test)]
 fn open_root_authorized_snapshot_with_hook(
     data_root: &Path,
     path: &Path,
     after_authorize: impl FnOnce(),
+) -> HermesSourceBackedResult<(SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot)> {
+    open_root_authorized_snapshot_with_hook_and_progress(
+        data_root,
+        path,
+        after_authorize,
+        &mut |_| Ok(()),
+    )
+}
+
+fn open_root_authorized_snapshot_with_hook_and_progress(
+    data_root: &Path,
+    path: &Path,
+    after_authorize: impl FnOnce(),
+    report_progress: &mut dyn FnMut(
+        SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()>,
 ) -> HermesSourceBackedResult<(SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot)> {
     let parent = path
         .parent()
@@ -294,7 +380,12 @@ fn open_root_authorized_snapshot_with_hook(
         .map_err(CaptureError::from)?;
     let sqlite_authority =
         retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
-    let sqlite_snapshot = sqlite_authority.open_logical_online_backup_snapshot(database_leaf)?;
+    let sqlite_snapshot = sqlite_authority
+        .open_logical_online_backup_snapshot_with_progress(database_leaf, report_progress)
+        .map_err(|error| match error {
+            SqliteSourceProgressError::Source(error) => HermesSourceBackedError::from(error),
+            SqliteSourceProgressError::Progress(error) => HermesSourceBackedError::from(error),
+        })?;
     after_authorize();
     sqlite_snapshot.revalidate()?;
     let connection = sqlite_snapshot.connection()?;
@@ -314,6 +405,17 @@ fn hermes_schema_evidence(sqlite_user_version: i64, schema_fingerprint: &str) ->
          schema={schema_fingerprint}",
     )
     .into_bytes()
+}
+
+fn hermes_logical_progress(
+    stage: SourceBackedCurrentSourceProgressStage,
+    rows_scanned: u64,
+    certified_bytes: u64,
+) -> SourceBackedCurrentSourceProgress {
+    let mut progress = SourceBackedCurrentSourceProgress::new(stage);
+    progress.logical_rows_scanned = Some(rows_scanned);
+    progress.logical_certified_bytes = Some(certified_bytes);
+    progress
 }
 
 fn hermes_tree_fingerprint(source: &SourceKey) -> [u8; 32] {

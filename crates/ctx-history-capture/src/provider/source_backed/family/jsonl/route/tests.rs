@@ -327,6 +327,7 @@ fn capture_parallel_test_generation(
             leaf_worker_budget: workers,
             applied_removals: &mut Vec::new(),
             record_progress: None,
+            current_source_progress: None,
         };
         with_family_scanner_workers(workers, || {
             capture(adapter, root, &resident, &mut sink).unwrap();
@@ -364,6 +365,7 @@ fn capture_checkpoint_test_generation(
             leaf_worker_budget: workers,
             applied_removals: &mut Vec::new(),
             record_progress: None,
+            current_source_progress: None,
         };
         with_family_scanner_workers(workers, || {
             capture(&CheckpointTestAdapter, root, &resident, &mut sink).unwrap();
@@ -546,6 +548,7 @@ fn production_jsonl_scheduler_projects_multiple_sources_concurrently() {
         leaf_worker_budget: 4,
         applied_removals: &mut Vec::new(),
         record_progress: None,
+        current_source_progress: None,
     };
 
     with_family_scanner_workers(4, || {

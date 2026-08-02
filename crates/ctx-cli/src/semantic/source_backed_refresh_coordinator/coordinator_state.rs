@@ -11,12 +11,13 @@ mod route_frontier;
 mod runtime_metadata;
 use generation_authority::CoreRefreshTerminalSuccess;
 pub(crate) use generation_authority::PinnedCorePublication;
-use read_model::{
-    SourceBackedRefreshAttempt, SourceBackedRefreshProgress, SourceBackedRefreshState,
-};
 pub(crate) use read_model::{
-    SourceBackedRefreshReceipt, SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
+    SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
+    SourceBackedRefreshCatalogRouteOutcome, SourceBackedRefreshProgress,
+    SourceBackedRefreshReceipt, SourceBackedRefreshRouteFailure, SourceBackedRefreshSourceFailure,
+    SourceBackedRefreshTimings,
 };
+use read_model::{SourceBackedRefreshAttempt, SourceBackedRefreshState};
 use route_frontier::RouteFreshnessFrontier;
 use runtime_metadata::{
     source_catalog_refresh_runtime_metadata, source_refresh_runtime_metadata,
@@ -30,6 +31,7 @@ pub(super) struct SourceBackedRefreshProgressUpdate {
     pub(super) current_source: Option<String>,
     pub(super) completed_records: Option<u64>,
     pub(super) completed_bytes: Option<u64>,
+    pub(super) current_source_progress: Option<SourceBackedCurrentSourceProgress>,
 }
 
 /// Daemon-owned execution context passed to the capture refresh callback.
@@ -58,6 +60,28 @@ impl SourceBackedRefreshExecution<'_> {
         completed_records: Option<u64>,
         completed_bytes: Option<u64>,
     ) -> Result<()> {
+        self.report_detailed_progress(
+            phase,
+            completed_sources,
+            total_sources,
+            current_source,
+            completed_records,
+            completed_bytes,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn report_detailed_progress(
+        &self,
+        phase: &str,
+        completed_sources: usize,
+        total_sources: usize,
+        current_source: Option<String>,
+        completed_records: Option<u64>,
+        completed_bytes: Option<u64>,
+        current_source_progress: Option<SourceBackedCurrentSourceProgress>,
+    ) -> Result<()> {
         (self.report_progress)(SourceBackedRefreshProgressUpdate {
             phase: phase.to_owned(),
             completed_sources,
@@ -65,6 +89,7 @@ impl SourceBackedRefreshExecution<'_> {
             current_source,
             completed_records,
             completed_bytes,
+            current_source_progress,
         })
     }
 }
@@ -873,7 +898,7 @@ impl CoreRefreshEngine {
                 continue;
             };
             if let Some(failure) = receipt
-                .source_failures
+                .failed_route_outcomes
                 .iter()
                 .find(|failure| failure.route_identity == admission.route().as_str())
             {
@@ -966,11 +991,20 @@ fn source_backed_refresh_failure_type(error: &anyhow::Error) -> Option<&'static 
         else {
             return None;
         };
-        let first = failed_routes.first()?.class;
-        if failed_routes.iter().any(|failure| failure.class != first) {
+        let classes = [
+            SourceBackedSourceFailureClass::Unavailable,
+            SourceBackedSourceFailureClass::SourceChanged,
+            SourceBackedSourceFailureClass::Unreadable,
+            SourceBackedSourceFailureClass::Incompatible,
+        ];
+        let present = classes
+            .into_iter()
+            .filter(|class| failed_routes.class_total(*class) != 0)
+            .collect::<Vec<_>>();
+        let [first] = present.as_slice() else {
             return Some("source_failures");
-        }
-        Some(match first {
+        };
+        Some(match *first {
             SourceBackedSourceFailureClass::Unavailable => "source_unavailable",
             SourceBackedSourceFailureClass::SourceChanged => "source_changed",
             SourceBackedSourceFailureClass::Unreadable => "malformed_source",
@@ -991,15 +1025,31 @@ fn source_backed_refresh_error_summary(error: &anyhow::Error) -> String {
     let Some(failed_routes) = failed_routes else {
         return format!("{error:#}");
     };
-    let mut summaries = failed_routes
+    let mut details = failed_routes
         .iter()
+        .take(3)
         .map(|failure| format!("{} ({})", failure.provider.as_str(), failure.class.as_str()))
         .collect::<Vec<_>>();
-    summaries.sort();
-    summaries.dedup();
+    details.sort();
+    details.dedup();
+    let mut totals = [
+        SourceBackedSourceFailureClass::Unavailable,
+        SourceBackedSourceFailureClass::SourceChanged,
+        SourceBackedSourceFailureClass::Unreadable,
+        SourceBackedSourceFailureClass::Incompatible,
+    ]
+    .into_iter()
+    .filter_map(|class| {
+        let total = failed_routes.class_total(class);
+        (total != 0).then(|| format!("{} {total}", class.as_str()))
+    })
+    .collect::<Vec<_>>();
+    totals.sort();
+    totals.dedup();
     format!(
-        "source-backed refresh retained no usable source; failed routes: {}",
-        summaries.join(", ")
+        "source-backed refresh retained no usable source; failed routes: {}; class totals: {}",
+        details.join(", "),
+        totals.join(", ")
     )
 }
 

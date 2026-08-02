@@ -23,13 +23,14 @@ fn empty_terminal_receipt_fixture() -> (tempfile::TempDir, Value, PinnedSourceBa
 }
 
 #[test]
-fn current_terminal_receipt_requires_every_route_outcome_array() {
+fn current_terminal_receipt_requires_compact_route_outcomes() {
     let (_temp, response, pin) = empty_terminal_receipt_fixture();
 
     for field in [
-        "selected_route_ids",
-        "successful_route_ids",
+        "selected_route_total",
+        "successful_route_total",
         "source_failures",
+        "catalog_route_outcomes",
     ] {
         let mut missing = response.clone();
         assert!(missing["receipt"]
@@ -39,9 +40,9 @@ fn current_terminal_receipt_requires_every_route_outcome_array() {
             .is_some());
 
         let error = published_refresh_receipt(&missing, &pin)
-            .expect_err("missing current-protocol route outcome array must fail");
+            .expect_err("missing current-protocol route outcome must fail");
         assert!(
-            format!("{error:#}").contains(&format!("required {field} array")),
+            format!("{error:#}").contains(field),
             "unexpected error for {field}: {error:#}"
         );
     }
@@ -51,10 +52,10 @@ fn current_terminal_receipt_requires_every_route_outcome_array() {
 fn current_terminal_receipt_rejects_malformed_route_outcome_arrays() {
     let (_temp, response, pin) = empty_terminal_receipt_fixture();
     let cases = [
-        ("selected_route_ids", json!(null)),
-        ("successful_route_ids", json!({})),
+        ("selected_route_total", json!(null)),
+        ("successful_route_total", json!({})),
         ("source_failures", json!("none")),
-        ("selected_route_ids", json!([17])),
+        ("catalog_route_outcomes", json!(17)),
     ];
 
     for (field, malformed_value) in cases {
@@ -73,7 +74,7 @@ fn current_terminal_receipt_rejects_malformed_route_outcome_arrays() {
 #[test]
 fn current_terminal_receipt_rejects_inconsistent_route_outcome_partition() {
     let (_temp, mut response, pin) = empty_terminal_receipt_fixture();
-    response["receipt"]["successful_route_ids"] = json!(["11".repeat(32)]);
+    response["receipt"]["successful_route_total"] = json!(1);
 
     let error = published_refresh_receipt(&response, &pin)
         .expect_err("unselected successful route must fail partition validation");
@@ -84,15 +85,130 @@ fn current_terminal_receipt_rejects_inconsistent_route_outcome_partition() {
 }
 
 #[test]
-fn current_terminal_receipt_preserves_legitimate_empty_route_outcome_arrays() {
+fn catalog_outcomes_must_match_global_route_partition() {
+    let (_temp, response, pin) = empty_terminal_receipt_fixture();
+    let lineage = "11".repeat(32);
+    let route = "22".repeat(32);
+
+    let mut impossible_success = response.clone();
+    impossible_success["receipt"]["catalog_route_outcomes"] =
+        json!({ (lineage.clone()): [route.clone(), "s"] });
+    let error = published_refresh_receipt(&impossible_success, &pin)
+        .expect_err("catalog success cannot exceed successful route total");
+    assert!(format!("{error:#}").contains("invalid route-result partition"));
+
+    let mut conflicting_shared_route = response;
+    conflicting_shared_route["receipt"]["catalog_route_outcomes"] = json!({
+        (lineage): [route.clone(), "s"],
+        ("33".repeat(32)): [route, "f", "u"],
+    });
+    let error = published_refresh_receipt(&conflicting_shared_route, &pin)
+        .expect_err("shared route cannot have conflicting catalog outcomes");
+    assert!(format!("{error:#}").contains("disagree on a shared route result"));
+}
+
+#[test]
+fn current_terminal_receipt_preserves_legitimate_empty_route_outcomes() {
     let (_temp, response, pin) = empty_terminal_receipt_fixture();
     let receipt = published_refresh_receipt(&response, &pin)
-        .expect("present empty arrays describe a legitimate empty current receipt");
+        .expect("present empty outcomes describe a legitimate empty current receipt");
 
+    assert_eq!(receipt.selected_route_total, 0);
+    assert_eq!(receipt.successful_route_total, 0);
     assert!(receipt.selected_route_ids.is_empty());
     assert!(receipt.successful_route_ids.is_empty());
+    assert!(receipt.catalog_route_outcomes.is_empty());
     assert!(receipt.source_failures.is_empty());
     assert_eq!(receipt.to_json()["outcome"], "completed");
+}
+
+#[test]
+fn terminal_response_is_transport_bounded_and_preserves_exact_catalog_outcome() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let catalog_lineage = format!("{:064x}", 255);
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let commit = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                WriterOptions::default(),
+            )?
+            .commit(|_| true)?;
+            let route_ids = (0..256)
+                .map(|index| format!("{index:064x}"))
+                .collect::<Vec<_>>();
+            let failed_route_outcomes = route_ids
+                .iter()
+                .map(|route_identity| SourceBackedRefreshRouteFailure {
+                    route_identity: route_identity.clone(),
+                    source_identity: "cd".repeat(32),
+                    provider: "opencode".to_owned(),
+                    class: "unreadable".to_owned(),
+                    carried_forward: false,
+                })
+                .collect();
+            let source_failures = route_ids
+                .iter()
+                .map(|route_identity| SourceBackedRefreshSourceFailure {
+                    route_identity: route_identity.clone(),
+                    source_identity: "cd".repeat(32),
+                    provider: "opencode".to_owned(),
+                    class: "unreadable".to_owned(),
+                    carried_forward: false,
+                    source_selector: "s".repeat(512),
+                    detail: "d".repeat(512),
+                })
+                .collect();
+            Ok(SourceBackedRefreshPublication {
+                generation_id: commit.generation_id,
+                published_explicit_source_catalog: execution
+                    .explicit_source_catalog
+                    .cloned()
+                    .expect("catalog authority"),
+                scanned_routes: route_ids.len(),
+                unsupported_routes: 0,
+                certified_source_count: 0,
+                certified_source_bytes: 0,
+                current: SourceBackedRefreshCurrent::default(),
+                timings: SourceBackedRefreshTimings::default(),
+                selected_route_ids: route_ids.clone(),
+                successful_route_ids: Vec::new(),
+                failed_route_outcomes,
+                catalog_route_outcomes: route_ids
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(index, route_identity)| SourceBackedRefreshCatalogRouteOutcome {
+                            catalog_lineage: format!("{index:064x}"),
+                            route_identity: route_identity.clone(),
+                            outcome: "failed".to_owned(),
+                            failure_class: Some("unreadable".to_owned()),
+                        },
+                    )
+                    .collect(),
+                source_failures,
+            })
+        },
+    ));
+    coordinator.enqueue_periodic(&data_root).unwrap();
+    let run = coordinator.run_next(&data_root).expect("bounded refresh");
+    assert!(!run.failed);
+    let wire = serde_json::to_vec(&run.job).unwrap();
+    assert!(wire.len() < SOURCE_REFRESH_RESPONSE_MAX_BYTES as usize);
+    let pin = pin_published_generation(&data_root)
+        .unwrap()
+        .expect("published generation");
+    let receipt = published_refresh_receipt(&run.job, &pin).unwrap();
+    assert_eq!(receipt.source_failure_total(), 256);
+    assert!(receipt.source_failures.len() < 256);
+    assert_eq!(
+        receipt.source_failures_omitted(),
+        256 - receipt.source_failures.len()
+    );
+    assert_eq!(receipt.catalog_route_outcomes.len(), 256);
+    assert!(receipt.catalog_route_outcomes.iter().any(|outcome| {
+        outcome.catalog_lineage == catalog_lineage && outcome.outcome == "failed"
+    }));
 }
 
 #[test]
@@ -268,7 +384,8 @@ fn nonempty_explicit_catalog_publication_is_recorded_in_the_terminal_receipt() {
         DiscoveryPlatform::Linux,
         DiscoveryPlatformDirs::default(),
     );
-    let mut progress = |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+    let mut progress =
+        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
     let publication = refresh_all_provider_sources(
         &discovery,
         DiscoveryReport {

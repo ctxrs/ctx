@@ -210,6 +210,8 @@ fn missing_fixture_executor(
                 .iter()
                 .map(|route| route.as_str().to_owned())
                 .collect(),
+            failed_route_outcomes: Vec::new(),
+            catalog_route_outcomes: Vec::new(),
             source_failures: Vec::new(),
         })
     })

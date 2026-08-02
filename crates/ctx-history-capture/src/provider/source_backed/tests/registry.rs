@@ -42,6 +42,54 @@ fn heterogeneous_routes_publish_one_core_generation() {
     assert!(committed.stage_duration > Duration::ZERO);
 }
 
+#[test]
+fn current_source_progress_failure_is_latched_when_driver_suppresses_it() {
+    let mut route = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 1);
+    let original = route.driver.take().unwrap();
+    let scan = Arc::clone(&original.scan);
+    let owns = Arc::clone(&original.owns_source);
+    let revalidate = Arc::clone(&original.revalidate);
+    route.driver = Some(SourceBackedRouteDriver::new(
+        move |sink| {
+            let progress = SourceBackedCurrentSourceProgress::new(
+                SourceBackedCurrentSourceProgressStage::LogicalScan,
+            );
+            assert!(sink.report_current_source_progress(progress).is_err());
+            assert!(sink.report_current_source_progress(progress).is_err());
+            scan(sink)
+        },
+        move |source| owns(source),
+        move |target| revalidate(target),
+    ));
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(route);
+    let callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&callbacks);
+
+    let error = refresh_source_backed_generation_with_detailed_progress(
+        tempdir().unwrap().path(),
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+        move |update| {
+            if update.current_source_progress.is_some() {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "fixture progress failure",
+                ));
+            }
+            Ok(())
+        },
+    )
+    .expect_err("latched progress failure remains systemic");
+
+    assert!(matches!(error, SourceBackedCoordinatorError::Progress(_)));
+    assert_eq!(callbacks.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 fn fail_route_after_scan(
     mut route: SourceBackedRoute,
     kind: SourceBackedRouteErrorKind,

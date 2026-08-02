@@ -193,6 +193,34 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
 }
 
 #[test]
+fn warm_no_op_import_progress_keeps_per_run_bytes_unknown() {
+    let temp = tempdir();
+    copy_dir_all(
+        Path::new(&provider_history_fixture("codex-sessions")),
+        &temp.path().join(".codex").join("sessions"),
+    );
+    ctx(&temp)
+        .args(["import", "--all", "--format=json", "--progress", "none"])
+        .assert()
+        .success();
+    let output = ctx(&temp)
+        .args(["import", "--all", "--format=json", "--progress", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let terminal = String::from_utf8(output.stderr)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["done"] == true && line["phase"] == "published")
+        .expect("terminal JSON progress event");
+    assert_eq!(terminal["completed_bytes"], 0);
+    assert_eq!(terminal["total_bytes"], 0);
+    assert_eq!(terminal["percent"], 0.0);
+}
+
+#[test]
 fn human_import_is_outcome_first_without_internal_generation_fields() {
     let temp = tempdir();
     let _daemon = start_full_source_refresh_daemon(&temp);
@@ -831,7 +859,12 @@ fn explicit_import_reports_warm_carried_route_failure() {
     assert_eq!(source["source_failure_total"], 1, "{source:#}");
     assert_eq!(source["source_failure_class"], "unreadable", "{source:#}");
     assert_eq!(source["carried_forward"], true, "{source:#}");
-    assert_eq!(source["successful_routes"], 0, "{source:#}");
+    assert!(
+        source["successful_routes"]
+            .as_u64()
+            .is_some_and(|routes| routes > 0),
+        "{source:#}"
+    );
     assert!(source["source_identity"].is_string(), "{source:#}");
     assert_eq!(provider_core_counts(&data_root(&temp), "custom"), (1, 1));
 }
@@ -1071,17 +1104,17 @@ fn import_all_publishes_valid_routes_and_reports_one_invalid_route() {
         publication["daemon_request_metadata"]["operation"],
         "import"
     );
-    assert!(publication["successful_route_ids"]
-        .as_array()
-        .is_some_and(|routes| !routes.is_empty()));
+    assert!(publication["successful_routes"]
+        .as_u64()
+        .is_some_and(|routes| routes > 0));
     let failed = imported["sources"]
         .as_array()
         .unwrap()
         .iter()
         .find(|source| source["provider"] == "opencode")
         .expect("typed opencode route failure");
-    assert_eq!(failed["status"], "failed");
-    assert_eq!(failed["class"], "unreadable");
+    assert_eq!(failed["status"], "failure");
+    assert_eq!(failed["source_failure_class"], "unreadable");
     assert_eq!(failed["carried_forward"], false);
 }
 

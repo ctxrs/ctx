@@ -10,6 +10,7 @@ use std::{
 // Keep an outer fail-safe without making normal large local histories fail.
 const SQLITE_ONLINE_BACKUP_DEADLINE: Duration = Duration::from_secs(5 * 60);
 const SQLITE_ONLINE_BACKUP_PAGES_PER_STEP: i32 = 256;
+const SQLITE_SOURCE_FAMILY_COPY_PROGRESS_BYTES: u64 = 8 * 1024 * 1024;
 
 mod scratch;
 
@@ -38,6 +39,7 @@ pub(crate) fn open_root_handle_sqlite_source_snapshot(
     )
 }
 
+#[cfg(test)]
 pub(super) fn open_root_handle_sqlite_source_snapshot_with_policy(
     authority: &SqliteSourceDirectoryAuthority,
     database_name: &OsStr,
@@ -50,6 +52,22 @@ pub(super) fn open_root_handle_sqlite_source_snapshot_with_policy(
         || {},
         || {},
         || {},
+    )
+}
+
+pub(super) fn open_root_handle_sqlite_source_logical_snapshot_with_progress<E>(
+    authority: &SqliteSourceDirectoryAuthority,
+    database_name: &OsStr,
+    report_progress: &mut impl FnMut(SourceBackedCurrentSourceProgress) -> Result<(), E>,
+) -> Result<SqliteSourceReadSnapshot, SqliteSourceProgressError<E>> {
+    let family = SqliteSourceFamily::open(authority, database_name, || {})?;
+    open_logical_online_backup_snapshot_with_progress(
+        authority,
+        family,
+        || {},
+        || {},
+        SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+        report_progress,
     )
 }
 
@@ -117,6 +135,28 @@ fn open_logical_online_backup_snapshot(
     before_source_revalidation: impl FnOnce(),
     scratch_limit: u64,
 ) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
+    match open_logical_online_backup_snapshot_with_progress(
+        authority,
+        family,
+        after_database_copy,
+        before_source_revalidation,
+        scratch_limit,
+        &mut |_| Ok::<(), std::convert::Infallible>(()),
+    ) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(SqliteSourceProgressError::Source(error)) => Err(error),
+        Err(SqliteSourceProgressError::Progress(never)) => match never {},
+    }
+}
+
+fn open_logical_online_backup_snapshot_with_progress<E>(
+    authority: &SqliteSourceDirectoryAuthority,
+    family: SqliteSourceFamily,
+    after_database_copy: impl FnOnce(),
+    before_source_revalidation: impl FnOnce(),
+    scratch_limit: u64,
+    report_progress: &mut impl FnMut(SourceBackedCurrentSourceProgress) -> Result<(), E>,
+) -> Result<SqliteSourceReadSnapshot, SqliteSourceProgressError<E>> {
     let opening_evidence = family.capture_revision_evidence()?;
     enforce_snapshot_copy_bounds_with_limit(&family, &opening_evidence, scratch_limit)?;
     let source = acquire_online_backup_source(
@@ -126,6 +166,7 @@ fn open_logical_online_backup_snapshot(
         &opening_evidence,
         after_database_copy,
         scratch_limit,
+        report_progress,
     )?;
     verify_connection_read_only(&source.connection)?;
     source
@@ -156,7 +197,8 @@ fn open_logical_online_backup_snapshot(
         (opening_evidence.clone(), true)
     };
     let source_sqlite_evidence = capture_sqlite_evidence(&source.connection)?;
-    enforce_online_backup_bounds(&source.connection, &family.database.path, scratch_limit)?;
+    let online_backup_bounds =
+        enforce_online_backup_bounds(&source.connection, &family.database.path, scratch_limit)?;
 
     // A ctx-owned exact family is already the one certified private logical
     // snapshot. Retain that pinned view instead of allocating a second full
@@ -201,8 +243,13 @@ fn open_logical_online_backup_snapshot(
         });
     }
 
-    let (snapshot_directory, snapshot_path, snapshot_bytes) =
-        online_backup_to_ctx(authority.data_root(), &source.connection, scratch_limit)?;
+    let (snapshot_directory, snapshot_path, snapshot_bytes) = online_backup_to_ctx(
+        authority.data_root(),
+        &source.connection,
+        scratch_limit,
+        online_backup_bounds,
+        report_progress,
+    )?;
     family.revalidate_logical_database_identity(&native_evidence)?;
     end_pinned_read_snapshot(&source.connection)?;
     drop(source);
@@ -221,7 +268,8 @@ fn open_logical_online_backup_snapshot(
     if !sqlite_evidence.same_database_view(&source_sqlite_evidence) {
         return Err(SqliteSourceAccessError::SnapshotUnavailable {
             reason: "the private SQLite backup does not match its pinned source view".to_owned(),
-        });
+        }
+        .into());
     }
     family.revalidate_logical_database_identity(&native_evidence)?;
     let evidence = SqliteSourceEvidence::from_snapshot(&native_evidence, &sqlite_evidence);
@@ -258,14 +306,15 @@ struct OnlineBackupSource {
     copied_source_bytes: u64,
 }
 
-fn acquire_online_backup_source(
+fn acquire_online_backup_source<E>(
     data_root: &Path,
     snapshot_context: &Arc<SqliteSourceSnapshotContext>,
     family: &SqliteSourceFamily,
     evidence: &SqliteFamilyEvidence,
     after_database_copy: impl FnOnce(),
     scratch_limit: u64,
-) -> SqliteSourceAccessResult<OnlineBackupSource> {
+    report_progress: &mut impl FnMut(SourceBackedCurrentSourceProgress) -> Result<(), E>,
+) -> Result<OnlineBackupSource, SqliteSourceProgressError<E>> {
     let committed_wal = evidence.wal.as_ref().is_some_and(|state| state.length != 0);
     if !committed_wal {
         #[cfg(target_os = "linux")]
@@ -280,8 +329,13 @@ fn acquire_online_backup_source(
 
         let copied_bytes =
             enforce_snapshot_copy_bounds_with_limit(family, evidence, scratch_limit)?;
-        let (snapshot_directory, snapshot_path) =
-            copy_sqlite_family_to_ctx(data_root, family, evidence, after_database_copy)?;
+        let (snapshot_directory, snapshot_path) = copy_sqlite_family_to_ctx_with_progress(
+            data_root,
+            family,
+            evidence,
+            after_database_copy,
+            report_progress,
+        )?;
         snapshot_context.record_source_bytes_copied(copied_bytes)?;
         return Ok(OnlineBackupSource {
             connection: Connection::open_with_flags(
@@ -311,8 +365,13 @@ fn acquire_online_backup_source(
     }
 
     let copied_bytes = enforce_snapshot_copy_bounds_with_limit(family, evidence, scratch_limit)?;
-    let (snapshot_directory, snapshot_path) =
-        copy_sqlite_family_to_ctx(data_root, family, evidence, after_database_copy)?;
+    let (snapshot_directory, snapshot_path) = copy_sqlite_family_to_ctx_with_progress(
+        data_root,
+        family,
+        evidence,
+        after_database_copy,
+        report_progress,
+    )?;
     snapshot_context.record_source_bytes_copied(copied_bytes)?;
     let connection = Connection::open_with_flags(
         &snapshot_path,
@@ -347,11 +406,18 @@ fn open_live_authorized_source(
     .map_err(|source| sqlite_error("opening the retained live provider database", source))
 }
 
+#[derive(Clone, Copy)]
+struct OnlineBackupBounds {
+    page_count: u64,
+    page_size: u64,
+    bytes: u64,
+}
+
 fn enforce_online_backup_bounds(
     connection: &Connection,
     path: &Path,
     scratch_limit: u64,
-) -> SqliteSourceAccessResult<u64> {
+) -> SqliteSourceAccessResult<OnlineBackupBounds> {
     let page_count: i64 = connection
         .pragma_query_value(None, "page_count", |row| row.get(0))
         .map_err(|source| sqlite_error("reading online-backup page count", source))?;
@@ -380,14 +446,20 @@ fn enforce_online_backup_bounds(
             maximum: scratch_limit,
         });
     }
-    Ok(bytes)
+    Ok(OnlineBackupBounds {
+        page_count,
+        page_size,
+        bytes,
+    })
 }
 
-fn online_backup_to_ctx(
+fn online_backup_to_ctx<E>(
     data_root: &Path,
     source: &Connection,
     scratch_limit: u64,
-) -> SqliteSourceAccessResult<(TempDir, PathBuf, u64)> {
+    bounds: OnlineBackupBounds,
+    report_progress: &mut impl FnMut(SourceBackedCurrentSourceProgress) -> Result<(), E>,
+) -> Result<(TempDir, PathBuf, u64), SqliteSourceProgressError<E>> {
     let directory = create_snapshot_directory(data_root, "provider-sqlite-online-backup-")?;
     let snapshot_path = directory.path().join("source.sqlite");
     let destination = Connection::open_with_flags(
@@ -399,7 +471,7 @@ fn online_backup_to_ctx(
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|source| sqlite_error("creating the private logical SQLite backup", source))?;
-    run_online_backup(source, &destination)?;
+    run_online_backup_with_progress(source, &destination, bounds, report_progress)?;
     destination
         .query_row("PRAGMA journal_mode=DELETE", [], |row| {
             row.get::<_, String>(0)
@@ -418,23 +490,157 @@ fn online_backup_to_ctx(
             path: snapshot_path,
             length: snapshot_bytes,
             maximum: scratch_limit,
-        });
+        }
+        .into());
     }
     Ok((directory, snapshot_path, snapshot_bytes))
 }
 
-fn run_online_backup(
+fn run_online_backup_with_progress<E>(
     source: &Connection,
     destination: &Connection,
-) -> SqliteSourceAccessResult<()> {
+    bounds: OnlineBackupBounds,
+    report_progress: &mut impl FnMut(SourceBackedCurrentSourceProgress) -> Result<(), E>,
+) -> Result<(), SqliteSourceProgressError<E>> {
     let deadline = Instant::now()
         .checked_add(SQLITE_ONLINE_BACKUP_DEADLINE)
         .ok_or_else(|| SqliteSourceAccessError::SnapshotUnavailable {
             reason: "the logical SQLite online-backup deadline overflowed".to_owned(),
         })?;
-    run_online_backup_until(source, destination, deadline)
+    let backup = unsafe {
+        ffi::sqlite3_backup_init(
+            destination.handle(),
+            c"main".as_ptr(),
+            source.handle(),
+            c"main".as_ptr(),
+        )
+    };
+    if backup.is_null() {
+        return Err(SqliteSourceAccessError::SqliteControl {
+            operation: "initializing the logical SQLite online backup",
+            code: unsafe { ffi::sqlite3_extended_errcode(destination.handle()) },
+        }
+        .into());
+    }
+    let mut backup = OnlineBackupHandle(Some(backup));
+    let mut completed_pages = 0;
+    report_progress(online_backup_progress(0, bounds)?)
+        .map_err(SqliteSourceProgressError::Progress)?;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(online_backup_deadline_error().into());
+        }
+        let code = unsafe {
+            ffi::sqlite3_backup_step(backup.pointer(), SQLITE_ONLINE_BACKUP_PAGES_PER_STEP)
+        };
+        if Instant::now() >= deadline {
+            return Err(online_backup_deadline_error().into());
+        }
+        match code {
+            ffi::SQLITE_DONE => {
+                completed_pages = report_online_backup_step(
+                    &backup,
+                    bounds,
+                    completed_pages,
+                    true,
+                    report_progress,
+                )?;
+                break;
+            }
+            ffi::SQLITE_OK => {
+                completed_pages = report_online_backup_step(
+                    &backup,
+                    bounds,
+                    completed_pages,
+                    false,
+                    report_progress,
+                )?;
+            }
+            ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            code => {
+                return Err(SqliteSourceAccessError::SqliteControl {
+                    operation: "copying the pinned logical SQLite snapshot",
+                    code,
+                }
+                .into());
+            }
+        }
+    }
+    if completed_pages != bounds.page_count {
+        return Err(SqliteSourceAccessError::SnapshotUnavailable {
+            reason: "the logical SQLite backup did not reach its terminal page total".to_owned(),
+        }
+        .into());
+    }
+    let code = backup.finish();
+    if code == ffi::SQLITE_OK {
+        Ok(())
+    } else {
+        Err(SqliteSourceAccessError::SqliteControl {
+            operation: "finishing the logical SQLite online backup",
+            code,
+        }
+        .into())
+    }
 }
 
+fn report_online_backup_step<E>(
+    backup: &OnlineBackupHandle,
+    bounds: OnlineBackupBounds,
+    previous_completed: u64,
+    terminal: bool,
+    report_progress: &mut impl FnMut(SourceBackedCurrentSourceProgress) -> Result<(), E>,
+) -> Result<u64, SqliteSourceProgressError<E>> {
+    let total = unsafe { ffi::sqlite3_backup_pagecount(backup.pointer()) };
+    let remaining = unsafe { ffi::sqlite3_backup_remaining(backup.pointer()) };
+    let total = u64::try_from(total).map_err(|_| SqliteSourceAccessError::SnapshotUnavailable {
+        reason: "the logical SQLite backup reported a negative page count".to_owned(),
+    })?;
+    let remaining =
+        u64::try_from(remaining).map_err(|_| SqliteSourceAccessError::SnapshotUnavailable {
+            reason: "the logical SQLite backup reported a negative remaining page count".to_owned(),
+        })?;
+    if total != bounds.page_count || remaining > total {
+        return Err(SqliteSourceAccessError::SnapshotUnavailable {
+            reason: "the logical SQLite backup page totals changed during its pinned copy"
+                .to_owned(),
+        }
+        .into());
+    }
+    let completed = total - remaining;
+    if completed < previous_completed || (terminal && completed != total) {
+        return Err(SqliteSourceAccessError::SnapshotUnavailable {
+            reason: "the logical SQLite backup reported non-monotonic page progress".to_owned(),
+        }
+        .into());
+    }
+    report_progress(online_backup_progress(completed, bounds)?)
+        .map_err(SqliteSourceProgressError::Progress)?;
+    Ok(completed)
+}
+
+fn online_backup_progress(
+    completed_pages: u64,
+    bounds: OnlineBackupBounds,
+) -> SqliteSourceAccessResult<SourceBackedCurrentSourceProgress> {
+    let completed_bytes = completed_pages
+        .checked_mul(bounds.page_size)
+        .ok_or_else(|| SqliteSourceAccessError::SnapshotUnavailable {
+            reason: "the logical SQLite backup progress byte count overflowed".to_owned(),
+        })?;
+    let mut progress = SourceBackedCurrentSourceProgress::new(
+        SourceBackedCurrentSourceProgressStage::OnlineBackup,
+    );
+    progress.snapshot_pages_completed = Some(completed_pages);
+    progress.snapshot_pages_total = Some(bounds.page_count);
+    progress.snapshot_bytes_completed = Some(completed_bytes);
+    progress.snapshot_bytes_total = Some(bounds.bytes);
+    Ok(progress)
+}
+
+#[cfg(test)]
 fn run_online_backup_until(
     source: &Connection,
     destination: &Connection,
@@ -651,19 +857,58 @@ fn copy_sqlite_family_to_ctx(
     evidence: &SqliteFamilyEvidence,
     after_database_copy: impl FnOnce(),
 ) -> SqliteSourceAccessResult<(TempDir, PathBuf)> {
+    match copy_sqlite_family_to_ctx_with_progress(
+        data_root,
+        family,
+        evidence,
+        after_database_copy,
+        &mut |_| Ok::<(), std::convert::Infallible>(()),
+    ) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(SqliteSourceProgressError::Source(error)) => Err(error),
+        Err(SqliteSourceProgressError::Progress(never)) => match never {},
+    }
+}
+
+fn copy_sqlite_family_to_ctx_with_progress<E>(
+    data_root: &Path,
+    family: &SqliteSourceFamily,
+    evidence: &SqliteFamilyEvidence,
+    after_database_copy: impl FnOnce(),
+    report_progress: &mut impl FnMut(SourceBackedCurrentSourceProgress) -> Result<(), E>,
+) -> Result<(TempDir, PathBuf), SqliteSourceProgressError<E>> {
+    let total_bytes = enforce_snapshot_copy_bounds(family, evidence)?;
+    let mut completed_bytes = 0;
+    let mut last_reported_bytes = 0;
+    report_source_family_copy_progress(report_progress, completed_bytes, total_bytes)?;
     let directory = create_snapshot_directory(data_root, "provider-sqlite-snapshot-")?;
     let snapshot_path = directory.path().join("source.sqlite");
-    copy_sqlite_member(&family.database, &snapshot_path, evidence.database.length)?;
+    copy_sqlite_member_with_progress(
+        &family.database,
+        &snapshot_path,
+        evidence.database.length,
+        &mut completed_bytes,
+        &mut last_reported_bytes,
+        total_bytes,
+        report_progress,
+    )?;
     after_database_copy();
     family.revalidate(evidence)?;
     match (family.wal.as_ref(), evidence.wal.as_ref()) {
-        (Some(wal), Some(state)) => copy_sqlite_member(
+        (Some(wal), Some(state)) => copy_sqlite_member_with_progress(
             wal,
             &directory.path().join("source.sqlite-wal"),
             state.length,
+            &mut completed_bytes,
+            &mut last_reported_bytes,
+            total_bytes,
+            report_progress,
         )?,
         (None, None) => {}
-        _ => return Err(SqliteSourceAccessError::SourceChanged),
+        _ => return Err(SqliteSourceAccessError::SourceChanged.into()),
+    }
+    if completed_bytes != total_bytes {
+        return Err(SqliteSourceAccessError::SourceChanged.into());
     }
     family.revalidate(evidence)?;
     // SHM is lock coordination, not provider content. Copying it would retain
@@ -690,11 +935,15 @@ fn create_snapshot_directory(data_root: &Path, prefix: &str) -> SqliteSourceAcce
     Ok(directory)
 }
 
-fn copy_sqlite_member(
+fn copy_sqlite_member_with_progress<E>(
     member: &SqliteFamilyMember,
     destination: &Path,
     expected_length: u64,
-) -> SqliteSourceAccessResult<()> {
+    completed_bytes: &mut u64,
+    last_reported_bytes: &mut u64,
+    total_bytes: u64,
+    report_progress: &mut impl FnMut(SourceBackedCurrentSourceProgress) -> Result<(), E>,
+) -> Result<(), SqliteSourceProgressError<E>> {
     let mut source_file =
         member
             .file()
@@ -733,7 +982,7 @@ fn copy_sqlite_member(
                 source,
             })?;
         if read == 0 {
-            return Err(SqliteSourceAccessError::SourceChanged);
+            return Err(SqliteSourceAccessError::SourceChanged.into());
         }
         destination_file
             .write_all(&buffer[..read])
@@ -743,6 +992,18 @@ fn copy_sqlite_member(
                 source,
             })?;
         remaining -= read as u64;
+        *completed_bytes = completed_bytes.checked_add(read as u64).ok_or_else(|| {
+            SqliteSourceAccessError::SnapshotUnavailable {
+                reason: "the SQLite source-family copy progress count overflowed".to_owned(),
+            }
+        })?;
+        if *completed_bytes == total_bytes
+            || completed_bytes.saturating_sub(*last_reported_bytes)
+                >= SQLITE_SOURCE_FAMILY_COPY_PROGRESS_BYTES
+        {
+            report_source_family_copy_progress(report_progress, *completed_bytes, total_bytes)?;
+            *last_reported_bytes = *completed_bytes;
+        }
     }
     let mut extra = [0_u8; 1];
     if source_file
@@ -754,7 +1015,7 @@ fn copy_sqlite_member(
         })?
         != 0
     {
-        return Err(SqliteSourceAccessError::SourceChanged);
+        return Err(SqliteSourceAccessError::SourceChanged.into());
     }
     destination_file
         .flush()
@@ -764,6 +1025,19 @@ fn copy_sqlite_member(
             source,
         })?;
     Ok(())
+}
+
+fn report_source_family_copy_progress<E>(
+    report_progress: &mut impl FnMut(SourceBackedCurrentSourceProgress) -> Result<(), E>,
+    completed_bytes: u64,
+    total_bytes: u64,
+) -> Result<(), SqliteSourceProgressError<E>> {
+    let mut progress = SourceBackedCurrentSourceProgress::new(
+        SourceBackedCurrentSourceProgressStage::SourceFamilyCopy,
+    );
+    progress.snapshot_bytes_completed = Some(completed_bytes);
+    progress.snapshot_bytes_total = Some(total_bytes);
+    report_progress(progress).map_err(SqliteSourceProgressError::Progress)
 }
 
 #[cfg(test)]

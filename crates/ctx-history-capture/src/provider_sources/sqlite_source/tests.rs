@@ -16,6 +16,8 @@ use ctx_history_core::ScannedSourceCounts;
 use rusqlite::{config::DbConfig, params, Connection};
 use sha2::{Digest, Sha256};
 
+use crate::provider::source_backed::SourceBackedCurrentSourceProgressStage;
+
 use super::{
     certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
     open_root_handle_sqlite_source_online_backup_after_database_copy_for_test,
@@ -999,6 +1001,51 @@ fn logical_online_backup_is_one_private_snapshot_without_provider_content_or_nam
     assert_eq!(parent.snapshot_counters().active_snapshots(), 0);
     assert_eq!(directory_names(temp.path()), before_names);
     assert_eq!(provider_content_bytes(temp.path()), before_content);
+}
+
+#[test]
+fn logical_online_backup_progress_is_monotonic_and_terminal() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let _writer = create_persistent_wal(&database);
+    let parent = retain_parent(temp.path());
+    let mut progress = Vec::new();
+
+    let snapshot = parent
+        .open_logical_online_backup_snapshot_with_progress(
+            OsStr::new("provider.sqlite"),
+            |update| {
+                progress.push(update);
+                Ok::<(), std::convert::Infallible>(())
+            },
+        )
+        .unwrap();
+    let copied_bytes = snapshot.copied_bytes();
+    snapshot.finish().unwrap();
+
+    let backup = progress
+        .iter()
+        .filter(|update| update.stage == SourceBackedCurrentSourceProgressStage::OnlineBackup)
+        .collect::<Vec<_>>();
+    assert!(backup.len() >= 2);
+    assert_eq!(backup[0].snapshot_pages_completed, Some(0));
+    assert_eq!(backup[0].snapshot_bytes_completed, Some(0));
+    assert!(backup.windows(2).all(|pair| {
+        pair[0].snapshot_pages_completed <= pair[1].snapshot_pages_completed
+            && pair[0].snapshot_bytes_completed <= pair[1].snapshot_bytes_completed
+            && pair[0].snapshot_pages_total == pair[1].snapshot_pages_total
+            && pair[0].snapshot_bytes_total == pair[1].snapshot_bytes_total
+    }));
+    let terminal = backup.last().unwrap();
+    assert_eq!(
+        terminal.snapshot_pages_completed,
+        terminal.snapshot_pages_total
+    );
+    assert_eq!(
+        terminal.snapshot_bytes_completed,
+        terminal.snapshot_bytes_total
+    );
+    assert_eq!(terminal.snapshot_bytes_total, Some(copied_bytes));
 }
 
 #[cfg(target_os = "linux")]

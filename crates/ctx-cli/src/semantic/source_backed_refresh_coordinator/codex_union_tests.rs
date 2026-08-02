@@ -36,7 +36,8 @@ fn automatic_and_explicit_codex_roots_publish_through_one_union_route() {
         DiscoveryPlatform::Linux,
         DiscoveryPlatformDirs::default(),
     );
-    let mut progress = |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+    let mut progress =
+        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
 
     let first = refresh_all_provider_sources(
         &discovery,

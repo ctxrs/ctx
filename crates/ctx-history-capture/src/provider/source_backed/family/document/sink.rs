@@ -408,6 +408,20 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
         }
     }
 
+    pub(crate) fn report_current_source_progress(
+        &mut self,
+        progress: SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()> {
+        match &mut self.target {
+            ChangedDocumentTarget::Generation(sink) => {
+                sink.report_current_source_progress(progress)
+            }
+            ChangedDocumentTarget::Parallel(_) => Err(document_internal(
+                "parallel document leaves cannot report current-source progress",
+            )),
+        }
+    }
+
     pub(super) fn source(&self) -> SourceBackedRouteResult<&SourceKey> {
         self.source
             .as_ref()

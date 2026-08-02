@@ -108,11 +108,12 @@ pub(crate) use source_backed_pro_catch_up::wait_for_completed_generation as wait
 mod source_backed_refresh_coordinator;
 #[allow(unused_imports)] // Provider-neutral executor types are the capture coordinator seam.
 pub(crate) use source_backed_refresh_coordinator::{
-    coordinate_import_source_backed_refresh, coordinate_source_backed_refresh,
+    coordinate_import_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
     pin_active_verified_generation, PinnedSourceBackedGeneration,
+    SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
     SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshExecution,
     SourceBackedRefreshExecutor, SourceBackedRefreshMode, SourceBackedRefreshObservation,
-    SourceBackedRefreshPublication,
+    SourceBackedRefreshProgress, SourceBackedRefreshPublication,
 };
 mod daemon_scheduler;
 #[cfg(test)]

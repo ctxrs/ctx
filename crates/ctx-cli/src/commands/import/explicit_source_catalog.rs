@@ -2,7 +2,7 @@ mod codex_union;
 mod storage;
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -120,6 +120,7 @@ impl ExplicitSourceCatalogAuthority {
             &snapshot,
             false,
         )
+        .map(|_| ())
     }
 
     pub(crate) fn from_json(value: &Value) -> Result<Self> {
@@ -153,6 +154,12 @@ pub(crate) struct ExplicitSourceCatalogUpsert {
     pub(crate) path: PathBuf,
     pub(crate) catalog_lineage: [u8; 32],
     pub(crate) changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExplicitSourceCatalogRouteBinding {
+    pub(crate) catalog_lineage: String,
+    pub(crate) route_identity: String,
 }
 
 impl ExplicitSourceCatalogUpsert {
@@ -445,7 +452,7 @@ fn register_explicit_source_catalog_snapshot_routes(
     build: &mut SourceBackedAutomaticRegistryBuild,
     snapshot: &ExplicitSourceCatalogSnapshot,
     codex_session_roots_merged: bool,
-) -> Result<()> {
+) -> Result<Vec<ExplicitSourceCatalogRouteBinding>> {
     for entry in &snapshot.entries {
         if codex_session_roots_merged && is_enabled_codex_session_tree(entry)? {
             continue;
@@ -508,10 +515,18 @@ fn register_explicit_source_catalog_snapshot_routes(
         (Vec::new(), Vec::new())
     };
 
+    let mut bindings = Vec::new();
+    let mut merged_codex_lineages = Vec::new();
     for entry in &snapshot.entries {
         if codex_session_roots_merged && is_enabled_codex_session_tree(entry)? {
+            merged_codex_lineages.push(entry.catalog_lineage.clone());
             continue;
         }
+        let before = build
+            .registry
+            .routes()
+            .filter_map(|route| route.route_identity.clone())
+            .collect::<BTreeSet<_>>();
         if entry.enabled {
             let source = source_from_catalog_entry(entry, true)?;
             validate_explicit_source_root(data_root, &source)?;
@@ -538,8 +553,48 @@ fn register_explicit_source_catalog_snapshot_routes(
                 &mut build.registry,
             )?;
         }
+        let added = build
+            .registry
+            .routes()
+            .filter_map(|route| route.route_identity.clone())
+            .filter(|identity| !before.contains(identity))
+            .collect::<Vec<_>>();
+        let [route_identity] = added.as_slice() else {
+            bail!(
+                "explicit catalog lineage {} registered {} executable routes instead of one",
+                entry.catalog_lineage,
+                added.len()
+            );
+        };
+        bindings.push(ExplicitSourceCatalogRouteBinding {
+            catalog_lineage: entry.catalog_lineage.clone(),
+            route_identity: route_identity.as_str().to_owned(),
+        });
     }
-    Ok(())
+    if !merged_codex_lineages.is_empty() {
+        let routes = build
+            .registry
+            .routes()
+            .filter(|route| {
+                route.source.provider == CaptureProvider::Codex
+                    && route.source.source_format == "codex_session_jsonl_tree"
+            })
+            .filter_map(|route| route.route_identity.as_ref())
+            .collect::<Vec<_>>();
+        let [route_identity] = routes.as_slice() else {
+            bail!(
+                "merged explicit Codex catalog roots resolved to {} executable routes instead of one",
+                routes.len()
+            );
+        };
+        bindings.extend(merged_codex_lineages.into_iter().map(|catalog_lineage| {
+            ExplicitSourceCatalogRouteBinding {
+                catalog_lineage,
+                route_identity: route_identity.as_str().to_owned(),
+            }
+        }));
+    }
+    Ok(bindings)
 }
 
 fn is_enabled_codex_session_tree(entry: &CatalogEntry) -> Result<bool> {

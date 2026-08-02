@@ -17,6 +17,7 @@ fn failed_refresh_retains_the_previous_published_generation() {
                         current_source: Some("source-a".to_owned()),
                         completed_records: Some(3),
                         completed_bytes: Some(384),
+                        current_source_progress: None,
                     },
                 );
                 Err(anyhow!("injected writer failure before publication"))
@@ -76,13 +77,17 @@ fn all_cold_route_failures_keep_their_typed_daemon_classification() {
             .run_next_with(
                 |_, _| {
                     Err(SourceBackedCoordinatorError::NoUsableSourceRoutes {
-                        failed_routes: vec![SourceBackedFailedRoute {
-                            route_identity,
-                            source_identity: "11".repeat(32),
-                            provider: CaptureProvider::Codex,
-                            class,
-                            carried_forward: false,
-                        }],
+                        failed_routes: SourceBackedSourceFailures::from_failures([
+                            SourceBackedFailedRoute::new(
+                                route_identity,
+                                "11".repeat(32),
+                                CaptureProvider::Codex,
+                                class,
+                                false,
+                                "fixture source",
+                                "fixture failure",
+                            ),
+                        ]),
                     }
                     .into())
                 },
@@ -106,21 +111,25 @@ fn all_cold_route_failures_keep_their_typed_daemon_classification() {
 fn mixed_cold_route_failures_keep_a_typed_aggregate_classification() {
     let coordinator = CoreRefreshEngine::new();
     let _ = coordinator.enqueue(None);
-    let route = |byte: u8, class| SourceBackedFailedRoute {
-        route_identity: SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap(),
-        source_identity: format!("{:02x}", byte.saturating_add(1)).repeat(32),
-        provider: CaptureProvider::Codex,
-        class,
-        carried_forward: false,
+    let route = |byte: u8, class| {
+        SourceBackedFailedRoute::new(
+            SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap(),
+            format!("{:02x}", byte.saturating_add(1)).repeat(32),
+            CaptureProvider::Codex,
+            class,
+            false,
+            "fixture source",
+            "fixture failure",
+        )
     };
     let run = coordinator
         .run_next_with(
             |_, _| {
                 Err(SourceBackedCoordinatorError::NoUsableSourceRoutes {
-                    failed_routes: vec![
+                    failed_routes: SourceBackedSourceFailures::from_failures([
                         route(1, SourceBackedSourceFailureClass::Unavailable),
                         route(2, SourceBackedSourceFailureClass::SourceChanged),
-                    ],
+                    ]),
                 }
                 .into())
             },
@@ -502,6 +511,7 @@ fn recovered_wait_after_restart_attaches_to_equivalent_running_attempt() {
                 current_source: Some("interrupted-source".to_owned()),
                 completed_records: Some(5),
                 completed_bytes: Some(640),
+                current_source_progress: None,
             },
         )
         .expect("interrupted running job");

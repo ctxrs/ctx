@@ -31,11 +31,15 @@ use crate::{
     common::io::ProviderSourceRoot,
     provider::{
         normalization::provider_required_timestamp_millis,
-        providers::opencode::OpenCodeSqliteDialect, source_backed::SourceBackedRouteError,
+        providers::opencode::OpenCodeSqliteDialect,
+        source_backed::{
+            SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
+            SourceBackedRouteError, SourceBackedRouteResult,
+        },
     },
     provider_sources::{
         retain_sqlite_source_directory_authority, SqliteLogicalSnapshot, SqliteSourceAccessError,
-        SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
+        SqliteSourceDirectoryAuthority, SqliteSourceProgressError, SqliteSourceReadSnapshot,
     },
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -48,6 +52,7 @@ const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
 const SOURCE_BACKED_MAX_FILE_TOUCHES: usize = 32;
 const SOURCE_BACKED_MAX_NATIVE_IDENTITY_BYTES: usize = 4 * 1024;
+const LOGICAL_SCAN_PROGRESS_ROW_CADENCE: u64 = 4_096;
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "OpenCode-family history database must be a regular file";
 
@@ -209,6 +214,7 @@ enum OpenCodeScanOutput {
     Begin(SourceKey),
     CompletedBytes(u64),
     Document(CoreRecord),
+    Progress(SourceBackedCurrentSourceProgress),
 }
 
 #[derive(Debug)]
@@ -306,12 +312,33 @@ fn scan_pinned_source_with_scratch_limit(
     })
 }
 
+#[cfg(test)]
 fn observe_logical_source(
     connection: &Connection,
     dialect: &'static OpenCodeSqliteDialect,
 ) -> OpenCodeSourceBackedResult<OpenCodeLogicalObservation> {
+    observe_logical_source_with_progress(connection, dialect, &mut |_| Ok(()))
+}
+
+fn observe_logical_source_with_progress(
+    connection: &Connection,
+    dialect: &'static OpenCodeSqliteDialect,
+    report_progress: &mut dyn FnMut(
+        SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()>,
+) -> OpenCodeSourceBackedResult<OpenCodeLogicalObservation> {
+    report_progress(opencode_logical_progress(
+        SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
+        0,
+        0,
+    ))?;
     let schema = OpenCodeNativeSchema::probe(connection, dialect)?;
     let source = source_key(dialect, schema.family)?;
+    report_progress(opencode_logical_progress(
+        SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
+        0,
+        0,
+    ))?;
     Ok(OpenCodeLogicalObservation { source, schema })
 }
 
@@ -351,6 +378,11 @@ fn stream_logical_rows(
     let mut previous_explicit_order = None::<(String, i64)>;
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     let mut session_metadata_loads = 0_u64;
+    emit(OpenCodeScanOutput::Progress(opencode_logical_progress(
+        SourceBackedCurrentSourceProgressStage::LogicalScan,
+        0,
+        0,
+    )))?;
     let fallback_stats = {
         let mut consume_event = |event: SourceEventRow| -> OpenCodeSourceBackedResult<()> {
             if let super::model::OpenCodeNativeOrder::ExplicitSequence {
@@ -375,6 +407,13 @@ fn stream_logical_rows(
             hash_source_event(&mut content_hasher, &event);
             counts.complete_records = checked_add(counts.complete_records, 1)?;
             counts.certified_bytes = checked_add(counts.certified_bytes, event.content_bytes)?;
+            if counts.complete_records % LOGICAL_SCAN_PROGRESS_ROW_CADENCE == 0 {
+                emit(OpenCodeScanOutput::Progress(opencode_logical_progress(
+                    SourceBackedCurrentSourceProgressStage::LogicalScan,
+                    counts.complete_records,
+                    counts.certified_bytes,
+                )))?;
+            }
             emit(OpenCodeScanOutput::CompletedBytes(event.content_bytes))?;
             let disposition = projection_disposition(&event.projection);
             let retained = retained_projection(&event.projection);
@@ -442,6 +481,11 @@ fn stream_logical_rows(
             &mut consume_event,
         )?
     };
+    emit(OpenCodeScanOutput::Progress(opencode_logical_progress(
+        SourceBackedCurrentSourceProgressStage::LogicalScan,
+        counts.complete_records,
+        counts.certified_bytes,
+    )))?;
     let fallback_payload_hydrations = fallback_stats.rows;
     Ok(StreamedLogicalRows {
         counts,
@@ -700,17 +744,55 @@ fn schema_family_for_source(
     })
 }
 
+#[cfg(test)]
 fn open_root_authorized_snapshot_retained(
     data_root: &Path,
     path: &Path,
 ) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
-    open_root_authorized_snapshot_retained_with_hook(data_root, path, || {})
+    open_root_authorized_snapshot_retained_with_hook_and_progress(
+        data_root,
+        path,
+        || {},
+        &mut |_| Ok(()),
+    )
 }
 
+fn open_root_authorized_snapshot_retained_with_progress(
+    data_root: &Path,
+    path: &Path,
+    report_progress: &mut dyn FnMut(
+        SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()>,
+) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
+    open_root_authorized_snapshot_retained_with_hook_and_progress(
+        data_root,
+        path,
+        || {},
+        report_progress,
+    )
+}
+
+#[cfg(test)]
 fn open_root_authorized_snapshot_retained_with_hook(
     data_root: &Path,
     path: &Path,
     after_authorize: impl FnOnce(),
+) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
+    open_root_authorized_snapshot_retained_with_hook_and_progress(
+        data_root,
+        path,
+        after_authorize,
+        &mut |_| Ok(()),
+    )
+}
+
+fn open_root_authorized_snapshot_retained_with_hook_and_progress(
+    data_root: &Path,
+    path: &Path,
+    after_authorize: impl FnOnce(),
+    report_progress: &mut dyn FnMut(
+        SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
     let parent = path
         .parent()
@@ -729,7 +811,12 @@ fn open_root_authorized_snapshot_retained_with_hook(
         .map_err(CaptureError::from)?;
     let sqlite_authority =
         retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
-    let sqlite_snapshot = sqlite_authority.open_logical_online_backup_snapshot(database_leaf)?;
+    let sqlite_snapshot = sqlite_authority
+        .open_logical_online_backup_snapshot_with_progress(database_leaf, report_progress)
+        .map_err(|error| match error {
+            SqliteSourceProgressError::Source(error) => OpenCodeSourceBackedError::from(error),
+            SqliteSourceProgressError::Progress(error) => OpenCodeSourceBackedError::from(error),
+        })?;
     after_authorize();
     sqlite_snapshot.revalidate()?;
     source_directory.revalidate()?;
@@ -769,6 +856,17 @@ fn relevant_schema_evidence(schema: &OpenCodeNativeSchema) -> Vec<u8> {
         hasher.update([u8::from(schema.session_columns.contains(column))]);
     }
     hasher.finalize().to_vec()
+}
+
+fn opencode_logical_progress(
+    stage: SourceBackedCurrentSourceProgressStage,
+    rows_scanned: u64,
+    certified_bytes: u64,
+) -> SourceBackedCurrentSourceProgress {
+    let mut progress = SourceBackedCurrentSourceProgress::new(stage);
+    progress.logical_rows_scanned = Some(rows_scanned);
+    progress.logical_certified_bytes = Some(certified_bytes);
+    progress
 }
 
 fn hash_session(hasher: &mut Sha256, session: &SourceSession) {
