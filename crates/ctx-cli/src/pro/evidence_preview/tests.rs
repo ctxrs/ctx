@@ -93,9 +93,16 @@ fn binding_for(
 }
 
 fn authorize_local_root(record: &mut CoreEventRecord, local_root: &str) {
-    let binding = &mut record.core_record.repository_bindings[0];
-    binding.checkout_id = Some("checkout-1".to_owned());
-    binding.worktree_id = Some("worktree-1".to_owned());
+    authorize_binding(
+        &mut record.core_record.repository_bindings[0],
+        local_root,
+        "1",
+    );
+}
+
+fn authorize_binding(binding: &mut RepositoryBinding, local_root: &str, identity: &str) {
+    binding.checkout_id = Some(format!("checkout-{identity}"));
+    binding.worktree_id = Some(format!("worktree-{identity}"));
     binding.local_root_authorization = Some(RepositoryLocalRootAuthorization {
         local_root: local_root.to_owned(),
         local_root_authorization_fingerprint_revision:
@@ -685,7 +692,7 @@ fn unsupported_and_mixed_file_grammars_omit() {
 }
 
 #[test]
-fn repository_binding_identity_scopes_file_observations_exactly() {
+fn production_repository_display_mapping_scopes_file_observations_exactly() {
     let exact = file_record(
         39,
         1,
@@ -757,20 +764,131 @@ fn repository_binding_identity_scopes_file_observations_exactly() {
 }
 
 #[test]
-fn commit_requires_one_certified_success_outcome_and_one_exact_oid_unit() {
-    let success = commit_record(
-        40,
-        2,
-        &format!("Process exited with code 0\nOutput:\n[main 0123456] exact\n{OID}\nadjacent"),
+fn same_path_other_repositories_require_distinct_certified_absolute_roots() {
+    for (index, logical_repository_id) in [
+        "forge:github.com/fork/ctx",
+        "local:certified-other-repository",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut record = file_record(
+            43 + u8::try_from(index).unwrap(),
+            1,
+            "*** Update File: src/lib.rs",
+            "src/lib.rs",
+            RepositoryFileObservationKind::Modified,
+            None,
+        );
+        record.core_record.repository_bindings.push(binding_for(
+            "binding-2",
+            logical_repository_id,
+            None,
+        ));
+        record
+            .core_record
+            .repository_file_observations
+            .push(RepositoryFileObservation {
+                repository_binding_id: "binding-2".to_owned(),
+                relative_path: "src/lib.rs".to_owned(),
+                kind: RepositoryFileObservationKind::Modified,
+                prior_relative_path: None,
+            });
+        assert!(
+            one_file_preview("src/lib.rs", &record).previews.is_empty(),
+            "{logical_repository_id}"
+        );
+    }
+
+    let mut prior_path = file_record(
+        45,
         1,
+        "*** Update File: src/old.rs\n*** Move to: src/new.rs",
+        "src/new.rs",
+        RepositoryFileObservationKind::Renamed,
+        Some("src/old.rs"),
     );
-    let evidence = numbered(&success, 1);
-    let model = project_evidence_previews(
-        &commit_result(OID, vec![evidence.clone()]),
-        &[verified(&evidence, &success)],
+    prior_path.core_record.repository_bindings.push(binding_for(
+        "binding-2",
+        "local:prior-path-repository",
+        None,
+    ));
+    prior_path
+        .core_record
+        .repository_file_observations
+        .push(RepositoryFileObservation {
+            repository_binding_id: "binding-2".to_owned(),
+            relative_path: "other/new.rs".to_owned(),
+            kind: RepositoryFileObservationKind::Renamed,
+            prior_relative_path: Some("src/old.rs".to_owned()),
+        });
+    assert!(one_file_preview("src/old.rs", &prior_path)
+        .previews
+        .is_empty());
+
+    let absolute_body = "*** Update File: /worktrees/target/src/lib.rs";
+    let mut distinct_roots = file_record(
+        46,
+        1,
+        absolute_body,
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
     );
-    assert_eq!(model.previews[0].kind, EvidencePreviewKind::Commit);
-    assert_eq!(model.previews[0].excerpt, OID);
+    authorize_local_root(&mut distinct_roots, "/worktrees/target");
+    let mut competing = binding_for("binding-2", "forge:github.com/fork/ctx", None);
+    authorize_binding(&mut competing, "/worktrees/fork", "2");
+    distinct_roots
+        .core_record
+        .repository_bindings
+        .push(competing);
+    distinct_roots
+        .core_record
+        .repository_file_observations
+        .push(RepositoryFileObservation {
+            repository_binding_id: "binding-2".to_owned(),
+            relative_path: "src/lib.rs".to_owned(),
+            kind: RepositoryFileObservationKind::Modified,
+            prior_relative_path: None,
+        });
+    assert_eq!(
+        one_file_preview("src/lib.rs", &distinct_roots).previews[0].excerpt,
+        absolute_body
+    );
+
+    let mut same_roots = distinct_roots.clone();
+    authorize_binding(
+        &mut same_roots.core_record.repository_bindings[1],
+        "/worktrees/target",
+        "2",
+    );
+    assert!(one_file_preview("src/lib.rs", &same_roots)
+        .previews
+        .is_empty());
+}
+
+#[test]
+fn commit_requires_one_certified_success_outcome_and_one_exact_oid_unit() {
+    for (index, body) in [
+        format!(
+            "Script completed\nProcess exited with code 0\nWall time 0.1 seconds\nOutput:\n[main 0123456] exact\n{OID}\nadjacent"
+        ),
+        format!(
+            "Script completed\nProcess exited with code 0\nFinal output:\n[main 0123456] exact\n{OID}\nadjacent"
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let success = commit_record(40 + u8::try_from(index).unwrap(), 2, &body, 1);
+        let evidence = numbered(&success, 1);
+        let model = project_evidence_previews(
+            &commit_result(OID, vec![evidence.clone()]),
+            &[verified(&evidence, &success)],
+        );
+        assert_eq!(model.previews[0].kind, EvidencePreviewKind::Commit);
+        assert_eq!(model.previews[0].excerpt, OID);
+    }
 
     let failed = commit_record(
         41,
@@ -866,6 +984,33 @@ fn commit_case_token_duplicate_unit_and_duplicate_outcome_ambiguity_omit() {
 }
 
 #[test]
+fn commit_output_framing_rejects_malformed_duplicate_and_mixed_markers() {
+    for (index, body) in [
+        format!("Process exited with code 0\nFinal output: \n{OID}"),
+        format!("Process exited with code 0\nfinal output:\n{OID}"),
+        format!("Process exited with code 0\nOutput:\nFinal output:\n{OID}"),
+        format!("Process exited with code 0\nOutput:\nOutput:\n{OID}"),
+        format!("Process exited with code 0\nFinal output:\nFinal output:\n{OID}"),
+        format!(" Process exited with code 0\nFinal output:\n{OID}"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let record = commit_record(50 + u8::try_from(index).unwrap(), 2, &body, 1);
+        let evidence = numbered(&record, 1);
+        assert!(
+            project_evidence_previews(
+                &commit_result(OID, vec![evidence.clone()]),
+                &[verified(&evidence, &record)],
+            )
+            .previews
+            .is_empty(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
 fn commit_outcome_must_belong_to_the_exact_resolved_repository_binding() {
     assert!(
         super::commit_oid_matches_binding(OID, &binding(Some(GitObjectFormat::Sha1))).is_some()
@@ -898,6 +1043,45 @@ fn commit_outcome_must_belong_to_the_exact_resolved_repository_binding() {
     )
     .previews
     .is_empty());
+
+    for (index, logical_repository_id) in [
+        "forge:github.com/fork/ctx",
+        "local:simultaneous-other-repository",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut simultaneous = commit_record(
+            56 + u8::try_from(index).unwrap(),
+            2,
+            &format!("Process exited with code 0\nFinal output:\n{OID}"),
+            1,
+        );
+        simultaneous
+            .core_record
+            .repository_bindings
+            .push(binding_for(
+                "binding-2",
+                logical_repository_id,
+                Some(GitObjectFormat::Sha1),
+            ));
+        let mut competing = simultaneous.core_record.repository_vcs_observations[0].clone();
+        competing.repository_binding_id = "binding-2".to_owned();
+        simultaneous
+            .core_record
+            .repository_vcs_observations
+            .push(competing);
+        let evidence = numbered(&simultaneous, 1);
+        assert!(
+            project_evidence_previews(
+                &commit_result(OID, vec![evidence.clone()]),
+                &[verified(&evidence, &simultaneous)],
+            )
+            .previews
+            .is_empty(),
+            "{logical_repository_id}"
+        );
+    }
 
     let mut ambiguous = commit_record(49, 2, &body, 1);
     ambiguous.core_record.repository_bindings.push(binding_for(
@@ -1075,6 +1259,12 @@ fn digest_generation_and_all_coordinates_must_match() {
     );
     let evidence = numbered(&record, 1);
     assert!(VerifiedEvidenceRecord::new(&evidence, "b", &record).is_none());
+
+    for malformed_generation in ["A".repeat(64), "a".repeat(63), "g".repeat(64)] {
+        let mut malformed = evidence.clone();
+        malformed.citation.core_generation_id = malformed_generation.clone();
+        assert!(VerifiedEvidenceRecord::new(&malformed, &malformed_generation, &record).is_none());
+    }
 
     let mut wrong_digest = evidence.clone();
     wrong_digest.citation.evidence_sha256 = Some("f".repeat(64));

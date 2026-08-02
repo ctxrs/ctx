@@ -8,7 +8,7 @@ use ctx_pro_host_protocol::{
     BlameResult, EvidenceCitation, NumberedEvidence, ResolvedBlameTarget, ResourceKind, ResourceRef,
 };
 use sha2::{Digest, Sha256};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 pub(crate) const MAX_EVIDENCE_PREVIEW_CITATIONS: usize = 3;
 pub(crate) const MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES: usize = 512;
@@ -21,7 +21,8 @@ const VALIDATED_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const VALIDATED_PROVIDER_IDENTITY_VERSION: u32 = 1;
 const VALIDATED_PARSER_REVISION: &str = "codex-nativepath-core-record-v7";
 
-/// Exact Core evidence whose generation, digest, and coordinates were verified by hydration.
+/// Exact Core evidence whose generation and coordinates were verified by hydration and whose
+/// stored Core bytes are digest-verified during construction.
 ///
 /// Construction is deliberately fail-closed. A caller cannot pass a bare Core record to the
 /// projector and accidentally bypass the citation identity checks.
@@ -44,6 +45,7 @@ impl<'a> VerifiedEvidenceRecord<'a> {
         let actual_digest = format!("{:x}", Sha256::digest(encoded));
         if citation.byte_range.is_some()
             || hydrated_core_generation_id != citation.core_generation_id
+            || !is_lower_sha256(hydrated_core_generation_id)
             || actual_digest != cited_digest
             || !is_lower_sha256(cited_digest)
             || !citation_matches_record(citation, record)
@@ -286,6 +288,7 @@ fn body_lines(body: &str) -> Option<Vec<BodyLine<'_>>> {
 struct FileUnit {
     kind: RepositoryFileObservationKind,
     span: ByteSpan,
+    authorized_absolute: bool,
 }
 
 fn file_unit(
@@ -316,7 +319,47 @@ fn file_unit(
     if units.len() != 1 || units[0].kind != observation.kind {
         return None;
     }
+    if same_path_other_binding_is_ambiguous(
+        target,
+        repository_binding,
+        record,
+        units[0].authorized_absolute,
+    ) {
+        return None;
+    }
     Some((observation.kind, units[0].span))
+}
+
+fn same_path_other_binding_is_ambiguous(
+    target: &str,
+    repository_binding: &RepositoryBinding,
+    record: &CoreEventRecord,
+    authorized_absolute: bool,
+) -> bool {
+    let competitors = record
+        .core_record
+        .repository_file_observations
+        .iter()
+        .filter(|observation| {
+            observation.repository_binding_id != repository_binding.binding_id
+                && (observation.relative_path == target
+                    || observation.prior_relative_path.as_deref() == Some(target))
+        });
+    if !authorized_absolute {
+        return competitors.count() > 0;
+    }
+    let Some(selected_path) = authorized_target_path(repository_binding, target) else {
+        return true;
+    };
+    competitors.into_iter().any(|observation| {
+        record
+            .core_record
+            .repository_bindings
+            .iter()
+            .find(|binding| binding.binding_id == observation.repository_binding_id)
+            .and_then(|binding| authorized_target_path(binding, target))
+            .is_none_or(|path| path == selected_path)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,18 +446,24 @@ fn apply_patch_units(
                     .map(|path| (line, path))
             });
             if let Some((move_line, new_path)) = move_to {
-                if authorized_path_matches(old_path, target, repository_binding) {
+                if let Some(authorized_absolute) =
+                    authorized_path_matches(old_path, target, repository_binding)
+                {
                     units.push(FileUnit {
                         kind: RepositoryFileObservationKind::Renamed,
                         span: ByteSpan {
                             start: lines[index].span.start,
                             end: move_line.span.end,
                         },
+                        authorized_absolute,
                     });
-                } else if authorized_path_matches(new_path, target, repository_binding) {
+                } else if let Some(authorized_absolute) =
+                    authorized_path_matches(new_path, target, repository_binding)
+                {
                     units.push(FileUnit {
                         kind: RepositoryFileObservationKind::Renamed,
                         span: move_line.span,
+                        authorized_absolute,
                     });
                 }
                 index += 1;
@@ -463,11 +512,13 @@ fn diff_units(target: &str, lines: &[BodyLine<'_>]) -> Vec<FileUnit> {
                 units.push(FileUnit {
                     kind: RepositoryFileObservationKind::Renamed,
                     span: rename_from[0].0.span,
+                    authorized_absolute: false,
                 });
             } else if rename_to[0].1 == target {
                 units.push(FileUnit {
                     kind: RepositoryFileObservationKind::Renamed,
                     span: rename_to[0].0.span,
+                    authorized_absolute: false,
                 });
             }
             continue;
@@ -489,6 +540,7 @@ fn diff_units(target: &str, lines: &[BodyLine<'_>]) -> Vec<FileUnit> {
                         start: section[0].span.start,
                         end: mode_line.span.end,
                     },
+                    authorized_absolute: false,
                 });
             }
             ([], [(mode_line, _)]) if mode_line.span.start == section[0].span.end + 1 => {
@@ -498,11 +550,13 @@ fn diff_units(target: &str, lines: &[BodyLine<'_>]) -> Vec<FileUnit> {
                         start: section[0].span.start,
                         end: mode_line.span.end,
                     },
+                    authorized_absolute: false,
                 });
             }
             ([], []) => units.push(FileUnit {
                 kind: RepositoryFileObservationKind::Modified,
                 span: section[0].span,
+                authorized_absolute: false,
             }),
             _ => {}
         }
@@ -556,12 +610,15 @@ fn narrow_result_units(
         }
         if let Some(paths) = text.strip_prefix("renamed: ") {
             if let Some((old, new)) = paths.split_once(" -> ") {
-                if authorized_path_matches(old, target, repository_binding)
-                    || authorized_path_matches(new, target, repository_binding)
+                let old_match = authorized_path_matches(old, target, repository_binding);
+                let new_match = authorized_path_matches(new, target, repository_binding);
+                if let (Some(authorized_absolute), None) | (None, Some(authorized_absolute)) =
+                    (old_match, new_match)
                 {
                     units.push(FileUnit {
                         kind: RepositoryFileObservationKind::Renamed,
                         span: line.span,
+                        authorized_absolute,
                     });
                 }
             }
@@ -578,8 +635,14 @@ fn push_path_unit(
     kind: RepositoryFileObservationKind,
     span: ByteSpan,
 ) {
-    if authorized_path_matches(candidate, target, repository_binding) {
-        units.push(FileUnit { kind, span });
+    if let Some(authorized_absolute) =
+        authorized_path_matches(candidate, target, repository_binding)
+    {
+        units.push(FileUnit {
+            kind,
+            span,
+            authorized_absolute,
+        });
     }
 }
 
@@ -587,30 +650,33 @@ fn authorized_path_matches(
     candidate: &str,
     target: &str,
     repository_binding: &RepositoryBinding,
-) -> bool {
+) -> Option<bool> {
     if candidate == target {
-        return true;
+        return Some(false);
     }
+    (authorized_target_path(repository_binding, target)?.to_str() == Some(candidate))
+        .then_some(true)
+}
+
+fn authorized_target_path(repository_binding: &RepositoryBinding, target: &str) -> Option<PathBuf> {
     let target_path = Path::new(target);
     if target_path.is_absolute()
         || target_path
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
     {
-        return false;
+        return None;
     }
-    let Some(authorization) = &repository_binding.local_root_authorization else {
-        return false;
-    };
+    let authorization = repository_binding.local_root_authorization.as_ref()?;
     let local_root = Path::new(&authorization.local_root);
     if !local_root.is_absolute()
         || local_root
             .components()
             .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
     {
-        return false;
+        return None;
     }
-    local_root.join(target_path).to_str() == Some(candidate)
+    Some(local_root.join(target_path))
 }
 
 fn commit_unit(
@@ -620,6 +686,25 @@ fn commit_unit(
     lines: &[BodyLine<'_>],
 ) -> Option<ByteSpan> {
     if !is_canonical_oid(target) {
+        return None;
+    }
+    if record
+        .core_record
+        .repository_vcs_observations
+        .iter()
+        .any(|observation| {
+            observation.repository_binding_id != repository_binding_id
+                && matches!(
+                    &observation.kind,
+                    RepositoryVcsObservationKind::Outcome(outcome)
+                        if outcome.kind == RepositoryOutcomeKind::Commit
+                            && outcome
+                                .produced_object_ids
+                                .iter()
+                                .any(|object_id| object_id.hex == target)
+                )
+        })
+    {
         return None;
     }
     let mut outcomes = record
@@ -682,18 +767,21 @@ fn successful_output_start(lines: &[BodyLine<'_>]) -> Option<usize> {
         .enumerate()
         .filter_map(|(index, line)| {
             line.text
-                .trim()
                 .strip_prefix("Process exited with code ")
                 .map(|code| (index, code))
         })
         .collect::<Vec<_>>();
-    let outputs = lines
+    let output_markers = lines
         .iter()
         .enumerate()
-        .filter_map(|(index, line)| (line.text.trim() == "Output:").then_some(index))
+        .filter_map(|(index, line)| {
+            matches!(line.text, "Final output:" | "Output:").then_some((index, line.text))
+        })
         .collect::<Vec<_>>();
-    match (statuses.as_slice(), outputs.as_slice()) {
-        ([(status_index, "0")], [output_index]) if status_index < output_index => {
+    match (statuses.as_slice(), output_markers.as_slice()) {
+        ([(status_index, "0")], [(output_index, "Final output:" | "Output:")])
+            if status_index < output_index =>
+        {
             output_index.checked_add(1)
         }
         _ => None,
