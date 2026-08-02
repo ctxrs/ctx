@@ -152,12 +152,13 @@ by multiple ctx data roots on the same machine.
 
 ## Provider sources, Core, and derived storage
 
-Provider-owned history remains source authority. Import reads native JSONL,
-document/tree, and provider SQLite formats plus explicit plugin/custom streams,
-applies content policy, and publishes a Core/Tantivy generation with stable ctx
-identities, complete policy-selected normalized records, and source identity
-metadata. Provider SQLite adapters use short read-only logical snapshots with
-normal committed WAL visibility and never checkpoint or write provider data.
+Provider-owned history remains the acquisition authority for import and
+refresh. Those flows read native JSONL, document/tree, and provider SQLite
+formats plus explicit plugin/custom streams, apply content policy, and publish
+a Core/Tantivy generation with stable ctx identities, complete policy-selected
+normalized records, and source identity metadata. Provider SQLite adapters use
+short read-only logical snapshots with normal committed WAL visibility and
+never checkpoint or write provider data.
 
 - `search/lexical` contains immutable verified Core/Tantivy generations used
   for lexical search and indexed snippets.
@@ -570,9 +571,9 @@ ctx setup
 ```
 
 This removes the active Core/Tantivy generation and semantic sidecar, then
-imports searchable records and exact locators from the available provider
-histories. It does not delete provider transcripts, `usage.sqlite`, or Local Pro
-data.
+imports complete policy-selected normalized records and stable provider/source
+identities from the available provider histories. It does not delete provider
+transcripts, `usage.sqlite`, or Local Pro data.
 
 Inspect storage size:
 

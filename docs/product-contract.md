@@ -5,13 +5,13 @@ ctx is a local search CLI for existing agent history.
 ## Promise
 
 Given local provider histories that ctx supports, the CLI treats those native
-records as source authority, publishes an immutable local Core/Tantivy search
-generation, and returns deterministic retrieval results with citations and
-stable provider/source identities. The paid Local Pro helper adds an encrypted
-local work graph with deterministic, evidence-backed fact materialization from
-a pinned Core generation through its bounded materialization protocol. Neither
-path generates an LLM interpretation, uploads transcript or repository content,
-or requires a hosted research agent.
+records as the acquisition authority for import and refresh, publishes an
+immutable local Core/Tantivy search generation, and returns deterministic
+retrieval results with citations and stable provider/source identities. The
+paid Local Pro helper adds an encrypted local work graph with deterministic,
+evidence-backed fact materialization from a pinned Core generation through its
+bounded materialization protocol. Neither path generates an LLM interpretation,
+uploads transcript or repository content, or requires a hosted research agent.
 
 ## In Scope
 

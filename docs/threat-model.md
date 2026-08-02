@@ -72,8 +72,8 @@ and orphan credentials or graph keys.
 
 - keep imports explicit and repeatable;
 - reject unknown provider formats;
-- keep policy-selected searchable content and source locators in immutable
-  Core/Tantivy generations;
+- keep complete policy-selected searchable content and stable provider/source
+  identities in immutable Core/Tantivy generations;
 - preserve stable ctx citations and provider session identity;
 - keep setup local and side-effect-limited;
 - open provider-native SQLite histories only through short read-only logical

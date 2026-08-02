@@ -2,7 +2,6 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use thiserror::Error;
-use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum CoreError {
@@ -119,7 +118,6 @@ pub mod projection;
 pub mod provider;
 mod result_compaction;
 pub mod source;
-pub mod sync;
 
 pub use core_record::{
     core_record_contract_fingerprint, CoreContent, CoreContentPolicyStatus, CoreRecord,
@@ -140,12 +138,8 @@ pub use core_record::{
     MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
 };
 pub use dtos::{
-    AgentType, Artifact, ArtifactKind, CitationReference, Confidence, Event, EventRole, EventType,
-    FileChangeKind, FileTouched, HistoryRecord, HistoryRecordLink, HistoryRecordLinkTargetType,
-    HistoryRecordLinkType, HistoryRecordMetadata, HistoryRecordStatus, HistoryRecordTag,
-    RecordEdge, RecordEdgeType, Run, RunStatus, RunType, Session, SessionEdge, SessionEdgeType,
-    SessionStatus, Summary, SummaryKind, Tag, TagKind, VcsChange, VcsChangeKind, VcsHost, VcsKind,
-    VcsWorkspace,
+    AgentType, ArtifactKind, Confidence, EventRole, EventType, Fidelity, FileChangeKind,
+    SessionEdgeType, SessionStatus,
 };
 pub use history_jsonl::{
     CtxHistoryJsonlEdgeRecord, CtxHistoryJsonlEventRecord, CtxHistoryJsonlFileTouchRecord,
@@ -170,17 +164,9 @@ pub use provider::{
     ProviderSupportStatus, PROVIDER_SUPPORT_MATRIX_SCHEMA_VERSION,
 };
 pub use result_compaction::compact_result_payload;
-pub use source::{CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind};
-pub use sync::{
-    AuditActorKind, AuditLogEntry, EntityTimestamps, Fidelity, RedactionState, SyncAlias,
-    SyncBatch, SyncBatchStatus, SyncCursor, SyncDirection, SyncMetadata, SyncOutboxItem,
-    SyncOutboxOperation, SyncState, Visibility,
-};
-
-pub(crate) use sync::default_metadata;
-
-pub fn new_id() -> Uuid {
-    Uuid::now_v7()
+pub use source::CaptureProvider;
+pub(crate) fn default_metadata() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
 }
 
 #[cfg(test)]

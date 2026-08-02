@@ -52,15 +52,15 @@ Treat the ctx data root and command output as sensitive. They may contain source
 code, prompts, local paths, tool-call arguments, private repository names, and
 typed identifiers extracted from provider transcripts.
 
-Provider transcript files remain provider-owned source authority. Import and
-daemon refresh publish policy-selected searchable content, metadata, and exact
-provider and source identities into immutable Core/Tantivy generations. Search,
-show, locate, and MCP retrieval read the active verified generation; they do not
-reopen provider history at query time. Provider SQLite inputs are opened only as
-short read-only logical snapshots during import or refresh. A temporarily
-inaccessible or changed input may fail that refresh, while the last verified
-Core generation remains available for retrieval until a later refresh publishes
-new content.
+Provider transcript files remain the provider-owned acquisition authority for
+import and daemon refresh. Those flows publish policy-selected searchable
+content, metadata, and exact provider and source identities into immutable
+Core/Tantivy generations. Search, show, locate, and MCP retrieval read the
+active verified generation; they do not reopen provider history at query time.
+Provider SQLite inputs are opened only as short read-only logical snapshots
+during import or refresh. A temporarily inaccessible or changed input may fail
+that refresh, while the last verified Core generation remains available for
+retrieval until a later refresh publishes new content.
 
 ## Local Output Limits
 
