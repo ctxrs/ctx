@@ -39,6 +39,9 @@ impl SourceBackedRefreshExecutor for TestExecutor {
 
 fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
     SourceBackedRefreshPublication {
+        selected_route_ids: Vec::new(),
+        successful_route_ids: Vec::new(),
+        source_failures: Vec::new(),
         generation_id: generation_id.into(),
         published_explicit_source_catalog: load_explicit_source_catalog_authority(
             tempfile::tempdir().unwrap().path(),

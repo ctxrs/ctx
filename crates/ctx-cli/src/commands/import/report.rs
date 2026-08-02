@@ -136,7 +136,7 @@ fn render_import_report_human(context: &RenderContext, report: &ImportReport) ->
 
     if totals.failed_sources > 0 || rejected_records > 0 {
         document.push_blank();
-        let fully_failed = totals.imported_sources == 0 && totals.failed_sources > 0;
+        let fully_failed = !totals.has_usable_source_result() && totals.failed_sources > 0;
         let (text, command) = if !fully_failed && rejected_records > 0 {
             (
                 "Diagnose rejected records while keeping the imported history available.",
@@ -154,7 +154,7 @@ fn render_import_report_human(context: &RenderContext, report: &ImportReport) ->
 }
 
 fn import_outcome_copy(totals: &ImportTotals) -> (OutcomeState, &'static str, String) {
-    if totals.imported_sources == 0 && totals.failed_sources > 0 {
+    if !totals.has_usable_source_result() && totals.failed_sources > 0 {
         return (
             OutcomeState::Error,
             "History import failed",
@@ -523,6 +523,35 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.ends_with("Next\n  ctx doctor\n"), "{rendered}");
+    }
+
+    #[test]
+    fn retained_usable_generation_keeps_source_failures_partial() {
+        let report = ImportReport {
+            resume: false,
+            totals: ImportTotals {
+                per_run_counts_available: true,
+                failed_sources: 1,
+                current_source_count: Some(2),
+                current_indexed_documents: Some(7),
+                work_result: ProviderImportWorkResult::NoOp,
+                ..ImportTotals::default()
+            },
+            sources: vec![json!({
+                "status": "failed",
+                "route_identity": "ab".repeat(32),
+                "class": "source_changed",
+                "carried_forward": true,
+            })],
+        };
+
+        let json = import_report_json(&report);
+        assert_eq!(json["outcome"], "completed_with_source_failures");
+        assert_eq!(json["failure_scope"], "source");
+        let rendered =
+            render_import_report_human(&context(80, ColorMode::Never), &report).render_plain();
+        assert!(rendered.starts_with("! History import completed with rejections\n"));
+        assert!(rendered.contains("1 source failed; imported history remains available."));
     }
 
     #[test]

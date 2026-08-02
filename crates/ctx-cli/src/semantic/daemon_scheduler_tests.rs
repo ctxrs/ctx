@@ -67,6 +67,9 @@ fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefr
         .commit(|_| true)
         .unwrap();
     SourceBackedRefreshPublication {
+        selected_route_ids: Vec::new(),
+        successful_route_ids: Vec::new(),
+        source_failures: Vec::new(),
         generation_id: receipt.generation_id.clone(),
         published_explicit_source_catalog:
             crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
@@ -270,6 +273,9 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
         .unwrap();
     let receipt = writer.commit(|_| true).unwrap();
     SourceBackedRefreshPublication {
+        selected_route_ids: Vec::new(),
+        successful_route_ids: Vec::new(),
+        source_failures: Vec::new(),
         generation_id: receipt.generation_id,
         published_explicit_source_catalog:
             crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),

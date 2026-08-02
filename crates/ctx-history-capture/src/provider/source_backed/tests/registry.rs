@@ -42,6 +42,383 @@ fn heterogeneous_routes_publish_one_core_generation() {
     assert!(committed.stage_duration > Duration::ZERO);
 }
 
+fn fail_route_after_scan(
+    mut route: SourceBackedRoute,
+    kind: SourceBackedRouteErrorKind,
+) -> SourceBackedRoute {
+    let original = route.driver.take().unwrap();
+    let scan = Arc::clone(&original.scan);
+    let owns = Arc::clone(&original.owns_source);
+    let revalidate = Arc::clone(&original.revalidate);
+    route.driver = Some(SourceBackedRouteDriver::new(
+        move |sink| {
+            scan(sink)?;
+            Err(SourceBackedRouteError::new(kind, "fixture route failure"))
+        },
+        move |source| owns(source),
+        move |target| revalidate(target),
+    ));
+    route
+}
+
+fn fail_route_before_scan(
+    mut route: SourceBackedRoute,
+    kind: SourceBackedRouteErrorKind,
+) -> SourceBackedRoute {
+    let original = route.driver.take().unwrap();
+    let owns = Arc::clone(&original.owns_source);
+    route.driver = Some(SourceBackedRouteDriver::new(
+        move |_| Err(SourceBackedRouteError::new(kind, "fixture route failure")),
+        move |source| owns(source),
+        |_| false,
+    ));
+    route
+}
+
+fn fail_route_at_final_revalidation(mut route: SourceBackedRoute) -> SourceBackedRoute {
+    let original = route.driver.take().unwrap();
+    let scan = Arc::clone(&original.scan);
+    let owns = Arc::clone(&original.owns_source);
+    route.driver = Some(SourceBackedRouteDriver::new(
+        move |sink| scan(sink),
+        move |source| owns(source),
+        |_| false,
+    ));
+    route
+}
+
+fn count_route_scans(
+    mut route: SourceBackedRoute,
+    scans: Arc<std::sync::atomic::AtomicUsize>,
+) -> SourceBackedRoute {
+    let original = route.driver.take().unwrap();
+    let scan = Arc::clone(&original.scan);
+    let owns = Arc::clone(&original.owns_source);
+    let revalidate = Arc::clone(&original.revalidate);
+    route.driver = Some(SourceBackedRouteDriver::new(
+        move |sink| {
+            scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            scan(sink)
+        },
+        move |source| owns(source),
+        move |target| revalidate(target),
+    ));
+    route
+}
+
+fn fail_route_with_systemic_writer_error(
+    mut route: SourceBackedRoute,
+    source: SourceKey,
+) -> SourceBackedRoute {
+    let original = route.driver.take().unwrap();
+    let scan = Arc::clone(&original.scan);
+    let owns = Arc::clone(&original.owns_source);
+    let revalidate = Arc::clone(&original.revalidate);
+    route.driver = Some(SourceBackedRouteDriver::new(
+        move |sink| {
+            scan(sink)?;
+            sink.begin_source(source.clone())
+                .map_err(route_coordinator_error)
+        },
+        move |source| owns(source),
+        move |target| revalidate(target),
+    ));
+    route
+}
+
+#[test]
+fn cold_second_route_failure_after_output_publishes_first_without_partial_records() {
+    let first_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = count_route_scans(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 1),
+        Arc::clone(&first_scans),
+    );
+    let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 2);
+    let first_id = first.metadata.route_identity.clone().unwrap();
+    let second_id = second.metadata.route_identity.clone().unwrap();
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(first);
+    registry.register(fail_route_after_scan(
+        second,
+        SourceBackedRouteErrorKind::SourceChanged,
+    ));
+    let temp = tempdir().unwrap();
+
+    let receipt =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    assert_eq!(receipt.successful_route_ids, vec![first_id.clone()]);
+    assert_eq!(receipt.failed_routes.len(), 1);
+    assert_eq!(receipt.failed_routes[0].route_identity, second_id.clone());
+    assert_eq!(
+        receipt.failed_routes[0].class,
+        SourceBackedSourceFailureClass::SourceChanged
+    );
+    assert!(!receipt.failed_routes[0].carried_forward);
+    assert!(receipt.commit.manifest().source_route(&first_id).is_some());
+    assert!(receipt.commit.manifest().source_route(&second_id).is_none());
+    assert_eq!(receipt.commit.indexed_documents, 1);
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().document_count(),
+        1
+    );
+    assert_eq!(
+        first_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a later scan failure must not repeat an earlier successful route"
+    );
+}
+
+#[test]
+fn warm_success_advances_while_failed_route_is_carried_exactly() {
+    let (first_v1, _) = revisioned_receipt_route(1);
+    let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 9);
+    let second_id = second.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(first_v1);
+    initial_registry.register(second.clone());
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+    let retained_route = initial
+        .commit
+        .manifest()
+        .source_route(&second_id)
+        .unwrap()
+        .clone();
+    let retained_sources = retained_route
+        .sources()
+        .iter()
+        .filter_map(|source| {
+            initial
+                .sources
+                .iter()
+                .find(|certificate| {
+                    certificate
+                        .observation()
+                        .source()
+                        .exact_descriptor_eq(source)
+                })
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+
+    let (first_v2, first_v2_certificate) = revisioned_receipt_route(2);
+    let first_id = first_v2.metadata.route_identity.clone().unwrap();
+    let mut warm_registry = SourceBackedProviderRegistry::new();
+    warm_registry.register(first_v2);
+    warm_registry.register(fail_route_before_scan(
+        second,
+        SourceBackedRouteErrorKind::Unavailable,
+    ));
+    let warm =
+        refresh_source_backed_generation(temp.path(), &warm_registry, WriterOptions::default())
+            .unwrap();
+
+    assert!(warm.successful_route_ids.contains(&first_id));
+    assert_eq!(warm.failed_routes.len(), 1);
+    assert!(warm.failed_routes[0].carried_forward);
+    assert_eq!(
+        warm.commit.manifest().source_route(&second_id),
+        Some(&retained_route)
+    );
+    for retained in retained_sources {
+        assert!(warm.sources.contains(&retained));
+    }
+    assert!(warm.sources.contains(&first_v2_certificate));
+    assert_eq!(warm.commit.indexed_documents, 2);
+}
+
+#[test]
+fn internal_route_failure_aborts_the_whole_cold_refresh() {
+    let first = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 11);
+    let second_source = fixture_source(CaptureProvider::Hermes, "hermes_state_sqlite", 12);
+    let second = fail_route_with_systemic_writer_error(
+        fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 12),
+        second_source,
+    );
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(first);
+    registry.register(second);
+    let temp = tempdir().unwrap();
+
+    assert!(matches!(
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()),
+        Err(SourceBackedCoordinatorError::RouteScan {
+            source: SourceBackedRouteError {
+                kind: SourceBackedRouteErrorKind::Internal,
+                ..
+            },
+            ..
+        })
+    ));
+    assert!(matches!(
+        VerifiedIndex::open(temp.path()),
+        Err(IndexError::MissingActiveGenerationPointer)
+    ));
+}
+
+#[test]
+fn final_revalidation_failure_retries_without_the_changed_route() {
+    let first = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 13);
+    let second = fail_route_at_final_revalidation(fixture_route(
+        CaptureProvider::Hermes,
+        "hermes_state_sqlite",
+        14,
+    ));
+    let first_id = first.metadata.route_identity.clone().unwrap();
+    let second_id = second.metadata.route_identity.clone().unwrap();
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(first);
+    registry.register(second);
+    let temp = tempdir().unwrap();
+
+    let receipt =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    assert_eq!(receipt.successful_route_ids, vec![first_id]);
+    assert_eq!(receipt.failed_routes.len(), 1);
+    assert_eq!(receipt.failed_routes[0].route_identity, second_id.clone());
+    assert_eq!(
+        receipt.failed_routes[0].class,
+        SourceBackedSourceFailureClass::SourceChanged
+    );
+    assert!(receipt.commit.manifest().source_route(&second_id).is_none());
+}
+
+#[test]
+fn cold_refresh_with_only_failed_routes_does_not_publish_ready_data() {
+    let route = fail_route_before_scan(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 15),
+        SourceBackedRouteErrorKind::Unavailable,
+    );
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(route);
+    let temp = tempdir().unwrap();
+
+    let error = refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes }
+            if failed_routes.len() == 1
+                && failed_routes[0].class == SourceBackedSourceFailureClass::Unavailable
+    ));
+    assert!(matches!(
+        VerifiedIndex::open(temp.path()),
+        Err(IndexError::MissingActiveGenerationPointer)
+    ));
+}
+
+#[test]
+fn selected_route_refresh_carries_unselected_route_and_reports_exact_noop_success() {
+    let first = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 21);
+    let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 22);
+    let first_id = first.metadata.route_identity.clone().unwrap();
+    let second_id = second.metadata.route_identity.clone().unwrap();
+    let second_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let original_second = second.driver.clone().unwrap();
+    let scans = Arc::clone(&second_scans);
+    let second = SourceBackedRoute {
+        driver: Some(SourceBackedRouteDriver::new(
+            move |sink| {
+                scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (original_second.scan)(sink)
+            },
+            {
+                let owns = Arc::clone(&second.driver.as_ref().unwrap().owns_source);
+                move |source| owns(source)
+            },
+            {
+                let revalidate = Arc::clone(&second.driver.as_ref().unwrap().revalidate);
+                move |target| revalidate(target)
+            },
+        )),
+        ..second
+    };
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(first.clone());
+    registry.register(second);
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    assert_eq!(second_scans.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let retained_second = initial
+        .commit
+        .manifest()
+        .source_route(&second_id)
+        .unwrap()
+        .clone();
+
+    let mut selected_registry = SourceBackedProviderRegistry::new();
+    selected_registry.register(first);
+    let selected = refresh_source_backed_generation_for_routes(
+        temp.path(),
+        &selected_registry,
+        WriterOptions::default(),
+        [first_id.clone()],
+    )
+    .unwrap();
+    assert_eq!(selected.commit.generation_id, initial.commit.generation_id);
+    assert_eq!(selected.successful_route_ids, vec![first_id]);
+    assert!(selected.failed_routes.is_empty());
+    assert_eq!(
+        selected.carried_unselected_route_ids,
+        vec![second_id.clone()]
+    );
+    assert_eq!(
+        selected.commit.manifest().source_route(&second_id),
+        Some(&retained_second)
+    );
+    assert_eq!(second_scans.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn selected_failed_route_reports_exact_identity_and_carries_the_whole_base() {
+    let first = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 23);
+    let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 24);
+    let first_id = first.metadata.route_identity.clone().unwrap();
+    let second_id = second.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(first);
+    initial_registry.register(second.clone());
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+
+    let mut selected_registry = SourceBackedProviderRegistry::new();
+    selected_registry.register(fail_route_before_scan(
+        second,
+        SourceBackedRouteErrorKind::SourceChanged,
+    ));
+    let selected = refresh_source_backed_generation_for_routes(
+        temp.path(),
+        &selected_registry,
+        WriterOptions::default(),
+        [second_id.clone()],
+    )
+    .unwrap();
+    assert_eq!(selected.commit.generation_id, initial.commit.generation_id);
+    assert!(selected.successful_route_ids.is_empty());
+    assert_eq!(selected.failed_routes.len(), 1);
+    assert_eq!(selected.failed_routes[0].route_identity, second_id.clone());
+    assert!(selected.failed_routes[0].carried_forward);
+    assert_eq!(
+        selected.carried_unselected_route_ids,
+        vec![first_id.clone()]
+    );
+    assert_eq!(selected.carried_failed_route_ids, vec![second_id]);
+    assert_eq!(
+        selected.commit.manifest().source_route(&first_id),
+        initial.commit.manifest().source_route(&first_id)
+    );
+    assert_eq!(selected.sources, initial.sources);
+    assert_eq!(
+        selected.commit.manifest().source_routes(),
+        initial.commit.manifest().source_routes()
+    );
+}
+
 #[test]
 fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
     let temp = tempdir().unwrap();

@@ -151,6 +151,27 @@ pub(super) fn refresh_all_provider_sources(
         certified_source_count: receipt.certified_source_count,
         certified_source_bytes: receipt.certified_source_bytes,
         current,
+        selected_route_ids: receipt
+            .selected_route_ids
+            .iter()
+            .map(|identity| identity.as_str().to_owned())
+            .collect(),
+        successful_route_ids: receipt
+            .successful_route_ids
+            .iter()
+            .map(|identity| identity.as_str().to_owned())
+            .collect(),
+        source_failures: receipt
+            .failed_routes
+            .iter()
+            .map(|failure| SourceBackedRefreshSourceFailure {
+                route_identity: failure.route_identity.as_str().to_owned(),
+                source_identity: failure.source_identity.clone(),
+                provider: failure.provider.as_str().to_owned(),
+                class: failure.class.as_str().to_owned(),
+                carried_forward: failure.carried_forward,
+            })
+            .collect(),
         timings: SourceBackedRefreshTimings {
             discovery_us: nonzero_duration_micros(receipt.discovery_duration),
             scan_stage_us: nonzero_duration_micros(receipt.scan_stage_duration),

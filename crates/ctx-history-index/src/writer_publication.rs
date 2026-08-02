@@ -86,9 +86,12 @@ impl GenerationWriter {
                 "generation writer lost its root publication lock",
             ));
         }
+        self.validate_source_route_plan_complete()?;
         if let Some(witness) = self.exact_replay_inventory_witness()? {
             self.validate_base_integrity_for_reuse()?;
-            for certificate in &witness.base.sources {
+            for certificate in witness.base.sources.iter().filter(|certificate| {
+                !self.source_is_carried_from_base(certificate.observation().source())
+            }) {
                 if !revalidate(RevalidationTarget::Source(certificate)) {
                     return Err(IndexError::SourceInvalidated(
                         certificate.observation().source().identity().to_string(),
@@ -397,6 +400,7 @@ impl GenerationWriter {
     }
 
     fn next_manifest(&self) -> Result<GenerationManifest> {
+        self.validate_source_route_plan_complete()?;
         let mut sources = HashMap::<SourceKey, CertifiedSource>::new();
         if let Some(base) = &self.base_manifest {
             for source in &base.sources {

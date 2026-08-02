@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -63,7 +63,7 @@ pub(in crate::semantic) use coordinator_state::CoreRefreshEngine;
 use coordinator_state::SourceBackedRefreshProgressUpdate;
 pub(crate) use coordinator_state::{
     PinnedCorePublication, SourceBackedRefreshExecution, SourceBackedRefreshExecutor,
-    SourceBackedRefreshReceipt, SourceBackedRefreshTimings,
+    SourceBackedRefreshReceipt, SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
 };
 pub(crate) use current_state::SourceBackedRefreshCurrent;
 
@@ -176,6 +176,9 @@ pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) certified_source_bytes: u64,
     pub(crate) current: SourceBackedRefreshCurrent,
     pub(crate) timings: SourceBackedRefreshTimings,
+    pub(crate) selected_route_ids: Vec<String>,
+    pub(crate) successful_route_ids: Vec<String>,
+    pub(crate) source_failures: Vec<SourceBackedRefreshSourceFailure>,
 }
 
 pub(super) fn source_backed_index_root(data_root: &Path) -> PathBuf {
@@ -676,6 +679,30 @@ fn published_refresh_receipt(
         sources_with_rejections: required_usize(current_value, "current_sources_with_rejections")?,
         removed_source_count: required_usize(current_value, "removed_source_count")?,
     };
+    let selected_route_ids = optional_string_array(value.get("selected_route_ids"))?;
+    let successful_route_ids = optional_string_array(value.get("successful_route_ids"))?;
+    let source_failures = optional_source_failures(value.get("source_failures"))?;
+    let failed_route_ids = source_failures
+        .iter()
+        .map(|failure| failure.route_identity.clone())
+        .collect::<BTreeSet<_>>();
+    let successful_route_id_set = successful_route_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let selected_route_id_set = selected_route_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if selected_route_id_set.len() != selected_route_ids.len()
+        || successful_route_id_set.len() != successful_route_ids.len()
+        || failed_route_ids.len() != source_failures.len()
+        || !successful_route_id_set.is_disjoint(&failed_route_ids)
+        || selected_route_id_set
+            != successful_route_id_set
+                .union(&failed_route_ids)
+                .cloned()
+                .collect()
+    {
+        bail!("published daemon source refresh has an invalid route-result partition");
+    }
 
     let top_previous_generation = optional_generation(response.get("previous_generation"))?;
     let top_published_generation = required_generation(
@@ -729,7 +756,96 @@ fn published_refresh_receipt(
         generation_changed,
         published_explicit_source_catalog,
         current,
+        selected_route_ids,
+        successful_route_ids,
+        source_failures,
     })
+}
+
+fn optional_string_array(value: Option<&Value>) -> Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| anyhow!("daemon source refresh route identities are malformed"))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| is_sha256_identity(value))
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("daemon source refresh route identity is malformed"))
+        })
+        .collect()
+}
+
+fn optional_source_failures(
+    value: Option<&Value>,
+) -> Result<Vec<SourceBackedRefreshSourceFailure>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    value
+        .as_array()
+        .ok_or_else(|| anyhow!("daemon source refresh source failures are malformed"))?
+        .iter()
+        .map(|value| {
+            let value = value
+                .as_object()
+                .ok_or_else(|| anyhow!("daemon source refresh source failure is malformed"))?;
+            let required = |field: &'static str| {
+                value
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow!("daemon source refresh source failure has no {field}"))
+            };
+            Ok(SourceBackedRefreshSourceFailure {
+                route_identity: required("route_identity")?
+                    .into_sha256_identity("route_identity")?,
+                source_identity: required("source_identity")?
+                    .into_sha256_identity("source_identity")?,
+                provider: required("provider")?,
+                class: match required("class")?.as_str() {
+                    "unavailable" => "unavailable".to_owned(),
+                    "source_changed" => "source_changed".to_owned(),
+                    "unreadable" => "unreadable".to_owned(),
+                    "incompatible" => "incompatible".to_owned(),
+                    _ => bail!("daemon source refresh source failure class is malformed"),
+                },
+                carried_forward: value
+                    .get("carried_forward")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| {
+                        anyhow!("daemon source refresh source failure has no carried_forward fact")
+                    })?,
+            })
+        })
+        .collect()
+}
+
+trait Sha256IdentityString {
+    fn into_sha256_identity(self, field: &'static str) -> Result<String>;
+}
+
+impl Sha256IdentityString for String {
+    fn into_sha256_identity(self, field: &'static str) -> Result<String> {
+        if is_sha256_identity(&self) {
+            Ok(self)
+        } else {
+            bail!("daemon source refresh source failure {field} is malformed")
+        }
+    }
+}
+
+fn is_sha256_identity(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn optional_generation(value: Option<&Value>) -> Result<Option<String>> {

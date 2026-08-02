@@ -374,6 +374,9 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                 )?;
                 let receipt = writer.commit(|_| true)?;
                 Ok(SourceBackedRefreshPublication {
+                    selected_route_ids: Vec::new(),
+                    successful_route_ids: Vec::new(),
+                    source_failures: Vec::new(),
                     generation_id: receipt.generation_id,
                     published_explicit_source_catalog:
                         crate::commands::import::load_explicit_source_catalog_authority(
@@ -472,6 +475,9 @@ fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
             )?;
             let receipt = writer.commit(|_| true)?;
             Ok(SourceBackedRefreshPublication {
+                selected_route_ids: Vec::new(),
+                successful_route_ids: Vec::new(),
+                source_failures: Vec::new(),
                 generation_id: receipt.generation_id,
                 published_explicit_source_catalog:
                     crate::commands::import::load_explicit_source_catalog_authority(

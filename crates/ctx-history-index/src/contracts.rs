@@ -152,6 +152,20 @@ pub enum IndexError {
     InvalidCertifiedSourceDeletion(String),
     #[error("source route {0} was observed missing more than once in one refresh")]
     DuplicateSourceRouteMissingObservation(String),
+    #[error("source route plan is incomplete or internally inconsistent: {0}")]
+    InvalidSourceRoutePlan(String),
+    #[error("source route staging is already active for {0}")]
+    SourceRouteStagingAlreadyActive(String),
+    #[error("source route staging is not active for {0}")]
+    SourceRouteStagingNotActive(String),
+    #[error("carried source route {route_id} cannot mutate retained source {source_id}")]
+    CarriedSourceRouteMutation { route_id: String, source_id: String },
+    #[error("source route {active_route_id} cannot mutate source {source_id} owned by route {owner_route_id}")]
+    SourceRouteOwnershipMutation {
+        active_route_id: String,
+        owner_route_id: String,
+        source_id: String,
+    },
     #[error("source route {0} cannot enter deletion grace because it is not retained")]
     SourceRouteMissingObservationNotRetained(String),
     #[error(

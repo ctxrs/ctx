@@ -8,9 +8,20 @@ pub(crate) struct SourceBackedRefreshReceipt {
     pub(crate) generation_changed: bool,
     pub(crate) published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
     pub(crate) current: SourceBackedRefreshCurrent,
+    pub(crate) selected_route_ids: Vec<String>,
+    pub(crate) successful_route_ids: Vec<String>,
+    pub(crate) source_failures: Vec<SourceBackedRefreshSourceFailure>,
 }
 
 impl SourceBackedRefreshReceipt {
+    fn terminal_outcome(&self) -> &'static str {
+        if self.source_failures.is_empty() {
+            "completed"
+        } else {
+            "completed_with_source_failures"
+        }
+    }
+
     pub(crate) fn to_json(&self) -> Value {
         compact_json(json!({
             "previous_generation": self.previous_generation,
@@ -20,7 +31,34 @@ impl SourceBackedRefreshReceipt {
                 .published_explicit_source_catalog
                 .to_json(),
             "current": self.current.to_json(),
+            "outcome": self.terminal_outcome(),
+            "selected_route_ids": self.selected_route_ids,
+            "successful_route_ids": self.successful_route_ids,
+            "source_failures": self.source_failures.iter()
+                .map(SourceBackedRefreshSourceFailure::to_json)
+                .collect::<Vec<_>>(),
         }))
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct SourceBackedRefreshSourceFailure {
+    pub(crate) route_identity: String,
+    pub(crate) source_identity: String,
+    pub(crate) provider: String,
+    pub(crate) class: String,
+    pub(crate) carried_forward: bool,
+}
+
+impl SourceBackedRefreshSourceFailure {
+    pub(crate) fn to_json(&self) -> Value {
+        json!({
+            "route_identity": self.route_identity,
+            "source_identity": self.source_identity,
+            "provider": self.provider,
+            "class": self.class,
+            "carried_forward": self.carried_forward,
+        })
     }
 }
 
@@ -155,6 +193,14 @@ impl SourceBackedRefreshAttempt {
                 .map(ExplicitSourceCatalogAuthority::to_json),
             "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
             "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
+            "outcome": self.receipt.as_ref().map(SourceBackedRefreshReceipt::terminal_outcome),
+            "successful_route_ids": self.receipt.as_ref()
+                .map(|receipt| &receipt.successful_route_ids),
+            "source_failures": self.receipt.as_ref().map(|receipt| {
+                receipt.source_failures.iter()
+                    .map(SourceBackedRefreshSourceFailure::to_json)
+                    .collect::<Vec<_>>()
+            }),
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
             "scanned_routes": self.scanned_routes,
@@ -198,6 +244,14 @@ impl SourceBackedRefreshAttempt {
                 .map(ExplicitSourceCatalogAuthority::to_json),
             "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
             "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
+            "outcome": self.receipt.as_ref().map(SourceBackedRefreshReceipt::terminal_outcome),
+            "successful_route_ids": self.receipt.as_ref()
+                .map(|receipt| &receipt.successful_route_ids),
+            "source_failures": self.receipt.as_ref().map(|receipt| {
+                receipt.source_failures.iter()
+                    .map(SourceBackedRefreshSourceFailure::to_json)
+                    .collect::<Vec<_>>()
+            }),
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
             "scanned_routes": self.scanned_routes,

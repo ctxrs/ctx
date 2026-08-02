@@ -7,6 +7,81 @@ pub type SourceBackedRouteResult<T> = Result<T, SourceBackedRouteError>;
 pub const AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS: u32 =
     ctx_history_index::policy::AUTOMATIC_ROUTE_DELETION_GRACE_OBSERVATIONS;
 
+/// Selects the provider routes incorporated into one global generation.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SourceBackedRefreshScope {
+    #[default]
+    All,
+    Exact(BTreeSet<SourceRouteIdentity>),
+}
+
+impl SourceBackedRefreshScope {
+    pub fn exact(route_identities: impl IntoIterator<Item = SourceRouteIdentity>) -> Self {
+        Self::Exact(route_identities.into_iter().collect())
+    }
+}
+
+/// Narrow source-authority failures that may be isolated to one route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBackedSourceFailureClass {
+    Unavailable,
+    SourceChanged,
+    Unreadable,
+    Incompatible,
+}
+
+impl SourceBackedSourceFailureClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::SourceChanged => "source_changed",
+            Self::Unreadable => "unreadable",
+            Self::Incompatible => "incompatible",
+        }
+    }
+}
+
+/// Content-free identity and class for one route-local failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBackedFailedRoute {
+    pub route_identity: SourceRouteIdentity,
+    pub source_identity: String,
+    pub provider: CaptureProvider,
+    pub class: SourceBackedSourceFailureClass,
+    pub carried_forward: bool,
+}
+
+impl SourceBackedFailedRoute {
+    pub(in super::super) fn from_route(
+        route: &SourceBackedRoute,
+        class: SourceBackedSourceFailureClass,
+        carried_forward: bool,
+    ) -> SourceBackedCoordinatorResult<Self> {
+        let route_identity = route.metadata.route_identity.clone().ok_or_else(|| {
+            SourceBackedCoordinatorError::InvalidRoute {
+                provider: route.metadata.source.provider,
+                detail: "failed executable route has no route identity".to_owned(),
+            }
+        })?;
+        let mut digest = Sha256::new();
+        digest.update(b"ctx.source-failure-identity-v1\0");
+        digest.update(route.metadata.source.provider.as_str().as_bytes());
+        digest.update([0]);
+        digest.update(route.metadata.certified_source_format.as_bytes());
+        digest.update([0]);
+        let path = route.metadata.source.path.as_os_str().as_encoded_bytes();
+        digest.update((path.len() as u64).to_be_bytes());
+        digest.update(path);
+        Ok(Self {
+            route_identity,
+            source_identity: format!("{:x}", digest.finalize()),
+            provider: route.metadata.source.provider,
+            class,
+            carried_forward,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceBackedDeletionDisposition {
     Deferred,
@@ -31,6 +106,18 @@ pub enum SourceBackedRouteErrorKind {
     InvalidSource,
     Unsupported,
     Internal,
+}
+
+impl SourceBackedRouteErrorKind {
+    pub fn source_failure_class(self) -> Option<SourceBackedSourceFailureClass> {
+        match self {
+            Self::Unavailable => Some(SourceBackedSourceFailureClass::Unavailable),
+            Self::SourceChanged => Some(SourceBackedSourceFailureClass::SourceChanged),
+            Self::InvalidSource => Some(SourceBackedSourceFailureClass::Unreadable),
+            Self::Unsupported => Some(SourceBackedSourceFailureClass::Incompatible),
+            Self::Internal => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -79,6 +166,12 @@ pub enum SourceBackedCoordinatorError {
     RetainedDeletionRecertification { source_id: String, detail: String },
     #[error("source-backed refresh progress callback failed: {0}")]
     Progress(SourceBackedRouteError),
+    #[error("selected source-backed route {route_id} is unknown or not executable")]
+    InvalidRefreshScope { route_id: String },
+    #[error("source-backed refresh completed with source failures but retained no usable source")]
+    NoUsableSourceRoutes {
+        failed_routes: Vec<SourceBackedFailedRoute>,
+    },
 }
 
 /// The only write surface provider drivers receive. It exposes staging and

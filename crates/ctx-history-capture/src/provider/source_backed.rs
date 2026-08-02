@@ -6,7 +6,8 @@
 //! [`GenerationWriter`] and no adapter can publish a generation by itself.
 
 use std::{
-    collections::{HashMap, HashSet},
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     path::{Path, PathBuf},
     sync::Arc,

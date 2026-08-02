@@ -8,7 +8,9 @@ pub(crate) use generation_authority::PinnedCorePublication;
 use read_model::{
     SourceBackedRefreshAttempt, SourceBackedRefreshProgress, SourceBackedRefreshState,
 };
-pub(crate) use read_model::{SourceBackedRefreshReceipt, SourceBackedRefreshTimings};
+pub(crate) use read_model::{
+    SourceBackedRefreshReceipt, SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
+};
 use runtime_metadata::{
     source_catalog_refresh_runtime_metadata, source_refresh_runtime_metadata,
     SourceRefreshRuntimeMetadata,
@@ -676,6 +678,9 @@ impl CoreRefreshEngine {
                             .published_explicit_source_catalog
                             .clone(),
                         current: publication.current,
+                        selected_route_ids: publication.selected_route_ids,
+                        successful_route_ids: publication.successful_route_ids,
+                        source_failures: publication.source_failures,
                     });
                     attempt.timings = Some(publication.timings);
                     attempt.published_explicit_source_catalog =
