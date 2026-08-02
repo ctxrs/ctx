@@ -20,7 +20,7 @@ pub(crate) use components::{
     Outcome, OutcomeState, Progress, Table,
 };
 pub(crate) use context::{ColorMode, RenderContext, StreamKind, TestContext};
-pub(crate) use document::{Document, Line, Span};
+pub(crate) use document::{sanitize_untrusted_history_body_for_terminal, Document, Line, Span};
 pub(crate) use style::{trim_terminal_line_ends, Token, CLAP_STYLES};
 pub(crate) use writer::Ui;
 

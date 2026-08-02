@@ -33,6 +33,7 @@ pub(crate) struct Fields {
     pub(crate) workspace_filter: Field,
     pub(crate) touched_file_filter: Field,
     pub(crate) core_content_bytes: Field,
+    pub(crate) core_record_encoded_bytes: Field,
     pub(crate) core_record: Field,
     pub(crate) source_event_order: Field,
     pub(crate) session_event_order: Field,
@@ -81,6 +82,7 @@ pub(crate) fn lexical_schema() -> Schema {
     builder.add_text_field("workspace_filter", STRING);
     builder.add_text_field("touched_file_filter", STRING);
     builder.add_u64_field("core_content_bytes", FAST);
+    builder.add_u64_field("core_record_encoded_bytes", FAST);
     builder.add_bytes_field("core_record", STORED);
     builder.add_bytes_field("source_event_order", INDEXED);
     builder.add_bytes_field("session_event_order", INDEXED);
@@ -117,6 +119,7 @@ pub(crate) fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         workspace_filter: required_field(schema, "workspace_filter")?,
         touched_file_filter: required_field(schema, "touched_file_filter")?,
         core_content_bytes: required_field(schema, "core_content_bytes")?,
+        core_record_encoded_bytes: required_field(schema, "core_record_encoded_bytes")?,
         core_record: required_field(schema, "core_record")?,
         source_event_order: required_field(schema, "source_event_order")?,
         session_event_order: required_field(schema, "session_event_order")?,
@@ -171,5 +174,16 @@ mod tests {
         ] {
             assert!(schema.get_field(removed).is_err(), "{removed} still exists");
         }
+    }
+
+    #[test]
+    fn core_record_encoded_size_is_u64_metadata_and_not_stored_or_indexed() {
+        let schema = lexical_schema();
+        let field = schema.get_field("core_record_encoded_bytes").unwrap();
+        let entry = schema.get_field_entry(field);
+
+        assert_eq!(entry.field_type().value_type(), tantivy::schema::Type::U64);
+        assert!(!entry.is_stored());
+        assert!(!entry.is_indexed());
     }
 }

@@ -617,7 +617,7 @@ fn stale_schema_manifest_fails_closed_at_generation_boundary() {
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
     let mut stale_manifest = index.manifest().clone();
-    const STALE_LEXICAL_SCHEMA: u32 = 9;
+    const STALE_LEXICAL_SCHEMA: u32 = 15;
     stale_manifest.lexical_schema_version = STALE_LEXICAL_SCHEMA;
     let stale_generation_id = stale_manifest.generation_id().unwrap();
     write_manifest(temp.path(), &stale_generation_id, &stale_manifest).unwrap();
@@ -687,6 +687,7 @@ fn assert_active_meta_incompatibility_is_rebuilt(
         .join(rebuild.candidate_directory_name.as_deref().unwrap());
     let candidate = Index::open_in_dir(&candidate_path).unwrap();
     assert!(candidate.load_metas().unwrap().segments.is_empty());
+    validate_schema(&candidate.schema()).unwrap();
     assert_eq!(
         candidate.settings(),
         &publication::lexical_index_settings(),
@@ -743,6 +744,26 @@ fn incompatible_schema_generation_is_rebuilt_without_interpretation() {
         |meta| {
             meta["schema"] =
                 serde_json::to_value(tantivy::schema::Schema::builder().build()).unwrap();
+        },
+        |error| {
+            assert!(matches!(
+                error,
+                IndexError::SchemaMismatch(LEXICAL_SCHEMA_VERSION)
+            ));
+        },
+    );
+}
+
+#[test]
+fn schema_without_encoded_core_size_is_rebuilt_without_fallback() {
+    assert_eq!(LEXICAL_SCHEMA_VERSION, 16);
+    assert_active_meta_incompatibility_is_rebuilt(
+        "encoded-size-schema-rebuild.jsonl",
+        |meta| {
+            let schema = meta["schema"].as_array_mut().unwrap();
+            let current_fields = schema.len();
+            schema.retain(|field| field["name"] != "core_record_encoded_bytes");
+            assert_eq!(schema.len() + 1, current_fields);
         },
         |error| {
             assert!(matches!(
@@ -1039,10 +1060,11 @@ fn verified_generation_rejects_malformed_stored_core_during_exhaustive_audit() {
     let document = pinned.searcher.doc::<TantivyDocument>(address).unwrap();
     let mut forged = TantivyDocument::default();
     for (field, value) in document.field_values() {
-        if field != fields.core_record {
+        if field != fields.core_record && field != fields.core_record_encoded_bytes {
             forged.add_field_value(field, value);
         }
     }
+    forged.add_u64(fields.core_record_encoded_bytes, 1);
     forged.add_bytes(fields.core_record, b"{");
     let index = pinned.searcher.index().clone();
     publish_unchecked_generation(

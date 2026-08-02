@@ -1360,6 +1360,14 @@ fn stored_document_contains_exactly_one_canonical_core_record() {
     assert_eq!(values[0].0, fields.core_record);
     let encoded = values[0].1.as_bytes().unwrap();
     assert_eq!(CoreRecord::decode_stored(encoded).unwrap(), expected);
+    let segment = &index.searcher.segment_readers()[address.segment_ord as usize];
+    let encoded_fast_bytes = segment
+        .fast_fields()
+        .u64("core_record_encoded_bytes")
+        .unwrap()
+        .first(address.doc_id)
+        .unwrap();
+    assert_eq!(usize::try_from(encoded_fast_bytes).unwrap(), encoded.len());
     assert_eq!(
         index
             .event_by_id(expected.event_id.as_uuid())

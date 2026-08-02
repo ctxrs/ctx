@@ -11,9 +11,9 @@ use unicode_width::UnicodeWidthStr as _;
 use super::{
     bootstrap::{scan_color_mode, scan_machine_output_hint},
     canonical_human_output_bytes, diagnostic, empty_state, evidence_list, fields, hint, outcome,
-    progress, section, table, Action, ColorMode, Diagnostic, DiagnosticLevel, Document, EmptyState,
-    Evidence, Field, Hint, Line, Outcome, OutcomeState, Progress, RenderContext, Span, StreamKind,
-    Table, TestContext, Token, Ui,
+    progress, sanitize_untrusted_history_body_for_terminal, section, table, Action, ColorMode,
+    Diagnostic, DiagnosticLevel, Document, EmptyState, Evidence, Field, Hint, Line, Outcome,
+    OutcomeState, Progress, RenderContext, Span, StreamKind, Table, TestContext, Token, Ui,
 };
 
 fn tty(width: usize) -> RenderContext {
@@ -511,6 +511,206 @@ fn component_values_cannot_inject_ansi_or_terminal_controls() {
     .render_plain();
     assert!(!direct.contains('\u{1b}'));
     assert!(direct.contains("\\x1b[2A"));
+}
+
+#[test]
+fn shared_production_wrapping_preserves_legitimate_unicode_at_all_widths() {
+    const FAMILY: &str = "👨‍👩‍👧‍👦";
+    const PROFESSION: &str = "👩🏽‍💻";
+    const PERSIAN_ZWNJ: &str = "می‌روم";
+    const ARABIC_COMBINING: &str = "اَلْعَرَبِيَّةُ";
+    const DECOMPOSED_LATIN: &str = "e\u{0301}";
+    const RTL_LETTERS: &str = "مرحبا";
+    const VARIATION_SELECTOR: &str = "✈\u{fe0f}";
+    let body = format!(
+        "Family {FAMILY} profession {PROFESSION} Persian {PERSIAN_ZWNJ} Arabic \
+         {ARABIC_COMBINING} decomposed {DECOMPOSED_LATIN} RTL {RTL_LETTERS} variant \
+         {VARIATION_SELECTOR}. This intentionally long history body traverses the shared \
+         production wrapping path without changing legitimate Unicode grapheme content at \
+         narrow or wide terminal sizes."
+    );
+
+    for width in [32, 48, 80, 120] {
+        let context = RenderContext::for_test(
+            TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Always),
+        );
+        let document = fields(&context, &[Field::new("Body", &body)]);
+        let plain = document.render_plain();
+        let styled = document.render(&context);
+
+        for expected in [
+            FAMILY,
+            PROFESSION,
+            PERSIAN_ZWNJ,
+            ARABIC_COMBINING,
+            DECOMPOSED_LATIN,
+            RTL_LETTERS,
+            VARIATION_SELECTOR,
+        ] {
+            assert!(
+                plain.contains(expected),
+                "width {width} changed {expected:?}"
+            );
+        }
+        assert!(!plain.contains("\\u{200c}"), "width {width}");
+        assert!(!plain.contains("\\u{200d}"), "width {width}");
+        assert_eq!(strip_ansi(&styled), plain, "width {width}");
+        assert_within_terminal(&document, &context);
+    }
+}
+
+#[test]
+fn global_spans_preserve_ordinary_unicode_exactly() {
+    let ordinary = concat!("👨‍👩‍👧‍👦 👩🏽‍💻 می‌روم اَلْعَرَبِيَّةُ e\u{0301} ", "مرحبا ✈\u{fe0f}");
+
+    assert_eq!(Span::text(ordinary).content(), ordinary);
+    assert_eq!(
+        Document::from_line(Line::styled(ordinary, Token::Heading)).render_plain(),
+        format!("{ordinary}\n")
+    );
+}
+
+#[test]
+fn strict_history_sanitizer_escapes_disallowed_format_controls_exactly() {
+    const CASES: &[(char, &str)] = &[
+        ('\u{00ad}', "\\u{00ad}"),
+        ('\u{0600}', "\\u{0600}"),
+        ('\u{061c}', "\\u{061c}"),
+        ('\u{115f}', "\\u{115f}"),
+        ('\u{180e}', "\\u{180e}"),
+        ('\u{2028}', "\\u{2028}"),
+        ('\u{2029}', "\\u{2029}"),
+        ('\u{2061}', "\\u{2061}"),
+        ('\u{2062}', "\\u{2062}"),
+        ('\u{2063}', "\\u{2063}"),
+        ('\u{2064}', "\\u{2064}"),
+        ('\u{2065}', "\\u{2065}"),
+        ('\u{3164}', "\\u{3164}"),
+        ('\u{ffa0}', "\\u{ffa0}"),
+        ('\u{fff0}', "\\u{fff0}"),
+        ('\u{fff9}', "\\u{fff9}"),
+        ('\u{110bd}', "\\u{110bd}"),
+        ('\u{13430}', "\\u{13430}"),
+        ('\u{1bca0}', "\\u{1bca0}"),
+        ('\u{1d173}', "\\u{1d173}"),
+        ('\u{e0001}', "\\u{e0001}"),
+        ('\u{e0020}', "\\u{e0020}"),
+        ('\u{e007f}', "\\u{e007f}"),
+        ('\u{e0080}', "\\u{e0080}"),
+        ('\u{e01f0}', "\\u{e01f0}"),
+    ];
+
+    for (character, expected) in CASES {
+        assert_eq!(
+            sanitize_untrusted_history_body_for_terminal(&character.to_string()),
+            *expected,
+            "U+{:04X}",
+            u32::from(*character)
+        );
+    }
+}
+
+#[test]
+fn strict_history_sanitizer_preserves_text_shaping_and_generic_ui_behavior() {
+    const PRESERVED: &str = concat!(
+        "می\u{200c}روم ",
+        "👩\u{200d}💻 ",
+        "✈\u{fe0f} 字\u{e0100} ᠠ\u{180b} ",
+        "e\u{0301} x\u{034f} ក\u{17b4} ",
+        "مرحبا שלום"
+    );
+    const STRICT_ONLY: &str = "\u{2028}\u{2029}\u{2061}\u{2062}\u{2063}\u{2064}";
+
+    assert_eq!(
+        sanitize_untrusted_history_body_for_terminal(PRESERVED),
+        PRESERVED
+    );
+    assert_eq!(
+        Span::text(STRICT_ONLY).content(),
+        STRICT_ONLY,
+        "the generic UI sanitizer must remain unchanged"
+    );
+}
+
+#[test]
+fn untrusted_history_body_controls_are_visibly_escaped_before_layout() {
+    const FORBIDDEN: &[char] = &[
+        '\u{061c}', '\u{200b}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}',
+        '\u{202d}', '\u{202e}', '\u{2060}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        '\u{206a}', '\u{206b}', '\u{206c}', '\u{206d}', '\u{206e}', '\u{206f}', '\u{feff}',
+    ];
+    const VISIBLE: &[&str] = &[
+        "\\u{061c}",
+        "\\u{200b}",
+        "\\u{200e}",
+        "\\u{200f}",
+        "\\u{202a}",
+        "\\u{202b}",
+        "\\u{202c}",
+        "\\u{202d}",
+        "\\u{202e}",
+        "\\u{2060}",
+        "\\u{2066}",
+        "\\u{2067}",
+        "\\u{2068}",
+        "\\u{2069}",
+        "\\u{206a}",
+        "\\u{206b}",
+        "\\u{206c}",
+        "\\u{206d}",
+        "\\u{206e}",
+        "\\u{206f}",
+        "\\u{feff}",
+    ];
+    const LEGITIMATE: &str = "می‌روم 👩🏽‍💻 اَلْعَرَبِيَّةُ e\u{0301} مرحبا ✈\u{fe0f}";
+    let controls = FORBIDDEN
+        .iter()
+        .map(char::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let visible_controls = VISIBLE.join(" ");
+    let input = format!(
+        "before \n \r \t \u{1b} \u{0000} \u{001f} \u{007f} \u{0085} \u{009b} \
+         {controls} after {LEGITIMATE}"
+    );
+    let expected = format!(
+        "before \\n \\r \\t \\x1b \\u{{0000}} \\u{{001f}} \\u{{007f}} \\u{{0085}} \\u{{009b}} \
+         {visible_controls} after {LEGITIMATE}"
+    );
+
+    let sanitized = sanitize_untrusted_history_body_for_terminal(&input);
+    assert_eq!(sanitized, expected);
+    assert!(VISIBLE.iter().all(|escape| escape.is_ascii()));
+    let dangerous_only = format!("\n\r\t\u{1b}\u{0000}\u{001f}\u{007f}\u{0085}\u{009b}{controls}");
+    assert!(sanitize_untrusted_history_body_for_terminal(&dangerous_only).is_ascii());
+    assert!(sanitized.contains(LEGITIMATE));
+    for forbidden in FORBIDDEN {
+        assert!(!sanitized.contains(*forbidden), "retained {forbidden:?}");
+    }
+
+    let context =
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 80).color(ColorMode::Always));
+    let document = fields(&context, &[Field::new("Body", &sanitized)]);
+    let plain = document.render_plain();
+    let styled = document.render(&context);
+    assert_eq!(document.render_plain(), plain);
+    assert_eq!(document.render(&context), styled);
+    assert_eq!(strip_ansi(&styled), plain);
+    for legitimate in ["می‌روم", "👩🏽‍💻", "اَلْعَرَبِيَّةُ", "e\u{0301}", "مرحبا", "✈\u{fe0f}"]
+    {
+        assert!(plain.contains(legitimate), "changed {legitimate:?}");
+    }
+    assert_within_terminal(&document, &context);
+    for escape in VISIBLE {
+        assert!(plain.contains(escape), "missing {escape}");
+    }
+    for forbidden in FORBIDDEN {
+        assert!(!plain.contains(*forbidden), "plain retained {forbidden:?}");
+        assert!(
+            !styled.contains(*forbidden),
+            "styled retained {forbidden:?}"
+        );
+    }
 }
 
 #[derive(Clone, Default)]

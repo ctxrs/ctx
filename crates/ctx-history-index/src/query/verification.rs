@@ -1,10 +1,10 @@
 use ctx_history_core::{SourceKey, StableEntityId};
 use tantivy::{schema::Value as _, DocAddress, TantivyDocument};
 
-use super::records::stored_core_verification_record;
+use super::records::{stored_core_verification_record, validate_core_record_encoded_bytes};
 use crate::{source_token, Fields, IndexError, Result, LEXICAL_SCHEMA_VERSION};
 
-const VERIFY_CORE_RECORD: u32 = 27;
+const VERIFY_CORE_RECORD: u32 = 28;
 
 pub(crate) struct VerificationRecord {
     pub(crate) source_owner: String,
@@ -62,6 +62,7 @@ pub(crate) fn stored_identity_record(
     let fields = crate::fields_from_schema(searcher.schema())?;
     let document: TantivyDocument = searcher.doc(address)?;
     let encoded = unique_stored_core(&document, fields.core_record)?;
+    validate_core_record_encoded_bytes(searcher, address, encoded.len())?;
     let record: CoreIdentityProjection = serde_json::from_slice(encoded)?;
     record.source.validate_contract()?;
     record.event_id.validate_contract()?;

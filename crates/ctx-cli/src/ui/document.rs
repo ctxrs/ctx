@@ -32,22 +32,87 @@ impl Span {
 pub(super) fn neutralize_controls(text: &str) -> String {
     let mut safe = String::with_capacity(text.len());
     for character in text.chars() {
-        match character {
-            '\n' => safe.push_str("\\n"),
-            '\r' => safe.push_str("\\r"),
-            '\t' => safe.push_str("\\t"),
-            '\u{1b}' => safe.push_str("\\x1b"),
-            character
-                if character <= '\u{1f}'
-                    || character == '\u{7f}'
-                    || ('\u{80}'..='\u{9f}').contains(&character) =>
-            {
-                let _ = write!(safe, "\\u{{{:04x}}}", u32::from(character));
-            }
-            character => safe.push(character),
+        if !push_visible_terminal_control(&mut safe, character) {
+            safe.push(character);
         }
     }
     safe
+}
+
+/// Makes terminal-formatting controls in source-authored history visible.
+///
+/// Callers must sanitize history bodies before passing them to shared layout so
+/// wrapping and measurement operate on the same plain ASCII escape text that
+/// the terminal will receive.
+pub(crate) fn sanitize_untrusted_history_body_for_terminal(text: &str) -> String {
+    let mut safe = String::with_capacity(text.len());
+    for character in text.chars() {
+        if push_visible_terminal_control(&mut safe, character) {
+            continue;
+        }
+        if is_untrusted_history_format_control(character) {
+            push_visible_unicode_escape(&mut safe, character);
+        } else {
+            safe.push(character);
+        }
+    }
+    safe
+}
+
+fn push_visible_terminal_control(safe: &mut String, character: char) -> bool {
+    match character {
+        '\n' => safe.push_str("\\n"),
+        '\r' => safe.push_str("\\r"),
+        '\t' => safe.push_str("\\t"),
+        '\u{1b}' => safe.push_str("\\x1b"),
+        character
+            if character <= '\u{1f}'
+                || character == '\u{7f}'
+                || ('\u{80}'..='\u{9f}').contains(&character) =>
+        {
+            push_visible_unicode_escape(safe, character);
+        }
+        _ => return false,
+    }
+    true
+}
+
+fn push_visible_unicode_escape(safe: &mut String, character: char) {
+    let _ = write!(safe, "\\u{{{:04x}}}", u32::from(character));
+}
+
+fn is_untrusted_history_format_control(character: char) -> bool {
+    // Keep text-shaping content such as ZWNJ, ZWJ, combining marks, and
+    // variation selectors. This denylist covers separators, invisible fillers,
+    // format controls, and the non-mark default-ignorable ranges instead.
+    matches!(
+        character,
+        '\u{00ad}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061c}'
+            | '\u{06dd}'
+            | '\u{070f}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08e2}'
+            | '\u{115f}'..='\u{1160}'
+            | '\u{180e}'
+            | '\u{200b}'
+            | '\u{200e}'..='\u{200f}'
+            | '\u{2028}'..='\u{2029}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{3164}'
+            | '\u{feff}'
+            | '\u{ffa0}'
+            | '\u{fff0}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e00ff}'
+            | '\u{e01f0}'..='\u{e0fff}'
+    )
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
