@@ -1,13 +1,42 @@
 use std::{
+    cell::Cell,
     fs,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
 };
 
 use super::*;
 use crate::analytics::{ProviderRefreshCompletedV1, Surface};
+use ctx_history_capture::{
+    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceStatus, SourceBackedProviderRegistry, SourceBackedRoute, SourceBackedRouteDriver,
+    SourceBackedSelectorAuthority,
+};
+use ctx_history_core::CaptureProvider;
+
+fn daemon_watch_test_catalog(path: PathBuf) -> SourceBackedWatchCatalog {
+    let route = SourceBackedRoute::automatic(
+        ProviderSource {
+            provider: CaptureProvider::Codex,
+            path,
+            exists: true,
+            source_format: "codex_history_jsonl",
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Native,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Available,
+            unsupported_reason: None,
+        },
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        SourceBackedRouteDriver::new(|_| Ok(()), |_| false, |_| true),
+    )
+    .expect("build watcher test route");
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(route);
+    registry.watch_catalog()
+}
 
 fn manual_run() -> DaemonRunFactsV1 {
     DaemonRunFactsV1::new(DaemonStartModeV1::Manual, DaemonSupervisorV1::User, None)
@@ -77,6 +106,200 @@ fn scheduler_cycle_without_runtime_telemetry_preserves_provider_handoff() {
         PublicEventV1::ProviderRefreshCompleted(_)
     ));
     assert!(iteration.provider_refresh_events.is_empty());
+}
+
+#[test]
+fn safety_reconciliation_recovers_a_failed_startup_catalog_without_empty_authority() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let data_root = temp.path().join("data");
+    let provider_root = temp.path().join("provider");
+    let provider_file = provider_root.join("history.jsonl");
+    fs::create_dir_all(&data_root)?;
+    fs::create_dir_all(&provider_root)?;
+    fs::write(&provider_file, b"{\"event\":1}\n")?;
+    let catalog = daemon_watch_test_catalog(provider_file);
+    let route = catalog
+        .route_ids()
+        .next()
+        .expect("one watcher test route")
+        .clone();
+    let coordinator = CoreRefreshEngine::new();
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let mut watch_runtime = DaemonWatchRuntime::new(Arc::clone(&wakeup));
+
+    watch_runtime.reconcile_catalog_and_seed_routes_with(
+        &data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::Startup,
+        false,
+        |_| Err(anyhow!("injected startup catalog failure")),
+        DaemonFileWatcher::start,
+    );
+
+    assert!(watch_runtime.file_watcher.is_some());
+    assert!(watch_runtime.catalog.snapshot().is_none());
+    assert!(!coordinator.watch_routes_initialized());
+    assert!(!coordinator.has_scheduled_route_work());
+    assert_eq!(
+        super::super::daemon_wakeup::daemon_wakeup_report(&data_root)["status"],
+        "degraded"
+    );
+
+    watch_runtime.reconcile_catalog_and_seed_routes_with(
+        &data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::SafetyTimeout,
+        false,
+        |_| Ok(catalog.clone()),
+        |_, _, _| -> Result<DaemonFileWatcher> {
+            panic!("an existing watcher must be updated through the shared catalog owner")
+        },
+    );
+
+    let recovered = watch_runtime
+        .catalog
+        .snapshot()
+        .expect("safety reconciliation publishes catalog authority");
+    assert_eq!(recovered.route_ids().next(), Some(&route));
+    assert!(coordinator.watch_routes_initialized());
+    assert!(coordinator.has_scheduled_route_work());
+    assert_eq!(
+        super::super::daemon_wakeup::daemon_wakeup_report(&data_root)["status"],
+        "active"
+    );
+    Ok(())
+}
+
+#[test]
+fn safety_reconciliation_recreates_a_failed_startup_watcher_without_healthy_catalog_scans(
+) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let data_root = temp.path().join("data");
+    let provider_root = temp.path().join("provider");
+    let provider_file = provider_root.join("history.jsonl");
+    fs::create_dir_all(&data_root)?;
+    fs::create_dir_all(&provider_root)?;
+    fs::write(&provider_file, b"{\"event\":1}\n")?;
+    let catalog = daemon_watch_test_catalog(provider_file);
+    let coordinator = CoreRefreshEngine::new();
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let mut watch_runtime = DaemonWatchRuntime::new(Arc::clone(&wakeup));
+    let catalog_attempts = Cell::new(0_u64);
+    let watcher_attempts = Cell::new(0_u64);
+
+    watch_runtime.reconcile_catalog_and_seed_routes_with(
+        &data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::Startup,
+        false,
+        |_| {
+            catalog_attempts.set(catalog_attempts.get().saturating_add(1));
+            Ok(catalog.clone())
+        },
+        |_, _, _| {
+            watcher_attempts.set(watcher_attempts.get().saturating_add(1));
+            Err(anyhow!("injected startup watcher creation failure"))
+        },
+    );
+
+    assert_eq!(catalog_attempts.get(), 1);
+    assert_eq!(watcher_attempts.get(), 1);
+    assert!(watch_runtime.file_watcher.is_none());
+    assert!(watch_runtime.catalog.snapshot().is_some());
+    assert!(coordinator.watch_routes_initialized());
+
+    watch_runtime.reconcile_catalog_and_seed_routes_with(
+        &data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::SafetyTimeout,
+        false,
+        |_| {
+            catalog_attempts.set(catalog_attempts.get().saturating_add(1));
+            Ok(catalog.clone())
+        },
+        |path, wakeup, catalog| {
+            watcher_attempts.set(watcher_attempts.get().saturating_add(1));
+            DaemonFileWatcher::start(path, wakeup, catalog)
+        },
+    );
+
+    assert_eq!(catalog_attempts.get(), 2);
+    assert_eq!(watcher_attempts.get(), 2);
+    assert!(watch_runtime.file_watcher.is_some());
+
+    watch_runtime.reconcile_catalog_and_seed_routes_with(
+        &data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::SafetyTimeout,
+        false,
+        |_| -> Result<SourceBackedWatchCatalog> {
+            panic!("healthy idle safety reconciliation must reuse catalog authority")
+        },
+        |_, _, _| -> Result<DaemonFileWatcher> {
+            panic!("healthy idle safety reconciliation must reuse the watcher")
+        },
+    );
+
+    assert_eq!(catalog_attempts.get(), 2);
+    assert_eq!(watcher_attempts.get(), 2);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_watcher_recovery_seeds_a_route_mutated_inside_the_rearm_gap() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let data_root = temp.path().join("data");
+    let provider_root = temp.path().join("provider");
+    let provider_file = provider_root.join("history.jsonl");
+    fs::create_dir_all(&data_root)?;
+    fs::create_dir_all(&provider_root)?;
+    fs::write(&provider_file, b"{\"event\":1}\n")?;
+    let catalog = daemon_watch_test_catalog(provider_file.clone());
+    let coordinator = CoreRefreshEngine::new();
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let mut watch_runtime = DaemonWatchRuntime::new(Arc::clone(&wakeup));
+    watch_runtime.reconcile_catalog_and_seed_routes_with(
+        &data_root,
+        None,
+        WatchCatalogReconcileTrigger::Startup,
+        false,
+        |_| Ok(catalog.clone()),
+        DaemonFileWatcher::start,
+    );
+    let watcher = watch_runtime
+        .file_watcher
+        .as_mut()
+        .expect("startup watcher");
+    let mutation_observed = Arc::new(AtomicBool::new(false));
+    let hook_observed = Arc::clone(&mutation_observed);
+    let hook_root = provider_root.clone();
+    let hook_file = provider_file.clone();
+    watcher.install_rearm_gap_hook(move |unwatched| {
+        if unwatched == hook_root && !hook_observed.swap(true, Ordering::SeqCst) {
+            fs::write(&hook_file, b"{\"event\":2}\n")
+                .expect("mutate provider source inside forced-rearm gap");
+        }
+    });
+
+    watch_runtime.reconcile_catalog_and_seed_routes_with(
+        &data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::WatcherRecovery,
+        true,
+        |_| -> Result<SourceBackedWatchCatalog> {
+            panic!("watcher rearm must use the shared catalog snapshot")
+        },
+        |_, _, _| -> Result<DaemonFileWatcher> {
+            panic!("forced rearm must retain the current watcher")
+        },
+    );
+
+    assert!(mutation_observed.load(Ordering::SeqCst));
+    assert_eq!(fs::read(provider_file)?, b"{\"event\":2}\n");
+    assert!(coordinator.watch_routes_initialized());
+    assert!(coordinator.has_scheduled_route_work());
+    Ok(())
 }
 
 #[cfg(unix)]

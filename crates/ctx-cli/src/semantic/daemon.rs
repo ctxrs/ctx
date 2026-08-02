@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use ctx_history_capture::SourceBackedWatchCatalog;
 use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 
@@ -43,7 +44,10 @@ use super::{
         daemon_report_failure_message, render_daemon_disable_receipt, render_daemon_enable_receipt,
         render_daemon_prepare_uninstall_receipt, render_daemon_status_human, DaemonStatusView,
     },
-    daemon_wakeup::{write_degraded_wakeup_receipt, DaemonFileWatcher, DaemonWakeup},
+    daemon_wakeup::{
+        write_degraded_wakeup_receipt, DaemonFileWatcher, DaemonWakeup, DaemonWatchCatalog,
+        SourceWatchBatch,
+    },
     daemon_worker::write_daemon_lifecycle_status_with_runtime,
     dirty_source_routes::EventWatermark,
     health_search::semantic_env_flag,
@@ -120,6 +124,187 @@ pub(super) struct DaemonRuntime {
     pub(super) sidecar_drain: DaemonSidecarDrain,
     pub(super) consumer_retry_deferral: DaemonConsumerRetryDeferral,
     pub(super) config: AppConfig,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WatchCatalogReconcileTrigger {
+    Startup,
+    RuntimeActivation,
+    SafetyTimeout,
+    CatalogControl(EventWatermark),
+    WatcherRecovery,
+    Filesystem,
+}
+
+impl WatchCatalogReconcileTrigger {
+    fn requests_catalog_refresh(self) -> bool {
+        matches!(self, Self::Startup | Self::CatalogControl(_))
+    }
+
+    fn attempts_pending_catalog(self) -> bool {
+        matches!(
+            self,
+            Self::Startup | Self::SafetyTimeout | Self::CatalogControl(_)
+        )
+    }
+
+    fn ensures_watcher(self) -> bool {
+        matches!(
+            self,
+            Self::Startup | Self::SafetyTimeout | Self::CatalogControl(_)
+        )
+    }
+
+    fn reconciles_roots(self) -> bool {
+        matches!(
+            self,
+            Self::SafetyTimeout
+                | Self::CatalogControl(_)
+                | Self::WatcherRecovery
+                | Self::Filesystem
+        )
+    }
+
+    fn watermark(self) -> Option<EventWatermark> {
+        match self {
+            Self::CatalogControl(watermark) => Some(watermark),
+            _ => None,
+        }
+    }
+}
+
+/// Owns the daemon's one watch-catalog snapshot and its native projection.
+///
+/// Publishing catalog authority and seeding coordinator route authority must
+/// only happen through `reconcile_catalog_and_seed_routes`; this prevents the
+/// callback matcher and refresh coordinator from drifting to different
+/// snapshots during degraded startup or recovery.
+struct DaemonWatchRuntime {
+    wakeup: Arc<DaemonWakeup>,
+    catalog: DaemonWatchCatalog,
+    file_watcher: Option<DaemonFileWatcher>,
+    catalog_refresh_pending: bool,
+}
+
+impl DaemonWatchRuntime {
+    fn new(wakeup: Arc<DaemonWakeup>) -> Self {
+        Self {
+            wakeup,
+            catalog: DaemonWatchCatalog::default(),
+            file_watcher: None,
+            catalog_refresh_pending: false,
+        }
+    }
+
+    fn reconcile_catalog_and_seed_routes(
+        &mut self,
+        data_root: &Path,
+        source_refresh: Option<&CoreRefreshEngine>,
+        trigger: WatchCatalogReconcileTrigger,
+        force_rearm: bool,
+    ) {
+        self.reconcile_catalog_and_seed_routes_with(
+            data_root,
+            source_refresh,
+            trigger,
+            force_rearm,
+            source_backed_watch_catalog,
+            DaemonFileWatcher::start,
+        )
+    }
+
+    fn reconcile_catalog_and_seed_routes_with<C, W>(
+        &mut self,
+        data_root: &Path,
+        source_refresh: Option<&CoreRefreshEngine>,
+        trigger: WatchCatalogReconcileTrigger,
+        force_rearm: bool,
+        mut construct_catalog: C,
+        mut start_watcher: W,
+    ) where
+        C: FnMut(&Path) -> Result<SourceBackedWatchCatalog>,
+        W: FnMut(&Path, Arc<DaemonWakeup>, DaemonWatchCatalog) -> Result<DaemonFileWatcher>,
+    {
+        if trigger.requests_catalog_refresh() {
+            self.catalog_refresh_pending = true;
+        }
+        if self.file_watcher.is_none() && trigger.ensures_watcher() {
+            // A missing watcher could also have missed a control/catalog
+            // change. Attempt fresh catalog construction before recreating
+            // the native projection, and retain this bit if either fails.
+            self.catalog_refresh_pending = true;
+        }
+
+        let mut catalog_published = false;
+        if self.catalog_refresh_pending && trigger.attempts_pending_catalog() {
+            match construct_catalog(data_root) {
+                Ok(catalog) => {
+                    self.catalog.publish(catalog);
+                    self.catalog_refresh_pending = false;
+                    catalog_published = true;
+                }
+                Err(error) => {
+                    let _ = write_degraded_wakeup_receipt(data_root, &error);
+                }
+            }
+        }
+
+        let mut watcher_recreated = false;
+        if self.file_watcher.is_none() && trigger.ensures_watcher() {
+            match start_watcher(data_root, Arc::clone(&self.wakeup), self.catalog.clone()) {
+                Ok(watcher) => {
+                    self.file_watcher = Some(watcher);
+                    watcher_recreated = true;
+                }
+                Err(error) => {
+                    // Keep catalog recovery pending: while no watcher exists,
+                    // a later safety pass must refresh both authorities before
+                    // recreating the native backend.
+                    self.catalog_refresh_pending = true;
+                    let _ = write_degraded_wakeup_receipt(data_root, &error);
+                }
+            }
+        }
+
+        let mut affected = SourceWatchBatch::default();
+        if !watcher_recreated && (catalog_published || trigger.reconciles_roots()) {
+            if let Some(watcher) = self.file_watcher.as_mut() {
+                let (batch, receipt) = watcher.reconcile_roots(force_rearm);
+                affected = batch;
+                if let Err(error) = receipt {
+                    let _ = write_degraded_wakeup_receipt(data_root, &error);
+                }
+            }
+        }
+
+        let coordinator_needs_authority =
+            source_refresh.is_some_and(|refresh| !refresh.watch_routes_initialized());
+        let must_seed_routes = catalog_published
+            || watcher_recreated
+            || !affected.routes.is_empty()
+            || coordinator_needs_authority;
+        if must_seed_routes {
+            if let (Some(catalog), Some(source_refresh)) = (self.catalog.snapshot(), source_refresh)
+            {
+                let watcher_watermark = self
+                    .file_watcher
+                    .as_ref()
+                    .map(DaemonFileWatcher::startup_watermark)
+                    .unwrap_or_else(|| EventWatermark::new(0, 0));
+                let watermark = trigger
+                    .watermark()
+                    .into_iter()
+                    .chain(affected.routes.values().copied())
+                    .max()
+                    .unwrap_or(watcher_watermark);
+                source_refresh.reconcile_watch_routes(
+                    catalog.route_ids().cloned(),
+                    watermark,
+                    source_route_ledger_now_ms(),
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -603,38 +788,15 @@ pub(super) fn run_daemon_inner(
             daemon_semantic_runtime_active(&runtime, query_service.as_ref()),
             &config_reload.to_json(),
         )?;
-        let initial_watch_catalog = match source_backed_watch_catalog(data_root) {
-            Ok(catalog) => catalog,
-            Err(error) => {
-                write_degraded_wakeup_receipt(data_root, &error)?;
-                Default::default()
-            }
-        };
-        let mut file_watcher = match DaemonFileWatcher::start(
+        let mut watch_runtime = DaemonWatchRuntime::new(Arc::clone(&wakeup));
+        watch_runtime.reconcile_catalog_and_seed_routes(
             data_root,
-            Arc::clone(&wakeup),
-            initial_watch_catalog.clone(),
-        ) {
-            Ok(watcher) => Some(watcher),
-            Err(error) => {
-                write_degraded_wakeup_receipt(data_root, &error)?;
-                None
-            }
-        };
-        if let Some(source_refresh) = refresh_service
-            .as_ref()
-            .map(|service| service.source_refresh.as_ref())
-        {
-            let watermark = file_watcher
+            refresh_service
                 .as_ref()
-                .map(DaemonFileWatcher::startup_watermark)
-                .unwrap_or_else(|| EventWatermark::new(0, 0));
-            source_refresh.reconcile_watch_routes(
-                initial_watch_catalog.route_ids().cloned(),
-                watermark,
-                source_route_ledger_now_ms(),
-            );
-        }
+                .map(|service| service.source_refresh.as_ref()),
+            WatchCatalogReconcileTrigger::Startup,
+            false,
+        );
         // The daemon is ready only after every fallible lifecycle and runtime
         // initialization step has succeeded. Publish that status before
         // acknowledging any durable restart request so every parent observes
@@ -702,30 +864,12 @@ pub(super) fn run_daemon_inner(
                 .map(|service| service.source_refresh.as_ref())
                 .filter(|refresh| !refresh.watch_routes_initialized())
             {
-                let catalog = match source_backed_watch_catalog(data_root).or_else(|error| {
-                    file_watcher
-                        .as_ref()
-                        .map(DaemonFileWatcher::catalog)
-                        .ok_or(error)
-                }) {
-                    Ok(catalog) => catalog,
-                    Err(error) => {
-                        let _ = write_degraded_wakeup_receipt(data_root, &error);
-                        Default::default()
-                    }
-                };
-                let watermark = file_watcher
-                    .as_ref()
-                    .map(DaemonFileWatcher::startup_watermark)
-                    .unwrap_or_else(|| EventWatermark::new(0, 0));
-                source_refresh.reconcile_watch_routes(
-                    catalog.route_ids().cloned(),
-                    watermark,
-                    source_route_ledger_now_ms(),
+                watch_runtime.reconcile_catalog_and_seed_routes(
+                    data_root,
+                    Some(source_refresh),
+                    WatchCatalogReconcileTrigger::RuntimeActivation,
+                    false,
                 );
-                if let Some(watcher) = file_watcher.as_mut() {
-                    let _ = watcher.replace_catalog(catalog);
-                }
             }
             write_daemon_lifecycle_status_with_runtime(
                 data_root,
@@ -901,47 +1045,33 @@ pub(super) fn run_daemon_inner(
             let source_refresh = refresh_service
                 .as_ref()
                 .map(|service| service.source_refresh.as_ref());
-            if let (Some(watermark), Some(source_refresh)) =
-                (wake.source_watch.reconcile, source_refresh)
-            {
-                let reconciled = source_backed_watch_catalog(data_root).or_else(|error| {
-                    if let Some(watcher) = file_watcher.as_ref() {
-                        return Ok(watcher.catalog());
-                    }
-                    Err(error)
+            let watch_reconcile_trigger = wake
+                .source_watch
+                .reconcile
+                .map(WatchCatalogReconcileTrigger::CatalogControl)
+                .or_else(|| safety_due.then_some(WatchCatalogReconcileTrigger::SafetyTimeout))
+                .or_else(|| {
+                    wake.source_watch
+                        .rearm
+                        .then_some(WatchCatalogReconcileTrigger::WatcherRecovery)
+                })
+                .or_else(|| {
+                    wake.filesystem
+                        .then_some(WatchCatalogReconcileTrigger::Filesystem)
                 });
-                match reconciled {
-                    Ok(catalog) => {
-                        source_refresh.reconcile_watch_routes(
-                            catalog.route_ids().cloned(),
-                            watermark,
-                            source_route_ledger_now_ms(),
-                        );
-                        if let Some(watcher) = file_watcher.as_mut() {
-                            let _ = watcher.replace_catalog(catalog);
-                        }
-                    }
-                    Err(error) => {
-                        let _ = write_degraded_wakeup_receipt(data_root, &error);
-                    }
-                }
+            if let Some(trigger) = watch_reconcile_trigger {
+                watch_runtime.reconcile_catalog_and_seed_routes(
+                    data_root,
+                    source_refresh,
+                    trigger,
+                    wake.source_watch.rearm,
+                );
             }
             if let Some(source_refresh) = source_refresh {
                 source_refresh
                     .record_watch_routes(wake.source_watch.routes, source_route_ledger_now_ms());
             }
-            if (wake.filesystem || safety_due)
-                && file_watcher.as_mut().is_some_and(|watcher| {
-                    watcher
-                        .reconcile_roots(safety_due || wake.source_watch.rearm)
-                        .is_err()
-                })
-            {
-                // Keep the last good exact catalog. A backend error event will
-                // seed it while the bounded registration reconciliation keeps
-                // attempting to restore native watches.
-            }
-            if let Some(watcher) = file_watcher.as_ref() {
+            if let Some(watcher) = watch_runtime.file_watcher.as_ref() {
                 let _ =
                     watcher.write_receipt(if safety_due || wake.filesystem || source_retry_due {
                         "active"
@@ -993,7 +1123,7 @@ pub(super) fn run_daemon_inner(
         // Keep daemon ownership until the query service has removed its endpoint
         // and joined its listener thread. Otherwise a replacement can publish a
         // new endpoint that this service's destructor then removes.
-        drop(file_watcher);
+        drop(watch_runtime);
         drop(query_service);
         drop(refresh_service);
         Ok(failed)

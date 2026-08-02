@@ -233,16 +233,43 @@ struct WatchCounters {
     last_relevant_path: Option<PathBuf>,
 }
 
+/// The daemon's single authoritative watch-catalog snapshot.
+///
+/// The native callback thread and the daemon reconciliation loop share this
+/// exact owner. `None` is deliberately distinct from an authoritative empty
+/// catalog: it means catalog construction has not succeeded yet and must not
+/// initialize coordinator route authority.
+#[derive(Debug, Clone, Default)]
+pub(super) struct DaemonWatchCatalog {
+    snapshot: Arc<RwLock<Option<SourceBackedWatchCatalog>>>,
+}
+
+impl DaemonWatchCatalog {
+    pub(super) fn publish(&self, catalog: SourceBackedWatchCatalog) {
+        *self
+            .snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(catalog);
+    }
+
+    pub(super) fn snapshot(&self) -> Option<SourceBackedWatchCatalog> {
+        self.snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct WatchAuthority {
-    routes: SourceBackedWatchCatalog,
+    catalog: DaemonWatchCatalog,
     controls: BTreeSet<PathBuf>,
 }
 
 impl WatchAuthority {
-    fn new(data_root: &Path, routes: SourceBackedWatchCatalog) -> Self {
+    fn new(data_root: &Path, catalog: DaemonWatchCatalog) -> Self {
         Self {
-            routes,
+            catalog,
             controls: BTreeSet::from([
                 data_root.join(CONFIG_FILE),
                 data_root.join("catalogs").join("explicit-sources"),
@@ -250,11 +277,12 @@ impl WatchAuthority {
         }
     }
 
-    fn target_paths(&self) -> impl Iterator<Item = &Path> {
-        self.controls
-            .iter()
-            .map(PathBuf::as_path)
-            .chain(self.routes.target_paths())
+    fn target_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self.controls.iter().cloned().collect::<Vec<_>>();
+        if let Some(catalog) = self.catalog.snapshot() {
+            paths.extend(catalog.target_paths().map(Path::to_path_buf));
+        }
+        paths
     }
 }
 
@@ -270,13 +298,16 @@ pub(super) struct DaemonFileWatcher {
     thread: Option<thread::JoinHandle<()>>,
     last_error: Option<String>,
     watcher_epoch: u64,
+    callback_sequence: Arc<AtomicU64>,
+    #[cfg(test)]
+    rearm_gap_hook: Option<Box<dyn FnMut(&Path)>>,
 }
 
 impl DaemonFileWatcher {
     pub(super) fn start(
         data_root: &Path,
         wakeup: Arc<DaemonWakeup>,
-        catalog: SourceBackedWatchCatalog,
+        catalog: DaemonWatchCatalog,
     ) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
         let authority = Arc::new(RwLock::new(WatchAuthority::new(data_root, catalog)));
@@ -288,7 +319,7 @@ impl DaemonFileWatcher {
         let callback_counters = Arc::clone(&counters);
         let callback_wakeup = Arc::clone(&wakeup);
         let callback_accepting_events = Arc::clone(&accepting_events);
-        let callback_sequence = Arc::clone(&callback_sequence);
+        let callback_sequence_for_callback = Arc::clone(&callback_sequence);
         let callback_data_root = data_root.to_path_buf();
         let watcher = RecommendedWatcher::new(
             move |event: notify::Result<Event>| {
@@ -299,7 +330,7 @@ impl DaemonFileWatcher {
                     &callback_wakeup,
                     &callback_accepting_events,
                     watcher_epoch,
-                    &callback_sequence,
+                    &callback_sequence_for_callback,
                     event,
                 );
             },
@@ -336,9 +367,12 @@ impl DaemonFileWatcher {
             thread: Some(thread),
             last_error: None,
             watcher_epoch,
+            callback_sequence,
+            #[cfg(test)]
+            rearm_gap_hook: None,
         };
-        service.reconcile_roots(false)?;
-        service.write_receipt("active")?;
+        let (_, registration) = service.reconcile_roots(false);
+        registration?;
         Ok(service)
     }
 
@@ -346,31 +380,39 @@ impl DaemonFileWatcher {
         EventWatermark::new(self.watcher_epoch, 0)
     }
 
-    pub(super) fn catalog(&self) -> SourceBackedWatchCatalog {
-        self.authority
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .routes
-            .clone()
-    }
-
-    pub(super) fn replace_catalog(&mut self, catalog: SourceBackedWatchCatalog) -> Result<()> {
-        *self
-            .authority
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            WatchAuthority::new(&self.data_root, catalog);
-        self.reconcile_roots(false)
-    }
-
-    pub(super) fn reconcile_roots(&mut self, force_rearm: bool) -> Result<()> {
+    pub(super) fn reconcile_roots(&mut self, force_rearm: bool) -> (SourceWatchBatch, Result<()>) {
         let authority = self
             .authority
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let desired = watch_roots(authority.target_paths());
-        self.last_error = None;
+        let catalog = authority.catalog.snapshot();
+        let desired_paths = authority.target_paths();
+        let desired = watch_roots(desired_paths.iter().map(PathBuf::as_path));
+        let registration_needed = desired.iter().any(|(path, recursive)| {
+            force_rearm || self.watched.get(path).copied() != Some(*recursive)
+        });
+        let affected = if registration_needed {
+            catalog
+                .as_ref()
+                .map(|catalog| {
+                    let watermark = self.next_watermark();
+                    SourceWatchBatch {
+                        routes: catalog
+                            .route_ids()
+                            .cloned()
+                            .map(|route| (route, watermark))
+                            .collect(),
+                        ..SourceWatchBatch::default()
+                    }
+                })
+                .unwrap_or_default()
+        } else {
+            SourceWatchBatch::default()
+        };
+        self.last_error = catalog
+            .is_none()
+            .then(|| "watch catalog authority is unavailable".to_owned());
         // A forced pass deliberately discards the in-memory registration
         // cache. This repairs watches tied to deleted inodes or silently lost
         // by the native backend even when the desired paths are unchanged.
@@ -400,6 +442,10 @@ impl DaemonFileWatcher {
                     self.last_error = Some(format!("unwatch {}: {error}", path.display()));
                 }
                 self.watched.remove(path);
+                #[cfg(test)]
+                if let Some(hook) = self.rearm_gap_hook.as_mut() {
+                    hook(path);
+                }
             }
             let mode = if *recursive {
                 RecursiveMode::Recursive
@@ -426,11 +472,29 @@ impl DaemonFileWatcher {
                 counters.forced_rearms = counters.forced_rearms.saturating_add(1);
             }
         }
-        self.write_receipt(if self.last_error.is_some() {
+        let receipt = self.write_receipt(if self.last_error.is_some() {
             "degraded"
         } else {
             "active"
-        })
+        });
+        (affected, receipt)
+    }
+
+    fn next_watermark(&self) -> EventWatermark {
+        EventWatermark::new(
+            self.watcher_epoch,
+            self.callback_sequence
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_add(1))
+                })
+                .unwrap_or_else(|current| current)
+                .saturating_add(1),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_rearm_gap_hook(&mut self, hook: impl FnMut(&Path) + 'static) {
+        self.rearm_gap_hook = Some(Box::new(hook));
     }
 
     pub(super) fn write_receipt(&self, status: &str) -> Result<()> {
@@ -444,7 +508,8 @@ impl DaemonFileWatcher {
             "watched_roots": self.watched.len(),
             "catalog_routes": self.authority.read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .routes.route_ids().len(),
+                .catalog.snapshot()
+                .map_or(0, |catalog| catalog.route_ids().len()),
             "raw_events": counters.raw_events,
             "ignored_access_events": counters.ignored_access_events,
             "ignored_catalog_lock_events": counters.ignored_catalog_lock_events,
@@ -629,6 +694,7 @@ fn record_watch_event(
     let authority = authority
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let catalog = authority.catalog.snapshot();
     let mut batch = SourceWatchBatch::default();
     let mut relevant_path = None;
     for event_path in &event.paths {
@@ -643,9 +709,11 @@ fn record_watch_event(
             batch.reconcile = Some(watermark);
             relevant_path.get_or_insert_with(|| event_path.clone());
         }
-        for route in authority.routes.routes_overlapping_path(event_path) {
-            batch.routes.insert(route, watermark);
-            relevant_path.get_or_insert_with(|| event_path.clone());
+        if let Some(catalog) = catalog.as_ref() {
+            for route in catalog.routes_overlapping_path(event_path) {
+                batch.routes.insert(route, watermark);
+                relevant_path.get_or_insert_with(|| event_path.clone());
+            }
         }
     }
     if event.paths.is_empty() {
@@ -842,6 +910,16 @@ mod tests {
         registry.watch_catalog()
     }
 
+    fn catalog_owner(catalog: SourceBackedWatchCatalog) -> DaemonWatchCatalog {
+        let owner = DaemonWatchCatalog::default();
+        owner.publish(catalog);
+        owner
+    }
+
+    fn watch_authority(data_root: &Path, catalog: SourceBackedWatchCatalog) -> WatchAuthority {
+        WatchAuthority::new(data_root, catalog_owner(catalog))
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn catalog_lock_query_churn_stays_idle_but_provider_append_wakes() {
@@ -862,7 +940,7 @@ mod tests {
         fs::write(catalog_root.join("catalog.lock"), b"").expect("write catalog lock");
         fs::write(&provider_file, b"{\"event\":1}\n").expect("write provider fixture");
 
-        let targets = Arc::new(RwLock::new(WatchAuthority::new(
+        let targets = Arc::new(RwLock::new(watch_authority(
             &data_root,
             watch_catalog([catalog_route(
                 CaptureProvider::Codex,
@@ -1089,7 +1167,8 @@ mod tests {
         let route = catalog.route_ids().next().unwrap().clone();
         let wakeup = Arc::new(DaemonWakeup::default());
         let mut watcher =
-            DaemonFileWatcher::start(&data_root, Arc::clone(&wakeup), catalog).unwrap();
+            DaemonFileWatcher::start(&data_root, Arc::clone(&wakeup), catalog_owner(catalog))
+                .unwrap();
 
         fs::remove_dir_all(&provider_root).expect("remove watched root");
         let removed = wakeup.wait(Duration::from_secs(3));
@@ -1099,9 +1178,8 @@ mod tests {
 
         fs::create_dir_all(&provider_root).expect("recreate watched root");
         let attempts_before = watcher.lock_counters().registration_attempts;
-        watcher
-            .reconcile_roots(true)
-            .expect("force native watcher re-registration");
+        let (_, registration) = watcher.reconcile_roots(true);
+        registration.expect("force native watcher re-registration");
         fs::write(provider_root.join("recreated.jsonl"), b"{\"event\":2}\n")
             .expect("write recreated source");
 
@@ -1116,13 +1194,56 @@ mod tests {
         assert!(counters.registration_attempts > attempts_before);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forced_rearm_conservatively_dirties_a_route_mutated_in_the_registration_gap() {
+        let temp = tempfile::tempdir().expect("create watcher fixture");
+        let data_root = temp.path().join("data");
+        let provider_root = temp.path().join("provider");
+        let provider_file = provider_root.join("history.jsonl");
+        fs::create_dir_all(&data_root).expect("create data root");
+        fs::create_dir_all(&provider_root).expect("create provider root");
+        fs::write(&provider_file, b"{\"event\":1}\n").expect("write initial source");
+        let catalog = watch_catalog([catalog_route(
+            CaptureProvider::Codex,
+            provider_root.clone(),
+            "codex_session_jsonl_tree",
+        )]);
+        let route = catalog.route_ids().next().unwrap().clone();
+        let wakeup = Arc::new(DaemonWakeup::default());
+        let mut watcher =
+            DaemonFileWatcher::start(&data_root, Arc::clone(&wakeup), catalog_owner(catalog))
+                .expect("start watcher");
+        let mutation_observed = Arc::new(AtomicBool::new(false));
+        let hook_observed = Arc::clone(&mutation_observed);
+        let hook_root = provider_root.clone();
+        let hook_file = provider_file.clone();
+        watcher.install_rearm_gap_hook(move |unwatched| {
+            if unwatched == hook_root && !hook_observed.swap(true, Ordering::SeqCst) {
+                fs::write(&hook_file, b"{\"event\":2}\n")
+                    .expect("mutate source inside forced-rearm gap");
+            }
+        });
+
+        let (affected, registration) = watcher.reconcile_roots(true);
+        registration.expect("force native watcher re-registration");
+
+        assert!(mutation_observed.load(Ordering::SeqCst));
+        assert_eq!(
+            fs::read(&provider_file).expect("read gap mutation"),
+            b"{\"event\":2}\n"
+        );
+        assert_eq!(affected.routes.len(), 1);
+        assert!(affected.routes.contains_key(&route));
+    }
+
     #[test]
     fn rescan_and_backend_errors_require_catalog_reconciliation_and_rearm() {
         use notify::event::Flag;
 
         let data_root = Path::new("/tmp/ctx-data");
         let daemon_root = data_root.join("daemon");
-        let authority = RwLock::new(WatchAuthority::new(data_root, watch_catalog([])));
+        let authority = RwLock::new(watch_authority(data_root, watch_catalog([])));
         let counters = Mutex::new(WatchCounters::default());
         let rescan = Event::new(EventKind::Access(AccessKind::Read))
             .add_path(data_root.join("catalogs/explicit-sources/catalog.lock"))
@@ -1215,7 +1336,7 @@ mod tests {
     fn core_owned_writes_do_not_retrigger_provider_refresh_or_increment_work_counters() {
         let data_root = Path::new("/tmp/ctx-data");
         let daemon_root = data_root.join("daemon");
-        let targets = RwLock::new(WatchAuthority::new(
+        let targets = RwLock::new(watch_authority(
             data_root,
             watch_catalog([catalog_route(
                 CaptureProvider::Codex,
@@ -1320,7 +1441,7 @@ mod tests {
         let sqlite = PathBuf::from("/tmp/provider/history.sqlite");
         let dynamic_source = PathBuf::from("/tmp/home/.codex/sessions");
         let catalog_root = data_root.join("catalogs").join("explicit-sources");
-        let targets = RwLock::new(WatchAuthority::new(
+        let targets = RwLock::new(watch_authority(
             data_root,
             watch_catalog([
                 catalog_route(
