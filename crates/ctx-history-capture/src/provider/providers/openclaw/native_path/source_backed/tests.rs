@@ -246,8 +246,8 @@ fn every_tool_call_block_projects_with_a_stable_selector() {
     assert_eq!(emitted[0].event_sequence, 1);
     assert_eq!(emitted[1].event_sequence, 3);
     let calls = native_tool_calls(&value);
-    let first = strict_tool_call_projection(&calls[0].block, calls[0].block_index as u64).unwrap();
-    let second = strict_tool_call_projection(&calls[1].block, calls[1].block_index as u64).unwrap();
+    let first = strict_tool_call_projection(calls[0].block, calls[0].block_index as u64).unwrap();
+    let second = strict_tool_call_projection(calls[1].block, calls[1].block_index as u64).unwrap();
     let [read] = first.file_invocations.as_slice() else {
         panic!("expected one exact read invocation");
     };

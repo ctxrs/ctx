@@ -82,28 +82,29 @@ fn strict_file_invocations(
         return StrictExtraction::NoTarget;
     };
     if object.get("type").and_then(Value::as_str) != Some("toolCall") {
-        return target_bearing(object)
-            .then_some(StrictExtraction::Abstained(
-                StrictInvocationAbstention::Opaque,
-            ))
-            .unwrap_or(StrictExtraction::NoTarget);
+        return if target_bearing(object) {
+            StrictExtraction::Abstained(StrictInvocationAbstention::Opaque)
+        } else {
+            StrictExtraction::NoTarget
+        };
     }
     let Some(tool_name) = object.get("name").and_then(exact_tool_name) else {
-        return target_bearing(object)
-            .then_some(StrictExtraction::Abstained(
-                StrictInvocationAbstention::Opaque,
-            ))
-            .unwrap_or(StrictExtraction::NoTarget);
+        return if target_bearing(object) {
+            StrictExtraction::Abstained(StrictInvocationAbstention::Opaque)
+        } else {
+            StrictExtraction::NoTarget
+        };
     };
     let Some(kind) = strict_file_action(tool_name) else {
-        return object
+        return if object
             .get("arguments")
             .and_then(Value::as_object)
             .is_some_and(target_bearing)
-            .then_some(StrictExtraction::Abstained(
-                StrictInvocationAbstention::Opaque,
-            ))
-            .unwrap_or(StrictExtraction::NoTarget);
+        {
+            StrictExtraction::Abstained(StrictInvocationAbstention::Opaque)
+        } else {
+            StrictExtraction::NoTarget
+        };
     };
     let Some(arguments) = object.get("arguments").and_then(Value::as_object) else {
         return StrictExtraction::Abstained(StrictInvocationAbstention::Opaque);
