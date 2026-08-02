@@ -310,6 +310,65 @@ fn cold_refresh_with_only_failed_routes_does_not_publish_ready_data() {
 }
 
 #[test]
+fn warm_missing_route_in_grace_remains_usable_when_a_new_cold_route_fails() {
+    let provider = CaptureProvider::Gemini;
+    let format = GEMINI_CLI_SOURCE_FORMAT;
+    let present = fixture_route(provider, format, 16);
+    let route_id = present.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(present);
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+
+    let mut missing_source =
+        fixture_provider_source(provider, format, ProviderImportSupport::Native);
+    missing_source.status = ProviderSourceStatus::Missing;
+    missing_source.exists = false;
+    let missing = SourceBackedRoute::certified_missing(
+        missing_source,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+    )
+    .unwrap();
+    assert_eq!(missing.metadata.route_identity.as_ref(), Some(&route_id));
+    let failed = fail_route_before_scan(
+        fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 17),
+        SourceBackedRouteErrorKind::Unavailable,
+    );
+    let failed_id = failed.metadata.route_identity.clone().unwrap();
+    let mut refresh_registry = SourceBackedProviderRegistry::new();
+    refresh_registry.register(missing);
+    refresh_registry.register(failed);
+
+    let refresh =
+        refresh_source_backed_generation(temp.path(), &refresh_registry, WriterOptions::default())
+            .unwrap();
+    assert_eq!(refresh.failed_routes.len(), 1);
+    assert_eq!(refresh.failed_routes[0].route_identity, failed_id);
+    assert!(!refresh.failed_routes[0].carried_forward);
+    assert_eq!(refresh.sources, initial.sources);
+    let retained_route = refresh.commit.manifest().source_route(&route_id).unwrap();
+    assert_eq!(
+        retained_route.sources(),
+        initial
+            .commit
+            .manifest()
+            .source_route(&route_id)
+            .unwrap()
+            .sources()
+    );
+    assert_eq!(
+        retained_route
+            .missing_state()
+            .unwrap()
+            .consecutive_missing()
+            .get(),
+        1
+    );
+}
+
+#[test]
 fn selected_route_refresh_carries_unselected_route_and_reports_exact_noop_success() {
     let first = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 21);
     let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 22);

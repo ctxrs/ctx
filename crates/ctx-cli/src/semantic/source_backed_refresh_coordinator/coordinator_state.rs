@@ -745,12 +745,30 @@ impl CoreRefreshEngine {
 
 fn source_backed_refresh_failure_type(error: &anyhow::Error) -> Option<&'static str> {
     error.chain().find_map(|cause| {
-        let route = cause.downcast_ref::<SourceBackedRouteError>()?;
-        match route.kind {
-            SourceBackedRouteErrorKind::Unsupported => Some("unsupported_schema"),
-            SourceBackedRouteErrorKind::InvalidSource => Some("malformed_source"),
-            _ => None,
+        if let Some(route) = cause.downcast_ref::<SourceBackedRouteError>() {
+            return match route.kind {
+                SourceBackedRouteErrorKind::Unsupported => Some("unsupported_schema"),
+                SourceBackedRouteErrorKind::InvalidSource => Some("malformed_source"),
+                SourceBackedRouteErrorKind::Unavailable => Some("source_unavailable"),
+                SourceBackedRouteErrorKind::SourceChanged => Some("source_changed"),
+                SourceBackedRouteErrorKind::Internal => None,
+            };
         }
+        let SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes } =
+            cause.downcast_ref::<SourceBackedCoordinatorError>()?
+        else {
+            return None;
+        };
+        let first = failed_routes.first()?.class;
+        if failed_routes.iter().any(|failure| failure.class != first) {
+            return Some("source_failures");
+        }
+        Some(match first {
+            SourceBackedSourceFailureClass::Unavailable => "source_unavailable",
+            SourceBackedSourceFailureClass::SourceChanged => "source_changed",
+            SourceBackedSourceFailureClass::Unreadable => "malformed_source",
+            SourceBackedSourceFailureClass::Incompatible => "unsupported_schema",
+        })
     })
 }
 

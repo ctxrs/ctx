@@ -5,8 +5,9 @@ use std::sync::{
 
 use ctx_history_capture::{
     provider_source_for_path, DiscoveryPlatform, DiscoveryPlatformDirs, ProviderCatalogSupport,
-    ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderImportSupport, ProviderSource, ProviderSourceKind, SourceBackedFailedRoute,
 };
+use ctx_history_index::SourceRouteIdentity;
 use rusqlite::Connection;
 
 use super::*;
@@ -1181,6 +1182,86 @@ fn failed_refresh_retains_the_previous_published_generation() {
     assert_eq!(run.job["status"], "failed");
     assert_eq!(run.job["published_generation"], "generation-1");
     assert_eq!(run.job["progress"]["phase"], "failed");
+}
+
+#[test]
+fn all_cold_route_failures_keep_their_typed_daemon_classification() {
+    let cases = [
+        (
+            SourceBackedSourceFailureClass::Unavailable,
+            "source_unavailable",
+        ),
+        (
+            SourceBackedSourceFailureClass::SourceChanged,
+            "source_changed",
+        ),
+        (
+            SourceBackedSourceFailureClass::Unreadable,
+            "malformed_source",
+        ),
+        (
+            SourceBackedSourceFailureClass::Incompatible,
+            "unsupported_schema",
+        ),
+    ];
+    for (index, (class, expected)) in cases.into_iter().enumerate() {
+        let coordinator = CoreRefreshEngine::new();
+        let _ = coordinator.enqueue(None);
+        let route_identity =
+            SourceRouteIdentity::from_sha256(format!("{index:02x}").repeat(32)).unwrap();
+        let run = coordinator
+            .run_next_with(
+                |_, _| {
+                    Err(SourceBackedCoordinatorError::NoUsableSourceRoutes {
+                        failed_routes: vec![SourceBackedFailedRoute {
+                            route_identity,
+                            source_identity: "11".repeat(32),
+                            provider: CaptureProvider::Codex,
+                            class,
+                            carried_forward: false,
+                        }],
+                    }
+                    .into())
+                },
+                || Ok(None),
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert!(run.failed);
+        assert_eq!(run.job["failure_type"], expected, "{:#?}", run.job);
+    }
+}
+
+#[test]
+fn mixed_cold_route_failures_keep_a_typed_aggregate_classification() {
+    let coordinator = CoreRefreshEngine::new();
+    let _ = coordinator.enqueue(None);
+    let route = |byte: u8, class| SourceBackedFailedRoute {
+        route_identity: SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap(),
+        source_identity: format!("{:02x}", byte.saturating_add(1)).repeat(32),
+        provider: CaptureProvider::Codex,
+        class,
+        carried_forward: false,
+    };
+    let run = coordinator
+        .run_next_with(
+            |_, _| {
+                Err(SourceBackedCoordinatorError::NoUsableSourceRoutes {
+                    failed_routes: vec![
+                        route(1, SourceBackedSourceFailureClass::Unavailable),
+                        route(2, SourceBackedSourceFailureClass::SourceChanged),
+                    ],
+                }
+                .into())
+            },
+            || Ok(None),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(run.failed);
+    assert_eq!(run.job["failure_type"], "source_failures", "{:#?}", run.job);
 }
 
 #[test]

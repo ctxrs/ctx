@@ -16,9 +16,10 @@ use ctx_history_capture::{
     discover_provider_sources_with_context_and_work_budget, source_backed_refresh_work_budget,
     validate_provider_source_roots_outside_data_root, CaptureError, DiscoveryContext,
     DiscoveryReport, ProviderSourceStatus, SourceBackedAutomaticRegistryIssue,
-    SourceBackedAutomaticUnavailableReason, SourceBackedProviderRegistry,
+    SourceBackedAutomaticUnavailableReason, SourceBackedCoordinatorError,
+    SourceBackedProviderRegistry,
     SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress, SourceBackedRouteError,
-    SourceBackedRouteErrorKind, SourceBackedRouteResult,
+    SourceBackedRouteErrorKind, SourceBackedRouteResult, SourceBackedSourceFailureClass,
 };
 #[cfg(test)]
 use ctx_history_core::CaptureProvider;

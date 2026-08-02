@@ -415,8 +415,18 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 attempt_carried.contains(route.route_identity()) && !route.sources().is_empty()
             })
         });
+        let has_successful_retained_source = writer.base_manifest().is_some_and(|base| {
+            base.source_routes().iter().any(|route| {
+                successful_this_attempt.contains(route.route_identity())
+                    && !route.sources().is_empty()
+            })
+        });
         let has_successful_source = owners.values().any(|owner| owner.present);
-        if !failed_routes.is_empty() && !has_carried_source && !has_successful_source {
+        if !failed_routes.is_empty()
+            && !has_carried_source
+            && !has_successful_retained_source
+            && !has_successful_source
+        {
             return Err(SourceBackedCoordinatorError::NoUsableSourceRoutes {
                 failed_routes: failed_routes.into_values().collect(),
             });
