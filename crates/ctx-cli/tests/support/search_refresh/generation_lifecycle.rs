@@ -271,13 +271,11 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     );
     let unavailable_status = assert_source_generation_ready(&temp, &unavailable_generation);
     assert_eq!(
-        unavailable_status["daemon"]["jobs"]["core_refresh"]["status"],
-        "completed",
+        unavailable_status["daemon"]["jobs"]["core_refresh"]["status"], "completed",
         "{unavailable_status:#}"
     );
     assert_eq!(
-        unavailable_status["daemon"]["jobs"]["core_refresh"]["source_count"],
-        0,
+        unavailable_status["daemon"]["jobs"]["core_refresh"]["source_count"], 0,
         "{unavailable_status:#}"
     );
     assert_eq!(
@@ -365,11 +363,14 @@ fn search_refresh_codex_generation_covers_full_source_lifecycle() {
     );
     let (deletion_manifest, _) = generation_manifest(&temp, &deletion_generation);
     assert_eq!(deletion_manifest.sources.len(), 1);
-    assert!(deletion_manifest.sources.iter().all(|source| {
-        source.observation().source() != truncate_source.observation().source()
-    }));
+    assert!(deletion_manifest
+        .sources
+        .iter()
+        .all(|source| { source.observation().source() != truncate_source.observation().source() }));
     assert!(deletion_manifest.source_routes().iter().all(|route| {
-        !route.sources().contains(truncate_source.observation().source())
+        !route
+            .sources()
+            .contains(truncate_source.observation().source())
     }));
     let deleted_show = failure_stderr(ctx(&temp).args([
         "show",
@@ -459,12 +460,7 @@ fn two_provider_mutation_publishes_while_temporarily_missing_route_is_retained()
         retained_manifest.indexed_documents + 1,
         "{mutation:#}"
     );
-    assert_daemon_publication(
-        &temp,
-        &mutation_generation,
-        1,
-        &["claude", "codex"],
-    );
+    assert_daemon_publication(&temp, &mutation_generation, 1, &["claude", "codex"]);
     let updated_manifests = generation_manifest_paths(&temp);
     assert_eq!(
         updated_manifests.len(),
@@ -480,7 +476,10 @@ fn two_provider_mutation_publishes_while_temporarily_missing_route_is_retained()
     assert_eq!(updated_claude, &retained_claude);
     assert!(updated_manifest.source_routes().iter().any(|route| {
         route.missing_state().is_some()
-            && route.sources().iter().any(|source| source.provider() == "claude")
+            && route
+                .sources()
+                .iter()
+                .any(|source| source.provider() == "claude")
     }));
 
     let codex = json_output(ctx(&temp).args([
