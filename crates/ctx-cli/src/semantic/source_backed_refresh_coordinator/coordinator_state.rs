@@ -306,7 +306,13 @@ impl CoreRefreshEngine {
         let frontier = state.route_freshness_frontier.clone();
         drop(state);
         if let Some(frontier) = frontier {
-            frontier.observe_routes(recorded_routes.iter());
+            if let Err(error) = frontier.observe_routes(recorded_routes.iter()) {
+                let error = anyhow::Error::new(error);
+                let _ = crate::semantic::daemon_wakeup::write_degraded_wakeup_receipt(
+                    &frontier.data_root(),
+                    &error,
+                );
+            }
         }
     }
 
@@ -815,6 +821,29 @@ impl CoreRefreshEngine {
     }
 
     fn finish_route_admissions(&self, request_id: &str, publication_ready: bool) {
+        let frontier_preparation = publication_ready
+            .then(|| {
+                let state = self.lock_state();
+                let routes = state
+                    .route_admissions
+                    .get(request_id)?
+                    .iter()
+                    .map(|admission| admission.route().clone())
+                    .collect::<BTreeSet<_>>();
+                state
+                    .route_freshness_frontier
+                    .clone()
+                    .zip(state.pinned_core_publication.as_ref().map(Arc::clone))
+                    .map(|(frontier, publication)| (frontier, publication, routes))
+            })
+            .flatten()
+            .map(|(frontier, publication, routes)| {
+                let data_root = frontier.data_root();
+                let prepared =
+                    frontier.prepare_acknowledged_routes(publication.verified_index_ref(), &routes);
+                (data_root, prepared)
+            });
+
         let now_ms = source_route_ledger_now_ms();
         let mut state = self.lock_state();
         let Some(admissions) = state.route_admissions.remove(request_id) else {
@@ -896,26 +925,20 @@ impl CoreRefreshEngine {
                 .and_then(|attempt| attempt.timings)
                 .unwrap_or_default();
         }
-        let frontier_publication = publication_ready
-            .then(|| {
-                state
-                    .route_freshness_frontier
-                    .clone()
-                    .zip(state.pinned_core_publication.as_ref().map(Arc::clone))
-            })
-            .flatten();
-        // Keep the dirty-ledger lock through durable frontier publication.
-        // A watcher event arriving after acknowledgement must either wait and
-        // leave this older candidate durable, or have invalidated the
-        // admission before this point. It must never update the candidate in
-        // the gap between acknowledgement and persistence.
-        let frontier_error = frontier_publication.and_then(|(frontier, publication)| {
-            frontier
-                .publish_acknowledged_routes(publication.verified_index_ref(), &covered_route_ids)
-                .err()
-                .map(|error| (frontier.data_root(), error))
-        });
         drop(state);
+
+        // The plan binds an immutable pre-acknowledgement target sample to the
+        // pinned generation. Exact acknowledgement remains serialized above,
+        // but generation hashing, JSON encoding, and filesystem persistence
+        // cannot block the global coordinator mutex. A watcher event admitted
+        // after acknowledgement leaves this older plan intact and remains
+        // dirty in the exact ledger.
+        let frontier_error = frontier_preparation.and_then(|(data_root, prepared)| {
+            prepared
+                .and_then(|prepared| prepared.persist_acknowledged_routes(&covered_route_ids))
+                .err()
+                .map(|error| (data_root, error))
+        });
         if let Some((data_root, error)) = frontier_error {
             let _ =
                 crate::semantic::daemon_wakeup::write_degraded_wakeup_receipt(&data_root, &error);
