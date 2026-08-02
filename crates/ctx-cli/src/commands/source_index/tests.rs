@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     mod semantic_fallback;
+    mod show_lineage;
 
     use std::{
         cell::Cell,

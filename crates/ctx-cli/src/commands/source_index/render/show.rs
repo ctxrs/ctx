@@ -101,12 +101,15 @@ pub(in crate::commands::source_index) fn render_session_truncated_document(
 
 fn render_session_header(document: &mut Document, context: &RenderContext, value: &Value) {
     push_heading(document, "Session", Token::Heading);
-    push_optional_field(
+    let session = &value["session"];
+    push_session_lineage(
         document,
         context,
-        "ID",
-        value["ctx_session_id"].as_str(),
-        Token::Reference,
+        session["ctx_session_id"]
+            .as_str()
+            .or_else(|| value["ctx_session_id"].as_str()),
+        session["parent_ctx_session_id"].as_str(),
+        session["root_ctx_session_id"].as_str(),
     );
     push_optional_field(
         document,
@@ -133,6 +136,7 @@ fn render_session_header(document: &mut Document, context: &RenderContext, value
 
 fn render_event_header(document: &mut Document, context: &RenderContext, value: &Value) {
     push_heading(document, "Event window", Token::Heading);
+    let selected = &value["event"];
     push_optional_field(
         document,
         context,
@@ -140,14 +144,15 @@ fn render_event_header(document: &mut Document, context: &RenderContext, value: 
         value["ctx_event_id"].as_str(),
         Token::Reference,
     );
-    push_optional_field(
+    push_session_lineage(
         document,
         context,
-        "Session",
-        value["ctx_session_id"].as_str(),
-        Token::Reference,
+        selected["ctx_session_id"]
+            .as_str()
+            .or_else(|| value["ctx_session_id"].as_str()),
+        selected["parent_ctx_session_id"].as_str(),
+        selected["root_ctx_session_id"].as_str(),
     );
-    let selected = &value["event"];
     push_optional_field(
         document,
         context,
@@ -162,6 +167,34 @@ fn render_event_header(document: &mut Document, context: &RenderContext, value: 
         selected["provider_session_id"].as_str(),
         Token::Reference,
     );
+}
+
+fn push_session_lineage(
+    document: &mut Document,
+    context: &RenderContext,
+    direct: Option<&str>,
+    parent: Option<&str>,
+    root: Option<&str>,
+) {
+    push_optional_field(document, context, "Session", direct, Token::Reference);
+
+    let parent = parent.filter(|parent| Some(*parent) != direct);
+    let root = root.filter(|root| Some(*root) != direct);
+    match (parent, root) {
+        (Some(parent), Some(root)) if parent == root => {
+            push_optional_field(
+                document,
+                context,
+                "Parent / root",
+                Some(parent),
+                Token::Reference,
+            );
+        }
+        (parent, root) => {
+            push_optional_field(document, context, "Parent", parent, Token::Reference);
+            push_optional_field(document, context, "Root", root, Token::Reference);
+        }
+    }
 }
 
 fn push_optional_field(

@@ -268,11 +268,14 @@ fn exact_provider_outcome_binding(
         return None;
     }
     let mut matching = annotation.repository_bindings.iter().filter(|binding| {
-        binding.aliases.contains(&forge_repository)
-            && binding.evidence.iter().any(|evidence| {
-                evidence.kind == RepositoryEvidenceKind::ProviderNativeProject
-                    && evidence.confidence == RepositoryEvidenceConfidence::Explicit
-            })
+        binding.aliases.iter().any(|alias| {
+            alias.host.eq_ignore_ascii_case(&forge_repository.host)
+                && alias.namespace == forge_repository.namespace
+                && alias.name == forge_repository.name
+        }) && binding.evidence.iter().any(|evidence| {
+            evidence.kind == RepositoryEvidenceKind::ProviderNativeProject
+                && evidence.confidence == RepositoryEvidenceConfidence::Explicit
+        })
     });
     let selected = matching.next()?;
     matching

@@ -255,15 +255,6 @@ pub(super) fn parse_aliases(value: &[u8]) -> Result<Vec<RepositoryAlias>, ProbeF
         ))
     });
     aliases.dedup();
-    let mut logical = aliases
-        .iter()
-        .map(|alias| (&alias.host, &alias.namespace, &alias.name))
-        .collect::<Vec<_>>();
-    logical.sort();
-    logical.dedup();
-    if logical.len() > 1 {
-        return Err(ProbeFailure::AmbiguousRemote);
-    }
     Ok(aliases)
 }
 

@@ -53,9 +53,13 @@ fn render_attribution(
     if let Some(actor) = &value.direct_actor {
         push_role_resource(document, context, indent + 2, "direct actor", actor);
     }
-    if let Some(root) = &value.owning_root {
-        push_role_resource(document, context, indent + 2, "owning root", root);
-    }
+    render_session_lineage(
+        document,
+        context,
+        indent + 2,
+        value.parent_session.as_ref(),
+        value.owning_root.as_ref(),
+    );
     push_enum_field(
         document,
         context,
@@ -81,3 +85,22 @@ fn render_attribution(
         &value.evidence_numbers,
     );
 }
+
+pub(super) fn render_session_lineage(
+    document: &mut Document,
+    context: &RenderContext,
+    indent: usize,
+    parent_session: Option<&ctx_pro_host_protocol::ResourceRef>,
+    owning_root: Option<&ctx_pro_host_protocol::ResourceRef>,
+) {
+    if let Some(parent) = parent_session {
+        push_role_resource(document, context, indent, "parent", parent);
+    }
+    if let Some(root) = owning_root {
+        push_role_resource(document, context, indent, "owning root", root);
+    }
+}
+
+#[cfg(test)]
+#[path = "relationships_tests.rs"]
+mod tests;

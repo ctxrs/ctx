@@ -259,6 +259,7 @@ fn attribution(
             ResourceKind::Session,
             session,
         ),
+        parent_session: None,
         direct_actor: None,
         owning_root: None,
         confidence: if ambiguous {
@@ -273,6 +274,47 @@ fn attribution(
         },
         evidence_numbers: vec![evidence_number],
     }
+}
+
+#[test]
+fn direct_commit_blame_shows_its_parent_session() {
+    let commit = resource("commit:abcdef", ResourceKind::Commit, "abcdef");
+    let mut item = commit_match(
+        &commit,
+        CommitFactType::Produced,
+        CommitPredicate::ProducedBy,
+        "worker",
+        FactConfidence::Explicit,
+        FactState::Asserted,
+        1,
+    );
+    let BlameMatch::Commit(value) = &mut item else {
+        unreachable!();
+    };
+    value.parent_session = Some(resource(
+        "session:manager",
+        ResourceKind::Session,
+        "manager",
+    ));
+    value.owning_root = Some(resource("run:root", ResourceKind::Run, "root"));
+    let result = BlameResult {
+        snapshot: protocol_snapshot(),
+        target: ResolvedBlameTarget::Commit {
+            commit,
+            repository: repository(),
+        },
+        git_snapshot: None,
+        matches: vec![item],
+        evidence: vec![event_evidence(1)],
+        next: None,
+    };
+
+    let rendered = render_plain(&result, 80);
+    assert!(
+        rendered.contains("parent        session manager"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("owning root   run root"), "{rendered}");
 }
 
 fn commit_match(
@@ -294,6 +336,7 @@ fn commit_match(
             ResourceKind::Session,
             object,
         )),
+        parent_session: None,
         fact_occurred_at_ms: None,
         confidence,
         state,

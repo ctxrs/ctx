@@ -189,6 +189,15 @@ pub(super) fn inventory() -> Value {
                 "core_generation_id", "source", "session_id", "event_id", "event_sequence",
                 "byte_range", "evidence_sha256"
             ], &[]),
+            "AgentAttribution": fields(&[
+                "id", "relationship", "producing_session", "parent_session",
+                "direct_actor", "owning_root", "confidence", "state", "evidence_numbers"
+            ], &[]),
+            "CommitBlameMatch": fields(&[
+                "fact_id", "fact_type", "predicate", "subject", "object",
+                "parent_session", "fact_occurred_at_ms", "confidence", "state",
+                "direct_actor", "owning_root", "evidence_numbers"
+            ], &[]),
             "CoreRecord": fields(&[
                 "record_version", "event_id", "session_id", "parent_session_id",
                 "root_session_id", "source", "provider_session_id", "native_event_id",

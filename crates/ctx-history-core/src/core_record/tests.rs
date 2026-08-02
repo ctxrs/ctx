@@ -1045,6 +1045,27 @@ fn pull_request_outcome_must_match_its_referenced_repository_binding() {
         record.validate_contract(),
         Err(CoreRecordError::InvalidRepositoryOutcome)
     ));
+
+    record.repository_bindings[0].logical_repository_id = "local:certified-checkout".to_owned();
+    record.repository_bindings[0].aliases.push(RepositoryAlias {
+        kind: RepositoryAliasKind::Forge,
+        host: "github.com".to_owned(),
+        namespace: vec!["ctxrs".to_owned()],
+        name: "other".to_owned(),
+        remote_name: Some("upstream".to_owned()),
+    });
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryOutcome)
+    ));
+    record.repository_bindings[0].aliases.push(RepositoryAlias {
+        kind: RepositoryAliasKind::Forge,
+        host: "GITHUB.COM".to_owned(),
+        namespace: vec!["ctxrs".to_owned()],
+        name: "ctx".to_owned(),
+        remote_name: Some("origin".to_owned()),
+    });
+    record.validate_contract().unwrap();
 }
 
 #[test]
@@ -1053,7 +1074,7 @@ fn every_repository_revision_changes_the_core_contract_fingerprint() {
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
-        "931172482d0ee38770bc21b173bfd0c304c2d1d8e0dfa0c51b2654ec2134a7e7"
+        "4b98a0de80615ce7742d79622dc5743482d3ed4a8c7b48a002cdb681fd39c7a0"
     );
     for changed in [
         CoreContractRevisions {

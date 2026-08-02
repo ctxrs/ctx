@@ -703,10 +703,6 @@ fn push_probe_failure(
             "candidate_missing_before_certification",
         ),
         ProbeFailure::Unsafe(detail) => (RepositoryAbstentionReason::UnsafePath, detail),
-        ProbeFailure::AmbiguousRemote => (
-            RepositoryAbstentionReason::AmbiguousRemote,
-            "credential_free_remotes_conflict",
-        ),
         ProbeFailure::Failed(detail) => (RepositoryAbstentionReason::GitProbeFailed, detail),
         ProbeFailure::ConcurrentDrift => (
             RepositoryAbstentionReason::ConcurrentDrift,

@@ -1297,7 +1297,7 @@ fn certification_does_not_synthesize_vcs_activity_but_explicit_activity_survives
 }
 
 #[test]
-fn conflicting_remotes_abstain_without_session_fallback() {
+fn distinct_remotes_preserve_local_attribution_and_scope_exact_pull_request() {
     let temp = TempDir::new().unwrap();
     let repo = repository(
         temp.path(),
@@ -1316,13 +1316,77 @@ fn conflicting_remotes_abstain_without_session_fallback() {
     let annotation = attribute(AttributionInput {
         session_cwd: Some(temp.path().to_string_lossy().into_owned()),
         declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        provider_native_repository_aliases: vec![forge("other", "repo")],
+        outcome_observations: vec![exact_pull_request_outcome(forge("other", "repo")).into()],
         ..AttributionInput::default()
     });
-    assert!(annotation.repository_bindings.is_empty());
-    assert!(has_reason(
+    assert_eq!(annotation.repository_bindings.len(), 1);
+    let binding = &annotation.repository_bindings[0];
+    assert!(binding.logical_repository_id.starts_with("local:"));
+    assert_eq!(binding.aliases.len(), 3);
+    assert!(
+        binding
+            .aliases
+            .iter()
+            .any(|alias| alias.namespace == ["acme"]
+                && alias.remote_name.as_deref() == Some("origin"))
+    );
+    assert!(binding.aliases.iter().any(|alias| {
+        alias.namespace == ["other"] && alias.remote_name.as_deref() == Some("upstream")
+    }));
+    assert!(binding
+        .aliases
+        .iter()
+        .any(|alias| { alias.namespace == ["other"] && alias.remote_name.is_none() }));
+    assert!(binding
+        .evidence
+        .iter()
+        .any(|evidence| { evidence.kind == RepositoryEvidenceKind::ProviderNativeProject }));
+    assert_eq!(annotation.repository_vcs_observations.len(), 1);
+    assert_eq!(
+        annotation.repository_vcs_observations[0].repository_binding_id,
+        binding.binding_id
+    );
+    assert!(!has_reason(
         &annotation,
         RepositoryAbstentionReason::AmbiguousRemote
     ));
+    assert!(!has_reason(
+        &annotation,
+        RepositoryAbstentionReason::OutcomeRepositoryUnbound
+    ));
+}
+
+#[test]
+fn multiple_remote_names_for_one_repository_keep_one_forge_identity() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(
+        temp.path(),
+        "repo",
+        Some("https://github.com/acme/repo.git"),
+    );
+    run_git(
+        &repo,
+        &["remote", "add", "backup", "git@github.com:acme/repo.git"],
+    );
+
+    let annotation = attribute(AttributionInput {
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_bindings.len(), 1);
+    let binding = &annotation.repository_bindings[0];
+    assert_eq!(binding.logical_repository_id, "forge:github.com/acme/repo");
+    assert_eq!(binding.aliases.len(), 2);
+    assert!(binding
+        .aliases
+        .iter()
+        .any(|alias| alias.remote_name.as_deref() == Some("origin")));
+    assert!(binding
+        .aliases
+        .iter()
+        .any(|alias| alias.remote_name.as_deref() == Some("backup")));
 }
 
 #[test]
