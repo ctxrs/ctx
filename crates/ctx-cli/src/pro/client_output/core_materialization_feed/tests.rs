@@ -111,6 +111,51 @@ fn receipt_for(index: &VerifiedIndex, revision: &str) -> CoreMaterializationRece
     }
 }
 
+fn source_delta(index: usize, anchor_bytes: usize, schema_variant_bytes: usize) -> CoreSourceDelta {
+    let suffix = format!("-{index:05}");
+    let anchor = format!("{}{}", "x".repeat(anchor_bytes - suffix.len()), suffix);
+    let source = SourceKey::derive(
+        "fixture",
+        "fixture_jsonl",
+        "s".repeat(schema_variant_bytes),
+        1,
+        SourceAnchor::provider_native("session-file", TypedKey::utf8(anchor).unwrap()).unwrap(),
+    )
+    .unwrap();
+    CoreSourceDelta::Present(CoreSourceState {
+        source,
+        core_record_accumulator: "a".repeat(64),
+        event_count: 1,
+    })
+}
+
+fn ordered_source_deltas(count: usize, anchor_bytes: usize) -> Vec<CoreSourceDelta> {
+    let encoded_lengths = (0..count)
+        .map(|index| {
+            serde_json::to_vec(&source_delta(index, anchor_bytes, 1))
+                .unwrap()
+                .len()
+        })
+        .collect::<Vec<_>>();
+    let maximum_encoded_length = encoded_lengths.iter().copied().max().unwrap();
+    let mut deltas = encoded_lengths
+        .into_iter()
+        .enumerate()
+        .map(|(index, encoded_length)| {
+            source_delta(
+                index,
+                anchor_bytes,
+                1 + maximum_encoded_length - encoded_length,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(deltas
+        .iter()
+        .all(|delta| serde_json::to_vec(delta).unwrap().len() == maximum_encoded_length));
+    deltas.sort_by_key(|delta| delta.source().identity().digest());
+    deltas
+}
+
 type EventStates = BTreeMap<[u8; 32], BTreeMap<[u8; 32], CoreEventState>>;
 
 #[derive(Default)]
@@ -174,6 +219,7 @@ impl CoreMaterializationConsumer for Consumer {
         request: ApplyCoreSourceDeltaPageRequest,
     ) -> Result<CoreSourceDeltaPageApplied> {
         let page = request.page;
+        assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES);
         let mut reconcile_sources = Vec::new();
         let mut changed_sources = 0_u32;
         let mut removed_sources = 0_u32;
@@ -357,6 +403,134 @@ impl CoreMaterializationConsumer for Consumer {
         self.finish = Some(request);
         Ok(response)
     }
+}
+
+#[test]
+fn source_page_admission_uses_exact_wire_index_at_decimal_transitions() {
+    let materialization_id = "d".repeat(64);
+    let generation_id = "a".repeat(64);
+
+    for transition in [9_u32, 99] {
+        let count = usize::try_from(transition).unwrap() * 2 + 5;
+        let deltas = ordered_source_deltas(count, 32);
+        let pair_start = usize::try_from(transition).unwrap() * 2;
+        let exact_boundary_page = CoreSourceDeltaPage::new(
+            &materialization_id,
+            &generation_id,
+            transition,
+            false,
+            deltas[pair_start..pair_start + 2].to_vec(),
+        )
+        .unwrap();
+        let maximum_wire_bytes = serde_json::to_vec(&exact_boundary_page).unwrap().len();
+
+        let pages = build_delta_pages_with_wire_bound(
+            &materialization_id,
+            &generation_id,
+            deltas.clone(),
+            maximum_wire_bytes,
+        )
+        .unwrap();
+        let repeated = build_delta_pages_with_wire_bound(
+            &materialization_id,
+            &generation_id,
+            deltas,
+            maximum_wire_bytes,
+        )
+        .unwrap();
+
+        assert_eq!(pages, repeated);
+        assert_eq!(
+            pages[usize::try_from(transition).unwrap()],
+            exact_boundary_page
+        );
+        assert_eq!(
+            pages[usize::try_from(transition + 1).unwrap()].deltas.len(),
+            1
+        );
+        assert_eq!(
+            pages[usize::try_from(transition + 2).unwrap()].deltas.len(),
+            2
+        );
+        assert_eq!(
+            serde_json::to_vec(&pages[usize::try_from(transition + 2).unwrap()])
+                .unwrap()
+                .len(),
+            maximum_wire_bytes
+        );
+        assert_eq!(
+            pages.last().map(|page| page.page_index),
+            Some(transition + 2)
+        );
+        for (expected_index, page) in pages.iter().enumerate() {
+            assert_eq!(page.page_index, u32::try_from(expected_index).unwrap());
+            assert_eq!(page.terminal, expected_index + 1 == pages.len());
+            assert!(serde_json::to_vec(page).unwrap().len() <= maximum_wire_bytes);
+            page.validate().unwrap();
+        }
+    }
+}
+
+#[test]
+fn source_page_admission_enforces_the_protocol_wire_bound() {
+    let materialization_id = "d".repeat(64);
+    let generation_id = "a".repeat(64);
+    let deltas = ordered_source_deltas(140, 60 * 1024);
+
+    assert_eq!(MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES, 4_194_304);
+    let pages = build_delta_pages(&materialization_id, &generation_id, deltas).unwrap();
+
+    assert!(pages.len() > 1);
+    for (index, page) in pages.iter().enumerate() {
+        let wire_bytes = serde_json::to_vec(page).unwrap().len();
+        assert!(wire_bytes <= MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES);
+        assert_eq!(page.page_index, u32::try_from(index).unwrap());
+        assert_eq!(page.terminal, index + 1 == pages.len());
+        page.validate().unwrap();
+        if let Some(next) = pages.get(index + 1) {
+            let next_delta_bytes = serde_json::to_vec(&next.deltas[0]).unwrap().len();
+            assert!(
+                page.deltas.len() == MAX_CORE_SOURCE_DELTA_PAGE_ITEMS
+                    || wire_bytes + 1 + next_delta_bytes > MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES
+            );
+        }
+    }
+}
+
+#[test]
+fn source_page_admission_rejects_an_oversized_singleton_with_typed_error() {
+    let materialization_id = "d".repeat(64);
+    let generation_id = "a".repeat(64);
+    let delta = source_delta(0, 32, 1);
+    let exact_singleton_bytes = serde_json::to_vec(
+        &CoreSourceDeltaPage::new(
+            &materialization_id,
+            &generation_id,
+            0,
+            true,
+            vec![delta.clone()],
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .len();
+
+    let error = build_delta_pages_with_wire_bound(
+        &materialization_id,
+        &generation_id,
+        vec![delta],
+        exact_singleton_bytes - 1,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        CoreSourceDeltaPageBuildError::OversizedSingleton
+    ));
+    assert_eq!(
+        error.to_string(),
+        "invalid_request: one Core source delta exceeds its wire bound"
+    );
 }
 
 #[test]
