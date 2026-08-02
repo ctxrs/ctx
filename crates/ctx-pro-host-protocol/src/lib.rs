@@ -53,9 +53,11 @@ pub use lifecycle::{
 };
 mod message;
 pub use message::{
-    Capability, CoreProjectionCurrentness, HelloRequest, HelloResult, HelperEnvelope,
-    HelperMessage, HostEnvelope, HostMessage, MaterializedCoverage, ProAccessState,
-    ProAccessStatus, ProOperation, RepositoryCoverage, StatusRequest, StatusResult,
+    apply_core_source_delta_page_request_frame_wire_bytes,
+    core_source_delta_page_applied_frame_wire_bytes, Capability, CoreProjectionCurrentness,
+    HelloRequest, HelloResult, HelperEnvelope, HelperMessage, HostEnvelope, HostMessage,
+    MaterializedCoverage, ProAccessState, ProAccessStatus, ProOperation, RepositoryCoverage,
+    StatusRequest, StatusResult,
 };
 mod query;
 pub use query::{
@@ -70,9 +72,10 @@ mod core_materialization;
 pub use core_materialization::{
     core_materialization_id, core_record_sha256, core_source_snapshot_sha256,
     ApplyCoreEventDeltaPageRequest, ApplyCoreSourceDeltaPageRequest,
-    BeginCoreMaterializationRequest, CoreEventDelta, CoreEventDeltaPage, CoreEventDeltaPageApplied,
-    CoreEventReplacement, CoreEventState, CoreEventStatePage, CoreEventStatePageRequest,
-    CoreEventTombstone, CoreGenerationHead, CoreMaterializationBegan,
+    BeginCoreMaterializationRequest, CoreEventDelta, CoreEventDeltaPage,
+    CoreEventDeltaPageAcknowledgementIdentity, CoreEventDeltaPageApplied,
+    CoreEventDeltaPageBuilder, CoreEventReplacement, CoreEventState, CoreEventStatePage,
+    CoreEventStatePageRequest, CoreEventTombstone, CoreGenerationHead, CoreMaterializationBegan,
     CoreMaterializationBeginAcknowledgementIdentity, CoreMaterializationFinished,
     CoreMaterializationReceipt, CoreMaterializationReceiptIdentity, CoreSourceDelta,
     CoreSourceDeltaPage, CoreSourceDeltaPageAcknowledgementIdentity, CoreSourceDeltaPageApplied,

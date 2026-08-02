@@ -141,9 +141,6 @@ export class LocalAgentHistoryClient {
 
   async init(options = {}) {
     const args = ["setup", "--format=json", "--progress", options.progress ?? "none"];
-    if (options.catalogOnly) {
-      args.push("--catalog-only");
-    }
     return this.#agentHistoryJson("init", args);
   }
 
@@ -214,20 +211,27 @@ export class LocalAgentHistoryClient {
   }
 
   async #agentHistoryJson(operation, args) {
-    return toAgentHistoryEnvelope(operation, await this.#json(args), {
+    const validatesStatusCounters = operation === "status" || operation === "init";
+    return toAgentHistoryEnvelope(operation, await this.#json(args, validatesStatusCounters), {
       kind: "local",
       dataRoot: this.adapter.dataRoot ?? null,
     });
   }
 
-  async #json(args) {
+  async #json(args, validatesStatusCounters = false) {
     const result = await this.adapter.execute(args);
     if (result.exitCode !== 0) {
       throw cliError(`ctx ${args.join(" ")} failed`, result);
     }
     try {
+      if (validatesStatusCounters) {
+        validateExactStatusCounterLexemes(result.stdout);
+      }
       return JSON.parse(result.stdout);
     } catch (cause) {
+      if (cause instanceof CtxParseError) {
+        throw cause;
+      }
       throw new CtxParseError("ctx returned invalid JSON", {
         details: {
           command: result.command,
@@ -237,6 +241,73 @@ export class LocalAgentHistoryClient {
         },
         cause,
       });
+    }
+  }
+}
+
+const STATUS_COUNTER_WIRE_KEYS = new Map([
+  ["indexed_items", "indexedItems"],
+  ["indexed_sessions", "indexedSessions"],
+  ["indexed_events", "indexedEvents"],
+  ["indexed_sources", "indexedSources"],
+  ["indexedItems", "indexedItems"],
+  ["indexedSessions", "indexedSessions"],
+  ["indexedEvents", "indexedEvents"],
+  ["indexedSources", "indexedSources"],
+]);
+
+function validateExactStatusCounterLexemes(json) {
+  let index = 0;
+  let depth = 0;
+  while (index < json.length) {
+    if (json[index] === "{" || json[index] === "[") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+    if (json[index] === "}" || json[index] === "]") {
+      depth -= 1;
+      index += 1;
+      continue;
+    }
+    if (json[index] !== '"') {
+      index += 1;
+      continue;
+    }
+    const stringStart = index;
+    index += 1;
+    while (index < json.length) {
+      if (json[index] === "\\") {
+        index += 2;
+      } else if (json[index] === '"') {
+        index += 1;
+        break;
+      } else {
+        index += 1;
+      }
+    }
+    if (depth !== 1) continue;
+    let cursor = index;
+    while (/\s/u.test(json[cursor] ?? "")) cursor += 1;
+    if (json[cursor] !== ":") continue;
+    let key;
+    try {
+      key = JSON.parse(json.slice(stringStart, index));
+    } catch {
+      continue;
+    }
+    const field = STATUS_COUNTER_WIRE_KEYS.get(key);
+    if (!field) continue;
+    cursor += 1;
+    while (/\s/u.test(json[cursor] ?? "")) cursor += 1;
+    const number = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/u.exec(
+      json.slice(cursor),
+    )?.[0];
+    if (number && !/^(?:0|[1-9]\d*)$/u.test(number)) {
+      throw new CtxParseError(
+        `ctx status counter ${field} is outside the exact JSON integer domain`,
+        { details: { field, maximum: Number.MAX_SAFE_INTEGER } },
+      );
     }
   }
 }
@@ -326,7 +397,7 @@ export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
   switch (operation) {
     case "status":
     case "init":
-      envelope.status = camelizeKeys(raw);
+      envelope.status = normalizeStatus(raw);
       break;
     case "sources":
       envelope.sources = camelizeKeys(raw?.sources ?? []);
@@ -363,6 +434,46 @@ export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
   return envelope;
 }
 
+function normalizeStatus(raw) {
+  const current = camelizeKeys(raw ?? {});
+  const status = {};
+  for (const key of [
+    "initialized",
+    "readOnly",
+    "dataRoot",
+    "indexedItems",
+    "indexedSessions",
+    "indexedEvents",
+    "indexedSources",
+    "historyEpoch",
+    "lexical",
+    "refresh",
+    "semantic",
+    "daemon",
+  ]) {
+    if (current[key] !== undefined) {
+      if (key.startsWith("indexed")) {
+        requireExactStatusCounter(key, current[key]);
+      }
+      status[key] = current[key];
+    }
+  }
+  status.initialized ??= typeof current.lexical?.generationId === "string";
+  status.localOnly = true;
+  return status;
+}
+
+function requireExactStatusCounter(key, value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new CtxParseError(
+      `ctx status counter ${key} is outside the exact JSON integer domain`,
+      {
+        details: { field: key, maximum: Number.MAX_SAFE_INTEGER },
+      },
+    );
+  }
+}
+
 function camelizeKeys(value) {
   if (Array.isArray(value)) {
     return value.map((item) => camelizeKeys(item));
@@ -374,7 +485,6 @@ function camelizeKeys(value) {
   for (const [key, item] of Object.entries(value)) {
     const camelKey = key.replace(/_([a-z])/g, (_, char) => char.toUpperCase());
     if (
-      camelKey === "databasePath" ||
       camelKey === "configPath" ||
       camelKey === "itemType" ||
       camelKey === "payloadType" ||

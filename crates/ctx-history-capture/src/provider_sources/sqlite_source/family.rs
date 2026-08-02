@@ -1,5 +1,12 @@
 use super::*;
 
+mod native_file;
+
+pub(super) use native_file::{
+    validate_approved_parent_path, ExpectedObjectKind, NativeFileIdentity, NativeFileState,
+};
+use native_file::{validate_database_leaf, with_suffix};
+
 #[cfg(test)]
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -126,14 +133,12 @@ impl SqliteSourceFamily {
             .as_ref()
             .map(SqliteFamilyMember::capture_state)
             .transpose()?;
-        if let (Some(member), Some(state)) = (&self.shared_memory, &shared_memory) {
-            if state.length > SQLITE_SHM_MAX_BYTES {
-                return Err(SqliteSourceAccessError::SnapshotTooLarge {
-                    path: member.path.clone(),
-                    length: state.length,
-                    maximum: SQLITE_SHM_MAX_BYTES,
-                });
-            }
+        if let Some(state) = &shared_memory {
+            enforce_member_length_bound(
+                &self.shared_memory_path,
+                state.length,
+                SQLITE_SHM_MAX_BYTES,
+            )?;
         }
         Ok(SqliteFamilyEvidence {
             parent_identity: self.authority.identity.clone(),
@@ -153,19 +158,116 @@ impl SqliteSourceFamily {
         })
     }
 
-    pub(super) fn revalidate_database_identity(
+    /// Revalidates the authorized SQLite family topology without treating
+    /// ordinary writes to retained members as source replacement.
+    ///
+    /// Logical-online-backup snapshots admit a SQLite read view, so DB/WAL/SHM
+    /// metadata and bytes may advance after that view is pinned. The pathname
+    /// topology may not: every member that existed at admission must still
+    /// resolve to the same retained object, absent members must remain absent,
+    /// and rollback journals remain unavailable. This closes named-open and
+    /// checkpoint replacement races while allowing same-object WAL growth.
+    pub(super) fn revalidate_logical_identity(
         &self,
-        expected_identity: &NativeFileIdentity,
+        expected: &SqliteFamilyEvidence,
     ) -> SqliteSourceAccessResult<()> {
-        self.authority
-            .revalidate_database_identity(self.database_name(), expected_identity)
+        #[cfg(test)]
+        let _ =
+            self.revalidation_count
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    Some(count.saturating_add(1))
+                });
+        self.authority.revalidate()?;
+        if self.authority.identity != expected.parent_identity {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        self.database
+            .revalidate_identity(&self.authority, &expected.database.identity)?;
+        revalidate_optional_member_identity(
+            &self.authority,
+            self.wal.as_ref(),
+            expected.wal.as_ref(),
+            &self.wal_name,
+            &self.wal_path,
+            None,
+        )?;
+        revalidate_optional_member_identity(
+            &self.authority,
+            self.shared_memory.as_ref(),
+            expected.shared_memory.as_ref(),
+            &self.shared_memory_name,
+            &self.shared_memory_path,
+            Some(SQLITE_SHM_MAX_BYTES),
+        )?;
+        if SqliteFamilyMember::open_optional(
+            &self.authority,
+            self.journal_name.clone(),
+            self.journal_path.clone(),
+        )
+        .map_err(map_revalidation_error)?
+        .is_some()
+        {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        Ok(())
     }
 
-    pub(super) fn capture_named_revision_evidence(
+    /// Revalidates the exact bounded DB/WAL revision used to admit a durable
+    /// no-op replay. SHM bytes remain excluded because SQLite mutates reader
+    /// coordination there, but its object identity and size bound remain
+    /// certified.
+    pub(super) fn revalidate_revision(
         &self,
-    ) -> SqliteSourceAccessResult<SqliteFamilyEvidence> {
-        let current = Self::open(&self.authority, self.database_name(), || {})?;
-        current.capture_revision_evidence()
+        expected: &SqliteFamilyEvidence,
+    ) -> SqliteSourceAccessResult<()> {
+        self.authority.revalidate()?;
+        if self.authority.identity != expected.parent_identity {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        self.database
+            .revalidate(&self.authority, &expected.database)?;
+        self.revalidate_wal(expected)?;
+        revalidate_optional_member_identity(
+            &self.authority,
+            self.shared_memory.as_ref(),
+            expected.shared_memory.as_ref(),
+            &self.shared_memory_name,
+            &self.shared_memory_path,
+            Some(SQLITE_SHM_MAX_BYTES),
+        )?;
+        if SqliteFamilyMember::open_optional(
+            &self.authority,
+            self.journal_name.clone(),
+            self.journal_path.clone(),
+        )
+        .map_err(map_revalidation_error)?
+        .is_some()
+        {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        Ok(())
+    }
+
+    /// Revalidates only the durable source identity after a private logical
+    /// backup has been certified. WAL/SHM creation, checkpoint removal, and
+    /// recreation are normal writer lifecycle after that point and cannot
+    /// change the retained backup that will be published.
+    pub(super) fn revalidate_logical_database_identity(
+        &self,
+        expected: &SqliteFamilyEvidence,
+    ) -> SqliteSourceAccessResult<()> {
+        #[cfg(test)]
+        let _ =
+            self.revalidation_count
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    Some(count.saturating_add(1))
+                });
+        self.authority.revalidate()?;
+        if self.authority.identity != expected.parent_identity {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        self.database
+            .revalidate_identity(&self.authority, &expected.database.identity)
     }
 
     pub(super) fn revalidate(
@@ -322,6 +424,25 @@ impl SqliteFamilyMember {
         }
     }
 
+    fn revalidate_identity(
+        &self,
+        authority: &SqliteSourceDirectoryAuthority,
+        expected: &NativeFileIdentity,
+    ) -> SqliteSourceAccessResult<()> {
+        let retained = self.capture_state().map_err(map_revalidation_error)?;
+        if &retained.identity != expected {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        let named = Self::open(authority, self.name.clone(), self.path.clone())
+            .map_err(map_revalidation_error)?;
+        let named_state = named.capture_state().map_err(map_revalidation_error)?;
+        if &named_state.identity == expected {
+            Ok(())
+        } else {
+            Err(SqliteSourceAccessError::SourceChanged)
+        }
+    }
+
     fn bounded_token(&self) -> SqliteSourceAccessResult<[u8; 32]> {
         let state = self.capture_state()?;
         let mut file =
@@ -373,13 +494,7 @@ impl SqliteFamilyMember {
 
     fn content_digest(&self) -> SqliteSourceAccessResult<[u8; 32]> {
         let state = self.capture_state()?;
-        if state.length > SQLITE_SHM_MAX_BYTES {
-            return Err(SqliteSourceAccessError::SnapshotTooLarge {
-                path: self.path.clone(),
-                length: state.length,
-                maximum: SQLITE_SHM_MAX_BYTES,
-            });
-        }
+        enforce_member_length_bound(&self.path, state.length, SQLITE_SHM_MAX_BYTES)?;
         let mut file =
             self.opened
                 .file()
@@ -412,6 +527,66 @@ impl SqliteFamilyMember {
             remaining -= requested as u64;
         }
         Ok(digest.finalize().into())
+    }
+}
+
+fn enforce_member_length_bound(
+    path: &Path,
+    length: u64,
+    maximum: u64,
+) -> SqliteSourceAccessResult<()> {
+    if length > maximum {
+        Err(SqliteSourceAccessError::SnapshotTooLarge {
+            path: path.to_path_buf(),
+            length,
+            maximum,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn revalidate_optional_member_identity(
+    authority: &SqliteSourceDirectoryAuthority,
+    member: Option<&SqliteFamilyMember>,
+    expected: Option<&NativeFileState>,
+    name: &OsStr,
+    path: &Path,
+    maximum_length: Option<u64>,
+) -> SqliteSourceAccessResult<()> {
+    match (member, expected) {
+        (Some(member), Some(expected)) => {
+            let retained = member.capture_state().map_err(map_revalidation_error)?;
+            if let Some(maximum) = maximum_length {
+                enforce_member_length_bound(path, retained.length, maximum)?;
+            }
+            if retained.identity != expected.identity {
+                return Err(SqliteSourceAccessError::SourceChanged);
+            }
+            let named =
+                SqliteFamilyMember::open(authority, name.to_os_string(), path.to_path_buf())
+                    .map_err(map_revalidation_error)?;
+            let named_state = named.capture_state().map_err(map_revalidation_error)?;
+            if let Some(maximum) = maximum_length {
+                enforce_member_length_bound(path, named_state.length, maximum)?;
+            }
+            if named_state.identity == expected.identity {
+                Ok(())
+            } else {
+                Err(SqliteSourceAccessError::SourceChanged)
+            }
+        }
+        (None, None) => {
+            if SqliteFamilyMember::open_optional(authority, name.to_os_string(), path.to_path_buf())
+                .map_err(map_revalidation_error)?
+                .is_some()
+            {
+                Err(SqliteSourceAccessError::SourceChanged)
+            } else {
+                Ok(())
+            }
+        }
+        _ => Err(SqliteSourceAccessError::SourceChanged),
     }
 }
 
@@ -572,305 +747,6 @@ fn hash_optional_state(digest: &mut Sha256, state: Option<&NativeFileState>) {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) enum ExpectedObjectKind {
-    Directory,
-    RegularFile,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct NativeFileState {
-    pub(super) identity: NativeFileIdentity,
-    pub(super) length: u64,
-    platform: PlatformFileState,
-}
-
-impl NativeFileState {
-    pub(super) fn read(
-        file: &File,
-        path: &Path,
-        expected_kind: ExpectedObjectKind,
-    ) -> SqliteSourceAccessResult<Self> {
-        let metadata = file
-            .metadata()
-            .map_err(|source| SqliteSourceAccessError::Io {
-                operation: "reading retained SQLite source metadata",
-                path: path.to_path_buf(),
-                source,
-            })?;
-        validate_opened_metadata(path, &metadata, expected_kind)?;
-        let (identity, platform) =
-            platform_file_state(file, &metadata).map_err(|source| SqliteSourceAccessError::Io {
-                operation: "reading native SQLite source identity",
-                path: path.to_path_buf(),
-                source,
-            })?;
-        Ok(Self {
-            identity,
-            length: metadata.len(),
-            platform,
-        })
-    }
-
-    fn hash_into(&self, digest: &mut Sha256) {
-        self.identity.hash_into(digest);
-        digest.update(self.length.to_le_bytes());
-        self.platform.hash_into(digest);
-    }
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct NativeFileIdentity {
-    device: u64,
-    inode: u64,
-}
-
-#[cfg(windows)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct NativeFileIdentity {
-    volume_serial_number: u64,
-    file_id: [u8; 16],
-}
-
-#[cfg(not(any(unix, windows)))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct NativeFileIdentity;
-
-impl NativeFileIdentity {
-    fn digest(&self) -> [u8; 32] {
-        let mut digest = Sha256::new();
-        digest.update(EVIDENCE_DOMAIN);
-        digest.update(b"identity\0");
-        self.hash_into(&mut digest);
-        digest.finalize().into()
-    }
-
-    fn hash_into(&self, digest: &mut Sha256) {
-        #[cfg(unix)]
-        {
-            digest.update(self.device.to_le_bytes());
-            digest.update(self.inode.to_le_bytes());
-        }
-        #[cfg(windows)]
-        {
-            digest.update(self.volume_serial_number.to_le_bytes());
-            digest.update(self.file_id);
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = digest;
-        }
-    }
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PlatformFileState {
-    mode: u32,
-    modified_seconds: i64,
-    modified_nanoseconds: i64,
-    changed_seconds: i64,
-    changed_nanoseconds: i64,
-}
-
-#[cfg(windows)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PlatformFileState {
-    creation_time: i64,
-    last_write_time: i64,
-    change_time: i64,
-    attributes: u32,
-}
-
-#[cfg(not(any(unix, windows)))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PlatformFileState;
-
-impl PlatformFileState {
-    fn hash_into(&self, digest: &mut Sha256) {
-        #[cfg(unix)]
-        {
-            digest.update(self.mode.to_le_bytes());
-            digest.update(self.modified_seconds.to_le_bytes());
-            digest.update(self.modified_nanoseconds.to_le_bytes());
-            digest.update(self.changed_seconds.to_le_bytes());
-            digest.update(self.changed_nanoseconds.to_le_bytes());
-        }
-        #[cfg(windows)]
-        {
-            digest.update(self.creation_time.to_le_bytes());
-            digest.update(self.last_write_time.to_le_bytes());
-            digest.update(self.change_time.to_le_bytes());
-            digest.update(self.attributes.to_le_bytes());
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = digest;
-        }
-    }
-}
-
-#[cfg(unix)]
-fn platform_file_state(
-    _file: &File,
-    metadata: &Metadata,
-) -> std::io::Result<(NativeFileIdentity, PlatformFileState)> {
-    use std::os::unix::fs::MetadataExt;
-
-    Ok((
-        NativeFileIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        },
-        PlatformFileState {
-            mode: metadata.mode(),
-            modified_seconds: metadata.mtime(),
-            modified_nanoseconds: metadata.mtime_nsec(),
-            changed_seconds: metadata.ctime(),
-            changed_nanoseconds: metadata.ctime_nsec(),
-        },
-    ))
-}
-
-#[cfg(windows)]
-fn platform_file_state(
-    file: &File,
-    _metadata: &Metadata,
-) -> std::io::Result<(NativeFileIdentity, PlatformFileState)> {
-    use std::{mem::size_of, os::windows::io::AsRawHandle};
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO, FILE_ID_INFO,
-    };
-
-    let handle = file.as_raw_handle();
-    let mut basic = FILE_BASIC_INFO::default();
-    if unsafe {
-        GetFileInformationByHandleEx(
-            handle,
-            FileBasicInfo,
-            (&mut basic as *mut FILE_BASIC_INFO).cast(),
-            size_of::<FILE_BASIC_INFO>() as u32,
-        )
-    } == 0
-    {
-        return Err(std::io::Error::last_os_error());
-    }
-    let mut id = FILE_ID_INFO::default();
-    if unsafe {
-        GetFileInformationByHandleEx(
-            handle,
-            FileIdInfo,
-            (&mut id as *mut FILE_ID_INFO).cast(),
-            size_of::<FILE_ID_INFO>() as u32,
-        )
-    } == 0
-    {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok((
-        NativeFileIdentity {
-            volume_serial_number: id.VolumeSerialNumber,
-            file_id: id.FileId.Identifier,
-        },
-        PlatformFileState {
-            creation_time: basic.CreationTime,
-            last_write_time: basic.LastWriteTime,
-            change_time: basic.ChangeTime,
-            attributes: basic.FileAttributes,
-        },
-    ))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn platform_file_state(
-    _file: &File,
-    _metadata: &Metadata,
-) -> std::io::Result<(NativeFileIdentity, PlatformFileState)> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "native SQLite source identity is unsupported on this platform",
-    ))
-}
-
-pub(super) fn validate_approved_parent_path(path: &Path) -> SqliteSourceAccessResult<()> {
-    if !path.is_absolute()
-        || path.as_os_str().is_empty()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(SqliteSourceAccessError::UnsafeFile {
-            path: path.to_path_buf(),
-            reason: "the approved SQLite parent path must be absolute and traversal-free",
-        });
-    }
-    Ok(())
-}
-
-fn validate_database_leaf(name: &OsStr) -> SqliteSourceAccessResult<()> {
-    let path = Path::new(name);
-    if name.is_empty()
-        || path.components().count() != 1
-        || !matches!(path.components().next(), Some(Component::Normal(_)))
-    {
-        return Err(SqliteSourceAccessError::UnsafeFile {
-            path: path.to_path_buf(),
-            reason: "the SQLite database name must be one normal leaf component",
-        });
-    }
-    Ok(())
-}
-
-fn with_suffix(name: &OsStr, suffix: &str) -> OsString {
-    let mut value = name.to_os_string();
-    value.push(suffix);
-    value
-}
-
-fn validate_opened_metadata(
-    path: &Path,
-    metadata: &Metadata,
-    expected_kind: ExpectedObjectKind,
-) -> SqliteSourceAccessResult<()> {
-    if metadata.file_type().is_symlink() || metadata_is_reparse_point(metadata) {
-        return Err(SqliteSourceAccessError::UnsafeFile {
-            path: path.to_path_buf(),
-            reason: "symlink and reparse-point SQLite source objects are not allowed",
-        });
-    }
-    let valid = match expected_kind {
-        ExpectedObjectKind::Directory => metadata.is_dir(),
-        ExpectedObjectKind::RegularFile => metadata.file_type().is_file(),
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(SqliteSourceAccessError::UnsafeFile {
-            path: path.to_path_buf(),
-            reason: match expected_kind {
-                ExpectedObjectKind::Directory => "the approved SQLite parent must be a directory",
-                ExpectedObjectKind::RegularFile => {
-                    "SQLite source family members must be regular files"
-                }
-            },
-        })
-    }
-}
-
-#[cfg(windows)]
-fn metadata_is_reparse_point(metadata: &Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-fn metadata_is_reparse_point(_metadata: &Metadata) -> bool {
-    false
-}
-
 pub(super) fn map_provider_source_error(
     error: CaptureError,
     operation: &'static str,
@@ -913,9 +789,13 @@ pub(super) fn configure_and_pin_snapshot(connection: &Connection) -> SqliteSourc
     connection
         .pragma_update(None, "query_only", true)
         .map_err(|source| sqlite_error("enabling provider query-only mode", source))?;
+    // SQLite has no connection-local filesystem temp-directory authority.
+    // Shared snapshots therefore permit only memory temp state for their
+    // bounded/indexed queries. The one unindexed OpenCode corpus ordering path
+    // uses its own size-capped ordinary database under the ctx data root.
     connection
         .pragma_update(None, "temp_store", "MEMORY")
-        .map_err(|source| sqlite_error("forcing in-memory SQLite temporary storage", source))?;
+        .map_err(|source| sqlite_error("disabling provider SQLite temporary files", source))?;
     connection
         .pragma_update(None, "mmap_size", 0_i64)
         .map_err(|source| sqlite_error("disabling provider database mmap", source))?;
@@ -924,6 +804,14 @@ pub(super) fn configure_and_pin_snapshot(connection: &Connection) -> SqliteSourc
         .map_err(|source| sqlite_error("verifying provider query-only mode", source))?;
     if query_only != 1 {
         return Err(SqliteSourceAccessError::ConnectionNotQueryOnly);
+    }
+    let temp_store: i64 = connection
+        .pragma_query_value(None, "temp_store", |row| row.get(0))
+        .map_err(|source| sqlite_error("verifying provider temporary storage", source))?;
+    if temp_store != 2 {
+        return Err(SqliteSourceAccessError::SnapshotUnavailable {
+            reason: "provider SQLite temporary storage is not memory-only".to_owned(),
+        });
     }
     connection
         .execute_batch("BEGIN DEFERRED")

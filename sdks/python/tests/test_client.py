@@ -24,7 +24,7 @@ from ctx_agent_history import (
 )
 from ctx_agent_history.errors import CtxAgentHistoryCliError, CtxAgentHistoryProtocolError
 from ctx_agent_history.errors import CtxAgentHistoryTimeoutError, CtxAgentHistoryValidationError
-from ctx_agent_history.agent_history_v1 import normalize_import, normalize_sources
+from ctx_agent_history.agent_history_v1 import normalize_import, normalize_sources, normalize_status
 from ctx_agent_history.transport import LocalCliAdapter
 from ctx_agent_history.types import AgentHistoryErrorCode, SearchHit
 import dogfood_local
@@ -89,8 +89,31 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertEqual(result["backend"], {"kind": "local", "dataRoot": "/tmp/ctx-data"})
         self.assertTrue(result["status"]["initialized"])
         self.assertTrue(result["status"]["localOnly"])
-        self.assertEqual(result["status"]["freshness"], {"mode": "off", "status": "skipped"})
-        self.assertEqual(result["status"]["futureField"], "preserved")
+        self.assertEqual(result["status"]["lexical"]["generationId"], "gen-1")
+        self.assertNotIn("futureField", result["status"])
+
+    def test_status_counters_use_the_exact_cross_sdk_integer_domain(self) -> None:
+        maximum = (1 << 53) - 1
+        normalized = normalize_status(
+            {
+                "initialized": True,
+                "indexed_items": maximum,
+                "indexed_sessions": maximum,
+                "indexed_events": maximum,
+                "indexed_sources": maximum,
+            }
+        )
+        self.assertEqual(normalized["indexedItems"], maximum)
+        self.assertEqual(normalized["indexedSessions"], maximum)
+        self.assertEqual(normalized["indexedEvents"], maximum)
+        self.assertEqual(normalized["indexedSources"], maximum)
+
+        for rejected in ((1 << 53) + 1, (1 << 64) - 1):
+            with self.subTest(rejected=rejected):
+                with self.assertRaises(CtxAgentHistoryProtocolError) as raised:
+                    normalize_status({"initialized": True, "indexed_items": rejected})
+                self.assertEqual(raised.exception.code, "decode_error")
+                self.assertEqual(raised.exception.details["field"], "indexedItems")
 
     def test_local_cli_forces_analytics_off_after_ambient_and_user_env(self) -> None:
         completed = subprocess.CompletedProcess(
@@ -117,7 +140,7 @@ class LocalCliAdapterTests(unittest.TestCase):
         with fake_ctx() as cli:
             client = AgentHistoryClient.local(ctx_binary=str(cli))
 
-            self.assertEqual(client.init(catalog_only=True)["operation"], "init")
+            self.assertEqual(client.init()["operation"], "init")
             self.assertEqual(client.sources()["operation"], "sources")
             self.assertEqual(client.import_(provider="codex", resume=True)["operation"], "import")
             self.assertEqual(
@@ -530,13 +553,13 @@ def _fake_ctx_script(
         elif command == "status":
             payload.update(
                 {
-                    "initialized": True,
-                    "freshness": {"mode": "off", "status": "skipped"},
+                    "lexical": {"status": "ready", "generation_id": "gen-1"},
+                    "refresh": {"status": "ready", "generation_id": "gen-1"},
                     "future_field": "preserved",
                 }
             )
         elif command == "setup":
-            payload.update({"mode": "ready"})
+            payload.update({"lexical": {"status": "ready", "generation_id": "gen-1"}})
         elif command == "import":
             payload.update({"totals": {}, "sources": []})
         print(json.dumps(payload))

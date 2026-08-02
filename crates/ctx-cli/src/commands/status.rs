@@ -8,6 +8,7 @@ use crate::config::{self, CONFIG_FILE};
 use crate::local_usage;
 use crate::output::print_json;
 use crate::pro::PRO_MONTHLY_PRICE_DISPLAY;
+use crate::progress::format_bytes;
 use crate::semantic::source_epoch_status_report;
 use crate::ui::{
     fields, outcome, section, Document, Field, Line, Outcome, OutcomeState, RenderContext, Span,
@@ -40,7 +41,7 @@ pub(crate) fn status_read_model(
     config: &config::AppConfig,
 ) -> Result<StatusReadModel> {
     let source = source_epoch_status_report(data_root, config)?;
-    let mut pro = crate::pro::lifecycle_status_json(data_root);
+    let mut pro = source.pro;
     if let Some(object) = pro.as_object_mut() {
         object.insert(
             "conversion_action".to_owned(),
@@ -52,6 +53,7 @@ pub(crate) fn status_read_model(
     let local_usage = local_usage::read_report(data_root, config.local_usage.enabled, false);
     let mut report = source.report;
     if let Some(object) = report.as_object_mut() {
+        object.remove("catalog");
         object.insert("upgrade".to_owned(), upgrade);
         object.insert("pro".to_owned(), pro);
         object.insert(
@@ -210,6 +212,28 @@ fn render_status_human(
             }
         }
     }
+    if component_status(&report["refresh"]) == "pending" {
+        let progress = report["refresh"].get("progress");
+        if let Some(source) = progress
+            .and_then(|progress| progress.get("current_source"))
+            .and_then(Value::as_str)
+            .filter(|source| !source.is_empty())
+        {
+            history_values.push(("Active source", source.to_owned()));
+        }
+        if let Some(records) = progress
+            .and_then(|progress| progress.get("completed_records"))
+            .and_then(Value::as_u64)
+        {
+            history_values.push(("Accepted", counted(records, "record", "records")));
+        }
+        if let Some(bytes) = progress
+            .and_then(|progress| progress.get("completed_bytes"))
+            .and_then(Value::as_u64)
+        {
+            history_values.push(("Scanned", format_bytes(bytes)));
+        }
+    }
     let history_fields = history_values
         .iter()
         .map(|(label, value)| Field::new(label, value.as_str()))
@@ -317,7 +341,6 @@ fn humanize_code(value: &str) -> String {
     match value {
         "projection_missing" => "still being prepared".to_owned(),
         "generation_not_published" => "history has not been indexed yet".to_owned(),
-        "catalog_publication_pending" => "catalog is still being prepared".to_owned(),
         "lexical_generation_unavailable" => "search index unavailable".to_owned(),
         "path_shadowed" => "another ctx binary appears earlier in PATH".to_owned(),
         _ => value.replace('_', " "),
@@ -394,12 +417,11 @@ mod tests {
         String::from_utf8(stream.into_inner()).unwrap()
     }
 
-    fn status_report(initialized: bool, lexical: &str, catalog: &str, refresh: &str) -> Value {
+    fn status_report(initialized: bool, lexical: &str, refresh: &str) -> Value {
         json!({
             "initialized": initialized,
             "history_epoch": {"status": lexical},
             "lexical": {"status": lexical},
-            "catalog": {"status": catalog},
             "refresh": {"status": refresh},
             "semantic": {"status": "disabled"},
             "daemon": {"status": "running", "running": true},
@@ -452,7 +474,7 @@ mod tests {
 
     #[test]
     fn healthy_status_is_concise_and_hides_routine_internal_paths() {
-        let report = status_report(true, "ready", "ready", "ready");
+        let report = status_report(true, "ready", "ready");
         for width in [32, 48, 80, 120] {
             let context = context(width, ColorMode::Never);
             let document = render_report(&context, &report);
@@ -481,7 +503,7 @@ mod tests {
 
     #[test]
     fn status_surfaces_only_actionable_auxiliary_service_errors() {
-        let report = status_report(true, "ready", "ready", "ready");
+        let report = status_report(true, "ready", "ready");
         let upgrade = json!({
             "auto": "apply",
             "install": {
@@ -520,7 +542,7 @@ mod tests {
 
     #[test]
     fn actionable_daemon_or_semantic_state_prevents_a_healthy_headline() {
-        let mut daemon_failed = status_report(true, "ready", "ready", "ready");
+        let mut daemon_failed = status_report(true, "ready", "ready");
         daemon_failed["daemon"] = json!({
             "status": "failed",
             "enabled": true,
@@ -537,7 +559,7 @@ mod tests {
         assert!(rendered.contains("failed"), "{rendered}");
         assert!(rendered.contains("Next\n  ctx doctor\n"), "{rendered}");
 
-        let mut semantic_pending = status_report(true, "ready", "ready", "ready");
+        let mut semantic_pending = status_report(true, "ready", "ready");
         semantic_pending["semantic"] = json!({
             "status": "pending",
             "enabled": true,
@@ -557,7 +579,7 @@ mod tests {
 
     #[test]
     fn normal_status_always_reports_local_usage_enablement_and_store_health() {
-        let report = status_report(true, "ready", "ready", "ready");
+        let report = status_report(true, "ready", "ready");
         let context = context(80, ColorMode::Never);
         for (usage, expected) in [
             (
@@ -592,14 +614,14 @@ mod tests {
 
     #[test]
     fn partial_status_keeps_searchable_counts_and_points_to_index_watch() {
-        let report = status_report(true, "ready", "pending", "pending");
+        let report = status_report(true, "ready", "pending");
         for width in [32, 48, 80, 120] {
             let context = context(width, ColorMode::Never);
             let document = render_report(&context, &report);
             let rendered = document.render_plain();
             let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(rendered.starts_with("! ctx is partially ready\n"));
-            assert!(rendered.contains("Catalog"));
+            assert!(rendered.contains("Refresh"));
             assert!(rendered.contains("pending"));
             assert!(normalized.contains("1,000 searchable events"));
             assert!(rendered.contains("Next\n  ctx index watch\n"));
@@ -609,12 +631,31 @@ mod tests {
 
         let context = context(80, ColorMode::Never);
         let rendered = render_report(&context, &report).render_plain();
-        assert!(rendered.contains("2 history services are catching up; search remains available."));
+        assert!(rendered.contains("1 history service is catching up; search remains available."));
+    }
+
+    #[test]
+    fn active_refresh_status_shows_record_and_byte_progress_without_inventing_a_total() {
+        let mut report = status_report(true, "ready", "pending");
+        report["refresh"]["progress"] = json!({
+            "phase": "refreshing",
+            "completed_sources": 2,
+            "total_sources": 6,
+            "current_source": "~/.local/share/opencode/opencode.db",
+            "completed_records": 1234,
+            "completed_bytes": 4 * 1024 * 1024,
+        });
+
+        let rendered = render_report(&context(80, ColorMode::Never), &report).render_plain();
+        assert!(rendered.contains("Active source  ~/.local/share/opencode/opencode.db"));
+        assert!(rendered.contains("Accepted       1,234 records"));
+        assert!(rendered.contains("Scanned        4.0 MiB"));
+        assert!(!rendered.contains("records /"));
     }
 
     #[test]
     fn failed_status_exposes_actionable_paths_and_doctor_recovery() {
-        let mut report = status_report(false, "unavailable", "unavailable", "unavailable");
+        let mut report = status_report(false, "unavailable", "unavailable");
         report["lexical"]["reason"] = json!("generation_verification_failed");
         report["daemon"] = json!({
             "status": "failed",
@@ -638,7 +679,7 @@ mod tests {
 
     #[test]
     fn status_without_a_published_generation_points_to_setup() {
-        let mut report = status_report(false, "unavailable", "pending", "unavailable");
+        let mut report = status_report(false, "unavailable", "unavailable");
         report["lexical"]["reason"] = json!("generation_not_published");
         let context = context(80, ColorMode::Never);
         let rendered = render_report(&context, &report).render_plain();
@@ -647,7 +688,7 @@ mod tests {
 
     #[test]
     fn installed_pro_status_is_grouped_without_internal_deadlines() {
-        let report = status_report(true, "ready", "ready", "ready");
+        let report = status_report(true, "ready", "ready");
         let pro = json!({
             "installed": true,
             "state": "ready",
@@ -685,7 +726,7 @@ mod tests {
 
     #[test]
     fn status_plain_output_equals_ansi_stripped_styled_output() {
-        let report = status_report(true, "ready", "ready", "ready");
+        let report = status_report(true, "ready", "ready");
         let context = context(80, ColorMode::Always);
         let document = render_report(&context, &report);
         assert_eq!(

@@ -12,6 +12,15 @@ use ctx_pro_host_protocol::{
 
 use super::*;
 
+fn protocol_snapshot() -> ctx_pro_host_protocol::QuerySnapshotExpectation {
+    ctx_pro_host_protocol::QuerySnapshotExpectation::Core {
+        receipt: ctx_pro_host_protocol::CoreMaterializationReceiptIdentity {
+            core_generation_id: "a".repeat(64),
+            materializer_revision: "materializer-v1".to_owned(),
+        },
+    }
+}
+
 fn sink_ui() -> crate::ui::Ui {
     let stdout_context = crate::ui::RenderContext::for_test(crate::ui::TestContext::pipe(
         crate::ui::StreamKind::Stdout,
@@ -449,6 +458,7 @@ fn commit_and_pr_results_skip_hydration_for_text_and_json() {
                     BlameTarget::File { .. } => panic!("unexpected file target"),
                 };
                 Ok(BlameResult {
+                    snapshot: protocol_snapshot(),
                     target,
                     git_snapshot: None,
                     matches: Vec::new(),
@@ -500,6 +510,7 @@ fn file_hydration_is_automatic_for_text_and_json_and_empty_context_is_nonfatal()
             &mut ui,
             |_, _, _, _| {
                 Ok(BlameResult {
+                    snapshot: protocol_snapshot(),
                     target: ResolvedBlameTarget::File {
                         path: "src/lib.rs".to_owned(),
                         repository: ResourceRef {
@@ -548,6 +559,7 @@ fn output_failure_does_not_retain_blame_result_or_citation_counts() {
     };
     let commit = resource("commit:abc1234", ResourceKind::Commit);
     let result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: commit.clone(),
             repository: resource("repository:ctx", ResourceKind::Repository),
@@ -597,6 +609,7 @@ fn successful_blame_observes_structured_results_and_empty_pages() {
     };
     let commit = resource("commit:abc1234", ResourceKind::Commit);
     let mut result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: commit.clone(),
             repository: resource("repository:ctx", ResourceKind::Repository),
@@ -666,6 +679,7 @@ fn human_byte_accounting_is_plain_and_invariant_across_color_modes() {
         display: id.to_owned(),
     };
     let result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: resource("commit:abc1234", ResourceKind::Commit),
             repository: resource("repository:ctx", ResourceKind::Repository),
@@ -713,6 +727,7 @@ fn automatic_evidence_context_bytes_are_included_in_local_usage_accounting() {
         display: id.to_owned(),
     };
     let result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::File {
             path: "src/lib.rs".to_owned(),
             repository: resource("repository:ctx", ResourceKind::Repository),
@@ -769,6 +784,7 @@ fn referral_cta_requires_nonempty_interactive_human_success() {
     };
     let commit = resource("commit:abc1234", ResourceKind::Commit);
     let mut result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: commit.clone(),
             repository: resource("repository:ctx", ResourceKind::Repository),

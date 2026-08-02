@@ -267,6 +267,32 @@ fn daemon_query_activity_prevents_idle_shutdown_during_a_request() {
     assert!(activity.begin_request().is_some());
 }
 
+#[test]
+fn last_query_completion_wakes_the_daemon_waiter() {
+    let wakeup = Arc::new(super::daemon_wakeup::DaemonWakeup::default());
+    let activity = Arc::new(DaemonQueryActivity::with_idle_wakeup(Arc::clone(&wakeup)));
+    let first = activity.begin_request().expect("first request");
+    let second = activity.begin_request().expect("second request");
+    activity.wake_daemon_when_idle();
+
+    drop(first);
+    assert!(wakeup.wait(StdDuration::ZERO).timed_out);
+
+    drop(second);
+    assert!(!wakeup.wait(StdDuration::ZERO).timed_out);
+}
+
+#[test]
+fn ordinary_query_completion_does_not_wake_daemon_maintenance() {
+    let wakeup = Arc::new(super::daemon_wakeup::DaemonWakeup::default());
+    let activity = Arc::new(DaemonQueryActivity::with_idle_wakeup(Arc::clone(&wakeup)));
+    let request = activity.begin_request().expect("ordinary request");
+
+    drop(request);
+
+    assert!(wakeup.wait(StdDuration::ZERO).timed_out);
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn stalled_query_client_is_discarded_and_next_query_is_served() -> Result<()> {
@@ -338,6 +364,7 @@ fn query_service_coalesces_source_refresh_requests_on_one_daemon_ticket() -> Res
                 "schema_version": 1,
                 "op": "source_refresh_request",
                 "mode": "wait",
+                "operation": "refresh",
             })),
             StdDuration::from_secs(1),
             64 * 1024,

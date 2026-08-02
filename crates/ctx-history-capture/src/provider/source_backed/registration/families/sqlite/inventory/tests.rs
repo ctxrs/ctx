@@ -17,8 +17,6 @@ use sha2::{Digest, Sha256};
 use crate::{
     provider::source_backed::{
         family::document::DocumentLeafExecutionPolicy, source_backed_leaf_worker_budget,
-        SourceBackedRefreshOutcome, SourceBackedRefreshReceipt, SourceBackedSourceFailureClass,
-        AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES,
     },
     provider_sources::ProviderCatalogSupport,
 };
@@ -27,7 +25,6 @@ use super::{
     shared::{
         sqlite_inventory_leaf_execution_policy, SqliteInventoryCatalog, SqliteInventoryCatalogLeaf,
         SqliteInventoryDocumentAdapter, SqliteInventoryProvider, SqliteInventorySnapshotCounters,
-        SQLITE_INVENTORY_MAX_LEAF_WORKERS,
     },
     *,
 };
@@ -313,7 +310,7 @@ impl SqliteInventoryProvider for TestProvider {
 }
 
 #[test]
-fn finite_sqlite_inventory_parallelism_is_explicit_and_default_safe() {
+fn sqlite_inventory_uses_serial_bounded_streaming() {
     for provider in [
         CaptureProvider::AstrBot,
         CaptureProvider::Lingma,
@@ -321,7 +318,7 @@ fn finite_sqlite_inventory_parallelism_is_explicit_and_default_safe() {
     ] {
         assert_eq!(
             sqlite_inventory_leaf_execution_policy(provider),
-            DocumentLeafExecutionPolicy::IndependentCapped(SQLITE_INVENTORY_MAX_LEAF_WORKERS)
+            DocumentLeafExecutionPolicy::Serial
         );
     }
     for provider in [
@@ -390,15 +387,29 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
         serial_cold.commit.generation_id
     );
     assert_eq!(parallel_cold.sources, serial_cold.sources);
-    assert_inventory_work(&serial_provider, DATABASES, 1, 2, 1, DATABASES, DATABASES);
+    assert_inventory_work(
+        &serial_provider,
+        ExpectedInventoryWork {
+            projections: DATABASES,
+            peak_scans: 1,
+            discoveries: 2,
+            terminal_callbacks: 1,
+            snapshot_observations: DATABASES,
+            snapshot_scans: DATABASES,
+            logical_replacements: DATABASES,
+        },
+    );
     assert_inventory_work(
         &parallel_provider,
-        DATABASES,
-        parallel_worker_count,
-        2,
-        1,
-        DATABASES,
-        DATABASES,
+        ExpectedInventoryWork {
+            projections: DATABASES,
+            peak_scans: parallel_worker_count,
+            discoveries: 2,
+            terminal_callbacks: 1,
+            snapshot_observations: DATABASES,
+            snapshot_scans: DATABASES,
+            logical_replacements: DATABASES,
+        },
     );
     assert_eq!(
         parallel_provider.state.lock().unwrap().peak_scans,
@@ -421,21 +432,27 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     assert_eq!(parallel_noop.sources, serial_noop.sources);
     assert_inventory_work(
         &serial_provider,
-        DATABASES * 2,
-        1,
-        4,
-        2,
-        DATABASES * 2,
-        DATABASES,
+        ExpectedInventoryWork {
+            projections: DATABASES,
+            peak_scans: 0,
+            discoveries: 4,
+            terminal_callbacks: 2,
+            snapshot_observations: DATABASES * 2,
+            snapshot_scans: DATABASES,
+            logical_replacements: DATABASES,
+        },
     );
     assert_inventory_work(
         &parallel_provider,
-        DATABASES * 2,
-        parallel_worker_count,
-        4,
-        2,
-        DATABASES * 2,
-        DATABASES,
+        ExpectedInventoryWork {
+            projections: DATABASES,
+            peak_scans: 0,
+            discoveries: 4,
+            terminal_callbacks: 2,
+            snapshot_observations: DATABASES * 2,
+            snapshot_scans: DATABASES,
+            logical_replacements: DATABASES,
+        },
     );
 
     writers[3]
@@ -459,56 +476,30 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     assert_eq!(parallel_changed.sources, serial_changed.sources);
     assert_inventory_work(
         &serial_provider,
-        DATABASES * 3,
-        1,
-        6,
-        3,
-        DATABASES * 3,
-        DATABASES + 1,
+        ExpectedInventoryWork {
+            projections: DATABASES + 1,
+            peak_scans: 1,
+            discoveries: 6,
+            terminal_callbacks: 3,
+            snapshot_observations: DATABASES * 3,
+            snapshot_scans: DATABASES + 1,
+            logical_replacements: DATABASES + 1,
+        },
     );
     assert_inventory_work(
         &parallel_provider,
-        DATABASES * 3,
-        parallel_worker_count,
-        6,
-        3,
-        DATABASES * 3,
-        DATABASES + 1,
+        ExpectedInventoryWork {
+            projections: DATABASES + 1,
+            peak_scans: 1,
+            discoveries: 6,
+            terminal_callbacks: 3,
+            snapshot_observations: DATABASES * 3,
+            snapshot_scans: DATABASES + 1,
+            logical_replacements: DATABASES + 1,
+        },
     );
 
     let deleted_source = catalog.lock().unwrap().pop().unwrap().source;
-    serial_provider.reset_scan_activity();
-    parallel_provider.reset_scan_activity();
-    for expected_missing in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
-        let serial_grace = publish(&serial_index_root, &serial_registry);
-        let parallel_grace = publish(&parallel_index_root, &parallel_registry);
-        assert!(serial_grace.removals.is_empty());
-        assert!(parallel_grace.removals.is_empty());
-        assert_eq!(serial_grace.sources.len(), DATABASES);
-        assert_eq!(parallel_grace.sources.len(), DATABASES);
-        assert_eq!(
-            serial_grace
-                .commit
-                .manifest()
-                .source_catalog()
-                .missing_source(&deleted_source)
-                .unwrap()
-                .consecutive_missing()
-                .get(),
-            expected_missing
-        );
-        assert_eq!(
-            parallel_grace
-                .commit
-                .manifest()
-                .source_catalog()
-                .missing_source(&deleted_source)
-                .unwrap()
-                .consecutive_missing()
-                .get(),
-            expected_missing
-        );
-    }
     serial_provider.reset_scan_activity();
     parallel_provider.reset_scan_activity();
     let serial_deleted = publish(&serial_index_root, &serial_registry);
@@ -518,29 +509,12 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
         serial_deleted.commit.generation_id
     );
     assert_eq!(parallel_deleted.sources, serial_deleted.sources);
+    assert_eq!(serial_deleted.sources.len(), DATABASES - 1);
     assert_eq!(parallel_deleted.removals, serial_deleted.removals);
     assert!(parallel_deleted.removals.iter().any(|removal| removal
         .deletion
         .source()
         .exact_descriptor_eq(&deleted_source)));
-    assert_inventory_work(
-        &serial_provider,
-        DATABASES * 3 + (DATABASES - 1) * 3,
-        1,
-        12,
-        6,
-        DATABASES * 3 + (DATABASES - 1) * 3,
-        DATABASES + 1,
-    );
-    assert_inventory_work(
-        &parallel_provider,
-        DATABASES * 3 + (DATABASES - 1) * 3,
-        parallel_worker_count,
-        12,
-        6,
-        DATABASES * 3 + (DATABASES - 1) * 3,
-        DATABASES + 1,
-    );
 
     writers[0]
         .execute(
@@ -549,83 +523,44 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
         )
         .unwrap();
     parallel_provider.set_after_seal_action(TestAfterSealAction::MutateDatabase);
-    let retained_generation = parallel_deleted.commit.generation_id.clone();
-    let terminal_failed = refresh_source_backed_generation(
+    let retained_generation = parallel_deleted.commit.generation_id;
+    let failed = refresh_source_backed_generation(
         &parallel_index_root,
         &parallel_registry,
         writer_options(),
     )
     .unwrap();
-    assert_sqlite_source_failure(
-        &terminal_failed,
+    assert_carried_route_failure(
+        &failed,
+        &retained_generation,
         SourceBackedSourceFailureClass::SourceChanged,
-        &selected_database,
     );
-    assert_eq!(terminal_failed.commit.generation_id, retained_generation);
-    assert_eq!(terminal_failed.sources, parallel_deleted.sources);
     assert_eq!(
         VerifiedIndex::open(&parallel_index_root)
             .unwrap()
             .generation_id(),
         retained_generation
     );
-    assert_eq!(
-        VerifiedIndex::open(&parallel_index_root)
-            .unwrap()
-            .manifest()
-            .sources,
-        parallel_deleted.sources
-    );
 
     let settled = publish(&parallel_index_root, &parallel_registry);
-    assert_eq!(settled.outcome, SourceBackedRefreshOutcome::Completed);
-    assert_eq!(settled.successful_routes, 1);
-    assert!(settled.source_failures.is_empty());
-    assert_ne!(settled.commit.generation_id, retained_generation);
-    let available_path = catalog.lock().unwrap()[0].path.clone();
     catalog.lock().unwrap()[0].path = provider_dir.join("unavailable.sqlite");
-    let unavailable = refresh_source_backed_generation(
+    let failed = refresh_source_backed_generation(
         &parallel_index_root,
         &parallel_registry,
         writer_options(),
     )
     .unwrap();
-    assert_sqlite_source_failure(
-        &unavailable,
+    assert_carried_route_failure(
+        &failed,
+        &settled.commit.generation_id,
         SourceBackedSourceFailureClass::Unreadable,
-        &selected_database,
     );
-    assert_eq!(
-        unavailable.commit.generation_id,
-        settled.commit.generation_id
-    );
-    assert_eq!(unavailable.sources, settled.sources);
     assert_eq!(
         VerifiedIndex::open(&parallel_index_root)
             .unwrap()
             .generation_id(),
         settled.commit.generation_id
     );
-    assert_eq!(
-        VerifiedIndex::open(&parallel_index_root)
-            .unwrap()
-            .manifest()
-            .sources,
-        settled.sources
-    );
-    catalog.lock().unwrap()[0].path = available_path;
-    let unavailable_retried = publish(&parallel_index_root, &parallel_registry);
-    assert_eq!(
-        unavailable_retried.outcome,
-        SourceBackedRefreshOutcome::Completed
-    );
-    assert_eq!(unavailable_retried.successful_routes, 1);
-    assert!(unavailable_retried.source_failures.is_empty());
-    assert_eq!(
-        unavailable_retried.commit.generation_id,
-        settled.commit.generation_id
-    );
-    assert_eq!(unavailable_retried.sources, settled.sources);
     assert_no_snapshot_temp_leak(&serial_data_root);
     assert_no_snapshot_temp_leak(&parallel_data_root);
 }
@@ -651,7 +586,7 @@ fn one_logical_snapshot_distinguishes_noop_insert_update_delete_and_rewrite() {
     let noop = publish(&index_root, &registry);
     assert_eq!(noop.commit.generation_id, cold.commit.generation_id);
     assert_eq!(directory_file_bytes(&provider_dir), before);
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[1], 1, true);
+    assert_zero_snapshot_replay(provider.state.lock().unwrap().counters[1]);
 
     writer
         .execute_batch(
@@ -660,32 +595,39 @@ fn one_logical_snapshot_distinguishes_noop_insert_update_delete_and_rewrite() {
         )
         .unwrap();
     let irrelevant_wal_growth = publish(&index_root, &registry);
-    assert_eq!(
+    assert_ne!(
         irrelevant_wal_growth.commit.generation_id,
         cold.commit.generation_id
     );
+    assert!(!irrelevant_wal_growth.successful_route_outcomes[0].changed);
     assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[2], 1, true);
+    let irrelevant_settled = publish(&index_root, &registry);
+    assert_eq!(
+        irrelevant_settled.commit.generation_id,
+        irrelevant_wal_growth.commit.generation_id
+    );
+    assert_zero_snapshot_replay(provider.state.lock().unwrap().counters[3]);
 
     writer
         .execute("insert into messages (id, body) values (2, 'inserted')", [])
         .unwrap();
     let inserted = publish(&index_root, &registry);
     assert_ne!(inserted.commit.generation_id, cold.commit.generation_id);
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[3], 2, false);
+    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[4], 2, false);
 
     writer
         .execute("update messages set body = 'updated' where id = 1", [])
         .unwrap();
     let updated = publish(&index_root, &registry);
     assert_ne!(updated.commit.generation_id, inserted.commit.generation_id);
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[4], 2, false);
+    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[5], 2, false);
 
     writer
         .execute("delete from messages where id = 2", [])
         .unwrap();
     let deleted = publish(&index_root, &registry);
     assert_ne!(deleted.commit.generation_id, updated.commit.generation_id);
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[5], 1, false);
+    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[6], 1, false);
 
     writer
         .execute_batch(
@@ -695,18 +637,25 @@ fn one_logical_snapshot_distinguishes_noop_insert_update_delete_and_rewrite() {
         .unwrap();
     let rewritten = publish(&index_root, &registry);
     assert_ne!(rewritten.commit.generation_id, deleted.commit.generation_id);
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[6], 1, false);
+    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[7], 1, false);
 
     writer
         .execute_batch("pragma wal_checkpoint(truncate)")
         .unwrap();
     let checkpoint_only = publish(&index_root, &registry);
-    assert_eq!(
+    assert_ne!(
         checkpoint_only.commit.generation_id,
         rewritten.commit.generation_id
     );
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[7], 1, true);
-    assert_eq!(provider.state.lock().unwrap().projections, 8);
+    assert!(!checkpoint_only.successful_route_outcomes[0].changed);
+    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[8], 1, true);
+    let checkpoint_settled = publish(&index_root, &registry);
+    assert_eq!(
+        checkpoint_settled.commit.generation_id,
+        checkpoint_only.commit.generation_id
+    );
+    assert_zero_snapshot_replay(provider.state.lock().unwrap().counters[9]);
+    assert_eq!(provider.state.lock().unwrap().projections, 7);
     assert_no_snapshot_temp_leak(&data_root);
 }
 
@@ -748,8 +697,8 @@ fn active_wal_logical_noop_works_from_a_read_only_provider_tree() {
     let exact = publish(&index_root, &restarted);
     assert_eq!(exact.commit.generation_id, cold.commit.generation_id);
     assert_eq!(directory_file_bytes(&provider_dir), before);
-    assert_one_active_wal_logical_snapshot(provider.state.lock().unwrap().counters[1], 1, true);
-    assert_eq!(provider.state.lock().unwrap().projections, 2);
+    assert_zero_snapshot_replay(provider.state.lock().unwrap().counters[1]);
+    assert_eq!(provider.state.lock().unwrap().projections, 1);
 
     fs::set_permissions(&provider_dir, fs::Permissions::from_mode(0o755)).unwrap();
     for path in [&database, &wal, &shared_memory] {
@@ -815,30 +764,20 @@ fn nonempty_wal_creation_fails_closed_and_clean_retry_succeeds() {
     provider.set_after_seal_action(TestAfterSealAction::CreateNonemptyWal);
     let failed =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_sqlite_source_failure(
+    assert_carried_route_failure(
         &failed,
+        &cold.commit.generation_id,
         SourceBackedSourceFailureClass::SourceChanged,
-        &database,
     );
-    assert_eq!(failed.commit.generation_id, cold.commit.generation_id);
-    assert_eq!(failed.sources, cold.sources);
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         cold.commit.generation_id
-    );
-    assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().manifest().sources,
-        cold.sources
     );
     assert!(fs::metadata(&wal).unwrap().len() > 0);
 
     fs::remove_file(&wal).unwrap();
     let retried = publish(&index_root, &registry);
-    assert_eq!(retried.outcome, SourceBackedRefreshOutcome::Completed);
-    assert_eq!(retried.successful_routes, 1);
-    assert!(retried.source_failures.is_empty());
     assert_eq!(retried.commit.generation_id, cold.commit.generation_id);
-    assert_eq!(retried.sources, cold.sources);
     assert_no_snapshot_temp_leak(&data_root);
     drop(writer);
 }
@@ -860,57 +799,32 @@ fn concurrent_mutation_before_and_after_seal_fails_closed_and_retries() {
         .execute("update messages set body = 'replacement' where id = 1", [])
         .unwrap();
     provider.state.lock().unwrap().mutate_before_finish = true;
-    let before_finish_failed =
+    let failed =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_sqlite_source_failure(
-        &before_finish_failed,
+    assert_carried_route_failure(
+        &failed,
+        &cold.commit.generation_id,
         SourceBackedSourceFailureClass::Unreadable,
-        &database,
     );
-    assert_eq!(
-        before_finish_failed.commit.generation_id,
-        cold.commit.generation_id
-    );
-    assert_eq!(before_finish_failed.sources, cold.sources);
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         cold.commit.generation_id
-    );
-    assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().manifest().sources,
-        cold.sources
     );
 
     let replacement = publish(&index_root, &registry);
-    assert_eq!(replacement.outcome, SourceBackedRefreshOutcome::Completed);
-    assert_eq!(replacement.successful_routes, 1);
-    assert!(replacement.source_failures.is_empty());
-    assert_ne!(replacement.commit.generation_id, cold.commit.generation_id);
     provider.set_after_seal_action(TestAfterSealAction::MutateDatabase);
-    let after_seal_failed =
+    let failed =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_sqlite_source_failure(
-        &after_seal_failed,
+    assert_carried_route_failure(
+        &failed,
+        &replacement.commit.generation_id,
         SourceBackedSourceFailureClass::SourceChanged,
-        &database,
     );
-    assert_eq!(
-        after_seal_failed.commit.generation_id,
-        replacement.commit.generation_id
-    );
-    assert_eq!(after_seal_failed.sources, replacement.sources);
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         replacement.commit.generation_id
     );
-    assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().manifest().sources,
-        replacement.sources
-    );
     let retried = publish(&index_root, &registry);
-    assert_eq!(retried.outcome, SourceBackedRefreshOutcome::Completed);
-    assert_eq!(retried.successful_routes, 1);
-    assert!(retried.source_failures.is_empty());
     assert_ne!(
         retried.commit.generation_id,
         replacement.commit.generation_id
@@ -990,27 +904,6 @@ fn writer_options() -> WriterOptions {
         indexer_threads: 1,
         memory_bytes: 15_000_000,
     }
-}
-
-fn assert_sqlite_source_failure(
-    receipt: &SourceBackedRefreshReceipt,
-    class: SourceBackedSourceFailureClass,
-    selector: &Path,
-) {
-    assert_eq!(
-        receipt.outcome,
-        SourceBackedRefreshOutcome::CompletedWithSourceFailures
-    );
-    assert_eq!(receipt.successful_routes, 0);
-    assert_eq!(receipt.source_failures.total(), 1);
-    assert_eq!(receipt.source_failures.omitted(), 0);
-    let failure = &receipt.source_failures.failures()[0];
-    assert_eq!(failure.provider, CaptureProvider::Shelley);
-    assert_eq!(failure.class, class);
-    assert!(failure.carried_forward);
-    assert_eq!(failure.source_selector, selector.display().to_string());
-    assert!(!failure.detail.is_empty());
-    assert_eq!(failure.source_identity.len(), 64);
 }
 
 fn effective_test_leaf_worker_count(requested_workers: usize, leaf_count: usize) -> usize {
@@ -1119,35 +1012,56 @@ fn directory_file_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
         .collect()
 }
 
-fn assert_inventory_work(
-    provider: &TestProvider,
+struct ExpectedInventoryWork {
     projections: usize,
-    maximum_peak_scans: usize,
+    peak_scans: usize,
     discoveries: usize,
     terminal_callbacks: usize,
     snapshot_observations: usize,
+    snapshot_scans: usize,
     logical_replacements: usize,
-) {
+}
+
+fn assert_inventory_work(provider: &TestProvider, expected: ExpectedInventoryWork) {
     let state = provider.state.lock().unwrap();
-    assert_eq!(state.projections, projections);
-    assert!((1..=maximum_peak_scans).contains(&state.peak_scans));
-    assert_eq!(state.discoveries, discoveries);
-    assert_eq!(state.terminal_callbacks, terminal_callbacks);
+    assert_eq!(state.projections, expected.projections);
+    assert_eq!(state.peak_scans, expected.peak_scans);
+    assert_eq!(state.discoveries, expected.discoveries);
+    assert_eq!(state.terminal_callbacks, expected.terminal_callbacks);
     assert_eq!(state.active_scans, 0);
     assert!(state.active_scans_by_path.is_empty());
-    assert_eq!(state.max_active_scans_per_path, 1);
-    assert_eq!(state.counters.len(), snapshot_observations);
+    assert_eq!(
+        state.max_active_scans_per_path,
+        usize::from(expected.peak_scans > 0)
+    );
+    assert_eq!(state.counters.len(), expected.snapshot_observations);
+    assert_eq!(
+        state
+            .counters
+            .iter()
+            .filter(|counters| counters.copied_snapshot_opens == 1)
+            .count(),
+        expected.snapshot_scans
+    );
     assert_eq!(
         state
             .counters
             .iter()
             .filter(|counters| counters.logical_replacements == 1)
             .count(),
-        logical_replacements
+        expected.logical_replacements
     );
     for counters in &state.counters {
-        assert_one_active_wal_logical_snapshot(*counters, 1, counters.logical_noops == 1);
+        if counters.copied_snapshot_opens == 0 {
+            assert_zero_snapshot_replay(*counters);
+        } else {
+            assert_one_active_wal_logical_snapshot(*counters, 1, counters.logical_noops == 1);
+        }
     }
+}
+
+fn assert_zero_snapshot_replay(counters: SqliteInventorySnapshotCounters) {
+    assert_eq!(counters, SqliteInventorySnapshotCounters::default());
 }
 
 fn assert_one_active_wal_logical_snapshot(

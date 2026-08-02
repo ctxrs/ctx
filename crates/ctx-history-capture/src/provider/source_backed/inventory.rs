@@ -83,6 +83,18 @@ pub enum SourceBackedRouteConstructor {
     SelectedWithRetainedRoutes,
 }
 
+/// Filesystem authority exposed by one landed route to provider-neutral
+/// daemon watchers.
+///
+/// This is part of the central landed-route inventory, so watch derivation and
+/// capture registration cannot silently disagree about whether a selected
+/// path is an ordinary source root or a SQLite database family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBackedWatchTargetKind {
+    Path,
+    SqliteDatabase,
+}
+
 /// Static inventory of one landed provider/source-format registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceBackedProviderRouteMetadata {
@@ -97,6 +109,7 @@ pub struct SourceBackedProviderRouteMetadata {
     pub unsupported_reason: Option<&'static str>,
     /// Provider-owned selector input required to construct this route.
     pub constructor: SourceBackedRouteConstructor,
+    pub watch_target_kind: SourceBackedWatchTargetKind,
 }
 
 macro_rules! route {
@@ -113,6 +126,7 @@ macro_rules! route {
             selector_authority: SourceBackedSelectorAuthority::$authority,
             unsupported_reason: None,
             constructor: SourceBackedRouteConstructor::$constructor,
+            watch_target_kind: SourceBackedWatchTargetKind::Path,
         }
     };
     (
@@ -128,6 +142,7 @@ macro_rules! route {
             selector_authority: SourceBackedSelectorAuthority::$authority,
             unsupported_reason: None,
             constructor: SourceBackedRouteConstructor::ProviderSource,
+            watch_target_kind: SourceBackedWatchTargetKind::Path,
         }
     };
     (
@@ -143,7 +158,40 @@ macro_rules! route {
             selector_authority: SourceBackedSelectorAuthority::$authority,
             unsupported_reason: None,
             constructor: SourceBackedRouteConstructor::ProviderSource,
+            watch_target_kind: SourceBackedWatchTargetKind::Path,
         }
+    };
+}
+
+macro_rules! sqlite_route {
+    (
+        $provider:ident, $format:literal, $automatic:literal, $explicit:literal,
+        $authority:ident, $constructor:ident
+    ) => {
+        SourceBackedProviderRouteMetadata {
+            provider: CaptureProvider::$provider,
+            source_format: $format,
+            certified_source_format: $format,
+            automatic: $automatic,
+            explicit_manual: $explicit,
+            selector_authority: SourceBackedSelectorAuthority::$authority,
+            unsupported_reason: None,
+            constructor: SourceBackedRouteConstructor::$constructor,
+            watch_target_kind: SourceBackedWatchTargetKind::SqliteDatabase,
+        }
+    };
+    (
+        $provider:ident, $format:literal, $automatic:literal, $explicit:literal,
+        $authority:ident
+    ) => {
+        sqlite_route!(
+            $provider,
+            $format,
+            $automatic,
+            $explicit,
+            $authority,
+            ProviderSource
+        )
     };
 }
 
@@ -201,9 +249,9 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         DiscoveredWinner
     ),
     route!(Pi, "pi_session_jsonl", true, true, DiscoveredWinner),
-    route!(OpenCode, "opencode_sqlite", true, true, DiscoveredWinner),
-    route!(Kilo, "kilo_sqlite", true, true, DiscoveredWinner),
-    route!(KiroCli, "kiro_cli_sqlite", true, true, DiscoveredWinner),
+    sqlite_route!(OpenCode, "opencode_sqlite", true, true, DiscoveredWinner),
+    sqlite_route!(Kilo, "kilo_sqlite", true, true, DiscoveredWinner),
+    sqlite_route!(KiroCli, "kiro_cli_sqlite", true, true, DiscoveredWinner),
     route!(
         Antigravity,
         "antigravity_cli_transcript_jsonl_tree",
@@ -253,7 +301,7 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         true,
         ExplicitPath
     ),
-    route!(Zed, "zed_threads_sqlite", true, true, DiscoveredWinner),
+    sqlite_route!(Zed, "zed_threads_sqlite", true, true, DiscoveredWinner),
     route!(
         CopilotCli,
         "copilot_cli_session_events_jsonl",
@@ -311,21 +359,21 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         true,
         ExplicitPath
     ),
-    route!(
+    sqlite_route!(
         Firebender,
         "firebender_chat_history_sqlite",
         true,
         true,
         DiscoveredWinner
     ),
-    route!(
+    sqlite_route!(
         ForgeCode,
         "forgecode_sqlite",
         true,
         true,
         SelectedWithRetainedExplicit
     ),
-    route!(
+    sqlite_route!(
         DeepAgents,
         "deepagents_sessions_sqlite",
         true,
@@ -374,7 +422,7 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         true,
         DiscoveredWinner
     ),
-    route!(Hermes, "hermes_state_sqlite", true, true, DiscoveredWinner),
+    sqlite_route!(Hermes, "hermes_state_sqlite", true, true, DiscoveredWinner),
     route!(
         NanoClaw,
         "nanoclaw_project",
@@ -383,7 +431,7 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         CatalogLineage,
         CatalogLineage
     ),
-    route!(
+    sqlite_route!(
         AstrBot,
         "astrbot_data_v4_sqlite",
         true,
@@ -391,7 +439,7 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         DiscoveredWinner,
         DiscoveryContext
     ),
-    route!(Shelley, "shelley_sqlite", true, false, ExactCwd, ExactCwd),
+    sqlite_route!(Shelley, "shelley_sqlite", true, false, ExactCwd, ExactCwd),
     route!(
         Continue,
         "continue_cli_sessions_json",
@@ -420,7 +468,7 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         true,
         DiscoveredWinner
     ),
-    route!(
+    sqlite_route!(
         Crush,
         "crush_sqlite",
         true,
@@ -428,7 +476,7 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         SelectedWithRetainedExplicit,
         FiniteInventory
     ),
-    route!(
+    sqlite_route!(
         Goose,
         "goose_sessions_sqlite",
         true,
@@ -436,7 +484,7 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         SelectedWithRetainedExplicit,
         SelectedWithRetainedRoutes
     ),
-    route!(
+    sqlite_route!(
         Lingma,
         "lingma_sqlite",
         true,
@@ -458,7 +506,7 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         true,
         ExplicitPath
     ),
-    route!(Warp, "warp_sqlite", true, true, NamedSurface, NamedSurface),
+    sqlite_route!(Warp, "warp_sqlite", true, true, NamedSurface, NamedSurface),
     route!(
         CodeBuddy,
         "codebuddy_history_json",
@@ -466,8 +514,8 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         true,
         DiscoveredWinner
     ),
-    route!(Trae, "trae_state_vscdb", true, true, ExplicitPath),
-    route!(MiMoCode, "mimocode_sqlite", true, true, DiscoveredWinner),
+    sqlite_route!(Trae, "trae_state_vscdb", true, true, ExplicitPath),
+    sqlite_route!(MiMoCode, "mimocode_sqlite", true, true, DiscoveredWinner),
 ];
 
 pub fn source_backed_route_inventory() -> &'static [SourceBackedProviderRouteMetadata] {

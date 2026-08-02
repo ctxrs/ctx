@@ -5,11 +5,40 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 pub const CONTRACT_VERSION: &str = "agent-history-v1";
 pub const SCHEMA_VERSION: u16 = 1;
+pub const MAX_SAFE_STATUS_COUNTER: u64 = (1_u64 << 53) - 1;
+
+fn deserialize_optional_status_counter<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<u64>::deserialize(deserializer)?;
+    if value.is_some_and(|value| value > MAX_SAFE_STATUS_COUNTER) {
+        return Err(serde::de::Error::custom(format!(
+            "status counter exceeds maximum {MAX_SAFE_STATUS_COUNTER}"
+        )));
+    }
+    Ok(value)
+}
+
+fn serialize_optional_status_counter<S>(
+    value: &Option<u64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if value.is_some_and(|value| value > MAX_SAFE_STATUS_COUNTER) {
+        return Err(serde::ser::Error::custom(format!(
+            "status counter exceeds maximum {MAX_SAFE_STATUS_COUNTER}"
+        )));
+    }
+    value.serialize(serializer)
+}
 
 /// Extensible JSON object used where `agent-history-v1` intentionally leaves room for
 /// backend-specific additive fields.
@@ -158,23 +187,47 @@ pub struct AgentHistoryStatus {
     pub initialized: bool,
     pub local_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_root: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_status_counter",
+        serialize_with = "serialize_optional_status_counter",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub indexed_items: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_status_counter",
+        serialize_with = "serialize_optional_status_counter",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub indexed_sessions: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_status_counter",
+        serialize_with = "serialize_optional_status_counter",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub indexed_events: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_status_counter",
+        serialize_with = "serialize_optional_status_counter",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub indexed_sources: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cataloged_sessions: Option<u64>,
+    pub history_epoch: Option<JsonObject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub indexed_catalog_sessions: Option<u64>,
+    pub lexical: Option<JsonObject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_catalog_sessions: Option<u64>,
+    pub refresh: Option<JsonObject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failed_catalog_sessions: Option<u64>,
+    pub semantic: Option<JsonObject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stale_catalog_sessions: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub freshness: Option<Freshness>,
+    pub daemon: Option<JsonObject>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: JsonObject,
 }
@@ -538,7 +591,7 @@ pub fn camelize_object_keys(value: &Value) -> Value {
 fn omitted_public_key(key: &str) -> bool {
     matches!(
         key,
-        "itemType" | "payloadType" | "recordType" | "databasePath" | "configPath"
+        "itemType" | "payloadType" | "recordType" | "configPath"
     )
 }
 
@@ -688,6 +741,53 @@ mod tests {
         let status = envelope.status.unwrap();
         assert_eq!(status.extra["futureField"]["enabled"], true);
         assert_eq!(envelope.extra["futureEnvelopeField"], "kept");
+    }
+
+    #[test]
+    fn status_counters_accept_the_exact_cross_sdk_maximum() {
+        let status: AgentHistoryStatus = serde_json::from_value(serde_json::json!({
+            "initialized": true,
+            "localOnly": true,
+            "indexedItems": MAX_SAFE_STATUS_COUNTER,
+            "indexedSessions": MAX_SAFE_STATUS_COUNTER,
+            "indexedEvents": MAX_SAFE_STATUS_COUNTER,
+            "indexedSources": MAX_SAFE_STATUS_COUNTER
+        }))
+        .unwrap();
+
+        assert_eq!(status.indexed_items, Some(MAX_SAFE_STATUS_COUNTER));
+        assert_eq!(status.indexed_sessions, Some(MAX_SAFE_STATUS_COUNTER));
+        assert_eq!(status.indexed_events, Some(MAX_SAFE_STATUS_COUNTER));
+        assert_eq!(status.indexed_sources, Some(MAX_SAFE_STATUS_COUNTER));
+        serde_json::to_value(status).unwrap();
+    }
+
+    #[test]
+    fn status_counters_reject_values_above_the_exact_cross_sdk_maximum() {
+        for rejected in [MAX_SAFE_STATUS_COUNTER + 2, u64::MAX] {
+            let error = serde_json::from_value::<AgentHistoryStatus>(serde_json::json!({
+                "initialized": true,
+                "localOnly": true,
+                "indexedItems": rejected
+            }))
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("status counter exceeds maximum"),
+                "{error}"
+            );
+        }
+
+        let mut status: AgentHistoryStatus = serde_json::from_value(serde_json::json!({
+            "initialized": true,
+            "localOnly": true
+        }))
+        .unwrap();
+        status.indexed_items = Some(MAX_SAFE_STATUS_COUNTER + 2);
+        let error = serde_json::to_value(status).unwrap_err();
+        assert!(
+            error.to_string().contains("status counter exceeds maximum"),
+            "{error}"
+        );
     }
 
     #[test]

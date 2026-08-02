@@ -1,11 +1,22 @@
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier, Mutex,
+    },
+};
 
+use ctx_history_capture::SourceBackedRefreshScope;
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
     NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
     SourceFrontier, SourceObservation, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, WriterOptions, MAX_SEMANTIC_EVENT_PAGE_ITEMS};
+use ctx_history_index::{
+    GenerationWriter, SourceRouteIdentity, WriterOptions, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+};
+use ctx_pro_host_protocol::ProFilesystemLayout;
 use serde_json::{json, Value};
 
 use crate::{
@@ -13,6 +24,7 @@ use crate::{
     output::JsonOutputFormat,
     semantic::{
         daemon::{install_daemon_test_job_hooks, DaemonTestJobHooks},
+        dirty_source_routes::EventWatermark,
         source_backed_refresh_coordinator::{
             coordinate_source_backed_refresh, source_backed_index_root, CoreRefreshEngine,
             SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshMode,
@@ -24,12 +36,13 @@ use crate::{
 };
 
 use super::{
-    daemon_core_refresh_job_path, daemon_job_should_backoff, daemon_mode_runs_core_pro_catch_up,
-    daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path, persist_pro_status,
-    prepare_pro_retry_for_generation, read_daemon_job_status, read_pro_status,
-    record_daemon_job_retry, restore_daemon_consumer_retries,
-    run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
-    run_pro_catch_up_with_retry, write_daemon_job_status, DaemonRetryBackoff, DaemonRuntime,
+    daemon_consumer_retry_due, daemon_core_refresh_job_path, daemon_job_should_backoff,
+    daemon_mode_runs_core_pro_catch_up, daemon_mode_runs_core_semantic_projection,
+    daemon_semantic_job_path, persist_pro_status, prepare_pro_retry_for_generation,
+    read_daemon_job_status, read_pro_status, record_daemon_job_retry,
+    restore_daemon_consumer_retries, run_daemon_scheduler_cycle_with_activity,
+    run_pending_core_pro_catch_up, run_pro_catch_up_with_retry, write_daemon_job_status,
+    DaemonRetryBackoff, DaemonRuntime, SourceBackedProCoreAuthority,
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";
@@ -65,12 +78,16 @@ fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefr
         .commit(|_| true)
         .unwrap();
     SourceBackedRefreshPublication {
+        selected_route_ids: Vec::new(),
+        successful_route_ids: Vec::new(),
+        successful_route_changes: Default::default(),
+        failed_route_outcomes: Vec::new(),
+        catalog_route_outcomes: Vec::new(),
+        source_failures: Vec::new(),
         generation_id: receipt.generation_id.clone(),
         published_explicit_source_catalog:
             crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
         scanned_routes: 0,
-        successful_routes: 0,
-        source_failures: Default::default(),
         unsupported_routes: 0,
         certified_source_count: 0,
         certified_source_bytes: 0,
@@ -270,12 +287,16 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
         .unwrap();
     let receipt = writer.commit(|_| true).unwrap();
     SourceBackedRefreshPublication {
+        selected_route_ids: Vec::new(),
+        successful_route_ids: Vec::new(),
+        successful_route_changes: Default::default(),
+        failed_route_outcomes: Vec::new(),
+        catalog_route_outcomes: Vec::new(),
+        source_failures: Vec::new(),
         generation_id: receipt.generation_id,
         published_explicit_source_catalog:
             crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
         scanned_routes: 1,
-        successful_routes: 1,
-        source_failures: Default::default(),
         unsupported_routes: 0,
         certified_source_count: 1,
         certified_source_bytes: 128,
@@ -310,10 +331,11 @@ fn core_publication_is_ready_and_searchable_before_consumer_receipts() {
     let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
             let publication = publish_readiness_generation(execution.index_root);
-            execution.report_progress("committed", 1, 1, None)?;
+            execution.report_progress("committed", 1, 1, None, None, None)?;
             Ok(publication)
         },
     ));
+    coordinator.enqueue_for_test(None);
     let mut runtime = DaemonRuntime::default();
     let core = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
@@ -376,6 +398,198 @@ fn core_publication_is_ready_and_searchable_before_consumer_receipts() {
     );
 }
 
+#[test]
+fn healthy_idle_scheduler_performs_zero_source_refresh_scans() {
+    let temp = tempfile::tempdir().unwrap();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executor_calls = std::sync::Arc::clone(&calls);
+    let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
+        move |_: SourceBackedRefreshExecution<'_>| {
+            executor_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow::anyhow!("idle executor must not run"))
+        },
+    ));
+    let mut runtime = DaemonRuntime::default();
+
+    let idle = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+
+    assert!(!idle.did_work);
+    assert!(!idle.failed);
+    assert!(!idle.continue_immediately);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(!daemon_core_refresh_job_path(temp.path()).exists());
+}
+
+#[test]
+fn startup_seeded_manual_all_continuation_scans_each_route_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    GenerationWriter::open(data_root.join("search/lexical"), WriterOptions::default())
+        .unwrap()
+        .commit(|_| true)
+        .unwrap();
+    let route =
+        |byte: u8| SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap();
+    let routes = BTreeSet::from([route(0x81), route(0x82), route(0x83)]);
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_routes = routes.clone();
+    let executor_scans = Arc::clone(&scans);
+    let executor_calls = Arc::clone(&calls);
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let selected = match &execution.scope {
+                SourceBackedRefreshScope::All => executor_routes
+                    .difference(&execution.covered_route_ids)
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+                SourceBackedRefreshScope::Exact(routes) => routes.clone(),
+            };
+            for route in &selected {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            if executor_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                executor_entered.wait();
+                executor_release.wait();
+            }
+            let receipt = GenerationWriter::open(execution.index_root, WriterOptions::default())?
+                .commit(|_| true)?;
+            let selected_route_ids = selected
+                .iter()
+                .map(|route| route.as_str().to_owned())
+                .collect::<Vec<_>>();
+            let successful_route_changes = selected_route_ids
+                .iter()
+                .cloned()
+                .map(|route| (route, true))
+                .collect();
+            Ok(SourceBackedRefreshPublication {
+                selected_route_ids: selected_route_ids.clone(),
+                successful_route_ids: selected_route_ids,
+                successful_route_changes,
+                failed_route_outcomes: Vec::new(),
+                catalog_route_outcomes: Vec::new(),
+                source_failures: Vec::new(),
+                generation_id: receipt.generation_id,
+                published_explicit_source_catalog: execution
+                    .explicit_source_catalog
+                    .cloned()
+                    .expect("startup refresh catalog authority"),
+                scanned_routes: selected.len(),
+                unsupported_routes: 0,
+                certified_source_count: 0,
+                certified_source_bytes: 0,
+                current: SourceBackedRefreshCurrent::default(),
+                timings: SourceBackedRefreshTimings {
+                    discovery_us: 1,
+                    scan_stage_us: 1,
+                    commit_us: 1,
+                },
+            })
+        },
+    )));
+    coordinator.reconcile_watch_routes(
+        routes.clone(),
+        EventWatermark::new(1, 0),
+        super::source_route_ledger_now_ms().saturating_sub(1_000),
+    );
+    let authority =
+        crate::commands::import::load_explicit_source_catalog_authority(&data_root).unwrap();
+
+    let (manual_request_id, mut runtime) = std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_root = data_root.clone();
+        let handle = scope.spawn(move || {
+            let mut config = AppConfig::default();
+            config.daemon.mode = DaemonMode::SourceRefreshOnly;
+            let mut runtime = DaemonRuntime {
+                config,
+                ..DaemonRuntime::default()
+            };
+            let iteration = run_daemon_scheduler_cycle_with_activity(
+                &daemon_args(),
+                &runner_root,
+                &mut runtime,
+                None,
+                false,
+                None,
+                Some(&runner),
+            )
+            .unwrap();
+            (iteration, runtime)
+        });
+        entered.wait();
+        let response = coordinator
+            .handle_ipc_request(
+                &data_root,
+                &json!({
+                    "schema_version": 1,
+                    "op": "source_refresh_request",
+                    "mode": "wait",
+                    "operation": "import",
+                    "explicit_source_catalog": authority.to_json(),
+                }),
+            )
+            .unwrap()
+            .expect("manual all continuation response");
+        let request_id = response["request_id"].as_str().unwrap().to_owned();
+        release.wait();
+        let (first, runtime) = handle.join().unwrap();
+        assert!(!first.failed);
+        assert!(
+            !first.continue_immediately,
+            "the daemon loop must drain watcher events before the queued all-route successor"
+        );
+        (request_id, runtime)
+    });
+
+    let successor = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        &data_root,
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+
+    assert!(!successor.failed);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *scans.lock().unwrap(),
+        routes
+            .iter()
+            .cloned()
+            .map(|route| (route, 1))
+            .collect::<BTreeMap<_, _>>()
+    );
+    let terminal = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
+    assert_eq!(terminal["request_id"], manual_request_id);
+    assert_eq!(terminal["request_state"], "published");
+    assert_eq!(terminal["scanned_routes"], routes.len());
+    assert!(!coordinator.has_pending_request());
+    assert!(!coordinator.has_scheduled_route_work());
+}
+
 fn install_jobs(
     calls: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
     semantic_index: Option<Value>,
@@ -394,6 +608,7 @@ fn one_core_cycle_then_scheduler_drains_optional_consumers() {
             Ok(publish_empty_authoritative_generation(execution.index_root))
         },
     ));
+    coordinator.enqueue_for_test(None);
     let mut runtime = DaemonRuntime::default();
     let core = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
@@ -518,6 +733,7 @@ fn idle_semantic_catch_up_continues_past_one_page_and_drains_to_terminal() {
     let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut runtime = DaemonRuntime::default();
     runtime.sidecar_drain.generation = Some(generation.clone());
+    runtime.sidecar_drain.pro_attempted_generation = Some(generation.clone());
 
     {
         let _jobs = install_jobs(
@@ -604,6 +820,7 @@ fn nonretryable_pro_attempt_is_generation_guarded() {
             Ok(publish_empty_authoritative_generation(execution.index_root))
         },
     ));
+    coordinator.enqueue_for_test(None);
     let mut runtime = DaemonRuntime::default();
 
     let core = run_daemon_scheduler_cycle_with_activity(
@@ -672,6 +889,7 @@ fn local_completed_pro_status_cannot_suppress_scheduler_validation() {
             Ok(publish_empty_authoritative_generation(execution.index_root))
         },
     ));
+    coordinator.enqueue_for_test(None);
     let mut runtime = DaemonRuntime::default();
     let core = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
@@ -833,7 +1051,10 @@ fn failed_pro_status(generation: &str) -> Value {
 #[test]
 fn pro_failure_backoff_is_independent_and_skips_until_due() {
     let temp = tempfile::tempdir().unwrap();
-    let generation = "a".repeat(64);
+    let generation = publish_empty_core_generation(temp.path());
+    let durable = super::pin_published_generation(temp.path())
+        .unwrap()
+        .expect("durable Core generation");
     let mut runtime = DaemonRuntime::default();
     runtime.history_retry.record_failure();
     runtime.semantic_retry.record_failure();
@@ -850,12 +1071,273 @@ fn pro_failure_backoff_is_independent_and_skips_until_due() {
         semantic_failures
     );
 
-    let skipped =
-        run_pro_catch_up_with_retry(temp.path(), &mut runtime, &generation, None).unwrap();
+    let skipped = run_pro_catch_up_with_retry(
+        temp.path(),
+        &mut runtime,
+        &generation,
+        SourceBackedProCoreAuthority::Durable(&durable),
+    )
+    .unwrap();
     assert!(!skipped.did_work);
     assert_eq!(skipped.status["reason"], "retry_backoff");
     assert_eq!(skipped.status["consecutive_failures"], 1);
     assert_eq!(read_pro_status(temp.path()).unwrap()["status"], "error");
+}
+
+#[test]
+fn persisted_due_pro_retry_reopens_durable_core_after_process_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    let mut first = DaemonRuntime::default();
+    let mut status = record_daemon_job_retry(&mut first.pro_retry, failed_pro_status(&generation));
+    status["retry_not_before_at_ms"] = json!(ctx_history_core::utc_now().timestamp_millis() - 1);
+    persist_pro_status(temp.path(), &status).unwrap();
+
+    let coordinator = CoreRefreshEngine::new();
+    assert!(coordinator.pinned_core_publication().is_none());
+    let mut restarted = DaemonRuntime::default();
+    restore_daemon_consumer_retries(&mut restarted, temp.path());
+    assert!(daemon_consumer_retry_due(&restarted));
+    assert!(restarted.pro_retry.ready());
+
+    let (iteration, verified_opens) =
+        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
+            run_daemon_scheduler_cycle_with_activity(
+                &daemon_args(),
+                temp.path(),
+                &mut restarted,
+                None,
+                false,
+                None,
+                Some(&coordinator),
+            )
+            .unwrap()
+        });
+
+    assert_eq!(
+        verified_opens, 1,
+        "restart must reopen durable active Core once"
+    );
+    assert!(!iteration.failed);
+    let retried = read_pro_status(temp.path()).expect("retried Pro status");
+    assert_eq!(retried["core_generation_id"], generation);
+    assert_eq!(retried["attempts"], 2);
+    assert_eq!(
+        restarted.sidecar_drain.pro_attempted_generation.as_deref(),
+        Some(generation.as_str())
+    );
+}
+
+#[test]
+fn process_restart_checks_durable_core_once_without_a_preexisting_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    let coordinator = CoreRefreshEngine::new();
+    assert!(coordinator.pinned_core_publication().is_none());
+    let mut restarted = DaemonRuntime::default();
+
+    let (first, first_verified_opens) =
+        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
+            run_daemon_scheduler_cycle_with_activity(
+                &daemon_args(),
+                temp.path(),
+                &mut restarted,
+                None,
+                false,
+                None,
+                Some(&coordinator),
+            )
+            .unwrap()
+        });
+    let first_status = read_pro_status(temp.path()).expect("initial durable Pro check");
+
+    let (second, second_verified_opens) =
+        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
+            run_daemon_scheduler_cycle_with_activity(
+                &daemon_args(),
+                temp.path(),
+                &mut restarted,
+                None,
+                false,
+                None,
+                Some(&coordinator),
+            )
+            .unwrap()
+        });
+
+    assert_eq!(first_verified_opens, 1);
+    assert!(!first.failed);
+    assert_eq!(first_status["core_generation_id"], generation);
+    assert_eq!(first_status["attempts"], 1);
+    assert_eq!(
+        second_verified_opens, 0,
+        "steady ticks must not reopen Core"
+    );
+    assert!(!second.failed);
+    assert_eq!(
+        read_pro_status(temp.path()).unwrap(),
+        first_status,
+        "steady ticks must not resubmit Pro catch-up"
+    );
+}
+
+#[test]
+fn prior_not_installed_result_does_not_suppress_first_install_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    persist_pro_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "error",
+            "pending": true,
+            "retryable": false,
+            "core_generation_id": generation,
+            "receipt_core_generation_id": null,
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "error_code": "pro_not_installed",
+            "last_error": "fixture helper was not installed",
+        }),
+    )
+    .unwrap();
+    let coordinator = CoreRefreshEngine::new();
+    let mut after_install = DaemonRuntime::default();
+    restore_daemon_consumer_retries(&mut after_install, temp.path());
+    assert_eq!(after_install.pro_retry.consecutive_failures, 0);
+    after_install.sidecar_drain.pro_attempted_generation = Some(generation.clone());
+    let helper = ProFilesystemLayout::new(temp.path()).helper_path();
+    std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+    std::fs::write(&helper, b"newly installed helper fixture").unwrap();
+
+    let (_, verified_opens) =
+        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
+            run_daemon_scheduler_cycle_with_activity(
+                &daemon_args(),
+                temp.path(),
+                &mut after_install,
+                None,
+                false,
+                None,
+                Some(&coordinator),
+            )
+            .unwrap()
+        });
+
+    assert_eq!(verified_opens, 1);
+    let checked = read_pro_status(temp.path()).expect("post-install Pro check");
+    assert_eq!(checked["core_generation_id"], generation);
+    assert_eq!(checked["attempts"], 2);
+}
+
+#[test]
+fn newly_installed_pro_is_checked_against_durable_core_after_daemon_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    persist_pro_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "error",
+            "pending": true,
+            "retryable": false,
+            "core_generation_id": generation,
+            "receipt_core_generation_id": null,
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "error_code": "pro_not_installed",
+            "last_error": "fixture helper was removed",
+        }),
+    )
+    .unwrap();
+    let helper = ProFilesystemLayout::new(temp.path()).helper_path();
+    std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+    std::fs::write(&helper, b"reinstalled helper fixture").unwrap();
+
+    let coordinator = CoreRefreshEngine::new();
+    let mut restarted = DaemonRuntime::default();
+    restore_daemon_consumer_retries(&mut restarted, temp.path());
+    assert!(restarted.sidecar_drain.pro_attempted_generation.is_none());
+
+    let (_, verified_opens) =
+        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
+            run_daemon_scheduler_cycle_with_activity(
+                &daemon_args(),
+                temp.path(),
+                &mut restarted,
+                None,
+                false,
+                None,
+                Some(&coordinator),
+            )
+            .unwrap()
+        });
+
+    assert_eq!(verified_opens, 1, "restart must reopen durable Core once");
+    let checked = read_pro_status(temp.path()).expect("post-reinstall Pro check");
+    assert_eq!(checked["core_generation_id"], generation);
+    assert_eq!(checked["attempts"], 2);
+    assert_eq!(
+        restarted.sidecar_drain.pro_attempted_generation.as_deref(),
+        Some(generation.as_str())
+    );
+}
+
+#[test]
+fn active_queries_defer_due_consumer_retry_only_until_fairness_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _hooks = install_jobs(
+        calls.clone(),
+        Some(json!({
+            "status": "ready",
+            "source_generation_ready": true,
+            "source_work_remaining": false,
+        })),
+    );
+    let activity = std::sync::Arc::new(super::DaemonQueryActivity::new());
+    let _request = activity.begin_request().expect("foreground query");
+    let mut runtime = DaemonRuntime::default();
+    runtime.semantic_retry.consecutive_failures = 1;
+    runtime.semantic_retry.retry_not_before = Some(std::time::Instant::now());
+    runtime.sidecar_drain.generation = Some(generation.clone());
+    runtime.sidecar_drain.pro_attempted_generation = Some(generation.clone());
+
+    let deferred = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        Some(activity.as_ref()),
+        None,
+    )
+    .unwrap();
+    assert!(!deferred.did_work);
+    assert!(runtime.consumer_retry_deferral.retry_at.is_some());
+    assert!(calls.borrow().is_empty());
+
+    runtime.consumer_retry_deferral.retry_at = Some(std::time::Instant::now());
+    let fair = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        Some(activity.as_ref()),
+        None,
+    )
+    .unwrap();
+
+    assert!(!fair.failed);
+    assert!(runtime.consumer_retry_deferral.retry_at.is_none());
+    assert_eq!(&*calls.borrow(), &["semantic_index"]);
+    assert_eq!(runtime.semantic_retry.consecutive_failures, 0);
 }
 
 #[test]
@@ -926,6 +1408,7 @@ fn semantic_retry_runs_across_core_backoff_and_recovers_independently() {
     let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut first = DaemonRuntime::default();
     first.history_retry.record_failure();
+    first.sidecar_drain.pro_attempted_generation = Some(generation.clone());
     {
         let _hooks = install_jobs(
             calls.clone(),
@@ -955,6 +1438,7 @@ fn semantic_retry_runs_across_core_backoff_and_recovers_independently() {
     let mut restarted = DaemonRuntime::default();
     restarted.history_retry.record_failure();
     restore_daemon_consumer_retries(&mut restarted, temp.path());
+    restarted.sidecar_drain.pro_attempted_generation = Some(generation.clone());
     assert!(!restarted.semantic_retry.ready());
     restarted.semantic_retry.retry_not_before = None;
     restarted.semantic_retry.retry_not_before_at_ms = None;

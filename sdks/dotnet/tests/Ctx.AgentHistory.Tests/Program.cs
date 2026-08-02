@@ -17,11 +17,12 @@ internal static class Program
         var tests = new (string Name, Func<Task> Body)[]
         {
             ("wraps status as agent-history-v1", WrapsStatus),
-            ("preserves additive response fields", PreservesAdditiveFields),
+            ("filters status to the current readiness contract", FiltersStatusFields),
             ("preserves legitimate source semantics", PreservesLegitimateSourceSemantics),
             ("builds local CLI operation arguments", BuildsOperationArguments),
             ("forces analytics off after ambient and user environment merging", ForcesAnalyticsOff),
             ("normalizes setup init status", NormalizesSetupInitStatus),
+            ("enforces the exact status counter domain", EnforcesExactStatusCounterDomain),
             ("builds search flags", BuildsSearchFlags),
             ("camelizes search retrieval json", CamelizesSearchRetrievalJson),
             ("rejects search without intent", RejectsSearchWithoutIntent),
@@ -86,20 +87,33 @@ internal static class Program
 
     private static async Task NormalizesSetupInitStatus()
     {
-        var transport = new RecordingTransport("""{"schema_version":1,"data_root":"/tmp/ctx","mode":"ready","indexed_items":9,"network_required":false}""");
+        var transport = new RecordingTransport("""{"schema_version":2,"initialized":true,"data_root":"/tmp/ctx","mode":"ready","indexed_items":9007199254740991,"indexed_sessions":9007199254740991,"indexed_events":9007199254740991,"indexed_sources":9007199254740991,"lexical":{"status":"ready","generation_id":"gen-64"},"refresh":{"status":"ready","generation_id":"gen-64"},"network_required":false}""");
         var client = new AgentHistoryClient(transport);
 
-        var response = await client.InitAsync(new InitOptions { CatalogOnly = true });
+        var response = await client.InitAsync(new InitOptions());
 
         Equal("init", response.Operation);
         Equal(true, response.Status.Initialized);
         Equal(true, response.Status.LocalOnly);
-        Equal(9, response.Status.IndexedItems ?? -1);
+        Equal(9007199254740991UL, response.Status.IndexedItems ?? 0UL);
+        Equal(9007199254740991UL, response.Status.IndexedSessions ?? 0UL);
+        Equal(9007199254740991UL, response.Status.IndexedEvents ?? 0UL);
+        Equal(9007199254740991UL, response.Status.IndexedSources ?? 0UL);
+    }
+
+    private static async Task EnforcesExactStatusCounterDomain()
+    {
+        foreach (var rejected in new[] { "9007199254740993", "18446744073709551615" })
+        {
+            var client = new AgentHistoryClient(new RecordingTransport(
+                $$"""{"initialized":true,"indexed_items":{{rejected}}}"""));
+            await ThrowsAsync<CtxAgentHistoryProtocolException>(() => client.StatusAsync());
+        }
     }
 
     private static async Task WrapsStatus()
     {
-        var transport = new RecordingTransport("""{"schema_version":1,"initialized":true,"data_root":"/tmp/ctx","database_path":"/tmp/ctx/history.sqlite3","indexed_items":4,"local_only":true}""");
+        var transport = new RecordingTransport("""{"schema_version":1,"data_root":"/tmp/ctx","indexed_items":4,"indexed_sessions":2,"indexed_events":2,"lexical":{"status":"ready","generation_id":"gen-4"},"refresh":{"status":"ready","generation_id":"gen-4"},"local_only":true}""");
         var client = new AgentHistoryClient(transport);
 
         var status = await client.StatusAsync();
@@ -108,22 +122,22 @@ internal static class Program
         Equal("status", status.Operation);
         Equal("local", status.Backend.Kind);
         Equal(true, status.Status.Initialized);
-        Equal(4, status.Status.IndexedItems ?? -1);
+        Equal(4UL, status.Status.IndexedItems ?? 0UL);
 
         var envelope = status.ToJsonObject();
         Equal("agent-history-v1", envelope["contractVersion"]!.GetValue<string>());
-        Equal(4, envelope["status"]!["indexedItems"]!.GetValue<int>());
+        Equal(4UL, envelope["status"]!["indexedItems"]!.GetValue<ulong>());
     }
 
-    private static async Task PreservesAdditiveFields()
+    private static async Task FiltersStatusFields()
     {
-        var transport = new RecordingTransport("""{"schema_version":1,"initialized":true,"future_counter":7,"freshness":{"mode":"off"}}""");
+        var transport = new RecordingTransport("""{"schema_version":1,"future_counter":7,"lexical":{"status":"ready","generation_id":"gen-1"},"refresh":{"status":"ready"}}""");
         var client = new AgentHistoryClient(transport);
 
         var status = await client.StatusAsync();
 
-        Equal(7, status.ToJsonObject()["status"]!["futureCounter"]!.GetValue<int>());
-        Equal("off", status.Status.Freshness!.Mode ?? "");
+        True(status.ToJsonObject()["status"]!["futureCounter"] is null, "unexpected future status field");
+        Equal("gen-1", status.Status.Lexical["generationId"]!.GetValue<string>());
     }
 
     private static async Task PreservesLegitimateSourceSemantics()
@@ -150,13 +164,13 @@ internal static class Program
         var client = new AgentHistoryClient(transport);
 
         await client.StatusAsync();
-        await client.InitAsync(new InitOptions { CatalogOnly = true });
+        await client.InitAsync(new InitOptions());
         await client.SourcesAsync();
         await client.ImportHistoryAsync(new ImportOptions { Provider = "codex", Resume = true });
         await client.SyncAsync(new ImportOptions { All = true });
 
         Equal("status --format=json", Join(transport.Calls[0]));
-        Equal("setup --format=json --progress none --catalog-only", Join(transport.Calls[1]));
+        Equal("setup --format=json --progress none", Join(transport.Calls[1]));
         Equal("sources --format=json", Join(transport.Calls[2]));
         Equal("import --format=json --progress none --provider codex --resume", Join(transport.Calls[3]));
         Equal("import --format=json --progress none --all", Join(transport.Calls[4]));

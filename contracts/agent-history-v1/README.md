@@ -30,7 +30,7 @@ All operations return JSON objects with `contractVersion: "agent-history-v1"` an
 | Operation | Purpose |
 | --- | --- |
 | `status()` | Read local index status and freshness metadata. |
-| `init()` | Initialize local ctx storage, optionally catalog-only. |
+| `init()` | Initialize local ctx storage and return current readiness. |
 | `sources()` | List local provider sources and importability. |
 | `importHistory()` / `sync()` | Import local provider history into ctx. |
 | `search()` | Search indexed agent history. |
@@ -62,8 +62,14 @@ Important reusable records:
 
 - `ProviderSource`: provider, path, availability, and importability.
 - `Freshness`: pre-search refresh mode/status/totals.
-- `Status.semantic` and `Status.daemon`: extensible local diagnostic objects for
-  semantic coverage and the ctx-owned daemon coordinator.
+- `Status.lexical` and `Status.refresh`: the verified generation and daemon-owned
+  refresh readiness reported by `ctx status`; `Status.semantic` and
+  `Status.daemon` remain extensible local diagnostic objects.
+- `Status.indexedItems`, `indexedSessions`, `indexedEvents`, and
+  `indexedSources` are operational counters in the exact integer range
+  `0..9007199254740991` (`2^53-1`). SDKs retain their native integer/number
+  types but must reject out-of-domain values instead of rounding, saturating,
+  or dropping them.
 - `SearchRetrieval`: requested/effective retrieval mode, applied semantic
   weight, semantic coverage, optional fallback code/message, and optional
   diagnostics. The CLI adapter camel-cases raw CLI retrieval fields for this

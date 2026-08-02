@@ -2,12 +2,12 @@ use super::*;
 
 pub(super) const STORE_FORMAT: &str = "ctx-flat-f32";
 pub(super) const MANIFEST_ENVELOPE_VERSION: u32 = 1;
-pub(super) const MANIFEST_SCHEMA_VERSION: u32 = 1;
-pub(super) const SEGMENT_FORMAT_VERSION: u32 = 1;
+pub(super) const MANIFEST_SCHEMA_VERSION: u32 = 3;
+pub(super) const SEGMENT_FORMAT_VERSION: u32 = 2;
 pub(super) const HEADER_BYTES: usize = 4_096;
 pub(super) const HEADER_BYTES_U64: u64 = HEADER_BYTES as u64;
 pub(super) const METADATA_RECORD_BYTES: usize = 72;
-pub(super) const MUTATION_RECORD_BYTES: usize = 24;
+pub(super) const MUTATION_RECORD_BYTES: usize = 128;
 pub(super) const VECTOR_ALIGNMENT: usize = 64;
 pub(super) const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 pub(super) const MAX_DIMENSIONS: u32 = 65_536;
@@ -17,6 +17,7 @@ pub(super) const NORMALIZED_NORM_SQUARED_TOLERANCE: f64 = 1.0e-3;
 pub(super) const MANIFESTS_DIRECTORY: &str = "flat_manifests";
 pub(super) const SEGMENTS_DIRECTORY: &str = "flat_segments";
 pub(super) const WRITER_LOCK_FILE: &str = "flat_writer.lock";
+pub(super) const TRANSACTION_LOCK_FILE: &str = "flat_transaction.lock";
 pub(super) const MANIFEST_PREFIX: &str = "flat-manifest-";
 pub(super) const SEGMENT_PREFIX: &str = "flat-segment-";
 pub(super) const TEMP_PREFIX: &str = ".flat-tmp-";
@@ -41,6 +42,12 @@ pub(super) struct Manifest {
     pub(super) generation: u64,
     pub(super) created_unix_millis: u64,
     pub(super) model: FlatModelContract,
+    #[serde(default)]
+    pub(super) active_events: u64,
+    #[serde(default)]
+    pub(super) active_chunks: u64,
+    #[serde(default)]
+    pub(super) source_snapshots: Vec<SourceSnapshot>,
     pub(super) segments: Vec<SegmentDescriptor>,
 }
 
@@ -51,6 +58,9 @@ impl Manifest {
             generation: 0,
             created_unix_millis: 0,
             model,
+            active_events: 0,
+            active_chunks: 0,
+            source_snapshots: Vec::new(),
             segments: Vec::new(),
         }
     }
@@ -71,9 +81,21 @@ pub(super) struct SegmentDescriptor {
     pub(super) kind: SegmentKind,
     pub(super) vector_count: u64,
     pub(super) mutation_count: u64,
+    #[serde(default)]
+    pub(super) source_identity_digest: String,
+    #[serde(default)]
+    pub(super) source_reconciliation_id: String,
     pub(super) vectors: ArtifactDescriptor,
     pub(super) metadata: ArtifactDescriptor,
     pub(super) mutations: ArtifactDescriptor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SourceSnapshot {
+    pub(super) source_identity_digest: String,
+    pub(super) generation: u64,
+    pub(super) receipt: Option<FlatSourceReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,14 +106,22 @@ pub(super) struct ArtifactDescriptor {
     pub(super) payload_sha256: String,
 }
 
+#[derive(Clone)]
 pub(super) struct SelectedManifest {
     pub(super) envelope: ManifestEnvelope,
     pub(super) generation_hash: String,
     pub(super) path: PathBuf,
 }
 
+pub(super) struct PreparedManifest {
+    pub(super) envelope: ManifestEnvelope,
+    pub(super) generation_hash: String,
+    pub(super) bytes: Vec<u8>,
+}
+
 pub(super) struct StagedSegment {
     pub(super) descriptor: SegmentDescriptor,
+    pub(super) mutations: Vec<EventMutation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +134,12 @@ pub(super) enum MutationKind {
 pub(super) struct EventMutation {
     pub(super) event_id: Uuid,
     pub(super) kind: MutationKind,
+    pub(super) seq: u64,
+    pub(super) source_text_hash: FlatSourceHash,
+    pub(super) stable_identity_hash: [u8; 32],
+    pub(super) vector_generation: u64,
+    pub(super) first_vector_ordinal: u64,
+    pub(super) chunk_count: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -116,17 +152,10 @@ pub(super) struct FlatChunkMetadata {
     pub(super) end_char: u32,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct EventVersion {
-    pub(super) generation: u64,
-    pub(super) kind: MutationKind,
-}
-
 pub(super) struct LoadedSegment {
     pub(super) descriptor: SegmentDescriptor,
     pub(super) vectors: Mmap,
     pub(super) metadata: Mmap,
-    pub(super) mutations: Vec<EventMutation>,
     pub(super) stride_bytes: usize,
 }
 

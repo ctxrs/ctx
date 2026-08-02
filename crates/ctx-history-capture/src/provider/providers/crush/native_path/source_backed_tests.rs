@@ -117,14 +117,22 @@ fn inventory_route_projects_each_logical_leaf_and_deletes_safely() {
     assert_eq!(unchanged.commit.opstamp, cold.commit.opstamp);
     assert_eq!(unchanged.sources, cold.sources);
     let (projection_passes, snapshots) = route_inventory.work();
-    assert_eq!(projection_passes, 4);
+    assert_eq!(projection_passes, 2);
     assert_eq!(snapshots.len(), 4);
-    assert!(snapshots
+    assert!(snapshots[..2]
         .iter()
         .all(|work| work.immutable_snapshot_opens == 1
             && work.copied_snapshot_opens == 0
             && work.source_bytes_copied == 0
             && work.max_active_snapshots == 1));
+    assert!(snapshots[2..]
+        .iter()
+        .all(|work| work.immutable_snapshot_opens == 0
+            && work.copied_snapshot_opens == 0
+            && work.source_bytes_copied == 0
+            && work.terminal_fences == 0
+            && work.terminal_revalidations == 0
+            && work.max_active_snapshots == 0));
     let source = crush_source_key(TypedKey::utf8("route-project-a").unwrap()).unwrap();
     let deleted_source = crush_source_key(TypedKey::utf8("route-project-b").unwrap()).unwrap();
     let pinned = VerifiedIndex::open(&index_root).unwrap();
@@ -167,7 +175,7 @@ fn inventory_route_projects_each_logical_leaf_and_deletes_safely() {
         "alpha"
     );
     refresh_source_backed_generation(&index_root, &registry, options.clone()).unwrap();
-    assert_eq!(route_inventory.work().0, 6);
+    assert_eq!(route_inventory.work().0, 3);
     let rewritten = VerifiedIndex::open(&index_root).unwrap();
     let rewritten_page = rewritten.core_source_event_page(&source, None, 8).unwrap();
     assert_eq!(rewritten_page.items.len(), 1);
@@ -187,7 +195,7 @@ fn inventory_route_projects_each_logical_leaf_and_deletes_safely() {
     ));
     let deleted = refresh_source_backed_generation(&index_root, &registry, options).unwrap();
     assert_eq!(deleted.sources.len(), 1);
-    assert_eq!(route_inventory.work().0, 7);
+    assert_eq!(route_inventory.work().0, 3);
 
     let latest = VerifiedIndex::open(&index_root).unwrap();
     let events = latest
@@ -591,6 +599,30 @@ fn stock_sqlite_snapshot_finish_precedes_publication_revalidation() {
     })));
 
     assert!(!finish_opened_source(opened).unwrap());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn retained_database_leaf_fence_rejects_exact_path_replacement() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("project.db");
+    let replacement = temp.path().join("replacement.db");
+    write_database(&path, "session", "message", "opening body");
+    write_database(&replacement, "session", "message", "replacement body");
+    let frozen = bind_inventory(
+        crate::test_provider_sqlite_data_root(),
+        inventory(b"leaf-fence", vec![database("project", &path)]),
+    )
+    .unwrap();
+    let database = &frozen.databases[0];
+
+    std::fs::rename(&replacement, &path).unwrap();
+
+    assert!(matches!(
+        database.database_file.revalidate_same_object_leaf(),
+        Err(CaptureError::SourceChangedDuringCapture)
+            | Err(CaptureError::InvalidProviderTranscriptPath { .. })
+    ));
 }
 
 fn inventory(

@@ -50,7 +50,6 @@ fn render_status_text(value: &Value) -> String {
                 .and_then(|policy| policy.get("published_hash")),
         );
     }
-    push_component_summary(&mut out, "catalog", value.get("catalog"));
     push_component_summary(&mut out, "source_refresh", value.get("refresh"));
     if let Some(refresh) = value.get("refresh") {
         push_object_summary(

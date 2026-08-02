@@ -57,7 +57,7 @@ class DogfoodSnapshot:
 def run_demo(client: AgentHistoryClient) -> DogfoodSnapshot:
     return DogfoodSnapshot(
         status=client.status(),
-        init=client.init(catalog_only=True),
+        init=client.init(),
         imported=client.import_(provider="codex", resume=True),
         synced=client.sync(all=True),
         search=client.search("local agent history", provider="codex", limit=5, refresh="off"),
@@ -129,9 +129,9 @@ def _fake_ctx_script() -> str:
 
         payload = {{"schema_version": 1}}
         if args == ["status", "--format=json"]:
-            payload.update({{"initialized": True, "data_root": "/tmp/ctx-agent-history-dogfood"}})
+            payload.update({{"data_root": "/tmp/ctx-agent-history-dogfood", "lexical": {{"status": "ready", "generation_id": "gen-1"}}, "refresh": {{"status": "ready", "generation_id": "gen-1"}}}})
         elif args[:2] == ["setup", "--format=json"]:
-            payload.update({{"mode": "catalog_only", "data_root": "/tmp/ctx-agent-history-dogfood", "indexed_items": 1}})
+            payload.update({{"data_root": "/tmp/ctx-agent-history-dogfood", "indexed_items": 1, "lexical": {{"status": "ready", "generation_id": "gen-1"}}}})
         elif args[:2] == ["import", "--format=json"]:
             payload.update(
                 {{

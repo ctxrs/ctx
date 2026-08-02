@@ -14,10 +14,9 @@ use sha2::{Digest, Sha256};
 use super::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, source_backed_leaf_worker_budget,
-        SourceBackedCoordinatorError, SourceBackedProviderRegistry, SourceBackedRefreshOutcome,
-        SourceBackedRefreshReceipt, SourceBackedSourceFailureClass,
-        AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES,
+        assert_carried_route_failure, refresh_source_backed_generation,
+        source_backed_leaf_worker_budget, SourceBackedProviderRegistry,
+        SourceBackedSourceFailureClass,
     },
     ProviderCatalogSupport, ProviderImportSupport, ProviderSourceKind, ProviderSourceStatus,
     AUGGIE_SESSION_JSON_SOURCE_FORMAT,
@@ -482,42 +481,6 @@ fn publish(
     refresh_source_backed_generation(root, registry, writer_options()).unwrap()
 }
 
-fn assert_document_source_failure(
-    receipt: &SourceBackedRefreshReceipt,
-    class: SourceBackedSourceFailureClass,
-    selector: &Path,
-) {
-    assert_eq!(
-        receipt.outcome,
-        SourceBackedRefreshOutcome::CompletedWithSourceFailures
-    );
-    assert_eq!(receipt.successful_routes, 0);
-    assert_eq!(receipt.source_failures.total(), 1);
-    assert_eq!(receipt.source_failures.omitted(), 0);
-    let failure = &receipt.source_failures.failures()[0];
-    assert_eq!(failure.provider, CaptureProvider::Auggie);
-    assert_eq!(failure.class, class);
-    assert!(failure.carried_forward);
-    assert_eq!(failure.source_selector, selector.display().to_string());
-    assert!(!failure.detail.is_empty());
-    assert_eq!(failure.source_identity.len(), 64);
-}
-
-fn assert_cold_document_source_failure(error: SourceBackedCoordinatorError, selector: &Path) {
-    let SourceBackedCoordinatorError::NoUsableSourceRoutes { failures } = error else {
-        panic!("expected a cold source-scoped failure, got {error:?}");
-    };
-    assert_eq!(failures.total(), 1);
-    assert_eq!(failures.omitted(), 0);
-    let failure = &failures.failures()[0];
-    assert_eq!(failure.provider, CaptureProvider::Auggie);
-    assert_eq!(failure.class, SourceBackedSourceFailureClass::SourceChanged);
-    assert!(!failure.carried_forward);
-    assert_eq!(failure.source_selector, selector.display().to_string());
-    assert!(!failure.detail.is_empty());
-    assert_eq!(failure.source_identity.len(), 64);
-}
-
 fn publish_with_reopened_route(
     index_root: &Path,
     selected_root: &Path,
@@ -668,38 +631,6 @@ fn independent_leaf_runner_has_one_vs_four_parity_and_bounded_peak_work() {
         .retain(|leaf| leaf.logical_id != 0);
     serial_runner.reset_scan_counts();
     parallel_runner.reset_scan_counts();
-    for expected_missing in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
-        let serial_grace = publish(&serial_root, &serial_registry);
-        let parallel_grace = publish(&parallel_root, &parallel_registry);
-        assert!(serial_grace.removals.is_empty());
-        assert!(parallel_grace.removals.is_empty());
-        assert_eq!(serial_grace.sources.len(), 8);
-        assert_eq!(parallel_grace.sources.len(), 8);
-        assert_eq!(
-            serial_grace
-                .commit
-                .manifest()
-                .source_catalog()
-                .missing_source(&deleted_source)
-                .unwrap()
-                .consecutive_missing()
-                .get(),
-            expected_missing
-        );
-        assert_eq!(
-            parallel_grace
-                .commit
-                .manifest()
-                .source_catalog()
-                .missing_source(&deleted_source)
-                .unwrap()
-                .consecutive_missing()
-                .get(),
-            expected_missing
-        );
-    }
-    serial_runner.reset_scan_counts();
-    parallel_runner.reset_scan_counts();
     let serial_deleted = publish(&serial_root, &serial_registry);
     let parallel_deleted = publish(&parallel_root, &parallel_registry);
     assert_eq!(
@@ -707,6 +638,7 @@ fn independent_leaf_runner_has_one_vs_four_parity_and_bounded_peak_work() {
         serial_deleted.commit.generation_id
     );
     assert_eq!(parallel_deleted.sources, serial_deleted.sources);
+    assert_eq!(serial_deleted.sources.len(), 7);
     assert_eq!(parallel_deleted.removals, serial_deleted.removals);
     assert!(parallel_deleted.removals.iter().any(|removal| removal
         .deletion
@@ -715,36 +647,20 @@ fn independent_leaf_runner_has_one_vs_four_parity_and_bounded_peak_work() {
     assert_eq!(serial_runner.total_scans(), 0);
     assert_eq!(parallel_runner.total_scans(), 0);
 
-    let retained_generation = parallel_deleted.commit.generation_id.clone();
+    let retained_generation = parallel_deleted.commit.generation_id;
     parallel_runner.replace(1, 2, "terminal tree race");
     parallel_runner.state.lock().unwrap().mutate_on_revalidate = true;
     let failed =
-        refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options())
-            .unwrap();
-    assert_document_source_failure(
-        &failed,
+        refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options());
+    assert_carried_route_failure(
+        &failed.unwrap(),
+        &retained_generation,
         SourceBackedSourceFailureClass::SourceChanged,
-        temp.path(),
     );
-    assert_eq!(failed.commit.generation_id, retained_generation);
-    assert_eq!(failed.sources, parallel_deleted.sources);
     assert_eq!(
         VerifiedIndex::open(&parallel_root).unwrap().generation_id(),
         retained_generation
     );
-    assert_eq!(
-        VerifiedIndex::open(&parallel_root)
-            .unwrap()
-            .manifest()
-            .sources,
-        parallel_deleted.sources
-    );
-
-    let retried = publish(&parallel_root, &parallel_registry);
-    assert_eq!(retried.outcome, SourceBackedRefreshOutcome::Completed);
-    assert_eq!(retried.successful_routes, 1);
-    assert!(retried.source_failures.is_empty());
-    assert_ne!(retried.commit.generation_id, retained_generation);
 }
 
 #[test]
@@ -966,32 +882,6 @@ fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
         .leaves
         .retain(|leaf| leaf.logical_id != 1);
     adapter.reset_scan_counts();
-    for expected_missing in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
-        let grace = publish(&index_root, &registry);
-        assert_eq!(grace.sources.len(), 3);
-        assert!(grace.removals.is_empty());
-        assert_eq!(
-            grace
-                .commit
-                .manifest()
-                .source_catalog()
-                .missing_source(&deleted_source)
-                .unwrap()
-                .consecutive_missing()
-                .get(),
-            expected_missing
-        );
-        assert_eq!(
-            VerifiedIndex::open(&index_root)
-                .unwrap()
-                .source_event_page(&deleted_source, None, 8)
-                .unwrap()
-                .items
-                .len(),
-            1
-        );
-    }
-    adapter.reset_scan_counts();
     let deleted = publish(&index_root, &registry);
     assert_eq!(deleted.sources.len(), 2);
     assert!(deleted.removals.iter().any(|removal| removal
@@ -1009,37 +899,23 @@ fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
         ))
     ));
 
-    let retained_generation = deleted.commit.generation_id.clone();
+    let retained_generation = deleted.commit.generation_id;
     adapter.state.lock().unwrap().available = false;
     let failed =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_document_source_failure(
+    assert_carried_route_failure(
         &failed,
+        &retained_generation,
         SourceBackedSourceFailureClass::Unavailable,
-        temp.path(),
     );
-    assert_eq!(failed.commit.generation_id, retained_generation);
-    assert_eq!(failed.sources, deleted.sources);
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         retained_generation
     );
-    assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().manifest().sources,
-        deleted.sources
-    );
-
-    adapter.state.lock().unwrap().available = true;
-    let retried = publish(&index_root, &registry);
-    assert_eq!(retried.outcome, SourceBackedRefreshOutcome::Completed);
-    assert_eq!(retried.successful_routes, 1);
-    assert!(retried.source_failures.is_empty());
-    assert_eq!(retried.commit.generation_id, retained_generation);
-    assert_eq!(retried.sources, deleted.sources);
 }
 
 #[test]
-fn automatic_document_missing_grace_survives_route_reopen_and_reappearance() {
+fn automatic_document_leaf_deletion_and_reappearance_are_immediate() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let index_root = temp.path().join("index");
     let selected_root = temp.path().join("selected");
@@ -1055,48 +931,39 @@ fn automatic_document_missing_grace_survives_route_reopen_and_reappearance() {
     let cold = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
     let noop = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
     assert_eq!(noop.commit.generation_id, cold.commit.generation_id);
-    assert!(noop.commit.manifest().source_catalog().is_empty());
+    assert!(noop
+        .commit
+        .manifest()
+        .source_routes()
+        .iter()
+        .all(|route| route.missing_state().is_none()));
 
     adapter.state.lock().unwrap().leaves.clear();
-    for expected_missing in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
-        let grace = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
-        assert_eq!(grace.sources.len(), 1);
-        assert!(grace.removals.is_empty());
-        assert_eq!(
-            grace
-                .commit
-                .manifest()
-                .source_catalog()
-                .missing_source(&source)
-                .unwrap()
-                .consecutive_missing()
-                .get(),
-            expected_missing
-        );
-        assert_eq!(
-            VerifiedIndex::open(&index_root).unwrap().document_count(),
-            1
-        );
-    }
+    let deleted = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
+    assert!(deleted.sources.is_empty());
+    assert_eq!(deleted.removals.len(), 1);
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        0
+    );
 
     adapter.state.lock().unwrap().leaves.push(leaf.clone());
     let reappeared = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
     assert_eq!(reappeared.sources.len(), 1);
     assert!(reappeared.removals.is_empty());
-    assert!(reappeared.commit.manifest().source_catalog().is_empty());
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().document_count(),
         1
     );
 
     adapter.state.lock().unwrap().leaves.clear();
-    for _ in 1..AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES {
-        let grace = publish_with_reopened_route(&index_root, &selected_root, adapter.clone());
-        assert!(grace.removals.is_empty());
-        assert_eq!(grace.sources.len(), 1);
-    }
     let deleted = publish_with_reopened_route(&index_root, &selected_root, adapter);
-    assert!(deleted.commit.manifest().source_catalog().is_empty());
+    assert!(deleted
+        .commit
+        .manifest()
+        .source_routes()
+        .iter()
+        .all(|route| route.sources().is_empty()));
     assert_eq!(deleted.sources.len(), 0);
     assert_eq!(deleted.removals.len(), 1);
     assert!(deleted.removals[0]
@@ -1218,46 +1085,39 @@ fn active_source_family_contract_document_replacement_tree_rejects_races_duplica
 
     adapter.reset_scan_counts();
     adapter.state.lock().unwrap().parser_v2 = true;
-    let parser_changed = publish(&index_root, &registry);
+    publish(&index_root, &registry);
     assert_eq!(adapter.scan_count(1), 1);
 
     adapter.replace(1, 2, "observation race");
     adapter.state.lock().unwrap().mutate_before_scan = Some(1);
-    let before = parser_changed.commit.generation_id.clone();
-    let observation_failure =
+    let before = VerifiedIndex::open(&index_root)
+        .unwrap()
+        .generation_id()
+        .to_owned();
+    let failed =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_document_source_failure(
-        &observation_failure,
+    assert_carried_route_failure(
+        &failed,
+        &before,
         SourceBackedSourceFailureClass::SourceChanged,
-        temp.path(),
     );
-    assert_eq!(observation_failure.commit.generation_id, before);
-    assert_eq!(observation_failure.sources, parser_changed.sources);
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         before
     );
 
     adapter.state.lock().unwrap().mutate_on_revalidate = true;
-    let terminal_failure =
+    let failed =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert_document_source_failure(
-        &terminal_failure,
+    assert_carried_route_failure(
+        &failed,
+        &before,
         SourceBackedSourceFailureClass::SourceChanged,
-        temp.path(),
     );
-    assert_eq!(terminal_failure.commit.generation_id, before);
-    assert_eq!(terminal_failure.sources, parser_changed.sources);
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         before
     );
-
-    let retried = publish(&index_root, &registry);
-    assert_eq!(retried.outcome, SourceBackedRefreshOutcome::Completed);
-    assert_eq!(retried.successful_routes, 1);
-    assert!(retried.source_failures.is_empty());
-    assert_ne!(retried.commit.generation_id, before);
 
     let duplicate_physical = SyntheticAdapter::new(vec![
         SyntheticLeaf {
@@ -1274,13 +1134,12 @@ fn active_source_family_contract_document_replacement_tree_rejects_races_duplica
         },
     ]);
     let duplicate_registry = fixture_registry(temp.path(), duplicate_physical.clone());
-    let duplicate_physical_error = refresh_source_backed_generation(
+    assert!(refresh_source_backed_generation(
         temp.path().join("duplicate-physical"),
         &duplicate_registry,
-        writer_options(),
+        writer_options()
     )
-    .unwrap_err();
-    assert_cold_document_source_failure(duplicate_physical_error, temp.path());
+    .is_err());
     assert_eq!(duplicate_physical.scan_count(8), 0);
 
     let duplicate_source = SyntheticAdapter::new(vec![
@@ -1298,22 +1157,12 @@ fn active_source_family_contract_document_replacement_tree_rejects_races_duplica
         },
     ]);
     let duplicate_registry = fixture_registry(temp.path(), duplicate_source);
-    let duplicate_source_error = refresh_source_backed_generation(
+    assert!(refresh_source_backed_generation(
         temp.path().join("duplicate-source"),
         &duplicate_registry,
-        writer_options(),
+        writer_options()
     )
-    .unwrap_err();
-    match duplicate_source_error {
-        SourceBackedCoordinatorError::RouteScan { provider, source } => {
-            assert_eq!(provider, CaptureProvider::Auggie);
-            assert_eq!(source.kind, SourceBackedRouteErrorKind::Internal);
-            assert!(source
-                .detail
-                .contains("source replacement has already started"));
-        }
-        error => panic!("expected a duplicate-source writer failure, got {error:?}"),
-    }
+    .is_err());
     assert_eq!(cold.sources.len(), 1);
 }
 

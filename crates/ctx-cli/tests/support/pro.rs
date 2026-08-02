@@ -586,6 +586,7 @@ send({
   'sequence': request['sequence'],
   'request_id': request['request_id'],
   'message': {'kind':'blame','body':{
+    'snapshot':body['expected_snapshot'],
     'target':resolved,
     'git_snapshot':snapshot,
     'matches':matches,

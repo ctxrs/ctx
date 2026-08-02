@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Optional, cast
 
 from .config import HostedConfig, LocalConfig
+from .errors import CtxAgentHistoryProtocolError
 from .types import (
     Backend,
     EventResult,
@@ -18,6 +19,13 @@ from .types import (
 from .version import API_VERSION
 
 SCHEMA_VERSION = 1
+MAX_SAFE_STATUS_COUNTER = (1 << 53) - 1
+_STATUS_COUNTER_KEYS = (
+    "indexedItems",
+    "indexedSessions",
+    "indexedEvents",
+    "indexedSources",
+)
 
 
 def local_backend(config: LocalConfig, raw: Optional[Mapping[str, Any]] = None) -> Backend:
@@ -50,27 +58,52 @@ def envelope(operation: str, backend: Mapping[str, Any], **payload: Any) -> Json
 
 
 def normalize_status(raw: Mapping[str, Any]) -> Status:
-    status = _camelize_public(raw)
-    status.setdefault("initialized", False)
-    status.setdefault("localOnly", True)
-    status.setdefault("indexedItems", 0)
-    status.setdefault("indexedSources", 0)
-    status.setdefault("pendingCatalogSessions", 0)
-    status.setdefault("failedCatalogSessions", 0)
-    status.setdefault("staleCatalogSessions", 0)
+    current = _camelize_public(raw)
+    for key in _STATUS_COUNTER_KEYS:
+        if key in current:
+            _validate_status_counter(key, current[key])
+    lexical = current.get("lexical") if isinstance(current, Mapping) else None
+    initialized = current.get("initialized")
+    if not isinstance(initialized, bool):
+        initialized = isinstance(lexical, Mapping) and bool(lexical.get("generationId"))
     return cast(
         Status,
         _drop_none(
             {
-                key: value
-                for key, value in status.items()
+                "initialized": initialized,
+                "localOnly": True,
+                **{
+                    key: current.get(key)
+                    for key in (
+                        "dataRoot",
+                        "readOnly",
+                        "indexedItems",
+                        "indexedSessions",
+                        "indexedEvents",
+                        "indexedSources",
+                        "historyEpoch",
+                        "lexical",
+                        "refresh",
+                        "semantic",
+                        "daemon",
+                    )
+                },
             }
         ),
     )
 
 
-def normalize_init(raw: Mapping[str, Any]) -> JsonObject:
-    return cast(JsonObject, _camelize_public(raw))
+def _validate_status_counter(key: str, value: Any) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > MAX_SAFE_STATUS_COUNTER
+    ):
+        raise CtxAgentHistoryProtocolError(
+            f"ctx status counter {key} is outside the exact JSON integer domain",
+            details={"field": key, "maximum": MAX_SAFE_STATUS_COUNTER},
+        )
 
 
 def normalize_sources(raw: Mapping[str, Any]) -> list[ProviderSource]:

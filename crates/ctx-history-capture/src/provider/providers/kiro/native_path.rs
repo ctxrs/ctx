@@ -97,6 +97,19 @@ impl KiroSqliteDatabase {
         self.snapshot.terminal_revalidator()
     }
 
+    fn with_private_scratch_database<T, E>(
+        &self,
+        prefix: &str,
+        maximum_bytes: u64,
+        use_scratch: impl FnOnce(&Connection, &Path) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E>
+    where
+        E: From<SqliteSourceAccessError>,
+    {
+        self.snapshot
+            .with_private_scratch_database(prefix, maximum_bytes, use_scratch)
+    }
+
     fn sqlite_authority(&self) -> SqliteSourceDirectoryAuthority {
         self.authority.clone()
     }

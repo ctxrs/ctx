@@ -88,7 +88,7 @@ fn foreground_analytics_eligibility_is_closed_and_remote_safe() {
             "--no-daemon",
         ],
         vec!["ctx", "status", "--format=json"],
-        vec!["ctx", "index", "status", "--format=json"],
+        vec!["ctx", "index", "wait", "--format=json"],
         vec!["ctx", "doctor"],
         vec!["ctx", "show", "event", "deadbeef"],
     ] {

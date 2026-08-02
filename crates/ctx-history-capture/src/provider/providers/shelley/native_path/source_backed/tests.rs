@@ -593,10 +593,10 @@ fn shelley_route_cold_noop_and_rewrite_keep_complete_core_records() {
     assert_eq!(noop.commit.opstamp, cold.commit.opstamp);
     assert_eq!(noop.sources, cold.sources);
     let noop_work = shelley_query_counters();
-    assert_eq!(shelley_query_shape(noop_work), [4, 3, 3, 3, 6, 40]);
-    assert_eq!(noop_work.pages_emitted, 1);
-    assert_eq!(noop_work.peak_buffered_rows, 40);
-    assert!(noop_work.peak_buffered_bytes > 0);
+    assert_eq!(shelley_query_shape(noop_work), [0; 6]);
+    assert_eq!(noop_work.pages_emitted, 0);
+    assert_eq!(noop_work.peak_buffered_rows, 0);
+    assert_eq!(noop_work.peak_buffered_bytes, 0);
     assert_eq!(sqlite_persistent_bytes(&database), persistent_before);
 
     let verified = VerifiedIndex::open(&index_root).unwrap();

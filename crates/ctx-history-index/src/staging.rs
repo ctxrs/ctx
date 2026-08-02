@@ -24,13 +24,16 @@ pub(super) enum PendingSourceMode {
 }
 
 impl GenerationWriter {
-    /// Retains one source after a full logical rescan reproduced its exact
-    /// certified base. This records current-source coverage without opening
-    /// Tantivy or requiring an append frontier.
+    /// Retains one source's indexed Core records after a full logical rescan
+    /// reproduced them exactly.
+    ///
+    /// The current certificate may advance only its replay frontier. This
+    /// records current-source coverage without restaging documents while
+    /// still letting a durable physical-change hint move forward.
     pub fn retain_source(&mut self, certificate: CertifiedSource) -> Result<()> {
         certificate.validate_contract()?;
         let source = certificate.observation().source();
-        self.reject_carried_base_source_mutation(source)?;
+        self.reject_carried_source_mutation(source)?;
         register_compact_identity(
             &mut self.source_identities,
             source.identity(),
@@ -51,7 +54,7 @@ impl GenerationWriter {
                 })
                 .cloned()
                 .ok_or_else(|| IndexError::SourceNotAppendable(source.identity().to_string()))?;
-        if base != certificate {
+        if !retained_core_records_match(&base, &certificate) {
             return Err(IndexError::SourceCertificateMismatch);
         }
         self.deletions.remove(source);
@@ -71,6 +74,13 @@ impl GenerationWriter {
         );
         Ok(())
     }
+}
+
+fn retained_core_records_match(base: &CertifiedSource, current: &CertifiedSource) -> bool {
+    base.observation() == current.observation()
+        && base.parser_revision() == current.parser_revision()
+        && base.content_digest() == current.content_digest()
+        && base.counts() == current.counts()
 }
 
 pub(super) fn core_record_leaf(
@@ -136,6 +146,9 @@ pub(super) fn manifest_record_aggregates(
         .unwrap_or_default();
     for removal in generation.deletions.values() {
         base_aggregates.remove(&source_token(removal.source()));
+    }
+    for source in &generation.route_deletions {
+        base_aggregates.remove(&source_token(source));
     }
 
     for pending in generation.pending.values() {
@@ -219,11 +232,11 @@ pub(super) fn manifest_record_aggregates(
 /// Discards a completed one-pass staging run when it reproduced the full
 /// verified base manifest exactly.
 ///
-/// Requiring every retained base source to have a pending certificate or an
-/// explicit locked-base carry marker prevents an incomplete route scan from
-/// turning an omission into a false no-op. The already-created Tantivy writer
-/// is rolled back, so physical churn that leaves the logical corpus unchanged
-/// does not publish `meta.json`, advance the opstamp, or create a generation.
+/// Requiring every retained base source to have a pending certificate prevents
+/// an incomplete route scan from turning a carried source into a false no-op.
+/// The already-created Tantivy writer is rolled back, so physical churn that
+/// leaves the logical corpus unchanged does not publish `meta.json`, advance
+/// the opstamp, or create a generation.
 pub(super) fn finish_identical_staging<F, I>(
     generation: &mut GenerationWriter,
     manifest: &GenerationManifest,
@@ -250,10 +263,15 @@ where
         }
     }
     for removal in generation.deletions.values() {
-        if !revalidate(RevalidationTarget::Deletion(removal.deletion())) {
+        if !revalidate(RevalidationTarget::Deletion(&removal.proof)) {
             return Err(IndexError::SourceInvalidated(
                 removal.source().identity().to_string(),
             ));
+        }
+    }
+    for (route, revalidate_missing) in &generation.missing_route_revalidations {
+        if !revalidate_missing() {
+            return Err(IndexError::SourceInvalidated(route.as_str().to_owned()));
         }
     }
     for inventory in &generation.complete_inventories {
@@ -293,7 +311,7 @@ fn staged_manifest_matches_base(
         !generation
             .pending
             .contains_key(&source_token(source.observation().source()))
-            && !generation.is_base_source_carried(source.observation().source())
+            && !generation.source_is_carried_from_base(source.observation().source())
     }) {
         return Ok(false);
     }

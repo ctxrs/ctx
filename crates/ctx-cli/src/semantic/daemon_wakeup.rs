@@ -2,40 +2,84 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, Condvar, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc, Arc, Condvar, Mutex, RwLock,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
-use ctx_history_capture::{
-    discover_provider_sources, validate_provider_source_roots_outside_data_root,
-};
+use ctx_history_capture::SourceBackedWatchCatalog;
+use ctx_history_index::SourceRouteIdentity;
 use notify::{
-    event::{AccessKind, AccessMode, MetadataKind, ModifyKind},
+    event::{AccessKind, AccessMode, CreateKind, MetadataKind, ModifyKind, RemoveKind},
     Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
 use serde_json::{json, Value};
 
-use crate::{compact_json, config::CONFIG_FILE, identity};
+use crate::{compact_json, config::CONFIG_FILE};
 
 use super::{
+    dirty_source_routes::EventWatermark,
     health_search::create_private_dir_all,
     paths_status::{daemon_root_path, write_private_json_file},
 };
 
 const WATCH_DEBOUNCE_QUIET: Duration = Duration::from_millis(250);
 const WATCH_DEBOUNCE_MAX: Duration = Duration::from_secs(2);
+// Native callbacks must never grow daemon memory or block the backend. A full
+// queue is represented by a catalog reconciliation in the separately
+// coalesced wake state, so dropping the individual native payload is safe.
+const WATCH_EVENT_QUEUE_CAPACITY: usize = 256;
 const WATCH_RECEIPT_FILE: &str = "wakeup.json";
 
 const WAKE_FILESYSTEM: u8 = 1;
 const WAKE_IPC: u8 = 1 << 1;
 const WAKE_SHUTDOWN: u8 = 1 << 2;
+static NEXT_WATCHER_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct SourceWatchBatch {
+    pub(super) routes: BTreeMap<SourceRouteIdentity, EventWatermark>,
+    pub(super) reconcile: Option<EventWatermark>,
+    pub(super) rearm: bool,
+}
+
+impl SourceWatchBatch {
+    fn is_empty(&self) -> bool {
+        self.routes.is_empty() && self.reconcile.is_none() && !self.rearm
+    }
+
+    fn merge(&mut self, other: Self) {
+        for (route, watermark) in other.routes {
+            self.routes
+                .entry(route)
+                .and_modify(|current| *current = (*current).max(watermark))
+                .or_insert(watermark);
+        }
+        if let Some(watermark) = other.reconcile {
+            self.reconcile = Some(
+                self.reconcile
+                    .map_or(watermark, |current| current.max(watermark)),
+            );
+        }
+        self.rearm |= other.rearm;
+    }
+
+    fn catalog_reconciliation(watermark: EventWatermark) -> Self {
+        Self {
+            reconcile: Some(watermark),
+            rearm: true,
+            ..Self::default()
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 struct DaemonWakeupState {
     pending: u8,
-    filesystem_deferred_until_safety: bool,
     filesystem_signals: u64,
     ipc_signals: u64,
     shutdown_signals: u64,
@@ -44,14 +88,17 @@ struct DaemonWakeupState {
     scheduled_retry_wakeups: u64,
     work_cycles: u64,
     no_work_cycles: u64,
+    // One merged batch replaces a queue of batches. Route entries therefore
+    // cannot exceed the current exact watch-catalog cardinality.
+    source_watch: SourceWatchBatch,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct DaemonWake {
     pub(super) filesystem: bool,
-    pub(super) filesystem_refresh: bool,
     pub(super) shutdown: bool,
     pub(super) timed_out: bool,
+    pub(super) source_watch: SourceWatchBatch,
 }
 
 #[derive(Debug, Default)]
@@ -61,8 +108,20 @@ pub(super) struct DaemonWakeup {
 }
 
 impl DaemonWakeup {
+    #[cfg(test)]
     pub(super) fn signal_filesystem(&self) {
         self.signal(WAKE_FILESYSTEM);
+    }
+
+    fn signal_source_watch(&self, batch: SourceWatchBatch) {
+        if batch.is_empty() {
+            return;
+        }
+        let mut state = self.lock_state();
+        state.pending |= WAKE_FILESYSTEM;
+        state.filesystem_signals = state.filesystem_signals.saturating_add(1);
+        state.source_watch.merge(batch);
+        self.changed.notify_one();
     }
 
     pub(super) fn signal_ipc(&self) {
@@ -75,6 +134,7 @@ impl DaemonWakeup {
 
     fn signal(&self, reason: u8) {
         let mut state = self.lock_state();
+        state.pending |= reason;
         if reason == WAKE_FILESYSTEM {
             state.filesystem_signals = state.filesystem_signals.saturating_add(1);
         } else if reason == WAKE_IPC {
@@ -82,7 +142,6 @@ impl DaemonWakeup {
         } else if reason == WAKE_SHUTDOWN {
             state.shutdown_signals = state.shutdown_signals.saturating_add(1);
         }
-        state.pending |= reason;
         self.changed.notify_one();
     }
 
@@ -103,12 +162,12 @@ impl DaemonWakeup {
             state.timeout_wakeups = state.timeout_wakeups.saturating_add(1);
         }
         let pending = std::mem::take(&mut state.pending);
-        let filesystem = pending & WAKE_FILESYSTEM != 0;
+        let source_watch = std::mem::take(&mut state.source_watch);
         DaemonWake {
-            filesystem,
-            filesystem_refresh: filesystem && !state.filesystem_deferred_until_safety,
+            filesystem: pending & WAKE_FILESYSTEM != 0,
             shutdown: pending & WAKE_SHUTDOWN != 0,
             timed_out,
+            source_watch,
         }
     }
 
@@ -124,23 +183,6 @@ impl DaemonWakeup {
     pub(super) fn record_scheduled_retry_wakeup(&self) {
         let mut state = self.lock_state();
         state.scheduled_retry_wakeups = state.scheduled_retry_wakeups.saturating_add(1);
-    }
-
-    pub(super) fn defer_filesystem_until_safety(&self) {
-        let mut state = self.lock_state();
-        // Filesystem notifications are level-triggered dirty work, not a count
-        // of refreshes owed. Once an all-provider refresh publishes, carrying
-        // notifications accumulated during or shortly after that synchronous
-        // run into the next wait would immediately enqueue equivalent work.
-        // Collapse automatic debt through the safety boundary; IPC requests
-        // and shutdown retain their immediacy.
-        state.pending &= !WAKE_FILESYSTEM;
-        state.filesystem_deferred_until_safety = true;
-    }
-
-    pub(super) fn release_filesystem_at_safety(&self) {
-        let mut state = self.lock_state();
-        state.filesystem_deferred_until_safety = false;
     }
 
     fn snapshot(&self) -> Value {
@@ -165,7 +207,10 @@ impl DaemonWakeup {
 }
 
 enum WatchMessage {
-    Event(notify::Result<Event>),
+    Event {
+        event: notify::Result<Event>,
+        watermark: EventWatermark,
+    },
     Stop,
 }
 
@@ -178,44 +223,145 @@ struct WatchCounters {
     ignored_other_events: u64,
     last_ignored_access_path: Option<PathBuf>,
     backend_errors: u64,
+    rescan_notifications: u64,
+    ingress_overflows: u64,
+    ingress_disconnects: u64,
     coalesced_wakeups: u64,
     reconciliations: u64,
+    forced_rearms: u64,
+    registration_attempts: u64,
     last_relevant_path: Option<PathBuf>,
 }
+
+/// The daemon's single authoritative watch-catalog snapshot.
+///
+/// The native callback thread and the daemon reconciliation loop share this
+/// exact owner. `None` is deliberately distinct from an authoritative empty
+/// catalog: it means catalog construction has not succeeded yet and must not
+/// initialize coordinator route authority.
+#[derive(Debug, Clone, Default)]
+pub(super) struct DaemonWatchCatalog {
+    snapshot: Arc<RwLock<Option<SourceBackedWatchCatalog>>>,
+}
+
+impl DaemonWatchCatalog {
+    pub(super) fn publish(&self, catalog: SourceBackedWatchCatalog) {
+        *self
+            .snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(catalog);
+    }
+
+    pub(super) fn snapshot(&self) -> Option<SourceBackedWatchCatalog> {
+        self.snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WatchAuthority {
+    catalog: DaemonWatchCatalog,
+    controls: BTreeSet<PathBuf>,
+}
+
+impl WatchAuthority {
+    fn new(data_root: &Path, catalog: DaemonWatchCatalog) -> Self {
+        Self {
+            catalog,
+            controls: BTreeSet::from([
+                data_root.join(CONFIG_FILE),
+                data_root.join("catalogs").join("explicit-sources"),
+            ]),
+        }
+    }
+
+    fn target_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self.controls.iter().cloned().collect::<Vec<_>>();
+        if let Some(catalog) = self.catalog.snapshot() {
+            paths.extend(catalog.target_paths().map(Path::to_path_buf));
+        }
+        paths
+    }
+}
+
+#[cfg(test)]
+type RearmOverlapHook = Box<dyn FnMut(&Path)>;
 
 pub(super) struct DaemonFileWatcher {
     data_root: PathBuf,
     wakeup: Arc<DaemonWakeup>,
     watcher: RecommendedWatcher,
     watched: BTreeMap<PathBuf, bool>,
-    targets: Arc<RwLock<Vec<PathBuf>>>,
+    authority: Arc<RwLock<WatchAuthority>>,
     counters: Arc<Mutex<WatchCounters>>,
-    sender: mpsc::Sender<WatchMessage>,
+    sender: mpsc::SyncSender<WatchMessage>,
+    accepting_events: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
     last_error: Option<String>,
+    rearm_pending: bool,
+    watcher_epoch: u64,
+    callback_sequence: Arc<AtomicU64>,
+    #[cfg(test)]
+    rearm_overlap_hook: Option<RearmOverlapHook>,
+}
+
+fn native_file_watcher(
+    data_root: &Path,
+    sender: &mpsc::SyncSender<WatchMessage>,
+    counters: &Arc<Mutex<WatchCounters>>,
+    wakeup: &Arc<DaemonWakeup>,
+    accepting_events: &Arc<AtomicBool>,
+    watcher_epoch: u64,
+    callback_sequence: &Arc<AtomicU64>,
+) -> Result<RecommendedWatcher> {
+    let callback_data_root = data_root.to_path_buf();
+    let callback_sender = sender.clone();
+    let callback_counters = Arc::clone(counters);
+    let callback_wakeup = Arc::clone(wakeup);
+    let callback_accepting_events = Arc::clone(accepting_events);
+    let callback_sequence = Arc::clone(callback_sequence);
+    RecommendedWatcher::new(
+        move |event: notify::Result<Event>| {
+            forward_watch_event(
+                &callback_data_root,
+                &callback_counters,
+                &callback_sender,
+                &callback_wakeup,
+                &callback_accepting_events,
+                watcher_epoch,
+                &callback_sequence,
+                event,
+            );
+        },
+        Config::default(),
+    )
+    .context("start native daemon filesystem watcher")
 }
 
 impl DaemonFileWatcher {
-    pub(super) fn start(data_root: &Path, wakeup: Arc<DaemonWakeup>) -> Result<Self> {
-        let (sender, receiver) = mpsc::channel();
-        let targets = Arc::new(RwLock::new(Vec::new()));
+    pub(super) fn start(
+        data_root: &Path,
+        wakeup: Arc<DaemonWakeup>,
+        catalog: DaemonWatchCatalog,
+    ) -> Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
+        let authority = Arc::new(RwLock::new(WatchAuthority::new(data_root, catalog)));
         let counters = Arc::new(Mutex::new(WatchCounters::default()));
-        let callback_sender = sender.clone();
-        let callback_counters = Arc::clone(&counters);
-        let callback_data_root = data_root.to_path_buf();
-        let watcher = RecommendedWatcher::new(
-            move |event: notify::Result<Event>| {
-                forward_watch_event(
-                    &callback_data_root,
-                    &callback_counters,
-                    &callback_sender,
-                    event,
-                );
-            },
-            Config::default(),
-        )
-        .context("start native daemon filesystem watcher")?;
-        let thread_targets = Arc::clone(&targets);
+        let accepting_events = Arc::new(AtomicBool::new(true));
+        let watcher_epoch = NEXT_WATCHER_EPOCH.fetch_add(1, Ordering::Relaxed);
+        let callback_sequence = Arc::new(AtomicU64::new(0));
+        let watcher = native_file_watcher(
+            data_root,
+            &sender,
+            &counters,
+            &wakeup,
+            &accepting_events,
+            watcher_epoch,
+            &callback_sequence,
+        )?;
+        let thread_authority = Arc::clone(&authority);
         let thread_counters = Arc::clone(&counters);
         let thread_wakeup = Arc::clone(&wakeup);
         let thread_data_root = data_root.to_path_buf();
@@ -225,7 +371,7 @@ impl DaemonFileWatcher {
             .spawn(move || {
                 watch_event_loop(
                     receiver,
-                    thread_targets,
+                    thread_authority,
                     thread_counters,
                     thread_wakeup,
                     thread_data_root,
@@ -238,63 +384,180 @@ impl DaemonFileWatcher {
             wakeup,
             watcher,
             watched: BTreeMap::new(),
-            targets,
+            authority,
             counters,
             sender,
+            accepting_events,
             thread: Some(thread),
             last_error: None,
+            rearm_pending: false,
+            watcher_epoch,
+            callback_sequence,
+            #[cfg(test)]
+            rearm_overlap_hook: None,
         };
-        service.reconcile()?;
-        service.write_receipt("active")?;
+        let (_, registration) = service.reconcile_roots(false);
+        registration?;
         Ok(service)
     }
 
-    pub(super) fn reconcile(&mut self) -> Result<()> {
-        let targets = daemon_watch_targets(&self.data_root)?;
-        let desired = watch_roots(&targets);
-        let stale = self
-            .watched
-            .keys()
-            .filter(|path| !desired.contains_key(*path))
-            .cloned()
-            .collect::<Vec<_>>();
-        for path in stale {
-            if let Err(error) = self.watcher.unwatch(&path) {
-                self.last_error = Some(format!("unwatch {}: {error}", path.display()));
-            }
-            self.watched.remove(&path);
-        }
-        for (path, recursive) in &desired {
-            if self.watched.get(path) == Some(recursive) {
-                continue;
-            }
-            let mode = if *recursive {
-                RecursiveMode::Recursive
-            } else {
-                RecursiveMode::NonRecursive
-            };
-            match self.watcher.watch(path, mode) {
-                Ok(()) => {
-                    self.watched.insert(path.clone(), *recursive);
+    pub(super) fn startup_watermark(&self) -> EventWatermark {
+        EventWatermark::new(self.watcher_epoch, 0)
+    }
+
+    pub(super) fn reconcile_roots(&mut self, force_rearm: bool) -> (SourceWatchBatch, Result<()>) {
+        let authority = self
+            .authority
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let catalog = authority.catalog.snapshot();
+        let desired_paths = authority.target_paths();
+        let desired = watch_roots(desired_paths.iter().map(PathBuf::as_path));
+        self.rearm_pending |= force_rearm;
+        let replace_native_watcher = self.rearm_pending;
+        let registration_needed = desired.iter().any(|(path, recursive)| {
+            replace_native_watcher || self.watched.get(path).copied() != Some(*recursive)
+        });
+        let affected = if registration_needed && !replace_native_watcher {
+            catalog
+                .as_ref()
+                .map(|catalog| {
+                    let watermark = self.next_watermark();
+                    SourceWatchBatch {
+                        routes: catalog
+                            .route_ids()
+                            .cloned()
+                            .map(|route| (route, watermark))
+                            .collect(),
+                        ..SourceWatchBatch::default()
+                    }
+                })
+                .unwrap_or_default()
+        } else {
+            SourceWatchBatch::default()
+        };
+        self.last_error = catalog
+            .is_none()
+            .then(|| "watch catalog authority is unavailable".to_owned());
+        let mut registration_attempts = 0_u64;
+        if replace_native_watcher {
+            match native_file_watcher(
+                &self.data_root,
+                &self.sender,
+                &self.counters,
+                &self.wakeup,
+                &self.accepting_events,
+                self.watcher_epoch,
+                &self.callback_sequence,
+            ) {
+                Ok(mut replacement) => {
+                    let mut replacement_ready = true;
+                    for (path, recursive) in &desired {
+                        registration_attempts = registration_attempts.saturating_add(1);
+                        let mode = if *recursive {
+                            RecursiveMode::Recursive
+                        } else {
+                            RecursiveMode::NonRecursive
+                        };
+                        if let Err(error) = replacement.watch(path, mode) {
+                            replacement_ready = false;
+                            self.last_error = Some(format!("watch {}: {error}", path.display()));
+                        }
+                    }
+                    if replacement_ready {
+                        // Both native watchers are live during this hook. Any
+                        // mutation in the handoff is delivered through the
+                        // normal exact-route callback path, so a clean rearm
+                        // does not need to manufacture an all-routes batch.
+                        #[cfg(test)]
+                        for path in desired.keys() {
+                            if let Some(hook) = self.rearm_overlap_hook.as_mut() {
+                                hook(path);
+                            }
+                        }
+                        self.watcher = replacement;
+                        self.watched = desired;
+                        self.rearm_pending = false;
+                    }
                 }
                 Err(error) => {
-                    self.last_error = Some(format!("watch {}: {error}", path.display()));
+                    self.last_error = Some(error.to_string());
+                }
+            }
+        } else {
+            let stale = self
+                .watched
+                .keys()
+                .filter(|path| !desired.contains_key(*path))
+                .cloned()
+                .collect::<Vec<_>>();
+            for path in stale {
+                if let Err(error) = self.watcher.unwatch(&path) {
+                    self.last_error = Some(format!("unwatch {}: {error}", path.display()));
+                }
+                self.watched.remove(&path);
+            }
+            for (path, recursive) in &desired {
+                let current = self.watched.get(path).copied();
+                if current == Some(*recursive) {
+                    continue;
+                }
+                if current.is_some() {
+                    if let Err(error) = self.watcher.unwatch(path) {
+                        self.last_error = Some(format!("unwatch {}: {error}", path.display()));
+                    }
+                    self.watched.remove(path);
+                }
+                let mode = if *recursive {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                };
+                registration_attempts = registration_attempts.saturating_add(1);
+                match self.watcher.watch(path, mode) {
+                    Ok(()) => {
+                        self.watched.insert(path.clone(), *recursive);
+                    }
+                    Err(error) => {
+                        self.last_error = Some(format!("watch {}: {error}", path.display()));
+                    }
                 }
             }
         }
-        *self
-            .targets
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = targets;
         {
             let mut counters = self.lock_counters();
             counters.reconciliations = counters.reconciliations.saturating_add(1);
+            counters.registration_attempts = counters
+                .registration_attempts
+                .saturating_add(registration_attempts);
+            if force_rearm {
+                counters.forced_rearms = counters.forced_rearms.saturating_add(1);
+            }
         }
-        self.write_receipt(if self.last_error.is_some() {
+        let receipt = self.write_receipt(if self.last_error.is_some() {
             "degraded"
         } else {
             "active"
-        })
+        });
+        (affected, receipt)
+    }
+
+    fn next_watermark(&self) -> EventWatermark {
+        EventWatermark::new(
+            self.watcher_epoch,
+            self.callback_sequence
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_add(1))
+                })
+                .unwrap_or_else(|current| current)
+                .saturating_add(1),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_rearm_overlap_hook(&mut self, hook: impl FnMut(&Path) + 'static) {
+        self.rearm_overlap_hook = Some(Box::new(hook));
     }
 
     pub(super) fn write_receipt(&self, status: &str) -> Result<()> {
@@ -306,6 +569,10 @@ impl DaemonFileWatcher {
             "backend": "notify_recommended",
             "idle_strategy": "blocking",
             "watched_roots": self.watched.len(),
+            "catalog_routes": self.authority.read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .catalog.snapshot()
+                .map_or(0, |catalog| catalog.route_ids().len()),
             "raw_events": counters.raw_events,
             "ignored_access_events": counters.ignored_access_events,
             "ignored_catalog_lock_events": counters.ignored_catalog_lock_events,
@@ -313,8 +580,13 @@ impl DaemonFileWatcher {
             "ignored_other_events": counters.ignored_other_events,
             "last_ignored_access_path": counters.last_ignored_access_path,
             "backend_errors": counters.backend_errors,
+            "rescan_notifications": counters.rescan_notifications,
+            "ingress_overflows": counters.ingress_overflows,
+            "ingress_disconnects": counters.ingress_disconnects,
             "coalesced_wakeups": counters.coalesced_wakeups,
             "reconciliations": counters.reconciliations,
+            "forced_rearms": counters.forced_rearms,
+            "registration_attempts": counters.registration_attempts,
             "last_relevant_path": counters.last_relevant_path,
             "last_error": self.last_error,
             "wakeup": wakeup,
@@ -334,6 +606,7 @@ impl DaemonFileWatcher {
 
 impl Drop for DaemonFileWatcher {
     fn drop(&mut self) {
+        self.accepting_events.store(false, Ordering::Release);
         let _ = self.sender.send(WatchMessage::Stop);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -345,36 +618,82 @@ impl Drop for DaemonFileWatcher {
     }
 }
 
+// This is the narrow adapter between notify's callback and the independently
+// owned queue, wakeup, lifecycle, and watermark state.
+#[allow(clippy::too_many_arguments)]
 fn forward_watch_event(
     data_root: &Path,
     counters: &Mutex<WatchCounters>,
-    sender: &mpsc::Sender<WatchMessage>,
+    sender: &mpsc::SyncSender<WatchMessage>,
+    wakeup: &DaemonWakeup,
+    accepting_events: &AtomicBool,
+    watcher_epoch: u64,
+    sequence: &AtomicU64,
     event: notify::Result<Event>,
 ) {
+    if !accepting_events.load(Ordering::Acquire) {
+        return;
+    }
     if let Ok(event) = event.as_ref() {
-        if let Some(kind) = ignored_watch_event(data_root, event) {
-            record_ignored_watch_event(counters, event, kind);
-            return;
+        if !event.need_rescan() {
+            if let Some(kind) = ignored_watch_event(data_root, event) {
+                record_ignored_watch_event(counters, event, kind);
+                return;
+            }
         }
     }
-    let _ = sender.send(WatchMessage::Event(event));
+    let watermark = EventWatermark::new(
+        watcher_epoch,
+        sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(1))
+            })
+            .unwrap_or_else(|current| current)
+            .saturating_add(1),
+    );
+    match sender.try_send(WatchMessage::Event { event, watermark }) {
+        Ok(()) => {}
+        Err(mpsc::TrySendError::Full(_)) => {
+            let mut counters = counters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            counters.ingress_overflows = counters.ingress_overflows.saturating_add(1);
+            drop(counters);
+            wakeup.signal_source_watch(SourceWatchBatch::catalog_reconciliation(watermark));
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => {
+            let mut counters = counters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            counters.ingress_disconnects = counters.ingress_disconnects.saturating_add(1);
+            drop(counters);
+            wakeup.signal_source_watch(SourceWatchBatch::catalog_reconciliation(watermark));
+        }
+    }
 }
 
 fn watch_event_loop(
     receiver: mpsc::Receiver<WatchMessage>,
-    targets: Arc<RwLock<Vec<PathBuf>>>,
+    authority: Arc<RwLock<WatchAuthority>>,
     counters: Arc<Mutex<WatchCounters>>,
     wakeup: Arc<DaemonWakeup>,
     data_root: PathBuf,
     daemon_root: PathBuf,
 ) {
     loop {
-        let first = match receiver.recv() {
-            Ok(WatchMessage::Event(event)) => event,
+        let (first, first_watermark) = match receiver.recv() {
+            Ok(WatchMessage::Event { event, watermark }) => (event, watermark),
             Ok(WatchMessage::Stop) | Err(_) => return,
         };
         let started = Instant::now();
-        let mut relevant = record_watch_event(&targets, &counters, &data_root, &daemon_root, first);
+        let mut relevant = record_watch_event(
+            &authority,
+            &counters,
+            &data_root,
+            &daemon_root,
+            first,
+            first_watermark,
+        );
         loop {
             let elapsed = started.elapsed();
             if elapsed >= WATCH_DEBOUNCE_MAX {
@@ -382,32 +701,39 @@ fn watch_event_loop(
             }
             let timeout = WATCH_DEBOUNCE_QUIET.min(WATCH_DEBOUNCE_MAX - elapsed);
             match receiver.recv_timeout(timeout) {
-                Ok(WatchMessage::Event(event)) => {
-                    relevant |=
-                        record_watch_event(&targets, &counters, &data_root, &daemon_root, event);
+                Ok(WatchMessage::Event { event, watermark }) => {
+                    relevant.merge(record_watch_event(
+                        &authority,
+                        &counters,
+                        &data_root,
+                        &daemon_root,
+                        event,
+                        watermark,
+                    ));
                 }
                 Ok(WatchMessage::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
             }
         }
-        if relevant {
+        if !relevant.is_empty() {
             let mut counters = counters
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             counters.coalesced_wakeups = counters.coalesced_wakeups.saturating_add(1);
             drop(counters);
-            wakeup.signal_filesystem();
+            wakeup.signal_source_watch(relevant);
         }
     }
 }
 
 fn record_watch_event(
-    targets: &RwLock<Vec<PathBuf>>,
+    authority: &RwLock<WatchAuthority>,
     counters: &Mutex<WatchCounters>,
     data_root: &Path,
     daemon_root: &Path,
     event: notify::Result<Event>,
-) -> bool {
+    watermark: EventWatermark,
+) -> SourceWatchBatch {
     let event = match event {
         Ok(event) => event,
         Err(_) => {
@@ -415,39 +741,78 @@ fn record_watch_event(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             counters.backend_errors = counters.backend_errors.saturating_add(1);
-            return true;
+            return SourceWatchBatch::catalog_reconciliation(watermark);
         }
     };
-    if let Some(kind) = ignored_watch_event(data_root, &event) {
-        record_ignored_watch_event(counters, &event, kind);
-        return false;
-    }
-    let targets = targets
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let relevant_path = event.paths.iter().find(|event_path| {
-        if event_path.as_path() == data_root || event_path.starts_with(daemon_root) {
-            return false;
-        }
-        targets
-            .iter()
-            .any(|target| paths_overlap(target, event_path))
-    });
-    let relevant = event.paths.is_empty() || relevant_path.is_some();
-    drop(targets);
-    if relevant {
+    if event.need_rescan() {
         let mut counters = counters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         counters.raw_events = counters.raw_events.saturating_add(1);
-        counters.last_relevant_path = relevant_path.cloned();
+        counters.rescan_notifications = counters.rescan_notifications.saturating_add(1);
+        counters.last_relevant_path = event.paths.first().cloned();
+        return SourceWatchBatch::catalog_reconciliation(watermark);
+    }
+    if let Some(kind) = ignored_watch_event(data_root, &event) {
+        record_ignored_watch_event(counters, &event, kind);
+        return SourceWatchBatch::default();
+    }
+    let authority = authority
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let catalog = authority.catalog.snapshot();
+    let mut batch = SourceWatchBatch::default();
+    let mut relevant_path = None;
+    for event_path in &event.paths {
+        if event_path.as_path() == data_root || event_path.starts_with(daemon_root) {
+            continue;
+        }
+        if authority
+            .controls
+            .iter()
+            .any(|target| declared_control_paths_overlap(target, event_path))
+        {
+            batch.reconcile = Some(watermark);
+            relevant_path.get_or_insert_with(|| event_path.clone());
+        }
+        if let Some(catalog) = catalog.as_ref() {
+            for route in catalog.routes_overlapping_path(event_path) {
+                batch.routes.insert(route, watermark);
+                relevant_path.get_or_insert_with(|| event_path.clone());
+            }
+        }
+    }
+    if event.paths.is_empty() {
+        batch.reconcile = Some(watermark);
+        batch.rearm = true;
+    } else if !batch.is_empty() && watch_event_requires_rearm(&event) {
+        batch.rearm = true;
+    }
+    drop(authority);
+    if !batch.is_empty() {
+        let mut counters = counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        counters.raw_events = counters.raw_events.saturating_add(1);
+        counters.last_relevant_path = relevant_path;
     } else {
         let mut counters = counters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         counters.ignored_other_events = counters.ignored_other_events.saturating_add(1);
     }
-    relevant
+    batch
+}
+
+fn watch_event_requires_rearm(event: &Event) -> bool {
+    matches!(
+        event.kind,
+        EventKind::Any
+            | EventKind::Other
+            | EventKind::Create(CreateKind::Any | CreateKind::Folder | CreateKind::Other)
+            | EventKind::Modify(ModifyKind::Any | ModifyKind::Name(_) | ModifyKind::Other)
+            | EventKind::Remove(RemoveKind::Any | RemoveKind::Folder | RemoveKind::Other)
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -505,51 +870,28 @@ fn record_ignored_watch_event(
     }
 }
 
-fn paths_overlap(target: &Path, event: &Path) -> bool {
-    if target == event || target.starts_with(event) || event.starts_with(target) {
-        return true;
-    }
-    let Some(target_name) = target.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    let Some(event_name) = event.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    target.parent() == event.parent()
-        && (event_name == format!("{target_name}-wal")
-            || event_name == format!("{target_name}-shm")
-            || event_name == format!("{target_name}-journal"))
+fn declared_control_paths_overlap(target: &Path, event: &Path) -> bool {
+    target == event || target.starts_with(event) || event.starts_with(target)
 }
 
-fn daemon_watch_targets(data_root: &Path) -> Result<Vec<PathBuf>> {
-    let home = identity::home_dir().context("resolve user home for daemon filesystem watcher")?;
-    let mut targets = BTreeSet::new();
-    targets.insert(data_root.join(CONFIG_FILE));
-    targets.insert(data_root.join("catalogs").join("explicit-sources"));
-    let sources = discover_provider_sources(&home);
-    validate_provider_source_roots_outside_data_root(data_root, sources.iter())
-        .context("validate provider roots before daemon watch registration")?;
-    for source in sources {
-        targets.insert(source.path);
-    }
-    Ok(targets.into_iter().collect())
-}
-
-fn watch_roots(targets: &[PathBuf]) -> BTreeMap<PathBuf, bool> {
+fn watch_roots<'a>(targets: impl IntoIterator<Item = &'a Path>) -> BTreeMap<PathBuf, bool> {
     let mut roots = BTreeMap::new();
     for target in targets {
         if target.is_dir() {
-            roots.insert(target.clone(), true);
+            roots
+                .entry(target.to_path_buf())
+                .and_modify(|recursive| *recursive = true)
+                .or_insert(true);
             continue;
         }
         if target.is_file() {
             if let Some(parent) = target.parent() {
-                roots.insert(parent.to_path_buf(), false);
+                roots.entry(parent.to_path_buf()).or_insert(false);
             }
             continue;
         }
         if let Some(existing) = nearest_existing_ancestor(target) {
-            roots.insert(existing, false);
+            roots.entry(existing).or_insert(false);
         }
     }
     roots
@@ -592,302 +934,4 @@ pub(super) fn daemon_wakeup_report(data_root: &Path) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn catalog_lock_query_churn_stays_idle_but_provider_append_wakes() {
-        use std::{fs::OpenOptions, io::Write};
-
-        let temp = tempfile::tempdir().expect("create watcher fixture");
-        let data_root = temp.path().join("data");
-        let catalog_root = data_root.join("catalogs").join("explicit-sources");
-        let provider_root = temp.path().join("provider");
-        let provider_file = provider_root.join("session.jsonl");
-        fs::create_dir_all(&catalog_root).expect("create catalog root");
-        fs::create_dir_all(&provider_root).expect("create provider root");
-        fs::write(
-            catalog_root.join("catalog-00000000000000000001.json"),
-            b"{\"revision\":1}\n",
-        )
-        .expect("write catalog");
-        fs::write(catalog_root.join("catalog.lock"), b"").expect("write catalog lock");
-        fs::write(&provider_file, b"{\"event\":1}\n").expect("write provider fixture");
-
-        let targets = Arc::new(RwLock::new(vec![
-            catalog_root.clone(),
-            provider_file.clone(),
-        ]));
-        let counters = Arc::new(Mutex::new(WatchCounters::default()));
-        let wakeup = Arc::new(DaemonWakeup::default());
-        let (sender, receiver) = mpsc::channel();
-        let callback_sender = sender.clone();
-        let callback_counters = Arc::clone(&counters);
-        let callback_data_root = data_root.clone();
-        let mut watcher = RecommendedWatcher::new(
-            move |event: notify::Result<Event>| {
-                forward_watch_event(
-                    &callback_data_root,
-                    &callback_counters,
-                    &callback_sender,
-                    event,
-                );
-            },
-            Config::default(),
-        )
-        .expect("start fixture watcher");
-        watcher
-            .watch(&catalog_root, RecursiveMode::Recursive)
-            .expect("watch catalog");
-        watcher
-            .watch(&provider_root, RecursiveMode::Recursive)
-            .expect("watch provider");
-
-        let thread_targets = Arc::clone(&targets);
-        let thread_counters = Arc::clone(&counters);
-        let thread_wakeup = Arc::clone(&wakeup);
-        let thread_data_root = data_root.clone();
-        let thread_daemon_root = daemon_root_path(&data_root);
-        let watch_thread = thread::spawn(move || {
-            watch_event_loop(
-                receiver,
-                thread_targets,
-                thread_counters,
-                thread_wakeup,
-                thread_data_root,
-                thread_daemon_root,
-            );
-        });
-
-        for _ in 0..128 {
-            let lock = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(catalog_root.join("catalog.lock"))
-                .expect("open catalog lock like a query");
-            fs::read_to_string(catalog_root.join("catalog-00000000000000000001.json"))
-                .expect("query catalog");
-            drop(lock);
-        }
-        thread::sleep(WATCH_DEBOUNCE_QUIET * 3);
-
-        let idle = wakeup.snapshot();
-        assert_eq!(idle["filesystem_signals"], 0, "{idle:#}");
-        assert_eq!(idle["work_cycles"], 0, "{idle:#}");
-        assert_eq!(idle["no_work_cycles"], 0, "{idle:#}");
-        let counters_after_churn = counters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(counters_after_churn.coalesced_wakeups, 0);
-        assert_eq!(counters_after_churn.reconciliations, 0);
-        assert!(counters_after_churn.ignored_catalog_lock_events > 0);
-        drop(counters_after_churn);
-
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(provider_file)
-            .expect("open provider fixture for append");
-        file.write_all(b"{\"event\":2}\n")
-            .expect("append provider event");
-        file.flush().expect("flush provider append");
-        drop(file);
-        let wake = wakeup.wait(Duration::from_secs(2));
-        assert!(wake.filesystem, "provider append did not wake the daemon");
-        assert!(!wake.timed_out, "provider append exceeded two seconds");
-
-        sender.send(WatchMessage::Stop).expect("stop watch thread");
-        watch_thread.join().expect("join watch thread");
-        drop(watcher);
-    }
-
-    #[test]
-    fn wakeup_blocks_until_signaled_and_coalesces_reasons() {
-        let wakeup = Arc::new(DaemonWakeup::default());
-        wakeup.signal_filesystem();
-        wakeup.signal_ipc();
-        let wake = wakeup.wait(Duration::from_secs(1));
-        assert!(wake.filesystem);
-        assert!(!wake.shutdown);
-        assert!(!wake.timed_out);
-        assert_eq!(wakeup.snapshot()["ipc_signals"], 1);
-    }
-
-    #[test]
-    fn deferring_filesystem_debt_preserves_ipc_immediacy() {
-        let wakeup = DaemonWakeup::default();
-        wakeup.defer_filesystem_until_safety();
-        // This event is after the successful publication transition, not a bit
-        // that happened to be pending when publication completed.
-        wakeup.signal_filesystem();
-        wakeup.signal_ipc();
-
-        let wake = wakeup.wait(Duration::ZERO);
-
-        assert!(wake.filesystem);
-        assert!(!wake.filesystem_refresh);
-        assert!(!wake.shutdown);
-        assert!(
-            !wake.timed_out,
-            "the retained IPC signal must wake immediately"
-        );
-
-        wakeup.release_filesystem_at_safety();
-        wakeup.signal_filesystem();
-        let safety_wake = wakeup.wait(Duration::ZERO);
-        assert!(safety_wake.filesystem);
-        assert!(safety_wake.filesystem_refresh);
-        assert!(!safety_wake.timed_out);
-    }
-
-    #[test]
-    fn sqlite_companion_files_overlap_the_database_target() {
-        let target = Path::new("/tmp/history.sqlite");
-        assert!(paths_overlap(target, Path::new("/tmp/history.sqlite-wal")));
-        assert!(paths_overlap(target, Path::new("/tmp/history.sqlite-shm")));
-        assert!(!paths_overlap(
-            target,
-            Path::new("/tmp/unrelated.sqlite-wal")
-        ));
-    }
-
-    #[test]
-    fn core_owned_writes_do_not_retrigger_provider_refresh_or_increment_work_counters() {
-        let data_root = Path::new("/tmp/ctx-data");
-        let daemon_root = data_root.join("daemon");
-        let targets = RwLock::new(vec![
-            data_root.join("config.toml"),
-            data_root.join(".codex/sessions"),
-        ]);
-        let counters = Mutex::new(WatchCounters::default());
-        let event = |path: &Path| {
-            let mut event = Event::new(notify::EventKind::Any);
-            event.paths.push(path.to_path_buf());
-            event
-        };
-
-        assert!(!record_watch_event(
-            &targets,
-            &counters,
-            data_root,
-            &daemon_root,
-            Ok(event(&daemon_root.join("wakeup.json"))),
-        ));
-        assert!(!record_watch_event(
-            &targets,
-            &counters,
-            data_root,
-            &daemon_root,
-            Ok(event(data_root)),
-        ));
-        let mut access = event(&data_root.join("config.toml"));
-        access.kind = EventKind::Access(AccessKind::Read);
-        assert!(!record_watch_event(
-            &targets,
-            &counters,
-            data_root,
-            &daemon_root,
-            Ok(access),
-        ));
-        assert_eq!(counters.lock().unwrap().raw_events, 0);
-        let mut access_time = event(&data_root.join("config.toml"));
-        access_time.kind = EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime));
-        assert!(!record_watch_event(
-            &targets,
-            &counters,
-            data_root,
-            &daemon_root,
-            Ok(access_time),
-        ));
-        let mut catalog_lock = event(
-            &data_root
-                .join("catalogs")
-                .join("explicit-sources")
-                .join("catalog.lock"),
-        );
-        catalog_lock.kind = EventKind::Access(AccessKind::Close(AccessMode::Write));
-        assert!(!record_watch_event(
-            &targets,
-            &counters,
-            data_root,
-            &daemon_root,
-            Ok(catalog_lock),
-        ));
-        let mut close_write = event(&data_root.join("config.toml"));
-        close_write.kind = EventKind::Access(AccessKind::Close(AccessMode::Write));
-        assert!(record_watch_event(
-            &targets,
-            &counters,
-            data_root,
-            &daemon_root,
-            Ok(close_write),
-        ));
-        assert!(record_watch_event(
-            &targets,
-            &counters,
-            data_root,
-            &daemon_root,
-            Ok(event(&data_root.join("config.toml"))),
-        ));
-        assert_eq!(counters.lock().unwrap().raw_events, 2);
-    }
-
-    #[test]
-    fn authoritative_changes_and_dynamic_discovery_remain_relevant() {
-        use notify::event::{CreateKind, DataChange, RenameMode};
-
-        let data_root = Path::new("/tmp/ctx-data");
-        let daemon_root = data_root.join("daemon");
-        let provider_file = PathBuf::from("/tmp/provider/session.jsonl");
-        let sqlite = PathBuf::from("/tmp/provider/history.sqlite");
-        let dynamic_source = PathBuf::from("/tmp/home/.codex/sessions");
-        let catalog_root = data_root.join("catalogs").join("explicit-sources");
-        let targets = RwLock::new(vec![
-            data_root.join("config.toml"),
-            catalog_root.clone(),
-            provider_file.clone(),
-            sqlite.clone(),
-            dynamic_source,
-        ]);
-        let counters = Mutex::new(WatchCounters::default());
-        let relevant = |kind, paths: &[&Path]| {
-            let mut event = Event::new(kind);
-            event
-                .paths
-                .extend(paths.iter().map(|path| path.to_path_buf()));
-            record_watch_event(&targets, &counters, data_root, &daemon_root, Ok(event))
-        };
-
-        assert!(relevant(
-            EventKind::Access(AccessKind::Close(AccessMode::Write)),
-            &[&data_root.join("config.toml")],
-        ));
-        assert!(relevant(
-            EventKind::Create(CreateKind::File),
-            &[&catalog_root.join("catalog-00000000000000000002.json")],
-        ));
-        assert!(relevant(
-            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
-            &[&provider_file],
-        ));
-        assert!(relevant(
-            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
-            &[Path::new("/tmp/provider/session.tmp"), &provider_file],
-        ));
-        assert!(relevant(
-            EventKind::Create(CreateKind::Folder),
-            &[Path::new("/tmp/home/.codex")],
-        ));
-        assert!(relevant(
-            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
-            &[Path::new("/tmp/provider/history.sqlite-wal")],
-        ));
-        assert!(record_watch_event(
-            &targets,
-            &counters,
-            data_root,
-            &daemon_root,
-            Err(notify::Error::generic("overflow")),
-        ));
-    }
-}
+mod tests;

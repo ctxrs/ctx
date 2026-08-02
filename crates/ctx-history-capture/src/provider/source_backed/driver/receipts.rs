@@ -1,23 +1,37 @@
-use std::fmt;
-
 use super::super::*;
 
-pub type SourceBackedCoordinatorResult<T> = Result<T, SourceBackedCoordinatorError>;
-pub type SourceBackedRouteResult<T> = Result<T, SourceBackedRouteError>;
-
-/// Three independently committed complete inventories bound transient
-/// automatic-source absence while preserving prompt eventual deletion.
-pub const AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES: u32 = 3;
 pub const MAX_RECORDED_SOURCE_BACKED_FAILURES: usize = 64;
 pub const MAX_SOURCE_BACKED_FAILURE_SELECTOR_BYTES: usize = 512;
 pub const MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES: usize = 512;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceBackedRefreshOutcome {
-    Completed,
-    CompletedWithSourceFailures,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in super::super) struct SourceBackedRecordProgressDelta {
+    pub(in super::super) accepted_records: u64,
+    pub(in super::super) completed_bytes: u64,
 }
 
+pub type SourceBackedCoordinatorResult<T> = Result<T, SourceBackedCoordinatorError>;
+pub type SourceBackedRouteResult<T> = Result<T, SourceBackedRouteError>;
+
+/// Three independently committed certified whole-route absences bound grace.
+pub const AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS: u32 =
+    ctx_history_index::policy::AUTOMATIC_ROUTE_DELETION_GRACE_OBSERVATIONS;
+
+/// Selects the provider routes incorporated into one global generation.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SourceBackedRefreshScope {
+    #[default]
+    All,
+    Exact(BTreeSet<SourceRouteIdentity>),
+}
+
+impl SourceBackedRefreshScope {
+    pub fn exact(route_identities: impl IntoIterator<Item = SourceRouteIdentity>) -> Self {
+        Self::Exact(route_identities.into_iter().collect())
+    }
+}
+
+/// Narrow source-authority failures that may be isolated to one route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceBackedSourceFailureClass {
     Unavailable,
@@ -26,8 +40,70 @@ pub enum SourceBackedSourceFailureClass {
     Incompatible,
 }
 
+impl SourceBackedSourceFailureClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::SourceChanged => "source_changed",
+            Self::Unreadable => "unreadable",
+            Self::Incompatible => "incompatible",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Unavailable => 0,
+            Self::SourceChanged => 1,
+            Self::Unreadable => 2,
+            Self::Incompatible => 3,
+        }
+    }
+}
+
+#[cfg(test)]
+mod bounded_failure_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_diagnostics_retain_exact_aggregate_class_totals() {
+        let failures = (0..70).map(|index| {
+            SourceBackedFailedRoute::new(
+                SourceRouteIdentity::from_sha256(format!("{index:064x}")).unwrap(),
+                format!("source-{index}"),
+                CaptureProvider::OpenCode,
+                if index % 2 == 0 {
+                    SourceBackedSourceFailureClass::Unreadable
+                } else {
+                    SourceBackedSourceFailureClass::Incompatible
+                },
+                false,
+                format!("selector-{index}"),
+                format!("detail-{index}"),
+            )
+        });
+        let bounded = SourceBackedSourceFailures::from_failures(failures);
+
+        assert_eq!(
+            bounded.failures().len(),
+            MAX_RECORDED_SOURCE_BACKED_FAILURES
+        );
+        assert_eq!(bounded.omitted(), 6);
+        assert_eq!(bounded.total(), 70);
+        assert_eq!(
+            bounded.class_total(SourceBackedSourceFailureClass::Unreadable),
+            35
+        );
+        assert_eq!(
+            bounded.class_total(SourceBackedSourceFailureClass::Incompatible),
+            35
+        );
+    }
+}
+
+/// Content-free identity and class for one route-local failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceBackedSourceFailure {
+pub struct SourceBackedFailedRoute {
+    pub route_identity: SourceRouteIdentity,
     pub source_identity: String,
     pub provider: CaptureProvider,
     pub class: SourceBackedSourceFailureClass,
@@ -36,13 +112,65 @@ pub struct SourceBackedSourceFailure {
     pub detail: String,
 }
 
-impl SourceBackedSourceFailure {
+/// Compact lifecycle result retained for every failed route. Human-readable
+/// selector/detail diagnostics live only in [`SourceBackedSourceFailures`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBackedFailedRouteOutcome {
+    pub route_identity: SourceRouteIdentity,
+    pub source_identity: String,
+    pub provider: CaptureProvider,
+    pub class: SourceBackedSourceFailureClass,
+    pub carried_forward: bool,
+}
+
+impl From<&SourceBackedFailedRoute> for SourceBackedFailedRouteOutcome {
+    fn from(failure: &SourceBackedFailedRoute) -> Self {
+        Self {
+            route_identity: failure.route_identity.clone(),
+            source_identity: failure.source_identity.clone(),
+            provider: failure.provider,
+            class: failure.class,
+            carried_forward: failure.carried_forward,
+        }
+    }
+}
+
+impl SourceBackedFailedRoute {
+    pub fn new(
+        route_identity: SourceRouteIdentity,
+        source_identity: String,
+        provider: CaptureProvider,
+        class: SourceBackedSourceFailureClass,
+        carried_forward: bool,
+        source_selector: impl AsRef<str>,
+        detail: impl AsRef<str>,
+    ) -> Self {
+        Self {
+            route_identity,
+            source_identity,
+            provider,
+            class,
+            carried_forward,
+            source_selector: bounded_text(
+                source_selector.as_ref(),
+                MAX_SOURCE_BACKED_FAILURE_SELECTOR_BYTES,
+            ),
+            detail: bounded_text(detail.as_ref(), MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES),
+        }
+    }
+
     pub(in super::super) fn from_route(
         route: &SourceBackedRoute,
         class: SourceBackedSourceFailureClass,
         carried_forward: bool,
         detail: impl AsRef<str>,
-    ) -> Self {
+    ) -> SourceBackedCoordinatorResult<Self> {
+        let route_identity = route.metadata.route_identity.clone().ok_or_else(|| {
+            SourceBackedCoordinatorError::InvalidRoute {
+                provider: route.metadata.source.provider,
+                detail: "failed executable route has no route identity".to_owned(),
+            }
+        })?;
         let mut digest = Sha256::new();
         digest.update(b"ctx.source-failure-identity-v1\0");
         digest.update(route.metadata.source.provider.as_str().as_bytes());
@@ -52,17 +180,15 @@ impl SourceBackedSourceFailure {
         let path = route.metadata.source.path.as_os_str().as_encoded_bytes();
         digest.update((path.len() as u64).to_be_bytes());
         digest.update(path);
-        Self {
-            source_identity: format!("{:x}", digest.finalize()),
-            provider: route.metadata.source.provider,
+        Ok(Self::new(
+            route_identity,
+            format!("{:x}", digest.finalize()),
+            route.metadata.source.provider,
             class,
             carried_forward,
-            source_selector: bounded_text(
-                &route.metadata.source.path.display().to_string(),
-                MAX_SOURCE_BACKED_FAILURE_SELECTOR_BYTES,
-            ),
-            detail: bounded_text(detail.as_ref(), MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES),
-        }
+            route.metadata.source.path.display().to_string(),
+            detail,
+        ))
     }
 }
 
@@ -79,12 +205,21 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SourceBackedSourceFailures {
-    failures: Vec<SourceBackedSourceFailure>,
+    failures: Vec<SourceBackedFailedRoute>,
     omitted: usize,
+    class_totals: [usize; 4],
 }
 
 impl SourceBackedSourceFailures {
-    pub fn failures(&self) -> &[SourceBackedSourceFailure] {
+    pub fn from_failures(failures: impl IntoIterator<Item = SourceBackedFailedRoute>) -> Self {
+        let mut bounded = Self::default();
+        for failure in failures {
+            bounded.record(failure);
+        }
+        bounded
+    }
+
+    pub fn failures(&self) -> &[SourceBackedFailedRoute] {
         &self.failures
     }
 
@@ -96,16 +231,36 @@ impl SourceBackedSourceFailures {
         self.failures.len().saturating_add(self.omitted)
     }
 
+    pub fn class_total(&self, class: SourceBackedSourceFailureClass) -> usize {
+        self.class_totals[class.index()]
+    }
+
     pub fn is_empty(&self) -> bool {
         self.total() == 0
     }
 
-    pub(in super::super) fn record(&mut self, failure: SourceBackedSourceFailure) {
+    pub(in super::super) fn record(&mut self, failure: SourceBackedFailedRoute) {
+        self.class_totals[failure.class.index()] =
+            self.class_totals[failure.class.index()].saturating_add(1);
         if self.failures.len() < MAX_RECORDED_SOURCE_BACKED_FAILURES {
             self.failures.push(failure);
         } else {
             self.omitted = self.omitted.saturating_add(1);
         }
+    }
+
+    pub fn extend(&mut self, failures: impl IntoIterator<Item = SourceBackedFailedRoute>) {
+        for failure in failures {
+            self.record(failure);
+        }
+    }
+}
+
+impl std::ops::Deref for SourceBackedSourceFailures {
+    type Target = [SourceBackedFailedRoute];
+
+    fn deref(&self) -> &Self::Target {
+        self.failures()
     }
 }
 
@@ -124,10 +279,11 @@ impl fmt::Display for SourceBackedSourceFailures {
             }
             write!(
                 formatter,
-                "source-backed scan failed for {}: {}: {}",
+                "source-backed scan failed for {} at {}: {}: {}",
                 failure.provider.as_str(),
+                failure.source_selector,
                 failure.class.display_label(),
-                failure.detail
+                failure.detail,
             )?;
         }
         let undisplayed = self
@@ -170,6 +326,8 @@ pub struct SourceBackedRouteMetadata {
     pub selection: Option<SourceBackedRouteSelection>,
     pub selector_authority: SourceBackedSelectorAuthority,
     pub unsupported_reason: Option<String>,
+    pub route_identity: Option<SourceRouteIdentity>,
+    pub watch_target_kind: SourceBackedWatchTargetKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +382,11 @@ pub enum SourceBackedCoordinatorError {
         #[source]
         source: SourceBackedRouteError,
     },
+    #[error("source-backed refresh has an unknown or unavailable route for {provider}: {detail}")]
+    UnavailableRoute {
+        provider: CaptureProvider,
+        detail: String,
+    },
     #[error("source {source_id} was staged by more than one provider route")]
     DuplicateSourceOwner { source_id: String },
     #[error("base source {source_id} was not claimed by any provider route in this refresh")]
@@ -234,11 +397,13 @@ pub enum SourceBackedCoordinatorError {
     RetainedDeletionRecertification { source_id: String, detail: String },
     #[error("source-backed refresh progress callback failed: {0}")]
     Progress(SourceBackedRouteError),
+    #[error("selected source-backed route {route_id} is unknown or not executable")]
+    InvalidRefreshScope { route_id: String },
     #[error(
-        "source-backed refresh completed with source failures but no usable source route: {failures}"
+        "source-backed refresh completed with source failures but retained no usable source: {failed_routes}"
     )]
     NoUsableSourceRoutes {
-        failures: SourceBackedSourceFailures,
+        failed_routes: SourceBackedSourceFailures,
     },
 }
 
@@ -248,18 +413,31 @@ pub struct SourceBackedGenerationSink<'writer> {
     pub(in super::super) writer: &'writer mut GenerationWriter,
     pub(in super::super) owners: &'writer mut HashMap<[u8; 32], SourceOwner>,
     pub(in super::super) complete_inventories: &'writer mut Vec<CompleteInventoryOwner>,
+    pub(in super::super) applied_removals: &'writer mut Vec<SourceBackedCertifiedRemoval>,
     pub(in super::super) route_index: usize,
     pub(in super::super) leaf_worker_budget: usize,
-    pub(in super::super) automatic_missing_observed_at_unix_ms: Option<u64>,
-    pub(in super::super) report_current_source_progress:
-        &'writer mut (dyn FnMut(SourceBackedCurrentSourceProgress) -> SourceBackedRouteResult<()>
-                          + 'writer),
+    pub(in super::super) record_progress: Option<
+        &'writer mut dyn FnMut(
+            SourceBackedRecordProgressDelta,
+        ) -> SourceBackedCoordinatorResult<()>,
+    >,
+    pub(in super::super) current_source_progress: Option<
+        &'writer mut dyn FnMut(SourceBackedCurrentSourceProgress) -> SourceBackedRouteResult<()>,
+    >,
 }
 
 #[derive(Clone)]
 pub(in super::super) struct SourceOwner {
     pub(in super::super) route_index: usize,
     pub(in super::super) source: SourceKey,
+    pub(in super::super) present: bool,
+    pub(in super::super) revalidation: Option<SourceBackedRouteRevalidation>,
+}
+
+#[derive(Clone)]
+pub(in super::super) enum SourceBackedRouteRevalidation {
+    Source(CertifiedSource),
+    Deletion(CertifiedSourceDeletion),
 }
 
 #[derive(Clone)]
@@ -273,12 +451,9 @@ impl SourceBackedGenerationSink<'_> {
         &mut self,
         progress: SourceBackedCurrentSourceProgress,
     ) -> SourceBackedRouteResult<()> {
-        (self.report_current_source_progress)(progress).map_err(|error| {
-            SourceBackedRouteError::new(
-                SourceBackedRouteErrorKind::Internal,
-                format!("source-backed progress callback failed: {error}"),
-            )
-        })
+        self.current_source_progress
+            .as_mut()
+            .map_or(Ok(()), |report| report(progress))
     }
 
     pub fn base_source(&self, source: &SourceKey) -> Option<&CertifiedSource> {
@@ -291,7 +466,7 @@ impl SourceBackedGenerationSink<'_> {
     }
 
     pub fn begin_source(&mut self, source: SourceKey) -> SourceBackedCoordinatorResult<()> {
-        self.claim(&source)?;
+        self.claim_present(&source)?;
         self.writer.begin_source(source)?;
         Ok(())
     }
@@ -300,12 +475,28 @@ impl SourceBackedGenerationSink<'_> {
         &mut self,
         source: SourceKey,
     ) -> SourceBackedCoordinatorResult<&CertifiedSource> {
-        self.claim(&source)?;
+        self.claim_present(&source)?;
         Ok(self.writer.begin_source_append(source)?)
     }
 
     pub fn add_core_record(&mut self, record: CoreRecord) -> SourceBackedCoordinatorResult<()> {
         self.writer.add_core_record(record)?;
+        if let Some(report_progress) = self.record_progress.as_mut() {
+            report_progress(SourceBackedRecordProgressDelta {
+                accepted_records: 1,
+                completed_bytes: 0,
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn report_completed_bytes(&mut self, bytes: u64) -> SourceBackedCoordinatorResult<()> {
+        if let Some(report_progress) = self.record_progress.as_mut() {
+            report_progress(SourceBackedRecordProgressDelta {
+                accepted_records: 0,
+                completed_bytes: bytes,
+            })?;
+        }
         Ok(())
     }
 
@@ -313,7 +504,9 @@ impl SourceBackedGenerationSink<'_> {
         &mut self,
         certificate: CertifiedSource,
     ) -> SourceBackedCoordinatorResult<()> {
-        self.writer.certify_source(certificate)?;
+        let source = certificate.observation().source().clone();
+        self.writer.certify_source(certificate.clone())?;
+        self.record_revalidation(&source, SourceBackedRouteRevalidation::Source(certificate))?;
         Ok(())
     }
 
@@ -321,7 +514,10 @@ impl SourceBackedGenerationSink<'_> {
         &mut self,
         append: CertifiedSourceAppend,
     ) -> SourceBackedCoordinatorResult<()> {
+        let certificate = append.current().clone();
+        let source = certificate.observation().source().clone();
         self.writer.certify_source_append(append)?;
+        self.record_revalidation(&source, SourceBackedRouteRevalidation::Source(certificate))?;
         Ok(())
     }
 
@@ -329,8 +525,10 @@ impl SourceBackedGenerationSink<'_> {
         &mut self,
         certificate: CertifiedSource,
     ) -> SourceBackedCoordinatorResult<()> {
-        self.claim(certificate.observation().source())?;
-        self.writer.retain_source(certificate)?;
+        self.claim_present(certificate.observation().source())?;
+        let source = certificate.observation().source().clone();
+        self.writer.retain_source(certificate.clone())?;
+        self.record_revalidation(&source, SourceBackedRouteRevalidation::Source(certificate))?;
         Ok(())
     }
 
@@ -354,21 +552,17 @@ impl SourceBackedGenerationSink<'_> {
         if !deletion.verifies(&inventory) {
             return Err(SourceBackedCoordinatorError::InvalidDeletionWitness);
         }
-        self.claim(deletion.source())?;
-        if let Some(observed_at_unix_ms) = self.automatic_missing_observed_at_unix_ms {
-            let deleted = self.writer.observe_automatic_source_missing(
-                deletion,
-                inventory,
-                observed_at_unix_ms,
-                AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES,
-            )?;
-            return Ok(if deleted {
-                SourceBackedDeletionDisposition::Deleted
-            } else {
-                SourceBackedDeletionDisposition::Deferred
-            });
-        }
-        self.writer.delete_source(deletion, inventory)?;
+        self.claim_absent(deletion.source())?;
+        self.writer
+            .delete_source(deletion.clone(), inventory.clone())?;
+        self.record_revalidation(
+            deletion.source(),
+            SourceBackedRouteRevalidation::Deletion(deletion.clone()),
+        )?;
+        self.applied_removals.push(SourceBackedCertifiedRemoval {
+            deletion,
+            inventory,
+        });
         Ok(SourceBackedDeletionDisposition::Deleted)
     }
 
@@ -384,16 +578,32 @@ impl SourceBackedGenerationSink<'_> {
         self.certify_source(certificate)
     }
 
-    pub(in super::super) fn claim(
+    pub(in super::super) fn claim_present(
         &mut self,
         source: &SourceKey,
     ) -> SourceBackedCoordinatorResult<()> {
+        self.claim(source, true)
+    }
+
+    pub(in super::super) fn claim_absent(
+        &mut self,
+        source: &SourceKey,
+    ) -> SourceBackedCoordinatorResult<()> {
+        self.claim(source, false)
+    }
+
+    fn claim(&mut self, source: &SourceKey, present: bool) -> SourceBackedCoordinatorResult<()> {
         let digest = source.identity().digest();
         match self.owners.get(&digest) {
             Some(owner)
                 if owner.route_index != self.route_index
                     || !owner.source.exact_descriptor_eq(source) =>
             {
+                return Err(SourceBackedCoordinatorError::DuplicateSourceOwner {
+                    source_id: source.identity().to_string(),
+                });
+            }
+            Some(owner) if owner.present != present => {
                 return Err(SourceBackedCoordinatorError::DuplicateSourceOwner {
                     source_id: source.identity().to_string(),
                 });
@@ -405,10 +615,32 @@ impl SourceBackedGenerationSink<'_> {
                     SourceOwner {
                         route_index: self.route_index,
                         source: source.clone(),
+                        present,
+                        revalidation: None,
                     },
                 );
             }
         }
+        Ok(())
+    }
+
+    fn record_revalidation(
+        &mut self,
+        source: &SourceKey,
+        revalidation: SourceBackedRouteRevalidation,
+    ) -> SourceBackedCoordinatorResult<()> {
+        let owner = self
+            .owners
+            .get_mut(&source.identity().digest())
+            .filter(|owner| {
+                owner.route_index == self.route_index
+                    && owner.source.exact_descriptor_eq(source)
+                    && owner.revalidation.is_none()
+            })
+            .ok_or(IndexError::WriterInvariant(
+                "source certification lost its route-local owner",
+            ))?;
+        owner.revalidation = Some(revalidation);
         Ok(())
     }
 }
@@ -489,6 +721,7 @@ impl SourceBackedRouteDriver {
 pub struct SourceBackedRoute {
     pub(in super::super) metadata: SourceBackedRouteMetadata,
     pub(in super::super) driver: Option<SourceBackedRouteDriver>,
+    pub(in super::super) certified_missing_paths: Vec<PathBuf>,
 }
 
 impl SourceBackedRoute {
@@ -502,6 +735,12 @@ impl SourceBackedRoute {
             SourceBackedRouteSelection::Automatic,
             selector_authority,
         )?;
+        let route_identity = source_backed_route_identity(
+            &source,
+            known.certified_source_format,
+            SourceBackedRouteSelection::Automatic,
+            selector_authority,
+        )?;
         Ok(Self {
             metadata: SourceBackedRouteMetadata {
                 source,
@@ -509,8 +748,11 @@ impl SourceBackedRoute {
                 selection: Some(SourceBackedRouteSelection::Automatic),
                 selector_authority,
                 unsupported_reason: None,
+                route_identity: Some(route_identity),
+                watch_target_kind: known.watch_target_kind,
             },
             driver: Some(driver),
+            certified_missing_paths: Vec::new(),
         })
     }
 
@@ -524,6 +766,12 @@ impl SourceBackedRoute {
             SourceBackedRouteSelection::ExplicitManual,
             selector_authority,
         )?;
+        let route_identity = source_backed_route_identity(
+            &source,
+            known.certified_source_format,
+            SourceBackedRouteSelection::ExplicitManual,
+            selector_authority,
+        )?;
         Ok(Self {
             metadata: SourceBackedRouteMetadata {
                 source,
@@ -531,8 +779,42 @@ impl SourceBackedRoute {
                 selection: Some(SourceBackedRouteSelection::ExplicitManual),
                 selector_authority,
                 unsupported_reason: None,
+                route_identity: Some(route_identity),
+                watch_target_kind: known.watch_target_kind,
             },
             driver: Some(driver),
+            certified_missing_paths: Vec::new(),
+        })
+    }
+
+    pub fn certified_missing(
+        source: ProviderSource,
+        selector_authority: SourceBackedSelectorAuthority,
+    ) -> SourceBackedCoordinatorResult<Self> {
+        let known = validate_executable_route(
+            &source,
+            SourceBackedRouteSelection::Automatic,
+            selector_authority,
+        )?;
+        let route_identity = source_backed_route_identity(
+            &source,
+            known.certified_source_format,
+            SourceBackedRouteSelection::Automatic,
+            selector_authority,
+        )?;
+        let path = source.path.clone();
+        Ok(Self {
+            metadata: SourceBackedRouteMetadata {
+                source,
+                certified_source_format: known.certified_source_format,
+                selection: Some(SourceBackedRouteSelection::Automatic),
+                selector_authority,
+                unsupported_reason: None,
+                route_identity: Some(route_identity),
+                watch_target_kind: known.watch_target_kind,
+            },
+            driver: None,
+            certified_missing_paths: vec![path],
         })
     }
 
@@ -546,8 +828,11 @@ impl SourceBackedRoute {
                 selection: None,
                 selector_authority: SourceBackedSelectorAuthority::ExplicitPath,
                 unsupported_reason: Some(reason.into()),
+                route_identity: None,
+                watch_target_kind: SourceBackedWatchTargetKind::Path,
             },
             driver: None,
+            certified_missing_paths: Vec::new(),
         }
     }
 
@@ -567,6 +852,27 @@ impl SourceBackedProviderRegistry {
     }
 
     pub fn register(&mut self, route: SourceBackedRoute) {
+        if let Some(identity) = route.metadata.route_identity.as_ref() {
+            if let Some(existing) = self
+                .routes
+                .iter_mut()
+                .find(|existing| existing.metadata.route_identity.as_ref() == Some(identity))
+            {
+                if existing.driver.is_some() {
+                    return;
+                }
+                if route.driver.is_some() {
+                    *existing = route;
+                    return;
+                }
+                existing
+                    .certified_missing_paths
+                    .extend(route.certified_missing_paths);
+                existing.certified_missing_paths.sort();
+                existing.certified_missing_paths.dedup();
+                return;
+            }
+        }
         self.routes.push(route);
     }
 
@@ -585,6 +891,80 @@ impl SourceBackedProviderRegistry {
         self.routes
             .iter()
             .filter(|route| route.driver.is_none())
+            .filter(|route| route.certified_missing_paths.is_empty())
             .count()
+    }
+}
+
+fn source_backed_route_identity(
+    source: &ProviderSource,
+    certified_source_format: &str,
+    selection: SourceBackedRouteSelection,
+    selector_authority: SourceBackedSelectorAuthority,
+) -> SourceBackedCoordinatorResult<SourceRouteIdentity> {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.source-route-identity-v1\0");
+    digest.update(source.provider.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(certified_source_format.as_bytes());
+    digest.update([0]);
+    digest.update(match selection {
+        SourceBackedRouteSelection::Automatic => b"automatic".as_slice(),
+        SourceBackedRouteSelection::ExplicitManual => b"explicit".as_slice(),
+    });
+    digest.update([0]);
+    digest.update(match selector_authority {
+        SourceBackedSelectorAuthority::DiscoveredWinner => b"discovered-winner".as_slice(),
+        SourceBackedSelectorAuthority::ExplicitPath => b"explicit-path".as_slice(),
+        SourceBackedSelectorAuthority::CatalogLineage => b"catalog-lineage".as_slice(),
+        SourceBackedSelectorAuthority::ExactCwd => b"exact-cwd".as_slice(),
+        SourceBackedSelectorAuthority::NamedSurface => b"named-surface".as_slice(),
+        SourceBackedSelectorAuthority::SelectedWithRetainedExplicit => {
+            b"selected-with-retained-explicit".as_slice()
+        }
+    });
+    if selection == SourceBackedRouteSelection::ExplicitManual {
+        let path = source.path.as_os_str().as_encoded_bytes();
+        digest.update((path.len() as u64).to_be_bytes());
+        digest.update(path);
+    }
+    SourceRouteIdentity::from_sha256(format!("{:x}", digest.finalize())).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn source_failure_diagnostics_bound_count_selector_detail_and_display() {
+        let failures = SourceBackedSourceFailures::from_failures((0_u8..70).map(|index| {
+            SourceBackedFailedRoute::new(
+                SourceRouteIdentity::from_sha256(format!("{index:02x}").repeat(32)).unwrap(),
+                format!("{:02x}", index.saturating_add(1)).repeat(32),
+                CaptureProvider::Codex,
+                SourceBackedSourceFailureClass::Unavailable,
+                false,
+                "é".repeat(MAX_SOURCE_BACKED_FAILURE_SELECTOR_BYTES),
+                "δ".repeat(MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES),
+            )
+        }));
+
+        assert_eq!(
+            failures.failures().len(),
+            MAX_RECORDED_SOURCE_BACKED_FAILURES
+        );
+        assert_eq!(failures.omitted(), 6);
+        assert_eq!(failures.total(), 70);
+        assert!(failures.failures().iter().all(|failure| {
+            failure.source_selector.len() <= MAX_SOURCE_BACKED_FAILURE_SELECTOR_BYTES
+                && failure.detail.len() <= MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES
+                && failure
+                    .source_selector
+                    .is_char_boundary(failure.source_selector.len())
+                && failure.detail.is_char_boundary(failure.detail.len())
+        }));
+        let displayed = failures.to_string();
+        assert_eq!(displayed.matches("source-backed scan failed").count(), 3);
+        assert!(displayed.contains("67 additional source failure(s) omitted"));
     }
 }

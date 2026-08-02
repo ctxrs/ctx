@@ -2,7 +2,6 @@ namespace Ctx.AgentHistory;
 
 public sealed record InitOptions
 {
-    public bool CatalogOnly { get; init; }
     public string? Progress { get; init; } = "none";
 }
 

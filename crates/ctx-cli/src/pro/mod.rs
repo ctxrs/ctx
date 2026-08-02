@@ -32,7 +32,11 @@ pub(crate) use client::{
     blame, preflight_core_materialization, stable_error_code, stable_error_diagnostic,
     sync_core_materialization, RESOURCE_NOT_FOUND_DIAGNOSTIC,
 };
-pub(crate) use lifecycle::{lifecycle_status_json, run_lifecycle, ProArgs};
+#[cfg(test)]
+pub(crate) use lifecycle::count_lifecycle_status_queries;
+pub(crate) use lifecycle::{
+    lifecycle_status_json, lifecycle_status_json_for_core, run_lifecycle, ProArgs,
+};
 pub(crate) use pricing::PRO_MONTHLY_PRICE_DISPLAY;
 #[cfg(test)]
 pub(crate) use referral::parse_referral_codename;

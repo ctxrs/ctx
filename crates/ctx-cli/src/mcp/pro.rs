@@ -380,6 +380,15 @@ mod tests {
 
     use super::*;
 
+    fn protocol_snapshot() -> ctx_pro_host_protocol::QuerySnapshotExpectation {
+        ctx_pro_host_protocol::QuerySnapshotExpectation::Core {
+            receipt: ctx_pro_host_protocol::CoreMaterializationReceiptIdentity {
+                core_generation_id: "a".repeat(64),
+                materializer_revision: "materializer-v1".to_owned(),
+            },
+        }
+    }
+
     fn private_tempdir() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         ctx_history_core::platform_security::restrict_private_directory(root.path()).unwrap();
@@ -456,6 +465,7 @@ mod tests {
             display: "fixture/repository".to_owned(),
         };
         let result = BlameResult {
+            snapshot: protocol_snapshot(),
             target: ResolvedBlameTarget::File {
                 path: "src/lib.rs".to_owned(),
                 repository,
@@ -548,6 +558,7 @@ mod tests {
                     repository: None,
                 },
                 BlameResult {
+                    snapshot: protocol_snapshot(),
                     target: ResolvedBlameTarget::Commit {
                         commit: ResourceRef {
                             id: "commit:abc1234".to_owned(),
@@ -569,6 +580,7 @@ mod tests {
                     repository: Some("fixture/repository".to_owned()),
                 },
                 BlameResult {
+                    snapshot: protocol_snapshot(),
                     target: ResolvedBlameTarget::PullRequest {
                         selector: "42".to_owned(),
                         pull_request: ResourceRef {

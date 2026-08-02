@@ -18,8 +18,9 @@ const FIXTURE_ROWS: usize = 24;
 const FIXTURE_COLUMNS: &[usize] = &[32, 80];
 const INDEXED_ITEMS: u64 = 854_466;
 const INDEXED_SESSIONS: u64 = 3_486;
-const COMPLETED_SOURCE_BYTES: u64 = 10_700_000_000;
-const TOTAL_SOURCE_BYTES: u64 = 13_600_000_000;
+const CERTIFIED_SOURCE_BYTES: u64 = 10_700_000_000;
+const COMPLETED_SOURCES: u64 = 7;
+const TOTAL_SOURCES: u64 = 12;
 const EMBEDDED_ITEMS: u64 = 357_421;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -71,9 +72,8 @@ pub(crate) fn run(args: IndexDashboardFixtureArgs, ui: &mut Ui) -> Result<ExitCo
 
     let mut output = super::index_watch_output(ui);
     for status in args.case.status_sequence()? {
-        // Each fixture frame is an independent production snapshot. Resetting
-        // only the rate sampler keeps elapsed wall time out of deterministic
-        // captures while preserving IndexWatchOutput's real redraw state.
+        // Each fixture frame is an independent production snapshot while
+        // preserving IndexWatchOutput's real redraw state.
         output.dashboard = Default::default();
         output.print_human(&status)?;
     }
@@ -172,25 +172,35 @@ impl FixtureCase {
         let mut status = DashboardStatus::active();
         match self {
             Self::Discovering => {
+                status.initialized = false;
+                status.lexical.status = LexicalState::Pending;
                 status.lexical.indexed_items = 0;
                 status.lexical.indexed_sessions = 0;
-                status.lexical.completed_source_bytes = 0;
-                status.lexical.total_source_bytes = 0;
+                status.lexical.indexed_sources = 0;
+                status.lexical.certified_source_bytes = 0;
+                status.refresh.progress.completed_sources = 0;
+                status.refresh.progress.total_sources = 0;
             }
             Self::ActiveProgress => {}
             Self::Finalizing => {
-                status.lexical.completed_source_bytes = TOTAL_SOURCE_BYTES;
+                status.refresh.progress.phase = "publishing";
+                status.refresh.progress.completed_sources = TOTAL_SOURCES;
             }
             Self::Ready | Self::SemanticDisabled => {
                 status.make_lexical_ready();
             }
             Self::ReadyPartialWarning => {
                 status.make_lexical_ready();
-                status.lexical.failed_inventory_units = 1;
+                status.refresh.status = RefreshState::Pending;
+                status.refresh.reason = Some("core_refresh_pending");
+                status.daemon.running = false;
             }
             Self::TerminalFailure => {
-                status.lexical.status = LexicalState::Failed;
-                status.lexical.failed_inventory_units = 1;
+                status.initialized = false;
+                status.lexical.status = LexicalState::Unavailable;
+                status.lexical.reason = Some("generation_verification_failed");
+                status.refresh.status = RefreshState::Unavailable;
+                status.refresh.reason = Some("core_refresh_failed");
             }
             Self::StoppedDaemon => {
                 status.daemon.status = DaemonState::Failed;
@@ -222,7 +232,9 @@ impl FixtureCase {
 
 #[derive(Debug, Serialize)]
 struct DashboardStatus {
+    initialized: bool,
     lexical: LexicalStatus,
+    refresh: RefreshStatus,
     semantic: SemanticStatus,
     daemon: DaemonStatus,
 }
@@ -230,14 +242,23 @@ struct DashboardStatus {
 impl DashboardStatus {
     fn active() -> Self {
         Self {
+            initialized: true,
             lexical: LexicalStatus {
-                status: LexicalState::Partial,
+                status: LexicalState::Ready,
+                reason: None,
                 indexed_items: INDEXED_ITEMS,
                 indexed_sessions: INDEXED_SESSIONS,
-                completed_source_bytes: COMPLETED_SOURCE_BYTES,
-                total_source_bytes: TOTAL_SOURCE_BYTES,
-                pending_inventory_units: 947,
-                failed_inventory_units: 0,
+                indexed_sources: TOTAL_SOURCES,
+                certified_source_bytes: CERTIFIED_SOURCE_BYTES,
+            },
+            refresh: RefreshStatus {
+                status: RefreshState::Pending,
+                reason: Some("core_refresh_pending"),
+                progress: RefreshProgress {
+                    phase: "scanning_provider_sources",
+                    completed_sources: COMPLETED_SOURCES,
+                    total_sources: TOTAL_SOURCES,
+                },
             },
             semantic: SemanticStatus {
                 status: SemanticState::Disabled,
@@ -264,8 +285,11 @@ impl DashboardStatus {
 
     fn make_lexical_ready(&mut self) {
         self.lexical.status = LexicalState::Ready;
-        self.lexical.completed_source_bytes = TOTAL_SOURCE_BYTES;
-        self.lexical.pending_inventory_units = 0;
+        self.lexical.reason = None;
+        self.refresh.status = RefreshState::Ready;
+        self.refresh.reason = None;
+        self.refresh.progress.phase = "published";
+        self.refresh.progress.completed_sources = TOTAL_SOURCES;
     }
 
     fn enable_semantic(
@@ -286,20 +310,41 @@ impl DashboardStatus {
 #[derive(Debug, Serialize)]
 struct LexicalStatus {
     status: LexicalState,
+    reason: Option<&'static str>,
     indexed_items: u64,
     indexed_sessions: u64,
-    completed_source_bytes: u64,
-    total_source_bytes: u64,
-    pending_inventory_units: u64,
-    failed_inventory_units: u64,
+    indexed_sources: u64,
+    certified_source_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum LexicalState {
-    Partial,
+    Pending,
     Ready,
-    Failed,
+    Unavailable,
+}
+
+#[derive(Debug, Serialize)]
+struct RefreshStatus {
+    status: RefreshState,
+    reason: Option<&'static str>,
+    progress: RefreshProgress,
+}
+
+#[derive(Debug, Serialize)]
+struct RefreshProgress {
+    phase: &'static str,
+    completed_sources: u64,
+    total_sources: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RefreshState {
+    Pending,
+    Ready,
+    Unavailable,
 }
 
 #[derive(Debug, Serialize)]

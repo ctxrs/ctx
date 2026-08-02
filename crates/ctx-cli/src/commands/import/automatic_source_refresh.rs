@@ -13,10 +13,6 @@ use crate::{
     compact_json,
     progress::ProgressReporter,
     provider_sources::{discovered_sources_for_provider_report, manual_path_guidance},
-    semantic::{
-        SourceBackedRefreshCurrent, SourceBackedRefreshSourceFailure,
-        SourceBackedRefreshSourceFailureClass,
-    },
     ImportArgs,
 };
 
@@ -24,6 +20,8 @@ use super::{
     core_refresh::{wait_for_import_core_refresh, ImportCoreRefreshRequest},
     ImportReport, ImportRunOptions, ImportTotals, ProviderRefreshCollector,
 };
+
+const MAX_REPORTED_SOURCE_FAILURES: usize = 3;
 
 pub(super) struct AutomaticSourceRefreshImportContext<'a> {
     pub(super) args: &'a ImportArgs,
@@ -77,6 +75,29 @@ pub(super) fn run_automatic_source_refresh_import(
     let index = refresh.pin.into_index();
     let manifest = index.manifest();
     let current = receipt.current;
+    let totals = ImportTotals {
+        // Core receipts describe the committed current generation, not
+        // synthetic per-run session/event/file totals.
+        per_run_counts_available: false,
+        // Route-result counts are reported separately from per-run import
+        // counts because the receipt certifies a whole Core generation.
+        failed_sources: receipt.source_failure_total(),
+        current_source_count: Some(current.source_count),
+        current_indexed_documents: Some(current.indexed_documents),
+        current_complete_records: Some(current.complete_records),
+        current_retained_records: Some(current.retained_records),
+        current_rejected_records: Some(current.rejected_records),
+        current_ignored_records: Some(current.ignored_records),
+        current_certified_source_bytes: Some(current.certified_source_bytes),
+        current_sources_with_rejections: Some(current.sources_with_rejections),
+        removed_source_count: Some(current.removed_source_count),
+        work_result: if receipt.generation_changed {
+            ProviderImportWorkResult::Changed
+        } else {
+            ProviderImportWorkResult::NoOp
+        },
+        ..ImportTotals::default()
+    };
     context
         .provider_refreshes
         .record_core_publication(ProviderRefreshTrigger::Import, receipt.generation_changed);
@@ -90,25 +111,28 @@ pub(super) fn run_automatic_source_refresh_import(
         "Finished refreshing local history.".to_owned()
     };
     progress.finish_line()?;
-    progress.done("published", completion, current.certified_source_bytes)?;
+    // The receipt exposes retained corpus bytes, not work performed by this
+    // invocation. Preserve the unknown per-run total instead of inventing a
+    // 100% work-byte result on warm no-op imports.
+    progress.done("published", completion, 0)?;
 
-    let totals = automatic_refresh_totals(
-        receipt.generation_changed,
-        receipt.source_failures.total(),
-        current,
-    );
-    let mut sources = vec![compact_json(json!({
+    let mut report_sources = vec![compact_json(json!({
         "status": "published",
-        "outcome": receipt.terminal_outcome(),
+        "outcome": if receipt.source_failures.is_empty() {
+            "completed"
+        } else {
+            "completed_with_source_failures"
+        },
         "source_format": "provider_authoritative_all",
         "change": if receipt.generation_changed { "changed" } else { "no_op" },
         "previous_generation": receipt.previous_generation,
         "published_generation": receipt.published_generation,
-            "generation_changed": receipt.generation_changed,
-            "scanned_routes": receipt.scanned_routes,
-            "successful_routes": receipt.successful_routes,
-            "source_failure_total": receipt.source_failures.total(),
-            "source_failures_omitted": receipt.source_failures.omitted,
+        "generation_changed": receipt.generation_changed,
+        "scanned_routes": receipt.selected_route_total,
+        "successful_routes": receipt.successful_route_total,
+        "source_failure_total": receipt.source_failure_total(),
+        "source_failures_omitted": receipt.source_failures_omitted()
+            .saturating_add(receipt.source_failures.len().saturating_sub(MAX_REPORTED_SOURCE_FAILURES)),
         "current_source_count": current.source_count,
         "current_indexed_documents": current.indexed_documents,
         "current_complete_records": current.complete_records,
@@ -124,81 +148,61 @@ pub(super) fn run_automatic_source_refresh_import(
         "daemon_request_id": request_id,
         "daemon_request_metadata": {
             "owner": "daemon",
+            "operation": "import",
             "trigger": "import",
             "trigger_provenance": "automatic_provider_refresh",
         },
     }))];
-    sources.extend(
+    report_sources.extend(
         receipt
             .source_failures
-            .failures
             .iter()
-            .map(source_failure_report_row),
+            .take(MAX_REPORTED_SOURCE_FAILURES)
+            .map(|failure| {
+                source_failure_report_row(
+                    &failure.source_identity,
+                    &failure.provider,
+                    &failure.class,
+                    failure.carried_forward,
+                    &failure.source_selector,
+                    &failure.detail,
+                )
+            }),
     );
+
     Ok(ImportReport {
         resume: context.args.resume,
         totals,
-        sources,
+        sources: report_sources,
     })
 }
 
-fn automatic_refresh_totals(
-    generation_changed: bool,
-    failed_sources: usize,
-    current: SourceBackedRefreshCurrent,
-) -> ImportTotals {
-    ImportTotals {
-        // Daemon receipts certify current-generation state and route outcomes,
-        // but do not attribute record or byte deltas to this import invocation.
-        per_run_counts_available: false,
-        failed_sources,
-        current_source_count: Some(current.source_count),
-        current_indexed_documents: Some(current.indexed_documents),
-        current_complete_records: Some(current.complete_records),
-        current_retained_records: Some(current.retained_records),
-        current_rejected_records: Some(current.rejected_records),
-        current_ignored_records: Some(current.ignored_records),
-        current_certified_source_bytes: Some(current.certified_source_bytes),
-        current_sources_with_rejections: Some(current.sources_with_rejections),
-        removed_source_count: Some(current.removed_source_count),
-        work_result: if generation_changed {
-            ProviderImportWorkResult::Changed
-        } else {
-            ProviderImportWorkResult::NoOp
-        },
-        ..ImportTotals::default()
-    }
-}
-
-fn source_failure_report_row(failure: &SourceBackedRefreshSourceFailure) -> serde_json::Value {
-    let failure_type = match failure.class {
-        SourceBackedRefreshSourceFailureClass::Incompatible => "unsupported_schema",
-        SourceBackedRefreshSourceFailureClass::Unavailable
-        | SourceBackedRefreshSourceFailureClass::SourceChanged
-        | SourceBackedRefreshSourceFailureClass::Unreadable => "other",
+fn source_failure_report_row(
+    source_identity: &str,
+    provider: &str,
+    class: &str,
+    carried_forward: bool,
+    source_selector: &str,
+    detail: &str,
+) -> serde_json::Value {
+    let failure_type = if class == "incompatible" {
+        "unsupported_schema"
+    } else {
+        "other"
     };
     compact_json(json!({
         "status": "failure",
         "failure_scope": "source",
         "failure_type": failure_type,
-        "source_identity": failure.source_identity,
-        "provider": failure.provider,
-        "source_failure_class": failure.class.as_str(),
-        "carried_forward": failure.carried_forward,
-        "source_selector": failure.source_selector,
-        "detail": failure.detail,
-        "error": failure.detail,
+        "source_identity": source_identity,
+        "provider": provider,
+        "source_failure_class": class,
+        "carried_forward": carried_forward,
+        "source_selector": source_selector,
+        "detail": detail,
+        "error": detail,
         "source_files": 0,
         "source_bytes": 0,
-        "imported_sessions": 0,
-        "imported_events": 0,
-        "imported_edges": 0,
-        "skipped_sessions": 0,
-        "skipped_events": 0,
-        "skipped_edges": 0,
-        "skipped": 0,
-        "rejected_records": 0,
-        "rejections": [],
     }))
 }
 
@@ -264,95 +268,25 @@ mod tests {
     }
 
     #[test]
-    fn automatic_import_reports_bounded_source_result_contract() {
-        let source = include_str!("automatic_source_refresh.rs");
-        for required in [
-            "receipt.terminal_outcome()",
-            "receipt.scanned_routes",
-            "receipt.successful_routes",
-            "receipt.source_failures.total()",
-            "receipt.source_failures.omitted",
-            "failure.source_identity",
-            "failure.class.as_str()",
-            "failure.carried_forward",
-            "failure.source_selector",
-            "failure.detail",
-        ] {
-            assert!(
-                source.contains(required),
-                "automatic source report omitted `{required}`"
-            );
-        }
-        for obsolete in [
-            ["successful_route", "_ids"].concat(),
-            ["route_", "identity"].concat(),
-        ] {
-            assert!(
-                !source.contains(&obsolete),
-                "automatic source report retained obsolete `{obsolete}`"
-            );
-        }
-    }
-
-    #[test]
-    fn daemon_receipt_totals_do_not_invent_per_run_counts() {
-        let totals = automatic_refresh_totals(
+    fn source_failure_rows_follow_schema_v2_and_are_bounded() {
+        let source_identity = "22".repeat(32);
+        let row = source_failure_report_row(
+            &source_identity,
+            "codex",
+            "source_changed",
             true,
-            2,
-            SourceBackedRefreshCurrent {
-                source_count: 3,
-                indexed_documents: 11,
-                certified_source_bytes: 4096,
-                ..SourceBackedRefreshCurrent::default()
-            },
+            "/tmp/codex-history",
+            "source changed during refresh",
         );
-
-        assert!(!totals.per_run_counts_available);
-        assert_eq!(totals.imported_sources, 0);
-        assert_eq!(totals.imported_events, 0);
-        assert_eq!(totals.source_bytes, 0);
-        assert_eq!(totals.failed_sources, 2);
-        assert_eq!(totals.current_source_count, Some(3));
-        assert_eq!(totals.current_indexed_documents, Some(11));
-    }
-
-    #[test]
-    fn source_failure_row_uses_schema_v2_shape() {
-        let source_identity = "ab".repeat(32);
-        let row = source_failure_report_row(&SourceBackedRefreshSourceFailure {
-            source_identity: source_identity.clone(),
-            provider: "codex".to_owned(),
-            class: SourceBackedRefreshSourceFailureClass::SourceChanged,
-            carried_forward: true,
-            source_selector: "/history/session.jsonl".to_owned(),
-            detail: "source changed during refresh".to_owned(),
-        });
-
-        assert_eq!(
-            row,
-            json!({
-                "status": "failure",
-                "failure_scope": "source",
-                "failure_type": "other",
-                "source_identity": source_identity,
-                "provider": "codex",
-                "source_failure_class": "source_changed",
-                "carried_forward": true,
-                "source_selector": "/history/session.jsonl",
-                "detail": "source changed during refresh",
-                "error": "source changed during refresh",
-                "source_files": 0,
-                "source_bytes": 0,
-                "imported_sessions": 0,
-                "imported_events": 0,
-                "imported_edges": 0,
-                "skipped_sessions": 0,
-                "skipped_events": 0,
-                "skipped_edges": 0,
-                "skipped": 0,
-                "rejected_records": 0,
-                "rejections": [],
-            })
-        );
+        assert_eq!(row["status"], "failure");
+        assert_eq!(row["failure_scope"], "source");
+        assert_eq!(row["failure_type"], "other");
+        assert_eq!(row["source_failure_class"], "source_changed");
+        assert_eq!(row["source_selector"], "/tmp/codex-history");
+        assert_eq!(row["detail"], row["error"]);
+        for unsupported in ["imported_sessions", "imported_events", "rejections"] {
+            assert!(row.get(unsupported).is_none(), "{row:#}");
+        }
+        assert_eq!(MAX_REPORTED_SOURCE_FAILURES, 3);
     }
 }

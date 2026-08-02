@@ -631,7 +631,7 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "status",
             "title": "Status",
-            "description": "Return local ctx index status without writing to provider history or repositories.",
+            "description": "Return detailed local ctx readiness and service status without writing to provider history or repositories.",
             "inputSchema": object_schema(json!({}), vec![]),
             "annotations": { "readOnlyHint": true },
         }),

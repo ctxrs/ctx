@@ -85,20 +85,16 @@ pub(super) fn status_next_command(
     }
 }
 
-fn history_components(report: &Value) -> [(&'static str, &Value); 4] {
+fn history_components(report: &Value) -> [(&'static str, &Value); 3] {
     [
         ("Epoch", &report["history_epoch"]),
         ("Search", &report["lexical"]),
-        ("Catalog", &report["catalog"]),
         ("Refresh", &report["refresh"]),
     ]
 }
 
-pub(super) fn supporting_history_components(report: &Value) -> [(&'static str, &Value); 2] {
-    [
-        ("Catalog", &report["catalog"]),
-        ("Refresh", &report["refresh"]),
-    ]
+pub(super) fn supporting_history_components(report: &Value) -> [(&'static str, &Value); 1] {
+    [("Refresh", &report["refresh"])]
 }
 
 pub(super) fn unhealthy_history_components(report: &Value) -> Vec<(&'static str, &Value)> {

@@ -21,7 +21,7 @@ use super::{
     paths_status::{daemon_jobs_path, read_daemon_job_status, write_daemon_job_status},
     source_backed_refresh_coordinator::{
         nonzero_duration_micros, open_verified_index, source_backed_index_root,
-        PinnedCorePublication,
+        PinnedCorePublication, PinnedSourceBackedGeneration,
     },
 };
 
@@ -177,32 +177,57 @@ pub(super) struct SourceBackedProCatchUpRun {
     pub(super) did_work: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum SourceBackedProCoreAuthority<'a> {
+    Retained(&'a PinnedCorePublication),
+    Durable(&'a PinnedSourceBackedGeneration),
+}
+
+impl<'a> SourceBackedProCoreAuthority<'a> {
+    pub(super) fn generation_id(self) -> &'a str {
+        match self {
+            Self::Retained(authority) => authority.generation_id(),
+            Self::Durable(authority) => authority.generation_id(),
+        }
+    }
+
+    fn verified_index(self) -> &'a VerifiedIndex {
+        match self {
+            Self::Retained(authority) => authority.verified_index_ref(),
+            Self::Durable(authority) => authority.verified_index(),
+        }
+    }
+
+    fn surface(self) -> &'static str {
+        match self {
+            Self::Retained(_) => "retained Core generation pin",
+            Self::Durable(_) => "durable active Core generation pin",
+        }
+    }
+}
+
 pub(super) fn run_after_core_publication(
     data_root: &Path,
     core_generation_id: &str,
-    authority: Option<&PinnedCorePublication>,
+    authority: SourceBackedProCoreAuthority<'_>,
 ) -> Result<SourceBackedProCatchUpRun> {
-    if authority.is_some_and(|authority| authority.generation_id() != core_generation_id) {
-        let supplied = authority
-            .map(PinnedCorePublication::generation_id)
-            .unwrap_or_default();
+    if authority.generation_id() != core_generation_id {
         return record_preflight_error(
             data_root,
             core_generation_id,
             SourceBackedProCatchUpError::GenerationMismatch {
                 expected: core_generation_id.to_owned(),
-                authority: supplied.to_owned(),
-                surface: "retained Core generation pin",
+                authority: authority.generation_id().to_owned(),
+                surface: authority.surface(),
             },
         );
     }
-    let verified_index = authority.and_then(PinnedCorePublication::verified_index);
     run_with(
         data_root,
         core_generation_id,
         ProCatchUpAuthority {
-            generation_id: authority.map(PinnedCorePublication::generation_id),
-            verified_index: verified_index.as_deref(),
+            generation_id: Some(authority.generation_id()),
+            verified_index: Some(authority.verified_index()),
         },
         preflight_core_materialization,
         |data_root, index| {

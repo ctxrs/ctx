@@ -368,11 +368,16 @@ fn completed_finite_run_wins_over_disabled_persistent_preference() {
 }
 
 #[test]
-fn catching_up_status_keeps_search_availability_and_progress_visible() {
+fn catching_up_status_keeps_record_and_byte_progress_visible() {
     let mut report = running_report();
     report["jobs"]["core_refresh"] = json!({
         "status": "running",
-        "progress": {"phase": "scanning_provider_sources"},
+        "progress": {
+            "phase": "scanning_provider_sources",
+            "current_source": "~/.local/share/opencode/opencode.db",
+            "completed_records": 1234,
+            "completed_bytes": 4 * 1024 * 1024
+        },
         "source_count": 9
     });
     let rendered = render_status(&context(48), &report).render_plain();
@@ -383,6 +388,9 @@ fn catching_up_status_keeps_search_availability_and_progress_visible() {
     ));
     assert!(rendered.contains("Status    catching up\n"));
     assert!(rendered.contains("Progress  scanning provider sources\n"));
+    assert!(rendered.contains("Source    ~/.local/share/opencode/opencode.db\n"));
+    assert!(rendered.contains("Accepted  1,234 records\n"));
+    assert!(rendered.contains("Scanned   4.0 MiB\n"));
     assert!(rendered.contains("ctx index watch\n"));
 }
 

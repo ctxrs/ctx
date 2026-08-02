@@ -1,8 +1,16 @@
 use super::*;
 use std::{
+    cell::{Cell, RefCell},
     fs, io,
     sync::{Arc, Mutex},
 };
+
+use ctx_history_core::{
+    derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
+    NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceObservation, TypedKey,
+};
+use ctx_history_index::{GenerationWriter, WriterOptions};
 
 use crate::{
     analytics::StatusTelemetry,
@@ -90,6 +98,90 @@ fn core_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, String)
     (temp, data_root, generation_id)
 }
 
+fn publish_changed_core_generation(data_root: &Path) -> String {
+    let source = ctx_history_core::SourceKey::derive(
+        "codex",
+        "codex_session_jsonl",
+        "session",
+        1,
+        SourceAnchor::provider_native(
+            "session-file",
+            TypedKey::utf8("status-snapshot-race.jsonl").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let native_session = TypedKey::utf8("status-snapshot-race-session").unwrap();
+    let session_key = NativeSessionKey::native_id("session", native_session).unwrap();
+    let session_id = derive_session_id(SessionIdentityInput {
+        source: &source,
+        logical_session_kind: "thread",
+        native_session_key: &session_key,
+    })
+    .unwrap();
+    let native_item = NativeItemKey::native_id(
+        "message",
+        TypedKey::utf8("status-snapshot-race-event").unwrap(),
+    )
+    .unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source: &source,
+        session_id,
+        logical_item_kind: "message",
+        native_item_key: &native_item,
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let mut record = CoreRecord::new_selected(
+        event_id,
+        session_id,
+        session_id,
+        source.clone(),
+        1,
+        "message",
+        "primary",
+        true,
+        "status-snapshot-race-v1",
+        "new generation published during status assembly",
+    )
+    .unwrap();
+    record.provider_session_id = Some("status-snapshot-race-session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(1));
+    record.role = Some("assistant".to_owned());
+    record.validate_contract().unwrap();
+
+    let mut writer = GenerationWriter::open(
+        data_root.join("search/lexical"),
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 32 * 1024 * 1024,
+        },
+    )
+    .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(record).unwrap();
+    let observation = SourceObservation::new(source, "status-snapshot-race-v1", vec![2]).unwrap();
+    writer
+        .certify_source(
+            CertifiedSource::certify(
+                observation.clone(),
+                observation,
+                "status-snapshot-race-v1",
+                [2; 32],
+                ScannedSourceCounts {
+                    complete_records: 1,
+                    retained_records: 1,
+                    indexed_documents: 1,
+                    certified_bytes: 128,
+                    ..ScannedSourceCounts::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    writer.commit(|_| true).unwrap().generation_id
+}
+
 #[test]
 fn durable_state_path_is_purpose_based() {
     assert_eq!(
@@ -124,6 +216,28 @@ fn pristine_source_status_is_read_only_and_exposes_stable_paths() {
         json!(data_root.join("search/semantic"))
     );
     assert!(status.report.get("prior_epoch").is_none());
+}
+
+#[test]
+fn refresh_report_preserves_optional_active_source_record_and_byte_progress() {
+    let job = json!({
+        "request_state": "running",
+        "progress": {
+            "phase": "refreshing",
+            "completed_sources": 2,
+            "total_sources": 6,
+            "current_source": "source.db",
+            "completed_records": 1234,
+            "completed_bytes": 4 * 1024 * 1024,
+        },
+    });
+    let daemon = json!({"running": true});
+
+    let report = refresh_report(Some(&job), None, &daemon);
+
+    assert_eq!(report["progress"]["current_source"], "source.db");
+    assert_eq!(report["progress"]["completed_records"], 1234);
+    assert_eq!(report["progress"]["completed_bytes"], 4 * 1024 * 1024);
 }
 
 #[test]
@@ -301,7 +415,7 @@ fn core_publication_is_ready_in_json_and_human_status() {
 
     assert_eq!(json_status["lexical"]["status"], "ready");
     assert_eq!(json_status["lexical"]["generation_id"], generation_id);
-    assert_eq!(json_status["catalog"]["status"], "ready");
+    assert!(json_status.get("catalog").is_none());
     assert_eq!(json_status["refresh"]["status"], "ready");
     assert_eq!(
         json_status["refresh"]["published_generation"],
@@ -344,23 +458,139 @@ fn core_publication_is_ready_in_json_and_human_status() {
 }
 
 #[test]
-fn pro_core_receipt_is_generation_bound() {
-    let ready_job = json!({
-        "status": "completed",
-        "core_generation_id": "generation-1",
-        "receipt_core_generation_id": "generation-1",
-        "attempts": 1,
+fn public_status_model_pins_core_once_and_queries_pro_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("missing");
+    let (status, counts) = count_public_status_snapshot_reads(|| {
+        crate::commands::status::status_read_model(&data_root, &AppConfig::default())
     });
-    let stale_job = json!({
+
+    status.unwrap();
+    assert_eq!(
+        counts,
+        StatusSnapshotReadCounts {
+            core_pins: 1,
+            pro_queries: 1,
+        }
+    );
+}
+
+#[test]
+fn corrupt_core_and_unavailable_pro_remain_typed_in_one_snapshot() {
+    let (_temp, data_root, _generation_id) = core_publication_fixture();
+    fs::write(
+        data_root.join("search/lexical/active-generation.json"),
+        b"{corrupt",
+    )
+    .unwrap();
+
+    let (status, counts) = count_public_status_snapshot_reads(|| {
+        crate::commands::status::status_read_model(&data_root, &AppConfig::default())
+    });
+    let status = status.unwrap().report;
+
+    assert_eq!(counts.core_pins, 1);
+    assert_eq!(counts.pro_queries, 1);
+    assert_eq!(status["lexical"]["status"], "unavailable");
+    assert_eq!(
+        status["lexical"]["reason"],
+        "generation_verification_failed"
+    );
+    assert_eq!(status["pro"]["installed"], false);
+    assert_eq!(status["pro"]["state"], "not_setup");
+    assert_eq!(status["pro_projection"]["status"], "unavailable");
+    assert_eq!(status["pro_projection"]["reason"], "pro_not_installed");
+}
+
+#[test]
+fn generation_publish_during_pro_query_cannot_mix_status_snapshot() {
+    let (_temp, data_root, pinned_generation) = core_publication_fixture();
+    let pro_queries = Cell::new(0);
+    let requested_generation = RefCell::new(None);
+    let published_generation = RefCell::new(None);
+
+    let (status, core_pins) =
+        super::super::source_backed_refresh_coordinator::count_verified_index_opens(|| {
+            source_epoch_status_report_with_pro_query(
+                &data_root,
+                &AppConfig::default(),
+                |_, core| {
+                    pro_queries.set(pro_queries.get() + 1);
+                    let requested = core.unwrap().generation_id().to_owned();
+                    requested_generation.replace(Some(requested));
+                    published_generation.replace(Some(publish_changed_core_generation(&data_root)));
+                    json!({
+                        "installed": true,
+                        "ready": true,
+                        "materialized": true,
+                        "projection_currentness": "current",
+                        "materialized_coverage": "complete",
+                        "repository_coverage": {},
+                        "access_state": "active",
+                        "supported_operations": ["file_blame"],
+                        "available_operations": ["file_blame"],
+                        "error_code": null,
+                    })
+                },
+            )
+            .unwrap()
+        });
+
+    let published_generation = published_generation.into_inner().unwrap();
+    assert_ne!(published_generation, pinned_generation);
+    assert_eq!(pro_queries.get(), 1);
+    assert_eq!(core_pins, 1);
+    assert_eq!(
+        requested_generation.into_inner(),
+        Some(pinned_generation.clone())
+    );
+    assert_eq!(status.report["lexical"]["generation_id"], pinned_generation);
+    assert_eq!(
+        status.report["pro_projection"]["core_generation_id"],
+        pinned_generation
+    );
+    assert_eq!(status.report["pro_projection"]["status"], "ready");
+    assert_eq!(status.indexed_items, Some(0));
+    let active = VerifiedIndex::open_pinned(data_root.join("search/lexical")).unwrap();
+    assert_eq!(active.generation_id(), published_generation);
+    assert_eq!(active.document_count(), 1);
+}
+
+#[test]
+fn pro_helper_status_is_the_only_projection_readiness_authority() {
+    let helper_ready = json!({
+        "installed": true,
+        "ready": false,
+        "materialized": true,
+        "projection_currentness": "current",
+        "materialized_coverage": "empty",
+        "repository_coverage": {},
+        "access_state": "trial",
+        "supported_operations": ["file_blame"],
+        "available_operations": [],
+        "error_code": null,
+    });
+    let helper_stale = json!({
+        "installed": true,
+        "ready": false,
+        "materialized": false,
+        "projection_currentness": "stale",
+        "materialized_coverage": "partial",
+        "repository_coverage": {},
+        "access_state": "active",
+        "supported_operations": ["file_blame"],
+        "available_operations": [],
+        "error_code": "stale_source",
+    });
+    let completed_job = json!({
         "status": "completed",
-        "core_generation_id": "generation-0",
-        "receipt_core_generation_id": "generation-0",
+        "pending": false,
         "attempts": 1,
     });
     let retry_job = json!({
         "status": "error",
         "error_code": "helper_crashed",
-        "core_generation_id": "generation-1",
+        "core_generation_id": "generation-0",
         "receipt_core_generation_id": null,
         "attempts": 2,
         "retryable": true,
@@ -369,22 +599,49 @@ fn pro_core_receipt_is_generation_bound() {
         "retry_not_before_at_ms": 1234,
     });
 
-    let ready =
-        pro_projection_report_from_job(Some("generation-1"), &ready_job, "pro-catch-up.json");
-    let stale =
-        pro_projection_report_from_job(Some("generation-1"), &stale_job, "pro-catch-up.json");
-    let retry =
-        pro_projection_report_from_job(Some("generation-1"), &retry_job, "pro-catch-up.json");
+    let ready = pro_projection_report_from_status(
+        Some("generation-1"),
+        true,
+        &helper_ready,
+        Some(&retry_job),
+        "pro-catch-up.json",
+    );
+    let stale = pro_projection_report_from_status(
+        Some("generation-1"),
+        true,
+        &helper_stale,
+        Some(&completed_job),
+        "pro-catch-up.json",
+    );
 
-    assert_eq!(ready["authority"], "core_generation");
+    assert_eq!(ready["authority"], "pro_helper_status");
+    assert_eq!(ready["status"], "ready");
     assert_eq!(ready["receipt"]["status"], "ready");
     assert_eq!(ready["receipt"]["generation_matches"], true);
+    assert_eq!(ready["materialized_coverage"], "empty");
+    assert_eq!(ready["ready"], false);
+    assert_eq!(ready["materialized"], true);
+    assert_eq!(ready["available_operations"], json!([]));
+    assert_eq!(ready["catch_up"]["status"], "error");
+    assert_eq!(ready["catch_up"]["error_code"], "helper_crashed");
+    assert_eq!(ready["catch_up"]["core_generation_id"], "generation-0");
+    assert_eq!(ready["catch_up"]["consecutive_failures"], 2);
+    assert_eq!(ready["catch_up"]["retry_after_ms"], 250);
+    assert_eq!(ready["catch_up"]["retry_not_before_at_ms"], 1234);
     assert_eq!(stale["status"], "stale");
     assert_eq!(stale["receipt"]["status"], "stale");
     assert_eq!(stale["receipt"]["generation_matches"], false);
-    assert_eq!(retry["status"], "unavailable");
-    assert_eq!(retry["reason"], "helper_crashed");
-    assert_eq!(retry["consecutive_failures"], 2);
-    assert_eq!(retry["retry_after_ms"], 250);
-    assert_eq!(retry["retry_not_before_at_ms"], 1234);
+    assert_eq!(stale["catch_up"]["status"], "completed");
+    assert_eq!(stale["reason"], "stale_source");
+
+    let raced = pro_projection_report_from_status(
+        Some("generation-1"),
+        false,
+        &helper_ready,
+        Some(&completed_job),
+        "pro-catch-up.json",
+    );
+    assert_eq!(raced["status"], "stale");
+    assert_eq!(raced["reason"], "stale_source");
+    assert_eq!(raced["receipt"]["generation_matches"], false);
 }

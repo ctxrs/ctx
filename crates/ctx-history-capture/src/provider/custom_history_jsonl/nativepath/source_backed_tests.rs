@@ -11,8 +11,9 @@ use serde_json::{json, Value};
 use super::source_backed::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, register_custom_history_source_backed_route,
-        SourceBackedProviderRegistry, SourceBackedRefreshOutcome, SourceBackedSourceFailureClass,
+        assert_carried_route_failure, refresh_source_backed_generation,
+        register_custom_history_source_backed_route, SourceBackedProviderRegistry,
+        SourceBackedSourceFailureClass,
     },
     test_support_paths::tempdir,
     CaptureError, ProviderCatalogSupport, ProviderImportSupport, ProviderSource,
@@ -630,23 +631,11 @@ fn structural_manifest_failure_retains_the_published_generation_and_restores() {
     fs::write(&path, []).unwrap();
     let failed =
         refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
-    assert_eq!(
-        failed.outcome,
-        SourceBackedRefreshOutcome::CompletedWithSourceFailures
+    assert_carried_route_failure(
+        &failed,
+        &initial_generation,
+        SourceBackedSourceFailureClass::Unreadable,
     );
-    assert_eq!(failed.successful_routes, 0);
-    assert_eq!(failed.certified_source_count, 1);
-    assert_eq!(failed.source_failures.total(), 1);
-    assert_eq!(failed.source_failures.omitted(), 0);
-    let failure = &failed.source_failures.failures()[0];
-    assert_eq!(failure.provider, CaptureProvider::Custom);
-    assert_eq!(failure.class, SourceBackedSourceFailureClass::Unreadable);
-    assert!(failure.carried_forward);
-    assert_eq!(failure.source_selector, path.display().to_string());
-    assert!(failure.detail.contains("missing manifest record"));
-    assert_eq!(failure.source_identity.len(), 64);
-    assert_eq!(failed.commit.generation_id, initial_generation);
-    assert_eq!(failed.sources, initial.sources);
     let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.generation_id(), initial_generation);
     assert_eq!(retained.document_count(), 1);
@@ -656,9 +645,6 @@ fn structural_manifest_failure_retains_the_published_generation_and_restores() {
     fs::write(&path, valid_bytes).unwrap();
     let restored =
         refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
-    assert_eq!(restored.outcome, SourceBackedRefreshOutcome::Completed);
-    assert_eq!(restored.successful_routes, 1);
-    assert!(restored.source_failures.is_empty());
     assert_eq!(restored.commit.indexed_documents, 1);
     assert_eq!(restored.sources.len(), 1);
     assert_ne!(restored.commit.generation_id, initial_generation);

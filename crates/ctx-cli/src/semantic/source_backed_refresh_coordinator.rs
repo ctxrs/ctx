@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::VecDeque,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -18,17 +18,20 @@ use ctx_history_capture::{
     discover_provider_sources_with_context_and_work_budget, source_backed_refresh_work_budget,
     validate_provider_source_roots_outside_data_root, CaptureError, DiscoveryContext,
     DiscoveryReport, ProviderSourceStatus, SourceBackedAutomaticRegistryIssue,
-    SourceBackedAutomaticUnavailableReason,
+    SourceBackedAutomaticUnavailableReason, SourceBackedCoordinatorError,
     SourceBackedCurrentSourceProgress as CaptureSourceBackedCurrentSourceProgress,
     SourceBackedCurrentSourceProgressStage as CaptureSourceBackedCurrentSourceProgressStage,
     SourceBackedDetailedRefreshProgress as CaptureSourceBackedDetailedRefreshProgress,
-    SourceBackedProviderRegistry, SourceBackedRouteError, SourceBackedRouteErrorKind,
-    SourceBackedRouteResult,
-    SourceBackedSourceFailureClass as CaptureSourceBackedSourceFailureClass,
+    SourceBackedProviderRegistry, SourceBackedRefreshScope, SourceBackedRouteError,
+    SourceBackedRouteErrorKind, SourceBackedRouteResult, SourceBackedSourceFailureClass,
+    SourceBackedSourceFailures, SourceBackedWatchCatalog,
 };
-use ctx_history_core::{utc_now, CaptureProvider, CertifiedSource, ScannedSourceCounts};
+#[cfg(test)]
+use ctx_history_core::CaptureProvider;
+use ctx_history_core::{utc_now, CertifiedSource, ScannedSourceCounts};
 use ctx_history_index::{
-    generation_incompatibility_requires_rebuild, IndexError, VerifiedIndex, WriterOptions,
+    generation_incompatibility_requires_rebuild, IndexError, SourceRouteIdentity, VerifiedIndex,
+    WriterOptions,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -52,14 +55,23 @@ use super::{
 };
 
 mod capture_refresh;
+mod client;
 mod coordinator_state;
 mod current_state;
+mod request;
 
-use capture_refresh::{execute_capture_owned_refresh, execute_source_backed_refresh};
+use capture_refresh::{
+    execute_capture_owned_refresh, execute_source_backed_refresh, SourceBackedRefreshPlan,
+};
 #[cfg(test)]
 use capture_refresh::{
     execute_capture_owned_refresh_with, refresh_all_provider_sources,
     reject_blocking_automatic_registry_issues,
+};
+use client::unknown_refresh_request_response;
+pub(crate) use client::{
+    coordinate_import_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
+    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshObservation,
 };
 #[cfg(test)]
 use coordinator_state::CaptureOwnedSourceBackedRefreshExecutor;
@@ -67,31 +79,27 @@ pub(in crate::semantic) use coordinator_state::CoreRefreshEngine;
 use coordinator_state::SourceBackedRefreshProgressUpdate;
 pub(crate) use coordinator_state::{
     PinnedCorePublication, SourceBackedCurrentSourceProgress,
-    SourceBackedCurrentSourceProgressStage, SourceBackedRefreshExecution,
-    SourceBackedRefreshExecutor, SourceBackedRefreshProgress, SourceBackedRefreshReceipt,
-    SourceBackedRefreshSourceFailure, SourceBackedRefreshSourceFailureClass,
-    SourceBackedRefreshSourceFailures, SourceBackedRefreshTimings,
+    SourceBackedCurrentSourceProgressStage, SourceBackedRefreshCatalogRouteOutcome,
+    SourceBackedRefreshExecution, SourceBackedRefreshExecutor, SourceBackedRefreshProgress,
+    SourceBackedRefreshReceipt, SourceBackedRefreshRouteFailure, SourceBackedRefreshSourceFailure,
+    SourceBackedRefreshTimings,
 };
 pub(crate) use current_state::SourceBackedRefreshCurrent;
+use request::{SourceBackedRefreshOperation, SourceBackedRefreshRequest};
 
 const SEARCH_DIRECTORY: &str = "search";
 const LEXICAL_DIRECTORY: &str = "lexical";
 const SOURCE_REFRESH_REQUEST_OP: &str = "source_refresh_request";
 const SOURCE_REFRESH_STATUS_OP: &str = "source_refresh_status";
+const SOURCE_REFRESH_UNKNOWN_REQUEST_STATE: &str = "request_unknown";
+const SOURCE_REFRESH_UNKNOWN_REQUEST_ERROR_CODE: &str = "source_refresh_request_unknown";
 const SOURCE_REFRESH_ATTEMPT_HISTORY: usize = 64;
 const SOURCE_REFRESH_ACTIVE_PENDING_LIMIT: usize = 8;
 const SOURCE_REFRESH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
 const SOURCE_REFRESH_IPC_TIMEOUT: StdDuration = StdDuration::from_secs(2);
-// Capture bounds each of 64 failure rows to two 512-byte text fields. JSON
-// control-character escaping can expand each input byte sixfold, so 512 KiB
-// retains the complete bounded receipt plus response metadata.
-const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 512 * 1024;
+const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
 const SOURCE_REFRESH_BUILD_ISSUE_LIMIT: usize = 8;
-// Wire validation mirrors the capture receipt's public bounded-row contract.
-const SOURCE_REFRESH_FAILURE_ROW_LIMIT: usize = 64;
-const SOURCE_REFRESH_FAILURE_TEXT_MAX_BYTES: usize = 512;
 const TERMINAL_COVERAGE_ERROR_CODE: &str = "all_provider_terminal_coverage_unavailable";
-type RefreshProgressObserver<'a> = dyn FnMut(&SourceBackedRefreshProgress) -> Result<()> + 'a;
 #[cfg(test)]
 thread_local! {
     static VERIFIED_INDEX_OPEN_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
@@ -107,6 +115,19 @@ pub(super) fn open_verified_index(
         }
     });
     VerifiedIndex::open_pinned(index_root)
+}
+
+fn open_retained_verified_index(
+    index_root: &Path,
+    generation_id: &str,
+) -> std::result::Result<VerifiedIndex, IndexError> {
+    #[cfg(test)]
+    VERIFIED_INDEX_OPEN_COUNT.with(|count| {
+        if let Some(current) = count.get() {
+            count.set(Some(current.saturating_add(1)));
+        }
+    });
+    VerifiedIndex::open_pinned_generation(index_root, generation_id)
 }
 
 #[cfg(test)]
@@ -144,53 +165,7 @@ impl SourceBackedRefreshMode {
             Self::Wait => "wait",
         }
     }
-
-    pub(crate) fn coordinate_explicit_source_catalog(
-        self,
-        data_root: &Path,
-        authority: &ExplicitSourceCatalogAuthority,
-    ) -> Result<SourceBackedRefreshObservation> {
-        coordinate_source_backed_refresh_with_catalog(data_root, self, Some(authority), false, None)
-    }
-
-    pub(crate) fn coordinate_explicit_source_catalog_with_progress(
-        self,
-        data_root: &Path,
-        authority: &ExplicitSourceCatalogAuthority,
-        observer: &mut RefreshProgressObserver<'_>,
-    ) -> Result<SourceBackedRefreshObservation> {
-        coordinate_source_backed_refresh_with_catalog(
-            data_root,
-            self,
-            Some(authority),
-            false,
-            Some(observer),
-        )
-    }
 }
-
-#[derive(Debug)]
-pub(crate) struct SourceBackedRefreshDaemonUnavailable {
-    detail: Option<String>,
-}
-
-impl SourceBackedRefreshDaemonUnavailable {
-    fn new(detail: Option<String>) -> Self {
-        Self { detail }
-    }
-}
-
-impl fmt::Display for SourceBackedRefreshDaemonUnavailable {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("the ctx daemon is unavailable for source-backed refresh")?;
-        if let Some(detail) = self.detail.as_deref() {
-            write!(formatter, ": {detail}")?;
-        }
-        formatter.write_str("; no foreground writer was started")
-    }
-}
-
-impl std::error::Error for SourceBackedRefreshDaemonUnavailable {}
 
 /// Provider-neutral publication returned by the capture-owned refresh
 /// executor after it atomically advances the source-backed generation.
@@ -200,13 +175,21 @@ pub(crate) struct SourceBackedRefreshPublication {
     /// Exact explicit-source catalog snapshot registered into this publication.
     pub(crate) published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
     pub(crate) scanned_routes: usize,
-    pub(crate) successful_routes: usize,
-    pub(crate) source_failures: SourceBackedRefreshSourceFailures,
     pub(crate) unsupported_routes: usize,
     pub(crate) certified_source_count: usize,
     pub(crate) certified_source_bytes: u64,
     pub(crate) current: SourceBackedRefreshCurrent,
     pub(crate) timings: SourceBackedRefreshTimings,
+    pub(crate) selected_route_ids: Vec<String>,
+    pub(crate) successful_route_ids: Vec<String>,
+    pub(crate) successful_route_changes: BTreeMap<String, bool>,
+    pub(crate) failed_route_outcomes: Vec<SourceBackedRefreshRouteFailure>,
+    pub(crate) catalog_route_outcomes: Vec<SourceBackedRefreshCatalogRouteOutcome>,
+    pub(crate) source_failures: Vec<SourceBackedRefreshSourceFailure>,
+}
+
+pub(super) fn source_backed_watch_catalog(data_root: &Path) -> Result<SourceBackedWatchCatalog> {
+    capture_refresh::source_backed_watch_catalog(data_root)
 }
 
 pub(super) fn source_backed_index_root(data_root: &Path) -> PathBuf {
@@ -258,8 +241,10 @@ fn verify_source_backed_publication(
         );
     }
     let manifest = verified.manifest();
-    let verified_current =
-        SourceBackedRefreshCurrent::from_sources(&manifest.sources, manifest.removals.len())?;
+    let verified_current = SourceBackedRefreshCurrent::from_sources(
+        &manifest.sources,
+        publication.current.removed_source_count,
+    )?;
     if verified_current != publication.current
         || publication.certified_source_count != verified_current.source_count
         || publication.certified_source_bytes != verified_current.certified_source_bytes
@@ -267,12 +252,6 @@ fn verify_source_backed_publication(
     {
         bail!("Core refresh publication facts do not match its exact verified generation");
     }
-    validate_source_refresh_results(
-        publication.scanned_routes,
-        publication.successful_routes,
-        &publication.source_failures,
-        publication.current.source_count,
-    )?;
     Ok(())
 }
 
@@ -345,382 +324,14 @@ impl PinnedSourceBackedGeneration {
         self.index
     }
 
+    pub(super) fn verified_index(&self) -> &VerifiedIndex {
+        &self.index
+    }
+
     #[cfg(test)]
     pub(crate) fn from_index(index: VerifiedIndex) -> Self {
         Self { index }
     }
-}
-
-#[allow(dead_code)] // Request metadata is retained for CLI/status integrations.
-pub(crate) struct SourceBackedRefreshObservation {
-    pub(crate) mode: SourceBackedRefreshMode,
-    pub(crate) status: String,
-    pub(crate) request_id: Option<String>,
-    pub(crate) daemon_available: bool,
-    pub(crate) source_count: usize,
-    pub(crate) receipt: Option<SourceBackedRefreshReceipt>,
-    pub(crate) pin: PinnedSourceBackedGeneration,
-}
-
-/// Coordinates source-backed refresh without ever falling back to a foreground
-/// writer. The returned reader is already pinned to one verified generation.
-pub(crate) fn coordinate_source_backed_refresh(
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, true, None)
-}
-
-pub(crate) fn coordinate_source_backed_refresh_with_progress(
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    observer: &mut RefreshProgressObserver<'_>,
-) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, true, Some(observer))
-}
-
-pub(crate) fn coordinate_core_refresh_without_autostart(
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, false, None)
-}
-
-pub(crate) fn coordinate_core_refresh_without_autostart_with_progress(
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    observer: &mut RefreshProgressObserver<'_>,
-) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, false, Some(observer))
-}
-
-fn coordinate_source_backed_refresh_with_catalog(
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
-    allow_daemon_autostart: bool,
-    progress_observer: Option<&mut RefreshProgressObserver<'_>>,
-) -> Result<SourceBackedRefreshObservation> {
-    if mode == SourceBackedRefreshMode::Off {
-        if explicit_source_catalog.is_some() {
-            bail!("explicit source catalog imports require daemon refresh mode `wait`");
-        }
-        let pin = pin_published_generation(data_root)?.ok_or_else(|| {
-            anyhow!("the Core index does not exist; retry with daemon refresh enabled")
-        })?;
-        return Ok(SourceBackedRefreshObservation {
-            mode,
-            status: "off".to_owned(),
-            request_id: None,
-            daemon_available: false,
-            source_count: 0,
-            receipt: None,
-            pin,
-        });
-    }
-
-    let config = AppConfig::load(data_root)
-        .context("load daemon configuration before source-backed refresh")?;
-    if allow_daemon_autostart && config.daemon.enabled {
-        super::daemon_autostart::autostart_daemon_and_wait(
-            data_root,
-            &config,
-            crate::DaemonTriggerCommandArg::Search,
-        )
-        .context("start or recover enabled daemon before source-backed refresh")?;
-    }
-
-    let request = compact_json(json!({
-        "schema_version": 1,
-        "op": SOURCE_REFRESH_REQUEST_OP,
-        "mode": mode.as_str(),
-        "explicit_source_catalog": explicit_source_catalog
-            .map(ExplicitSourceCatalogAuthority::to_json),
-    }));
-    let response = match daemon_source_refresh_request(
-        data_root,
-        request,
-        SOURCE_REFRESH_IPC_TIMEOUT,
-        SOURCE_REFRESH_RESPONSE_MAX_BYTES,
-    ) {
-        Ok(Some(response)) => response,
-        Ok(None) => return daemon_unavailable_fallback(data_root, mode, None),
-        Err(error)
-            if error
-                .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
-                .is_some() =>
-        {
-            return daemon_unavailable_fallback(data_root, mode, Some(error))
-        }
-        Err(error) => return Err(error.context("request daemon-owned source-backed refresh")),
-    };
-    validate_daemon_refresh_response(&response)?;
-    let request_id = response
-        .get("request_id")
-        .and_then(Value::as_str)
-        .filter(|request_id| !request_id.is_empty())
-        .ok_or_else(|| anyhow!("daemon source refresh response has no request ID"))?
-        .to_owned();
-
-    if mode == SourceBackedRefreshMode::Background {
-        let pin = pin_published_generation(data_root)?.ok_or_else(|| {
-            anyhow!(
-                "daemon source refresh was queued but no published generation exists; retry with --refresh wait"
-            )
-        })?;
-        return Ok(SourceBackedRefreshObservation {
-            mode,
-            status: response
-                .get("request_state")
-                .and_then(Value::as_str)
-                .unwrap_or("queued")
-                .to_owned(),
-            request_id: Some(request_id),
-            daemon_available: true,
-            source_count: response_source_count(&response),
-            receipt: None,
-            pin,
-        });
-    }
-
-    wait_for_published_generation(
-        data_root,
-        request_id,
-        mode,
-        explicit_source_catalog,
-        allow_daemon_autostart,
-        progress_observer,
-    )
-}
-
-fn wait_for_published_generation(
-    data_root: &Path,
-    mut request_id: String,
-    mode: SourceBackedRefreshMode,
-    expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
-    allow_daemon_autostart: bool,
-    progress_observer: Option<&mut RefreshProgressObserver<'_>>,
-) -> Result<SourceBackedRefreshObservation> {
-    let mut progress_observer = progress_observer.map(RefreshProgressObserverState::new);
-    loop {
-        let response = match daemon_source_refresh_request(
-            data_root,
-            compact_json(json!({
-                "schema_version": 1,
-                "op": SOURCE_REFRESH_STATUS_OP,
-                "request_id": request_id,
-            })),
-            SOURCE_REFRESH_IPC_TIMEOUT,
-            SOURCE_REFRESH_RESPONSE_MAX_BYTES,
-        ) {
-            Ok(Some(response)) => response,
-            Ok(None) => {
-                request_id = recover_wait_refresh_request(
-                    data_root,
-                    expected_catalog,
-                    allow_daemon_autostart,
-                )
-                .with_context(|| {
-                    format!("recover daemon while waiting for source refresh request {request_id}")
-                })?;
-                if let Some(observer) = progress_observer.as_mut() {
-                    observer.reset();
-                }
-                continue;
-            }
-            Err(error)
-                if error
-                    .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
-                    .is_some() =>
-            {
-                request_id = recover_wait_refresh_request(
-                    data_root,
-                    expected_catalog,
-                    allow_daemon_autostart,
-                )
-                .with_context(|| {
-                        format!(
-                            "recover unavailable daemon while waiting for source refresh request {request_id}: {error:#}"
-                        )
-                    })?;
-                if let Some(observer) = progress_observer.as_mut() {
-                    observer.reset();
-                }
-                continue;
-            }
-            Err(error) => {
-                return Err(error.context("wait for daemon-owned source-backed refresh publication"))
-            }
-        };
-        validate_daemon_refresh_response(&response)?;
-        match response.get("request_state").and_then(Value::as_str) {
-            Some("published") => {
-                if let Some(expected_catalog) = expected_catalog {
-                    let published_catalog = response
-                        .get("published_explicit_source_catalog")
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "published daemon source refresh has no explicit source catalog authority"
-                            )
-                        })
-                        .and_then(ExplicitSourceCatalogAuthority::from_json)?;
-                    if &published_catalog != expected_catalog {
-                        bail!(
-                            "daemon published an unexpected explicit source catalog authority: expected {:?}, published {:?}",
-                            expected_catalog,
-                            published_catalog
-                        );
-                    }
-                }
-                let expected = response
-                    .get("published_generation")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        anyhow!("published daemon source refresh has no generation ID")
-                    })?;
-                let pin = pin_published_generation(data_root)?.ok_or_else(|| {
-                    anyhow!(
-                        "daemon published Core generation {expected}, but no verified generation can be opened"
-                    )
-                })?;
-                if pin.generation_id() != expected {
-                    bail!(
-                        "daemon reported Core generation {expected}, but the verified published generation is {}",
-                        pin.generation_id()
-                    );
-                }
-                let receipt = published_refresh_receipt(&response, &pin)?;
-                return Ok(SourceBackedRefreshObservation {
-                    mode,
-                    status: "published".to_owned(),
-                    request_id: Some(request_id),
-                    daemon_available: true,
-                    source_count: response_source_count(&response),
-                    receipt: Some(receipt),
-                    pin,
-                });
-            }
-            Some("failed") => {
-                let error = response
-                    .get("last_error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("source-backed refresh failed");
-                let retained = response
-                    .get("published_generation")
-                    .and_then(Value::as_str)
-                    .or_else(|| response.get("previous_generation").and_then(Value::as_str))
-                    .map(|generation| format!("; retained generation {generation}"))
-                    .unwrap_or_default();
-                let detail =
-                    format!("daemon-owned source-backed refresh failed: {error}{retained}");
-                match response.get("failure_type").and_then(Value::as_str) {
-                    Some("unsupported_schema") => {
-                        return Err(CaptureError::UnsupportedSchema(detail).into())
-                    }
-                    Some("malformed_source") => {
-                        return Err(CaptureError::InvalidPayload(detail).into())
-                    }
-                    _ => {}
-                }
-                return Err(anyhow!("{detail}"));
-            }
-            Some("queued" | "running") => {
-                if let Some(observer) = progress_observer.as_mut() {
-                    observer.observe(&response)?;
-                }
-                std::thread::sleep(SOURCE_REFRESH_POLL_INTERVAL);
-            }
-            Some(state) => {
-                return Err(anyhow!(
-                    "daemon source refresh request {request_id} has unknown state `{state}`"
-                ));
-            }
-            None => {
-                return Err(anyhow!(
-                    "daemon source refresh response has no request state"
-                ))
-            }
-        }
-    }
-}
-
-struct RefreshProgressObserverState<'observer, 'callback> {
-    observer: &'observer mut RefreshProgressObserver<'callback>,
-    last_observed: Option<SourceBackedRefreshProgress>,
-}
-
-impl<'observer, 'callback> RefreshProgressObserverState<'observer, 'callback> {
-    fn new(observer: &'observer mut RefreshProgressObserver<'callback>) -> Self {
-        Self {
-            observer,
-            last_observed: None,
-        }
-    }
-
-    fn observe(&mut self, response: &Value) -> Result<()> {
-        let progress = SourceBackedRefreshProgress::from_status_json(response)?;
-        if self.last_observed.as_ref() == Some(&progress) {
-            return Ok(());
-        }
-        (self.observer)(&progress).context("report daemon source refresh progress")?;
-        self.last_observed = Some(progress);
-        Ok(())
-    }
-
-    fn reset(&mut self) {
-        self.last_observed = None;
-    }
-}
-
-fn recover_wait_refresh_request(
-    data_root: &Path,
-    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
-    allow_daemon_autostart: bool,
-) -> Result<String> {
-    if !allow_daemon_autostart {
-        return Err(SourceBackedRefreshDaemonUnavailable::new(Some(
-            "the explicit source import disabled daemon autostart".to_owned(),
-        ))
-        .into());
-    }
-    let config =
-        AppConfig::load(data_root).context("load daemon configuration for refresh recovery")?;
-    if !config.daemon.enabled {
-        return Err(SourceBackedRefreshDaemonUnavailable::new(Some(
-            "daemon was disabled while waiting for source refresh".to_owned(),
-        ))
-        .into());
-    }
-    super::daemon_autostart::autostart_daemon_and_wait(
-        data_root,
-        &config,
-        crate::DaemonTriggerCommandArg::Search,
-    )
-    .context("restart daemon-owned source refresh service")?;
-    let response = daemon_source_refresh_request(
-        data_root,
-        compact_json(json!({
-            "schema_version": 1,
-            "op": SOURCE_REFRESH_REQUEST_OP,
-            "mode": SourceBackedRefreshMode::Wait.as_str(),
-            "explicit_source_catalog": explicit_source_catalog
-                .map(ExplicitSourceCatalogAuthority::to_json),
-        })),
-        SOURCE_REFRESH_IPC_TIMEOUT,
-        SOURCE_REFRESH_RESPONSE_MAX_BYTES,
-    )?
-    .ok_or_else(|| {
-        SourceBackedRefreshDaemonUnavailable::new(Some(
-            "restarted daemon did not publish a source refresh endpoint".to_owned(),
-        ))
-    })?;
-    validate_daemon_refresh_response(&response)?;
-    response
-        .get("request_id")
-        .and_then(Value::as_str)
-        .filter(|request_id| !request_id.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("recovered daemon source refresh response has no request ID"))
 }
 
 fn published_refresh_receipt(
@@ -767,25 +378,50 @@ fn published_refresh_receipt(
         sources_with_rejections: required_usize(current_value, "current_sources_with_rejections")?,
         removed_source_count: required_usize(current_value, "removed_source_count")?,
     };
-    let scanned_routes = required_usize(value, "scanned_routes")?;
-    let successful_routes = required_usize(value, "successful_routes")?;
+    let selected_route_total = required_usize(value, "selected_route_total")?;
+    let successful_route_total = required_usize(value, "successful_route_total")?;
     let source_failures = required_source_failures(value.get("source_failures"))?;
-    let outcome = required_source_refresh_outcome(value.get("outcome"))?;
-    if outcome
-        != if source_failures.is_empty() {
-            "completed"
-        } else {
-            "completed_with_source_failures"
-        }
+    let catalog_route_outcomes =
+        required_catalog_route_outcomes(value.get("catalog_route_outcomes"))?;
+    let catalog_succeeded_routes = catalog_route_outcomes
+        .iter()
+        .filter(|outcome| outcome.outcome == "succeeded")
+        .map(|outcome| outcome.route_identity.as_str())
+        .collect::<BTreeSet<_>>();
+    let catalog_failed_routes = catalog_route_outcomes
+        .iter()
+        .filter(|outcome| outcome.outcome == "failed")
+        .map(|outcome| outcome.route_identity.as_str())
+        .collect::<BTreeSet<_>>();
+    let successful_route_changes = catalog_route_outcomes
+        .iter()
+        .filter_map(|outcome| {
+            (outcome.outcome == "succeeded")
+                .then_some(outcome.changed)
+                .flatten()
+                .map(|changed| (outcome.route_identity.clone(), changed))
+        })
+        .collect();
+    let diagnostic_route_ids = source_failures
+        .iter()
+        .map(|failure| failure.route_identity.clone())
+        .collect::<BTreeSet<_>>();
+    let source_failure_total = required_usize(value, "source_failure_total")?;
+    let source_failures_omitted = required_usize(value, "source_failures_omitted")?;
+    if successful_route_total > selected_route_total
+        || diagnostic_route_ids.len() != source_failures.len()
+        || source_failure_total != selected_route_total.saturating_sub(successful_route_total)
+        || catalog_succeeded_routes.len() > successful_route_total
+        || catalog_failed_routes.len() > source_failure_total
+        || catalog_succeeded_routes
+            .len()
+            .saturating_add(catalog_failed_routes.len())
+            > selected_route_total
+        || source_failures_omitted != source_failure_total.saturating_sub(source_failures.len())
+        || source_failures.len() > source_failure_total
     {
-        bail!("published daemon source refresh receipt has inconsistent outcome");
+        bail!("published daemon source refresh has an invalid route-result partition");
     }
-    validate_source_refresh_results(
-        scanned_routes,
-        successful_routes,
-        &source_failures,
-        current.source_count,
-    )?;
 
     let top_previous_generation = optional_generation(response.get("previous_generation"))?;
     let top_published_generation = required_generation(
@@ -802,37 +438,21 @@ fn published_refresh_receipt(
             anyhow!("published daemon source refresh has no explicit source catalog authority")
         })
         .and_then(ExplicitSourceCatalogAuthority::from_json)?;
-    let top_scanned_routes =
-        required_usize_from_value(response.get("scanned_routes"), "scanned_routes")?;
-    let top_successful_routes =
-        required_usize_from_value(response.get("successful_routes"), "successful_routes")?;
-    let top_source_failure_total =
-        required_usize_from_value(response.get("source_failure_total"), "source_failure_total")?;
-    let top_source_failures_omitted = required_usize_from_value(
-        response.get("source_failures_omitted"),
-        "source_failures_omitted",
-    )?;
-    let top_outcome = required_source_refresh_outcome(response.get("outcome"))?;
     let identity_changed = previous_generation.as_deref() != Some(published_generation.as_str());
     if previous_generation != top_previous_generation
         || published_generation != top_published_generation
         || generation_changed != top_generation_changed
         || generation_changed != identity_changed
         || published_explicit_source_catalog != top_published_explicit_source_catalog
-        || scanned_routes != top_scanned_routes
-        || successful_routes != top_successful_routes
-        || source_failures.total() != top_source_failure_total
-        || source_failures.omitted != top_source_failures_omitted
-        || outcome != top_outcome
     {
         bail!(
-            "published daemon source refresh receipt has inconsistent publication or result facts"
+            "published daemon source refresh receipt has inconsistent publication identity facts"
         );
     }
 
     let manifest = pin.index.manifest();
     let verified_current =
-        SourceBackedRefreshCurrent::from_sources(&manifest.sources, manifest.removals.len())?;
+        SourceBackedRefreshCurrent::from_sources(&manifest.sources, current.removed_source_count)?;
     if current != verified_current
         || current.source_count
             != required_usize_from_value(
@@ -856,96 +476,158 @@ fn published_refresh_receipt(
         generation_changed,
         published_explicit_source_catalog,
         current,
-        scanned_routes,
-        successful_routes,
+        selected_route_ids: Vec::new(),
+        successful_route_ids: Vec::new(),
+        successful_route_changes,
+        selected_route_total,
+        successful_route_total,
+        failed_route_outcomes: Vec::new(),
+        catalog_route_outcomes,
         source_failures,
     })
 }
 
-fn required_source_refresh_outcome(value: Option<&Value>) -> Result<&str> {
-    match value.and_then(Value::as_str) {
-        Some(outcome @ ("completed" | "completed_with_source_failures")) => Ok(outcome),
-        _ => bail!("published daemon source refresh receipt has invalid outcome"),
-    }
-}
-
-fn required_source_failures(value: Option<&Value>) -> Result<SourceBackedRefreshSourceFailures> {
-    let value = value
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("published daemon source refresh source failures are malformed"))?;
-    let failures = value
-        .get("failures")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("published daemon source refresh failure rows are malformed"))?;
-    if failures.len() > SOURCE_REFRESH_FAILURE_ROW_LIMIT {
-        bail!("published daemon source refresh has too many source failure rows");
-    }
-    let omitted = required_usize(value, "omitted")?;
-    let total = required_usize(value, "total")?;
-    if failures.len().checked_add(omitted) != Some(total) {
-        bail!("published daemon source refresh has inconsistent source failure totals");
-    }
-
-    let failures = failures
+fn required_catalog_route_outcomes(
+    value: Option<&Value>,
+) -> Result<Vec<SourceBackedRefreshCatalogRouteOutcome>> {
+    let value = value.ok_or_else(|| {
+        anyhow!("published daemon source refresh receipt has no catalog_route_outcomes")
+    })?;
+    let values = value.as_object().ok_or_else(|| {
+        anyhow!("published daemon source refresh receipt catalog_route_outcomes must be an object")
+    })?;
+    let mut route_results = BTreeMap::<String, (String, Option<String>, Option<bool>)>::new();
+    values
         .iter()
-        .map(|failure| {
-            let failure = failure.as_object().ok_or_else(|| {
-                anyhow!("published daemon source refresh source failure row is malformed")
-            })?;
-            let source_identity = required_nonempty_string(failure, "source_identity")?;
-            if !is_sha256_identity(&source_identity) {
-                bail!("published daemon source refresh source failure identity is malformed");
+        .map(|(catalog_lineage, value)| {
+            if catalog_lineage.len() != 64
+                || !catalog_lineage.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                bail!("published daemon source refresh catalog lineage is invalid");
             }
-            let provider = required_nonempty_string(failure, "provider")?;
-            provider.parse::<CaptureProvider>().map_err(|_| {
-                anyhow!("published daemon source refresh source failure provider is malformed")
+            let fields = value.as_array().ok_or_else(|| {
+                anyhow!("published daemon source refresh compact catalog outcome must be an array")
             })?;
-            let class = required_nonempty_string(failure, "class")?;
-            let class = SourceBackedRefreshSourceFailureClass::parse(&class).ok_or_else(|| {
-                anyhow!("published daemon source refresh source failure class is malformed")
-            })?;
-            let carried_forward = failure
-                .get("carried_forward")
-                .and_then(Value::as_bool)
+            if !(2..=3).contains(&fields.len()) {
+                bail!("published daemon source refresh compact catalog outcome has invalid width");
+            }
+            let route_identity = fields[0]
+                .as_str()
+                .filter(|identity| is_sha256_identity(identity))
                 .ok_or_else(|| {
-                    anyhow!(
-                        "published daemon source refresh source failure has no carried_forward fact"
-                    )
-                })?;
-            let source_selector = required_bounded_string(failure, "source_selector")?;
-            let detail = required_bounded_string(failure, "detail")?;
-            Ok(SourceBackedRefreshSourceFailure {
-                source_identity,
-                provider,
-                class,
-                carried_forward,
-                source_selector,
-                detail,
+                    anyhow!("published daemon source refresh catalog route identity is invalid")
+                })?
+                .to_owned();
+            let outcome = match fields[1].as_str() {
+                Some("s") => "succeeded",
+                Some("f") => "failed",
+                Some("n") => "not_selected",
+                _ => bail!("published daemon source refresh catalog route outcome is invalid"),
+            };
+            let (failure_class, changed) = match outcome {
+                "succeeded" if fields.len() == 3 => {
+                    let changed = fields.get(2).and_then(Value::as_bool).ok_or_else(|| {
+                        anyhow!("published daemon successful catalog route outcome has no changed fact")
+                    })?;
+                    (None, Some(changed))
+                }
+                "failed" if fields.len() == 3 => {
+                    let class = match fields.get(2).and_then(Value::as_str) {
+                        Some("u") => "unavailable",
+                        Some("c") => "source_changed",
+                        Some("r") => "unreadable",
+                        Some("i") => "incompatible",
+                        _ => bail!(
+                            "published daemon source refresh catalog failure class is invalid"
+                        ),
+                    };
+                    (Some(class.to_owned()), None)
+                }
+                "not_selected" if fields.len() == 2 => (None, None),
+                _ => bail!(
+                    "published daemon source refresh catalog route outcome has inconsistent fields"
+                ),
+            };
+            let result = (outcome.to_owned(), failure_class.clone(), changed);
+            if route_results
+                .insert(route_identity.clone(), result.clone())
+                .is_some_and(|previous| previous != result)
+            {
+                bail!("published daemon source refresh catalog lineages disagree on a shared route result");
+            }
+            Ok(SourceBackedRefreshCatalogRouteOutcome {
+                catalog_lineage: catalog_lineage.clone(),
+                route_identity,
+                outcome: outcome.to_owned(),
+                failure_class,
+                changed,
             })
         })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(SourceBackedRefreshSourceFailures { failures, omitted })
+        .collect()
 }
 
-fn required_nonempty_string(value: &serde_json::Map<String, Value>, field: &str) -> Result<String> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            anyhow!("published daemon source refresh source failure has invalid {field}")
-        })
-}
-
-fn required_bounded_string(value: &serde_json::Map<String, Value>, field: &str) -> Result<String> {
-    let value = value.get(field).and_then(Value::as_str).ok_or_else(|| {
-        anyhow!("published daemon source refresh source failure has invalid {field}")
+fn required_source_failures(
+    value: Option<&Value>,
+) -> Result<Vec<SourceBackedRefreshSourceFailure>> {
+    let value = value.ok_or_else(|| {
+        anyhow!("published daemon source refresh receipt has no required source_failures array")
     })?;
-    if value.len() > SOURCE_REFRESH_FAILURE_TEXT_MAX_BYTES {
-        bail!("published daemon source refresh source failure {field} is too large");
+    value
+        .as_array()
+        .ok_or_else(|| {
+            anyhow!("published daemon source refresh receipt source_failures must be an array")
+        })?
+        .iter()
+        .map(|value| {
+            let value = value
+                .as_object()
+                .ok_or_else(|| anyhow!("daemon source refresh source failure is malformed"))?;
+            let required = |field: &'static str| {
+                value
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow!("daemon source refresh source failure has no {field}"))
+            };
+            Ok(SourceBackedRefreshSourceFailure {
+                route_identity: required("route_identity")?
+                    .into_sha256_identity("route_identity")?,
+                source_identity: required("source_identity")?
+                    .into_sha256_identity("source_identity")?,
+                provider: required("provider")?,
+                class: match required("class")?.as_str() {
+                    "unavailable" => "unavailable".to_owned(),
+                    "source_changed" => "source_changed".to_owned(),
+                    "unreadable" => "unreadable".to_owned(),
+                    "incompatible" => "incompatible".to_owned(),
+                    _ => bail!("daemon source refresh source failure class is malformed"),
+                },
+                carried_forward: value
+                    .get("carried_forward")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| {
+                        anyhow!("daemon source refresh source failure has no carried_forward fact")
+                    })?,
+                source_selector: required("source_selector")?,
+                detail: required("detail")?,
+            })
+        })
+        .collect()
+}
+
+trait Sha256IdentityString {
+    fn into_sha256_identity(self, field: &'static str) -> Result<String>;
+}
+
+impl Sha256IdentityString for String {
+    fn into_sha256_identity(self, field: &'static str) -> Result<String> {
+        if is_sha256_identity(&self) {
+            Ok(self)
+        } else {
+            bail!("daemon source refresh source failure {field} is malformed")
+        }
     }
-    Ok(value.to_owned())
 }
 
 fn is_sha256_identity(value: &str) -> bool {
@@ -953,42 +635,6 @@ fn is_sha256_identity(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn validate_source_refresh_results(
-    scanned_routes: usize,
-    successful_routes: usize,
-    source_failures: &SourceBackedRefreshSourceFailures,
-    current_source_count: usize,
-) -> Result<()> {
-    if source_failures.failures.len() > SOURCE_REFRESH_FAILURE_ROW_LIMIT {
-        bail!("source-backed refresh has too many source failure rows");
-    }
-    for failure in &source_failures.failures {
-        if !is_sha256_identity(&failure.source_identity) {
-            bail!("source-backed refresh source failure identity is malformed");
-        }
-        failure
-            .provider
-            .parse::<CaptureProvider>()
-            .map_err(|_| anyhow!("source-backed refresh source failure provider is malformed"))?;
-        if failure.source_selector.len() > SOURCE_REFRESH_FAILURE_TEXT_MAX_BYTES {
-            bail!("source-backed refresh source failure source_selector is too large");
-        }
-        if failure.detail.len() > SOURCE_REFRESH_FAILURE_TEXT_MAX_BYTES {
-            bail!("source-backed refresh source failure detail is too large");
-        }
-    }
-    if successful_routes.checked_add(source_failures.total()) != Some(scanned_routes) {
-        bail!(
-            "source-backed refresh result counts are inconsistent: scanned {scanned_routes}, successful {successful_routes}, failed {}",
-            source_failures.total()
-        );
-    }
-    if !source_failures.is_empty() && current_source_count == 0 {
-        bail!("source-backed refresh completed with source failures but no usable source remains");
-    }
-    Ok(())
 }
 
 fn optional_generation(value: Option<&Value>) -> Result<Option<String>> {
@@ -1028,54 +674,24 @@ fn required_u64_from_value(value: Option<&Value>, field: &str) -> Result<u64> {
         .ok_or_else(|| anyhow!("published daemon source refresh receipt has invalid {field}"))
 }
 
-fn daemon_unavailable_fallback(
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    error: Option<anyhow::Error>,
-) -> Result<SourceBackedRefreshObservation> {
-    if mode == SourceBackedRefreshMode::Background {
-        if let Some(pin) = pin_published_generation(data_root)? {
-            return Ok(SourceBackedRefreshObservation {
-                mode,
-                status: "daemon_unavailable".to_owned(),
-                request_id: None,
-                daemon_available: false,
-                source_count: 0,
-                receipt: None,
-                pin,
-            });
-        }
-    }
-    Err(SourceBackedRefreshDaemonUnavailable::new(error.map(|error| format!("{error:#}"))).into())
-}
-
-fn validate_daemon_refresh_response(response: &Value) -> Result<()> {
-    if response.get("ok").and_then(Value::as_bool) == Some(true) {
-        return Ok(());
-    }
-    Err(anyhow!(
-        "{}",
-        response
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("daemon source refresh request failed")
-    ))
-}
-
-fn response_source_count(response: &Value) -> usize {
-    response
-        .get("progress")
-        .and_then(|progress| progress.get("total_sources"))
-        .or_else(|| response.get("source_count"))
-        .and_then(Value::as_u64)
-        .and_then(|count| usize::try_from(count).ok())
-        .unwrap_or(0)
-}
-
 pub(super) fn pin_published_generation(
     data_root: &Path,
 ) -> Result<Option<PinnedSourceBackedGeneration>> {
     Ok(open_published_generation(data_root)?.map(|index| PinnedSourceBackedGeneration { index }))
+}
+
+fn pin_retained_generation(
+    data_root: &Path,
+    generation_id: &str,
+) -> Result<PinnedSourceBackedGeneration> {
+    let index_root = source_backed_index_root(data_root);
+    let index = open_retained_verified_index(&index_root, generation_id).with_context(|| {
+        format!(
+            "open retained Core generation {generation_id} from {}",
+            index_root.display()
+        )
+    })?;
+    Ok(PinnedSourceBackedGeneration { index })
 }
 
 pub(crate) fn pin_active_verified_generation(
@@ -1089,6 +705,14 @@ pub(crate) fn pin_active_verified_generation(
 #[cfg(test)]
 #[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests_retained_generation_tests.rs"]
 mod retained_generation_tests;
+
+#[cfg(test)]
+#[path = "source_backed_refresh_coordinator/pending_missing_tests.rs"]
+mod pending_missing_tests;
+
+#[cfg(test)]
+#[path = "source_backed_refresh_coordinator/restart_recovery_tests.rs"]
+mod restart_recovery_tests;
 
 #[cfg(test)]
 #[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests.rs"]

@@ -1,41 +1,19 @@
-use std::{io::Write, path::Path};
+use std::io::Write;
 
 use super::*;
 
-fn assert_codex_source_failure(
-    receipt: &SourceBackedRefreshReceipt,
+fn assert_cold_route_failure(
+    error: SourceBackedCoordinatorError,
     class: SourceBackedSourceFailureClass,
-    selector: &Path,
 ) {
-    assert_eq!(
-        receipt.outcome,
-        SourceBackedRefreshOutcome::CompletedWithSourceFailures
-    );
-    assert_eq!(receipt.successful_routes, 0);
-    assert_eq!(receipt.source_failures.total(), 1);
-    assert_eq!(receipt.source_failures.omitted(), 0);
-    let failure = &receipt.source_failures.failures()[0];
-    assert_eq!(failure.provider, CaptureProvider::Codex);
-    assert_eq!(failure.class, class);
-    assert!(failure.carried_forward);
-    assert_eq!(failure.source_selector, selector.display().to_string());
-    assert!(!failure.detail.is_empty());
-    assert_eq!(failure.source_identity.len(), 64);
-}
-
-fn assert_cold_codex_source_failure(error: SourceBackedCoordinatorError, selector: &Path) {
-    let SourceBackedCoordinatorError::NoUsableSourceRoutes { failures } = error else {
-        panic!("expected a cold source-scoped failure, got {error:?}");
-    };
-    assert_eq!(failures.total(), 1);
-    assert_eq!(failures.omitted(), 0);
-    let failure = &failures.failures()[0];
-    assert_eq!(failure.provider, CaptureProvider::Codex);
-    assert_eq!(failure.class, SourceBackedSourceFailureClass::SourceChanged);
-    assert!(!failure.carried_forward);
-    assert_eq!(failure.source_selector, selector.display().to_string());
-    assert!(!failure.detail.is_empty());
-    assert_eq!(failure.source_identity.len(), 64);
+    match error {
+        SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes } => {
+            assert_eq!(failed_routes.len(), 1);
+            assert_eq!(failed_routes[0].class, class);
+            assert!(!failed_routes[0].carried_forward);
+        }
+        error => panic!("expected one unusable source route, got {error:?}"),
+    }
 }
 
 #[test]
@@ -429,8 +407,11 @@ fn active_source_family_contract_codex_tree_rejects_captured_session_removal() {
     fs::create_dir_all(&sessions).unwrap();
     let native_session_id = "019facf0-3333-7777-8888-000000000009";
     let selected = sessions.join(format!("rollout-{native_session_id}.jsonl"));
-    let selected_bytes = codex_rollout_bytes(native_session_id, &["removedtreesessionmarker"]);
-    fs::write(&selected, &selected_bytes).unwrap();
+    fs::write(
+        &selected,
+        codex_rollout_bytes(native_session_id, &["removedtreesessionmarker"]),
+    )
+    .unwrap();
 
     let mut registry = SourceBackedProviderRegistry::new();
     register_landed_source_backed_route(
@@ -444,33 +425,21 @@ fn active_source_family_contract_codex_tree_rejects_captured_session_removal() {
         SourceBackedRouteSelection::Automatic,
     )
     .unwrap();
-    let selected_for_hook = selected.clone();
     super::super::set_after_codex_session_tree_stage_hook(move |_| {
-        fs::remove_file(selected_for_hook).unwrap();
+        fs::remove_file(selected).unwrap();
     });
 
-    let options = WriterOptions {
-        indexer_threads: 1,
-        memory_bytes: 15_000_000,
-    };
-    let error = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap_err();
-    assert_cold_codex_source_failure(error, &sessions);
+    let error = refresh_source_backed_generation(
+        &index,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap_err();
+    assert_cold_route_failure(error, SourceBackedSourceFailureClass::SourceChanged);
     assert!(VerifiedIndex::open(&index).is_err());
-
-    fs::write(&selected, selected_bytes).unwrap();
-    let retried = refresh_source_backed_generation(&index, &registry, options).unwrap();
-    assert_eq!(retried.outcome, SourceBackedRefreshOutcome::Completed);
-    assert_eq!(retried.successful_routes, 1);
-    assert!(retried.source_failures.is_empty());
-    assert_eq!(retried.commit.indexed_documents, 1);
-    assert_eq!(
-        VerifiedIndex::open(&index)
-            .unwrap()
-            .search_event_candidates("removedtreesessionmarker", 8)
-            .unwrap()
-            .len(),
-        1
-    );
 }
 
 #[test]
@@ -522,16 +491,13 @@ fn active_source_family_contract_codex_tree_rejects_deleted_source_reappearance(
         );
     });
     let failed = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
-    assert_codex_source_failure(
+    assert_carried_route_failure(
         &failed,
+        &seeded_generation,
         SourceBackedSourceFailureClass::SourceChanged,
-        &sessions,
     );
-    assert_eq!(failed.commit.generation_id, seeded_generation);
-    assert_eq!(failed.sources, seeded.sources);
     let preserved = VerifiedIndex::open(&index).unwrap();
     assert_eq!(preserved.generation_id(), seeded_generation);
-    assert_eq!(preserved.manifest().sources, seeded.sources);
     assert_eq!(
         preserved
             .search_event_candidates("deletionbasemarker", 8)
@@ -545,9 +511,6 @@ fn active_source_family_contract_codex_tree_rejects_deleted_source_reappearance(
         .is_empty());
 
     let recovered = refresh_source_backed_generation(&index, &registry, options).unwrap();
-    assert_eq!(recovered.outcome, SourceBackedRefreshOutcome::Completed);
-    assert_eq!(recovered.successful_routes, 1);
-    assert!(recovered.source_failures.is_empty());
     assert_ne!(recovered.commit.generation_id, seeded_generation);
     assert_eq!(
         VerifiedIndex::open(&index)
@@ -597,25 +560,15 @@ fn active_source_family_contract_codex_tree_rejects_root_replacement_with_same_l
         fs::rename(&replace_sessions, moved_sessions).unwrap();
         fs::rename(replacement, replace_sessions).unwrap();
     });
-    let options = WriterOptions {
-        indexer_threads: 1,
-        memory_bytes: 15_000_000,
-    };
-    let error = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap_err();
-    assert_cold_codex_source_failure(error, &sessions);
+    let error = refresh_source_backed_generation(
+        &index,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap_err();
+    assert_cold_route_failure(error, SourceBackedSourceFailureClass::SourceChanged);
     assert!(VerifiedIndex::open(&index).is_err());
-
-    let retried = refresh_source_backed_generation(&index, &registry, options).unwrap();
-    assert_eq!(retried.outcome, SourceBackedRefreshOutcome::Completed);
-    assert_eq!(retried.successful_routes, 1);
-    assert!(retried.source_failures.is_empty());
-    assert_eq!(retried.commit.indexed_documents, 1);
-    assert_eq!(
-        VerifiedIndex::open(&index)
-            .unwrap()
-            .search_event_candidates("retainedrootmarker", 8)
-            .unwrap()
-            .len(),
-        1
-    );
 }

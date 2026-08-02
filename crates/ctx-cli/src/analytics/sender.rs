@@ -330,7 +330,6 @@ fn insert_client_operation_properties(
                 "has_indexed_content_after_setup",
                 value.has_indexed_content,
             );
-            insert_store_properties(properties, &value.store);
             insert_import_result_properties(properties, &value.import);
         }
         ClientOperationV1::Status(value) => {
@@ -343,22 +342,6 @@ fn insert_client_operation_properties(
             );
             insert_optional_count(properties, "indexed_events_bucket", value.indexed_events);
             insert_optional_count(properties, "indexed_sources_bucket", value.indexed_sources);
-            insert_optional_count(properties, "inventory_units_bucket", value.inventory_units);
-            insert_optional_count(
-                properties,
-                "pending_inventory_units_bucket",
-                value.pending_inventory_units,
-            );
-            insert_optional_count(
-                properties,
-                "failed_inventory_units_bucket",
-                value.failed_inventory_units,
-            );
-            insert_optional_count(
-                properties,
-                "stale_inventory_units_bucket",
-                value.stale_inventory_units,
-            );
         }
         ClientOperationV1::Index(value) => {
             insert_optional_str(
@@ -385,22 +368,6 @@ fn insert_client_operation_properties(
                 value.semantic_state.map(IndexState::as_str),
             );
             insert_optional_count(properties, "indexed_items_bucket", value.indexed_items);
-            insert_optional_count(properties, "inventory_units_bucket", value.inventory_units);
-            insert_optional_count(
-                properties,
-                "pending_inventory_units_bucket",
-                value.pending_inventory_units,
-            );
-            insert_optional_count(
-                properties,
-                "failed_inventory_units_bucket",
-                value.failed_inventory_units,
-            );
-            insert_optional_count(
-                properties,
-                "stale_inventory_units_bucket",
-                value.stale_inventory_units,
-            );
         }
         ClientOperationV1::Sources(value) => {
             insert_bool(properties, "all_sources", value.all);
@@ -515,17 +482,6 @@ fn insert_import_result_properties(properties: &mut Map<String, Value>, value: &
     );
 }
 
-fn insert_store_properties(properties: &mut Map<String, Value>, value: &StoreTelemetry) {
-    insert_optional_count(
-        properties,
-        "indexed_sessions_bucket",
-        value.indexed_sessions,
-    );
-    insert_optional_count(properties, "indexed_events_bucket", value.indexed_events);
-    insert_optional_count(properties, "indexed_items_bucket", value.indexed_items);
-    insert_optional_bytes(properties, "db_size_bucket", value.db_size);
-}
-
 fn insert_search_properties(properties: &mut Map<String, Value>, value: &SearchTelemetry) {
     insert_bool(properties, "has_query", value.has_query);
     insert_bool(properties, "has_provider_filter", value.has_provider_filter);
@@ -552,21 +508,6 @@ fn insert_search_properties(properties: &mut Map<String, Value>, value: &SearchT
     );
     insert_str(properties, "limit_bucket", value.limit.as_str());
     insert_optional_provider(properties, "provider_filter", value.provider_filter);
-    insert_optional_bool(
-        properties,
-        "had_existing_store_before_search",
-        value.had_existing_store,
-    );
-    insert_optional_bool(
-        properties,
-        "indexed_content_before_search_known",
-        value.indexed_content_before_known,
-    );
-    insert_optional_bool(
-        properties,
-        "had_indexed_content_before_search",
-        value.had_indexed_content_before,
-    );
     insert_optional_duration(
         properties,
         "refresh_duration_bucket",
@@ -587,7 +528,6 @@ fn insert_search_properties(properties: &mut Map<String, Value>, value: &SearchT
         "search_refresh_source_count_bucket",
         value.refresh_source_count,
     );
-    insert_optional_bool(properties, "store_created_by_search", value.store_created);
     insert_optional_bool(
         properties,
         "has_indexed_content_after_search",
@@ -614,7 +554,6 @@ fn insert_search_properties(properties: &mut Map<String, Value>, value: &SearchT
     insert_optional_count(properties, "citation_count_bucket", value.citation_count);
     insert_optional_bool(properties, "zero_result", value.zero_result);
     insert_optional_duration(properties, "render_duration_bucket", value.render_duration);
-    insert_store_properties(properties, &value.store);
 }
 
 fn insert_integration_properties(

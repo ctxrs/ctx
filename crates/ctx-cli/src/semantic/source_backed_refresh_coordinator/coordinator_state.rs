@@ -1,17 +1,26 @@
 use super::*;
+use crate::semantic::dirty_source_routes::{
+    DirtySourceRouteAdmission, DirtySourceRoutes, EventWatermark,
+};
 
+mod attempt_helpers;
 mod generation_authority;
 mod generation_observation;
 mod read_model;
+mod request_lifecycle;
+mod route_frontier;
 mod runtime_metadata;
+use attempt_helpers::*;
+use generation_authority::CoreRefreshTerminalSuccess;
 pub(crate) use generation_authority::PinnedCorePublication;
 pub(crate) use read_model::{
     SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
-    SourceBackedRefreshProgress, SourceBackedRefreshReceipt, SourceBackedRefreshSourceFailure,
-    SourceBackedRefreshSourceFailureClass, SourceBackedRefreshSourceFailures,
+    SourceBackedRefreshCatalogRouteOutcome, SourceBackedRefreshProgress,
+    SourceBackedRefreshReceipt, SourceBackedRefreshRouteFailure, SourceBackedRefreshSourceFailure,
     SourceBackedRefreshTimings,
 };
 use read_model::{SourceBackedRefreshAttempt, SourceBackedRefreshState};
+use route_frontier::RouteFreshnessFrontier;
 use runtime_metadata::{
     source_catalog_refresh_runtime_metadata, source_refresh_runtime_metadata,
     SourceRefreshRuntimeMetadata,
@@ -22,6 +31,8 @@ pub(super) struct SourceBackedRefreshProgressUpdate {
     pub(super) completed_sources: usize,
     pub(super) total_sources: usize,
     pub(super) current_source: Option<String>,
+    pub(super) completed_records: Option<u64>,
+    pub(super) completed_bytes: Option<u64>,
     pub(super) current_source_progress: Option<SourceBackedCurrentSourceProgress>,
 }
 
@@ -36,6 +47,8 @@ pub(crate) struct SourceBackedRefreshExecution<'a> {
     pub(crate) index_root: &'a Path,
     pub(crate) request_id: &'a str,
     pub(crate) explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
+    pub(crate) scope: SourceBackedRefreshScope,
+    pub(crate) covered_route_ids: BTreeSet<SourceRouteIdentity>,
     pub(super) report_progress: &'a dyn Fn(SourceBackedRefreshProgressUpdate) -> Result<()>,
 }
 
@@ -46,22 +59,29 @@ impl SourceBackedRefreshExecution<'_> {
         completed_sources: usize,
         total_sources: usize,
         current_source: Option<String>,
+        completed_records: Option<u64>,
+        completed_bytes: Option<u64>,
     ) -> Result<()> {
         self.report_detailed_progress(
             phase,
             completed_sources,
             total_sources,
             current_source,
+            completed_records,
+            completed_bytes,
             None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn report_detailed_progress(
         &self,
         phase: &str,
         completed_sources: usize,
         total_sources: usize,
         current_source: Option<String>,
+        completed_records: Option<u64>,
+        completed_bytes: Option<u64>,
         current_source_progress: Option<SourceBackedCurrentSourceProgress>,
     ) -> Result<()> {
         (self.report_progress)(SourceBackedRefreshProgressUpdate {
@@ -69,6 +89,8 @@ impl SourceBackedRefreshExecution<'_> {
             completed_sources,
             total_sources,
             current_source,
+            completed_records,
+            completed_bytes,
             current_source_progress,
         })
     }
@@ -119,6 +141,46 @@ pub(super) struct CoreRefreshEngineState {
     attempts: VecDeque<SourceBackedRefreshAttempt>,
     pinned_core_publication: Option<Arc<PinnedCorePublication>>,
     current_published_generation: Option<String>,
+    dirty_routes: DirtySourceRoutes,
+    known_route_ids: BTreeSet<SourceRouteIdentity>,
+    route_admissions: BTreeMap<String, Vec<DirtySourceRouteAdmission>>,
+    manual_all_continuations: BTreeMap<String, ManualAllContinuation>,
+    watch_routes_initialized: bool,
+    route_freshness_frontier: Option<RouteFreshnessFrontier>,
+}
+
+#[derive(Debug, Clone)]
+struct ManualAllContinuation {
+    predecessor_request_id: String,
+    predecessor_finished: bool,
+    covered_route_ids: BTreeSet<SourceRouteIdentity>,
+    covered_route_changes: BTreeMap<SourceRouteIdentity, bool>,
+    covered_scanned_routes: usize,
+    covered_removed_source_count: usize,
+    covered_timings: SourceBackedRefreshTimings,
+}
+
+impl ManualAllContinuation {
+    fn new(predecessor_request_id: String) -> Self {
+        Self {
+            predecessor_request_id,
+            predecessor_finished: false,
+            covered_route_ids: BTreeSet::new(),
+            covered_route_changes: BTreeMap::new(),
+            covered_scanned_routes: 0,
+            covered_removed_source_count: 0,
+            covered_timings: SourceBackedRefreshTimings::default(),
+        }
+    }
+
+    fn invalidate_route(&mut self, route: &SourceRouteIdentity) {
+        self.covered_route_changes.remove(route);
+        if self.covered_route_ids.remove(route) && self.covered_route_ids.is_empty() {
+            self.covered_scanned_routes = 0;
+            self.covered_removed_source_count = 0;
+            self.covered_timings = SourceBackedRefreshTimings::default();
+        }
+    }
 }
 
 pub(in crate::semantic) struct CoreRefreshEngine {
@@ -130,6 +192,7 @@ pub(in crate::semantic) struct SourceBackedRefreshRun {
     pub(in crate::semantic) job: Value,
     pub(in crate::semantic) did_work: bool,
     pub(in crate::semantic) failed: bool,
+    pub(in crate::semantic) scope: SourceBackedRefreshScope,
 }
 
 #[derive(Debug)]
@@ -196,6 +259,12 @@ impl CoreRefreshEngine {
                 attempts: VecDeque::new(),
                 pinned_core_publication: None,
                 current_published_generation: None,
+                dirty_routes: DirtySourceRoutes::default(),
+                known_route_ids: BTreeSet::new(),
+                route_admissions: BTreeMap::new(),
+                manual_all_continuations: BTreeMap::new(),
+                watch_routes_initialized: false,
+                route_freshness_frontier: None,
             }),
             executor,
         }
@@ -213,6 +282,232 @@ impl CoreRefreshEngine {
             })
     }
 
+    pub(in crate::semantic) fn initialize_watch_route_authority(
+        &self,
+        routes: impl IntoIterator<Item = SourceRouteIdentity>,
+    ) {
+        let routes = routes.into_iter().collect::<BTreeSet<_>>();
+        let mut state = self.lock_state();
+        state.dirty_routes.retain_exact_routes(&routes);
+        for continuation in state.manual_all_continuations.values_mut() {
+            for route in &routes {
+                continuation.invalidate_route(route);
+            }
+        }
+        state.known_route_ids = routes;
+        state.watch_routes_initialized = true;
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn reconcile_watch_routes(
+        &self,
+        routes: impl IntoIterator<Item = SourceRouteIdentity>,
+        watermark: EventWatermark,
+        observed_at_ms: u64,
+    ) {
+        let routes = routes.into_iter().collect::<BTreeSet<_>>();
+        self.initialize_watch_route_authority(routes.iter().cloned());
+        self.lock_state()
+            .dirty_routes
+            .seed_exact_routes(routes, watermark, observed_at_ms);
+    }
+
+    pub(in crate::semantic) fn record_watch_routes(
+        &self,
+        routes: impl IntoIterator<Item = (SourceRouteIdentity, EventWatermark)>,
+        observed_at_ms: u64,
+    ) {
+        let mut state = self.lock_state();
+        let mut recorded_routes = BTreeSet::new();
+        for (route, watermark) in routes {
+            if state.known_route_ids.contains(&route) {
+                let recorded =
+                    state
+                        .dirty_routes
+                        .record_event(route.clone(), watermark, observed_at_ms);
+                if recorded {
+                    recorded_routes.insert(route.clone());
+                    for continuation in state.manual_all_continuations.values_mut() {
+                        continuation.invalidate_route(&route);
+                    }
+                }
+            }
+        }
+        let frontier = state.route_freshness_frontier.clone();
+        drop(state);
+        if let Some(frontier) = frontier {
+            if let Err(error) = frontier.observe_routes(recorded_routes.iter()) {
+                let error = anyhow::Error::new(error);
+                let _ = crate::semantic::daemon_wakeup::write_degraded_wakeup_receipt(
+                    &frontier.data_root(),
+                    &error,
+                );
+            }
+        }
+    }
+
+    /// Performs the daemon's bounded startup comparison between exact watch
+    /// targets and the route snapshots certified by the active Core
+    /// generation. Changed or uncertifiable routes enter the normal exact
+    /// dirty-route scheduler; matching routes remain clean.
+    pub(in crate::semantic) fn reconcile_route_freshness_frontier(
+        &self,
+        data_root: &Path,
+        catalog: &SourceBackedWatchCatalog,
+        watcher_watermark: EventWatermark,
+        observed_at_ms: u64,
+    ) -> Result<usize> {
+        let (published, open_warning) = match open_published_generation(data_root) {
+            Ok(published) => (published, None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "open active Core publication for route freshness reconciliation: {error:#}"
+                )),
+            ),
+        };
+        let reconciliation =
+            RouteFreshnessFrontier::reconcile(data_root, catalog, published.as_ref());
+        let dirty_count = reconciliation.dirty_routes.len();
+        let mut state = self.lock_state();
+        state.route_freshness_frontier = Some(reconciliation.frontier);
+        let known_dirty = reconciliation
+            .dirty_routes
+            .into_iter()
+            .filter(|route| state.known_route_ids.contains(route))
+            .collect::<Vec<_>>();
+        let watermark = state.dirty_routes.seed_watermark().max(watcher_watermark);
+        state
+            .dirty_routes
+            .seed_clean_exact_routes(known_dirty, watermark, observed_at_ms);
+        drop(state);
+
+        let warnings = open_warning
+            .into_iter()
+            .chain(reconciliation.warning)
+            .collect::<Vec<_>>();
+        if warnings.is_empty() {
+            Ok(dirty_count)
+        } else {
+            Err(anyhow!(warnings.join("; ")))
+        }
+    }
+
+    pub(in crate::semantic) fn watch_routes_initialized(&self) -> bool {
+        self.lock_state().watch_routes_initialized
+    }
+
+    pub(in crate::semantic) fn next_dirty_route_due_in_ms(&self, now_ms: u64) -> Option<u64> {
+        self.lock_state()
+            .dirty_routes
+            .next_due_at_ms()
+            .map(|due| due.saturating_sub(now_ms))
+    }
+
+    pub(in crate::semantic) fn has_scheduled_route_work(&self) -> bool {
+        self.lock_state().dirty_routes.next_due_at_ms().is_some()
+    }
+
+    /// Projects only durable retained-route missing grace back into the exact
+    /// watcher ledger. Healthy routes never enter this safety path.
+    pub(in crate::semantic) fn schedule_pending_missing_route_rechecks(
+        &self,
+        data_root: &Path,
+        watcher_watermark: EventWatermark,
+        observed_at_ms: u64,
+    ) -> Result<usize> {
+        let Some(index) = open_published_generation(data_root)? else {
+            return Ok(0);
+        };
+        let generation_id = index.generation_id().to_owned();
+        let pending = index
+            .manifest()
+            .source_routes()
+            .iter()
+            .filter(|route| route.missing_state().is_some())
+            .map(|route| route.route_identity().clone())
+            .collect::<Vec<_>>();
+
+        let mut state = self.lock_state();
+        if !state.watch_routes_initialized {
+            return Ok(0);
+        }
+        if state
+            .current_published_generation
+            .as_deref()
+            .is_some_and(|current| current != generation_id.as_str())
+        {
+            // Publication advanced after this safety read. The next safety
+            // pass will inspect its exact active manifest.
+            return Ok(0);
+        }
+        let pending = pending
+            .into_iter()
+            .filter(|route| state.known_route_ids.contains(route))
+            .collect::<Vec<_>>();
+        let watermark = state.dirty_routes.seed_watermark().max(watcher_watermark);
+        Ok(state
+            .dirty_routes
+            .seed_clean_exact_routes(pending, watermark, observed_at_ms))
+    }
+
+    pub(in crate::semantic) fn enqueue_next_scheduled_refresh(
+        &self,
+        data_root: &Path,
+        now_ms: u64,
+    ) -> Result<bool> {
+        self.enqueue_next_dirty_route_with_cold_all(data_root, now_ms, true)
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn enqueue_next_dirty_route(
+        &self,
+        data_root: &Path,
+        now_ms: u64,
+    ) -> Result<bool> {
+        self.enqueue_next_dirty_route_with_cold_all(data_root, now_ms, false)
+    }
+
+    fn enqueue_next_dirty_route_with_cold_all(
+        &self,
+        data_root: &Path,
+        now_ms: u64,
+        cold_all: bool,
+    ) -> Result<bool> {
+        let observed_generation = self.observed_published_generation(data_root)?;
+        let catalog = load_explicit_source_catalog_authority(data_root)?;
+        let request_id = {
+            let mut state = self.lock_state();
+            if active_attempt_count(&state) != 0 {
+                return Ok(false);
+            }
+            let Some(route) = state.dirty_routes.next_due_route(now_ms) else {
+                return Ok(false);
+            };
+            let refresh_scope = if cold_all && observed_generation.is_none() {
+                // A cold generation has no retained routes to carry. Publish
+                // the complete startup inventory atomically instead of one
+                // transient partial generation per initially dirty route.
+                SourceBackedRefreshScope::All
+            } else {
+                SourceBackedRefreshScope::exact([route])
+            };
+            let attempt = new_refresh_attempt(
+                observed_generation,
+                SourceRefreshRuntimeMetadata::periodic(),
+                Some(catalog),
+                refresh_scope,
+            );
+            let request_id = attempt.request_id.clone();
+            state.active_request_id = Some(request_id.clone());
+            state.attempts.push_back(attempt);
+            trim_terminal_attempt_history(&mut state);
+            request_id
+        };
+        self.persist_job_status(data_root, &request_id)?;
+        Ok(true)
+    }
+
     pub(in crate::semantic) fn handle_ipc_request(
         &self,
         data_root: &Path,
@@ -224,7 +519,29 @@ impl CoreRefreshEngine {
                 if !matches!(mode, "background" | "wait") {
                     return Err(anyhow!("invalid daemon source refresh mode `{mode}`"));
                 }
+                let operation = SourceBackedRefreshOperation::from_request_json(request)?;
                 let explicit_catalog = request.get("explicit_source_catalog");
+                match (operation, mode, explicit_catalog) {
+                    (SourceBackedRefreshOperation::Refresh, _, Some(_)) => {
+                        return Err(anyhow!(
+                            "refresh operation cannot carry explicit source catalog authority"
+                        ))
+                    }
+                    (SourceBackedRefreshOperation::Import, "background", _) => {
+                        return Err(anyhow!(
+                            "import operation requires daemon refresh mode `wait`"
+                        ))
+                    }
+                    (SourceBackedRefreshOperation::Import, _, None) => {
+                        return Err(anyhow!(
+                            "import operation requires explicit source catalog authority"
+                        ))
+                    }
+                    _ => {}
+                }
+                if operation == SourceBackedRefreshOperation::Refresh && mode == "background" {
+                    return Ok(Some(self.background_maintenance_wake_response(data_root)?));
+                }
                 let requested_catalog = explicit_catalog
                     .map(ExplicitSourceCatalogAuthority::from_json)
                     .transpose()?
@@ -243,15 +560,19 @@ impl CoreRefreshEngine {
                     }
                 };
                 let previous_generation = self.observed_published_generation(data_root)?;
-                let metadata = if explicit_catalog.is_some() {
-                    source_catalog_refresh_runtime_metadata(data_root)
-                } else {
-                    source_refresh_runtime_metadata(data_root)
+                let metadata = match operation {
+                    SourceBackedRefreshOperation::Import => {
+                        source_catalog_refresh_runtime_metadata(data_root)
+                    }
+                    SourceBackedRefreshOperation::Refresh => {
+                        source_refresh_runtime_metadata(data_root)
+                    }
                 };
                 let response = match self.enqueue_with_catalog_metadata(
                     previous_generation,
                     metadata,
                     Some(requested_catalog),
+                    SourceBackedRefreshScope::All,
                     // Wait controls how the client observes the attempt; it is
                     // not itself a fresh-after-admission barrier.
                     admission,
@@ -279,357 +600,63 @@ impl CoreRefreshEngine {
                     .and_then(Value::as_str)
                     .filter(|request_id| !request_id.is_empty())
                     .ok_or_else(|| anyhow!("daemon source refresh request ID is missing"))?;
-                let status = self.status(request_id).ok_or_else(|| {
-                    anyhow!("daemon source refresh request `{request_id}` is unknown")
-                })?;
+                let status = self
+                    .status(request_id)
+                    .unwrap_or_else(|| unknown_refresh_request_response(request_id));
                 Ok(Some(status))
             }
             _ => Ok(None),
         }
     }
 
-    pub(in crate::semantic) fn run_next(&self, data_root: &Path) -> Option<SourceBackedRefreshRun> {
-        let executor = Arc::clone(&self.executor);
-        let verified_index = RefCell::new(None::<Arc<VerifiedIndex>>);
-        let publication_probe_attempted = Cell::new(false);
-        let request_id_cell = RefCell::new(None::<String>);
-        let run = self.run_next_with(
-            |request_id, coordinator| {
-                request_id_cell.replace(Some(request_id.to_owned()));
-                let requested_catalog =
-                    coordinator.freeze_requested_explicit_source_catalog(data_root, request_id)?;
-                coordinator.persist_job_status(data_root, request_id)?;
-                let publication = execute_source_backed_refresh(
-                    executor.as_ref(),
-                    data_root,
-                    request_id,
-                    coordinator,
-                    Some(&requested_catalog),
-                )?;
-                let probe_started = StdInstant::now();
-                publication_probe_attempted.set(true);
-                let pin = Arc::new(
-                    open_verified_index(&source_backed_index_root(data_root))
-                        .context("verify Core generation after publication")?,
-                );
-                let verification = verify_source_backed_publication(&publication, &pin);
-                coordinator.set_publication_probe_timing(
-                    request_id,
-                    nonzero_duration_micros(probe_started.elapsed()),
-                );
-                verified_index.replace(Some(pin));
-                verification?;
-                Ok(publication)
+    fn background_maintenance_wake_response(&self, data_root: &Path) -> Result<Value> {
+        let published_generation = self.observed_published_generation(data_root)?;
+        let metadata = source_refresh_runtime_metadata(data_root);
+        Ok(compact_json(json!({
+            "ok": true,
+            "schema_version": 1,
+            "owner": "daemon",
+            "request_id": Uuid::now_v7().to_string(),
+            "request_state": "queued",
+            "previous_generation": published_generation.clone(),
+            "published_generation": published_generation,
+            "progress": {
+                "phase": "maintenance_wake",
+                "completed_sources": 0,
+                "total_sources": 0,
             },
-            || {
-                if let Some(verified) = verified_index.borrow().as_ref() {
-                    return Ok(Some(verified.generation_id().to_owned()));
-                }
-                if publication_probe_attempted.get() {
-                    bail!(
-                        "post-publication verified-index probe already failed in this refresh cycle"
-                    );
-                }
-                let verified = open_published_generation(data_root)?.map(Arc::new);
-                let generation_id = verified
-                    .as_ref()
-                    .map(|index| index.generation_id().to_owned());
-                verified_index.replace(verified);
-                Ok(generation_id)
-            },
-            |_| {
-                request_id_cell
-                    .borrow()
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("published source refresh has no request ID"))
-                    .and_then(|request_id| self.persist_job_status(data_root, request_id))
-            },
-            |_| Ok(()),
-        )?;
-        if !run.failed {
-            let pin = verified_index.into_inner();
-            let request_id = run.job.get("request_id").and_then(Value::as_str);
-            let receipt = request_id.and_then(|request_id| self.receipt_for_request(request_id));
-            let binding = match (pin, receipt) {
-                (Some(pin), Some(receipt)) => self.bind_core_publication(receipt, pin),
-                _ => Err(anyhow!(
-                    "completed Core publication has no exact verified generation pin and receipt"
-                )),
-            };
-            if let Err(error) = binding {
-                let mut job = run.job;
-                job["post_publication_error"] =
-                    Value::String(format!("bind exact Core publication receipt: {error:#}"));
-                return Some(SourceBackedRefreshRun {
-                    job,
-                    did_work: run.did_work,
-                    failed: false,
-                });
-            }
-        }
-        Some(run)
+            "daemon_mode": metadata.daemon_mode.as_str(),
+            "trigger": metadata.trigger,
+            "trigger_provenance": metadata.trigger_provenance,
+            "maintenance_wake": true,
+        })))
     }
 
-    fn set_publication_probe_timing(&self, request_id: &str, duration_us: u64) {
-        let mut state = self.lock_state();
-        if let Some(attempt) = find_attempt_mut(&mut state, request_id) {
-            attempt.publication_probe_us = duration_us;
-        }
-    }
-
-    pub(in crate::semantic) fn enqueue_periodic(&self, data_root: &Path) -> Result<Value> {
-        let observed_generation = self.observed_published_generation(data_root)?;
-        let catalog = load_explicit_source_catalog_authority(data_root)?;
-        self.enqueue_with_catalog_metadata(
-            observed_generation,
-            SourceRefreshRuntimeMetadata::periodic(),
-            Some(catalog),
-            SourceRefreshAdmissionRequirement::AttachEquivalent,
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn enqueue(&self, observed_generation: Option<String>) -> Value {
-        self.enqueue_with_metadata(observed_generation, SourceRefreshRuntimeMetadata::default())
-    }
-
-    #[cfg(test)]
-    pub(in crate::semantic) fn enqueue_for_test(
-        &self,
-        observed_generation: Option<String>,
-    ) -> Value {
-        self.enqueue(observed_generation)
-    }
-
-    #[cfg(test)]
-    fn enqueue_with_metadata(
-        &self,
-        observed_generation: Option<String>,
-        metadata: SourceRefreshRuntimeMetadata,
-    ) -> Value {
-        self.enqueue_with_catalog_metadata(
-            observed_generation,
-            metadata,
-            None,
-            SourceRefreshAdmissionRequirement::AttachEquivalent,
-        )
-        .expect("requests without catalog authority always coalesce")
-    }
-
-    fn enqueue_with_catalog_metadata(
-        &self,
-        observed_generation: Option<String>,
-        metadata: SourceRefreshRuntimeMetadata,
-        requested_catalog: Option<ExplicitSourceCatalogAuthority>,
-        admission: SourceRefreshAdmissionRequirement,
-    ) -> Result<Value> {
-        let mut state = self.lock_state();
-        if let Some(active_request_id) = state.active_request_id.clone() {
-            if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
-                if active.state.is_active() && !admission.requires_successor(active.state) {
-                    if let Some(requested_catalog) = requested_catalog.as_ref() {
-                        let upgrades_queued_automatic =
-                            active.requested_explicit_source_catalog.is_none()
-                                && active.state == SourceBackedRefreshState::Queued;
-                        if upgrades_queued_automatic {
-                            active.requested_explicit_source_catalog =
-                                Some(requested_catalog.clone());
-                        }
-                    }
-                    if active.requested_explicit_source_catalog.as_ref()
-                        == requested_catalog.as_ref()
-                    {
-                        return Ok(coalesce_attempt(active, metadata));
-                    }
-                    // A running refresh is immutable. Preserve both catalog
-                    // authorities by serializing the newer one as a successor.
-                }
-            }
-        }
-
-        if admission == SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot
-            || requested_catalog.is_some()
-        {
-            let coalesced_request_id = state.pending_request_ids.iter().find_map(|request_id| {
-                find_attempt(&state, request_id)
-                    .filter(|attempt| {
-                        attempt.state.is_active()
-                            && attempt.requested_explicit_source_catalog.as_ref()
-                                == requested_catalog.as_ref()
-                    })
-                    .map(|attempt| attempt.request_id.clone())
-            });
-            if let Some(coalesced_request_id) = coalesced_request_id {
-                let attempt = find_attempt_mut(&mut state, &coalesced_request_id)
-                    .expect("pending source refresh attempt");
-                return Ok(coalesce_attempt(attempt, metadata));
-            }
-        }
-
-        let active_pending_requests = active_attempt_count(&state);
-        if active_pending_requests >= SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
-            return Err(SourceBackedRefreshQueueFull {
-                active_pending_requests,
-            }
-            .into());
-        }
-
-        let attempt = SourceBackedRefreshAttempt {
-            request_id: Uuid::now_v7().to_string(),
-            state: SourceBackedRefreshState::Queued,
-            requested_at_ms: utc_now().timestamp_millis(),
-            started_at_ms: None,
-            finished_at_ms: None,
-            previous_generation: observed_generation.clone(),
-            published_generation: observed_generation,
-            requested_explicit_source_catalog: requested_catalog,
-            published_explicit_source_catalog: None,
-            coalesced_requests: 0,
-            progress: SourceBackedRefreshProgress::default(),
-            scanned_routes: None,
-            unsupported_routes: None,
-            certified_source_count: None,
-            certified_source_bytes: None,
-            receipt: None,
-            timings: None,
-            publication_probe_us: 0,
-            daemon_mode: metadata.daemon_mode,
-            trigger: metadata.trigger,
-            trigger_provenance: metadata.trigger_provenance,
-            failure_type: None,
-            last_error: None,
-            post_publication_error: None,
-        };
-        let response = attempt.to_json();
-        if state
-            .active_request_id
-            .as_deref()
-            .and_then(|request_id| find_attempt(&state, request_id))
-            .is_some_and(|attempt| attempt.state.is_active())
-        {
-            state
-                .pending_request_ids
-                .push_back(attempt.request_id.clone());
-        } else {
-            state.active_request_id = Some(attempt.request_id.clone());
-        }
-        state.attempts.push_back(attempt);
-        trim_terminal_attempt_history(&mut state);
-        Ok(response)
-    }
-
-    pub(super) fn status(&self, request_id: &str) -> Option<Value> {
-        let state = self.lock_state();
-        find_attempt(&state, request_id).map(SourceBackedRefreshAttempt::to_json)
-    }
-
-    fn requested_explicit_source_catalog(
-        &self,
-        request_id: &str,
-    ) -> Option<ExplicitSourceCatalogAuthority> {
-        let state = self.lock_state();
-        find_attempt(&state, request_id)
-            .and_then(|attempt| attempt.requested_explicit_source_catalog.clone())
-    }
-
-    fn freeze_requested_explicit_source_catalog(
-        &self,
-        data_root: &Path,
-        request_id: &str,
-    ) -> Result<ExplicitSourceCatalogAuthority> {
-        if let Some(catalog) = self.requested_explicit_source_catalog(request_id) {
-            return Ok(catalog);
-        }
-        let catalog = load_explicit_source_catalog_authority(data_root)?;
-        let mut state = self.lock_state();
-        let attempt = find_attempt_mut(&mut state, request_id)
-            .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
-        if let Some(existing) = attempt.requested_explicit_source_catalog.as_ref() {
-            return Ok(existing.clone());
-        }
-        attempt.requested_explicit_source_catalog = Some(catalog.clone());
-        Ok(catalog)
-    }
-
-    fn job_status(&self, request_id: &str) -> Option<Value> {
-        let state = self.lock_state();
-        find_attempt(&state, request_id).map(SourceBackedRefreshAttempt::job_json)
-    }
-
-    fn persist_job_status(&self, data_root: &Path, request_id: &str) -> Result<()> {
-        let state = self.lock_state();
-        let job = find_attempt(&state, request_id)
-            .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?
-            .job_json();
-        // Keep the state lock through publication so an admission snapshot
-        // cannot overwrite a later terminal snapshot during waiter races.
-        write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)
-    }
-
-    fn receipt_for_request(&self, request_id: &str) -> Option<SourceBackedRefreshReceipt> {
-        let state = self.lock_state();
-        find_attempt(&state, request_id).and_then(|attempt| attempt.receipt.clone())
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_progress(
-        &self,
-        request_id: &str,
-        phase: &str,
-        completed_sources: usize,
-        total_sources: usize,
-        current_source: Option<String>,
-    ) -> Option<Value> {
-        self.set_detailed_progress(
-            request_id,
-            phase,
-            completed_sources,
-            total_sources,
-            current_source,
-            None,
-        )
-    }
-
-    pub(super) fn set_detailed_progress(
-        &self,
-        request_id: &str,
-        phase: &str,
-        completed_sources: usize,
-        total_sources: usize,
-        current_source: Option<String>,
-        current_source_progress: Option<SourceBackedCurrentSourceProgress>,
-    ) -> Option<Value> {
-        let mut state = self.lock_state();
-        let attempt = find_attempt_mut(&mut state, request_id)?;
-        if attempt.state != SourceBackedRefreshState::Running {
-            return None;
-        }
-        attempt.progress = SourceBackedRefreshProgress {
-            phase: phase.to_owned(),
-            completed_sources,
-            total_sources,
-            current_source,
-            current_source_progress,
-        };
-        Some(attempt.job_json())
-    }
-
-    pub(super) fn run_next_with<Execute, Probe, Published, Failed>(
+    fn run_next_with_terminal_success<Execute, Probe, Terminal, Published, Failed>(
         &self,
         execute: Execute,
         probe: Probe,
+        terminal: Terminal,
         published: Published,
         failed: Failed,
     ) -> Option<SourceBackedRefreshRun>
     where
         Execute: FnOnce(&str, &Self) -> Result<SourceBackedRefreshPublication>,
         Probe: FnOnce() -> Result<Option<String>>,
+        Terminal: FnOnce(SourceBackedRefreshReceipt) -> Result<CoreRefreshTerminalSuccess>,
         Published: FnOnce(&str) -> Result<()>,
         Failed: FnOnce(&str) -> Result<()>,
     {
-        let (request_id, previous_generation, requested_catalog) = {
+        let (request_id, previous_generation, requested_catalog, refresh_scope) = {
             let mut state = self.lock_state();
             let request_id = state.active_request_id.clone()?;
+            if state
+                .manual_all_continuations
+                .get(&request_id)
+                .is_some_and(|continuation| !continuation.predecessor_finished)
+            {
+                return None;
+            }
             let attempt = find_attempt_mut(&mut state, &request_id)?;
             if attempt.state != SourceBackedRefreshState::Queued {
                 return None;
@@ -641,6 +668,7 @@ impl CoreRefreshEngine {
                 request_id,
                 attempt.previous_generation.clone(),
                 attempt.requested_explicit_source_catalog.clone(),
+                attempt.refresh_scope.clone(),
             )
         };
 
@@ -675,10 +703,34 @@ impl CoreRefreshEngine {
                 )),
                 None,
             ),
-            (Err(error), Ok(observed)) => (Err(format!("{error:#}")), observed),
+            (Err(error), Ok(observed)) => {
+                (Err(source_backed_refresh_error_summary(&error)), observed)
+            }
             (Err(error), Err(probe_error)) => (Err(format!(
-                "{error:#}; verifying the retained generation also failed: {probe_error:#}"
+                "{}; verifying the retained generation also failed: {probe_error:#}",
+                source_backed_refresh_error_summary(&error)
             )), None),
+        };
+        let continuation = self
+            .lock_state()
+            .manual_all_continuations
+            .get(&request_id)
+            .cloned();
+        let verified = match verified {
+            Ok((observed, mut publication)) => {
+                if let Some(continuation) = continuation.as_ref() {
+                    aggregate_manual_all_continuation(&mut publication, continuation);
+                }
+                let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+                    previous_generation.clone(),
+                    observed.clone(),
+                    &publication,
+                );
+                terminal(receipt)
+                    .map(|terminal| (observed, publication, terminal))
+                    .map_err(|error| format!("finalize verified Core publication: {error:#}"))
+            }
+            Err(error) => Err(error),
         };
         let verified = match verified {
             Ok(verified) => Ok(verified),
@@ -690,56 +742,47 @@ impl CoreRefreshEngine {
             },
         };
         let mut state = self.lock_state();
+        state.manual_all_continuations.remove(&request_id);
         let mut newly_published_generation = None;
-        let (failed_run, did_work) = {
-            let attempt = find_attempt_mut(&mut state, &request_id)?;
-            attempt.finished_at_ms = Some(utc_now().timestamp_millis());
-            attempt.progress.current_source = None;
-            attempt.progress.current_source_progress = None;
-            if observed_for_status.is_some() {
-                attempt.published_generation = observed_for_status.clone();
+        let (failed_run, did_work) = match verified {
+            Ok((observed, publication, terminal)) => {
+                let receipt = terminal.install(&mut state);
+                let attempt = find_attempt_mut(&mut state, &request_id)?;
+                attempt.finished_at_ms = Some(utc_now().timestamp_millis());
+                attempt.progress.current_source = None;
+                attempt.progress.completed_records = None;
+                attempt.progress.completed_bytes = None;
+                attempt.state = SourceBackedRefreshState::Published;
+                attempt.published_generation = Some(observed.clone());
+                attempt.progress.phase = "published".to_owned();
+                attempt.progress.completed_sources = attempt.progress.total_sources;
+                attempt.scanned_routes = Some(publication.scanned_routes);
+                attempt.unsupported_routes = Some(publication.unsupported_routes);
+                attempt.certified_source_count = Some(publication.certified_source_count);
+                attempt.certified_source_bytes = Some(publication.certified_source_bytes);
+                attempt.receipt = Some(receipt);
+                attempt.timings = Some(publication.timings);
+                attempt.published_explicit_source_catalog =
+                    Some(publication.published_explicit_source_catalog);
+                newly_published_generation = Some(observed);
+                let did_work = attempt.published_generation != previous_generation;
+                (false, did_work)
             }
-
-            match verified {
-                Ok((observed, publication)) => {
-                    let generation_changed =
-                        previous_generation.as_deref() != Some(observed.as_str());
-                    attempt.state = SourceBackedRefreshState::Published;
-                    attempt.published_generation = Some(observed.clone());
-                    attempt.progress.phase = "published".to_owned();
-                    attempt.progress.completed_sources = attempt.progress.total_sources;
-                    attempt.scanned_routes = Some(publication.scanned_routes);
-                    attempt.unsupported_routes = Some(publication.unsupported_routes);
-                    attempt.certified_source_count = Some(publication.certified_source_count);
-                    attempt.certified_source_bytes = Some(publication.certified_source_bytes);
-                    attempt.receipt = Some(SourceBackedRefreshReceipt {
-                        previous_generation: previous_generation.clone(),
-                        published_generation: observed.clone(),
-                        generation_changed,
-                        published_explicit_source_catalog: publication
-                            .published_explicit_source_catalog
-                            .clone(),
-                        current: publication.current,
-                        scanned_routes: publication.scanned_routes,
-                        successful_routes: publication.successful_routes,
-                        source_failures: publication.source_failures,
-                    });
-                    attempt.timings = Some(publication.timings);
-                    attempt.published_explicit_source_catalog =
-                        Some(publication.published_explicit_source_catalog);
-                    newly_published_generation = Some(observed);
+            Err(error) => {
+                let attempt = find_attempt_mut(&mut state, &request_id)?;
+                attempt.finished_at_ms = Some(utc_now().timestamp_millis());
+                attempt.progress.current_source = None;
+                attempt.progress.completed_records = None;
+                attempt.progress.completed_bytes = None;
+                if observed_for_status.is_some() {
+                    attempt.published_generation = observed_for_status.clone();
                 }
-                Err(error) => {
-                    attempt.state = SourceBackedRefreshState::Failed;
-                    attempt.progress.phase = "failed".to_owned();
-                    attempt.failure_type = execution_failure_type;
-                    attempt.last_error = Some(error);
-                }
+                attempt.state = SourceBackedRefreshState::Failed;
+                attempt.progress.phase = "failed".to_owned();
+                attempt.failure_type = execution_failure_type;
+                attempt.last_error = Some(error);
+                (true, false)
             }
-
-            let failed = attempt.state == SourceBackedRefreshState::Failed;
-            let did_work = !failed && attempt.published_generation != previous_generation;
-            (failed, did_work)
         };
         if newly_published_generation.is_some() {
             state.current_published_generation = newly_published_generation;
@@ -747,8 +790,11 @@ impl CoreRefreshEngine {
         if state.active_request_id.as_deref() == Some(request_id.as_str()) {
             state.active_request_id = state.pending_request_ids.pop_front();
             if let Some(next_request_id) = state.active_request_id.clone() {
+                let next_is_manual_continuation = state
+                    .manual_all_continuations
+                    .contains_key(&next_request_id);
                 if let Some(next_attempt) = find_attempt_mut(&mut state, &next_request_id) {
-                    if observed_for_status.is_some() {
+                    if observed_for_status.is_some() && !next_is_manual_continuation {
                         next_attempt.previous_generation = observed_for_status.clone();
                         next_attempt.published_generation = observed_for_status.clone();
                     }
@@ -777,7 +823,169 @@ impl CoreRefreshEngine {
             job,
             did_work,
             failed: failed_run,
+            scope: refresh_scope,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn run_next_with<Execute, Probe, Published, Failed>(
+        &self,
+        execute: Execute,
+        probe: Probe,
+        published: Published,
+        failed: Failed,
+    ) -> Option<SourceBackedRefreshRun>
+    where
+        Execute: FnOnce(&str, &Self) -> Result<SourceBackedRefreshPublication>,
+        Probe: FnOnce() -> Result<Option<String>>,
+        Published: FnOnce(&str) -> Result<()>,
+        Failed: FnOnce(&str) -> Result<()>,
+    {
+        self.run_next_with_terminal_success(
+            execute,
+            probe,
+            |receipt| Ok(CoreRefreshTerminalSuccess::state_only(receipt)),
+            published,
+            failed,
+        )
+    }
+
+    fn finish_route_admissions(&self, request_id: &str, publication_ready: bool) {
+        let frontier_preparation = publication_ready
+            .then(|| {
+                let state = self.lock_state();
+                let routes = state
+                    .route_admissions
+                    .get(request_id)?
+                    .iter()
+                    .map(|admission| admission.route().clone())
+                    .collect::<BTreeSet<_>>();
+                state
+                    .route_freshness_frontier
+                    .clone()
+                    .zip(state.pinned_core_publication.as_ref().map(Arc::clone))
+                    .map(|(frontier, publication)| (frontier, publication, routes))
+            })
+            .flatten()
+            .map(|(frontier, publication, routes)| {
+                let data_root = frontier.data_root();
+                let prepared =
+                    frontier.prepare_acknowledged_routes(publication.verified_index_ref(), &routes);
+                (data_root, prepared)
+            });
+
+        let now_ms = source_route_ledger_now_ms();
+        let mut state = self.lock_state();
+        let Some(admissions) = state.route_admissions.remove(request_id) else {
+            for continuation in state.manual_all_continuations.values_mut() {
+                if continuation.predecessor_request_id == request_id {
+                    continuation.predecessor_finished = true;
+                }
+            }
+            return;
+        };
+        let attempt = find_attempt(&state, request_id).cloned();
+        let successful_route_changes = attempt
+            .as_ref()
+            .and_then(|attempt| attempt.receipt.as_ref())
+            .map(|receipt| &receipt.successful_route_changes);
+        let mut covered_route_ids = BTreeSet::new();
+        for admission in admissions {
+            let retry = !publication_ready
+                || attempt
+                    .as_ref()
+                    .is_none_or(|attempt| attempt.state != SourceBackedRefreshState::Published);
+            if retry {
+                state.dirty_routes.retryable_failure(&admission, now_ms);
+                continue;
+            }
+            let Some(receipt) = attempt
+                .as_ref()
+                .and_then(|attempt| attempt.receipt.as_ref())
+            else {
+                state.dirty_routes.retryable_failure(&admission, now_ms);
+                continue;
+            };
+            if let Some(failure) = receipt
+                .failed_route_outcomes
+                .iter()
+                .find(|failure| failure.route_identity == admission.route().as_str())
+            {
+                match failure.class.as_str() {
+                    "unavailable" | "source_changed" => {
+                        state.dirty_routes.retryable_failure(&admission, now_ms);
+                    }
+                    "unreadable" | "incompatible" => {
+                        state.dirty_routes.permanent_failure(&admission);
+                    }
+                    _ => {
+                        state.dirty_routes.retryable_failure(&admission, now_ms);
+                    }
+                }
+            } else if receipt
+                .successful_route_ids
+                .iter()
+                .any(|route| route == admission.route().as_str())
+            {
+                if state.dirty_routes.acknowledge(&admission) {
+                    covered_route_ids.insert(admission.route().clone());
+                }
+            } else {
+                state.dirty_routes.retryable_failure(&admission, now_ms);
+            }
+        }
+        for continuation in state.manual_all_continuations.values_mut() {
+            if continuation.predecessor_request_id != request_id {
+                continue;
+            }
+            continuation.predecessor_finished = true;
+            if covered_route_ids.is_empty() {
+                continue;
+            }
+            let covered_route_changes = covered_route_ids.iter().filter_map(|route| {
+                successful_route_changes
+                    .and_then(|changes| changes.get(route.as_str()))
+                    .copied()
+                    .map(|changed| (route.clone(), changed))
+            });
+            continuation
+                .covered_route_changes
+                .extend(covered_route_changes);
+            continuation
+                .covered_route_ids
+                .extend(continuation.covered_route_changes.keys().cloned());
+            continuation.covered_scanned_routes = attempt
+                .as_ref()
+                .and_then(|attempt| attempt.scanned_routes)
+                .unwrap_or_default();
+            continuation.covered_removed_source_count = attempt
+                .as_ref()
+                .and_then(|attempt| attempt.receipt.as_ref())
+                .map(|receipt| receipt.current.removed_source_count)
+                .unwrap_or_default();
+            continuation.covered_timings = attempt
+                .as_ref()
+                .and_then(|attempt| attempt.timings)
+                .unwrap_or_default();
+        }
+        drop(state);
+
+        // The plan binds an immutable pre-acknowledgement target sample to the
+        // pinned generation. Exact acknowledgement remains serialized above,
+        // but generation hashing, JSON encoding, and filesystem persistence
+        // cannot block the global coordinator mutex. A watcher event admitted
+        // after acknowledgement leaves this older plan intact and remains
+        // dirty in the exact ledger.
+        let frontier_error = frontier_preparation.and_then(|(data_root, prepared)| {
+            prepared
+                .and_then(|prepared| prepared.persist_acknowledged_routes(&covered_route_ids))
+                .err()
+                .map(|error| (data_root, error))
+        });
+        if let Some((data_root, error)) = frontier_error {
+            let _ =
+                crate::semantic::daemon_wakeup::write_degraded_wakeup_receipt(&data_root, &error);
+        }
     }
 
     pub(super) fn lock_state(&self) -> std::sync::MutexGuard<'_, CoreRefreshEngineState> {
@@ -785,72 +993,6 @@ impl CoreRefreshEngine {
     }
 }
 
-fn source_backed_refresh_failure_type(error: &anyhow::Error) -> Option<&'static str> {
-    error.chain().find_map(|cause| {
-        let route = cause.downcast_ref::<SourceBackedRouteError>()?;
-        match route.kind {
-            SourceBackedRouteErrorKind::Unsupported => Some("unsupported_schema"),
-            SourceBackedRouteErrorKind::InvalidSource => Some("malformed_source"),
-            _ => None,
-        }
-    })
-}
-
-fn find_attempt<'a>(
-    state: &'a CoreRefreshEngineState,
-    request_id: &str,
-) -> Option<&'a SourceBackedRefreshAttempt> {
-    state
-        .attempts
-        .iter()
-        .find(|attempt| attempt.request_id == request_id)
-}
-
-fn find_attempt_mut<'a>(
-    state: &'a mut CoreRefreshEngineState,
-    request_id: &str,
-) -> Option<&'a mut SourceBackedRefreshAttempt> {
-    state
-        .attempts
-        .iter_mut()
-        .find(|attempt| attempt.request_id == request_id)
-}
-
-fn coalesce_attempt(
-    attempt: &mut SourceBackedRefreshAttempt,
-    metadata: SourceRefreshRuntimeMetadata,
-) -> Value {
-    if metadata.trigger == "import" {
-        attempt.trigger = metadata.trigger;
-        attempt.trigger_provenance = metadata.trigger_provenance;
-    }
-    attempt.coalesced_requests = attempt.coalesced_requests.saturating_add(1);
-    attempt.to_json()
-}
-
-fn active_attempt_count(state: &CoreRefreshEngineState) -> usize {
-    state
-        .attempts
-        .iter()
-        .filter(|attempt| attempt.state.is_active())
-        .count()
-}
-
-fn trim_terminal_attempt_history(state: &mut CoreRefreshEngineState) {
-    let mut terminal_count = state
-        .attempts
-        .iter()
-        .filter(|attempt| !attempt.state.is_active())
-        .count();
-    while terminal_count > SOURCE_REFRESH_ATTEMPT_HISTORY {
-        let Some(oldest_terminal) = state
-            .attempts
-            .iter()
-            .position(|attempt| !attempt.state.is_active())
-        else {
-            break;
-        };
-        state.attempts.remove(oldest_terminal);
-        terminal_count = terminal_count.saturating_sub(1);
-    }
-}
+#[cfg(test)]
+#[path = "coordinator_state/frontier_behavior_tests.rs"]
+mod frontier_behavior_tests;

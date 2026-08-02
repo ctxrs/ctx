@@ -284,18 +284,21 @@ fn init_normalizes_real_setup_json_into_status_contract() {
         AgentHistoryOperation::Init,
         BackendInfo::local(Some("/tmp/ctx".to_owned())),
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
+            "initialized": true,
             "data_root": "/tmp/ctx",
-            "database_path": "/tmp/ctx/history.sqlite3",
             "config_path": "/tmp/ctx/config.toml",
             "mode": "ready",
-            "indexed_items": 12,
+            "indexed_items": 2_147_483_648_u64,
+            "indexed_sessions": 2_147_483_649_u64,
+            "indexed_events": 2_147_483_650_u64,
+            "indexed_sources": 2_147_483_651_u64,
             "network_required": false,
-            "acquisition_status": {
-                "source": "catalog_scan",
-                "cursor": "status-checkpoint"
+            "lexical": {
+                "status": "ready",
+                "generation_id": "generation-1"
             },
-            "catalog": {"cataloged_sessions": 4},
+            "refresh": {"status": "ready"},
             "import": {"resume": false, "totals": {}}
         }),
     )
@@ -306,14 +309,35 @@ fn init_normalizes_real_setup_json_into_status_contract() {
     assert!(status.initialized);
     assert!(status.local_only);
     assert_eq!(status.data_root.as_deref(), Some("/tmp/ctx"));
-    assert_eq!(status.indexed_items, Some(12));
-    assert!(status.extra.contains_key("mode"));
-    assert!(status.extra.contains_key("networkRequired"));
-    assert_eq!(status.extra["acquisitionStatus"]["source"], "catalog_scan");
-    assert_eq!(
-        status.extra["acquisitionStatus"]["cursor"],
-        "status-checkpoint"
-    );
+    assert_eq!(status.indexed_items, Some(2_147_483_648));
+    assert_eq!(status.indexed_sessions, Some(2_147_483_649));
+    assert_eq!(status.indexed_events, Some(2_147_483_650));
+    assert_eq!(status.indexed_sources, Some(2_147_483_651));
+    assert_eq!(status.lexical.as_ref().unwrap()["status"], "ready");
+    assert_eq!(status.refresh.as_ref().unwrap()["status"], "ready");
+    assert!(status.extra.is_empty());
+}
+
+#[test]
+fn status_normalization_rejects_counters_outside_the_exact_json_domain() {
+    for rejected in [9_007_199_254_740_993_u64, u64::MAX] {
+        let error = normalize(
+            AgentHistoryOperation::Status,
+            BackendInfo::local(Some("/tmp/ctx".to_owned())),
+            json!({
+                "initialized": true,
+                "indexed_items": rejected
+            }),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.body.code, AgentHistoryErrorCode::DecodeError);
+        assert!(error
+            .body
+            .cause
+            .as_deref()
+            .is_some_and(|cause| cause.contains("status counter exceeds maximum")));
+    }
 }
 
 #[test]

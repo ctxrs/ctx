@@ -51,6 +51,15 @@ internal static class JsonHelpers
         return value is JsonValue jsonValue && jsonValue.TryGetValue<long>(out var number) ? number : null;
     }
 
+    public static ulong? GetUInt64(JsonObject? obj, string key)
+    {
+        if (obj is null || !obj.TryGetPropertyValue(key, out var value) || value is null)
+        {
+            return null;
+        }
+        return value is JsonValue jsonValue && jsonValue.TryGetValue<ulong>(out var number) ? number : null;
+    }
+
     public static bool? GetBool(JsonObject? obj, string key)
     {
         if (obj is null || !obj.TryGetPropertyValue(key, out var value) || value is null)

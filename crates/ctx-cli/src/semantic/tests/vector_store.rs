@@ -52,7 +52,7 @@ fn flat_store_control_catalog_has_no_vectors_or_plaintext() -> Result<()> {
         [],
         |row| row.get::<_, String>(0),
     )?;
-    assert!(schema.contains("semantic_source_documents"));
+    assert!(!schema.contains("semantic_source_documents"));
     assert!(!schema.contains("locator_json"));
     assert!(!schema.contains("embedding_f32"));
     assert!(!schema.contains("event_embedding"));
@@ -69,14 +69,17 @@ fn flat_search_is_unique_deterministic_bounded_and_exact() -> Result<()> {
     let second = Uuid::new_v4();
     let first_chunk = test_chunk_at(first, 2, "first", 0, 2);
     let first_hash = first_chunk.source_text_hash.clone();
-    store.upsert_chunk_embeddings(&[
-        (first_chunk, test_embedding(1.0, 0.0)),
-        (
-            test_chunk_at(first, 2, "first", 1, 2),
-            test_embedding(0.8, 0.6),
-        ),
-        (test_chunk(second, 1, "second"), test_embedding(1.0, 0.0)),
-    ])?;
+    store.publish_chunk_replacements(
+        &[
+            (first_chunk, test_embedding(1.0, 0.0)),
+            (
+                test_chunk_at(first, 2, "first", 1, 2),
+                test_embedding(0.8, 0.6),
+            ),
+            (test_chunk(second, 1, "second"), test_embedding(1.0, 0.0)),
+        ],
+        &[],
+    )?;
 
     let search = exact_search(&store, &test_embedding(1.0, 0.0), 2)?;
     let mut expected = vec![first, second];
@@ -125,21 +128,24 @@ fn flat_rewrite_truncation_delete_and_restart_do_not_resurrect_chunks() -> Resul
     let rewritten_hash = rewritten_chunk.source_text_hash.clone();
     {
         let mut store = SemanticVectorStore::open(&root)?;
-        store.upsert_chunk_embeddings(&[
-            (
-                test_chunk_at(rewritten, 4, "rewrite-old", 0, 2),
-                test_embedding(1.0, 0.0),
-            ),
-            (
-                test_chunk_at(rewritten, 4, "rewrite-old", 1, 2),
-                test_embedding(1.0, 0.0),
-            ),
-            (
-                test_chunk(deleted, 5, "delete-me"),
-                test_embedding(0.0, 1.0),
-            ),
-        ])?;
-        store.upsert_chunk_embeddings(&[(rewritten_chunk, test_embedding(0.0, 1.0))])?;
+        store.publish_chunk_replacements(
+            &[
+                (
+                    test_chunk_at(rewritten, 4, "rewrite-old", 0, 2),
+                    test_embedding(1.0, 0.0),
+                ),
+                (
+                    test_chunk_at(rewritten, 4, "rewrite-old", 1, 2),
+                    test_embedding(1.0, 0.0),
+                ),
+                (
+                    test_chunk(deleted, 5, "delete-me"),
+                    test_embedding(0.0, 1.0),
+                ),
+            ],
+            &[],
+        )?;
+        store.publish_chunk_replacements(&[(rewritten_chunk, test_embedding(0.0, 1.0))], &[])?;
         assert_eq!(active_counts(&store)?, (2, 2));
         let rewritten_hit = exact_search(&store, &test_embedding(1.0, 0.0), 2)?
             .hits
@@ -158,5 +164,41 @@ fn flat_rewrite_truncation_delete_and_restart_do_not_resurrect_chunks() -> Resul
     assert_eq!(hits[0].event_id, rewritten);
     assert_eq!(hits[0].similarity, 0.0);
     assert_eq!(hits[0].source_text_hash, rewritten_hash);
+    Ok(())
+}
+
+#[test]
+fn future_control_schema_prevents_writable_flat_recovery_mutation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = source_backed_semantic_vector_path(temp.path());
+    let mut store = SemanticVectorStore::open(&root)?;
+    store.publish_chunk_replacements(
+        &[(
+            test_chunk(Uuid::new_v4(), 1, "future-schema"),
+            test_embedding(1.0, 0.0),
+        )],
+        &[],
+    )?;
+    drop(store);
+
+    let recovery_artifact = root
+        .join("flat_segments")
+        .join(".flat-tmp-future-control-schema");
+    fs::write(&recovery_artifact, b"must survive rejected writable open")?;
+    let control = rusqlite::Connection::open(root.join("state.sqlite"))?;
+    control.pragma_update(None, "user_version", SEMANTIC_VECTOR_SCHEMA_VERSION + 1)?;
+    drop(control);
+
+    let error = SemanticVectorStore::open(&root)
+        .err()
+        .expect("a future control schema must reject writable open");
+    assert_eq!(
+        semantic_vector_failure_kind(&error),
+        Some(SemanticVectorFailureKind::NewerSchema)
+    );
+    assert_eq!(
+        fs::read(recovery_artifact)?,
+        b"must survive rejected writable open"
+    );
     Ok(())
 }

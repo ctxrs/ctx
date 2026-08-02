@@ -1,15 +1,28 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    mpsc, Arc, Barrier,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc, Arc, Barrier,
+    },
 };
 
+use crate::semantic::dirty_source_routes::EventWatermark;
 use ctx_history_capture::{
     provider_source_for_path, DiscoveryPlatform, DiscoveryPlatformDirs, ProviderCatalogSupport,
-    ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderImportSupport, ProviderSource, ProviderSourceKind, SourceBackedFailedRoute,
 };
+use ctx_history_core::{
+    derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
+    NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceKey, SourceObservation, TypedKey,
+};
+use ctx_history_index::SourceRouteIdentity;
 use rusqlite::Connection;
 
 use super::*;
+
+#[path = "source_backed_refresh_coordinator_tests/registry_policy.rs"]
+mod registry_policy;
 
 struct TestExecutor {
     calls: Arc<AtomicUsize>,
@@ -31,22 +44,33 @@ impl SourceBackedRefreshExecutor for TestExecutor {
         if let Some(error) = self.failure.as_deref() {
             return Err(anyhow!("{error}"));
         }
-        execution.report_progress("refreshing", 0, 1, Some("provider-neutral".to_owned()))?;
-        execution.report_progress("verifying", 1, 1, None)?;
+        execution.report_progress(
+            "refreshing",
+            0,
+            1,
+            Some("provider-neutral".to_owned()),
+            Some(7),
+            Some(4_096),
+        )?;
+        execution.report_progress("verifying", 1, 1, None, None, None)?;
         Ok(test_publication(self.generation_id.clone()))
     }
 }
 
 fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
     SourceBackedRefreshPublication {
+        selected_route_ids: Vec::new(),
+        successful_route_ids: Vec::new(),
+        successful_route_changes: BTreeMap::new(),
+        failed_route_outcomes: Vec::new(),
+        catalog_route_outcomes: Vec::new(),
+        source_failures: Vec::new(),
         generation_id: generation_id.into(),
         published_explicit_source_catalog: load_explicit_source_catalog_authority(
             tempfile::tempdir().unwrap().path(),
         )
         .unwrap(),
         scanned_routes: 1,
-        successful_routes: 1,
-        source_failures: SourceBackedRefreshSourceFailures::default(),
         unsupported_routes: 0,
         certified_source_count: 1,
         certified_source_bytes: 128,
@@ -82,6 +106,17 @@ fn request_id(response: &Value) -> String {
         .and_then(Value::as_str)
         .expect("request ID")
         .to_owned()
+}
+
+fn route_identity(byte: u8) -> SourceRouteIdentity {
+    SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap()
+}
+
+fn ledger_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
 }
 
 struct RunningRefreshGate {
@@ -130,6 +165,746 @@ fn test_catalog_authority(revision: u64, digest_byte: u8) -> ExplicitSourceCatal
     .unwrap()
 }
 
+fn physically_selected_routes(
+    execution: &SourceBackedRefreshExecution<'_>,
+    current_routes: &BTreeSet<SourceRouteIdentity>,
+) -> BTreeSet<SourceRouteIdentity> {
+    match &execution.scope {
+        SourceBackedRefreshScope::All => current_routes
+            .difference(&execution.covered_route_ids)
+            .cloned()
+            .collect(),
+        SourceBackedRefreshScope::Exact(routes) => routes.clone(),
+    }
+}
+
+fn publish_selected_routes(
+    execution: &SourceBackedRefreshExecution<'_>,
+    selected: &BTreeSet<SourceRouteIdentity>,
+    failed_route: Option<(&SourceRouteIdentity, &'static str)>,
+) -> Result<SourceBackedRefreshPublication> {
+    let commit =
+        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
+            .commit(|_| true)?;
+    let mut publication = empty_test_publication(commit.generation_id);
+    publication.published_explicit_source_catalog = execution
+        .explicit_source_catalog
+        .cloned()
+        .expect("refresh catalog authority");
+    publication.scanned_routes = selected.len();
+    publication.selected_route_ids = selected
+        .iter()
+        .map(|route| route.as_str().to_owned())
+        .collect();
+    publication.successful_route_ids = publication.selected_route_ids.clone();
+    if let Some((route, class)) = failed_route {
+        publication
+            .successful_route_ids
+            .retain(|selected| selected != route.as_str());
+        publication.source_failures = vec![SourceBackedRefreshSourceFailure {
+            route_identity: route.as_str().to_owned(),
+            source_identity: "content-free-source".to_owned(),
+            provider: "fixture".to_owned(),
+            class: class.to_owned(),
+            carried_forward: true,
+            source_selector: "fixture source".to_owned(),
+            detail: "fixture failure".to_owned(),
+        }];
+    }
+    publication.successful_route_changes = publication
+        .successful_route_ids
+        .iter()
+        .cloned()
+        .map(|route| (route, true))
+        .collect();
+    Ok(publication)
+}
+
+fn publication_pin_source() -> SourceKey {
+    publication_pin_source_with_anchor(0x91)
+}
+
+fn publication_pin_source_with_anchor(anchor: u8) -> SourceKey {
+    SourceKey::derive(
+        "codex",
+        "codex_session_jsonl",
+        "session",
+        1,
+        SourceAnchor::CatalogLineage([anchor; 32]),
+    )
+    .unwrap()
+}
+
+fn publish_pin_source(index_root: &Path, source: SourceKey) -> String {
+    let mut writer =
+        ctx_history_index::GenerationWriter::open(index_root, WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer
+        .add_core_record(publication_pin_record(&source))
+        .unwrap();
+    writer
+        .certify_source(publication_pin_certificate(&source))
+        .unwrap();
+    writer.commit(|_| true).unwrap().generation_id
+}
+
+fn publication_pin_record(source: &SourceKey) -> CoreRecord {
+    let native_session = TypedKey::utf8("publication-pin-session").unwrap();
+    let session_key = NativeSessionKey::native_id("session", native_session).unwrap();
+    let session_id = derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: "thread",
+        native_session_key: &session_key,
+    })
+    .unwrap();
+    let native_item =
+        NativeItemKey::native_id("message", TypedKey::utf8("publication-pin-event").unwrap())
+            .unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: "message",
+        native_item_key: &native_item,
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let mut record = CoreRecord::new_selected(
+        event_id,
+        session_id,
+        session_id,
+        source.clone(),
+        0,
+        "message",
+        "primary",
+        true,
+        "publication-pin-test-v1",
+        "exact publication pin fixture",
+    )
+    .unwrap();
+    record.provider_session_id = Some("publication-pin-session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(0));
+    record.role = Some("user".to_owned());
+    record.validate_contract().unwrap();
+    record
+}
+
+fn publication_pin_certificate(source: &SourceKey) -> CertifiedSource {
+    let observation = SourceObservation::new(source.clone(), "regular-file-v1", vec![1]).unwrap();
+    CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        "publication-pin-test-v1",
+        [0x92; 32],
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 1,
+            indexed_documents: 1,
+            certified_bytes: 128,
+            ..ScannedSourceCounts::default()
+        },
+    )
+    .unwrap()
+}
+
+fn publish_pin_fixture(
+    execution: &SourceBackedRefreshExecution<'_>,
+    nonempty: bool,
+) -> Result<SourceBackedRefreshPublication> {
+    let mut writer =
+        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?;
+    if nonempty {
+        let source = publication_pin_source();
+        writer.begin_source(source.clone())?;
+        writer.add_core_record(publication_pin_record(&source))?;
+        writer.certify_source(publication_pin_certificate(&source))?;
+    }
+    let commit = writer.commit(|_| true)?;
+    let mut publication = if nonempty {
+        test_publication(commit.generation_id)
+    } else {
+        empty_test_publication(commit.generation_id)
+    };
+    if nonempty {
+        publication.certified_source_count = 1;
+        publication.certified_source_bytes = 128;
+        publication.current = SourceBackedRefreshCurrent {
+            source_count: 1,
+            indexed_documents: 1,
+            complete_records: 1,
+            retained_records: 1,
+            certified_source_bytes: 128,
+            ..SourceBackedRefreshCurrent::default()
+        };
+    }
+    publication.published_explicit_source_catalog = execution
+        .explicit_source_catalog
+        .cloned()
+        .expect("publication pin catalog authority");
+    publication.selected_route_ids = match &execution.scope {
+        SourceBackedRefreshScope::All => Vec::new(),
+        SourceBackedRefreshScope::Exact(routes) => routes
+            .iter()
+            .map(|route| route.as_str().to_owned())
+            .collect(),
+    };
+    publication.successful_route_ids = publication.selected_route_ids.clone();
+    publication.scanned_routes = publication.selected_route_ids.len();
+    Ok(publication)
+}
+
+fn publication_pin_executor(
+    publish_nonempty: Arc<AtomicBool>,
+) -> Arc<dyn SourceBackedRefreshExecutor> {
+    Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+        publish_pin_fixture(&execution, publish_nonempty.load(Ordering::SeqCst))
+    })
+}
+
+fn manual_all_request(
+    coordinator: &CoreRefreshEngine,
+    data_root: &Path,
+    authority: &ExplicitSourceCatalogAuthority,
+) -> Value {
+    coordinator
+        .handle_ipc_request(
+            data_root,
+            &json!({
+                "schema_version": 1,
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "mode": "wait",
+                "operation": "import",
+                "explicit_source_catalog": authority.to_json(),
+            }),
+        )
+        .unwrap()
+        .expect("manual all-route refresh response")
+}
+
+#[test]
+fn queued_startup_exact_is_upgraded_to_one_manual_all_scan() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let routes = BTreeSet::from([
+        route_identity(0x11),
+        route_identity(0x12),
+        route_identity(0x13),
+    ]);
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let executor_routes = routes.clone();
+    let executor_scans = Arc::clone(&scans);
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            assert_eq!(execution.scope, SourceBackedRefreshScope::All);
+            assert!(execution.covered_route_ids.is_empty());
+            let selected = physically_selected_routes(&execution, &executor_routes);
+            for route in &selected {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            publish_selected_routes(&execution, &selected, None)
+        },
+    ));
+    coordinator.reconcile_watch_routes(
+        routes.clone(),
+        EventWatermark::new(1, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let automatic_request_id =
+        read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+            .and_then(|status| status["request_id"].as_str().map(str::to_owned))
+            .expect("queued startup exact request ID");
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+    let manual = manual_all_request(&coordinator, &data_root, &authority);
+
+    assert_eq!(request_id(&manual), automatic_request_id);
+    assert_eq!(manual["trigger"], "import");
+    let run = coordinator.run_next(&data_root).expect("upgraded all run");
+    assert!(!run.failed);
+    assert_eq!(run.scope, SourceBackedRefreshScope::All);
+    assert_eq!(
+        *scans.lock().unwrap(),
+        routes
+            .iter()
+            .cloned()
+            .map(|route| (route, 1))
+            .collect::<BTreeMap<_, _>>()
+    );
+    assert!(!coordinator.has_scheduled_route_work());
+}
+
+#[test]
+fn running_startup_exact_continues_manual_all_without_rescanning() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let routes = BTreeSet::from([
+        route_identity(0x21),
+        route_identity(0x22),
+        route_identity(0x23),
+    ]);
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_routes = routes.clone();
+    let executor_scans = Arc::clone(&scans);
+    let executor_calls = Arc::clone(&calls);
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let selected = physically_selected_routes(&execution, &executor_routes);
+            for route in &selected {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            let first = executor_calls.fetch_add(1, Ordering::SeqCst) == 0;
+            if first {
+                assert!(matches!(
+                    execution.scope,
+                    SourceBackedRefreshScope::Exact(_)
+                ));
+                assert!(execution.covered_route_ids.is_empty());
+                executor_entered.wait();
+                executor_release.wait();
+            } else {
+                assert_eq!(execution.scope, SourceBackedRefreshScope::All);
+                assert_eq!(execution.covered_route_ids.len(), 1);
+            }
+            let mut publication = publish_selected_routes(&execution, &selected, None)?;
+            if first {
+                publication.current.removed_source_count = 1;
+            }
+            Ok(publication)
+        },
+    )));
+    coordinator.reconcile_watch_routes(
+        routes.clone(),
+        EventWatermark::new(2, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+
+    let manual = std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_root = data_root.clone();
+        scope.spawn(move || {
+            let run = runner
+                .run_next(&runner_root)
+                .expect("running startup exact");
+            assert!(!run.failed);
+        });
+        entered.wait();
+        let manual = manual_all_request(&coordinator, &data_root, &authority);
+        release.wait();
+        manual
+    });
+
+    let manual_request_id = request_id(&manual);
+    let successor = coordinator
+        .run_next(&data_root)
+        .expect("manual all continuation");
+    assert!(!successor.failed);
+    assert_eq!(request_id(&successor.job), manual_request_id);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *scans.lock().unwrap(),
+        routes
+            .iter()
+            .cloned()
+            .map(|route| (route, 1))
+            .collect::<BTreeMap<_, _>>()
+    );
+    let terminal = coordinator.status(&manual_request_id).unwrap();
+    assert_eq!(terminal["request_state"], "published");
+    assert_eq!(terminal["generation_changed"], true);
+    assert_eq!(terminal["scanned_routes"], routes.len());
+    assert_eq!(terminal["receipt"]["current"]["removed_source_count"], 1);
+    assert_eq!(
+        terminal["receipt"]["successful_route_total"]
+            .as_u64()
+            .unwrap() as usize,
+        routes.len()
+    );
+    assert!(!coordinator.has_scheduled_route_work());
+}
+
+#[test]
+fn failed_running_exact_remains_in_manual_all_successor_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let routes = BTreeSet::from([route_identity(0x31), route_identity(0x32)]);
+    let first_route = routes.iter().next().unwrap().clone();
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_routes = routes.clone();
+    let executor_scans = Arc::clone(&scans);
+    let executor_calls = Arc::clone(&calls);
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let executor_first_route = first_route.clone();
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let selected = physically_selected_routes(&execution, &executor_routes);
+            for route in &selected {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            let first = executor_calls.fetch_add(1, Ordering::SeqCst) == 0;
+            if first {
+                executor_entered.wait();
+                executor_release.wait();
+            } else {
+                assert!(execution.covered_route_ids.is_empty());
+            }
+            publish_selected_routes(
+                &execution,
+                &selected,
+                first.then_some((&executor_first_route, "unavailable")),
+            )
+        },
+    )));
+    coordinator.reconcile_watch_routes(
+        routes.clone(),
+        EventWatermark::new(3, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+
+    std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_root = data_root.clone();
+        scope.spawn(move || {
+            assert!(!runner.run_next(&runner_root).unwrap().failed);
+        });
+        entered.wait();
+        let _manual = manual_all_request(&coordinator, &data_root, &authority);
+        release.wait();
+    });
+    assert!(!coordinator.run_next(&data_root).unwrap().failed);
+
+    let observed = scans.lock().unwrap();
+    assert_eq!(observed.get(&first_route), Some(&2));
+    for route in routes.iter().filter(|route| *route != &first_route) {
+        assert_eq!(observed.get(route), Some(&1));
+    }
+    assert!(!coordinator.has_scheduled_route_work());
+}
+
+#[test]
+fn event_during_running_exact_invalidates_manual_all_coverage() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let routes = BTreeSet::from([route_identity(0x41), route_identity(0x42)]);
+    let first_route = routes.iter().next().unwrap().clone();
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_routes = routes.clone();
+    let executor_scans = Arc::clone(&scans);
+    let executor_calls = Arc::clone(&calls);
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let selected = physically_selected_routes(&execution, &executor_routes);
+            for route in &selected {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            if executor_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                executor_entered.wait();
+                executor_release.wait();
+            } else {
+                assert!(execution.covered_route_ids.is_empty());
+            }
+            publish_selected_routes(&execution, &selected, None)
+        },
+    )));
+    let observed_at_ms = ledger_now_ms().saturating_sub(1_000);
+    coordinator.reconcile_watch_routes(routes.clone(), EventWatermark::new(4, 0), observed_at_ms);
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+
+    std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_root = data_root.clone();
+        scope.spawn(move || {
+            assert!(!runner.run_next(&runner_root).unwrap().failed);
+        });
+        entered.wait();
+        let _manual = manual_all_request(&coordinator, &data_root, &authority);
+        coordinator.record_watch_routes(
+            [(first_route.clone(), EventWatermark::new(4, 1))],
+            observed_at_ms,
+        );
+        release.wait();
+    });
+    assert!(!coordinator.run_next(&data_root).unwrap().failed);
+
+    let observed = scans.lock().unwrap();
+    assert_eq!(observed.get(&first_route), Some(&2));
+    for route in routes.iter().filter(|route| *route != &first_route) {
+        assert_eq!(observed.get(route), Some(&1));
+    }
+    assert!(!coordinator.has_scheduled_route_work());
+}
+
+#[test]
+fn ordinary_manual_all_still_scans_every_current_route() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let routes = BTreeSet::from([route_identity(0x45), route_identity(0x46)]);
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let executor_routes = routes.clone();
+    let executor_scans = Arc::clone(&scans);
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            assert_eq!(execution.scope, SourceBackedRefreshScope::All);
+            assert!(execution.covered_route_ids.is_empty());
+            let selected = physically_selected_routes(&execution, &executor_routes);
+            for route in &selected {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            publish_selected_routes(&execution, &selected, None)
+        },
+    ));
+    coordinator.reconcile_watch_routes(
+        routes.clone(),
+        EventWatermark::new(5, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+    let manual = manual_all_request(&coordinator, &data_root, &authority);
+
+    let run = coordinator
+        .run_next(&data_root)
+        .expect("ordinary manual all");
+    assert!(!run.failed);
+    assert_eq!(request_id(&run.job), request_id(&manual));
+    assert_eq!(
+        *scans.lock().unwrap(),
+        routes
+            .iter()
+            .cloned()
+            .map(|route| (route, 1))
+            .collect::<BTreeMap<_, _>>()
+    );
+    assert!(!coordinator.has_scheduled_route_work());
+}
+
+#[test]
+fn exact_route_event_during_execution_creates_one_successor_and_noop_ack_cleans_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = route_identity(0x51);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_calls = Arc::clone(&calls);
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let executor_route = route.clone();
+    let executor: Arc<dyn SourceBackedRefreshExecutor> =
+        Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+            assert_eq!(
+                execution.scope,
+                SourceBackedRefreshScope::exact([executor_route.clone()])
+            );
+            let call = executor_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                executor_entered.wait();
+                executor_release.wait();
+            }
+            let commit = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                WriterOptions::default(),
+            )?
+            .commit(|_| true)?;
+            let mut publication = empty_test_publication(commit.generation_id);
+            publication.published_explicit_source_catalog = execution
+                .explicit_source_catalog
+                .cloned()
+                .expect("exact refresh catalog authority");
+            publication.scanned_routes = 1;
+            publication.selected_route_ids = vec![executor_route.as_str().to_owned()];
+            publication.successful_route_ids = vec![executor_route.as_str().to_owned()];
+            Ok(publication)
+        });
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(executor));
+    let observed_at_ms = ledger_now_ms().saturating_sub(1_000);
+    coordinator.reconcile_watch_routes([route.clone()], EventWatermark::new(1, 0), observed_at_ms);
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+
+    std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_data_root = data_root.clone();
+        scope.spawn(move || {
+            let run = runner
+                .run_next(&runner_data_root)
+                .expect("first exact route run");
+            assert!(!run.failed);
+            assert!(matches!(run.scope, SourceBackedRefreshScope::Exact(_)));
+        });
+        entered.wait();
+        coordinator
+            .record_watch_routes([(route.clone(), EventWatermark::new(1, 1))], observed_at_ms);
+        release.wait();
+    });
+
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let successor = coordinator
+        .run_next(&data_root)
+        .expect("successor exact route run");
+    assert!(!successor.failed);
+    assert!(!successor.did_work, "unchanged exact route must be a no-op");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(!coordinator.has_scheduled_route_work());
+    assert!(!coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+}
+
+fn route_failure_executor(
+    route: SourceRouteIdentity,
+    class: &'static str,
+) -> Arc<dyn SourceBackedRefreshExecutor> {
+    Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+        let commit = ctx_history_index::GenerationWriter::open(
+            execution.index_root,
+            WriterOptions::default(),
+        )?
+        .commit(|_| true)?;
+        let mut publication = empty_test_publication(commit.generation_id);
+        publication.published_explicit_source_catalog = execution
+            .explicit_source_catalog
+            .cloned()
+            .expect("exact refresh catalog authority");
+        publication.scanned_routes = 1;
+        publication.selected_route_ids = vec![route.as_str().to_owned()];
+        publication.failed_route_outcomes = vec![SourceBackedRefreshRouteFailure {
+            route_identity: route.as_str().to_owned(),
+            source_identity: "content-free-source".to_owned(),
+            provider: "fixture".to_owned(),
+            class: class.to_owned(),
+            carried_forward: true,
+        }];
+        publication.source_failures = vec![SourceBackedRefreshSourceFailure {
+            route_identity: route.as_str().to_owned(),
+            source_identity: "content-free-source".to_owned(),
+            provider: "fixture".to_owned(),
+            class: class.to_owned(),
+            carried_forward: true,
+            source_selector: "fixture source".to_owned(),
+            detail: "fixture failure".to_owned(),
+        }];
+        Ok(publication)
+    })
+}
+
+#[test]
+fn exact_route_receipt_failures_back_off_or_block_until_a_new_event() {
+    let route = route_identity(0x61);
+    let observed_at_ms = ledger_now_ms().saturating_sub(1_000);
+
+    let retry_temp = tempfile::tempdir().unwrap();
+    let retry_root = retry_temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&retry_root).unwrap();
+    let retry =
+        CoreRefreshEngine::with_executor(route_failure_executor(route.clone(), "unavailable"));
+    retry.reconcile_watch_routes([route.clone()], EventWatermark::new(1, 0), observed_at_ms);
+    assert!(retry
+        .enqueue_next_dirty_route(&retry_root, ledger_now_ms())
+        .unwrap());
+    assert!(!retry.run_next(&retry_root).unwrap().failed);
+    let retry_after = retry
+        .next_dirty_route_due_in_ms(ledger_now_ms())
+        .expect("retryable route remains scheduled");
+    assert!(retry_after <= 10_000 && retry_after > 0);
+    assert!(!retry
+        .enqueue_next_dirty_route(&retry_root, ledger_now_ms())
+        .unwrap());
+
+    let blocked_temp = tempfile::tempdir().unwrap();
+    let blocked_root = blocked_temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&blocked_root).unwrap();
+    let blocked =
+        CoreRefreshEngine::with_executor(route_failure_executor(route.clone(), "incompatible"));
+    blocked.reconcile_watch_routes([route.clone()], EventWatermark::new(2, 0), observed_at_ms);
+    assert!(blocked
+        .enqueue_next_dirty_route(&blocked_root, ledger_now_ms())
+        .unwrap());
+    assert!(!blocked.run_next(&blocked_root).unwrap().failed);
+    assert!(!blocked.has_scheduled_route_work());
+    blocked.record_watch_routes([(route.clone(), EventWatermark::new(2, 0))], observed_at_ms);
+    assert!(!blocked.has_scheduled_route_work());
+    blocked.record_watch_routes([(route, EventWatermark::new(2, 1))], observed_at_ms);
+    assert!(blocked.has_scheduled_route_work());
+}
+
+#[test]
+fn systemic_exact_publication_failure_leaves_the_route_dirty_with_backoff() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = route_identity(0x71);
+    let executor: Arc<dyn SourceBackedRefreshExecutor> =
+        Arc::new(|_: SourceBackedRefreshExecution<'_>| Err(anyhow!("systemic fixture failure")));
+    let coordinator = CoreRefreshEngine::with_executor(executor);
+    coordinator.reconcile_watch_routes(
+        [route],
+        EventWatermark::new(3, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    assert!(coordinator.run_next(&data_root).unwrap().failed);
+    let retry_after = coordinator
+        .next_dirty_route_due_in_ms(ledger_now_ms())
+        .expect("systemic failure remains dirty");
+    assert!(retry_after <= 10_000 && retry_after > 0);
+}
+
 #[path = "source_backed_refresh_coordinator_tests_receipt.rs"]
 mod receipt_tests;
 
@@ -147,6 +922,7 @@ fn differing_catalog_authority_queues_one_successor_behind_a_running_refresh() {
                     "schema_version": 1,
                     "op": SOURCE_REFRESH_REQUEST_OP,
                     "mode": "wait",
+                    "operation": "import",
                     "explicit_source_catalog": authority.to_json(),
                 }),
             )
@@ -241,6 +1017,7 @@ fn active_and_pending_refreshes_are_bounded_with_a_typed_busy_response() {
                     "schema_version": 1,
                     "op": SOURCE_REFRESH_REQUEST_OP,
                     "mode": "wait",
+                    "operation": "import",
                     "explicit_source_catalog": authority.to_json(),
                 }),
             )
@@ -313,7 +1090,7 @@ fn terminal_history_is_trimmed_independently_from_inflight_capacity() {
 }
 
 #[test]
-fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
+fn default_executor_with_implicit_import_catalog_keeps_automatic_discovery_and_maps_progress() {
     let coordinator = CoreRefreshEngine::new();
     assert_eq!(
         coordinator.executor.implementation_name(),
@@ -352,15 +1129,19 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
             update.completed_sources,
             update.total_sources,
             update.current_source,
-            update.current_source_progress,
+            update.completed_records,
+            update.completed_bytes,
         ));
         Ok(())
     };
+    let implicit_catalog = load_explicit_source_catalog_authority(&data_root).unwrap();
     let execution = SourceBackedRefreshExecution {
         data_root: &data_root,
         index_root: &index_root,
         request_id: "all-provider-request",
-        explicit_source_catalog: None,
+        explicit_source_catalog: Some(&implicit_catalog),
+        scope: SourceBackedRefreshScope::All,
+        covered_route_ids: BTreeSet::new(),
         report_progress: &report_progress,
     };
     let mut provider_wide_calls = 0;
@@ -374,6 +1155,8 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
          observed_data_root,
          observed_index_root,
          observed_explicit_source_catalog,
+         observed_scope,
+         observed_covered_route_ids,
          progress| {
             provider_wide_calls += 1;
             assert_eq!(observed_discovery.home(), discovery.home());
@@ -387,13 +1170,21 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
             assert_ne!(observed_discovery_duration, StdDuration::ZERO);
             assert_eq!(observed_data_root, data_root);
             assert_eq!(observed_index_root, index_root);
-            assert!(observed_explicit_source_catalog.is_none());
+            assert_eq!(
+                observed_explicit_source_catalog,
+                Some(&implicit_catalog),
+                "an implicit import catalog must not replace automatic discovery"
+            );
+            assert_eq!(observed_scope, SourceBackedRefreshScope::All);
+            assert!(observed_covered_route_ids.is_empty());
             progress(CaptureSourceBackedDetailedRefreshProgress {
                 progress: CaptureSourceBackedRefreshProgress {
                     phase: "discovering",
                     completed_sources: 0,
                     total_sources: 2,
                     current_source: None,
+                    completed_records: None,
+                    completed_bytes: None,
                     stage_duration: StdDuration::ZERO,
                     elapsed: StdDuration::ZERO,
                     certified_source_count: None,
@@ -407,20 +1198,14 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
                     completed_sources: 1,
                     total_sources: 2,
                     current_source: Some("provider-wide-route".to_owned()),
+                    completed_records: Some(11),
+                    completed_bytes: Some(4_096),
                     stage_duration: StdDuration::ZERO,
                     elapsed: StdDuration::ZERO,
                     certified_source_count: None,
                     certified_source_bytes: None,
                 },
-                current_source_progress: Some(CaptureSourceBackedCurrentSourceProgress {
-                    stage: CaptureSourceBackedCurrentSourceProgressStage::LogicalScan,
-                    snapshot_pages_completed: None,
-                    snapshot_pages_total: None,
-                    snapshot_bytes_completed: None,
-                    snapshot_bytes_total: None,
-                    logical_rows_scanned: Some(1_234),
-                    logical_certified_bytes: Some(8_192),
-                }),
+                current_source_progress: None,
             })?;
             progress(CaptureSourceBackedDetailedRefreshProgress {
                 progress: CaptureSourceBackedRefreshProgress {
@@ -428,6 +1213,8 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
                     completed_sources: 2,
                     total_sources: 2,
                     current_source: None,
+                    completed_records: None,
+                    completed_bytes: None,
                     stage_duration: StdDuration::ZERO,
                     elapsed: StdDuration::ZERO,
                     certified_source_count: None,
@@ -446,180 +1233,19 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
     assert_eq!(
         updates.into_inner().unwrap(),
         vec![
-            ("discovering".to_owned(), 0, 0, None, None),
-            ("discovering".to_owned(), 0, 2, None, None),
+            ("discovering".to_owned(), 0, 0, None, None, None),
+            ("discovering".to_owned(), 0, 2, None, None, None),
             (
                 "refreshing".to_owned(),
                 1,
                 2,
                 Some("provider-wide-route".to_owned()),
-                Some(SourceBackedCurrentSourceProgress {
-                    stage: SourceBackedCurrentSourceProgressStage::LogicalScan,
-                    snapshot_pages_completed: None,
-                    snapshot_pages_total: None,
-                    snapshot_bytes_completed: None,
-                    snapshot_bytes_total: None,
-                    logical_rows_scanned: Some(1_234),
-                    logical_certified_bytes: Some(8_192),
-                }),
+                Some(11),
+                Some(4_096),
             ),
-            ("verifying".to_owned(), 2, 2, None, None),
+            ("verifying".to_owned(), 2, 2, None, None, None),
         ]
     );
-}
-
-#[test]
-fn detailed_refresh_progress_status_round_trips_every_optional_counter() {
-    let progress = SourceBackedRefreshProgress {
-        phase: "refreshing".to_owned(),
-        completed_sources: 2,
-        total_sources: 6,
-        current_source: Some("source.db".to_owned()),
-        current_source_progress: Some(SourceBackedCurrentSourceProgress {
-            stage: SourceBackedCurrentSourceProgressStage::OnlineBackup,
-            snapshot_pages_completed: Some(10),
-            snapshot_pages_total: Some(20),
-            snapshot_bytes_completed: Some(40_960),
-            snapshot_bytes_total: Some(81_920),
-            logical_rows_scanned: Some(30),
-            logical_certified_bytes: Some(12_345),
-        }),
-    };
-    let status = json!({"progress": progress.to_json()});
-
-    let parsed = SourceBackedRefreshProgress::from_status_json(&status).unwrap();
-
-    assert_eq!(parsed, progress);
-    assert_eq!(
-        status["progress"]["current_source_progress"]["stage"],
-        "online_backup"
-    );
-    assert_eq!(
-        status["progress"]["current_source_progress"]["logical_certified_bytes"],
-        12_345
-    );
-}
-
-#[test]
-fn wait_progress_observer_deduplicates_exact_status_and_propagates_failures() {
-    let mut observed = Vec::new();
-    let mut response = json!({
-        "progress": {
-            "phase": "refreshing",
-            "completed_sources": 1,
-            "total_sources": 2,
-            "current_source": "source.db",
-            "current_source_progress": {
-                "stage": "logical_scan",
-                "snapshot_pages_completed": null,
-                "snapshot_pages_total": null,
-                "snapshot_bytes_completed": null,
-                "snapshot_bytes_total": null,
-                "logical_rows_scanned": 100,
-                "logical_certified_bytes": 4096
-            }
-        }
-    });
-    {
-        let mut observer = |progress: &SourceBackedRefreshProgress| {
-            observed.push(progress.clone());
-            Ok(())
-        };
-        let mut state = RefreshProgressObserverState::new(&mut observer);
-        state.observe(&response).unwrap();
-        state.observe(&response).unwrap();
-        response["progress"]["current_source_progress"]["logical_rows_scanned"] = json!(200);
-        state.observe(&response).unwrap();
-    }
-    assert_eq!(observed.len(), 2);
-    assert_eq!(
-        observed[1]
-            .current_source_progress
-            .unwrap()
-            .logical_rows_scanned,
-        Some(200)
-    );
-
-    let mut failing = |_: &SourceBackedRefreshProgress| Err(anyhow!("injected observer failure"));
-    let error = RefreshProgressObserverState::new(&mut failing)
-        .observe(&response)
-        .expect_err("observer failures must remain systemic");
-    assert!(error
-        .to_string()
-        .contains("report daemon source refresh progress"));
-    assert!(format!("{error:#}").contains("injected observer failure"));
-}
-
-#[test]
-fn source_transitions_and_terminal_states_clear_detailed_progress() {
-    for fail in [false, true] {
-        let coordinator = CoreRefreshEngine::new();
-        let request = coordinator.enqueue(Some("generation-1".to_owned()));
-        assert!(!request_id(&request).is_empty());
-        let run = coordinator
-            .run_next_with(
-                |request_id, coordinator| {
-                    let detailed = SourceBackedCurrentSourceProgress {
-                        stage: SourceBackedCurrentSourceProgressStage::LogicalScan,
-                        snapshot_pages_completed: None,
-                        snapshot_pages_total: None,
-                        snapshot_bytes_completed: None,
-                        snapshot_bytes_total: None,
-                        logical_rows_scanned: Some(100),
-                        logical_certified_bytes: Some(4_096),
-                    };
-                    let active = coordinator
-                        .set_detailed_progress(
-                            request_id,
-                            "refreshing",
-                            0,
-                            1,
-                            Some("source-a".to_owned()),
-                            Some(detailed),
-                        )
-                        .unwrap();
-                    assert_eq!(
-                        active["progress"]["current_source_progress"]["stage"],
-                        "logical_scan"
-                    );
-                    assert_eq!(
-                        coordinator.status(request_id).unwrap()["progress"]
-                            ["current_source_progress"]["logical_rows_scanned"],
-                        100
-                    );
-                    let transitioned = coordinator
-                        .set_progress(request_id, "verifying", 1, 1, None)
-                        .unwrap();
-                    assert!(transitioned["progress"]
-                        .get("current_source_progress")
-                        .is_none());
-                    coordinator.set_detailed_progress(
-                        request_id,
-                        "refreshing",
-                        0,
-                        1,
-                        Some("source-a".to_owned()),
-                        Some(detailed),
-                    );
-                    if fail {
-                        Err(anyhow!("injected terminal failure"))
-                    } else {
-                        Ok(test_publication("generation-2"))
-                    }
-                },
-                || {
-                    Ok(Some(
-                        if fail { "generation-1" } else { "generation-2" }.to_owned(),
-                    ))
-                },
-                |_| Ok(()),
-                |_| Ok(()),
-            )
-            .unwrap();
-        assert_eq!(run.failed, fail);
-        assert!(run.job["progress"].get("current_source").is_none());
-        assert!(run.job["progress"].get("current_source_progress").is_none());
-    }
 }
 
 #[test]
@@ -662,6 +1288,8 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
         &data_root,
         &index_root,
         None,
+        SourceBackedRefreshScope::All,
+        &BTreeSet::new(),
         &mut progress,
     )
     .unwrap();
@@ -672,7 +1300,7 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
     assert_eq!(first.published_explicit_source_catalog, empty_catalog);
     let verified = VerifiedIndex::open(&index_root).unwrap();
     assert!(verified.manifest().sources.is_empty());
-    assert!(verified.manifest().removals.is_empty());
+    assert!(verified.manifest().source_routes().is_empty());
     drop(verified);
 
     let replay = refresh_all_provider_sources(
@@ -682,6 +1310,8 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
         &data_root,
         &index_root,
         None,
+        SourceBackedRefreshScope::All,
+        &BTreeSet::new(),
         &mut progress,
     )
     .unwrap();
@@ -756,6 +1386,8 @@ fn automatic_refresh_replaces_a_zstd_settings_generation() {
         &data_root,
         &index_root,
         None,
+        SourceBackedRefreshScope::All,
+        &BTreeSet::new(),
         &mut progress,
     )
     .unwrap();
@@ -792,6 +1424,8 @@ fn automatic_refresh_replaces_a_zstd_settings_generation() {
                     &data_root,
                     &index_root,
                     None,
+                    SourceBackedRefreshScope::All,
+                    &BTreeSet::new(),
                     &mut progress,
                 )
             },
@@ -817,910 +1451,11 @@ fn automatic_refresh_replaces_a_zstd_settings_generation() {
     );
 }
 
-#[test]
-fn missing_roots_are_nonblocking_but_detected_selector_gaps_block_publication() {
-    let source = |path: &'static str, exists, status| ProviderSource {
-        provider: CaptureProvider::Warp,
-        path: PathBuf::from(path),
-        exists,
-        source_format: "warp_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::Native,
-        status,
-        unsupported_reason: None,
-    };
-    let missing = SourceBackedAutomaticRegistryIssue::Unavailable {
-        source: source(
-            "/unavailable/warp.sqlite",
-            false,
-            ProviderSourceStatus::Missing,
-        ),
-        reason: SourceBackedAutomaticUnavailableReason::SourceStatus(ProviderSourceStatus::Missing),
-    };
-    assert!(reject_blocking_automatic_registry_issues(&[missing]).is_ok());
-
-    let selector_gap = SourceBackedAutomaticRegistryIssue::Unavailable {
-        source: source(
-            "/detected/warp.sqlite",
-            true,
-            ProviderSourceStatus::Available,
-        ),
-        reason: SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
-            detail: "injected selector gap",
-        },
-    };
-    let error = reject_blocking_automatic_registry_issues(&[selector_gap]).unwrap_err();
-    assert!(format!("{error:#}").contains("injected selector gap"));
-}
-
 #[path = "codex_union_tests.rs"]
 mod codex_union_tests;
 
-#[test]
-fn duplicate_concurrent_requests_launch_one_writer() {
-    const REQUESTS: usize = 16;
+#[path = "source_backed_refresh_coordinator_tests_request_coalescing.rs"]
+mod request_coalescing_tests;
 
-    let coordinator = Arc::new(CoreRefreshEngine::new());
-    let barrier = Arc::new(Barrier::new(REQUESTS));
-    let mut threads = Vec::new();
-    for _ in 0..REQUESTS {
-        let coordinator = coordinator.clone();
-        let barrier = barrier.clone();
-        threads.push(std::thread::spawn(move || {
-            barrier.wait();
-            coordinator.enqueue(Some("generation-1".to_owned()))
-        }));
-    }
-    let responses = threads
-        .into_iter()
-        .map(|thread| thread.join().expect("request thread"))
-        .collect::<Vec<_>>();
-    let expected_request_id = request_id(&responses[0]);
-    assert!(responses
-        .iter()
-        .all(|response| request_id(response) == expected_request_id));
-
-    let writer_launches = AtomicUsize::new(0);
-    let run = coordinator
-        .run_next_with(
-            |request_id, coordinator| {
-                writer_launches.fetch_add(1, Ordering::SeqCst);
-                let _ = coordinator.set_progress(
-                    request_id,
-                    "refreshing",
-                    0,
-                    1,
-                    Some("source-a".to_owned()),
-                );
-                Ok(test_publication("generation-2"))
-            },
-            || Ok(Some("generation-2".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .expect("queued refresh");
-
-    assert_eq!(writer_launches.load(Ordering::SeqCst), 1);
-    assert!(run.did_work);
-    assert!(!run.failed);
-    let status = coordinator
-        .status(&expected_request_id)
-        .expect("published request status");
-    assert_eq!(status["request_state"], "published");
-    assert_eq!(status["published_generation"], "generation-2");
-    assert_eq!(status["generation_changed"], true);
-    assert_eq!(status["receipt"]["previous_generation"], "generation-1");
-    assert_eq!(status["receipt"]["published_generation"], "generation-2");
-    assert_eq!(status["receipt"]["generation_changed"], true);
-    assert_eq!(
-        status["receipt"]["published_explicit_source_catalog"],
-        status["published_explicit_source_catalog"]
-    );
-    assert_eq!(status["receipt"]["current"]["current_source_count"], 1);
-    assert_eq!(status["receipt"]["current"]["current_indexed_documents"], 2);
-    assert_eq!(status["receipt"]["current"]["current_rejected_records"], 1);
-    assert_eq!(
-        status["coalesced_requests"].as_u64(),
-        Some((REQUESTS - 1) as u64)
-    );
-    assert_eq!(status["certified_source_count"], 1);
-    assert_eq!(status["certified_source_bytes"], 128);
-    assert_eq!(status["timings_us"]["discovery"], 11);
-    assert_eq!(status["timings_us"]["scan_stage"], 22);
-    assert_eq!(status["timings_us"]["commit"], 33);
-    assert!(coordinator
-        .run_next_with(
-            |_, _| panic!("duplicate writer launched"),
-            || Ok(Some("generation-2".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .is_none());
-}
-
-#[test]
-fn unchanged_nonempty_publication_is_no_op_by_generation_identity() {
-    let coordinator = CoreRefreshEngine::new();
-    let request = coordinator.enqueue(Some("generation-1".to_owned()));
-    let request_id = request_id(&request);
-    let run = coordinator
-        .run_next_with(
-            |_, _| Ok(test_publication("generation-1")),
-            || Ok(Some("generation-1".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .expect("queued refresh");
-
-    assert!(!run.failed);
-    assert!(!run.did_work);
-    let status = coordinator.status(&request_id).expect("published request");
-    assert_eq!(status["generation_changed"], false);
-    assert_eq!(status["receipt"]["generation_changed"], false);
-    assert_eq!(status["receipt"]["current"]["current_source_count"], 1);
-    assert_eq!(status["receipt"]["current"]["current_indexed_documents"], 2);
-}
-
-#[test]
-fn concurrent_refresh_request_uses_active_generation_without_reopening_inflight_metadata() {
-    let temp = tempfile::tempdir().unwrap();
-    let coordinator = CoreRefreshEngine::new();
-    let request = coordinator.enqueue(None);
-    assert_eq!(request["request_state"], "queued");
-
-    let index_root = source_backed_index_root(temp.path());
-    let inactive = index_root.join("index-generations/in-flight");
-    std::fs::create_dir_all(&inactive).unwrap();
-    std::fs::write(inactive.join("meta.json"), b"in-flight metadata").unwrap();
-
-    let coalesced = coordinator
-        .handle_ipc_request(
-            temp.path(),
-            &json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-            }),
-        )
-        .unwrap()
-        .expect("coalesced refresh response");
-    assert_eq!(coalesced["request_id"], request["request_id"]);
-    assert_eq!(coalesced["coalesced_requests"], 1);
-}
-
-#[test]
-fn wait_request_with_equivalent_catalog_attaches_to_running_refresh() {
-    let temp = tempfile::tempdir().unwrap();
-    let coordinator = Arc::new(CoreRefreshEngine::new());
-    let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
-    let first = coordinator.enqueue_periodic(temp.path()).unwrap();
-    assert_eq!(first["trigger"], "periodic");
-    let first_request_id = request_id(&first);
-    let (gate, runner_started, runner_release) = RunningRefreshGate::new();
-    let executor_runs = Arc::new(AtomicUsize::new(0));
-
-    let attached = std::thread::scope(|scope| {
-        let runner = Arc::clone(&coordinator);
-        let runner_authority = authority.clone();
-        let runner_executor_runs = Arc::clone(&executor_runs);
-        scope.spawn(move || {
-            let run = runner
-                .run_next_with(
-                    |_, _| {
-                        runner_executor_runs.fetch_add(1, Ordering::SeqCst);
-                        runner_started.send(()).expect("signal running refresh");
-                        let _ = runner_release.recv();
-                        let mut publication = test_publication("generation-1");
-                        publication.published_explicit_source_catalog = runner_authority;
-                        Ok(publication)
-                    },
-                    || Ok(Some("generation-1".to_owned())),
-                    |_| Ok(()),
-                    |_| Ok(()),
-                )
-                .expect("running refresh");
-            assert!(!run.failed);
-        });
-        gate.wait_until_started();
-
-        let attached = coordinator
-            .handle_ipc_request(
-                temp.path(),
-                &json!({
-                    "op": SOURCE_REFRESH_REQUEST_OP,
-                    "mode": "wait",
-                    "explicit_source_catalog": authority.to_json(),
-                }),
-            )
-            .unwrap()
-            .expect("wait refresh response");
-        gate.release();
-        attached
-    });
-
-    assert_eq!(request_id(&attached), first_request_id);
-    assert_eq!(attached["request_state"], "running");
-    assert_eq!(attached["coalesced_requests"], 1);
-    assert_eq!(attached["trigger"], "import");
-    assert_eq!(attached["trigger_provenance"], "explicit_source_catalog");
-    assert_eq!(executor_runs.load(Ordering::SeqCst), 1);
-    let terminal = coordinator.status(&first_request_id).unwrap();
-    assert_eq!(terminal["request_state"], "published");
-    assert_eq!(terminal["receipt"]["published_generation"], "generation-1");
-    assert!(coordinator
-        .run_next_with(
-            |_, _| panic!("equivalent wait launched a successor executor"),
-            || Ok(Some("generation-1".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .is_none());
-}
-
-#[test]
-fn multiple_equivalent_waiters_share_one_request_and_terminal_receipt() {
-    const WAITERS: usize = 8;
-
-    let temp = tempfile::tempdir().unwrap();
-    let coordinator = Arc::new(CoreRefreshEngine::new());
-    let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
-    let first = coordinator.enqueue_periodic(temp.path()).unwrap();
-    let first_request_id = request_id(&first);
-    let (gate, runner_started, runner_release) = RunningRefreshGate::new();
-    let executor_runs = Arc::new(AtomicUsize::new(0));
-
-    let waiter_responses = std::thread::scope(|scope| {
-        let runner = Arc::clone(&coordinator);
-        let runner_authority = authority.clone();
-        let runner_executor_runs = Arc::clone(&executor_runs);
-        scope.spawn(move || {
-            let run = runner
-                .run_next_with(
-                    |_, _| {
-                        runner_executor_runs.fetch_add(1, Ordering::SeqCst);
-                        runner_started.send(()).expect("signal running refresh");
-                        let _ = runner_release.recv();
-                        let mut publication = test_publication("shared-generation");
-                        publication.published_explicit_source_catalog = runner_authority;
-                        Ok(publication)
-                    },
-                    || Ok(Some("shared-generation".to_owned())),
-                    |_| Ok(()),
-                    |_| Ok(()),
-                )
-                .expect("running refresh");
-            assert!(!run.failed);
-        });
-        gate.wait_until_started();
-
-        let responses = (0..WAITERS)
-            .map(|_| {
-                coordinator
-                    .handle_ipc_request(
-                        temp.path(),
-                        &json!({
-                            "op": SOURCE_REFRESH_REQUEST_OP,
-                            "mode": "wait",
-                            "explicit_source_catalog": authority.to_json(),
-                        }),
-                    )
-                    .unwrap()
-                    .expect("wait refresh response")
-            })
-            .collect::<Vec<_>>();
-        gate.release();
-        responses
-    });
-
-    assert!(waiter_responses
-        .iter()
-        .all(|response| request_id(response) == first_request_id));
-    assert_eq!(executor_runs.load(Ordering::SeqCst), 1);
-    let terminal = coordinator.status(&first_request_id).unwrap();
-    assert_eq!(terminal["request_state"], "published");
-    assert_eq!(terminal["coalesced_requests"], WAITERS as u64);
-    assert_eq!(terminal["trigger"], "import");
-    assert_eq!(
-        terminal["receipt"]["published_generation"],
-        "shared-generation"
-    );
-    assert!(waiter_responses
-        .iter()
-        .all(|response| { coordinator.status(&request_id(response)).as_ref() == Some(&terminal) }));
-    assert!(!coordinator.has_pending_request());
-}
-
-#[test]
-fn equivalent_waiters_share_the_same_terminal_failure_status() {
-    let temp = tempfile::tempdir().unwrap();
-    let coordinator = Arc::new(CoreRefreshEngine::new());
-    let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
-    let first = coordinator.enqueue_periodic(temp.path()).unwrap();
-    let first_request_id = request_id(&first);
-    let (gate, runner_started, runner_release) = RunningRefreshGate::new();
-
-    let waiter_request_ids = std::thread::scope(|scope| {
-        let runner = Arc::clone(&coordinator);
-        scope.spawn(move || {
-            let run = runner
-                .run_next_with(
-                    |_, _| {
-                        runner_started.send(()).expect("signal running refresh");
-                        let _ = runner_release.recv();
-                        Err(anyhow!("injected equivalent refresh failure"))
-                    },
-                    || Ok(None),
-                    |_| Ok(()),
-                    |_| Ok(()),
-                )
-                .expect("running refresh");
-            assert!(run.failed);
-        });
-        gate.wait_until_started();
-
-        let request_ids = (0..2)
-            .map(|_| {
-                coordinator
-                    .handle_ipc_request(
-                        temp.path(),
-                        &json!({
-                            "op": SOURCE_REFRESH_REQUEST_OP,
-                            "mode": "wait",
-                            "explicit_source_catalog": authority.to_json(),
-                        }),
-                    )
-                    .unwrap()
-                    .and_then(|response| {
-                        response
-                            .get("request_id")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .expect("wait refresh request ID")
-            })
-            .collect::<Vec<_>>();
-        gate.release();
-        request_ids
-    });
-
-    assert!(waiter_request_ids
-        .iter()
-        .all(|request_id| request_id == &first_request_id));
-    let terminal = coordinator.status(&first_request_id).unwrap();
-    assert_eq!(terminal["request_state"], "failed");
-    assert!(terminal["receipt"].is_null());
-    assert!(terminal["last_error"]
-        .as_str()
-        .is_some_and(|error| error.contains("injected equivalent refresh failure")));
-    assert!(waiter_request_ids
-        .iter()
-        .all(|request_id| { coordinator.status(request_id).as_ref() == Some(&terminal) }));
-    assert!(!coordinator.has_pending_request());
-}
-
-#[test]
-fn explicit_fresh_after_admitted_snapshot_queues_one_successor() {
-    let temp = tempfile::tempdir().unwrap();
-    let coordinator = Arc::new(CoreRefreshEngine::new());
-    let authority = test_catalog_authority(1, 0x11);
-    let first = coordinator
-        .handle_ipc_request(
-            temp.path(),
-            &json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "background",
-                "explicit_source_catalog": authority.to_json(),
-            }),
-        )
-        .unwrap()
-        .expect("background refresh response");
-    let first_request_id = request_id(&first);
-    let (gate, runner_started, runner_release) = RunningRefreshGate::new();
-
-    let (successor, replay) = std::thread::scope(|scope| {
-        let runner = Arc::clone(&coordinator);
-        let runner_authority = authority.clone();
-        scope.spawn(move || {
-            runner
-                .run_next_with(
-                    |_, _| {
-                        runner_started.send(()).expect("signal running refresh");
-                        let _ = runner_release.recv();
-                        let mut publication = test_publication("generation-1");
-                        publication.published_explicit_source_catalog = runner_authority;
-                        Ok(publication)
-                    },
-                    || Ok(Some("generation-1".to_owned())),
-                    |_| Ok(()),
-                    |_| Ok(()),
-                )
-                .expect("running refresh");
-        });
-        gate.wait_until_started();
-
-        let request = || {
-            coordinator
-                .handle_ipc_request(
-                    temp.path(),
-                    &json!({
-                        "op": SOURCE_REFRESH_REQUEST_OP,
-                        "mode": "wait",
-                        "explicit_source_catalog": authority.to_json(),
-                        "fresh_after_admitted_snapshot": true,
-                    }),
-                )
-                .unwrap()
-                .expect("fresh-after-admitted-snapshot response")
-        };
-        let successor = request();
-        let replay = request();
-        gate.release();
-        (successor, replay)
-    });
-
-    let successor_request_id = request_id(&successor);
-    assert_ne!(successor_request_id, first_request_id);
-    assert_eq!(request_id(&replay), successor_request_id);
-    assert_eq!(replay["coalesced_requests"], 1);
-    let successor_run = coordinator
-        .run_next_with(
-            |_, _| {
-                let mut publication = test_publication("generation-2");
-                publication.published_explicit_source_catalog = authority;
-                Ok(publication)
-            },
-            || Ok(Some("generation-2".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .expect("fresh successor");
-    assert!(!successor_run.failed);
-    assert_eq!(request_id(&successor_run.job), successor_request_id);
-    assert!(!coordinator.has_pending_request());
-}
-
-#[test]
-fn ipc_job_records_source_refresh_only_search_autostart_provenance() {
-    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join(crate::config::CONFIG_FILE),
-        "[daemon]\nmode = \"source-refresh-only\"\n",
-    )
-    .unwrap();
-    crate::semantic::paths_status::write_daemon_status(
-        temp.path(),
-        &json!({
-            "schema_version": 1,
-            "status": "running",
-            "start_mode": "auto",
-            "trigger_command": "search",
-        }),
-    )
-    .unwrap();
-    let coordinator = CoreRefreshEngine::new();
-
-    let response = coordinator
-        .handle_ipc_request(
-            temp.path(),
-            &json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "background",
-            }),
-        )
-        .unwrap()
-        .expect("source refresh response");
-    let job = crate::semantic::paths_status::read_daemon_job_status(
-        &daemon_source_backed_refresh_job_path(temp.path()),
-    )
-    .expect("persisted source refresh job");
-
-    assert_eq!(response["daemon_mode"], "source-refresh-only");
-    assert_eq!(response["trigger"], "search");
-    assert_eq!(response["trigger_provenance"], "autostart");
-    assert_eq!(job["daemon_mode"], "source-refresh-only");
-    assert_eq!(job["trigger"], "search");
-    assert_eq!(job["trigger_provenance"], "autostart");
-}
-
-#[test]
-fn failed_refresh_retains_the_previous_published_generation() {
-    let coordinator = CoreRefreshEngine::new();
-    let request = coordinator.enqueue(Some("generation-1".to_owned()));
-    let request_id = request_id(&request);
-    let run = coordinator
-        .run_next_with(
-            |request_id, coordinator| {
-                let _ = coordinator.set_progress(
-                    request_id,
-                    "refreshing",
-                    0,
-                    1,
-                    Some("source-a".to_owned()),
-                );
-                Err(anyhow!("injected writer failure before publication"))
-            },
-            || Ok(Some("generation-1".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .expect("queued refresh");
-
-    assert!(run.failed);
-    assert!(!run.did_work);
-    let status = coordinator
-        .status(&request_id)
-        .expect("failed request status");
-    assert_eq!(status["request_state"], "failed");
-    assert_eq!(status["previous_generation"], "generation-1");
-    assert_eq!(status["published_generation"], "generation-1");
-    assert!(status.get("generation_changed").is_none());
-    assert!(status.get("receipt").is_none());
-    assert!(status["last_error"]
-        .as_str()
-        .is_some_and(|error| error.contains("injected writer failure")));
-    assert_eq!(run.job["status"], "failed");
-    assert_eq!(run.job["published_generation"], "generation-1");
-    assert_eq!(run.job["progress"]["phase"], "failed");
-}
-
-#[test]
-fn unverified_returned_generation_is_never_recorded_as_published() {
-    let coordinator = CoreRefreshEngine::new();
-    let request = coordinator.enqueue(Some("generation-1".to_owned()));
-    let request_id = request_id(&request);
-    let run = coordinator
-        .run_next_with(
-            |_, _| Ok(test_publication("generation-2")),
-            || Ok(Some("generation-1".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .expect("queued refresh");
-
-    assert!(run.failed);
-    assert!(!run.did_work);
-    let status = coordinator
-        .status(&request_id)
-        .expect("failed request status");
-    assert_eq!(status["request_state"], "failed");
-    assert_eq!(status["previous_generation"], "generation-1");
-    assert_eq!(status["published_generation"], "generation-1");
-    assert!(status["last_error"]
-        .as_str()
-        .is_some_and(|error| error.contains("returned generation generation-2")));
-}
-
-#[test]
-fn verified_publication_atomically_installs_pinned_core_receipt() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let receipt = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?
-            .commit(|_| true)?;
-            Ok(empty_test_publication(receipt.generation_id))
-        },
-    ));
-    coordinator.enqueue_periodic(&data_root).unwrap();
-
-    let run = coordinator.run_next(&data_root).expect("queued refresh");
-    let pinned = coordinator
-        .pinned_core_publication()
-        .expect("pinned Core publication");
-
-    assert!(!run.failed);
-    assert_eq!(pinned.generation_id(), run.job["published_generation"]);
-    assert_eq!(
-        pinned.receipt().published_generation,
-        pinned
-            .verified_index()
-            .expect("verified Core index")
-            .generation_id()
-    );
-    assert!(!coordinator.has_pending_request());
-}
-
-#[test]
-fn failed_post_commit_probe_is_not_reopened_in_the_same_cycle() {
-    let temp = tempfile::tempdir().unwrap();
-    let coordinator = CoreRefreshEngine::with_executor(Arc::new(TestExecutor {
-        calls: Arc::new(AtomicUsize::new(0)),
-        generation_id: "claimed-generation".to_owned(),
-        failure: None,
-    }));
-    coordinator.enqueue(None);
-
-    let (run, verified_opens) = count_verified_index_opens(|| {
-        coordinator
-            .run_next(temp.path())
-            .expect("queued refresh must run")
-    });
-
-    assert_eq!(
-        verified_opens, 1,
-        "a failed post-commit probe must not trigger an immediate second open"
-    );
-    assert!(run.failed);
-    assert!(run.job["last_error"]
-        .as_str()
-        .is_some_and(|error| error.contains("already failed in this refresh cycle")));
-}
-
-#[test]
-fn trailing_publication_failure_keeps_committed_success() {
-    let coordinator = CoreRefreshEngine::new();
-    let failed_callbacks = AtomicUsize::new(0);
-    let request = coordinator.enqueue(Some("generation-a".to_owned()));
-    let request_id = request_id(&request);
-
-    let run = coordinator
-        .run_next_with(
-            |_, _| Ok(test_publication("generation-b")),
-            || Ok(Some("generation-b".to_owned())),
-            |_| Err(anyhow!("injected cleanup failure after commit")),
-            |_| {
-                failed_callbacks.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-        )
-        .expect("published refresh");
-
-    assert!(!run.failed);
-    assert!(run.did_work);
-    assert_eq!(run.job["status"], "completed");
-    assert!(run.job["post_publication_error"]
-        .as_str()
-        .is_some_and(|error| error.contains("injected cleanup failure after commit")));
-    assert_eq!(failed_callbacks.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        coordinator.status(&request_id).unwrap()["request_state"],
-        "published"
-    );
-}
-
-#[test]
-fn recovered_wait_after_restart_attaches_to_equivalent_running_attempt() {
-    let temp = tempfile::tempdir().unwrap();
-    let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
-    let first = CoreRefreshEngine::new();
-    let interrupted = first.enqueue_periodic(temp.path()).unwrap();
-    let interrupted_request_id = request_id(&interrupted);
-    let crash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = first.run_next_with(
-            |_, _| panic!("injected daemon process interruption"),
-            || Ok(None),
-            |_| Ok(()),
-            |_| Ok(()),
-        );
-    }));
-    assert!(crash.is_err());
-    let running_job = first
-        .set_progress(
-            &interrupted_request_id,
-            "refreshing",
-            0,
-            1,
-            Some("interrupted-source".to_owned()),
-        )
-        .expect("interrupted running job");
-    write_daemon_job_status(
-        &daemon_source_backed_refresh_job_path(temp.path()),
-        &running_job,
-    )
-    .unwrap();
-    drop(first);
-
-    let restarted = Arc::new(CoreRefreshEngine::new());
-    let active = restarted.enqueue_periodic(temp.path()).unwrap();
-    let active_request_id = request_id(&active);
-    assert_ne!(active_request_id, interrupted_request_id);
-    let (gate, runner_started, runner_release) = RunningRefreshGate::new();
-
-    let recovered = std::thread::scope(|scope| {
-        let runner = Arc::clone(&restarted);
-        let runner_authority = authority.clone();
-        scope.spawn(move || {
-            let run = runner
-                .run_next_with(
-                    |_, _| {
-                        runner_started.send(()).expect("signal running refresh");
-                        let _ = runner_release.recv();
-                        let mut publication = test_publication("restart-generation");
-                        publication.published_explicit_source_catalog = runner_authority;
-                        Ok(publication)
-                    },
-                    || Ok(Some("restart-generation".to_owned())),
-                    |_| Ok(()),
-                    |_| Ok(()),
-                )
-                .expect("restarted running refresh");
-            assert!(!run.failed);
-        });
-        gate.wait_until_started();
-
-        let recovered = restarted
-            .handle_ipc_request(
-                temp.path(),
-                &json!({
-                    "op": SOURCE_REFRESH_REQUEST_OP,
-                    "mode": "wait",
-                    "explicit_source_catalog": authority.to_json(),
-                }),
-            )
-            .unwrap()
-            .expect("recovered wait refresh response");
-        gate.release();
-        recovered
-    });
-
-    assert_eq!(request_id(&recovered), active_request_id);
-    let terminal = restarted.status(&active_request_id).unwrap();
-    assert_eq!(terminal["request_state"], "published");
-    assert_eq!(
-        terminal["receipt"]["published_generation"],
-        "restart-generation"
-    );
-    assert!(!restarted.has_pending_request());
-}
-
-#[test]
-fn restart_discards_incomplete_candidate_and_publishes_from_last_good() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let first = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let _writer = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?;
-            Err(anyhow!("injected cancellation before commit"))
-        },
-    ));
-    first.enqueue_periodic(&data_root).unwrap();
-    let failed = first.run_next(&data_root).expect("cancelled refresh");
-    assert!(failed.failed);
-    assert!(pin_published_generation(&data_root).unwrap().is_none());
-    drop(first);
-
-    let restarted = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let receipt = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?
-            .commit(|_| true)?;
-            Ok(empty_test_publication(receipt.generation_id))
-        },
-    ));
-    restarted.enqueue_periodic(&data_root).unwrap();
-    let published = restarted.run_next(&data_root).expect("restart refresh");
-
-    assert!(!published.failed);
-    let pinned = restarted
-        .pinned_core_publication()
-        .expect("restart publication pin");
-    assert_eq!(
-        pinned.generation_id(),
-        published.job["published_generation"]
-    );
-}
-
-#[test]
-fn restart_after_commit_replays_noop_without_identity_churn() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let first = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let receipt = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?
-            .commit(|_| true)?;
-            Err(anyhow!(
-                "injected cancellation after commit {}",
-                receipt.generation_id
-            ))
-        },
-    ));
-    first.enqueue_periodic(&data_root).unwrap();
-    let failed = first.run_next(&data_root).expect("cancelled refresh");
-    assert!(failed.failed);
-    let committed = pin_published_generation(&data_root)
-        .unwrap()
-        .expect("atomic commit survives cancellation")
-        .generation_id()
-        .to_owned();
-    drop(first);
-
-    let restarted = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let receipt = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?
-            .commit(|_| true)?;
-            Ok(empty_test_publication(receipt.generation_id))
-        },
-    ));
-    let queued = restarted.enqueue_periodic(&data_root).unwrap();
-    assert_eq!(queued["previous_generation"], committed);
-    let replay = restarted.run_next(&data_root).expect("restart replay");
-
-    assert!(!replay.failed);
-    assert!(!replay.did_work);
-    assert_eq!(replay.job["published_generation"], committed);
-    assert_eq!(
-        restarted
-            .pinned_core_publication()
-            .expect("restart publication pin")
-            .receipt()
-            .published_generation,
-        committed
-    );
-}
-
-#[test]
-fn active_generation_pin_fails_closed_when_core_state_is_missing() {
-    let temp = tempfile::tempdir().unwrap();
-    let error = match pin_active_verified_generation(temp.path()) {
-        Ok(_) => panic!("missing Core state must not fall back to a helper receipt"),
-        Err(error) => error,
-    };
-    assert!(format!("{error:#}").starts_with("source_unavailable:"));
-}
-
-#[test]
-fn activated_generation_missing_commit_payload_remains_typed_corruption() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let writer = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?;
-            let receipt = writer.commit(|_| true)?;
-            Ok(empty_test_publication(receipt.generation_id))
-        },
-    ));
-    coordinator.enqueue_periodic(&data_root).unwrap();
-    let run = coordinator.run_next(&data_root).expect("initial refresh");
-    assert!(!run.failed);
-    write_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root), &run.job).unwrap();
-
-    let index_root = source_backed_index_root(&data_root);
-    let pointer: Value =
-        serde_json::from_slice(&std::fs::read(index_root.join("active-generation.json")).unwrap())
-            .unwrap();
-    let directory = pointer["active"]["directory"].as_str().unwrap();
-    let meta_path = index_root
-        .join("index-generations")
-        .join(directory)
-        .join("meta.json");
-    let mut meta: Value = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
-    assert!(meta.as_object_mut().unwrap().remove("payload").is_some());
-    std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
-
-    drop(coordinator);
-    let restarted = CoreRefreshEngine::new();
-    let error = restarted
-        .enqueue_periodic(&data_root)
-        .expect_err("activated generation corruption must fail closed");
-    assert!(matches!(
-        error.downcast_ref::<IndexError>(),
-        Some(IndexError::MissingCommitPayload)
-    ));
-    assert!(!restarted.has_pending_request());
-
-    let error = match pin_active_verified_generation(&data_root) {
-        Ok(_) => panic!("corrupt active Core state must fail closed before blame"),
-        Err(error) => error,
-    };
-    assert!(format!("{error:#}").starts_with("source_unavailable:"));
-}
+#[path = "source_backed_refresh_coordinator_tests_publication_lifecycle.rs"]
+mod publication_lifecycle_tests;

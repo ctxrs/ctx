@@ -50,9 +50,40 @@ pub(super) fn load_and_validate_segment(
         descriptor: descriptor.clone(),
         vectors,
         metadata,
-        mutations,
         stride_bytes,
     })
+}
+
+pub(super) fn load_catalog_mutations(
+    root: &Path,
+    contract: &FlatModelContract,
+    descriptor: &SegmentDescriptor,
+) -> FlatResult<Vec<EventMutation>> {
+    let mapping = map_artifact(
+        root,
+        descriptor,
+        &descriptor.mutations,
+        ArtifactRole::Mutations,
+        contract,
+    )?;
+    let header = decode_header(&mapping)?;
+    validate_mutation_payload(&mapping, &header, descriptor.kind, descriptor.generation)
+}
+
+pub(super) fn load_catalog_mutations_in_directory(
+    directory: &Path,
+    contract: &FlatModelContract,
+    descriptor: &SegmentDescriptor,
+) -> FlatResult<Vec<EventMutation>> {
+    let mapping = map_artifact_in_directory(
+        directory,
+        descriptor,
+        &descriptor.mutations,
+        ArtifactRole::Mutations,
+        contract,
+    )?;
+    let header = decode_header(&mapping)?;
+    validate_mutation_payload(&mapping, &header, descriptor.kind, descriptor.generation)
 }
 
 pub(super) fn validate_staged_segment(
@@ -64,6 +95,50 @@ pub(super) fn validate_staged_segment(
     Ok(())
 }
 
+pub(super) fn validate_staged_segment_in_directory(
+    directory: &Path,
+    contract: &FlatModelContract,
+    descriptor: &SegmentDescriptor,
+) -> FlatResult<()> {
+    let vectors = map_artifact_in_directory(
+        directory,
+        descriptor,
+        &descriptor.vectors,
+        ArtifactRole::Vectors,
+        contract,
+    )?;
+    let metadata = map_artifact_in_directory(
+        directory,
+        descriptor,
+        &descriptor.metadata,
+        ArtifactRole::Metadata,
+        contract,
+    )?;
+    let mutation_map = map_artifact_in_directory(
+        directory,
+        descriptor,
+        &descriptor.mutations,
+        ArtifactRole::Mutations,
+        contract,
+    )?;
+    let vector_header = decode_header(&vectors)?;
+    let metadata_header = decode_header(&metadata)?;
+    let mutation_header = decode_header(&mutation_map)?;
+    validate_vector_payload(&vectors, &vector_header, contract)?;
+    let mutations = validate_mutation_payload(
+        &mutation_map,
+        &mutation_header,
+        descriptor.kind,
+        descriptor.generation,
+    )?;
+    validate_metadata_payload(
+        &metadata,
+        &metadata_header,
+        &mutations,
+        descriptor.generation,
+    )
+}
+
 pub(super) fn map_artifact(
     root: &Path,
     segment: &SegmentDescriptor,
@@ -71,8 +146,18 @@ pub(super) fn map_artifact(
     role: ArtifactRole,
     contract: &FlatModelContract,
 ) -> FlatResult<Mmap> {
+    map_artifact_in_directory(&segments_directory(root), segment, artifact, role, contract)
+}
+
+pub(super) fn map_artifact_in_directory(
+    directory: &Path,
+    segment: &SegmentDescriptor,
+    artifact: &ArtifactDescriptor,
+    role: ArtifactRole,
+    contract: &FlatModelContract,
+) -> FlatResult<Mmap> {
     validate_artifact_name(&artifact.file, segment.generation, role)?;
-    let path = segments_directory(root).join(&artifact.file);
+    let path = directory.join(&artifact.file);
     let metadata = symlink_metadata_file(&path)?;
     if metadata.len() != artifact.file_bytes {
         return Err(FlatStoreError::Corrupt(format!(
@@ -117,6 +202,10 @@ pub(super) fn metadata_at(mapping: &Mmap, ordinal: usize) -> FlatChunkMetadata {
 }
 
 pub(super) fn publish_manifest(root: &Path, manifest: Manifest) -> FlatResult<SelectedManifest> {
+    publish_prepared_manifest(root, prepare_manifest(manifest)?)
+}
+
+pub(super) fn prepare_manifest(manifest: Manifest) -> FlatResult<PreparedManifest> {
     let manifest_bytes = serde_json::to_vec(&manifest)?;
     let digest = encode_hex(Sha256::digest(&manifest_bytes).as_slice());
     let envelope = ManifestEnvelope {
@@ -131,6 +220,22 @@ pub(super) fn publish_manifest(root: &Path, manifest: Manifest) -> FlatResult<Se
             "manifest exceeds the safe size limit; compact first".to_owned(),
         ));
     }
+    Ok(PreparedManifest {
+        envelope,
+        generation_hash: digest,
+        bytes,
+    })
+}
+
+pub(super) fn publish_prepared_manifest(
+    root: &Path,
+    prepared: PreparedManifest,
+) -> FlatResult<SelectedManifest> {
+    let PreparedManifest {
+        envelope,
+        generation_hash: digest,
+        bytes,
+    } = prepared;
     let directory = manifests_directory(root);
     let final_path = directory.join(manifest_name(envelope.manifest.generation, &digest));
     let temporary = unique_temporary_path(&directory, "manifest");
@@ -153,9 +258,63 @@ pub(super) fn write_replacement_segment(
     root: &Path,
     contract: &FlatModelContract,
     generation: u64,
+    source: &FlatSourceScope,
     replacements: &[FlatEventReplacement],
     tombstones: &[Uuid],
 ) -> FlatResult<StagedSegment> {
+    let existing = FlatActiveEventLookup {
+        events: Arc::new(Vec::new()),
+    };
+    write_event_segment(
+        root,
+        contract,
+        generation,
+        source,
+        EventSegmentInput {
+            replacements,
+            authority_updates: &[],
+            tombstones,
+            existing: &existing,
+        },
+    )
+}
+
+pub(super) struct EventSegmentInput<'a> {
+    pub(super) replacements: &'a [FlatEventReplacement],
+    pub(super) authority_updates: &'a [FlatEventMetadataUpdate],
+    pub(super) tombstones: &'a [Uuid],
+    pub(super) existing: &'a FlatActiveEventLookup,
+}
+
+pub(super) fn write_event_segment(
+    root: &Path,
+    contract: &FlatModelContract,
+    generation: u64,
+    source: &FlatSourceScope,
+    input: EventSegmentInput<'_>,
+) -> FlatResult<StagedSegment> {
+    write_event_segment_in_directory(
+        &segments_directory(root),
+        contract,
+        generation,
+        source,
+        input,
+    )
+}
+
+pub(super) fn write_event_segment_in_directory(
+    directory: &Path,
+    contract: &FlatModelContract,
+    generation: u64,
+    source: &FlatSourceScope,
+    input: EventSegmentInput<'_>,
+) -> FlatResult<StagedSegment> {
+    let EventSegmentInput {
+        replacements,
+        authority_updates,
+        tombstones,
+        existing,
+    } = input;
     let mut ordered_replacements = replacements.iter().collect::<Vec<_>>();
     ordered_replacements.sort_by_key(|replacement| replacement.event_id);
     let mut ordered_tombstones = tombstones.to_vec();
@@ -171,18 +330,14 @@ pub(super) fn write_replacement_segment(
                 FlatStoreError::InvalidInput("publication vector count overflow".to_owned())
             })
         })?;
-    let mutation_count = u64::try_from(ordered_replacements.len())
-        .ok()
-        .zip(u64::try_from(ordered_tombstones.len()).ok())
-        .and_then(|(replacements, tombstones)| replacements.checked_add(tombstones))
-        .ok_or_else(|| FlatStoreError::InvalidInput("mutation count overflow".to_owned()))?;
-
-    let directory = segments_directory(root);
     let stride = usize_from_u32(vector_stride(contract.dimensions)?, "vector stride")?;
-    let mut vectors = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Vectors)?;
-    let mut metadata = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Metadata)?;
+    let mut vectors = StagedArtifactWriter::new(directory, generation, ArtifactRole::Vectors)?;
+    let mut metadata = StagedArtifactWriter::new(directory, generation, ArtifactRole::Metadata)?;
     let mut vector_scratch = vec![0_u8; stride];
+    let mut first_ordinals = HashMap::with_capacity(ordered_replacements.len());
+    let mut next_ordinal = 0_u64;
     for replacement in ordered_replacements {
+        first_ordinals.insert(replacement.event_id, next_ordinal);
         let mut chunks = replacement.chunks.iter().collect::<Vec<_>>();
         chunks.sort_by_key(|chunk| chunk.chunk_index);
         for chunk in chunks {
@@ -196,29 +351,124 @@ pub(super) fn write_replacement_segment(
                 start_char: chunk.start_char,
                 end_char: chunk.end_char,
             }))?;
+            next_ordinal = next_ordinal.checked_add(1).ok_or_else(|| {
+                FlatStoreError::InvalidInput("publication vector ordinal overflow".to_owned())
+            })?;
         }
     }
 
-    let mut mutations = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Mutations)?;
+    let updates = authority_updates
+        .iter()
+        .map(|update| (update.event_id, update))
+        .collect::<HashMap<_, _>>();
+    if updates.len() != authority_updates.len() {
+        return Err(FlatStoreError::InvalidInput(
+            "authority update repeats an event".to_owned(),
+        ));
+    }
+    let replacement_ids = replacements
+        .iter()
+        .map(|replacement| replacement.event_id)
+        .collect::<HashSet<_>>();
+    let tombstone_ids = tombstones.iter().copied().collect::<HashSet<_>>();
+    if replacement_ids.len() != replacements.len()
+        || tombstone_ids.len() != tombstones.len()
+        || replacement_ids
+            .iter()
+            .any(|event_id| tombstone_ids.contains(event_id))
+        || updates
+            .keys()
+            .any(|event_id| tombstone_ids.contains(event_id))
+    {
+        return Err(FlatStoreError::InvalidInput(
+            "event publication has duplicate or ambiguous mutations".to_owned(),
+        ));
+    }
+
+    let mut mutations = StagedArtifactWriter::new(directory, generation, ArtifactRole::Mutations)?;
     let mut ordered_mutations = replacements
         .iter()
-        .map(|replacement| EventMutation {
-            event_id: replacement.event_id,
-            kind: MutationKind::Replace,
+        .map(|replacement| {
+            let update = updates.get(&replacement.event_id).copied();
+            if update.is_some_and(|update| {
+                update.seq != replacement.seq
+                    || update.source_text_hash != replacement.source_text_hash
+            }) {
+                return Err(FlatStoreError::InvalidInput(format!(
+                    "replacement authority disagrees for {}",
+                    replacement.event_id
+                )));
+            }
+            Ok(EventMutation {
+                event_id: replacement.event_id,
+                kind: MutationKind::Replace,
+                seq: replacement.seq,
+                source_text_hash: replacement.source_text_hash,
+                stable_identity_hash: update.map_or([0; 32], |update| update.stable_identity_hash),
+                vector_generation: generation,
+                first_vector_ordinal: first_ordinals[&replacement.event_id],
+                chunk_count: u32::try_from(replacement.chunks.len()).map_err(|_| {
+                    FlatStoreError::InvalidInput("replacement chunk count is too large".to_owned())
+                })?,
+            })
         })
-        .chain(
-            ordered_tombstones
-                .into_iter()
-                .map(|event_id| EventMutation {
-                    event_id,
-                    kind: MutationKind::Delete,
-                }),
-        )
-        .collect::<Vec<_>>();
-    ordered_mutations.sort_by_key(|mutation| mutation.event_id);
-    for mutation in ordered_mutations {
-        mutations.write_payload(&encode_mutation_record(mutation))?;
+        .collect::<FlatResult<Vec<_>>>()?;
+    for update in authority_updates {
+        if replacement_ids.contains(&update.event_id) {
+            continue;
+        }
+        let prior = existing.event(update.event_id).ok_or_else(|| {
+            FlatStoreError::InvalidInput(format!(
+                "authority update references absent event {}",
+                update.event_id
+            ))
+        })?;
+        if prior.source_text_hash != update.source_text_hash {
+            return Err(FlatStoreError::InvalidInput(format!(
+                "authority update changes source hash for {}",
+                update.event_id
+            )));
+        }
+        ordered_mutations.push(EventMutation {
+            event_id: update.event_id,
+            kind: MutationKind::Replace,
+            seq: update.seq,
+            source_text_hash: update.source_text_hash,
+            stable_identity_hash: update.stable_identity_hash,
+            vector_generation: prior.vector_generation,
+            first_vector_ordinal: prior.first_vector_ordinal,
+            chunk_count: prior.chunk_count,
+        });
     }
+    ordered_mutations.extend(
+        ordered_tombstones
+            .into_iter()
+            .map(|event_id| EventMutation {
+                event_id,
+                kind: MutationKind::Delete,
+                seq: 0,
+                source_text_hash: FlatSourceHash::from_bytes([0; 32]),
+                stable_identity_hash: [0; 32],
+                vector_generation: 0,
+                first_vector_ordinal: 0,
+                chunk_count: 0,
+            }),
+    );
+    ordered_mutations.sort_by_key(|mutation| mutation.event_id);
+    if ordered_mutations
+        .windows(2)
+        .any(|pair| pair[0].event_id == pair[1].event_id)
+    {
+        return Err(FlatStoreError::InvalidInput(
+            "event publication repeats an event".to_owned(),
+        ));
+    }
+    for mutation in &ordered_mutations {
+        mutations.write_payload(&encode_mutation_record(*mutation))?;
+    }
+
+    let mutation_count = u64::try_from(ordered_mutations.len())
+        .map_err(|_| FlatStoreError::InvalidInput("mutation count overflow".to_owned()))?;
 
     let vectors = vectors.finalize(vector_count, stride as u32, contract.dimensions)?;
     let metadata = metadata.finalize(vector_count, METADATA_RECORD_BYTES as u32, 0)?;
@@ -230,10 +480,13 @@ pub(super) fn write_replacement_segment(
             kind: SegmentKind::Delta,
             vector_count,
             mutation_count,
+            source_identity_digest: source.source_identity_digest.clone(),
+            source_reconciliation_id: source.source_reconciliation_id.clone(),
             vectors,
             metadata,
             mutations,
         },
+        mutations: ordered_mutations,
     })
 }
 
@@ -405,6 +658,12 @@ pub(super) fn encode_mutation_record(mutation: EventMutation) -> [u8; MUTATION_R
     let mut record = [0_u8; MUTATION_RECORD_BYTES];
     record[..16].copy_from_slice(mutation.event_id.as_bytes());
     record[16] = mutation.kind as u8;
+    record[24..32].copy_from_slice(&mutation.seq.to_le_bytes());
+    record[32..64].copy_from_slice(mutation.source_text_hash.as_bytes());
+    record[64..96].copy_from_slice(&mutation.stable_identity_hash);
+    record[96..104].copy_from_slice(&mutation.vector_generation.to_le_bytes());
+    record[104..112].copy_from_slice(&mutation.first_vector_ordinal.to_le_bytes());
+    record[112..116].copy_from_slice(&mutation.chunk_count.to_le_bytes());
     record
 }
 
@@ -412,7 +671,10 @@ pub(super) fn decode_mutation_record(record: &[u8]) -> FlatResult<EventMutation>
     let mut event_id = [0_u8; 16];
     event_id.copy_from_slice(&record[..16]);
     let event_id = Uuid::from_bytes(event_id);
-    if event_id.is_nil() || record[17..].iter().any(|byte| *byte != 0) {
+    if event_id.is_nil()
+        || record[17..24].iter().any(|byte| *byte != 0)
+        || record[116..].iter().any(|byte| *byte != 0)
+    {
         return Err(FlatStoreError::Corrupt(
             "mutation record has invalid identity or reserved bytes".to_owned(),
         ));
@@ -426,7 +688,20 @@ pub(super) fn decode_mutation_record(record: &[u8]) -> FlatResult<EventMutation>
             )));
         }
     };
-    Ok(EventMutation { event_id, kind })
+    let mut source_text_hash = [0_u8; 32];
+    source_text_hash.copy_from_slice(&record[32..64]);
+    let mut stable_identity_hash = [0_u8; 32];
+    stable_identity_hash.copy_from_slice(&record[64..96]);
+    Ok(EventMutation {
+        event_id,
+        kind,
+        seq: read_u64(record, 24),
+        source_text_hash: FlatSourceHash::from_bytes(source_text_hash),
+        stable_identity_hash,
+        vector_generation: read_u64(record, 96),
+        first_vector_ordinal: read_u64(record, 104),
+        chunk_count: read_u32(record, 112),
+    })
 }
 
 pub(super) fn encode_header(header: SegmentHeader) -> [u8; HEADER_BYTES] {
@@ -506,10 +781,12 @@ pub(super) fn ensure_store_directories(root: &Path) -> FlatResult<()> {
             .map_err(|source| io_error("create flat store directory", &directory, source))?;
         ensure_real_directory(&directory)?;
     }
-    let lock = lock_path(root);
-    let file = open_lock(&lock, true)?;
-    file.sync_all()
-        .map_err(|source| io_error("sync flat writer lock", &lock, source))?;
+    ensure_source_stage_directory(root)?;
+    for lock in [lock_path(root), transaction_lock_path(root)] {
+        let file = open_lock(&lock, true)?;
+        file.sync_all()
+            .map_err(|source| io_error("sync flat writer lock", &lock, source))?;
+    }
     sync_directory(root)
 }
 
@@ -517,8 +794,11 @@ pub(super) fn validate_existing_store_directories(root: &Path) -> FlatResult<()>
     ensure_real_directory(root)?;
     ensure_real_directory(&manifests_directory(root))?;
     ensure_real_directory(&segments_directory(root))?;
+    ensure_real_directory(&source_stage_directory(root))?;
     let lock = lock_path(root);
     let _ = symlink_metadata_file(&lock)?;
+    let transaction_lock = transaction_lock_path(root);
+    let _ = symlink_metadata_file(&transaction_lock)?;
     Ok(())
 }
 
@@ -558,6 +838,10 @@ pub(super) fn lock_path(root: &Path) -> PathBuf {
     root.join(WRITER_LOCK_FILE)
 }
 
+pub(super) fn transaction_lock_path(root: &Path) -> PathBuf {
+    root.join(TRANSACTION_LOCK_FILE)
+}
+
 pub(super) fn create_new_file(path: &Path) -> FlatResult<File> {
     OpenOptions::new()
         .read(true)
@@ -578,13 +862,48 @@ pub(super) fn unique_temporary_path(directory: &Path, purpose: &str) -> PathBuf 
 
 pub(super) fn commit_unique_file(temporary: &Path, final_path: &Path) -> FlatResult<()> {
     if final_path.exists() {
+        if files_equal(temporary, final_path)? {
+            fs::remove_file(temporary)
+                .map_err(|source| io_error("remove duplicate Flat temporary", temporary, source))?;
+            return Ok(());
+        }
         return Err(FlatStoreError::Corrupt(format!(
-            "immutable flat artifact already exists: {}",
+            "immutable flat artifact already exists with different bytes: {}",
             final_path.display()
         )));
     }
     fs::rename(temporary, final_path)
         .map_err(|source| io_error("publish immutable flat artifact", final_path, source))
+}
+
+fn files_equal(left: &Path, right: &Path) -> FlatResult<bool> {
+    let left_metadata = symlink_metadata_file(left)?;
+    let right_metadata = symlink_metadata_file(right)?;
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+    let left_file =
+        File::open(left).map_err(|source| io_error("open Flat duplicate", left, source))?;
+    let right_file =
+        File::open(right).map_err(|source| io_error("open Flat duplicate", right, source))?;
+    let mut left_reader = BufReader::new(left_file);
+    let mut right_reader = BufReader::new(right_file);
+    let mut left_buffer = [0_u8; 64 * 1024];
+    let mut right_buffer = [0_u8; 64 * 1024];
+    loop {
+        let left_read = left_reader
+            .read(&mut left_buffer)
+            .map_err(|source| io_error("read Flat duplicate", left, source))?;
+        let right_read = right_reader
+            .read(&mut right_buffer)
+            .map_err(|source| io_error("read Flat duplicate", right, source))?;
+        if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
+            return Ok(false);
+        }
+        if left_read == 0 {
+            return Ok(true);
+        }
+    }
 }
 
 #[cfg(unix)]

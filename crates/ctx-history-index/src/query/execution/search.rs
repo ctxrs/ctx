@@ -63,13 +63,15 @@ impl VerifiedIndex {
                 Term::from_field_text(fields.repository_produced_object_id, object_id),
                 IndexRecordOption::Basic,
             ));
-            for candidate in self.collect_event_candidates(exact_query, filters, limit, fields)? {
-                if seen.insert(candidate.event.event_id.as_uuid()) {
+            for candidate in
+                self.collect_event_candidate_addresses(exact_query, filters, limit, fields)?
+            {
+                if seen.insert(candidate.event_id) {
                     candidates.push(candidate);
                 }
             }
             if candidates.len() == limit {
-                return Ok(candidates);
+                return self.materialize_event_candidates(candidates, fields);
             }
         }
         if ranking_terms.len() == 1 {
@@ -83,16 +85,16 @@ impl VerifiedIndex {
                 .checked_add(seen.len())
                 .ok_or(IndexError::CountOverflow)?;
             for candidate in
-                self.collect_event_candidates(body_query, filters, lexical_limit, fields)?
+                self.collect_event_candidate_addresses(body_query, filters, lexical_limit, fields)?
             {
-                if seen.insert(candidate.event.event_id.as_uuid()) {
+                if seen.insert(candidate.event_id) {
                     candidates.push(candidate);
                     if candidates.len() == limit {
                         break;
                     }
                 }
             }
-            return Ok(candidates);
+            return self.materialize_event_candidates(candidates, fields);
         }
 
         // Rank by exact query-term coverage without constructing one
@@ -122,17 +124,17 @@ impl VerifiedIndex {
                 .checked_add(seen.len())
                 .ok_or(IndexError::CountOverflow)?;
             for candidate in
-                self.collect_event_candidates(body_query, filters, tier_limit, fields)?
+                self.collect_event_candidate_addresses(body_query, filters, tier_limit, fields)?
             {
-                if seen.insert(candidate.event.event_id.as_uuid()) {
+                if seen.insert(candidate.event_id) {
                     candidates.push(candidate);
                     if candidates.len() == limit {
-                        return Ok(candidates);
+                        return self.materialize_event_candidates(candidates, fields);
                     }
                 }
             }
         }
-        Ok(candidates)
+        self.materialize_event_candidates(candidates, fields)
     }
 
     /// Lists filtered metadata records without requiring a lexical term.
@@ -146,16 +148,18 @@ impl VerifiedIndex {
             return Ok(Vec::new());
         }
         let fields = fields_from_schema(self.searcher.schema())?;
-        self.collect_event_candidates(Box::new(AllQuery), filters, limit, fields)
+        let candidates =
+            self.collect_event_candidate_addresses(Box::new(AllQuery), filters, limit, fields)?;
+        self.materialize_event_candidates(candidates, fields)
     }
 
-    fn collect_event_candidates(
+    fn collect_event_candidate_addresses(
         &self,
         body_query: Box<dyn Query>,
         filters: &EventSearchFilters,
         limit: usize,
         fields: Fields,
-    ) -> Result<Vec<EventSearchCandidate>> {
+    ) -> Result<Vec<LexicalAddressCandidate>> {
         validate_event_sort_fast_fields(&self.searcher)?;
         let source_identity_query = self.source_identity_query(filters, fields)?;
         let query = filtered_event_query(body_query, source_identity_query, filters, fields)?;
@@ -184,13 +188,35 @@ impl VerifiedIndex {
         record_lexical_query_execution();
         let hits: Vec<ScoredDocAddress> = self.searcher.search(query.as_ref(), &collector)?;
         let mut candidates = Vec::with_capacity(hits.len());
-        for ((score, _), address) in hits {
-            candidates.push(EventSearchCandidate {
-                event: self.event_record(address, fields)?,
+        for ((score, Reverse((event_id_high, event_id_low))), address) in hits {
+            candidates.push(LexicalAddressCandidate {
+                event_id: Uuid::from_u128(
+                    (u128::from(event_id_high) << 64) | u128::from(event_id_low),
+                ),
+                address,
                 score,
             });
         }
         Ok(candidates)
+    }
+
+    fn materialize_event_candidates(
+        &self,
+        candidates: Vec<LexicalAddressCandidate>,
+        fields: Fields,
+    ) -> Result<Vec<EventSearchCandidate>> {
+        let mut materialized = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let event = self.event_record(candidate.address, fields)?;
+            if event.event_id.as_uuid() != candidate.event_id {
+                return Err(IndexError::InvalidStoredDocumentField("event_id"));
+            }
+            materialized.push(EventSearchCandidate {
+                event,
+                score: candidate.score,
+            });
+        }
+        Ok(materialized)
     }
 
     fn source_identity_query(
@@ -250,6 +276,13 @@ impl VerifiedIndex {
         }
         Ok(Some(Box::new(BooleanQuery::new(clauses))))
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LexicalAddressCandidate {
+    event_id: Uuid,
+    address: DocAddress,
+    score: Score,
 }
 
 fn canonical_git_object_id_query<'a>(natural_texts: &'a [&str]) -> Option<&'a str> {

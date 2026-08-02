@@ -7,13 +7,13 @@ pub(crate) enum HermesSourceBackedError {
     #[error(transparent)]
     SqliteSource(#[from] SqliteSourceAccessError),
     #[error(transparent)]
+    Route(#[from] SourceBackedRouteError),
+    #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]
     CoreRecord(#[from] CoreRecordError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[error(transparent)]
-    Route(#[from] SourceBackedRouteError),
     #[error("Hermes source-backed source has an invalid profile path: {0:?}")]
     InvalidProfilePath(PathBuf),
     #[error("Hermes source-backed source changed while its snapshot was scanned")]
@@ -127,4 +127,5 @@ pub(crate) enum HermesSourceBackedRecord {
 #[derive(Debug, Clone)]
 pub(crate) struct HermesSourceBackedPage {
     pub(crate) records: Vec<HermesSourceBackedRecord>,
+    pub(crate) completed_bytes: u64,
 }

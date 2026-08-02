@@ -12,6 +12,8 @@ use crate::provider::sqlite::{
 };
 use crate::{CaptureError, Result};
 
+const HERMES_SCHEMA_INDEX_MAX_ROWS: usize = 64;
+
 /// Provider-owned SQLite values retained only for one bounded Hermes page.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum HermesSqliteValue {
@@ -37,6 +39,7 @@ impl HermesSqliteValue {
 #[derive(Clone)]
 pub(super) struct HermesSchema {
     sessions: RecordLayout<SessionField>,
+    session_id_lookup_index: String,
     messages: RecordLayout<MessageField>,
     message_visibility: String,
 }
@@ -57,8 +60,16 @@ impl HermesSchema {
             "Hermes messages table",
             &["id", "session_id", "role", "timestamp"],
         )?;
+        let session_id_lookup_index = hermes_unique_index_for_columns(conn, "sessions", &["id"])?
+            .ok_or_else(|| {
+                CaptureError::InvalidPayload(
+                    "Hermes sessions.id requires a unique non-partial BINARY lookup index for bounded ancestry resolution"
+                        .to_owned(),
+                )
+            })?;
         Ok(Self {
             sessions: RecordLayout::resolve(&SESSION_FIELDS, &session_columns, "s")?,
+            session_id_lookup_index,
             messages: RecordLayout::resolve(&MESSAGE_FIELDS, &message_columns, "m")?,
             message_visibility: hermes_message_visibility(&message_columns, "m"),
         })
@@ -72,9 +83,80 @@ impl HermesSchema {
         &self.messages
     }
 
+    pub(super) fn session_id_lookup_index(&self) -> &str {
+        &self.session_id_lookup_index
+    }
+
     pub(super) fn message_visibility(&self) -> &str {
         &self.message_visibility
     }
+}
+
+fn hermes_unique_index_for_columns(
+    conn: &Connection,
+    table: &str,
+    expected: &[&str],
+) -> Result<Option<String>> {
+    let sql = format!("pragma index_list(\"{}\")", table.replace('"', "\"\""));
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)? != 0,
+            row.get::<_, i64>(4)? != 0,
+        ))
+    })?;
+    let mut indexes = Vec::new();
+    for row in rows {
+        if indexes.len() >= HERMES_SCHEMA_INDEX_MAX_ROWS {
+            return Err(CaptureError::InvalidPayload(format!(
+                "Hermes {table} schema exceeds the {HERMES_SCHEMA_INDEX_MAX_ROWS}-index inspection bound"
+            )));
+        }
+        indexes.push(row?);
+    }
+    for (index, unique, partial) in indexes {
+        if !unique || partial {
+            continue;
+        }
+        let sql = format!("pragma index_xinfo(\"{}\")", index.replace('"', "\"\""));
+        let mut statement = conn.prepare(&sql)?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)? != 0,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)? != 0,
+            ))
+        })?;
+        let mut columns = Vec::new();
+        for row in rows {
+            if columns.len() >= HERMES_SCHEMA_INDEX_MAX_ROWS {
+                return Err(CaptureError::InvalidPayload(format!(
+                    "Hermes {table} index exceeds the {HERMES_SCHEMA_INDEX_MAX_ROWS}-column inspection bound"
+                )));
+            }
+            columns.push(row?);
+        }
+        let key_columns = columns
+            .iter()
+            .filter(|(_, _, _, key)| *key)
+            .collect::<Vec<_>>();
+        if key_columns.len() == expected.len()
+            && key_columns.iter().zip(expected).all(
+                |((column, descending, collation, _), expected)| {
+                    column.as_deref() == Some(*expected)
+                        && !descending
+                        && collation
+                            .as_deref()
+                            .is_some_and(|value| value.eq_ignore_ascii_case("binary"))
+                },
+            )
+        {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
 }
 
 fn hermes_table_columns(
@@ -130,6 +212,16 @@ impl<F: Copy + Eq> RecordLayout<F> {
             .map(|field| field.expression.as_str())
             .collect::<Vec<_>>()
             .join(", ")
+    }
+
+    pub(super) fn expression(&self, field: F) -> Result<&str> {
+        self.fields
+            .iter()
+            .find(|resolved| resolved.spec.field == field)
+            .map(|resolved| resolved.expression.as_str())
+            .ok_or(CaptureError::SystemInvariant(
+                "Hermes record layout is missing a requested field expression",
+            ))
     }
 
     pub(super) fn retained_length_expr(&self) -> String {

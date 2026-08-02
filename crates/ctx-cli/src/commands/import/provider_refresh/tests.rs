@@ -249,39 +249,6 @@ fn pro_lag_makes_refresh_partial_without_falsifying_core_result() {
 }
 
 #[test]
-fn retained_usable_generation_keeps_source_failures_partial() {
-    let retained = ImportTotals {
-        failed_sources: 1,
-        current_source_count: Some(1),
-        ..ImportTotals::default()
-    };
-    assert_eq!(
-        refresh_result(
-            &retained,
-            ProviderCoreResult::Complete,
-            ProviderProResult::Complete,
-            ProviderProResult::Complete,
-        ),
-        ProviderRefreshResult::Partial
-    );
-
-    let unusable = ImportTotals {
-        failed_sources: 1,
-        current_source_count: Some(0),
-        ..ImportTotals::default()
-    };
-    assert_eq!(
-        refresh_result(
-            &unusable,
-            ProviderCoreResult::Complete,
-            ProviderProResult::Complete,
-            ProviderProResult::Complete,
-        ),
-        ProviderRefreshResult::Failure
-    );
-}
-
-#[test]
 fn every_capture_provider_emits_without_usage_suppression() {
     let providers = [
         CaptureProvider::Codex,

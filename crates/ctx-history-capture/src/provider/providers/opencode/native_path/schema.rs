@@ -25,6 +25,8 @@ pub(super) struct OpenCodeNativeSchema {
     pub(super) schema_version: i64,
     pub(super) session_columns: BTreeSet<String>,
     pub(super) event_has_type: bool,
+    pub(super) message_part_indexed_streaming: bool,
+    pub(super) event_validation_traversals: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,7 +57,6 @@ impl OpenCodeNativeSchema {
         require_identity_column(&session, "session", "id")?;
         require_integer_column(&session, "session", "time_created")?;
         require_integer_column(&session, "session", "time_updated")?;
-        validate_session_rows(conn, session.contains_key("parent_id"))?;
 
         let session_message = if tables.contains("session_message") {
             let columns = table_capabilities(conn, "session_message")?;
@@ -132,7 +133,23 @@ impl OpenCodeNativeSchema {
             message_part_join,
         )?;
 
-        validate_native_ordering_rows(conn, family)?;
+        let indexed_message_part_candidate = family == OpenCodeNativeSchemaFamily::MessagePart
+            && index_has_column_prefix(conn, "message", &["session_id", "time_created", "id"])?
+            && index_has_column_prefix(conn, "part", &["message_id", "id"])?;
+        let mut event_validation_traversals = 0;
+        let message_part_indexed_streaming = if indexed_message_part_candidate {
+            event_validation_traversals += 1;
+            !message_part_has_unsafe_relationships(conn)?
+        } else {
+            false
+        };
+        let event_validation_traversals = if message_part_indexed_streaming {
+            validate_message_parent_rows(conn)?;
+            event_validation_traversals + 1
+        } else {
+            validate_native_ordering_rows(conn, family)?;
+            event_validation_traversals + native_validation_traversals(family)
+        };
         let user_version = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let schema_version = conn.pragma_query_value(None, "schema_version", |row| row.get(0))?;
         let capability_digest = capability_digest(conn, user_version, family)?;
@@ -143,6 +160,8 @@ impl OpenCodeNativeSchema {
             schema_version,
             session_columns: session.keys().cloned().collect(),
             event_has_type,
+            message_part_indexed_streaming,
+            event_validation_traversals,
         })
     }
 }
@@ -295,6 +314,49 @@ fn table_capabilities(
     Ok(columns)
 }
 
+fn index_has_column_prefix(conn: &Connection, table: &str, expected: &[&str]) -> Result<bool> {
+    let sql = format!("pragma index_list(\"{}\")", table.replace('"', "\"\""));
+    let mut statement = conn.prepare(&sql)?;
+    let indexes = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(4)? != 0))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (index, partial) in indexes {
+        if partial {
+            continue;
+        }
+        let sql = format!("pragma index_xinfo(\"{}\")", index.replace('"', "\"\""));
+        let mut statement = conn.prepare(&sql)?;
+        let columns = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)? != 0,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)? != 0,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let key_columns = columns
+            .iter()
+            .filter(|(_, _, _, key)| *key)
+            .collect::<Vec<_>>();
+        if key_columns.len() >= expected.len()
+            && key_columns.iter().zip(expected).all(
+                |((column, descending, collation, _), expected)| {
+                    column.as_deref() == Some(*expected)
+                        && !descending
+                        && collation.as_deref() == Some("BINARY")
+                },
+            )
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn require_message_columns(
     columns: &BTreeMap<String, ColumnCapability>,
     table: &str,
@@ -401,26 +463,7 @@ fn validate_native_ordering_rows(
                     .to_owned(),
             ));
         }
-        let parent_order_invalid: i64 = conn.query_row(
-            &format!(
-                "select exists(
-                     select 1 from message
-                     where typeof(id) <> 'text' or trim(id) = ''
-                        or octet_length(id) > {MAX_NATIVE_IDENTITY_BYTES}
-                        or typeof(session_id) <> 'text' or trim(session_id) = ''
-                        or octet_length(session_id) > {MAX_NATIVE_IDENTITY_BYTES}
-                        or typeof(time_created) <> 'integer'
-                        or typeof(time_updated) <> 'integer'
-                 )"
-            ),
-            [],
-            |row| row.get(0),
-        )?;
-        if parent_order_invalid != 0 {
-            return Err(CaptureError::InvalidPayload(
-                "OpenCode NativePath message parent identity/order rows are unsafe".to_owned(),
-            ));
-        }
+        validate_message_parent_rows(conn)?;
     }
     let ordering_invalid = match family {
         OpenCodeNativeSchemaFamily::SessionMessageSeq => format!(
@@ -447,56 +490,55 @@ fn validate_native_ordering_rows(
             "OpenCode NativePath {table} contains a non-integer native ordering value"
         )));
     }
-    if family == OpenCodeNativeSchemaFamily::SessionMessageSeq {
-        let duplicate_order: i64 = conn.query_row(
-            "select exists(
-                 select 1 from session_message
-                 group by session_id, seq
-                 having count(*) > 1
-             )",
-            [],
-            |row| row.get(0),
-        )?;
-        if duplicate_order != 0 {
-            return Err(CaptureError::InvalidPayload(
-                "OpenCode NativePath explicit session_message sequence is not unique".to_owned(),
-            ));
-        }
-    }
     Ok(())
 }
 
-fn validate_session_rows(conn: &Connection, has_parent_id: bool) -> Result<()> {
-    let parent_invalid = if has_parent_id {
-        format!(
-            " or (parent_id is not null and (
-                 typeof(parent_id) <> 'text'
-                 or octet_length(parent_id) > {MAX_NATIVE_IDENTITY_BYTES}
-             ))"
-        )
-    } else {
-        String::new()
-    };
-    let invalid: i64 = conn.query_row(
+fn validate_message_parent_rows(conn: &Connection) -> Result<()> {
+    let parent_order_invalid: i64 = conn.query_row(
         &format!(
             "select exists(
-                 select 1 from session
+                 select 1 from message
                  where typeof(id) <> 'text' or trim(id) = ''
                     or octet_length(id) > {MAX_NATIVE_IDENTITY_BYTES}
+                    or typeof(session_id) <> 'text' or trim(session_id) = ''
+                    or octet_length(session_id) > {MAX_NATIVE_IDENTITY_BYTES}
                     or typeof(time_created) <> 'integer'
                     or typeof(time_updated) <> 'integer'
-                    {parent_invalid}
              )"
         ),
         [],
         |row| row.get(0),
     )?;
-    if invalid != 0 {
+    if parent_order_invalid != 0 {
         return Err(CaptureError::InvalidPayload(
-            "OpenCode NativePath session identity/order rows are unsafe".to_owned(),
+            "OpenCode NativePath message parent identity/order rows are unsafe".to_owned(),
         ));
     }
     Ok(())
+}
+
+fn message_part_has_unsafe_relationships(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "select exists(
+             select 1 from part p
+             left join message m on m.id = p.message_id
+             where m.id is null
+                or cast(m.session_id as text) <> cast(p.session_id as text)
+             limit 1
+         )",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? != 0)
+}
+
+fn native_validation_traversals(family: OpenCodeNativeSchemaFamily) -> u64 {
+    match family {
+        OpenCodeNativeSchemaFamily::SessionMessageSeq => 2,
+        OpenCodeNativeSchemaFamily::MessagePart => 4,
+        OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq
+        | OpenCodeNativeSchemaFamily::SessionEntry
+        | OpenCodeNativeSchemaFamily::LegacyMessage => 2,
+    }
 }
 
 fn capability_digest(

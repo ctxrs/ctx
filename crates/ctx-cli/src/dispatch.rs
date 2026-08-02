@@ -570,11 +570,7 @@ fn command_json_output(command: &CommandRoot) -> bool {
 }
 
 fn command_uses_stable_pro_error_json(command: &CommandRoot, json_output: bool) -> bool {
-    json_output
-        && match command {
-            CommandRoot::Pro(_) | CommandRoot::Referral(_) => true,
-            _ => false,
-        }
+    json_output && matches!(command, CommandRoot::Pro(_) | CommandRoot::Referral(_))
 }
 
 fn show_json_output(args: &ShowArgs) -> bool {

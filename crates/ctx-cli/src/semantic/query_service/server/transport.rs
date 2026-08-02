@@ -130,13 +130,14 @@ pub(in crate::semantic) fn bind_daemon_service_listener(
 pub(in crate::semantic) fn start_daemon_query_service(
     data_root: &Path,
     runtime: SharedSemanticRuntime,
+    wakeup: Arc<DaemonWakeup>,
 ) -> Result<DaemonQueryService> {
     start_daemon_service_with_request_timeout(
         data_root,
         runtime,
         DAEMON_QUERY_REQUEST_READ_TIMEOUT,
         DaemonIpcService::SemanticQuery,
-        None,
+        Some(wakeup),
     )
 }
 
@@ -152,7 +153,7 @@ pub(in crate::semantic) fn start_daemon_query_service_with_request_timeout(
         runtime,
         request_read_timeout,
         DaemonIpcService::SemanticQuery,
-        None,
+        Some(Arc::new(DaemonWakeup::default())),
     )
 }
 
@@ -218,7 +219,15 @@ fn start_daemon_service_with_request_timeout(
     }
     let thread_data_root = data_root.to_path_buf();
     let thread_token = endpoint.token().to_owned();
-    let activity = Arc::new(DaemonQueryActivity::new());
+    let activity = Arc::new(if service == DaemonIpcService::SemanticQuery {
+        wakeup
+            .as_ref()
+            .map_or_else(DaemonQueryActivity::new, |wakeup| {
+                DaemonQueryActivity::with_idle_wakeup(Arc::clone(wakeup))
+            })
+    } else {
+        DaemonQueryActivity::new()
+    });
     let thread_activity = activity.clone();
     let source_refresh = source_refresh_coordinator(data_root, service)?;
     let thread_source_refresh = source_refresh.clone();
@@ -348,13 +357,14 @@ pub(in crate::semantic) fn configure_daemon_query_stream_unix(
 pub(in crate::semantic) fn start_daemon_query_service(
     data_root: &Path,
     runtime: SharedSemanticRuntime,
+    wakeup: Arc<DaemonWakeup>,
 ) -> Result<DaemonQueryService> {
     start_daemon_service_with_request_timeout(
         data_root,
         runtime,
         DAEMON_QUERY_REQUEST_READ_TIMEOUT,
         DaemonIpcService::SemanticQuery,
-        None,
+        Some(wakeup),
     )
 }
 
@@ -370,7 +380,7 @@ pub(in crate::semantic) fn start_daemon_query_service_with_request_timeout(
         runtime,
         request_read_timeout,
         DaemonIpcService::SemanticQuery,
-        None,
+        Some(Arc::new(DaemonWakeup::default())),
     )
 }
 
@@ -429,7 +439,15 @@ fn start_daemon_service_with_request_timeout(
     }
     let thread_data_root = data_root.to_path_buf();
     let thread_token = endpoint.token().to_owned();
-    let activity = Arc::new(DaemonQueryActivity::new());
+    let activity = Arc::new(if service == DaemonIpcService::SemanticQuery {
+        wakeup
+            .as_ref()
+            .map_or_else(DaemonQueryActivity::new, |wakeup| {
+                DaemonQueryActivity::with_idle_wakeup(Arc::clone(wakeup))
+            })
+    } else {
+        DaemonQueryActivity::new()
+    });
     let thread_activity = activity.clone();
     let source_refresh = source_refresh_coordinator(data_root, service)?;
     let thread_source_refresh = source_refresh.clone();
@@ -746,6 +764,7 @@ pub(in crate::semantic) fn wake_windows_daemon_query_pipe(pipe_name: &str) {
 pub(in crate::semantic) fn start_daemon_query_service(
     _data_root: &Path,
     _runtime: SharedSemanticRuntime,
+    _wakeup: Arc<DaemonWakeup>,
 ) -> Result<DaemonQueryService> {
     Err(anyhow!(
         "daemon query service is not supported on this platform"

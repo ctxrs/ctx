@@ -1,5 +1,9 @@
 use super::*;
 
+mod inventory_replay;
+
+use inventory_replay::{inventory_replay_registry, revisioned_receipt_route};
+
 #[test]
 fn heterogeneous_routes_publish_one_core_generation() {
     let gemini = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 1);
@@ -29,6 +33,11 @@ fn heterogeneous_routes_publish_one_core_generation() {
     assert_eq!(receipt.certified_source_count, 2);
     assert_eq!(receipt.certified_source_bytes, 2);
     assert_eq!(receipt.sources.len(), 2);
+    assert_eq!(receipt.successful_route_outcomes.len(), 2);
+    assert!(receipt
+        .successful_route_outcomes
+        .iter()
+        .all(|outcome| outcome.changed));
     assert!(receipt.removals.is_empty());
     assert!(receipt.scan_stage_duration > Duration::ZERO);
     assert!(receipt.commit_duration > Duration::ZERO);
@@ -42,620 +51,570 @@ fn heterogeneous_routes_publish_one_core_generation() {
     assert!(committed.stage_duration > Duration::ZERO);
 }
 
-fn fixture_route_with_current_source_progress(lineage: u8) -> SourceBackedRoute {
-    let route = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, lineage);
-    let scan = Arc::clone(&route.driver.as_ref().unwrap().scan);
-    rebuild_driver(route, move |sink| {
-        let mut progress = SourceBackedCurrentSourceProgress::new(
-            SourceBackedCurrentSourceProgressStage::LogicalScan,
-        );
-        progress.logical_rows_scanned = Some(7);
-        progress.logical_certified_bytes = Some(11);
-        sink.report_current_source_progress(progress)?;
-        scan(sink)
-    })
-}
-
 #[test]
-fn detailed_progress_projects_to_legacy_and_resets_at_source_transitions() {
-    let mut registry = SourceBackedProviderRegistry::new();
-    registry.register(fixture_route_with_current_source_progress(81));
-    let detailed_root = tempdir().unwrap();
-    let mut detailed = Vec::new();
-    refresh_source_backed_generation_with_detailed_progress(
-        detailed_root.path(),
-        &registry,
-        WriterOptions::default(),
-        |update| {
-            detailed.push(update);
-            Ok(())
-        },
-    )
-    .unwrap();
-
-    let legacy_root = tempdir().unwrap();
-    let mut legacy = Vec::new();
-    refresh_source_backed_generation_with_progress(
-        legacy_root.path(),
-        &registry,
-        WriterOptions::default(),
-        |update| {
-            legacy.push(update);
-            Ok(())
-        },
-    )
-    .unwrap();
-
-    let signature = |progress: &SourceBackedRefreshProgress| {
-        (
-            progress.phase,
-            progress.completed_sources,
-            progress.total_sources,
-            progress.current_source.clone(),
-            progress.certified_source_count,
-            progress.certified_source_bytes,
-        )
-    };
-    let projected = detailed
-        .iter()
-        .filter(|update| update.current_source_progress.is_none())
-        .cloned()
-        .map(SourceBackedDetailedRefreshProgress::into_legacy)
-        .map(|progress| signature(&progress))
-        .collect::<Vec<_>>();
-    assert_eq!(projected, legacy.iter().map(signature).collect::<Vec<_>>());
-
-    let detail_index = detailed
-        .iter()
-        .position(|update| update.current_source_progress.is_some())
-        .unwrap();
-    let current = detailed[detail_index].current_source_progress.unwrap();
-    assert_eq!(
-        current.stage,
-        SourceBackedCurrentSourceProgressStage::LogicalScan
-    );
-    assert_eq!(current.logical_rows_scanned, Some(7));
-    assert_eq!(current.logical_certified_bytes, Some(11));
-    assert!(detailed[detail_index - 1].current_source_progress.is_none());
-    assert!(detailed[detail_index + 1].current_source_progress.is_none());
-}
-
-#[test]
-fn current_source_progress_callback_failure_is_systemic_internal() {
-    let mut registry = SourceBackedProviderRegistry::new();
-    registry.register(fixture_route_with_current_source_progress(82));
-    let temp = tempdir().unwrap();
-
-    let error = refresh_source_backed_generation_with_detailed_progress(
-        temp.path(),
-        &registry,
-        WriterOptions::default(),
-        |update| {
-            if update.current_source_progress.is_some() {
-                Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Unavailable,
-                    "injected detailed progress failure",
-                ))
-            } else {
-                Ok(())
-            }
-        },
-    )
-    .unwrap_err();
-
-    assert!(matches!(
-        error,
-        SourceBackedCoordinatorError::RouteScan {
-            source: SourceBackedRouteError {
-                kind: SourceBackedRouteErrorKind::Internal,
-                detail,
-            },
-            ..
-        } if detail.contains("progress callback failed")
-            && detail.contains("injected detailed progress failure")
-    ));
-}
-
-fn controlled_revision_route(
-    label: &'static str,
-    lineage: u8,
-    revision: u8,
-    authority_revision: Arc<std::sync::atomic::AtomicU8>,
-    scan_log: Arc<Mutex<Vec<String>>>,
-    publication_count: Arc<std::sync::atomic::AtomicUsize>,
-) -> (SourceBackedRoute, SourceKey) {
-    let source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, lineage);
-    let session_id = fixture_session_id(&source);
-    let event_id = derive_event_id(EventIdentityInput {
-        source: &source,
-        session_id,
-        logical_item_kind: "message",
-        native_item_key: &NativeItemKey::native_id("message", TypedKey::U64(1)).unwrap(),
-        subrecord_selector: None,
-    })
-    .unwrap();
-    let mut record = CoreRecord::new_selected(
-        event_id,
-        session_id,
-        session_id,
-        source.clone(),
-        1,
-        "message",
-        "primary",
-        true,
-        "coordinator-test-v1",
-        format!("{label}revision{revision}"),
-    )
-    .unwrap();
-    record.provider_session_id = Some(label.to_owned());
-    record.native_event_id = Some(TypedKey::U64(1));
-    record.occurred_at_unix_ms = Some(i64::from(revision));
-    record.role = Some("user".to_owned());
-    let certificate = controlled_revision_certificate(&source, revision);
-    let scan_certificate = certificate.clone();
-    let revalidation_certificate = certificate;
-    let owned_source = source.clone();
-    let revalidation_authority = Arc::clone(&authority_revision);
-    let mut driver = SourceBackedRouteDriver::new(
-        move |sink| {
-            scan_log.lock().unwrap().push(label.to_owned());
-            sink.replace_source(scan_certificate.clone(), [record.clone()])
-                .map_err(route_coordinator_error)
-        },
-        move |candidate| candidate.exact_descriptor_eq(&owned_source),
-        move |target| {
-            revalidation_authority.load(std::sync::atomic::Ordering::SeqCst) == revision
-                && matches!(
-                    target,
-                    SourceBackedRevalidationTarget::Source(source)
-                        if source == &revalidation_certificate
-                )
-        },
-    );
-    driver = driver.with_successful_publication(move || {
-        publication_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    });
-    (
-        SourceBackedRoute::automatic(
-            fixture_provider_source_at(
-                CaptureProvider::Gemini,
-                GEMINI_CLI_SOURCE_FORMAT,
-                ProviderImportSupport::Native,
-                format!("/fixture/{label}"),
-            ),
-            SourceBackedSelectorAuthority::DiscoveredWinner,
-            driver,
-        )
-        .unwrap(),
-        source,
-    )
-}
-
-fn controlled_revision_certificate(source: &SourceKey, revision: u8) -> CertifiedSource {
-    let observation =
-        SourceObservation::new(source.clone(), "fixture-revision", vec![revision]).unwrap();
-    CertifiedSource::certify(
-        observation.clone(),
-        observation,
-        "coordinator-test-v1",
-        [revision; 32],
-        ScannedSourceCounts {
-            complete_records: 1,
-            retained_records: 1,
-            indexed_documents: 1,
-            certified_bytes: 1,
-            ..ScannedSourceCounts::default()
-        },
-    )
-    .unwrap()
-}
-
-fn rebuild_driver(
-    mut route: SourceBackedRoute,
-    scan: impl for<'writer> Fn(&mut SourceBackedGenerationSink<'writer>) -> SourceBackedRouteResult<()>
-        + Send
-        + Sync
-        + 'static,
-) -> SourceBackedRoute {
+fn current_source_progress_failure_is_latched_when_driver_suppresses_it() {
+    let mut route = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 1);
     let original = route.driver.take().unwrap();
+    let scan = Arc::clone(&original.scan);
     let owns = Arc::clone(&original.owns_source);
     let revalidate = Arc::clone(&original.revalidate);
-    let complete_revalidate = original.revalidate_complete_inventory.clone();
-    let after_publication = original.after_successful_publication.clone();
-    let mut replacement = SourceBackedRouteDriver::new(
-        scan,
+    route.driver = Some(SourceBackedRouteDriver::new(
+        move |sink| {
+            let progress = SourceBackedCurrentSourceProgress::new(
+                SourceBackedCurrentSourceProgressStage::LogicalScan,
+            );
+            assert!(sink.report_current_source_progress(progress).is_err());
+            assert!(sink.report_current_source_progress(progress).is_err());
+            scan(sink)
+        },
         move |source| owns(source),
         move |target| revalidate(target),
-    );
-    if let Some(revalidate) = complete_revalidate {
-        replacement = replacement
-            .with_complete_inventory_revalidation(move |inventory| revalidate(inventory));
-    }
-    if let Some(after_publication) = after_publication {
-        replacement = replacement.with_successful_publication(move || after_publication());
-    }
-    route.driver = Some(replacement);
-    route
+    ));
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(route);
+    let callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&callbacks);
+
+    let error = refresh_source_backed_generation_with_detailed_progress(
+        tempdir().unwrap().path(),
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+        move |update| {
+            if update.current_source_progress.is_some() {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "fixture progress failure",
+                ));
+            }
+            Ok(())
+        },
+    )
+    .expect_err("latched progress failure remains systemic");
+
+    assert!(matches!(error, SourceBackedCoordinatorError::Progress(_)));
+    assert_eq!(callbacks.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 fn fail_route_after_scan(
-    route: SourceBackedRoute,
+    mut route: SourceBackedRoute,
     kind: SourceBackedRouteErrorKind,
-    detail: impl Into<String>,
 ) -> SourceBackedRoute {
-    let scan = Arc::clone(&route.driver.as_ref().unwrap().scan);
-    let detail = detail.into();
-    rebuild_driver(route, move |sink| {
-        scan(sink)?;
-        Err(SourceBackedRouteError::new(kind, detail.clone()))
-    })
+    let original = route.driver.take().unwrap();
+    let scan = Arc::clone(&original.scan);
+    let owns = Arc::clone(&original.owns_source);
+    let revalidate = Arc::clone(&original.revalidate);
+    route.driver = Some(SourceBackedRouteDriver::new(
+        move |sink| {
+            scan(sink)?;
+            Err(SourceBackedRouteError::new(kind, "fixture route failure"))
+        },
+        move |source| owns(source),
+        move |target| revalidate(target),
+    ));
+    route
 }
 
 fn fail_route_before_scan(
-    route: SourceBackedRoute,
+    mut route: SourceBackedRoute,
     kind: SourceBackedRouteErrorKind,
-    detail: impl Into<String>,
 ) -> SourceBackedRoute {
-    let detail = detail.into();
-    rebuild_driver(route, move |_| {
-        Err(SourceBackedRouteError::new(kind, detail.clone()))
-    })
-}
-
-fn after_scan(
-    route: SourceBackedRoute,
-    action: impl Fn() + Send + Sync + 'static,
-) -> SourceBackedRoute {
-    let scan = Arc::clone(&route.driver.as_ref().unwrap().scan);
-    rebuild_driver(route, move |sink| {
-        scan(sink)?;
-        action();
-        Ok(())
-    })
-}
-
-#[test]
-fn source_failure_keeps_a_and_c_carries_b_and_retry_updates_b() {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let authority_a = Arc::new(std::sync::atomic::AtomicU8::new(1));
-    let authority_b = Arc::new(std::sync::atomic::AtomicU8::new(1));
-    let authority_c = Arc::new(std::sync::atomic::AtomicU8::new(1));
-    let published_a = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let published_b = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let published_c = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let mut initial_registry = SourceBackedProviderRegistry::new();
-    initial_registry.register(
-        controlled_revision_route(
-            "a",
-            1,
-            1,
-            Arc::clone(&authority_a),
-            Arc::clone(&log),
-            Arc::clone(&published_a),
-        )
-        .0,
-    );
-    initial_registry.register(
-        controlled_revision_route(
-            "b",
-            2,
-            1,
-            Arc::clone(&authority_b),
-            Arc::clone(&log),
-            Arc::clone(&published_b),
-        )
-        .0,
-    );
-    initial_registry.register(
-        controlled_revision_route(
-            "c",
-            3,
-            1,
-            Arc::clone(&authority_c),
-            Arc::clone(&log),
-            Arc::clone(&published_c),
-        )
-        .0,
-    );
-    let temp = tempdir().unwrap();
-    refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
-        .unwrap();
-    log.lock().unwrap().clear();
-
-    authority_a.store(2, std::sync::atomic::Ordering::SeqCst);
-    authority_b.store(2, std::sync::atomic::Ordering::SeqCst);
-    authority_c.store(2, std::sync::atomic::Ordering::SeqCst);
-    let route_a = controlled_revision_route(
-        "a",
-        1,
-        2,
-        Arc::clone(&authority_a),
-        Arc::clone(&log),
-        Arc::clone(&published_a),
-    )
-    .0;
-    let route_b = controlled_revision_route(
-        "b",
-        2,
-        2,
-        Arc::clone(&authority_b),
-        Arc::clone(&log),
-        Arc::clone(&published_b),
-    )
-    .0;
-    let route_c = controlled_revision_route(
-        "c",
-        3,
-        2,
-        Arc::clone(&authority_c),
-        Arc::clone(&log),
-        Arc::clone(&published_c),
-    )
-    .0;
-    let mut failing_registry = SourceBackedProviderRegistry::new();
-    failing_registry.register(route_a);
-    failing_registry.register(fail_route_after_scan(
-        route_b,
-        SourceBackedRouteErrorKind::SourceChanged,
-        "SQLite source changed while its read snapshot was active",
+    let original = route.driver.take().unwrap();
+    let owns = Arc::clone(&original.owns_source);
+    route.driver = Some(SourceBackedRouteDriver::new(
+        move |_| Err(SourceBackedRouteError::new(kind, "fixture route failure")),
+        move |source| owns(source),
+        |_| false,
     ));
-    failing_registry.register(route_c);
+    route
+}
 
-    let isolated =
-        refresh_source_backed_generation(temp.path(), &failing_registry, WriterOptions::default())
-            .unwrap();
-    assert_eq!(
-        isolated.outcome,
-        SourceBackedRefreshOutcome::CompletedWithSourceFailures
-    );
-    assert_eq!(isolated.successful_routes, 2);
-    assert_eq!(&*log.lock().unwrap(), &["a", "b", "c"]);
-    let failure = &isolated.source_failures.failures()[0];
-    assert_eq!(failure.class, SourceBackedSourceFailureClass::SourceChanged);
-    assert!(failure.carried_forward);
-    assert_eq!(failure.source_selector, "/fixture/b");
-    assert!(failure.detail.contains("read snapshot"));
-    assert_eq!(failure.source_identity.len(), 64);
-    let visible = VerifiedIndex::open(temp.path()).unwrap();
-    let source_a = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 1);
-    let source_b = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 2);
-    let source_c = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 3);
-    assert!(visible
-        .manifest()
-        .sources
-        .contains(&controlled_revision_certificate(&source_a, 2)));
-    assert!(visible
-        .manifest()
-        .sources
-        .contains(&controlled_revision_certificate(&source_b, 1)));
-    assert!(!visible
-        .manifest()
-        .sources
-        .contains(&controlled_revision_certificate(&source_b, 2)));
-    assert!(visible
-        .manifest()
-        .sources
-        .contains(&controlled_revision_certificate(&source_c, 2)));
-    assert_eq!(published_a.load(std::sync::atomic::Ordering::SeqCst), 2);
-    assert_eq!(published_b.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(published_c.load(std::sync::atomic::Ordering::SeqCst), 2);
+fn fail_route_at_final_revalidation(mut route: SourceBackedRoute) -> SourceBackedRoute {
+    let mut driver = route.driver.take().unwrap();
+    driver.revalidate = Arc::new(|_| false);
+    route.driver = Some(driver);
+    route
+}
 
-    log.lock().unwrap().clear();
-    let mut retry_registry = SourceBackedProviderRegistry::new();
-    retry_registry.register(
-        controlled_revision_route(
-            "a",
-            1,
-            2,
-            Arc::clone(&authority_a),
-            Arc::clone(&log),
-            Arc::clone(&published_a),
-        )
-        .0,
-    );
-    retry_registry.register(
-        controlled_revision_route(
-            "b",
-            2,
-            2,
-            Arc::clone(&authority_b),
-            Arc::clone(&log),
-            Arc::clone(&published_b),
-        )
-        .0,
-    );
-    retry_registry.register(
-        controlled_revision_route(
-            "c",
-            3,
-            2,
-            authority_c,
-            Arc::clone(&log),
-            Arc::clone(&published_c),
-        )
-        .0,
-    );
-    let retried =
-        refresh_source_backed_generation(temp.path(), &retry_registry, WriterOptions::default())
-            .unwrap();
-    assert_eq!(retried.outcome, SourceBackedRefreshOutcome::Completed);
-    assert!(retried.source_failures.is_empty());
-    assert!(VerifiedIndex::open(temp.path())
-        .unwrap()
-        .manifest()
-        .sources
-        .contains(&controlled_revision_certificate(&source_b, 2)));
-    assert_eq!(published_b.load(std::sync::atomic::Ordering::SeqCst), 2);
+fn fail_route_at_final_inventory_revalidation(mut route: SourceBackedRoute) -> SourceBackedRoute {
+    let mut driver = route.driver.take().unwrap();
+    driver.revalidate_complete_inventory = Some(Arc::new(|_| false));
+    route.driver = Some(driver);
+    route
+}
+
+fn count_route_scans(
+    mut route: SourceBackedRoute,
+    scans: Arc<std::sync::atomic::AtomicUsize>,
+) -> SourceBackedRoute {
+    let mut driver = route.driver.take().unwrap();
+    let scan = Arc::clone(&driver.scan);
+    driver.scan = Arc::new(move |sink| {
+        scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        scan(sink)
+    });
+    route.driver = Some(driver);
+    route
+}
+
+fn fail_route_with_systemic_writer_error(
+    mut route: SourceBackedRoute,
+    source: SourceKey,
+) -> SourceBackedRoute {
+    let original = route.driver.take().unwrap();
+    let scan = Arc::clone(&original.scan);
+    let owns = Arc::clone(&original.owns_source);
+    let revalidate = Arc::clone(&original.revalidate);
+    route.driver = Some(SourceBackedRouteDriver::new(
+        move |sink| {
+            scan(sink)?;
+            sink.begin_source(source.clone())
+                .map_err(route_coordinator_error)
+        },
+        move |source| owns(source),
+        move |target| revalidate(target),
+    ));
+    route
 }
 
 #[test]
-fn cold_source_failure_omits_b_and_publishes_a_and_c() {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let published = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let authority = Arc::new(std::sync::atomic::AtomicU8::new(1));
-    let route_a = controlled_revision_route(
-        "colda",
-        11,
-        1,
-        Arc::clone(&authority),
-        Arc::clone(&log),
-        Arc::clone(&published),
-    )
-    .0;
-    let route_b = controlled_revision_route(
-        "coldb",
-        12,
-        1,
-        Arc::clone(&authority),
-        Arc::clone(&log),
-        Arc::clone(&published),
-    )
-    .0;
-    let route_c = controlled_revision_route(
-        "coldc",
-        13,
-        1,
-        authority,
-        Arc::clone(&log),
-        Arc::clone(&published),
-    )
-    .0;
+fn cold_second_route_failure_after_output_publishes_first_without_partial_records() {
+    let first_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = count_route_scans(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 1),
+        Arc::clone(&first_scans),
+    );
+    let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 2);
+    let first_id = first.metadata.route_identity.clone().unwrap();
+    let second_id = second.metadata.route_identity.clone().unwrap();
     let mut registry = SourceBackedProviderRegistry::new();
-    registry.register(route_a);
+    registry.register(first);
     registry.register(fail_route_after_scan(
-        route_b,
-        SourceBackedRouteErrorKind::InvalidSource,
-        "source payload is unreadable",
+        second,
+        SourceBackedRouteErrorKind::SourceChanged,
     ));
-    registry.register(route_c);
     let temp = tempdir().unwrap();
 
     let receipt =
         refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    assert_eq!(receipt.sources.len(), 2);
-    assert_eq!(receipt.successful_routes, 2);
-    assert!(!receipt.source_failures.failures()[0].carried_forward);
-    let visible = VerifiedIndex::open(temp.path()).unwrap();
-    let cold_b = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 12);
-    assert_eq!(visible.document_count(), 2);
-    assert!(!visible
-        .manifest()
-        .sources
-        .contains(&controlled_revision_certificate(&cold_b, 1)));
+    assert_eq!(receipt.successful_route_ids, vec![first_id.clone()]);
+    assert_eq!(receipt.failed_routes.len(), 1);
+    assert_eq!(receipt.failed_routes[0].route_identity, second_id.clone());
+    assert_eq!(
+        receipt.failed_routes[0].class,
+        SourceBackedSourceFailureClass::SourceChanged
+    );
+    assert!(!receipt.failed_routes[0].carried_forward);
+    assert!(receipt.commit.manifest().source_route(&first_id).is_some());
+    assert!(receipt.commit.manifest().source_route(&second_id).is_none());
+    assert_eq!(receipt.commit.indexed_documents, 1);
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().document_count(),
+        1
+    );
+    assert_eq!(
+        first_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a later scan failure must not repeat an earlier successful route"
+    );
 }
 
 #[test]
-fn all_failed_warm_refresh_returns_unchanged_base_but_cold_refresh_has_no_publication() {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let authority = Arc::new(std::sync::atomic::AtomicU8::new(1));
-    let published = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+fn warm_success_advances_while_failed_route_is_carried_exactly() {
+    let (first_v1, _) = revisioned_receipt_route(1);
+    let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 9);
+    let second_id = second.metadata.route_identity.clone().unwrap();
     let mut initial_registry = SourceBackedProviderRegistry::new();
-    for (label, lineage) in [("walla", 21), ("wallb", 22), ("wallc", 23)] {
-        initial_registry.register(
-            controlled_revision_route(
-                label,
-                lineage,
-                1,
-                Arc::clone(&authority),
-                Arc::clone(&log),
-                Arc::clone(&published),
-            )
-            .0,
-        );
-    }
-    let warm_root = tempdir().unwrap();
-    let initial = refresh_source_backed_generation(
-        warm_root.path(),
-        &initial_registry,
-        WriterOptions::default(),
-    )
-    .unwrap();
-    let mut failed_registry = SourceBackedProviderRegistry::new();
-    for (label, lineage) in [("walla", 21), ("wallb", 22), ("wallc", 23)] {
-        let route = controlled_revision_route(
-            label,
-            lineage,
-            1,
-            Arc::clone(&authority),
-            Arc::clone(&log),
-            Arc::clone(&published),
-        )
-        .0;
-        failed_registry.register(fail_route_before_scan(
-            route,
-            SourceBackedRouteErrorKind::Unavailable,
-            "source is temporarily unavailable",
-        ));
-    }
-
-    let retained = refresh_source_backed_generation(
-        warm_root.path(),
-        &failed_registry,
-        WriterOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(retained.commit.generation_id, initial.commit.generation_id);
-    assert_eq!(retained.commit.opstamp, initial.commit.opstamp);
-    assert_eq!(retained.successful_routes, 0);
-    assert_eq!(retained.source_failures.total(), 3);
-    assert!(retained
-        .source_failures
-        .failures()
+    initial_registry.register(first_v1);
+    initial_registry.register(second.clone());
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+    let retained_route = initial
+        .commit
+        .manifest()
+        .source_route(&second_id)
+        .unwrap()
+        .clone();
+    let retained_sources = retained_route
+        .sources()
         .iter()
-        .all(|failure| failure.carried_forward));
-    assert_eq!(published.load(std::sync::atomic::Ordering::SeqCst), 3);
+        .filter_map(|source| {
+            initial
+                .sources
+                .iter()
+                .find(|certificate| {
+                    certificate
+                        .observation()
+                        .source()
+                        .exact_descriptor_eq(source)
+                })
+                .cloned()
+        })
+        .collect::<Vec<_>>();
 
-    let cold_root = tempdir().unwrap();
-    let error = refresh_source_backed_generation(
-        cold_root.path(),
-        &failed_registry,
-        WriterOptions::default(),
-    )
-    .unwrap_err();
-    let display = error.to_string();
-    assert!(display.contains("source-backed scan failed for gemini"));
-    assert!(display.contains("unavailable"));
-    assert!(display.contains("source is temporarily unavailable"));
-    assert!(matches!(
-        error,
-        SourceBackedCoordinatorError::NoUsableSourceRoutes { failures }
-            if failures.total() == 3
-                && failures.failures().iter().all(|failure| !failure.carried_forward)
+    let (first_v2, first_v2_certificate) = revisioned_receipt_route(2);
+    let first_id = first_v2.metadata.route_identity.clone().unwrap();
+    let mut warm_registry = SourceBackedProviderRegistry::new();
+    warm_registry.register(first_v2);
+    warm_registry.register(fail_route_before_scan(
+        second,
+        SourceBackedRouteErrorKind::Unavailable,
     ));
-    assert!(matches!(
-        VerifiedIndex::open(cold_root.path()),
-        Err(IndexError::MissingActiveGenerationPointer)
-    ));
+    let warm =
+        refresh_source_backed_generation(temp.path(), &warm_registry, WriterOptions::default())
+            .unwrap();
+
+    assert!(warm.successful_route_ids.contains(&first_id));
+    assert_eq!(warm.failed_routes.len(), 1);
+    assert!(warm.failed_routes[0].carried_forward);
+    assert_eq!(
+        warm.commit.manifest().source_route(&second_id),
+        Some(&retained_route)
+    );
+    for retained in retained_sources {
+        assert!(warm.sources.contains(&retained));
+    }
+    assert!(warm.sources.contains(&first_v2_certificate));
+    assert_eq!(warm.commit.indexed_documents, 2);
 }
 
 #[test]
-fn empty_success_does_not_make_a_failed_cold_refresh_usable() {
-    let empty_driver = SourceBackedRouteDriver::new(|_| Ok(()), |_| false, |_| false);
-    let empty_route = SourceBackedRoute::automatic(
-        fixture_provider_source_at(
-            CaptureProvider::Gemini,
-            GEMINI_CLI_SOURCE_FORMAT,
-            ProviderImportSupport::Native,
-            "/fixture/empty-success",
-        ),
-        SourceBackedSelectorAuthority::DiscoveredWinner,
-        empty_driver,
-    )
-    .unwrap();
-    let failed_route = fail_route_before_scan(
-        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 31),
+fn successful_route_outcomes_distinguish_changed_and_unchanged_routes() {
+    let (first_v1, _) = revisioned_receipt_route(1);
+    let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 9);
+    let first_id = first_v1.metadata.route_identity.clone().unwrap();
+    let second_id = second.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(first_v1);
+    initial_registry.register(second.clone());
+    let temp = tempdir().unwrap();
+    refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+        .unwrap();
+
+    let (first_v2, _) = revisioned_receipt_route(2);
+    let mut warm_registry = SourceBackedProviderRegistry::new();
+    warm_registry.register(first_v2);
+    warm_registry.register(second);
+    let warm =
+        refresh_source_backed_generation(temp.path(), &warm_registry, WriterOptions::default())
+            .unwrap();
+
+    let changed = warm
+        .successful_route_outcomes
+        .iter()
+        .map(|outcome| (&outcome.route_identity, outcome.changed))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(changed.get(&first_id), Some(&true));
+    assert_eq!(changed.get(&second_id), Some(&false));
+}
+
+#[test]
+fn authoritative_executor_publishes_valid_route_and_receipts_carried_failure() {
+    let (valid_v1, _) = revisioned_receipt_route(31);
+    let failing = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 32);
+    let failing_id = failing.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(valid_v1);
+    initial_registry.register(failing.clone());
+    let temp = tempdir().unwrap();
+    let initial = SourceBackedRefreshExecutor::new(initial_registry, WriterOptions::default())
+        .refresh_scope(temp.path(), SourceBackedRefreshScope::All, |_| Ok(()))
+        .unwrap();
+    let retained_failing_route = initial
+        .commit
+        .manifest()
+        .source_route(&failing_id)
+        .unwrap()
+        .clone();
+
+    let (valid_v2, valid_v2_certificate) = revisioned_receipt_route(33);
+    let valid_id = valid_v2.metadata.route_identity.clone().unwrap();
+    let mut refresh_registry = SourceBackedProviderRegistry::new();
+    refresh_registry.register(valid_v2);
+    refresh_registry.register(fail_route_before_scan(
+        failing,
         SourceBackedRouteErrorKind::Unavailable,
-        "failed source",
+    ));
+    let receipt = SourceBackedRefreshExecutor::new(refresh_registry, WriterOptions::default())
+        .refresh_scope(temp.path(), SourceBackedRefreshScope::All, |_| Ok(()))
+        .unwrap();
+
+    assert_eq!(receipt.successful_route_ids, vec![valid_id]);
+    assert_eq!(receipt.failed_routes.len(), 1);
+    assert_eq!(receipt.failed_routes[0].route_identity, failing_id.clone());
+    assert_eq!(
+        receipt.failed_routes[0].class,
+        SourceBackedSourceFailureClass::Unavailable
+    );
+    assert!(receipt.failed_routes[0].carried_forward);
+    assert_eq!(receipt.carried_failed_route_ids, vec![failing_id.clone()]);
+    assert_eq!(
+        receipt.commit.manifest().source_route(&failing_id),
+        Some(&retained_failing_route)
+    );
+    assert!(receipt.sources.contains(&valid_v2_certificate));
+}
+
+#[test]
+fn internal_route_failure_aborts_the_whole_cold_refresh() {
+    let first_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = count_route_scans(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 11),
+        Arc::clone(&first_scans),
+    );
+    let second_source = fixture_source(CaptureProvider::Hermes, "hermes_state_sqlite", 12);
+    let second = fail_route_with_systemic_writer_error(
+        fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 12),
+        second_source,
     );
     let mut registry = SourceBackedProviderRegistry::new();
-    registry.register(empty_route);
-    registry.register(failed_route);
+    registry.register(first);
+    registry.register(second);
     let temp = tempdir().unwrap();
 
     assert!(matches!(
         refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()),
-        Err(SourceBackedCoordinatorError::NoUsableSourceRoutes { failures })
-            if failures.total() == 1
+        Err(SourceBackedCoordinatorError::RouteScan {
+            source: SourceBackedRouteError {
+                kind: SourceBackedRouteErrorKind::Internal,
+                ..
+            },
+            ..
+        })
+    ));
+    assert!(matches!(
+        VerifiedIndex::open(temp.path()),
+        Err(IndexError::MissingActiveGenerationPointer)
+    ));
+    assert_eq!(
+        first_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a systemic abort must not restart already completed route work"
+    );
+}
+
+#[test]
+fn cold_final_revalidation_failures_scan_each_route_once_and_publish_only_successes() {
+    let first_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let second_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let third_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = count_route_scans(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 13),
+        Arc::clone(&first_scans),
+    );
+    let second = count_route_scans(
+        fail_route_at_final_revalidation(fixture_route(
+            CaptureProvider::Hermes,
+            "hermes_state_sqlite",
+            14,
+        )),
+        Arc::clone(&second_scans),
+    );
+    let third = count_route_scans(
+        fail_route_at_final_revalidation(fixture_route(
+            CaptureProvider::Tabnine,
+            "tabnine_cli_chat_recording_jsonl",
+            15,
+        )),
+        Arc::clone(&third_scans),
+    );
+    let first_id = first.metadata.route_identity.clone().unwrap();
+    let second_id = second.metadata.route_identity.clone().unwrap();
+    let third_id = third.metadata.route_identity.clone().unwrap();
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(first);
+    registry.register(second);
+    registry.register(third);
+    let temp = tempdir().unwrap();
+
+    let mut progress = Vec::new();
+    let receipt = refresh_source_backed_generation_with_progress(
+        temp.path(),
+        &registry,
+        WriterOptions::default(),
+        |update| {
+            progress.push(update);
+            Ok(())
+        },
+    )
+    .unwrap();
+    let completed_sources = progress
+        .iter()
+        .map(|update| update.completed_sources)
+        .collect::<Vec<_>>();
+    assert!(
+        completed_sources
+            .windows(2)
+            .all(|window| window[0] <= window[1]),
+        "route-attempt progress must be monotonic: {completed_sources:?}"
+    );
+    let committed = progress.last().unwrap();
+    assert_eq!(committed.phase, "committed");
+    assert_eq!(committed.completed_sources, 3);
+    assert_eq!(committed.total_sources, 3);
+    assert_eq!(receipt.successful_route_ids, vec![first_id.clone()]);
+    assert_eq!(receipt.failed_routes.len(), 2);
+    assert_eq!(
+        receipt
+            .failed_routes
+            .iter()
+            .map(|failure| failure.route_identity.clone())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([second_id.clone(), third_id.clone()])
+    );
+    assert!(receipt.failed_routes.iter().all(|failure| {
+        failure.class == SourceBackedSourceFailureClass::SourceChanged && !failure.carried_forward
+    }));
+    assert!(receipt.commit.manifest().source_route(&first_id).is_some());
+    assert!(receipt.commit.manifest().source_route(&second_id).is_none());
+    assert!(receipt.commit.manifest().source_route(&third_id).is_none());
+    assert_eq!(receipt.commit.indexed_documents, 1);
+    assert_eq!(
+        first_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "successive final failures must not rescan a successful route"
+    );
+    assert_eq!(
+        second_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a terminally failed route must not be scanned again"
+    );
+    assert_eq!(
+        third_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a terminally failed route must not be scanned again"
+    );
+}
+
+#[test]
+fn final_inventory_failure_scans_each_route_once_and_stays_route_local() {
+    let successful_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let failed_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let successful = count_route_scans(
+        fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 16),
+        Arc::clone(&successful_scans),
+    );
+    let successful_id = successful.metadata.route_identity.clone().unwrap();
+    let source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 17);
+    let mut inventory_registry = inventory_replay_registry(Arc::new(Mutex::new(vec![source])));
+    let failed = count_route_scans(
+        fail_route_at_final_inventory_revalidation(inventory_registry.routes.pop().unwrap()),
+        Arc::clone(&failed_scans),
+    );
+    let failed_id = failed.metadata.route_identity.clone().unwrap();
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(successful);
+    registry.register(failed);
+    let temp = tempdir().unwrap();
+
+    let receipt =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    assert_eq!(receipt.successful_route_ids, vec![successful_id.clone()]);
+    assert_eq!(receipt.failed_routes.len(), 1);
+    assert_eq!(receipt.failed_routes[0].route_identity, failed_id.clone());
+    assert_eq!(
+        receipt.failed_routes[0].class,
+        SourceBackedSourceFailureClass::SourceChanged
+    );
+    assert!(!receipt.failed_routes[0].carried_forward);
+    assert!(receipt
+        .commit
+        .manifest()
+        .source_route(&successful_id)
+        .is_some());
+    assert!(receipt.commit.manifest().source_route(&failed_id).is_none());
+    assert_eq!(receipt.commit.indexed_documents, 1);
+    assert_eq!(
+        successful_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(failed_scans.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn warm_final_revalidation_failure_scans_once_and_carries_the_exact_route() {
+    let (first_v1, _) = revisioned_receipt_route(1);
+    let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 16);
+    let second_id = second.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(first_v1);
+    initial_registry.register(second.clone());
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+    let retained_second = initial
+        .commit
+        .manifest()
+        .source_route(&second_id)
+        .unwrap()
+        .clone();
+
+    let first_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let second_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (first_v2, first_v2_certificate) = revisioned_receipt_route(2);
+    let first_v2 = count_route_scans(first_v2, Arc::clone(&first_scans));
+    let first_id = first_v2.metadata.route_identity.clone().unwrap();
+    let second = count_route_scans(
+        fail_route_at_final_revalidation(second),
+        Arc::clone(&second_scans),
+    );
+    let mut warm_registry = SourceBackedProviderRegistry::new();
+    warm_registry.register(first_v2);
+    warm_registry.register(second);
+
+    let warm =
+        refresh_source_backed_generation(temp.path(), &warm_registry, WriterOptions::default())
+            .unwrap();
+    assert_eq!(warm.successful_route_ids, vec![first_id]);
+    assert_eq!(warm.failed_routes.len(), 1);
+    assert_eq!(warm.failed_routes[0].route_identity, second_id.clone());
+    assert_eq!(
+        warm.failed_routes[0].class,
+        SourceBackedSourceFailureClass::SourceChanged
+    );
+    assert!(warm.failed_routes[0].carried_forward);
+    assert_eq!(warm.carried_failed_route_ids, vec![second_id.clone()]);
+    assert_eq!(
+        warm.commit.manifest().source_route(&second_id),
+        Some(&retained_second)
+    );
+    assert!(warm.sources.contains(&first_v2_certificate));
+    assert_eq!(warm.commit.indexed_documents, 2);
+    assert_eq!(
+        first_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a warm successful route must retain its one staged scan"
+    );
+    assert_eq!(
+        second_scans.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a warm failed route must be excluded from its existing stage"
+    );
+}
+
+#[test]
+fn cold_refresh_with_only_failed_routes_does_not_publish_ready_data() {
+    let route = fail_route_before_scan(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 15),
+        SourceBackedRouteErrorKind::Unavailable,
+    );
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(route);
+    let temp = tempdir().unwrap();
+
+    let error = refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes }
+            if failed_routes.len() == 1
+                && failed_routes[0].class == SourceBackedSourceFailureClass::Unavailable
     ));
     assert!(matches!(
         VerifiedIndex::open(temp.path()),
@@ -664,138 +623,360 @@ fn empty_success_does_not_make_a_failed_cold_refresh_usable() {
 }
 
 #[test]
-fn terminally_changed_a_is_omitted_and_b_c_publish_after_fail_closed_restart() {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let authority_a = Arc::new(std::sync::atomic::AtomicU8::new(1));
-    let stable_authority = Arc::new(std::sync::atomic::AtomicU8::new(1));
-    let published_a = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let published_b = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let published_c = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let route_a = controlled_revision_route(
-        "terminala",
-        41,
-        1,
-        Arc::clone(&authority_a),
-        Arc::clone(&log),
-        Arc::clone(&published_a),
-    )
-    .0;
-    let route_b = controlled_revision_route(
-        "terminalb",
-        42,
-        1,
-        Arc::clone(&stable_authority),
-        Arc::clone(&log),
-        Arc::clone(&published_b),
-    )
-    .0;
-    let route_c = controlled_revision_route(
-        "terminalc",
-        43,
-        1,
-        stable_authority,
-        Arc::clone(&log),
-        Arc::clone(&published_c),
-    )
-    .0;
-    let changing_authority = Arc::clone(&authority_a);
-    let route_c = after_scan(route_c, move || {
-        changing_authority.store(2, std::sync::atomic::Ordering::SeqCst);
-    });
-    let mut registry = SourceBackedProviderRegistry::new();
-    registry.register(route_a);
-    registry.register(route_b);
-    registry.register(route_c);
+fn warm_missing_route_in_grace_remains_usable_when_a_new_cold_route_fails() {
+    let provider = CaptureProvider::Gemini;
+    let format = GEMINI_CLI_SOURCE_FORMAT;
+    let present = fixture_route(provider, format, 16);
+    let route_id = present.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(present);
     let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
 
-    let receipt =
-        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    assert_eq!(
-        receipt.outcome,
-        SourceBackedRefreshOutcome::CompletedWithSourceFailures
+    let mut missing_source =
+        fixture_provider_source(provider, format, ProviderImportSupport::Native);
+    missing_source.status = ProviderSourceStatus::Missing;
+    missing_source.exists = false;
+    let missing = SourceBackedRoute::certified_missing(
+        missing_source,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+    )
+    .unwrap();
+    assert_eq!(missing.metadata.route_identity.as_ref(), Some(&route_id));
+    let failed = fail_route_before_scan(
+        fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 17),
+        SourceBackedRouteErrorKind::Unavailable,
     );
-    assert_eq!(receipt.successful_routes, 2);
-    assert_eq!(receipt.source_failures.total(), 1);
-    let failure = &receipt.source_failures.failures()[0];
-    assert_eq!(failure.source_selector, "/fixture/terminala");
-    assert_eq!(failure.class, SourceBackedSourceFailureClass::SourceChanged);
-    assert!(!failure.carried_forward);
+    let failed_id = failed.metadata.route_identity.clone().unwrap();
+    let mut refresh_registry = SourceBackedProviderRegistry::new();
+    refresh_registry.register(missing);
+    refresh_registry.register(failed);
+
+    let refresh =
+        refresh_source_backed_generation(temp.path(), &refresh_registry, WriterOptions::default())
+            .unwrap();
+    assert_eq!(refresh.failed_routes.len(), 1);
+    assert_eq!(refresh.failed_routes[0].route_identity, failed_id);
+    assert!(!refresh.failed_routes[0].carried_forward);
+    assert_eq!(refresh.sources, initial.sources);
+    let retained_route = refresh.commit.manifest().source_route(&route_id).unwrap();
     assert_eq!(
-        &*log.lock().unwrap(),
-        &[
-            "terminala",
-            "terminalb",
-            "terminalc",
-            "terminalb",
-            "terminalc"
-        ]
+        retained_route.sources(),
+        initial
+            .commit
+            .manifest()
+            .source_route(&route_id)
+            .unwrap()
+            .sources()
     );
-    let visible = VerifiedIndex::open(temp.path()).unwrap();
-    let terminal_a = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 41);
-    assert_eq!(visible.document_count(), 2);
-    assert!(!visible
-        .manifest()
-        .sources
-        .contains(&controlled_revision_certificate(&terminal_a, 1)));
-    assert_eq!(published_a.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(published_b.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(published_c.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        retained_route
+            .missing_state()
+            .unwrap()
+            .consecutive_missing()
+            .get(),
+        1
+    );
 }
 
 #[test]
-fn source_failure_receipts_are_row_and_detail_bounded() {
-    let mut registry = SourceBackedProviderRegistry::new();
-    for route_index in 0..=MAX_RECORDED_SOURCE_BACKED_FAILURES {
-        let detail = "x".repeat(MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES + 100);
-        let driver = SourceBackedRouteDriver::new(
-            move |_| {
-                Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Unavailable,
-                    detail.clone(),
-                ))
+fn selected_route_refresh_carries_unselected_route_and_reports_exact_noop_success() {
+    let first = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 21);
+    let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 22);
+    let first_id = first.metadata.route_identity.clone().unwrap();
+    let second_id = second.metadata.route_identity.clone().unwrap();
+    let second_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let original_second = second.driver.clone().unwrap();
+    let scans = Arc::clone(&second_scans);
+    let second = SourceBackedRoute {
+        driver: Some(SourceBackedRouteDriver::new(
+            move |sink| {
+                scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (original_second.scan)(sink)
             },
-            |_| false,
-            |_| false,
-        );
+            {
+                let owns = Arc::clone(&second.driver.as_ref().unwrap().owns_source);
+                move |source| owns(source)
+            },
+            {
+                let revalidate = Arc::clone(&second.driver.as_ref().unwrap().revalidate);
+                move |target| revalidate(target)
+            },
+        )),
+        ..second
+    };
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(first.clone());
+    registry.register(second);
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    assert_eq!(second_scans.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let retained_second = initial
+        .commit
+        .manifest()
+        .source_route(&second_id)
+        .unwrap()
+        .clone();
+
+    let mut selected_registry = SourceBackedProviderRegistry::new();
+    selected_registry.register(first);
+    let selected = refresh_source_backed_generation_for_routes(
+        temp.path(),
+        &selected_registry,
+        WriterOptions::default(),
+        [first_id.clone()],
+    )
+    .unwrap();
+    assert_eq!(selected.commit.generation_id, initial.commit.generation_id);
+    assert_eq!(selected.successful_route_ids, vec![first_id]);
+    assert!(selected.failed_routes.is_empty());
+    assert_eq!(
+        selected.carried_unselected_route_ids,
+        vec![second_id.clone()]
+    );
+    assert_eq!(
+        selected.commit.manifest().source_route(&second_id),
+        Some(&retained_second)
+    );
+    assert_eq!(second_scans.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn selected_failed_route_reports_exact_identity_and_carries_the_whole_base() {
+    let first = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 23);
+    let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 24);
+    let first_id = first.metadata.route_identity.clone().unwrap();
+    let second_id = second.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(first);
+    initial_registry.register(second.clone());
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+
+    let mut selected_registry = SourceBackedProviderRegistry::new();
+    selected_registry.register(fail_route_before_scan(
+        second,
+        SourceBackedRouteErrorKind::SourceChanged,
+    ));
+    let selected = refresh_source_backed_generation_for_routes(
+        temp.path(),
+        &selected_registry,
+        WriterOptions::default(),
+        [second_id.clone()],
+    )
+    .unwrap();
+    assert_eq!(selected.commit.generation_id, initial.commit.generation_id);
+    assert!(selected.successful_route_ids.is_empty());
+    assert_eq!(selected.failed_routes.len(), 1);
+    assert_eq!(selected.failed_routes[0].route_identity, second_id.clone());
+    assert!(selected.failed_routes[0].carried_forward);
+    assert_eq!(
+        selected.carried_unselected_route_ids,
+        vec![first_id.clone()]
+    );
+    assert_eq!(selected.carried_failed_route_ids, vec![second_id]);
+    assert_eq!(
+        selected.commit.manifest().source_route(&first_id),
+        initial.commit.manifest().source_route(&first_id)
+    );
+    assert_eq!(selected.sources, initial.sources);
+    assert_eq!(
+        selected.commit.manifest().source_routes(),
+        initial.commit.manifest().source_routes()
+    );
+}
+
+#[test]
+fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
+    let temp = tempdir().unwrap();
+    let provider = CaptureProvider::Gemini;
+    let format = GEMINI_CLI_SOURCE_FORMAT;
+
+    let mut present = SourceBackedProviderRegistry::new();
+    present.register(fixture_route(provider, format, 61));
+    let initial =
+        refresh_source_backed_generation(temp.path(), &present, WriterOptions::default()).unwrap();
+    let route_id = initial.commit.manifest().source_routes()[0]
+        .route_identity()
+        .clone();
+
+    let missing_registry = || {
+        let mut source = fixture_provider_source(provider, format, ProviderImportSupport::Native);
+        source.status = ProviderSourceStatus::Missing;
+        source.exists = false;
+        let mut registry = SourceBackedProviderRegistry::new();
         registry.register(
-            SourceBackedRoute::automatic(
-                fixture_provider_source_at(
-                    CaptureProvider::Gemini,
-                    GEMINI_CLI_SOURCE_FORMAT,
-                    ProviderImportSupport::Native,
-                    format!("/fixture/bounded-{route_index}"),
-                ),
+            SourceBackedRoute::certified_missing(
+                source,
                 SourceBackedSelectorAuthority::DiscoveredWinner,
-                driver,
             )
             .unwrap(),
         );
-    }
-    let temp = tempdir().unwrap();
-    let error = refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default())
-        .unwrap_err();
-    let SourceBackedCoordinatorError::NoUsableSourceRoutes { failures } = error else {
-        panic!("unexpected bounded failure result: {error:?}");
+        registry
     };
-    let display = failures.to_string();
+
+    for expected in 1..AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS {
+        let missing = refresh_source_backed_generation(
+            temp.path(),
+            &missing_registry(),
+            WriterOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(missing.sources.len(), 1);
+        assert_eq!(
+            missing
+                .commit
+                .manifest()
+                .source_route(&route_id)
+                .unwrap()
+                .missing_state()
+                .unwrap()
+                .consecutive_missing()
+                .get(),
+            expected
+        );
+    }
+
+    let retained_generation = VerifiedIndex::open(temp.path())
+        .unwrap()
+        .generation_id()
+        .to_owned();
+    let mut unknown_source =
+        fixture_provider_source(provider, format, ProviderImportSupport::Native);
+    unknown_source.status = ProviderSourceStatus::Unknown;
+    let mut unknown = SourceBackedProviderRegistry::new();
+    unknown.register(SourceBackedRoute::unsupported(
+        unknown_source,
+        "unknown test route",
+    ));
+    assert!(matches!(
+        refresh_source_backed_generation(temp.path(), &unknown, WriterOptions::default()),
+        Err(SourceBackedCoordinatorError::UnavailableRoute { .. })
+    ));
     assert_eq!(
-        display
-            .matches("source-backed scan failed for gemini")
-            .count(),
-        3
+        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        retained_generation
     );
-    assert!(display.contains("62 additional source failure(s) omitted"));
-    assert!(display.len() <= 2_048);
-    assert_eq!(failures.total(), MAX_RECORDED_SOURCE_BACKED_FAILURES + 1);
+
+    let reappeared =
+        refresh_source_backed_generation(temp.path(), &present, WriterOptions::default()).unwrap();
+    assert!(reappeared
+        .commit
+        .manifest()
+        .source_route(&route_id)
+        .unwrap()
+        .missing_state()
+        .is_none());
+
+    for expected in 1..AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS {
+        let missing = refresh_source_backed_generation(
+            temp.path(),
+            &missing_registry(),
+            WriterOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            missing
+                .commit
+                .manifest()
+                .source_route(&route_id)
+                .unwrap()
+                .missing_state()
+                .unwrap()
+                .consecutive_missing()
+                .get(),
+            expected
+        );
+    }
+    let deleted = refresh_source_backed_generation(
+        temp.path(),
+        &missing_registry(),
+        WriterOptions::default(),
+    )
+    .unwrap();
+    assert!(deleted.sources.is_empty());
+    assert!(deleted.commit.manifest().source_routes().is_empty());
     assert_eq!(
-        failures.failures().len(),
-        MAX_RECORDED_SOURCE_BACKED_FAILURES
+        VerifiedIndex::open(temp.path()).unwrap().document_count(),
+        0
     );
-    assert_eq!(failures.omitted(), 1);
-    assert!(failures.failures().iter().all(|failure| {
-        failure.detail.len() <= MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES
-            && failure.source_selector.len() <= MAX_SOURCE_BACKED_FAILURE_SELECTOR_BYTES
-    }));
+}
+
+#[test]
+fn certified_missing_route_reappearance_at_precommit_cannot_delete_the_route() {
+    let temp = tempdir().unwrap();
+    let provider = CaptureProvider::Gemini;
+    let format = GEMINI_CLI_SOURCE_FORMAT;
+    let reappearing_path = temp.path().join("reappearing-history.jsonl");
+
+    let mut present = SourceBackedProviderRegistry::new();
+    present.register(fixture_route(provider, format, 62));
+    let initial =
+        refresh_source_backed_generation(temp.path(), &present, WriterOptions::default()).unwrap();
+    let initial_generation = initial.commit.generation_id.clone();
+    let route_id = initial.commit.manifest().source_routes()[0]
+        .route_identity()
+        .clone();
+
+    let missing_registry = || {
+        let mut source = fixture_provider_source_at(
+            provider,
+            format,
+            ProviderImportSupport::Native,
+            reappearing_path.clone(),
+        );
+        source.status = ProviderSourceStatus::Missing;
+        source.exists = false;
+        let mut registry = SourceBackedProviderRegistry::new();
+        registry.register(
+            SourceBackedRoute::certified_missing(
+                source,
+                SourceBackedSelectorAuthority::DiscoveredWinner,
+            )
+            .unwrap(),
+        );
+        registry
+    };
+
+    for _ in 1..AUTOMATIC_ROUTE_DELETION_MISSING_OBSERVATIONS {
+        refresh_source_backed_generation(
+            temp.path(),
+            &missing_registry(),
+            WriterOptions::default(),
+        )
+        .unwrap();
+    }
+    let retained_generation = VerifiedIndex::open(temp.path())
+        .unwrap()
+        .generation_id()
+        .to_owned();
+    assert_ne!(retained_generation, initial_generation);
+
+    let hook_path = reappearing_path.clone();
+    install_before_source_backed_commit_hook_for_test(move || {
+        fs::write(hook_path, b"reappeared before commit\n").unwrap();
+    });
+    let error = refresh_source_backed_generation(
+        temp.path(),
+        &missing_registry(),
+        WriterOptions::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::Index(IndexError::SourceInvalidated(ref invalidated))
+            if invalidated == route_id.as_str()
+    ));
+
+    let retained = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(retained.generation_id(), retained_generation);
+    assert!(retained.manifest().source_route(&route_id).is_some());
+    assert_eq!(retained.document_count(), 1);
 }
 
 #[test]
@@ -839,16 +1020,15 @@ fn mutating_refresh_rejects_an_unclaimed_base_source_from_the_same_family() {
 #[test]
 fn cross_route_duplicate_source_ownership_remains_rejected() {
     let mut registry = SourceBackedProviderRegistry::new();
-    registry.register(fixture_route(
-        CaptureProvider::Gemini,
-        GEMINI_CLI_SOURCE_FORMAT,
-        42,
-    ));
-    registry.register(fixture_route(
-        CaptureProvider::Gemini,
-        GEMINI_CLI_SOURCE_FORMAT,
-        42,
-    ));
+    let automatic = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 42);
+    let explicit = SourceBackedRoute::explicit_manual(
+        automatic.metadata.source.clone(),
+        SourceBackedSelectorAuthority::ExplicitPath,
+        automatic.driver.clone().unwrap(),
+    )
+    .unwrap();
+    registry.register(automatic);
+    registry.register(explicit);
     let temp = tempdir().unwrap();
 
     assert!(matches!(
@@ -966,340 +1146,101 @@ fn committed_progress_failure_does_not_hide_visible_publication() {
     );
 }
 
-fn revisioned_receipt_route(revision: u8) -> (SourceBackedRoute, CertifiedSource) {
-    let source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 91);
-    let session_id = fixture_session_id(&source);
-    let event_id = derive_event_id(EventIdentityInput {
-        source: &source,
-        session_id,
-        logical_item_kind: "message",
-        native_item_key: &NativeItemKey::native_id("message", TypedKey::U64(1)).unwrap(),
-        subrecord_selector: None,
-    })
-    .unwrap();
-    let revision_digest = [revision; 32];
-    let mut document = CoreRecord::new_selected(
-        event_id,
-        session_id,
-        session_id,
-        source.clone(),
-        1,
-        "message",
-        "primary",
-        true,
-        "coordinator-test-v1",
-        format!("receipt revision {revision}"),
-    )
-    .unwrap();
-    document.provider_session_id = Some("receipt-race".to_owned());
-    document.native_event_id = Some(TypedKey::U64(1));
-    document.occurred_at_unix_ms = Some(i64::from(revision));
-    document.role = Some("user".to_owned());
-    let observation =
-        SourceObservation::new(source.clone(), "fixture-revision", vec![revision]).unwrap();
-    let certificate = CertifiedSource::certify(
-        observation.clone(),
-        observation,
-        "coordinator-test-v1",
-        revision_digest,
-        ScannedSourceCounts {
-            complete_records: 1,
-            retained_records: 1,
-            indexed_documents: 1,
-            certified_bytes: 1,
-            ..ScannedSourceCounts::default()
-        },
-    )
-    .unwrap();
-    let scan_certificate = certificate.clone();
-    let revalidation_certificate = certificate.clone();
-    let scan_document = document.clone();
-    let owned_source = source.clone();
-    let driver = SourceBackedRouteDriver::new(
-        move |sink| {
-            sink.replace_source(scan_certificate.clone(), [scan_document.clone()])
-                .map_err(route_coordinator_error)
-        },
-        move |candidate| candidate.exact_descriptor_eq(&owned_source),
-        move |target| {
-            matches!(
-                target,
-                SourceBackedRevalidationTarget::Source(source)
-                    if source == &revalidation_certificate
-            )
-        },
-    );
-    (
-        fixture_executable_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, driver),
-        certificate,
-    )
-}
-
-fn inventory_replay_certificate(source: &SourceKey) -> CertifiedSource {
-    let digest = source.identity().digest();
-    let observation = SourceObservation::new(
-        source.clone(),
-        "inventory-replay-source-v1",
-        digest.to_vec(),
-    )
-    .unwrap();
-    let frontier = SourceFrontier::new(
-        "inventory-replay-frontier-v1",
-        TypedKey::bytes(digest.to_vec()).unwrap(),
-        0,
-        digest,
-    )
-    .unwrap();
-    CertifiedSource::certify_with_frontier(
-        observation.clone(),
-        observation,
-        "inventory-replay-parser-v1",
-        digest,
-        ScannedSourceCounts::default(),
-        Some(frontier),
-    )
-    .unwrap()
-}
-
-fn inventory_replay_inventory(sources: &[SourceKey]) -> CertifiedSourceInventory {
-    let mut ordered = sources.to_vec();
-    ordered.sort();
-    let revision = ordered
-        .iter()
-        .flat_map(|source| source.identity().digest())
-        .collect::<Vec<_>>();
-    let observation = SourceInventoryObservation::new(
-        CaptureProvider::Gemini.as_str(),
-        "inventory-replay-root-v1",
-        TypedKey::utf8("root").unwrap(),
-        "inventory-replay-membership-v1",
-        if revision.is_empty() {
-            vec![0]
-        } else {
-            revision
-        },
-    )
-    .unwrap();
-    CertifiedSourceInventory::certify(
-        observation.clone(),
-        observation,
-        "inventory-replay-discovery-v1",
-        ordered,
-    )
-    .unwrap()
-}
-
-fn owns_inventory_replay_source(source: &SourceKey) -> bool {
-    source.provider() == CaptureProvider::Gemini.as_str()
-        && source.source_format() == GEMINI_CLI_SOURCE_FORMAT
-}
-
-fn inventory_replay_registry(
-    current_sources: Arc<Mutex<Vec<SourceKey>>>,
-) -> SourceBackedProviderRegistry {
-    let scan_sources = Arc::clone(&current_sources);
-    let revalidation_sources = Arc::clone(&current_sources);
-    let driver = SourceBackedRouteDriver::new(
-        move |sink| {
-            let current = scan_sources.lock().unwrap().clone();
-            let base_sources = source_backed_base_sources(sink, owns_inventory_replay_source);
-            for source in &current {
-                if let Some(base) = sink.base_source(source).cloned() {
-                    let frontier = base.frontier().expect("replay frontier");
-                    sink.begin_source_append(source.clone())
-                        .map_err(route_coordinator_error)?;
-                    let append = CertifiedSourceAppend::certify(
-                        &base,
-                        base.clone(),
-                        frontier.certified_prefix_bytes(),
-                        *frontier.certified_prefix_digest(),
-                    )
-                    .map_err(|error| {
-                        SourceBackedRouteError::new(
-                            SourceBackedRouteErrorKind::Internal,
-                            error.to_string(),
-                        )
-                    })?;
-                    sink.certify_source_append(append)
-                        .map_err(route_coordinator_error)?;
-                } else {
-                    sink.begin_source(source.clone())
-                        .map_err(route_coordinator_error)?;
-                    sink.certify_source(inventory_replay_certificate(source))
-                        .map_err(route_coordinator_error)?;
-                }
-            }
-            let inventory = inventory_replay_inventory(&current);
-            sink.certify_complete_inventory(inventory.clone())
-                .map_err(route_coordinator_error)?;
-            for base in base_sources {
-                let source = base.observation().source();
-                if current
-                    .iter()
-                    .any(|candidate| candidate.exact_descriptor_eq(source))
-                {
-                    continue;
-                }
-                let deletion = CertifiedSourceDeletion::from_inventory(source.clone(), &inventory)
-                    .map_err(|error| {
-                        SourceBackedRouteError::new(
-                            SourceBackedRouteErrorKind::Internal,
-                            error.to_string(),
-                        )
-                    })?;
-                sink.delete_source(deletion, inventory.clone())
-                    .map_err(route_coordinator_error)?;
-            }
-            Ok(())
-        },
-        owns_inventory_replay_source,
-        move |target| {
-            let current = revalidation_sources.lock().unwrap().clone();
-            let inventory = inventory_replay_inventory(&current);
-            match target {
-                SourceBackedRevalidationTarget::Source(certificate) => current
-                    .iter()
-                    .any(|source| inventory_replay_certificate(source) == *certificate),
-                SourceBackedRevalidationTarget::Deletion(deletion) => {
-                    owns_inventory_replay_source(deletion.source())
-                        && !inventory.contains(deletion.source())
-                        && deletion.verifies(&inventory)
-                }
-            }
-        },
-    )
-    .with_complete_inventory_revalidation(move |inventory| {
-        let current = current_sources.lock().unwrap().clone();
-        inventory == &inventory_replay_inventory(&current)
-    });
+#[test]
+fn source_record_progress_resets_per_route_and_is_absent_outside_scans() {
     let mut registry = SourceBackedProviderRegistry::new();
-    registry.register(fixture_executable_route(
+    registry.register(fixture_route(
         CaptureProvider::Gemini,
         GEMINI_CLI_SOURCE_FORMAT,
-        driver,
+        1,
     ));
-    registry
-}
-
-#[test]
-fn delete_b_then_discover_c_recertifies_replay_and_restart() {
-    let source_a = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 101);
-    let source_b = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 102);
-    let source_c = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 103);
-    let current = Arc::new(Mutex::new(vec![source_a.clone(), source_b.clone()]));
-    let registry = inventory_replay_registry(Arc::clone(&current));
+    registry.register(fixture_route(
+        CaptureProvider::Hermes,
+        "hermes_state_sqlite",
+        2,
+    ));
     let temp = tempdir().unwrap();
-
     let initial =
         refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    assert_eq!(initial.sources.len(), 2);
-    assert!(initial.removals.is_empty());
+    let mut updates = Vec::new();
 
-    *current.lock().unwrap() = vec![source_a.clone()];
-    let first_missing =
-        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    assert!(first_missing.removals.is_empty());
-    assert_eq!(first_missing.sources.len(), 2);
-    assert_eq!(
-        first_missing
-            .commit
-            .manifest()
-            .source_catalog()
-            .missing_source(&source_b)
-            .unwrap()
-            .consecutive_missing()
-            .get(),
-        1
-    );
-
-    drop(registry);
-    let registry = inventory_replay_registry(Arc::clone(&current));
-    let second_missing =
-        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    assert!(second_missing.removals.is_empty());
-    assert_eq!(second_missing.sources.len(), 2);
-    assert_eq!(
-        second_missing
-            .commit
-            .manifest()
-            .source_catalog()
-            .missing_source(&source_b)
-            .unwrap()
-            .consecutive_missing()
-            .get(),
-        2
-    );
-
-    let deleted =
-        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    let deleted_b = deleted
-        .removals
-        .iter()
-        .find(|removal| removal.deletion.source().exact_descriptor_eq(&source_b))
-        .expect("B deletion");
-    assert!(deleted_b.deletion.verifies(&deleted_b.inventory));
-
-    *current.lock().unwrap() = vec![source_a, source_c];
-    let discovered =
-        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    let recertified_b = discovered
-        .removals
-        .iter()
-        .find(|removal| removal.deletion.source().exact_descriptor_eq(&source_b))
-        .expect("recertified B deletion");
-    assert!(recertified_b.deletion.verifies(&recertified_b.inventory));
-    assert_eq!(recertified_b.inventory.observed_sources(), 2);
-    assert_ne!(
-        deleted_b.inventory.inventory_digest(),
-        recertified_b.inventory.inventory_digest()
-    );
-
-    let replay =
-        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    assert_eq!(replay.commit.generation_id, discovered.commit.generation_id);
-    assert!(replay.removals[0]
-        .deletion
-        .verifies(&replay.removals[0].inventory));
-
-    drop(registry);
-    let restarted_registry = inventory_replay_registry(Arc::clone(&current));
-    let restarted = refresh_source_backed_generation(
+    let replay = refresh_source_backed_generation_with_progress(
         temp.path(),
-        &restarted_registry,
+        &registry,
         WriterOptions::default(),
+        |progress| {
+            updates.push((
+                progress.phase,
+                progress.current_source,
+                progress.completed_records,
+                progress.completed_bytes,
+            ));
+            Ok(())
+        },
     )
     .unwrap();
+
+    assert_eq!(replay.commit.generation_id, initial.commit.generation_id);
+    assert!(replay
+        .successful_route_outcomes
+        .iter()
+        .all(|outcome| !outcome.changed));
+
+    let active = updates
+        .iter()
+        .filter(|(_, source, _, _)| source.is_some())
+        .map(|(_, _, completed_records, completed_bytes)| (*completed_records, *completed_bytes))
+        .collect::<Vec<_>>();
     assert_eq!(
-        restarted.commit.generation_id,
-        discovered.commit.generation_id
+        active,
+        vec![
+            (Some(0), Some(0)),
+            (Some(0), Some(1)),
+            (Some(1), Some(1)),
+            (Some(0), Some(0)),
+            (Some(0), Some(1)),
+            (Some(1), Some(1)),
+        ]
     );
-    assert!(restarted.removals[0]
-        .deletion
-        .verifies(&restarted.removals[0].inventory));
+    assert!(updates
+        .iter()
+        .filter(|(_, source, _, _)| source.is_none())
+        .all(|(_, _, completed_records, completed_bytes)| {
+            completed_records.is_none() && completed_bytes.is_none()
+        }));
 }
 
 #[test]
-fn unsupported_detected_format_stays_typed_and_never_executes() {
-    let source = fixture_provider_source(
-        CaptureProvider::Unknown,
-        "unknown_detected_format",
-        ProviderImportSupport::Unsupported,
-    );
+fn accepted_record_progress_failure_stays_typed_and_prevents_publication() {
     let mut registry = SourceBackedProviderRegistry::new();
-    registry.register(SourceBackedRoute::unsupported(
-        source,
-        "no product-approved source-backed adapter",
+    registry.register(fixture_route(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        1,
     ));
     let temp = tempdir().unwrap();
-    let receipt =
-        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
-    assert_eq!(receipt.scanned_routes, 0);
-    assert_eq!(receipt.unsupported_routes.len(), 1);
-    assert!(receipt.sources.is_empty());
-    assert!(receipt.removals.is_empty());
-    assert!(VerifiedIndex::open(temp.path())
-        .unwrap()
-        .manifest()
-        .sources
-        .is_empty());
+
+    let error = refresh_source_backed_generation_with_progress(
+        temp.path(),
+        &registry,
+        WriterOptions::default(),
+        |progress| {
+            if progress.completed_records == Some(1) {
+                Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "injected source-record progress failure",
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::Progress(SourceBackedRouteError { detail, .. })
+            if detail == "injected source-record progress failure"
+    ));
+    assert!(VerifiedIndex::open(temp.path()).is_err());
 }

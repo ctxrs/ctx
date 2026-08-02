@@ -48,9 +48,6 @@ public class AgentHistoryClient {
             args.add("--progress");
             args.add("none");
         }
-        if (safe.catalogOnly()) {
-            args.add("--catalog-only");
-        }
         return new InitResponse(executeEnvelope("init", args));
     }
 

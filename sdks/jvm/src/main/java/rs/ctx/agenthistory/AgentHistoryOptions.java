@@ -30,20 +30,10 @@ public final class AgentHistoryOptions {
     }
 
     public static final class Init {
-        private boolean catalogOnly;
         private String progress;
-
-        public boolean catalogOnly() {
-            return catalogOnly;
-        }
 
         public String progress() {
             return progress;
-        }
-
-        public Init catalogOnly(boolean catalogOnly) {
-            this.catalogOnly = catalogOnly;
-            return this;
         }
 
         public Init progress(String progress) {

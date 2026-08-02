@@ -96,24 +96,24 @@ mod daemon_retry;
 mod daemon_status;
 mod daemon_supervisor;
 mod daemon_wakeup;
+mod dirty_source_routes;
 #[cfg(test)]
 use daemon_retry::*;
 mod source_status;
+#[cfg(test)]
+pub(crate) use source_status::count_public_status_snapshot_reads;
 pub(crate) use source_status::source_epoch_status_report;
 mod source_backed_pro_catch_up;
 pub(crate) use source_backed_pro_catch_up::wait_for_completed_generation as wait_for_source_backed_pro_generation;
 mod source_backed_refresh_coordinator;
 #[allow(unused_imports)] // Provider-neutral executor types are the capture coordinator seam.
 pub(crate) use source_backed_refresh_coordinator::{
-    coordinate_core_refresh_without_autostart,
-    coordinate_core_refresh_without_autostart_with_progress, coordinate_source_backed_refresh,
-    coordinate_source_backed_refresh_with_progress, pin_active_verified_generation,
-    PinnedSourceBackedGeneration, SourceBackedCurrentSourceProgress,
-    SourceBackedCurrentSourceProgressStage, SourceBackedRefreshCurrent,
+    coordinate_import_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
+    pin_active_verified_generation, PinnedSourceBackedGeneration,
+    SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
     SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshExecution,
     SourceBackedRefreshExecutor, SourceBackedRefreshMode, SourceBackedRefreshObservation,
-    SourceBackedRefreshProgress, SourceBackedRefreshPublication, SourceBackedRefreshSourceFailure,
-    SourceBackedRefreshSourceFailureClass,
+    SourceBackedRefreshProgress, SourceBackedRefreshPublication,
 };
 mod daemon_scheduler;
 #[cfg(test)]
@@ -134,7 +134,6 @@ mod health_search;
 pub(crate) use health_search::semantic_worker_cache_dir;
 #[cfg(test)]
 use health_search::*;
-#[allow(dead_code)] // Signed provisioning consumes this seam in a separate integration lane.
 pub(crate) fn semantic_runtime_cache_dir(data_root: &std::path::Path) -> std::path::PathBuf {
     let model_cache_dir = semantic_worker_cache_dir(data_root);
     semantic_runtime_cache_dir_for_model_cache(&model_cache_dir)

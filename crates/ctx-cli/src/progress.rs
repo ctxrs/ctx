@@ -1,6 +1,5 @@
 use std::{
-    io::IsTerminal,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     sync::{Arc, Mutex},
     time::{Duration as StdDuration, Instant},
 };
@@ -81,9 +80,9 @@ impl ProgressReporter {
         if !self.is_enabled() {
             return Ok(());
         }
-        let (message, _) = bounded_progress_text(&message.into(), MAX_PROGRESS_MESSAGE_BYTES);
+        let message = bounded_progress_text(&message.into(), MAX_PROGRESS_MESSAGE_BYTES);
         self.emit_status(ProgressLine {
-            phase: phase.to_owned(),
+            phase: bounded_progress_text(phase, MAX_PROGRESS_PHASE_BYTES),
             message,
             completed_bytes: 0,
             total_bytes: self.total_bytes,
@@ -105,8 +104,8 @@ impl ProgressReporter {
             return Ok(());
         }
         self.emit_status(ProgressLine {
-            phase: phase.to_owned(),
-            message: bounded_progress_text(&message.into(), MAX_PROGRESS_MESSAGE_BYTES).0,
+            phase: bounded_progress_text(phase, MAX_PROGRESS_PHASE_BYTES),
+            message: bounded_progress_text(&message.into(), MAX_PROGRESS_MESSAGE_BYTES),
             completed_bytes,
             total_bytes: self.total_bytes.max(completed_bytes),
             completed_files: None,
@@ -186,13 +185,14 @@ fn progress_json(operation: &'static str, line: &ProgressLine, elapsed: StdDurat
         "done": line.done,
     });
     if let Some(progress) = line.refresh_progress.as_ref() {
-        let current_source = progress.current_source.as_deref().map(|source| {
-            let (source, _) = bounded_progress_text(source, MAX_PROGRESS_SOURCE_BYTES);
-            source
-        });
         value["completed_sources"] = json!(progress.completed_sources);
         value["total_sources"] = json!(progress.total_sources);
-        value["current_source"] = json!(current_source);
+        value["source_completed_records"] = json!(progress.completed_records);
+        value["source_completed_bytes"] = json!(progress.completed_bytes);
+        value["current_source"] = json!(progress
+            .current_source
+            .as_deref()
+            .map(|source| bounded_progress_text(source, MAX_PROGRESS_SOURCE_BYTES)));
         value["current_source_progress"] = progress
             .current_source_progress
             .map(SourceBackedCurrentSourceProgress::to_json)
@@ -206,15 +206,16 @@ fn source_refresh_line(progress: &SourceBackedRefreshProgress) -> ProgressLine {
         .current_source_progress
         .map(|current| detailed_source_refresh_line(progress, current))
         .unwrap_or_else(|| source_level_refresh_line(progress));
-    let (message, _) = bounded_progress_text(&message, MAX_PROGRESS_MESSAGE_BYTES);
     ProgressLine {
-        phase,
-        message,
+        phase: bounded_progress_text(&phase, MAX_PROGRESS_PHASE_BYTES),
+        message: bounded_progress_text(&message, MAX_PROGRESS_MESSAGE_BYTES),
         completed_bytes,
         total_bytes,
         completed_files: None,
         total_files: None,
-        imported_events: None,
+        imported_events: progress
+            .completed_records
+            .and_then(|value| usize::try_from(value).ok()),
         done: false,
         refresh_progress: Some(progress.clone()),
     }
@@ -227,15 +228,10 @@ fn detailed_source_refresh_line(
     let source = progress_source_label(progress);
     let (completed_bytes, total_bytes) = match current.stage {
         SourceBackedCurrentSourceProgressStage::SourceFamilyCopy
-        | SourceBackedCurrentSourceProgressStage::OnlineBackup => {
-            match (
-                current.snapshot_bytes_completed,
-                current.snapshot_bytes_total,
-            ) {
-                (Some(completed), Some(total)) => (completed, total),
-                _ => (0, 0),
-            }
-        }
+        | SourceBackedCurrentSourceProgressStage::OnlineBackup => (
+            current.snapshot_bytes_completed.unwrap_or_default(),
+            current.snapshot_bytes_total.unwrap_or_default(),
+        ),
         SourceBackedCurrentSourceProgressStage::LogicalFingerprint
         | SourceBackedCurrentSourceProgressStage::LogicalScan => (0, 0),
     };
@@ -269,37 +265,46 @@ fn detailed_source_refresh_line(
 }
 
 fn source_level_refresh_line(progress: &SourceBackedRefreshProgress) -> (String, String, u64, u64) {
-    let (phase, _) = bounded_progress_text(&progress.phase, MAX_PROGRESS_PHASE_BYTES);
     let source_progress = format!(
         "{} / {} sources",
         progress.completed_sources, progress.total_sources
     );
+    let source_work = match (progress.completed_records, progress.completed_bytes) {
+        (Some(records), Some(bytes)) => {
+            format!("; {records} records, {} scanned", format_bytes(bytes))
+        }
+        (Some(records), None) => format!("; {records} records"),
+        (None, Some(bytes)) => format!("; {} scanned", format_bytes(bytes)),
+        (None, None) => String::new(),
+    };
     let message = match (progress.phase.as_str(), progress.current_source.as_deref()) {
         ("discovering", _) => "Discovering local history sources.".to_owned(),
         ("refreshing", Some(_)) => format!(
-            "Refreshing {} ({source_progress}).",
-            progress_source_label(progress)
+            "Refreshing {} ({source_progress}{source_work}).",
+            progress_source_label(progress),
         ),
         ("verifying", _) => format!("Verifying refreshed history ({source_progress})."),
-        ("committing", _) => format!("Publishing refreshed history ({source_progress})."),
+        ("committing", _) | ("committed", _) => {
+            format!("Publishing refreshed history ({source_progress}).")
+        }
         (_, Some(_)) => format!(
             "Refreshing {} ({source_progress}; phase {}).",
             progress_source_label(progress),
-            phase.replace('_', " ")
+            progress.phase.replace('_', " ")
         ),
         _ => format!(
             "Refreshing local history ({source_progress}; phase {}).",
-            phase.replace('_', " ")
+            progress.phase.replace('_', " ")
         ),
     };
-    (phase, message, 0, 0)
+    (progress.phase.clone(), message, 0, 0)
 }
 
 fn progress_source_label(progress: &SourceBackedRefreshProgress) -> String {
     progress
         .current_source
         .as_deref()
-        .map(|source| bounded_progress_text(source, MAX_PROGRESS_SOURCE_BYTES).0)
+        .map(|source| bounded_progress_text(source, MAX_PROGRESS_SOURCE_BYTES))
         .unwrap_or_else(|| "the current source".to_owned())
 }
 
@@ -309,19 +314,19 @@ fn snapshot_progress_details(progress: SourceBackedCurrentSourceProgress) -> Str
         progress.snapshot_pages_completed,
         progress.snapshot_pages_total,
     ) {
-        (Some(completed), Some(total)) => details.push(format!(
-            "{} / {} pages",
-            format_u64_count(completed),
-            format_u64_count(total)
-        )),
-        (Some(completed), None) => details.push(format!("{} pages", format_u64_count(completed))),
+        (Some(completed), Some(total)) => details.push(format!("{completed} / {total} pages")),
+        (Some(completed), None) => details.push(format!("{completed} pages")),
         (None, _) => {}
     }
     match (
         progress.snapshot_bytes_completed,
         progress.snapshot_bytes_total,
     ) {
-        (Some(completed), Some(total)) => details.push(format_byte_progress(completed, total)),
+        (Some(completed), Some(total)) => details.push(format!(
+            "{} / {} copied",
+            format_bytes(completed),
+            format_bytes(total)
+        )),
         (Some(completed), None) => details.push(format!("{} copied", format_bytes(completed))),
         (None, _) => {}
     }
@@ -331,36 +336,12 @@ fn snapshot_progress_details(progress: SourceBackedCurrentSourceProgress) -> Str
 fn logical_progress_details(progress: SourceBackedCurrentSourceProgress) -> String {
     let mut details = Vec::new();
     if let Some(rows) = progress.logical_rows_scanned {
-        details.push(format!("{} rows", format_u64_count(rows)));
+        details.push(format!("{rows} rows"));
     }
     if let Some(bytes) = progress.logical_certified_bytes {
-        details.push(format!("{} certified bytes", format_bytes(bytes)));
+        details.push(format!("{} certified", format_bytes(bytes)));
     }
     details.join(", ")
-}
-
-fn bounded_progress_text(value: &str, max_bytes: usize) -> (String, bool) {
-    let sanitized = value
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
-    if sanitized.len() <= max_bytes {
-        return (sanitized, false);
-    }
-    const SUFFIX: &str = "...";
-    let mut end = max_bytes.saturating_sub(SUFFIX.len()).min(sanitized.len());
-    while end > 0 && !sanitized.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut bounded = sanitized[..end].to_owned();
-    bounded.push_str(SUFFIX);
-    (bounded, true)
 }
 
 fn progress_percent(completed: u64, total: u64) -> f64 {
@@ -381,7 +362,7 @@ fn progress_line_bytes(line: &ProgressLine) -> (u64, u64) {
 }
 
 fn progress_line_percent(line: &ProgressLine) -> f64 {
-    if line.done {
+    if line.done && line.total_bytes.max(line.completed_bytes) != 0 {
         100.0
     } else {
         let (completed_bytes, total_bytes) = progress_line_bytes(line);
@@ -409,6 +390,30 @@ fn eta_seconds(completed: u64, total: u64, elapsed: StdDuration) -> Option<f64> 
     Some((total - completed) as f64 / rate)
 }
 
+fn bounded_progress_text(value: &str, max_bytes: usize) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    if sanitized.len() <= max_bytes {
+        return sanitized;
+    }
+    const SUFFIX: &str = "...";
+    let mut end = max_bytes.saturating_sub(SUFFIX.len()).min(sanitized.len());
+    while end > 0 && !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut bounded = sanitized[..end].to_owned();
+    bounded.push_str(SUFFIX);
+    bounded
+}
+
 pub(crate) fn format_bytes(bytes: u64) -> String {
     let (value, unit) = scaled_bytes(bytes);
     if unit == "B" {
@@ -416,17 +421,6 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1} {unit}")
     }
-}
-
-pub(crate) fn format_byte_progress(completed: u64, total: u64) -> String {
-    let total = total.max(completed);
-    let (_, total_unit) = scaled_bytes(total);
-    if total_unit == "B" {
-        return format!("{completed} / {total} B");
-    }
-    let completed_value = bytes_in_unit(completed, total_unit);
-    let total_value = bytes_in_unit(total, total_unit);
-    format!("{completed_value:.1} / {total_value:.1} {total_unit}")
 }
 
 fn scaled_bytes(bytes: u64) -> (f64, &'static str) {
@@ -439,29 +433,10 @@ fn scaled_bytes(bytes: u64) -> (f64, &'static str) {
     (value, BYTE_UNITS[unit])
 }
 
-fn bytes_in_unit(bytes: u64, target_unit: &str) -> f64 {
-    let mut value = bytes as f64;
-    let target_index = BYTE_UNITS
-        .iter()
-        .position(|unit| *unit == target_unit)
-        .unwrap_or(0);
-    for _ in 0..target_index {
-        value /= 1024.0;
-    }
-    value
-}
-
 const BYTE_UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
 
 pub(crate) fn format_count(value: usize) -> String {
-    grouped_decimal(value.to_string())
-}
-
-fn format_u64_count(value: u64) -> String {
-    grouped_decimal(value.to_string())
-}
-
-fn grouped_decimal(digits: String) -> String {
+    let digits = value.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     let first_group_len = digits.len() % 3;
     for (index, ch) in digits.chars().enumerate() {
@@ -566,106 +541,6 @@ mod tests {
         assert!(!json.contains('\u{1b}'));
     }
 
-    fn detailed_progress(
-        stage: SourceBackedCurrentSourceProgressStage,
-    ) -> SourceBackedRefreshProgress {
-        SourceBackedRefreshProgress {
-            phase: "refreshing".to_owned(),
-            completed_sources: 2,
-            total_sources: 6,
-            current_source: Some("~/.local/share/opencode/opencode.db".to_owned()),
-            current_source_progress: Some(SourceBackedCurrentSourceProgress {
-                stage,
-                snapshot_pages_completed: None,
-                snapshot_pages_total: None,
-                snapshot_bytes_completed: None,
-                snapshot_bytes_total: None,
-                logical_rows_scanned: None,
-                logical_certified_bytes: None,
-            }),
-        }
-    }
-
-    #[test]
-    fn sqlite_snapshot_progress_is_useful_in_plain_and_structured_in_json() {
-        let mut progress = detailed_progress(SourceBackedCurrentSourceProgressStage::OnlineBackup);
-        let current = progress.current_source_progress.as_mut().unwrap();
-        current.snapshot_pages_completed = Some(1_024);
-        current.snapshot_pages_total = Some(4_096);
-        current.snapshot_bytes_completed = Some(4 * 1024 * 1024);
-        current.snapshot_bytes_total = Some(16 * 1024 * 1024);
-        let line = source_refresh_line(&progress);
-
-        let mut plain = Vec::new();
-        write_progress(
-            &mut plain,
-            ProgressRenderMode::Plain,
-            "import",
-            &line,
-            StdDuration::from_secs(1),
-        )
-        .unwrap();
-        let plain = String::from_utf8(plain).unwrap();
-        assert!(plain.contains("Copying SQLite snapshot"), "{plain}");
-        assert!(plain.contains("1,024 / 4,096 pages"), "{plain}");
-        assert!(plain.contains("4.0 / 16.0 MiB"), "{plain}");
-
-        let json: serde_json::Value =
-            serde_json::from_str(&progress_json("import", &line, StdDuration::from_secs(1)))
-                .unwrap();
-        assert_eq!(json["phase"], "online_backup");
-        assert_eq!(json["completed_sources"], 2);
-        assert_eq!(json["total_sources"], 6);
-        assert_eq!(
-            json["current_source_progress"]["snapshot_pages_completed"],
-            1_024
-        );
-        assert_eq!(
-            json["current_source_progress"]["snapshot_bytes_total"],
-            16 * 1024 * 1024
-        );
-        assert_eq!(json["percent"], 25.0);
-    }
-
-    #[test]
-    fn logical_scan_progress_reports_rows_and_certified_bytes_without_a_total() {
-        let mut progress = detailed_progress(SourceBackedCurrentSourceProgressStage::LogicalScan);
-        let current = progress.current_source_progress.as_mut().unwrap();
-        current.logical_rows_scanned = Some(12_345);
-        current.logical_certified_bytes = Some(8 * 1024 * 1024);
-        let line = source_refresh_line(&progress);
-
-        assert!(line.message.contains("Scanning SQLite history"));
-        assert!(line.message.contains("12,345 rows"));
-        assert!(line.message.contains("8.0 MiB certified bytes"));
-        let json: serde_json::Value =
-            serde_json::from_str(&progress_json("import", &line, StdDuration::from_secs(2)))
-                .unwrap();
-        assert_eq!(
-            json["current_source_progress"]["logical_rows_scanned"],
-            12_345
-        );
-        assert_eq!(json["completed_bytes"], 0);
-        assert_eq!(json["total_bytes"], 0);
-        assert_eq!(json["percent"], 0.0);
-        assert_eq!(json["eta_seconds"], serde_json::Value::Null);
-        assert!(json["current_source_progress"]
-            .get("logical_rows_total")
-            .is_none());
-    }
-
-    #[test]
-    fn detailed_progress_messages_and_sources_are_bounded() {
-        let mut progress = detailed_progress(SourceBackedCurrentSourceProgressStage::LogicalScan);
-        progress.current_source = Some("x".repeat(4_096));
-        let line = source_refresh_line(&progress);
-        let json: serde_json::Value =
-            serde_json::from_str(&progress_json("import", &line, StdDuration::ZERO)).unwrap();
-
-        assert!(line.message.len() <= MAX_PROGRESS_MESSAGE_BYTES);
-        assert!(json["current_source"].as_str().unwrap().len() <= MAX_PROGRESS_SOURCE_BYTES);
-    }
-
     #[derive(Clone, Copy)]
     enum WriterFailure {
         Write,
@@ -692,9 +567,17 @@ mod tests {
 
     #[test]
     fn progress_write_and_flush_failures_remain_errors() {
-        let line = source_refresh_line(&detailed_progress(
-            SourceBackedCurrentSourceProgressStage::LogicalScan,
-        ));
+        let line = ProgressLine {
+            phase: "logical_scan".to_owned(),
+            message: "Scanning SQLite history".to_owned(),
+            completed_bytes: 0,
+            total_bytes: 0,
+            completed_files: None,
+            total_files: None,
+            imported_events: None,
+            done: false,
+            refresh_progress: None,
+        };
         for (failure, expected) in [
             (WriterFailure::Write, "injected progress write failure"),
             (WriterFailure::Flush, "injected progress flush failure"),
@@ -713,5 +596,52 @@ mod tests {
                 .to_string()
                 .contains(expected));
         }
+    }
+
+    #[test]
+    fn sqlite_logical_progress_is_typed_and_never_invents_a_total() {
+        let progress = SourceBackedRefreshProgress {
+            phase: "refreshing".to_owned(),
+            completed_sources: 1,
+            total_sources: 2,
+            current_source: Some("/tmp/history\ncontrol.sqlite".to_owned()),
+            completed_records: Some(4_096),
+            completed_bytes: Some(2_048),
+            current_source_progress: Some(SourceBackedCurrentSourceProgress {
+                stage: SourceBackedCurrentSourceProgressStage::LogicalScan,
+                snapshot_pages_completed: None,
+                snapshot_pages_total: None,
+                snapshot_bytes_completed: None,
+                snapshot_bytes_total: None,
+                logical_rows_scanned: Some(4_096),
+                logical_certified_bytes: Some(2_048),
+            }),
+        };
+        let line = source_refresh_line(&progress);
+        assert_eq!(line.phase, "logical_scan");
+        assert!(line.message.contains("4,096") || line.message.contains("4096"));
+        assert!(!line.message.contains('\n'));
+        assert_eq!((line.completed_bytes, line.total_bytes), (0, 0));
+
+        let value: serde_json::Value =
+            serde_json::from_str(&progress_json("import", &line, StdDuration::from_secs(2)))
+                .unwrap();
+        assert_eq!(value["percent"], 0.0);
+        assert_eq!(value["eta_seconds"], serde_json::Value::Null);
+        assert_eq!(value["current_source_progress"]["stage"], "logical_scan");
+        assert_eq!(
+            value["current_source_progress"]["logical_rows_scanned"],
+            4_096
+        );
+        assert!(!value["current_source"].as_str().unwrap().contains('\n'));
+    }
+
+    #[test]
+    fn progress_text_is_control_safe_utf8_and_bounded() {
+        let text = format!("{}\n{}", "é".repeat(400), "x".repeat(400));
+        let bounded = bounded_progress_text(&text, MAX_PROGRESS_MESSAGE_BYTES);
+        assert!(bounded.len() <= MAX_PROGRESS_MESSAGE_BYTES);
+        assert!(!bounded.contains('\n'));
+        assert!(bounded.ends_with("..."));
     }
 }

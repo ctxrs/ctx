@@ -1,3 +1,5 @@
+use std::io::{self, Write};
+
 use ctx_history_core::CoreRecord;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -64,7 +66,6 @@ pub(super) fn core_source_delta_exact_eq(left: &CoreSourceDelta, right: &CoreSou
         }
         (CoreSourceDelta::Removed(left), CoreSourceDelta::Removed(right)) => {
             left.source.exact_descriptor_eq(&right.source)
-                && left.removal_revision_sha256 == right.removal_revision_sha256
         }
         _ => false,
     }
@@ -126,7 +127,34 @@ pub(super) fn validate_encoded_bound<T: Serialize>(
     maximum: usize,
     message: &'static str,
 ) -> Result<(), ProtocolError> {
-    encode_with_bound(value, maximum, message).map(drop)
+    if encoded_len(value)? > maximum {
+        return Err(ProtocolError::new(ErrorClass::Bounds, message));
+    }
+    Ok(())
+}
+
+pub(crate) fn encoded_len<T: Serialize + ?Sized>(value: &T) -> Result<usize, ProtocolError> {
+    #[derive(Default)]
+    struct Counter(usize);
+
+    impl Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| io::Error::other("protocol encoded length overflowed"))?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = Counter::default();
+    serde_json::to_writer(&mut counter, value)
+        .map_err(|_| ProtocolError::new(ErrorClass::Internal, "protocol encoding failed"))?;
+    Ok(counter.0)
 }
 
 pub(super) fn encode_with_bound<T: Serialize>(

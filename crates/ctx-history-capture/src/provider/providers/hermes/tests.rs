@@ -62,6 +62,40 @@ fn create_fixture(path: &Path, session: &str) {
     )
     .unwrap();
 }
+
+#[test]
+fn ancestry_requires_a_unique_indexed_session_identity_shape() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "create table sessions (
+                 id text,
+                 source text not null,
+                 parent_session_id text,
+                 started_at real not null
+             );
+             create table messages (
+                 id integer primary key,
+                 session_id text not null,
+                 role text not null,
+                 timestamp real not null
+             );
+             create index sessions_id_lookup on sessions(id);
+             create unique index sessions_id_composite on sessions(id, source);
+             create unique index sessions_id_nocase on sessions(id collate nocase);
+             create unique index sessions_id_descending on sessions(id desc);
+             create unique index sessions_id_partial on sessions(id) where source = 'acp';",
+        )
+        .unwrap();
+    let error = match HermesSchema::detect(&connection) {
+        Ok(_) => panic!("non-unique Hermes session identities must be rejected"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("requires a unique non-partial BINARY lookup index"));
+}
+
 #[test]
 fn minimum_sqlite_rowid_is_distinct_from_the_initial_frontier() {
     let temp = tempdir().unwrap();

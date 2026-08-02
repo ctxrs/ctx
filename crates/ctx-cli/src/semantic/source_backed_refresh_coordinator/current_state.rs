@@ -1,8 +1,7 @@
 use super::*;
 
-/// Exact cardinalities of the generation that was verified after publication.
-///
-/// These are current-state facts, not deltas attributed to one refresh.
+/// Exact cardinalities of the generation that was verified after publication,
+/// plus the explicitly named transition-local removal count.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub(crate) struct SourceBackedRefreshCurrent {
     pub(crate) source_count: usize,

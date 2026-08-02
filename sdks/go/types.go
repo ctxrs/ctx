@@ -1,6 +1,9 @@
 package ctxagenthistory
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // Object stores JSON sub-documents whose shape can grow across ctx releases.
 type Object map[string]any
@@ -124,19 +127,43 @@ type StatusResponse struct {
 
 // StatusRecord describes local index state.
 type StatusRecord struct {
-	Initialized            bool       `json:"initialized"`
-	LocalOnly              bool       `json:"localOnly"`
-	DataRoot               string     `json:"dataRoot,omitempty"`
-	IndexedItems           int        `json:"indexedItems,omitempty"`
-	IndexedSources         int        `json:"indexedSources,omitempty"`
-	CatalogedSessions      int        `json:"catalogedSessions,omitempty"`
-	IndexedCatalogSessions int        `json:"indexedCatalogSessions,omitempty"`
-	PendingCatalogSessions int        `json:"pendingCatalogSessions,omitempty"`
-	FailedCatalogSessions  int        `json:"failedCatalogSessions,omitempty"`
-	StaleCatalogSessions   int        `json:"staleCatalogSessions,omitempty"`
-	Freshness              *Freshness `json:"freshness,omitempty"`
-	Semantic               Object     `json:"semantic,omitempty"`
-	Daemon                 Object     `json:"daemon,omitempty"`
+	Initialized     bool   `json:"initialized"`
+	LocalOnly       bool   `json:"localOnly"`
+	ReadOnly        bool   `json:"readOnly,omitempty"`
+	DataRoot        string `json:"dataRoot,omitempty"`
+	IndexedItems    uint64 `json:"indexedItems,omitempty"`
+	IndexedSessions uint64 `json:"indexedSessions,omitempty"`
+	IndexedEvents   uint64 `json:"indexedEvents,omitempty"`
+	IndexedSources  uint64 `json:"indexedSources,omitempty"`
+	HistoryEpoch    Object `json:"historyEpoch,omitempty"`
+	Lexical         Object `json:"lexical,omitempty"`
+	Refresh         Object `json:"refresh,omitempty"`
+	Semantic        Object `json:"semantic,omitempty"`
+	Daemon          Object `json:"daemon,omitempty"`
+}
+
+// MaxSafeStatusCounter is the largest exact status counter in every supported SDK.
+const MaxSafeStatusCounter uint64 = (1 << 53) - 1
+
+// UnmarshalJSON rejects counters that other SDKs cannot represent exactly.
+func (s *StatusRecord) UnmarshalJSON(data []byte) error {
+	type statusRecord StatusRecord
+	var decoded statusRecord
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	for name, value := range map[string]uint64{
+		"indexedItems":    decoded.IndexedItems,
+		"indexedSessions": decoded.IndexedSessions,
+		"indexedEvents":   decoded.IndexedEvents,
+		"indexedSources":  decoded.IndexedSources,
+	} {
+		if value > MaxSafeStatusCounter {
+			return fmt.Errorf("status counter %s exceeds maximum %d", name, MaxSafeStatusCounter)
+		}
+	}
+	*s = StatusRecord(decoded)
+	return nil
 }
 
 // InitResponse is returned by Client.Init.

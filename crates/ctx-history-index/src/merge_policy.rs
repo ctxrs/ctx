@@ -66,7 +66,26 @@ mod tests {
     }
 
     #[test]
-    fn deletion_threshold_is_integer_exact_and_has_no_large_segment_hole() {
+    fn deletion_reclamation_is_strictly_more_than_one_quarter() {
+        let index = Index::create_in_ram(Schema::builder().build());
+        let at_limit = segment(&index, 400, 100);
+        let above_limit = segment(&index, 400, 101);
+        let policy = LexicalMergePolicy::default();
+
+        assert!(!deletion_density_exceeds_limit(&at_limit));
+        assert!(
+            policy.compute_merge_candidates(&[at_limit]).is_empty(),
+            "exactly 25% deleted documents must remain below the strict threshold"
+        );
+
+        assert!(deletion_density_exceeds_limit(&above_limit));
+        let candidates = policy.compute_merge_candidates(&[above_limit]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0.len(), 1);
+    }
+
+    #[test]
+    fn deletion_threshold_integer_arithmetic_has_no_large_segment_hole() {
         let index = Index::create_in_ram(Schema::builder().build());
         let at_limit = segment(&index, 40_000_004, 10_000_001);
         let above_limit = segment(&index, 40_000_004, 10_000_002);

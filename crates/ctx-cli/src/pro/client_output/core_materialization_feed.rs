@@ -1,23 +1,27 @@
 use std::collections::{BTreeSet, VecDeque};
+use std::io::{self, Write};
 
 use anyhow::{anyhow, bail, Result};
 use ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES;
 use ctx_history_index::{
     CoreEventPageBudget, GenerationManifest, SourceEventCursor, VerifiedIndex,
 };
+#[cfg(test)]
+use ctx_pro_host_protocol::CoreSourceRemoval;
 use ctx_pro_host_protocol::{
     core_record_sha256, ApplyCoreEventDeltaPageRequest, ApplyCoreSourceDeltaPageRequest,
     BeginCoreMaterializationRequest, Capability, CoreEventDelta, CoreEventDeltaPage,
-    CoreEventDeltaPageApplied, CoreEventReplacement, CoreEventState, CoreEventStatePage,
-    CoreEventStatePageRequest, CoreEventTombstone, CoreGenerationHead, CoreMaterializationBegan,
-    CoreMaterializationFinished, CoreMaterializationReceipt, CoreMaterializationReceiptIdentity,
-    CoreSourceDelta, CoreSourceDeltaPage, CoreSourceDeltaPageApplied, CoreSourceReconciliation,
-    CoreSourceRemoval, CoreSourceState, FinishCoreMaterializationRequest, HelperMessage,
-    HostMessage, StatusRequest, MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
-    MAX_CORE_EVENT_DELTA_PAGE_ITEMS, MAX_CORE_EVENT_STATE_PAGE_ITEMS,
-    MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
+    CoreEventDeltaPageApplied, CoreEventDeltaPageBuilder, CoreEventReplacement, CoreEventState,
+    CoreEventStatePage, CoreEventStatePageRequest, CoreEventTombstone, CoreGenerationHead,
+    CoreMaterializationBegan, CoreMaterializationFinished, CoreMaterializationReceipt,
+    CoreMaterializationReceiptIdentity, CoreSourceDelta, CoreSourceDeltaPage,
+    CoreSourceDeltaPageApplied, CoreSourceReconciliation, CoreSourceState,
+    FinishCoreMaterializationRequest, HelperMessage, HostMessage, StatusRequest,
+    MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES, MAX_CORE_EVENT_DELTA_PAGE_ITEMS,
+    MAX_CORE_EVENT_STATE_PAGE_ITEMS, MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
+    MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES, MAX_CORE_SOURCE_STATES,
 };
-use sha2::{Digest, Sha256};
+use serde::Serialize;
 
 use super::*;
 
@@ -198,34 +202,87 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
     let mut event_delta_pages = 0_u64;
 
     if !began.replayed {
-        let deltas = core_snapshot_deltas(index.manifest(), &sources)?;
+        let maximum_reconciliations = sources
+            .len()
+            .checked_add(MAX_CORE_SOURCE_STATES)
+            .ok_or_else(|| anyhow!("invalid_response: source reconciliation bound overflowed"))?;
+        let deltas = core_snapshot_deltas(&sources);
         let delta_pages =
             build_delta_pages(&began.materialization_id, index.generation_id(), deltas)?;
         source_delta_pages = u32::try_from(delta_pages.len())
             .map_err(|_| anyhow!("invalid_request: Core delta page count overflowed"))?;
+        let mut next_materialize_index = 0_u32;
+        let mut reconciled_source_ids = BTreeSet::new();
         let mut reconcile_sources = Vec::new();
         for page in delta_pages {
-            let acknowledgement_identity = page.acknowledgement_identity();
-            let request = ApplyCoreSourceDeltaPageRequest { page };
-            let applied = consumer.apply_source_delta(request)?;
-            applied
-                .validate_for_identity(&acknowledgement_identity)
-                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-            changed_sources = changed_sources
-                .checked_add(applied.changed_sources)
-                .ok_or_else(|| anyhow!("invalid_response: changed-source count overflowed"))?;
-            removed_sources = removed_sources
-                .checked_add(applied.removed_sources)
-                .ok_or_else(|| anyhow!("invalid_response: removal count overflowed"))?;
-            reconcile_sources.extend(applied.reconcile_sources);
-        }
-
-        reconcile_sources.sort_by_key(|item| item.delta.source().identity().digest());
-        for pair in reconcile_sources.windows(2) {
-            if pair[0].delta.source().identity().digest()
-                >= pair[1].delta.source().identity().digest()
-            {
-                bail!("invalid_response: Core reconciliations are not strictly ordered");
+            let mut acknowledgement_page_index = 0_u32;
+            loop {
+                let request = ApplyCoreSourceDeltaPageRequest {
+                    page: page.clone(),
+                    acknowledgement_page_index,
+                };
+                request
+                    .validate()
+                    .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+                let acknowledgement_identity = request.acknowledgement_identity();
+                let applied = consumer.apply_source_delta(request)?;
+                applied
+                    .validate_for_identity(&acknowledgement_identity)
+                    .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+                changed_sources = changed_sources
+                    .checked_add(applied.changed_sources)
+                    .ok_or_else(|| anyhow!("invalid_response: changed-source count overflowed"))?;
+                removed_sources = removed_sources
+                    .checked_add(applied.removed_sources)
+                    .ok_or_else(|| anyhow!("invalid_response: removal count overflowed"))?;
+                let acknowledgement_terminal = applied.acknowledgement_terminal;
+                for reconciliation in applied.reconcile_sources {
+                    if reconciliation.materialize_index != next_materialize_index {
+                        bail!("invalid_response: Core reconciliation indices are not contiguous");
+                    }
+                    next_materialize_index =
+                        next_materialize_index.checked_add(1).ok_or_else(|| {
+                            anyhow!("invalid_response: Core reconciliation index overflowed")
+                        })?;
+                    let source_id = reconciliation.delta.source().identity().digest();
+                    if !reconciled_source_ids.insert(source_id) {
+                        bail!(
+                            "invalid_response: Core reconciliations repeat a stable source identity"
+                        );
+                    }
+                    match &reconciliation.delta {
+                        CoreSourceDelta::Present(state) => {
+                            if !sources.iter().any(|current| current == state) {
+                                bail!(
+                                    "invalid_response: Core reconciliation carries a stale current source"
+                                );
+                            }
+                        }
+                        CoreSourceDelta::Removed(removal) => {
+                            if sources.iter().any(|current| {
+                                current.source.identity().digest()
+                                    == removal.source.identity().digest()
+                            }) {
+                                bail!(
+                                    "invalid_response: Core reconciliation removes a current source"
+                                );
+                            }
+                        }
+                    }
+                    if reconcile_sources.len() >= maximum_reconciliations {
+                        bail!(
+                            "invalid_response: Core reconciliations exceed current and prior source bounds"
+                        );
+                    }
+                    reconcile_sources.push(reconciliation);
+                }
+                if acknowledgement_terminal {
+                    break;
+                }
+                acknowledgement_page_index =
+                    acknowledgement_page_index.checked_add(1).ok_or_else(|| {
+                        anyhow!("invalid_response: Core acknowledgement page index overflowed")
+                    })?;
             }
         }
         for reconciliation in reconcile_sources {
@@ -321,76 +378,194 @@ fn core_generation_head(
     .map_err(|error| anyhow!("invalid_request: {}", error.message))
 }
 
-fn core_snapshot_deltas(
-    manifest: &GenerationManifest,
-    sources: &[CoreSourceState],
-) -> Result<Vec<CoreSourceDelta>> {
-    let mut deltas = sources
+fn core_snapshot_deltas(sources: &[CoreSourceState]) -> Vec<CoreSourceDelta> {
+    sources
         .iter()
         .cloned()
         .map(CoreSourceDelta::Present)
-        .collect::<Vec<_>>();
-    for removal in &manifest.removals {
-        deltas.push(CoreSourceDelta::Removed(CoreSourceRemoval {
-            source: removal.source().clone(),
-            removal_revision_sha256: canonical_sha256(removal)?,
-        }));
-    }
-    deltas.sort_by_key(|delta| delta.source().identity().digest());
-    for pair in deltas.windows(2) {
-        if pair[0].source().identity().digest() >= pair[1].source().identity().digest() {
-            bail!("invalid_request: Core snapshot retains and removes the same source");
-        }
-    }
-    Ok(deltas)
+        .collect()
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CoreSourceDeltaPageBuildError {
+    #[error("invalid_request: one Core source delta exceeds its wire bound")]
+    OversizedSingleton,
+    #[error("invalid_request: Core delta page index overflowed")]
+    PageIndexOverflow,
+    #[error("invalid_request: Core source delta page byte accounting overflowed")]
+    ByteCountOverflow,
+    #[error("invalid_request: Core source delta page encoding failed")]
+    Encoding(#[source] serde_json::Error),
+    #[error("invalid_request: {0}")]
+    InvalidPage(String),
 }
 
 fn build_delta_pages(
     materialization_id: &str,
     generation_id: &str,
     deltas: Vec<CoreSourceDelta>,
-) -> Result<Vec<CoreSourceDeltaPage>> {
+) -> Result<Vec<CoreSourceDeltaPage>, CoreSourceDeltaPageBuildError> {
+    build_delta_pages_with_wire_bound(
+        materialization_id,
+        generation_id,
+        deltas,
+        MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES,
+    )
+}
+
+fn build_delta_pages_with_wire_bound(
+    materialization_id: &str,
+    generation_id: &str,
+    deltas: Vec<CoreSourceDelta>,
+    maximum_wire_bytes: usize,
+) -> Result<Vec<CoreSourceDeltaPage>, CoreSourceDeltaPageBuildError> {
     if deltas.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut chunks = Vec::<Vec<CoreSourceDelta>>::new();
-    let mut current = Vec::new();
-    for delta in deltas {
-        current.push(delta);
-        let test =
-            CoreSourceDeltaPage::new(materialization_id, generation_id, 0, false, current.clone());
-        if current.len() > MAX_CORE_SOURCE_DELTA_PAGE_ITEMS || test.is_err() {
-            let overflow = current
-                .pop()
-                .ok_or_else(|| anyhow!("internal: empty Core delta page"))?;
-            if current.is_empty() {
-                return Err(anyhow!(
-                    "invalid_request: one Core source delta exceeds its wire bound"
-                ));
-            }
-            chunks.push(std::mem::take(&mut current));
-            current.push(overflow);
-        }
-    }
-    if !current.is_empty() {
-        chunks.push(current);
+        return CoreSourceDeltaPage::new(materialization_id, generation_id, 0, true, Vec::new())
+            .map(|page| vec![page])
+            .map_err(|error| CoreSourceDeltaPageBuildError::InvalidPage(error.message));
     }
 
-    let chunk_count = chunks.len();
-    let mut pages = Vec::with_capacity(chunk_count);
-    for (index, chunk) in chunks.into_iter().enumerate() {
-        let page = CoreSourceDeltaPage::new(
-            materialization_id,
-            generation_id,
-            u32::try_from(index)
-                .map_err(|_| anyhow!("invalid_request: Core delta page index overflowed"))?,
-            index + 1 == chunk_count,
-            chunk,
-        )
-        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
-        pages.push(page);
+    let mut pages = Vec::new();
+    let mut page_index = 0_u32;
+    let mut current = Vec::with_capacity(MAX_CORE_SOURCE_DELTA_PAGE_ITEMS);
+    let mut encoded_delta_items_bytes = 0_usize;
+    let mut empty_nonterminal_wire_bytes =
+        empty_source_delta_page_wire_bytes(materialization_id, generation_id, page_index, false)?;
+    let mut remaining = deltas.into_iter().peekable();
+
+    // A populated page is exactly its empty envelope plus each independently
+    // encoded delta and the intervening commas. Charge every delta once, but
+    // rebuild the tiny envelope whenever page_index or terminal changes.
+    while let Some(delta) = remaining.next() {
+        let terminal = remaining.peek().is_none();
+        let encoded_delta_bytes = encoded_json_len(&delta)?;
+        let candidate_delta_items_bytes = encoded_delta_items_bytes
+            .checked_add(usize::from(!current.is_empty()))
+            .and_then(|bytes| bytes.checked_add(encoded_delta_bytes))
+            .ok_or(CoreSourceDeltaPageBuildError::ByteCountOverflow)?;
+        let empty_wire_bytes = if terminal {
+            empty_source_delta_page_wire_bytes(materialization_id, generation_id, page_index, true)?
+        } else {
+            empty_nonterminal_wire_bytes
+        };
+        let candidate_wire_bytes = empty_wire_bytes
+            .checked_add(candidate_delta_items_bytes)
+            .ok_or(CoreSourceDeltaPageBuildError::ByteCountOverflow)?;
+
+        if current.len() == MAX_CORE_SOURCE_DELTA_PAGE_ITEMS
+            || candidate_wire_bytes > maximum_wire_bytes
+        {
+            if current.is_empty() {
+                return Err(CoreSourceDeltaPageBuildError::OversizedSingleton);
+            }
+            pages.push(validated_source_delta_page(
+                materialization_id,
+                generation_id,
+                page_index,
+                false,
+                std::mem::replace(
+                    &mut current,
+                    Vec::with_capacity(MAX_CORE_SOURCE_DELTA_PAGE_ITEMS),
+                ),
+            )?);
+            page_index = page_index
+                .checked_add(1)
+                .ok_or(CoreSourceDeltaPageBuildError::PageIndexOverflow)?;
+            empty_nonterminal_wire_bytes = empty_source_delta_page_wire_bytes(
+                materialization_id,
+                generation_id,
+                page_index,
+                false,
+            )?;
+            let singleton_empty_wire_bytes = if terminal {
+                empty_source_delta_page_wire_bytes(
+                    materialization_id,
+                    generation_id,
+                    page_index,
+                    true,
+                )?
+            } else {
+                empty_nonterminal_wire_bytes
+            };
+            if singleton_empty_wire_bytes
+                .checked_add(encoded_delta_bytes)
+                .is_none_or(|bytes| bytes > maximum_wire_bytes)
+            {
+                return Err(CoreSourceDeltaPageBuildError::OversizedSingleton);
+            }
+            encoded_delta_items_bytes = encoded_delta_bytes;
+            current.push(delta);
+        } else {
+            encoded_delta_items_bytes = candidate_delta_items_bytes;
+            current.push(delta);
+        }
     }
+
+    pages.push(validated_source_delta_page(
+        materialization_id,
+        generation_id,
+        page_index,
+        true,
+        current,
+    )?);
     Ok(pages)
+}
+
+fn validated_source_delta_page(
+    materialization_id: &str,
+    generation_id: &str,
+    page_index: u32,
+    terminal: bool,
+    deltas: Vec<CoreSourceDelta>,
+) -> Result<CoreSourceDeltaPage, CoreSourceDeltaPageBuildError> {
+    CoreSourceDeltaPage::new(
+        materialization_id,
+        generation_id,
+        page_index,
+        terminal,
+        deltas,
+    )
+    .map_err(|error| CoreSourceDeltaPageBuildError::InvalidPage(error.message))
+}
+
+fn empty_source_delta_page_wire_bytes(
+    materialization_id: &str,
+    generation_id: &str,
+    page_index: u32,
+    terminal: bool,
+) -> Result<usize, CoreSourceDeltaPageBuildError> {
+    encoded_json_len(&CoreSourceDeltaPage {
+        materialization_id: materialization_id.to_owned(),
+        core_generation_id: generation_id.to_owned(),
+        page_index,
+        terminal,
+        deltas: Vec::new(),
+    })
+}
+
+fn encoded_json_len<T: Serialize + ?Sized>(
+    value: &T,
+) -> Result<usize, CoreSourceDeltaPageBuildError> {
+    #[derive(Default)]
+    struct Counter(usize);
+
+    impl Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| io::Error::other("encoded length overflowed"))?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = Counter::default();
+    serde_json::to_writer(&mut counter, value).map_err(CoreSourceDeltaPageBuildError::Encoding)?;
+    Ok(counter.0)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -416,8 +591,13 @@ fn reconcile_source_events<C: CoreMaterializationConsumer>(
     let mut current_cursor = None;
     let mut current_terminal = current_source.is_none();
     let mut current = VecDeque::<ctx_history_core::CoreRecord>::new();
-    let mut pending = Vec::<CoreEventDelta>::new();
-    let mut event_page_index = 0_u32;
+    let mut page_builder = CoreEventDeltaPageBuilder::new(
+        materialization_id,
+        index.generation_id(),
+        reconciliation.clone(),
+        0,
+    )
+    .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
     let mut pages = 0_u64;
     let mut mutations = 0_u64;
 
@@ -515,65 +695,16 @@ fn reconcile_source_events<C: CoreMaterializationConsumer>(
         mutations = mutations
             .checked_add(1)
             .ok_or_else(|| anyhow!("invalid_request: Core event mutation count overflowed"))?;
-        if pending.len() == MAX_CORE_EVENT_DELTA_PAGE_ITEMS {
-            send_event_delta_page(
-                consumer,
-                materialization_id,
-                index.generation_id(),
-                &reconciliation,
-                event_page_index,
-                false,
-                std::mem::take(&mut pending),
-            )?;
+        if let Some(page) = page_builder
+            .push(delta)
+            .map_err(|error| anyhow!("invalid_request: {}", error.message))?
+        {
+            send_event_delta_page(consumer, page)?;
             pages = pages.saturating_add(1);
-            event_page_index = event_page_index
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("invalid_request: Core event delta page overflowed"))?;
-        }
-        pending.push(delta);
-        let candidate = event_delta_page(
-            materialization_id,
-            index.generation_id(),
-            &reconciliation,
-            event_page_index,
-            false,
-            pending.clone(),
-        );
-        if candidate.is_err() {
-            let overflow = pending
-                .pop()
-                .ok_or_else(|| anyhow!("internal: empty Core event delta page"))?;
-            if pending.is_empty() {
-                return Err(anyhow!(
-                    "invalid_request: one Core event delta exceeds its page bound"
-                ));
-            }
-            send_event_delta_page(
-                consumer,
-                materialization_id,
-                index.generation_id(),
-                &reconciliation,
-                event_page_index,
-                false,
-                std::mem::take(&mut pending),
-            )?;
-            pages = pages.saturating_add(1);
-            event_page_index = event_page_index
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("invalid_request: Core event delta page overflowed"))?;
-            pending.push(overflow);
         }
     }
 
-    send_event_delta_page(
-        consumer,
-        materialization_id,
-        index.generation_id(),
-        &reconciliation,
-        event_page_index,
-        true,
-        pending,
-    )?;
+    send_event_delta_page(consumer, page_builder.finish())?;
     pages = pages.saturating_add(1);
     Ok(EventReconciliationReport { pages, mutations })
 }
@@ -623,56 +754,18 @@ fn next_current_records(
     Ok((records, next_cursor, terminal))
 }
 
-fn event_delta_page(
-    materialization_id: &str,
-    generation_id: &str,
-    reconciliation: &CoreSourceReconciliation,
-    page_index: u32,
-    terminal: bool,
-    deltas: Vec<CoreEventDelta>,
-) -> Result<CoreEventDeltaPage> {
-    let page = CoreEventDeltaPage {
-        materialization_id: materialization_id.to_owned(),
-        core_generation_id: generation_id.to_owned(),
-        reconciliation: reconciliation.clone(),
-        page_index,
-        terminal,
-        deltas,
-    };
-    page.validate()
-        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
-    Ok(page)
-}
-
-#[allow(clippy::too_many_arguments)]
 fn send_event_delta_page<C: CoreMaterializationConsumer>(
     consumer: &mut C,
-    materialization_id: &str,
-    generation_id: &str,
-    reconciliation: &CoreSourceReconciliation,
-    page_index: u32,
-    terminal: bool,
-    deltas: Vec<CoreEventDelta>,
+    page: CoreEventDeltaPage,
 ) -> Result<()> {
-    let page = event_delta_page(
-        materialization_id,
-        generation_id,
-        reconciliation,
-        page_index,
-        terminal,
-        deltas,
-    )?;
+    page.validate()
+        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+    let acknowledgement_identity = page.acknowledgement_identity();
     let request = ApplyCoreEventDeltaPageRequest { page };
-    let response = consumer.apply_event_delta(request.clone())?;
+    let response = consumer.apply_event_delta(request)?;
     response
-        .validate_for(&request.page)
+        .validate_for_identity(&acknowledgement_identity)
         .map_err(|error| anyhow!("invalid_response: {}", error.message))
-}
-
-fn canonical_sha256(value: &impl serde::Serialize) -> Result<String> {
-    let encoded = serde_json::to_vec(value)?;
-    let digest = Sha256::digest(encoded);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 #[cfg(test)]

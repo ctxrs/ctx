@@ -3,21 +3,29 @@ use ctx_history_core::{
     CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION, CORE_REPOSITORY_CONTRACT_REVISION,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::{ErrorClass, ProtocolError};
 
+mod control;
+mod page_builder;
 mod validation;
+pub use control::{
+    BeginCoreMaterializationRequest, CoreMaterializationBegan,
+    CoreMaterializationBeginAcknowledgementIdentity, CoreMaterializationFinished,
+    CoreMaterializationReceipt, CoreMaterializationReceiptIdentity,
+    FinishCoreMaterializationRequest,
+};
+pub use page_builder::CoreEventDeltaPageBuilder;
 #[cfg(test)]
 use validation::canonical_sha256;
+pub(crate) use validation::encoded_len;
 pub use validation::{core_materialization_id, core_record_sha256, core_source_snapshot_sha256};
 use validation::{
-    core_record_content_bytes, core_source_delta_exact_eq, encode_with_bound, hex_sha256,
-    invalid_contract, validate_encoded_bound, validate_identity, validate_sha256,
-    validate_source_states,
+    core_record_content_bytes, core_source_delta_exact_eq, invalid_contract,
+    validate_encoded_bound, validate_sha256, validate_source_states,
 };
 
-pub const CORE_MATERIALIZATION_CONTRACT_VERSION: u16 = 1;
+pub const CORE_MATERIALIZATION_CONTRACT_VERSION: u16 = 3;
 pub const MAX_CORE_SOURCE_STATES: usize = 16_384;
 pub const MAX_CORE_SOURCE_DELTA_PAGE_ITEMS: usize = 256;
 pub const MAX_CORE_EVENT_STATE_PAGE_ITEMS: usize = 256;
@@ -53,7 +61,6 @@ impl CoreSourceState {
 #[serde(deny_unknown_fields)]
 pub struct CoreSourceRemoval {
     pub source: SourceKey,
-    pub removal_revision_sha256: String,
 }
 
 impl CoreSourceRemoval {
@@ -61,10 +68,7 @@ impl CoreSourceRemoval {
         self.source
             .validate_contract()
             .map_err(|error| invalid_contract("removed Core source identity", error))?;
-        validate_sha256(
-            &self.removal_revision_sha256,
-            "Core source removal revision",
-        )
+        Ok(())
     }
 }
 
@@ -214,195 +218,6 @@ impl CoreGenerationHead {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CoreMaterializationReceipt {
-    pub core_generation_id: String,
-    pub core_record_contract_fingerprint: String,
-    pub source_snapshot_sha256: String,
-    pub materializer_revision: String,
-    pub source_count: u32,
-    pub event_count: u64,
-}
-
-impl CoreMaterializationReceipt {
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        validate_sha256(&self.core_generation_id, "Core generation ID")?;
-        validate_sha256(
-            &self.core_record_contract_fingerprint,
-            "Core record contract fingerprint",
-        )?;
-        validate_sha256(&self.source_snapshot_sha256, "Core source snapshot")?;
-        validate_identity(&self.materializer_revision, "Core materializer revision")?;
-        if usize::try_from(self.source_count)
-            .ok()
-            .is_none_or(|count| count > MAX_CORE_SOURCE_STATES)
-        {
-            return Err(ProtocolError::new(
-                ErrorClass::Bounds,
-                "Core materialization receipt exceeds its source count bound",
-            ));
-        }
-        validate_encoded_bound(
-            self,
-            MAX_CORE_CONTROL_WIRE_BYTES,
-            "Core materialization receipt exceeds its wire bound",
-        )
-    }
-
-    pub fn validate_for_head(&self, head: &CoreGenerationHead) -> Result<(), ProtocolError> {
-        self.validate()?;
-        if self.core_generation_id != head.core_generation_id
-            || self.core_record_contract_fingerprint != head.core_record_contract_fingerprint
-            || self.source_snapshot_sha256 != head.source_snapshot_sha256
-            || self.source_count != head.source_count
-            || self.event_count != head.event_count
-        {
-            return Err(ProtocolError::new(
-                ErrorClass::Sequence,
-                "Core materialization receipt belongs to a different generation contract",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CoreMaterializationReceiptIdentity {
-    pub core_generation_id: String,
-    pub materializer_revision: String,
-}
-
-impl CoreMaterializationReceiptIdentity {
-    pub fn from_receipt(receipt: &CoreMaterializationReceipt) -> Result<Self, ProtocolError> {
-        receipt.validate()?;
-        Ok(Self {
-            core_generation_id: receipt.core_generation_id.clone(),
-            materializer_revision: receipt.materializer_revision.clone(),
-        })
-    }
-
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        validate_sha256(&self.core_generation_id, "Core generation ID")?;
-        validate_identity(&self.materializer_revision, "Core materializer revision")?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BeginCoreMaterializationRequest {
-    pub head: CoreGenerationHead,
-    pub expected_prior_receipt: Option<CoreMaterializationReceiptIdentity>,
-}
-
-impl BeginCoreMaterializationRequest {
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        self.validate_fields()?;
-        validate_encoded_bound(
-            self,
-            MAX_CORE_CONTROL_WIRE_BYTES,
-            "begin Core materialization request exceeds its wire bound",
-        )
-    }
-
-    fn validate_fields(&self) -> Result<(), ProtocolError> {
-        self.head.validate()?;
-        if let Some(receipt) = &self.expected_prior_receipt {
-            receipt.validate()?;
-        }
-        Ok(())
-    }
-
-    pub fn acknowledgement_identity(
-        &self,
-    ) -> Result<CoreMaterializationBeginAcknowledgementIdentity, ProtocolError> {
-        self.validate_fields()?;
-        let encoded_request = encode_with_bound(
-            self,
-            MAX_CORE_CONTROL_WIRE_BYTES,
-            "begin Core materialization request exceeds its wire bound",
-        )?;
-        let mut materialization_id_prefix = Sha256::new();
-        materialization_id_prefix.update(b"[");
-        materialization_id_prefix.update(encoded_request);
-        materialization_id_prefix.update(b",");
-        Ok(CoreMaterializationBeginAcknowledgementIdentity {
-            core_generation_id: self.head.core_generation_id.clone(),
-            expected_prior_receipt: self.expected_prior_receipt.clone(),
-            materialization_id_prefix,
-        })
-    }
-}
-
-/// Pre-transport CAS state for validating a Core materialization begin receipt
-/// without retaining or re-encoding the complete request.
-#[derive(Clone)]
-pub struct CoreMaterializationBeginAcknowledgementIdentity {
-    core_generation_id: String,
-    expected_prior_receipt: Option<CoreMaterializationReceiptIdentity>,
-    materialization_id_prefix: Sha256,
-}
-
-impl CoreMaterializationBeginAcknowledgementIdentity {
-    fn materialization_id(&self, materializer_revision: &str) -> Result<String, ProtocolError> {
-        validate_identity(materializer_revision, "Core materializer revision")?;
-        let encoded_revision = serde_json::to_vec(materializer_revision).map_err(|_| {
-            ProtocolError::new(
-                ErrorClass::Internal,
-                "Core materialization ID encoding failed",
-            )
-        })?;
-        let mut digest = self.materialization_id_prefix.clone();
-        digest.update(encoded_revision);
-        digest.update(b"]");
-        Ok(hex_sha256(digest.finalize()))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CoreMaterializationBegan {
-    pub materialization_id: String,
-    pub core_generation_id: String,
-    pub materializer_revision: String,
-    pub expected_prior_receipt: Option<CoreMaterializationReceiptIdentity>,
-    pub replayed: bool,
-}
-
-impl CoreMaterializationBegan {
-    pub fn validate_for(
-        &self,
-        request: &BeginCoreMaterializationRequest,
-    ) -> Result<(), ProtocolError> {
-        self.validate_for_identity(&request.acknowledgement_identity()?)
-    }
-
-    pub fn validate_for_identity(
-        &self,
-        identity: &CoreMaterializationBeginAcknowledgementIdentity,
-    ) -> Result<(), ProtocolError> {
-        validate_sha256(&self.materialization_id, "Core materialization ID")?;
-        validate_sha256(&self.core_generation_id, "Core generation ID")?;
-        validate_identity(&self.materializer_revision, "Core materializer revision")?;
-        if let Some(receipt) = &self.expected_prior_receipt {
-            receipt.validate()?;
-        }
-        if self.core_generation_id != identity.core_generation_id
-            || self.expected_prior_receipt != identity.expected_prior_receipt
-            || self.materialization_id
-                != identity.materialization_id(&self.materializer_revision)?
-        {
-            return Err(ProtocolError::new(
-                ErrorClass::Sequence,
-                "Core materialization begin response does not match its request CAS",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CoreSourceDeltaPage {
     pub materialization_id: String,
     pub core_generation_id: String,
@@ -433,7 +248,9 @@ impl CoreSourceDeltaPage {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         validate_sha256(&self.materialization_id, "Core materialization ID")?;
         validate_sha256(&self.core_generation_id, "Core generation ID")?;
-        if self.deltas.is_empty() || self.deltas.len() > MAX_CORE_SOURCE_DELTA_PAGE_ITEMS {
+        if (!self.terminal && self.deltas.is_empty())
+            || self.deltas.len() > MAX_CORE_SOURCE_DELTA_PAGE_ITEMS
+        {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,
                 "Core source delta page exceeds its item bound",
@@ -442,6 +259,12 @@ impl CoreSourceDeltaPage {
         let mut prior = None;
         for delta in &self.deltas {
             delta.validate()?;
+            if matches!(delta, CoreSourceDelta::Removed(_)) {
+                return Err(ProtocolError::new(
+                    ErrorClass::InvalidRequest,
+                    "Core source pages are current snapshots and cannot carry removals",
+                ));
+            }
             let current = delta.source().identity().digest();
             if prior.is_some_and(|prior| prior >= current) {
                 return Err(ProtocolError::new(
@@ -463,12 +286,17 @@ impl CoreSourceDeltaPage {
     /// The page must already have passed [`Self::validate`]. Keeping this
     /// compact identity lets an internal producer move the owned page into the
     /// transport without retaining or re-encoding the complete request.
-    pub fn acknowledgement_identity(&self) -> CoreSourceDeltaPageAcknowledgementIdentity {
+    pub fn acknowledgement_identity(
+        &self,
+        acknowledgement_page_index: u32,
+    ) -> CoreSourceDeltaPageAcknowledgementIdentity {
         CoreSourceDeltaPageAcknowledgementIdentity {
             materialization_id: self.materialization_id.clone(),
             core_generation_id: self.core_generation_id.clone(),
             page_index: self.page_index,
+            terminal: self.terminal,
             deltas: self.deltas.clone(),
+            acknowledgement_page_index,
         }
     }
 }
@@ -478,18 +306,39 @@ pub struct CoreSourceDeltaPageAcknowledgementIdentity {
     materialization_id: String,
     core_generation_id: String,
     page_index: u32,
+    terminal: bool,
     deltas: Vec<CoreSourceDelta>,
+    acknowledgement_page_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyCoreSourceDeltaPageRequest {
     pub page: CoreSourceDeltaPage,
+    pub acknowledgement_page_index: u32,
 }
 
 impl ApplyCoreSourceDeltaPageRequest {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        self.page.validate()
+        self.validate_with_control_frame_wire_bound(MAX_CORE_CONTROL_WIRE_BYTES)
+    }
+
+    fn validate_with_control_frame_wire_bound(&self, maximum: usize) -> Result<(), ProtocolError> {
+        self.page.validate()?;
+        if crate::apply_core_source_delta_page_request_frame_wire_bytes(u64::MAX, self)? > maximum {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "Core source delta request exceeds its complete frame wire bound",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Captures the complete source-page and acknowledgement-page CAS before
+    /// an owned request moves into the transport.
+    pub fn acknowledgement_identity(&self) -> CoreSourceDeltaPageAcknowledgementIdentity {
+        self.page
+            .acknowledgement_identity(self.acknowledgement_page_index)
     }
 }
 
@@ -499,6 +348,8 @@ pub struct CoreSourceDeltaPageApplied {
     pub materialization_id: String,
     pub core_generation_id: String,
     pub page_index: u32,
+    pub acknowledgement_page_index: u32,
+    pub acknowledgement_terminal: bool,
     pub changed_sources: u32,
     pub removed_sources: u32,
     pub reconcile_sources: Vec<CoreSourceReconciliation>,
@@ -506,9 +357,12 @@ pub struct CoreSourceDeltaPageApplied {
 }
 
 impl CoreSourceDeltaPageApplied {
-    pub fn validate_for(&self, page: &CoreSourceDeltaPage) -> Result<(), ProtocolError> {
-        page.validate()?;
-        self.validate_for_identity(&page.acknowledgement_identity())
+    pub fn validate_for(
+        &self,
+        request: &ApplyCoreSourceDeltaPageRequest,
+    ) -> Result<(), ProtocolError> {
+        request.validate()?;
+        self.validate_for_identity(&request.acknowledgement_identity())
     }
 
     pub fn validate_for_identity(
@@ -523,43 +377,77 @@ impl CoreSourceDeltaPageApplied {
                 "Core source delta acknowledgement exceeds its reconciliation item bound",
             ));
         }
-        let mut prior = None;
+        if !self.acknowledgement_terminal && self.reconcile_sources.is_empty() {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "Core source delta acknowledgement cannot be empty before terminal",
+            ));
+        }
+        if !identity.terminal && !self.acknowledgement_terminal {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "nonterminal Core source delta pages must complete in one acknowledgement page",
+            ));
+        }
+        let mut prior_index = None;
         let mut present = 0_usize;
         let mut removed = 0_usize;
         for requested in &self.reconcile_sources {
             requested.validate()?;
-            let current = requested.delta.source().identity().digest();
-            if prior.is_some_and(|prior| prior >= current) {
+            if prior_index.is_some_and(|prior| prior >= requested.materialize_index) {
                 return Err(ProtocolError::new(
                     ErrorClass::Sequence,
-                    "requested Core materialization sources must be strictly ordered",
-                ));
-            }
-            let exact_delta = identity
-                .deltas
-                .iter()
-                .any(|delta| core_source_delta_exact_eq(delta, &requested.delta));
-            if !exact_delta {
-                return Err(ProtocolError::new(
-                    ErrorClass::Sequence,
-                    "Core source delta acknowledgement requested an absent or stale reconciliation",
+                    "requested Core materialization indices must be strictly ordered",
                 ));
             }
             match &requested.delta {
-                CoreSourceDelta::Present(_) => present += 1,
-                CoreSourceDelta::Removed(_) => removed += 1,
+                CoreSourceDelta::Present(_) => {
+                    if identity.acknowledgement_page_index != 0 {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Sequence,
+                            "current Core sources are valid only on acknowledgement page zero",
+                        ));
+                    }
+                    let exact_delta = identity
+                        .deltas
+                        .iter()
+                        .any(|delta| core_source_delta_exact_eq(delta, &requested.delta));
+                    if !exact_delta {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Sequence,
+                            "Core source acknowledgement requested an absent or stale current source",
+                        ));
+                    }
+                    present += 1;
+                }
+                CoreSourceDelta::Removed(_) if identity.terminal => removed += 1,
+                CoreSourceDelta::Removed(_) => {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "stored-minus-snapshot removals are valid only on the terminal source page",
+                    ));
+                }
             }
-            prior = Some(current);
+            prior_index = Some(requested.materialize_index);
         }
         if self.materialization_id != identity.materialization_id
             || self.core_generation_id != identity.core_generation_id
             || self.page_index != identity.page_index
+            || self.acknowledgement_page_index != identity.acknowledgement_page_index
             || usize::try_from(self.changed_sources).ok() != Some(present)
             || usize::try_from(self.removed_sources).ok() != Some(removed)
         {
             return Err(ProtocolError::new(
                 ErrorClass::Sequence,
                 "Core source delta acknowledgement does not match its page CAS",
+            ));
+        }
+        if crate::core_source_delta_page_applied_frame_wire_bytes(u64::MAX, self)?
+            > MAX_CORE_CONTROL_WIRE_BYTES
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "Core source delta acknowledgement exceeds its complete frame wire bound",
             ));
         }
         Ok(())
@@ -569,6 +457,7 @@ impl CoreSourceDeltaPageApplied {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoreSourceReconciliation {
+    pub materialize_index: u32,
     pub delta: CoreSourceDelta,
 }
 
@@ -785,9 +674,11 @@ pub struct CoreEventDeltaPage {
 
 impl CoreEventDeltaPage {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        validate_sha256(&self.materialization_id, "Core materialization ID")?;
-        validate_sha256(&self.core_generation_id, "Core generation ID")?;
-        self.reconciliation.validate()?;
+        validate_core_event_delta_page_header(
+            &self.materialization_id,
+            &self.core_generation_id,
+            &self.reconciliation,
+        )?;
         if self.deltas.len() > MAX_CORE_EVENT_DELTA_PAGE_ITEMS
             || (!self.terminal && self.deltas.is_empty())
         {
@@ -852,6 +743,56 @@ impl CoreEventDeltaPage {
                 })
         })
     }
+
+    /// Captures only the fields needed to validate the page acknowledgement.
+    ///
+    /// The page must already have passed [`Self::validate`]. Keeping this
+    /// compact identity lets a producer move the owned page into transport
+    /// without retaining or revalidating the complete request.
+    pub fn acknowledgement_identity(&self) -> CoreEventDeltaPageAcknowledgementIdentity {
+        let mut additions = 0_u32;
+        let mut replacements = 0_u32;
+        let mut tombstones = 0_u32;
+        for delta in &self.deltas {
+            match delta {
+                CoreEventDelta::Added(_) => additions += 1,
+                CoreEventDelta::Replaced(_) => replacements += 1,
+                CoreEventDelta::Tombstoned(_) => tombstones += 1,
+            }
+        }
+        CoreEventDeltaPageAcknowledgementIdentity {
+            materialization_id: self.materialization_id.clone(),
+            core_generation_id: self.core_generation_id.clone(),
+            source: self.reconciliation.delta.source().clone(),
+            page_index: self.page_index,
+            additions,
+            replacements,
+            tombstones,
+            terminal: self.terminal,
+        }
+    }
+}
+
+fn validate_core_event_delta_page_header(
+    materialization_id: &str,
+    core_generation_id: &str,
+    reconciliation: &CoreSourceReconciliation,
+) -> Result<(), ProtocolError> {
+    validate_sha256(materialization_id, "Core materialization ID")?;
+    validate_sha256(core_generation_id, "Core generation ID")?;
+    reconciliation.validate()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreEventDeltaPageAcknowledgementIdentity {
+    materialization_id: String,
+    core_generation_id: String,
+    source: SourceKey,
+    page_index: u32,
+    additions: u32,
+    replacements: u32,
+    tombstones: u32,
+    terminal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -883,101 +824,30 @@ pub struct CoreEventDeltaPageApplied {
 impl CoreEventDeltaPageApplied {
     pub fn validate_for(&self, page: &CoreEventDeltaPage) -> Result<(), ProtocolError> {
         page.validate()?;
+        self.validate_for_identity(&page.acknowledgement_identity())
+    }
+
+    pub fn validate_for_identity(
+        &self,
+        identity: &CoreEventDeltaPageAcknowledgementIdentity,
+    ) -> Result<(), ProtocolError> {
         self.source
             .validate_contract()
             .map_err(|error| invalid_contract("Core event delta acknowledgement source", error))?;
-        let additions = page
-            .deltas
-            .iter()
-            .filter(|delta| matches!(delta, CoreEventDelta::Added(_)))
-            .count();
-        let replacements = page
-            .deltas
-            .iter()
-            .filter(|delta| matches!(delta, CoreEventDelta::Replaced(_)))
-            .count();
-        let tombstones = page
-            .deltas
-            .iter()
-            .filter(|delta| matches!(delta, CoreEventDelta::Tombstoned(_)))
-            .count();
-        if self.materialization_id != page.materialization_id
-            || self.core_generation_id != page.core_generation_id
-            || !self
-                .source
-                .exact_descriptor_eq(page.reconciliation.delta.source())
-            || self.page_index != page.page_index
-            || usize::try_from(self.additions).ok() != Some(additions)
-            || usize::try_from(self.replacements).ok() != Some(replacements)
-            || usize::try_from(self.tombstones).ok() != Some(tombstones)
-            || self.terminal != page.terminal
+        if self.materialization_id != identity.materialization_id
+            || self.core_generation_id != identity.core_generation_id
+            || !self.source.exact_descriptor_eq(&identity.source)
+            || self.page_index != identity.page_index
+            || self.additions != identity.additions
+            || self.replacements != identity.replacements
+            || self.tombstones != identity.tombstones
+            || self.terminal != identity.terminal
         {
             return Err(ProtocolError::new(
                 ErrorClass::Sequence,
                 "Core event delta acknowledgement does not match its page CAS",
             ));
         }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FinishCoreMaterializationRequest {
-    pub materialization_id: String,
-    pub head: CoreGenerationHead,
-    pub expected_prior_receipt: Option<CoreMaterializationReceiptIdentity>,
-    pub source_delta_pages: u32,
-    pub changed_sources: u32,
-    pub removed_sources: u32,
-    pub event_delta_pages: u32,
-    pub event_mutations: u64,
-}
-
-impl FinishCoreMaterializationRequest {
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        validate_sha256(&self.materialization_id, "Core materialization ID")?;
-        self.head.validate()?;
-        if let Some(receipt) = &self.expected_prior_receipt {
-            receipt.validate()?;
-        }
-        if self.changed_sources > self.head.source_count
-            || usize::try_from(self.removed_sources)
-                .ok()
-                .is_none_or(|count| count > MAX_CORE_SOURCE_STATES)
-            || (self.changed_sources == 0 && self.removed_sources == 0)
-                != (self.event_delta_pages == 0)
-            || self.event_delta_pages < self.changed_sources.saturating_add(self.removed_sources)
-            || (self.changed_sources > 0 || self.removed_sources > 0)
-                && self.source_delta_pages == 0
-        {
-            return Err(ProtocolError::new(
-                ErrorClass::Sequence,
-                "Core materialization terminal counts are inconsistent",
-            ));
-        }
-        validate_encoded_bound(
-            self,
-            MAX_CORE_CONTROL_WIRE_BYTES,
-            "finish Core materialization request exceeds its wire bound",
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CoreMaterializationFinished {
-    pub receipt: CoreMaterializationReceipt,
-    pub replayed: bool,
-}
-
-impl CoreMaterializationFinished {
-    pub fn validate_for(
-        &self,
-        request: &FinishCoreMaterializationRequest,
-    ) -> Result<(), ProtocolError> {
-        request.validate()?;
-        self.receipt.validate_for_head(&request.head)?;
         Ok(())
     }
 }

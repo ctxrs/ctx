@@ -96,11 +96,11 @@ fn strict_native_invocation(body: &Value) -> StrictExtraction<'_> {
         return StrictExtraction::NoTarget;
     };
     if object.get("type").and_then(Value::as_str) != Some("tool") {
-        return body_has_target(body)
-            .then_some(StrictExtraction::Abstained(
-                StrictInvocationAbstention::Opaque,
-            ))
-            .unwrap_or(StrictExtraction::NoTarget);
+        return if body_has_target(body) {
+            StrictExtraction::Abstained(StrictInvocationAbstention::Opaque)
+        } else {
+            StrictExtraction::NoTarget
+        };
     }
     if ["name", "tool_name"]
         .into_iter()
@@ -109,18 +109,18 @@ fn strict_native_invocation(body: &Value) -> StrictExtraction<'_> {
         return StrictExtraction::Abstained(StrictInvocationAbstention::Opaque);
     }
     let Some(tool_name) = object.get("tool").and_then(exact_tool_name) else {
-        return body_has_target(body)
-            .then_some(StrictExtraction::Abstained(
-                StrictInvocationAbstention::Opaque,
-            ))
-            .unwrap_or(StrictExtraction::NoTarget);
+        return if body_has_target(body) {
+            StrictExtraction::Abstained(StrictInvocationAbstention::Opaque)
+        } else {
+            StrictExtraction::NoTarget
+        };
     };
     let Some(kind) = strict_file_action(tool_name) else {
-        return body_has_target(body)
-            .then_some(StrictExtraction::Abstained(
-                StrictInvocationAbstention::Opaque,
-            ))
-            .unwrap_or(StrictExtraction::NoTarget);
+        return if body_has_target(body) {
+            StrictExtraction::Abstained(StrictInvocationAbstention::Opaque)
+        } else {
+            StrictExtraction::NoTarget
+        };
     };
     if ["input", "arguments"]
         .into_iter()
@@ -290,7 +290,7 @@ fn checked_targets(targets: Vec<(String, Option<String>)>) -> StrictTargets {
             .checked_add(path.len())?
             .checked_add(prior.as_deref().map_or(0, str::len))
     });
-    if bytes.map_or(true, |bytes| bytes > MAX_STRICT_TARGET_BYTES) {
+    if bytes.is_none_or(|bytes| bytes > MAX_STRICT_TARGET_BYTES) {
         StrictTargets::Capacity
     } else {
         StrictTargets::Exact(targets)

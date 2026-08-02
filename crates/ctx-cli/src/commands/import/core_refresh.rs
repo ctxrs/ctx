@@ -6,10 +6,8 @@ use crate::{
     config::AppConfig,
     progress::ProgressReporter,
     semantic::{
-        autostart_daemon_and_wait, coordinate_core_refresh_without_autostart,
-        coordinate_core_refresh_without_autostart_with_progress, coordinate_source_backed_refresh,
-        coordinate_source_backed_refresh_with_progress, SourceBackedRefreshMode,
-        SourceBackedRefreshObservation,
+        autostart_daemon_and_wait, coordinate_import_source_backed_refresh_with_progress,
+        SourceBackedRefreshMode, SourceBackedRefreshObservation,
     },
     DaemonTriggerCommandArg,
 };
@@ -36,38 +34,26 @@ pub(super) fn wait_for_import_core_refresh(
         autostart_daemon_and_wait(data_root, config, DaemonTriggerCommandArg::Import)?;
     }
 
-    let mut observe_progress = |update: &crate::semantic::SourceBackedRefreshProgress| {
+    let mut report_progress = |update: &crate::semantic::SourceBackedRefreshProgress| {
         progress.source_refresh(update).map_err(anyhow::Error::new)
     };
-    let refresh = match (request, progress.is_enabled()) {
-        (ImportCoreRefreshRequest::Automatic, false) if no_daemon => {
-            coordinate_core_refresh_without_autostart(data_root, SourceBackedRefreshMode::Wait)
-        }
-        (ImportCoreRefreshRequest::Automatic, false) => {
-            coordinate_source_backed_refresh(data_root, SourceBackedRefreshMode::Wait)
-        }
-        (ImportCoreRefreshRequest::ExplicitCatalog(authority), false) => {
-            SourceBackedRefreshMode::Wait.coordinate_explicit_source_catalog(data_root, authority)
-        }
-        (ImportCoreRefreshRequest::Automatic, true) if no_daemon => {
-            coordinate_core_refresh_without_autostart_with_progress(
+    let refresh = match request {
+        ImportCoreRefreshRequest::Automatic => {
+            coordinate_import_source_backed_refresh_with_progress(
                 data_root,
                 SourceBackedRefreshMode::Wait,
-                &mut observe_progress,
+                None,
+                !no_daemon,
+                &mut report_progress,
             )
         }
-        (ImportCoreRefreshRequest::Automatic, true) => {
-            coordinate_source_backed_refresh_with_progress(
+        ImportCoreRefreshRequest::ExplicitCatalog(authority) => {
+            coordinate_import_source_backed_refresh_with_progress(
                 data_root,
                 SourceBackedRefreshMode::Wait,
-                &mut observe_progress,
-            )
-        }
-        (ImportCoreRefreshRequest::ExplicitCatalog(authority), true) => {
-            SourceBackedRefreshMode::Wait.coordinate_explicit_source_catalog_with_progress(
-                data_root,
-                authority,
-                &mut observe_progress,
+                Some(authority),
+                false,
+                &mut report_progress,
             )
         }
     }

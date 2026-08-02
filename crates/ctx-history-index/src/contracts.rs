@@ -1,13 +1,13 @@
 use ctx_history_core::{
-    core_record_contract_fingerprint, CertifiedSource, CertifiedSourceDeletion,
-    CertifiedSourceInventory, CoreRecordError, ProjectionContractError, SourceKey,
-    CORE_RECORD_VERSION, IDENTITY_VERSION,
+    core_record_contract_fingerprint, CertifiedSource, CoreRecordError, ProjectionContractError,
+    SourceKey, CORE_RECORD_VERSION, IDENTITY_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    hex,
     identity::is_generation_id,
     policy::{
         current_source_generation_policy_hash, LEXICAL_SCHEMA_REVISION, LEXICAL_TOKENIZER_REVISION,
@@ -16,10 +16,12 @@ use crate::{
 };
 
 mod digest;
+mod writer_options;
 
 use digest::{decode_sha256_hex, is_sha256_hex};
+pub use writer_options::WriterOptions;
 
-pub const GENERATION_MANIFEST_VERSION: u32 = 6;
+pub const GENERATION_MANIFEST_VERSION: u32 = 7;
 pub const LEXICAL_SCHEMA_VERSION: u32 = LEXICAL_SCHEMA_REVISION;
 pub const LEXICAL_ANALYZER_VERSION: u32 = LEXICAL_TOKENIZER_REVISION;
 
@@ -132,18 +134,22 @@ pub enum IndexError {
     NonCanonicalManifest,
     #[error("generation manifest sources are not strictly sorted and unique")]
     NonCanonicalManifestSources,
-    #[error("generation manifest removals are not strictly sorted and unique")]
-    NonCanonicalManifestRemovals,
-    #[error("generation source catalog missing states are not strictly sorted and unique")]
-    NonCanonicalSourceCatalogMissingStates,
-    #[error("generation manifest retains and removes source {0}")]
-    ManifestSourceRemovalOverlap(String),
-    #[error("generation source catalog has invalid missing state for source {0}")]
-    InvalidSourceCatalogMissingState(String),
-    #[error("generation source catalog marks unretained source {0} as missing")]
-    SourceCatalogMissingSourceNotRetained(String),
-    #[error("certified removal for source {0} does not match its complete inventory")]
-    InvalidGenerationRemoval(String),
+    #[error("source route identity is not exactly 64 lowercase hexadecimal characters")]
+    InvalidSourceRouteIdentity,
+    #[error("generation source routes are not strictly sorted and unique")]
+    NonCanonicalSourceRoutes,
+    #[error("source route {0} members are not strictly sorted and unique")]
+    NonCanonicalSourceRouteMembers(String),
+    #[error("source route {0} has invalid active missing state")]
+    InvalidSourceRouteMissingState(String),
+    #[error("source route {0} is missing but has no retained members")]
+    EmptyMissingSourceRoute(String),
+    #[error("source route {route_id} contains source {source_id} that is not retained")]
+    SourceRouteMemberNotRetained { route_id: String, source_id: String },
+    #[error("retained source {0} is not owned by a source route")]
+    SourceNotOwnedByRoute(String),
+    #[error("retained source {0} is owned by more than one source route")]
+    SourceOwnedByMultipleRoutes(String),
     #[error(
         "generation manifest totals do not match its source certificates: \
          documents {documents}/{expected_documents}, bytes {bytes}/{expected_bytes}"
@@ -160,20 +166,30 @@ pub enum IndexError {
     IndexMemoryTooSmall { actual: usize, minimum: usize },
     #[error("source replacement has already started for {0}")]
     DuplicateSource(String),
-    #[error("source-scoped staging is already active")]
-    SourceStageAlreadyActive,
-    #[error("source-scoped staging is not active")]
-    SourceStageNotActive,
-    #[error("carried base source {0} cannot be mutated")]
-    CarriedBaseSourceMutation(String),
-    #[error("source {0} is not retained by the locked base generation")]
-    BaseSourceNotRetained(String),
-    #[error("source {0} was observed missing more than once in one refresh")]
-    DuplicateSourceMissingObservation(String),
-    #[error("source {0} cannot enter deletion grace because it is not retained")]
-    SourceMissingObservationNotRetained(String),
-    #[error("automatic source deletion grace must require at least two complete inventories")]
-    InvalidSourceDeletionGraceThreshold,
+    #[error("certified deletion for source {0} does not match its complete inventory")]
+    InvalidCertifiedSourceDeletion(String),
+    #[error("source route {0} was observed missing more than once in one refresh")]
+    DuplicateSourceRouteMissingObservation(String),
+    #[error("source route plan is incomplete or internally inconsistent: {0}")]
+    InvalidSourceRoutePlan(String),
+    #[error("source route staging is already active for {0}")]
+    SourceRouteStagingAlreadyActive(String),
+    #[error("source route staging is not active for {0}")]
+    SourceRouteStagingNotActive(String),
+    #[error("carried source route {route_id} cannot mutate retained source {source_id}")]
+    CarriedSourceRouteMutation { route_id: String, source_id: String },
+    #[error("source route {active_route_id} cannot mutate source {source_id} owned by route {owner_route_id}")]
+    SourceRouteOwnershipMutation {
+        active_route_id: String,
+        owner_route_id: String,
+        source_id: String,
+    },
+    #[error("source route {0} cannot enter deletion grace because it is not retained")]
+    SourceRouteMissingObservationNotRetained(String),
+    #[error(
+        "automatic source route deletion grace must require at least two certified observations"
+    )]
+    InvalidSourceRouteDeletionGraceThreshold,
     #[error("source replacement has not started for {0}")]
     SourceNotStarted(String),
     #[error("source {0} has no certified append frontier in the committed generation")]
@@ -396,33 +412,8 @@ pub enum IndexError {
     CoreRecordAggregateMismatch(String),
 }
 
-#[derive(Debug, Clone)]
-pub struct WriterOptions {
-    pub indexer_threads: usize,
-    pub memory_bytes: usize,
-}
-
-impl Default for WriterOptions {
-    fn default() -> Self {
-        let parallelism = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1);
-        Self {
-            indexer_threads: parallelism.clamp(1, 8),
-            memory_bytes: 512 * 1024 * 1024,
-        }
-    }
-}
-
-/// Metadata-only proof that one source lineage was authoritatively absent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GenerationRemoval {
-    deletion: CertifiedSourceDeletion,
-    inventory: CertifiedSourceInventory,
-}
-
-/// Non-zero number of consecutive complete inventories that omitted a source.
+/// Non-zero number of consecutive certified route observations that found a
+/// whole automatic source route absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ConsecutiveSourceMissingCount(u32);
@@ -445,7 +436,7 @@ impl ConsecutiveSourceMissingCount {
 
     fn validate(self) -> Result<()> {
         if self.0 == 0 {
-            return Err(IndexError::InvalidSourceCatalogMissingState(
+            return Err(IndexError::InvalidSourceRouteMissingState(
                 "zero-count".to_owned(),
             ));
         }
@@ -487,58 +478,32 @@ impl SourceMissingObservationPoint {
     }
 }
 
-/// Durable cross-refresh state for one retained source absent from a complete inventory.
+/// Durable cross-refresh grace for one whole automatic route that is
+/// conclusively absent. It exists only while that route still owns retained
+/// current sources.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SourceCatalogMissingState {
-    latest_deletion_candidate: CertifiedSourceDeletion,
+pub struct SourceRouteMissingState {
     consecutive_missing: ConsecutiveSourceMissingCount,
     first_observation: SourceMissingObservationPoint,
     last_observation: SourceMissingObservationPoint,
 }
 
-impl SourceCatalogMissingState {
-    pub(crate) fn first(
-        latest_deletion_candidate: CertifiedSourceDeletion,
-        observation: SourceMissingObservationPoint,
-    ) -> Self {
+impl SourceRouteMissingState {
+    pub(crate) fn first(observation: SourceMissingObservationPoint) -> Self {
         Self {
-            latest_deletion_candidate,
             consecutive_missing: ConsecutiveSourceMissingCount::first(),
             first_observation: observation.clone(),
             last_observation: observation,
         }
     }
 
-    pub(crate) fn advance(
-        &self,
-        latest_deletion_candidate: CertifiedSourceDeletion,
-        observation: SourceMissingObservationPoint,
-    ) -> Result<Self> {
-        if !self
-            .source()
-            .exact_descriptor_eq(latest_deletion_candidate.source())
-            || !same_inventory_authority(
-                self.latest_deletion_candidate.inventory(),
-                latest_deletion_candidate.inventory(),
-            )
-        {
-            return Ok(Self::first(latest_deletion_candidate, observation));
-        }
+    pub(crate) fn advance(&self, observation: SourceMissingObservationPoint) -> Result<Self> {
         Ok(Self {
-            latest_deletion_candidate,
             consecutive_missing: self.consecutive_missing.incremented()?,
             first_observation: self.first_observation.clone(),
             last_observation: observation,
         })
-    }
-
-    pub fn source(&self) -> &SourceKey {
-        self.latest_deletion_candidate.source()
-    }
-
-    pub fn latest_deletion_candidate(&self) -> &CertifiedSourceDeletion {
-        &self.latest_deletion_candidate
     }
 
     pub fn consecutive_missing(&self) -> ConsecutiveSourceMissingCount {
@@ -553,120 +518,124 @@ impl SourceCatalogMissingState {
         &self.last_observation
     }
 
-    fn validate_contract(&self) -> Result<()> {
-        let source_id = self.source().identity().to_string();
-        self.latest_deletion_candidate
-            .validate_contract()
-            .map_err(|_| IndexError::InvalidSourceCatalogMissingState(source_id.clone()))?;
+    fn validate_contract(&self, route_id: &str) -> Result<()> {
         self.consecutive_missing
             .validate()
-            .map_err(|_| IndexError::InvalidSourceCatalogMissingState(source_id.clone()))?;
+            .map_err(|_| IndexError::InvalidSourceRouteMissingState(route_id.to_owned()))?;
         self.first_observation
             .validate_contract()
-            .map_err(|_| IndexError::InvalidSourceCatalogMissingState(source_id.clone()))?;
+            .map_err(|_| IndexError::InvalidSourceRouteMissingState(route_id.to_owned()))?;
         self.last_observation
             .validate_contract()
-            .map_err(|_| IndexError::InvalidSourceCatalogMissingState(source_id.clone()))?;
+            .map_err(|_| IndexError::InvalidSourceRouteMissingState(route_id.to_owned()))?;
         if self.consecutive_missing.get() == 1 && self.first_observation != self.last_observation {
-            return Err(IndexError::InvalidSourceCatalogMissingState(source_id));
+            return Err(IndexError::InvalidSourceRouteMissingState(
+                route_id.to_owned(),
+            ));
         }
         Ok(())
     }
 }
 
-fn same_inventory_authority(
-    left: &ctx_history_core::SourceInventoryObservation,
-    right: &ctx_history_core::SourceInventoryObservation,
-) -> bool {
-    left.provider() == right.provider()
-        && left.authority_namespace() == right.authority_namespace()
-        && left.authority_key() == right.authority_key()
-}
+/// Exact identity of one selected ingestion route. The digest is derived by
+/// discovery from the provider, format, selection authority, and exact local
+/// route locator; paths themselves do not enter Core or Pro records.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SourceRouteIdentity(String);
 
-/// Generation-bound ctx source catalog state that is not provider content.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceCatalogCheckpoint {
-    missing_sources: Vec<SourceCatalogMissingState>,
-}
-
-impl SourceCatalogCheckpoint {
-    pub(crate) fn from_missing_sources(
-        mut missing_sources: Vec<SourceCatalogMissingState>,
-    ) -> Result<Self> {
-        missing_sources.sort_by(|left, right| {
-            source_sort_key(left.source()).cmp(&source_sort_key(right.source()))
-        });
-        let checkpoint = Self { missing_sources };
-        checkpoint.validate_contract()?;
-        Ok(checkpoint)
+impl SourceRouteIdentity {
+    pub fn from_sha256(value: String) -> Result<Self> {
+        if !is_sha256_hex(&value) {
+            return Err(IndexError::InvalidSourceRouteIdentity);
+        }
+        Ok(Self(value))
     }
 
-    pub fn missing_sources(&self) -> &[SourceCatalogMissingState] {
-        &self.missing_sources
-    }
-
-    pub fn missing_source(&self, source: &SourceKey) -> Option<&SourceCatalogMissingState> {
-        self.missing_sources
-            .binary_search_by(|candidate| {
-                source_sort_key(candidate.source()).cmp(&source_sort_key(source))
-            })
-            .ok()
-            .and_then(|index| self.missing_sources.get(index))
-            .filter(|candidate| candidate.source().exact_descriptor_eq(source))
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.missing_sources.is_empty()
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
     fn validate_contract(&self) -> Result<()> {
-        if self
-            .missing_sources
-            .windows(2)
-            .any(|pair| source_sort_key(pair[0].source()) >= source_sort_key(pair[1].source()))
-        {
-            return Err(IndexError::NonCanonicalSourceCatalogMissingStates);
-        }
-        for state in &self.missing_sources {
-            state.validate_contract()?;
+        if !is_sha256_hex(&self.0) {
+            return Err(IndexError::InvalidSourceRouteIdentity);
         }
         Ok(())
     }
 }
 
-impl GenerationRemoval {
-    pub fn new(
-        deletion: CertifiedSourceDeletion,
-        inventory: CertifiedSourceInventory,
+/// Generation-authoritative membership of one route. `missing` is present
+/// only during active whole-route absence grace; lifetime removed routes are
+/// deliberately absent from the manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRouteSnapshot {
+    route_identity: SourceRouteIdentity,
+    sources: Vec<SourceKey>,
+    missing: Option<SourceRouteMissingState>,
+}
+
+impl SourceRouteSnapshot {
+    pub fn present(route_identity: SourceRouteIdentity, sources: Vec<SourceKey>) -> Result<Self> {
+        Self::new(route_identity, sources, None)
+    }
+
+    pub(crate) fn missing(
+        route_identity: SourceRouteIdentity,
+        sources: Vec<SourceKey>,
+        missing: SourceRouteMissingState,
     ) -> Result<Self> {
-        let removal = Self {
-            deletion,
-            inventory,
+        Self::new(route_identity, sources, Some(missing))
+    }
+
+    fn new(
+        route_identity: SourceRouteIdentity,
+        mut sources: Vec<SourceKey>,
+        missing: Option<SourceRouteMissingState>,
+    ) -> Result<Self> {
+        sources.sort_by_key(source_sort_key);
+        let snapshot = Self {
+            route_identity,
+            sources,
+            missing,
         };
-        removal.validate_contract()?;
-        Ok(removal)
+        snapshot.validate_contract()?;
+        Ok(snapshot)
     }
 
-    pub fn deletion(&self) -> &CertifiedSourceDeletion {
-        &self.deletion
+    pub fn route_identity(&self) -> &SourceRouteIdentity {
+        &self.route_identity
     }
 
-    pub fn inventory(&self) -> &CertifiedSourceInventory {
-        &self.inventory
+    pub fn sources(&self) -> &[SourceKey] {
+        &self.sources
     }
 
-    pub fn source(&self) -> &SourceKey {
-        self.deletion.source()
+    pub fn missing_state(&self) -> Option<&SourceRouteMissingState> {
+        self.missing.as_ref()
     }
 
-    pub(crate) fn validate_contract(&self) -> Result<()> {
-        self.deletion.validate_contract()?;
-        self.inventory.validate_contract()?;
-        if !self.deletion.verifies(&self.inventory) {
-            return Err(IndexError::InvalidGenerationRemoval(
-                self.deletion.source().identity().to_string(),
+    fn validate_contract(&self) -> Result<()> {
+        self.route_identity.validate_contract()?;
+        if self
+            .sources
+            .windows(2)
+            .any(|pair| source_sort_key(&pair[0]) >= source_sort_key(&pair[1]))
+        {
+            return Err(IndexError::NonCanonicalSourceRouteMembers(
+                self.route_identity.0.clone(),
             ));
+        }
+        for source in &self.sources {
+            source.validate_contract()?;
+        }
+        if let Some(missing) = &self.missing {
+            if self.sources.is_empty() {
+                return Err(IndexError::EmptyMissingSourceRoute(
+                    self.route_identity.0.clone(),
+                ));
+            }
+            missing.validate_contract(&self.route_identity.0)?;
         }
         Ok(())
     }
@@ -686,8 +655,7 @@ pub struct GenerationManifest {
     pub certified_source_bytes: u64,
     pub sources: Vec<CertifiedSource>,
     pub core_record_aggregates: Vec<SourceCoreRecordAggregate>,
-    pub removals: Vec<GenerationRemoval>,
-    source_catalog: SourceCatalogCheckpoint,
+    source_routes: Vec<SourceRouteSnapshot>,
 }
 
 /// Incrementally composable commitment to one source's exact stored Core
@@ -757,38 +725,24 @@ impl SourceCoreRecordAggregate {
 impl GenerationManifest {
     #[cfg(test)]
     pub(crate) fn from_sources(sources: Vec<CertifiedSource>) -> Result<Self> {
-        Self::from_parts(sources, Vec::new())
+        let aggregates = test_aggregates(&sources)?;
+        let source_routes = implicit_source_routes(&sources)?;
+        Self::from_parts_with_record_aggregates(sources, aggregates, source_routes)
     }
 
     #[cfg(test)]
     pub(crate) fn from_parts(
         sources: Vec<CertifiedSource>,
-        removals: Vec<GenerationRemoval>,
+        source_routes: Vec<SourceRouteSnapshot>,
     ) -> Result<Self> {
-        let aggregates = sources
-            .iter()
-            .map(|source| {
-                SourceCoreRecordAggregate::new(
-                    crate::source_token(source.observation().source()),
-                    source.counts().indexed_documents,
-                    0,
-                    "00".repeat(32),
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Self::from_catalog_parts_with_record_aggregates(
-            sources,
-            aggregates,
-            removals,
-            SourceCatalogCheckpoint::default(),
-        )
+        let aggregates = test_aggregates(&sources)?;
+        Self::from_parts_with_record_aggregates(sources, aggregates, source_routes)
     }
 
-    pub(crate) fn from_catalog_parts_with_record_aggregates(
+    pub(crate) fn from_parts_with_record_aggregates(
         mut sources: Vec<CertifiedSource>,
         mut core_record_aggregates: Vec<SourceCoreRecordAggregate>,
-        mut removals: Vec<GenerationRemoval>,
-        source_catalog: SourceCatalogCheckpoint,
+        mut source_routes: Vec<SourceRouteSnapshot>,
     ) -> Result<Self> {
         sources.sort_by(|left, right| {
             source_sort_key(left.observation().source())
@@ -800,15 +754,7 @@ impl GenerationManifest {
         }) {
             return Err(IndexError::NonCanonicalManifestSources);
         }
-        removals.sort_by(|left, right| {
-            source_sort_key(left.source()).cmp(&source_sort_key(right.source()))
-        });
-        if removals
-            .windows(2)
-            .any(|pair| source_sort_key(pair[0].source()) >= source_sort_key(pair[1].source()))
-        {
-            return Err(IndexError::NonCanonicalManifestRemovals);
-        }
+        source_routes.sort_by(|left, right| left.route_identity.cmp(&right.route_identity));
         core_record_aggregates.sort_by(|left, right| {
             left.source_identity_digest
                 .cmp(&right.source_identity_digest)
@@ -840,8 +786,7 @@ impl GenerationManifest {
             certified_source_bytes,
             sources,
             core_record_aggregates,
-            removals,
-            source_catalog,
+            source_routes,
         };
         manifest.validate_contract()?;
         Ok(manifest)
@@ -851,8 +796,18 @@ impl GenerationManifest {
         Ok(sha256_hex(&serde_json::to_vec(self)?))
     }
 
-    pub fn source_catalog(&self) -> &SourceCatalogCheckpoint {
-        &self.source_catalog
+    pub fn source_routes(&self) -> &[SourceRouteSnapshot] {
+        &self.source_routes
+    }
+
+    pub fn source_route(
+        &self,
+        route_identity: &SourceRouteIdentity,
+    ) -> Option<&SourceRouteSnapshot> {
+        self.source_routes
+            .binary_search_by(|candidate| candidate.route_identity().cmp(route_identity))
+            .ok()
+            .and_then(|index| self.source_routes.get(index))
     }
 
     pub(crate) fn validate_contract(&self) -> Result<()> {
@@ -863,11 +818,11 @@ impl GenerationManifest {
             return Err(IndexError::NonCanonicalManifestSources);
         }
         if self
-            .removals
+            .source_routes
             .windows(2)
-            .any(|pair| source_sort_key(pair[0].source()) >= source_sort_key(pair[1].source()))
+            .any(|pair| pair[0].route_identity() >= pair[1].route_identity())
         {
-            return Err(IndexError::NonCanonicalManifestRemovals);
+            return Err(IndexError::NonCanonicalSourceRoutes);
         }
         if self
             .core_record_aggregates
@@ -878,25 +833,41 @@ impl GenerationManifest {
                 "non-canonical aggregate ordering".to_owned(),
             ));
         }
-        self.source_catalog.validate_contract()?;
-        let mut source_index = 0;
-        for removal in &self.removals {
-            removal.validate_contract()?;
-            let removal_key = source_sort_key(removal.source());
-            while self
-                .sources
-                .get(source_index)
-                .is_some_and(|source| source_sort_key(source.observation().source()) < removal_key)
-            {
-                source_index += 1;
+        let mut owned_sources = Vec::new();
+        for route in &self.source_routes {
+            route.validate_contract()?;
+            for route_source in route.sources() {
+                let retained = self.sources.binary_search_by(|candidate| {
+                    source_sort_key(candidate.observation().source())
+                        .cmp(&source_sort_key(route_source))
+                });
+                let is_exactly_retained = retained
+                    .ok()
+                    .and_then(|index| self.sources.get(index))
+                    .is_some_and(|source| {
+                        source
+                            .observation()
+                            .source()
+                            .exact_descriptor_eq(route_source)
+                    });
+                if !is_exactly_retained {
+                    return Err(IndexError::SourceRouteMemberNotRetained {
+                        route_id: route.route_identity().as_str().to_owned(),
+                        source_id: route_source.identity().to_string(),
+                    });
+                }
+                owned_sources.push(source_sort_key(route_source));
             }
-            if self
-                .sources
-                .get(source_index)
-                .is_some_and(|source| source_sort_key(source.observation().source()) == removal_key)
-            {
-                return Err(IndexError::ManifestSourceRemovalOverlap(
-                    removal.source().identity().to_string(),
+        }
+        owned_sources.sort();
+        if let Some(duplicate) = owned_sources.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(IndexError::SourceOwnedByMultipleRoutes(hex(&duplicate[0])));
+        }
+        for source in &self.sources {
+            let key = source_sort_key(source.observation().source());
+            if owned_sources.binary_search(&key).is_err() {
+                return Err(IndexError::SourceNotOwnedByRoute(
+                    source.observation().source().identity().to_string(),
                 ));
             }
         }
@@ -936,26 +907,6 @@ impl GenerationManifest {
                 "manifest aggregate cardinality".to_owned(),
             ));
         }
-        for missing in self.source_catalog.missing_sources() {
-            let retained = self.sources.binary_search_by(|candidate| {
-                source_sort_key(candidate.observation().source())
-                    .cmp(&source_sort_key(missing.source()))
-            });
-            let is_exactly_retained = retained
-                .ok()
-                .and_then(|index| self.sources.get(index))
-                .is_some_and(|source| {
-                    source
-                        .observation()
-                        .source()
-                        .exact_descriptor_eq(missing.source())
-                });
-            if !is_exactly_retained {
-                return Err(IndexError::SourceCatalogMissingSourceNotRetained(
-                    missing.source().identity().to_string(),
-                ));
-            }
-        }
         if self.semantic_eligible_documents != expected_semantic_eligible_documents {
             return Err(IndexError::SemanticEligibleDocumentCountMismatch {
                 manifest: self.semantic_eligible_documents,
@@ -974,6 +925,40 @@ impl GenerationManifest {
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+fn test_aggregates(sources: &[CertifiedSource]) -> Result<Vec<SourceCoreRecordAggregate>> {
+    sources
+        .iter()
+        .map(|source| {
+            SourceCoreRecordAggregate::new(
+                crate::source_token(source.observation().source()),
+                source.counts().indexed_documents,
+                0,
+                "00".repeat(32),
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn implicit_source_routes(
+    sources: &[CertifiedSource],
+) -> Result<Vec<SourceRouteSnapshot>> {
+    sources
+        .iter()
+        .map(|source| {
+            let source_key = source.observation().source().clone();
+            let route_identity = SourceRouteIdentity::from_sha256(sha256_hex(
+                format!(
+                    "ctx-implicit-source-route-v1\0{}",
+                    crate::source_token(&source_key)
+                )
+                .as_bytes(),
+            ))?;
+            SourceRouteSnapshot::present(route_identity, vec![source_key])
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

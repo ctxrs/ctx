@@ -4,16 +4,20 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use ctx_history_core::StableEntityId;
+use ctx_history_core::{SourceKey, StableEntityId};
 use ctx_history_index::{
-    CoreEventRecord, SemanticEventCursor, VerifiedIndex, LEXICAL_SCHEMA_VERSION,
-    MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+    CoreEventRecord, SemanticEligibility, SourceCoreRecordAggregate, SourceEventCursor,
+    VerifiedIndex, LEXICAL_SCHEMA_VERSION, MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
-use rusqlite::{params, OptionalExtension};
-use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+#[cfg(test)]
 use uuid::Uuid;
 
-use super::flat_segments::PinnedFlatGeneration;
+use super::control::FULL_REBUILD_STATE;
+use super::flat_segments::{
+    FlatActiveEventLookup, FlatEventMetadataUpdate, FlatSourceHash, FlatSourceReceiptInput,
+    FlatSourceStageResume, PinnedFlatGeneration,
+};
 use super::{SemanticChunkDocument, SemanticVectorStore};
 use crate::semantic::{
     indexing::{semantic_chunks_for_document, semantic_document_hash, semantic_source_text},
@@ -23,13 +27,18 @@ use crate::semantic::{
 };
 
 mod manifest;
+mod state;
 
+#[cfg(test)]
+use manifest::SOURCE_CONTRACT_VERSION;
 use manifest::{
-    semantic_policy_fingerprint, source_consumer_build_id, source_contract_fingerprint,
-    validate_flat_projection, validate_generation, validate_generation_id, validate_page,
-    validate_resolved_document, AcknowledgedSourceProjection, SourceProjectionAcknowledgement,
-    SourceProjectionFrontier, SOURCE_ACKNOWLEDGEMENT_STATE, SOURCE_CONTRACT_VERSION,
-    SOURCE_FRONTIER_STATE, SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
+    semantic_policy_fingerprint, source_contract_fingerprint, validate_generation, validate_page,
+    validate_resolved_document, SourceProjectionFrontier, SourceTraversalPhase,
+    SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
+};
+use state::{
+    clear_active_source, commit_frontier_after_flat, source_projection_states,
+    source_receipt_matches, SourceProjectionStates,
 };
 
 const SEARCH_DIRECTORY: &str = "search";
@@ -40,16 +49,23 @@ pub(in crate::semantic) fn source_backed_semantic_vector_path(data_root: &Path) 
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceBackedSemanticSource {
+    source: SourceKey,
+    aggregate: SourceCoreRecordAggregate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SourceBackedSemanticGeneration {
     pub(super) core_generation_id: String,
     pub(super) semantic_policy_fingerprint: String,
     /// Count of semantic-eligible records in this pinned Core generation.
     pub(super) semantic_documents: u64,
+    sources: Vec<SourceBackedSemanticSource>,
 }
 
 impl SourceBackedSemanticGeneration {
-    /// Binds semantic catch-up to one verified schema-v14 Core manifest and
-    /// mirrors its persisted exact semantic candidate count.
+    /// Binds semantic catch-up to one verified schema-v15 Core manifest and
+    /// mirrors its exact per-source Core commitments.
     pub(super) fn from_verified_index(index: &VerifiedIndex) -> Result<Self> {
         let manifest = index.manifest();
         if LEXICAL_SCHEMA_VERSION != SOURCE_INPUT_LEXICAL_SCHEMA_VERSION
@@ -70,25 +86,61 @@ impl SourceBackedSemanticGeneration {
                 "source-backed semantic document count exceeds its Core manifest"
             ));
         }
+        if manifest.sources.len() != manifest.core_record_aggregates.len() {
+            return Err(anyhow!(
+                "source-backed semantic manifest has mismatched source aggregates"
+            ));
+        }
         let manifest_generation_id = manifest.generation_id()?;
         if manifest_generation_id != index.generation_id() {
             return Err(anyhow!(
                 "source-backed semantic manifest identity does not match its verified index"
             ));
         }
+        let sources = manifest
+            .sources
+            .iter()
+            .zip(&manifest.core_record_aggregates)
+            .map(|(source, aggregate)| SourceBackedSemanticSource {
+                source: source.observation().source().clone(),
+                aggregate: aggregate.clone(),
+            })
+            .collect();
         let generation = Self {
             core_generation_id: manifest_generation_id,
             semantic_policy_fingerprint: semantic_policy_fingerprint()?,
             semantic_documents: manifest.semantic_eligible_documents,
+            sources,
         };
         validate_generation(&generation)?;
         Ok(generation)
+    }
+
+    fn source(&self, source_identity_digest: &str) -> Option<&SourceBackedSemanticSource> {
+        self.sources
+            .binary_search_by(|source| {
+                source
+                    .aggregate
+                    .source_identity_digest()
+                    .cmp(source_identity_digest)
+            })
+            .ok()
+            .map(|index| &self.sources[index])
+    }
+
+    fn sources_after(&self, source_identity_digest: Option<&str>) -> &[SourceBackedSemanticSource] {
+        let start = source_identity_digest.map_or(0, |digest| {
+            self.sources
+                .partition_point(|source| source.aggregate.source_identity_digest() <= digest)
+        });
+        &self.sources[start..]
     }
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct SourceBackedSemanticPage {
     pub(super) core_generation_id: String,
+    pub(super) source_identity_digest: String,
     /// Exclusive keyset cursor used to request this page.
     pub(super) after: Option<StableEntityId>,
     pub(super) records: Vec<CoreEventRecord>,
@@ -108,19 +160,55 @@ pub(in crate::semantic) trait SourceBackedSemanticEmbedder {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(in crate::semantic) struct SourceBackedSemanticOutcome {
+    /// Exact number of complete Core records decoded from changed-source pages.
+    pub(in crate::semantic) records_read: usize,
+    /// Compatibility name retained for daemon progress output.
     pub(in crate::semantic) records_scanned: usize,
     pub(in crate::semantic) records_embedded: usize,
     pub(in crate::semantic) records_reused: usize,
     pub(in crate::semantic) records_filtered: usize,
     pub(in crate::semantic) invalidated_chunks: usize,
     pub(in crate::semantic) deleted_chunks: usize,
+    pub(in crate::semantic) vectors_touched: u64,
+    pub(in crate::semantic) vector_bytes_touched: u64,
+    pub(in crate::semantic) metadata_records_touched: u64,
     pub(in crate::semantic) ready: bool,
     pub(in crate::semantic) work_remaining: bool,
 }
 
+fn merge_outcome(total: &mut SourceBackedSemanticOutcome, next: SourceBackedSemanticOutcome) {
+    total.records_read = total.records_read.saturating_add(next.records_read);
+    total.records_scanned = total.records_scanned.saturating_add(next.records_scanned);
+    total.records_embedded = total.records_embedded.saturating_add(next.records_embedded);
+    total.records_reused = total.records_reused.saturating_add(next.records_reused);
+    total.records_filtered = total.records_filtered.saturating_add(next.records_filtered);
+    total.invalidated_chunks = total
+        .invalidated_chunks
+        .saturating_add(next.invalidated_chunks);
+    total.deleted_chunks = total.deleted_chunks.saturating_add(next.deleted_chunks);
+    total.vectors_touched = total.vectors_touched.saturating_add(next.vectors_touched);
+    total.vector_bytes_touched = total
+        .vector_bytes_touched
+        .saturating_add(next.vector_bytes_touched);
+    total.metadata_records_touched = total
+        .metadata_records_touched
+        .saturating_add(next.metadata_records_touched);
+    total.ready |= next.ready;
+    total.work_remaining |= next.work_remaining;
+}
+
+pub(in crate::semantic) enum SourceBackedGenerationPin {
+    NotReady,
+    ReadyEmpty,
+    Ready(PinnedFlatGeneration),
+}
+
 #[derive(Debug)]
-struct StoredSourceDocument {
-    stable_event_identity: Vec<u8>,
+struct ResolvedSourceDocument {
+    event_id: StableEntityId,
+    stable_identity: Vec<u8>,
+    source_text_sha256: String,
+    seq: u64,
 }
 
 impl SemanticVectorStore {
@@ -135,11 +223,49 @@ impl SemanticVectorStore {
         E: SourceBackedSemanticEmbedder,
     {
         semantic_owned_sidecar_result((|| {
+            let work_before = self.flat.work_stats();
             let generation = SourceBackedSemanticGeneration::from_verified_index(index)?;
+            let mut outcome =
+                self.reconcile_source_backed_generation(index, &generation, builder, embedder)?;
+            let work = self.flat.work_since(work_before);
+            outcome.vectors_touched = work.vectors_touched;
+            outcome.vector_bytes_touched = work.vector_bytes_touched;
+            outcome.metadata_records_touched = work.metadata_records_touched;
+            Ok(outcome)
+        })())
+    }
+
+    fn reconcile_source_backed_generation<B, E>(
+        &mut self,
+        index: &VerifiedIndex,
+        generation: &SourceBackedSemanticGeneration,
+        builder: &mut B,
+        embedder: &mut E,
+    ) -> Result<SourceBackedSemanticOutcome>
+    where
+        B: SourceBackedSemanticDocumentBuilder,
+        E: SourceBackedSemanticEmbedder,
+    {
+        validate_generation(generation)?;
+        if generation.core_generation_id != index.generation_id() {
+            return Err(anyhow!(
+                "source-backed semantic target does not match its pinned Core index"
+            ));
+        }
+        if let Some(outcome) = self.reconcile_pending_full_rebuild()? {
+            return Ok(outcome);
+        }
+        self.flat
+            .begin_source_generation_view()
+            .map_err(anyhow::Error::new)?;
+        let result = (|| {
+            self.recover_lost_flat_publication()?;
             if self
                 .acknowledged_source_projection(
                     &generation.core_generation_id,
                     Some(generation.semantic_documents),
+                    Some(&generation.semantic_policy_fingerprint),
+                    false,
                 )?
                 .is_some()
             {
@@ -148,43 +274,193 @@ impl SemanticVectorStore {
                     ..SourceBackedSemanticOutcome::default()
                 });
             }
-            let frontier = self.begin_or_resume_source_generation(&generation)?;
-            let after = frontier
-                .after_identity
-                .as_deref()
-                .map(StableEntityId::decode_canonical)
-                .transpose()?;
-            let cursor = after.map(|after| {
-                SemanticEventCursor::new(generation.core_generation_id.clone(), after)
-            });
-            let page =
-                index.core_semantic_event_page(cursor.as_ref(), MAX_SEMANTIC_EVENT_PAGE_ITEMS)?;
-            if page.generation_id != generation.core_generation_id
-                || page.eligible_total != generation.semantic_documents
-            {
-                return Err(SemanticVectorStoreError::reset_required(
-                    "pinned semantic event page does not match its verified generation",
-                )
-                .into());
+
+            let mut frontier = self.begin_or_resume_source_generation(generation)?;
+            let mut states =
+                source_projection_states(self.flat.source_states().map_err(anyhow::Error::new)?);
+            let mut total = SourceBackedSemanticOutcome::default();
+            loop {
+                if let Some(source_identity_digest) = frontier.active_source_identity_digest.clone()
+                {
+                    let next = if frontier.removing_source {
+                        self.reconcile_removed_source(
+                            &mut frontier,
+                            &source_identity_digest,
+                            &mut states,
+                        )?
+                    } else {
+                        let source =
+                            generation.source(&source_identity_digest).ok_or_else(|| {
+                                SemanticVectorStoreError::reset_required(
+                            "active semantic source is absent from its pinned Core generation",
+                        )
+                            })?;
+                        if frontier.source_scan_complete {
+                            self.finish_active_source(&mut frontier, source, &mut states)?
+                        } else {
+                            self.reconcile_source_page(
+                                index,
+                                &mut frontier,
+                                source,
+                                builder,
+                                embedder,
+                            )?
+                        }
+                    };
+                    merge_outcome(&mut total, next);
+                    continue;
+                }
+
+                let next = match frontier.source_traversal_phase {
+                    SourceTraversalPhase::RemovingStaleSources => {
+                        self.reconcile_next_stale_source(&mut frontier, generation, &mut states)?
+                    }
+                    SourceTraversalPhase::ReconcilingSources => self.reconcile_next_target_source(
+                        index,
+                        &mut frontier,
+                        generation,
+                        builder,
+                        embedder,
+                        &mut states,
+                    )?,
+                    SourceTraversalPhase::Finalizing => {
+                        let finished =
+                            self.finish_source_generation(&frontier, generation, &states)?;
+                        merge_outcome(&mut total, finished);
+                        total.work_remaining = false;
+                        return Ok(total);
+                    }
+                };
+                merge_outcome(&mut total, next);
             }
-            self.reconcile_source_backed_page(
-                &generation,
-                SourceBackedSemanticPage {
-                    core_generation_id: page.generation_id,
-                    after,
-                    records: page.items,
-                    terminal: page.terminal,
-                },
-                builder,
-                embedder,
-            )
-        })())
+        })();
+        let end = self
+            .flat
+            .end_source_generation_view()
+            .map_err(anyhow::Error::new);
+        match (result, end) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(outcome), Ok(())) => Ok(outcome),
+        }
     }
 
-    pub(super) fn reconcile_source_backed_page<B, E>(
+    fn reconcile_next_stale_source(
         &mut self,
+        frontier: &mut SourceProjectionFrontier,
         generation: &SourceBackedSemanticGeneration,
-        page: SourceBackedSemanticPage,
+        states: &mut SourceProjectionStates,
+    ) -> Result<SourceBackedSemanticOutcome> {
+        let mut after = frontier.source_traversal_after_identity_digest.clone();
+        loop {
+            let source_identity_digest = states
+                .keys()
+                .find(|identity| {
+                    after
+                        .as_deref()
+                        .is_none_or(|after| identity.as_str() > after)
+                })
+                .cloned();
+            let Some(source_identity_digest) = source_identity_digest else {
+                frontier.source_traversal_phase = SourceTraversalPhase::ReconcilingSources;
+                frontier.source_traversal_after_identity_digest = None;
+                self.store_source_frontier(frontier)?;
+                return Ok(SourceBackedSemanticOutcome {
+                    work_remaining: true,
+                    ..SourceBackedSemanticOutcome::default()
+                });
+            };
+            if generation.source(&source_identity_digest).is_none() {
+                frontier.source_traversal_after_identity_digest = after;
+                self.start_source_removal(frontier, &source_identity_digest)?;
+                return self.reconcile_removed_source(frontier, &source_identity_digest, states);
+            }
+            after = Some(source_identity_digest);
+        }
+    }
+
+    fn reconcile_next_target_source<B, E>(
+        &mut self,
+        index: &VerifiedIndex,
+        frontier: &mut SourceProjectionFrontier,
+        generation: &SourceBackedSemanticGeneration,
+        builder: &mut B,
+        embedder: &mut E,
+        states: &mut SourceProjectionStates,
+    ) -> Result<SourceBackedSemanticOutcome>
+    where
+        B: SourceBackedSemanticDocumentBuilder,
+        E: SourceBackedSemanticEmbedder,
+    {
+        let contract_fingerprint = source_contract_fingerprint()?;
+        for source in
+            generation.sources_after(frontier.source_traversal_after_identity_digest.as_deref())
+        {
+            let source_identity_digest = source.aggregate.source_identity_digest();
+            let receipt = states.get(source_identity_digest).and_then(Option::as_ref);
+            if receipt.is_none_or(|receipt| {
+                !source_receipt_matches(
+                    receipt,
+                    source,
+                    &contract_fingerprint,
+                    &generation.semantic_policy_fingerprint,
+                )
+            }) {
+                self.start_source_reconciliation(frontier, source, generation)?;
+                return self.reconcile_source_page(index, frontier, source, builder, embedder);
+            }
+            frontier.source_traversal_after_identity_digest =
+                Some(source_identity_digest.to_owned());
+        }
+        frontier.source_traversal_phase = SourceTraversalPhase::Finalizing;
+        self.store_source_frontier(frontier)?;
+        Ok(SourceBackedSemanticOutcome {
+            work_remaining: true,
+            ..SourceBackedSemanticOutcome::default()
+        })
+    }
+
+    fn reconcile_pending_full_rebuild(&mut self) -> Result<Option<SourceBackedSemanticOutcome>> {
+        let pending = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM semantic_maintenance_state WHERE key = ?1
+             )",
+            [FULL_REBUILD_STATE],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !pending {
+            return Ok(None);
+        }
+        self.flat
+            .begin_reconciliation_view(FULL_REBUILD_STATE)
+            .map_err(anyhow::Error::new)?;
+        let event_ids = self
+            .flat
+            .reconciliation_event_ids(FULL_REBUILD_STATE, MAX_SOURCE_EVENT_PAGE_ITEMS)
+            .map_err(anyhow::Error::new)?;
+        if !event_ids.is_empty() {
+            let deleted_chunks = self.delete_events(&event_ids)?;
+            return Ok(Some(SourceBackedSemanticOutcome {
+                deleted_chunks,
+                work_remaining: true,
+                ..SourceBackedSemanticOutcome::default()
+            }));
+        }
+        self.flat
+            .finish_reconciliation_view()
+            .map_err(anyhow::Error::new)?;
+        self.conn.execute(
+            "DELETE FROM semantic_maintenance_state WHERE key = ?1",
+            [FULL_REBUILD_STATE],
+        )?;
+        Ok(None)
+    }
+
+    fn reconcile_source_page<B, E>(
+        &mut self,
+        index: &VerifiedIndex,
+        frontier: &mut SourceProjectionFrontier,
+        source: &SourceBackedSemanticSource,
         builder: &mut B,
         embedder: &mut E,
     ) -> Result<SourceBackedSemanticOutcome>
@@ -192,465 +468,393 @@ impl SemanticVectorStore {
         B: SourceBackedSemanticDocumentBuilder,
         E: SourceBackedSemanticEmbedder,
     {
-        semantic_owned_sidecar_result((|| {
-            validate_generation(generation)?;
-            let mut frontier = self.begin_or_resume_source_generation(generation)?;
-            validate_page(&frontier, &page)?;
+        let after = frontier
+            .after_identity
+            .as_deref()
+            .map(StableEntityId::decode_canonical)
+            .transpose()?;
+        let cursor = after.map(|after| {
+            SourceEventCursor::new(
+                frontier.core_generation_id.clone(),
+                source.source.clone(),
+                after,
+            )
+        });
+        let core_page = index.core_source_event_page(
+            &source.source,
+            cursor.as_ref(),
+            MAX_SOURCE_EVENT_PAGE_ITEMS,
+        )?;
+        let page = SourceBackedSemanticPage {
+            core_generation_id: core_page.generation_id,
+            source_identity_digest: source.aggregate.source_identity_digest().to_owned(),
+            after,
+            records: core_page.items,
+            terminal: core_page.terminal,
+        };
+        validate_page(frontier, &page)?;
+        let page_documents = u64::try_from(page.records.len())?;
+        let processed_documents = frontier
+            .processed_source_documents
+            .checked_add(page_documents)
+            .ok_or_else(|| {
+                SemanticVectorStoreError::reset_required(
+                    "source-backed semantic source document count overflowed",
+                )
+            })?;
+        if processed_documents > source.aggregate.indexed_documents()
+            || (page.terminal && processed_documents != source.aggregate.indexed_documents())
+        {
+            return Err(SemanticVectorStoreError::reset_required(
+                "source-backed semantic source page count disagrees with its Core aggregate",
+            )
+            .into());
+        }
 
-            // Page records are strictly unique and identity ordered. Pinning
-            // their reuse lookup once keeps every decision on the same flat
-            // generation even when this page publishes replacement segments.
-            let existing_events = self.flat_active_event_lookup()?;
-            let mut outcome = SourceBackedSemanticOutcome::default();
-            for record in page.records {
-                if frontier.processed_documents >= frontier.semantic_documents {
-                    return Err(SemanticVectorStoreError::reset_required(
-                        "source-backed semantic page exceeds its manifest-backed document count",
-                    )
-                    .into());
-                }
-                outcome.records_scanned = outcome.records_scanned.saturating_add(1);
-                let stable_identity = record.event_id.encode_canonical()?.to_vec();
-                let prior = self.stored_source_document(record.event_id.as_uuid())?;
-                if prior.as_ref().is_some_and(|prior| {
-                    prior.stable_event_identity.as_slice() != stable_identity.as_slice()
-                }) {
+        let reconciliation_id = frontier
+            .active_source_reconciliation_id
+            .clone()
+            .ok_or_else(|| {
+                SemanticVectorStoreError::reset_required(
+                    "active semantic source has no reconciliation identity",
+                )
+            })?;
+        let resume = self
+            .flat
+            .begin_source_reconciliation_view(
+                source.aggregate.source_identity_digest(),
+                &reconciliation_id,
+                &frontier.flat_publication,
+                frontier.flat_staging.as_ref(),
+            )
+            .map_err(anyhow::Error::new)?;
+        if resume == FlatSourceStageResume::Restarted {
+            frontier.processed_source_documents = 0;
+            frontier.processed_source_semantic_documents = 0;
+            frontier.after_identity = None;
+            frontier.source_scan_complete = false;
+            frontier.flat_staging = None;
+            self.store_source_frontier(frontier)?;
+            return Ok(SourceBackedSemanticOutcome {
+                work_remaining: true,
+                ..SourceBackedSemanticOutcome::default()
+            });
+        }
+        let eligible_event_ids = page
+            .records
+            .iter()
+            .filter(|record| SemanticEligibility::CURRENT.includes(&record.event))
+            .map(|record| record.event_id.as_uuid())
+            .collect::<Vec<_>>();
+        let existing_events = self
+            .flat
+            .source_reconciliation_events(&eligible_event_ids)
+            .map_err(anyhow::Error::new)?
+            .into_iter()
+            .zip(eligible_event_ids)
+            .filter_map(|(event, event_id)| event.map(|event| (event_id, event)))
+            .collect::<HashMap<_, _>>();
+        let existing_lookup =
+            FlatActiveEventLookup::from_events(existing_events.values().cloned().collect());
+        let mut outcome = SourceBackedSemanticOutcome {
+            records_read: page.records.len(),
+            records_scanned: page.records.len(),
+            ..SourceBackedSemanticOutcome::default()
+        };
+        let mut semantic_records = 0_u64;
+        let mut replacements = Vec::new();
+        let mut resolved = Vec::new();
+        let mut retire = Vec::new();
+
+        for record in &page.records {
+            if !SemanticEligibility::CURRENT.includes(&record.event) {
+                continue;
+            }
+            semantic_records = semantic_records.checked_add(1).ok_or_else(|| {
+                SemanticVectorStoreError::reset_required(
+                    "source-backed semantic candidate count overflowed",
+                )
+            })?;
+            let stable_identity = record.event_id.encode_canonical()?.to_vec();
+            let stable_identity_hash = Sha256::digest(&stable_identity);
+            if let Some(prior) = existing_events.get(&record.event_id.as_uuid()) {
+                if (prior.stable_identity_hash != [0; 32]
+                    && prior.stable_identity_hash != stable_identity_hash.as_slice())
+                    || prior.source_identity_digest != source.aggregate.source_identity_digest()
+                {
                     return Err(SemanticVectorStoreError::storage_conflict(format!(
                         "source-backed semantic compact identity collision at {}",
                         record.event_id.as_uuid()
                     ))
                     .into());
                 }
-
-                let Some(document) = builder.build_document(&record)? else {
-                    outcome.invalidated_chunks = outcome
-                        .invalidated_chunks
-                        .saturating_add(self.invalidate_source_event(record.event_id.as_uuid())?);
-                    outcome.records_filtered = outcome.records_filtered.saturating_add(1);
-                    frontier.processed_documents =
-                        frontier.processed_documents.checked_add(1).ok_or_else(|| {
-                            SemanticVectorStoreError::reset_required(
-                                "source-backed semantic frontier document count overflowed",
-                            )
-                        })?;
-                    frontier.after_identity = Some(stable_identity);
-                    frontier.last_failure = None;
-                    self.store_source_frontier(&frontier)?;
-                    continue;
-                };
-                validate_resolved_document(&record, &document)?;
-
-                let source_text = semantic_source_text(&document.text);
-                if semantic_core_content_is_control(&source_text) {
-                    outcome.invalidated_chunks = outcome
-                        .invalidated_chunks
-                        .saturating_add(self.invalidate_source_event(record.event_id.as_uuid())?);
-                    outcome.records_filtered = outcome.records_filtered.saturating_add(1);
-                    frontier.processed_documents =
-                        frontier.processed_documents.checked_add(1).ok_or_else(|| {
-                            SemanticVectorStoreError::reset_required(
-                                "source-backed semantic frontier document count overflowed",
-                            )
-                        })?;
-                    frontier.after_identity = Some(stable_identity);
-                    frontier.last_failure = None;
-                    self.store_source_frontier(&frontier)?;
-                    continue;
-                }
-                let source_text_sha256 = semantic_document_hash(
-                    &document,
-                    &source_text,
-                    &generation.semantic_policy_fingerprint,
-                );
-                let reusable = existing_events
-                    .event(document.event_id)
-                    .is_some_and(|event| {
-                        event.source_text_hash.to_hex().as_str() == source_text_sha256.as_str()
-                    });
-                if reusable {
-                    outcome.records_reused = outcome.records_reused.saturating_add(1);
-                } else {
-                    let chunks =
-                        semantic_chunks_for_document(&document, &source_text, &source_text_sha256);
-                    if chunks.is_empty() {
-                        return Err(anyhow!(
-                            "Core semantic projection produced an empty document for {}",
-                            record.event_id
-                        ));
-                    }
-                    let embeddings = embedder.embed_chunks(&chunks)?;
-                    if embeddings.len() != chunks.len()
-                        || embeddings
-                            .iter()
-                            .any(|embedding| embedding.len() != SEMANTIC_DIMENSIONS)
-                    {
-                        return Err(SemanticVectorStoreError::unavailable(
-                            "source-backed semantic embedder returned an invalid batch",
-                        )
-                        .into());
-                    }
-                    let items = chunks.into_iter().zip(embeddings).collect::<Vec<_>>();
-                    self.upsert_chunk_embeddings(&items)?;
-                    outcome.records_embedded = outcome.records_embedded.saturating_add(1);
-                }
-
-                self.store_resolved_source_document(
-                    record.event_id,
-                    &stable_identity,
-                    &source_text_sha256,
-                    &frontier,
-                )?;
-                frontier.processed_documents =
-                    frontier.processed_documents.checked_add(1).ok_or_else(|| {
-                        SemanticVectorStoreError::reset_required(
-                            "source-backed semantic frontier document count overflowed",
-                        )
-                    })?;
-                frontier.after_identity = Some(stable_identity);
-                frontier.last_failure = None;
-                self.store_source_frontier(&frontier)?;
             }
 
-            if page.terminal {
-                if frontier.processed_documents != frontier.semantic_documents {
-                    return Err(SemanticVectorStoreError::reset_required(format!(
-                        "source-backed semantic terminal count mismatch: processed {}, expected {}",
-                        frontier.processed_documents, frontier.semantic_documents
-                    ))
+            let Some(document) = builder.build_document(record)? else {
+                retire.push(record.event_id.as_uuid());
+                outcome.records_filtered = outcome.records_filtered.saturating_add(1);
+                continue;
+            };
+            validate_resolved_document(record, &document)?;
+            let source_text = semantic_source_text(&document.text);
+            if semantic_core_content_is_control(&source_text) {
+                retire.push(record.event_id.as_uuid());
+                outcome.records_filtered = outcome.records_filtered.saturating_add(1);
+                continue;
+            }
+            let source_text_sha256 = semantic_document_hash(
+                &document,
+                &source_text,
+                &frontier.semantic_policy_fingerprint,
+            );
+            let reusable = existing_events
+                .get(&document.event_id)
+                .is_some_and(|event| event.source_text_hash.to_hex() == source_text_sha256);
+            if reusable {
+                outcome.records_reused = outcome.records_reused.saturating_add(1);
+            } else {
+                let chunks =
+                    semantic_chunks_for_document(&document, &source_text, &source_text_sha256);
+                if chunks.is_empty() {
+                    return Err(anyhow!(
+                        "Core semantic projection produced an empty document for {}",
+                        record.event_id
+                    ));
+                }
+                let embeddings = embedder.embed_chunks(&chunks)?;
+                if embeddings.len() != chunks.len()
+                    || embeddings
+                        .iter()
+                        .any(|embedding| embedding.len() != SEMANTIC_DIMENSIONS)
+                {
+                    return Err(SemanticVectorStoreError::unavailable(
+                        "source-backed semantic embedder returned an invalid batch",
+                    )
                     .into());
                 }
-                outcome.deleted_chunks = self.finish_source_generation(&frontier)?;
-                outcome.ready = true;
-            } else {
-                outcome.work_remaining = true;
+                replacements.extend(chunks.into_iter().zip(embeddings));
+                outcome.records_embedded = outcome.records_embedded.saturating_add(1);
             }
-            Ok(outcome)
-        })())
-    }
-
-    #[cfg(test)]
-    pub(in crate::semantic) fn source_backed_generation_ready(
-        &self,
-        core_generation_id: &str,
-    ) -> Result<bool> {
-        semantic_owned_sidecar_result(
-            self.acknowledged_source_projection(core_generation_id, None)
-                .map(|projection| projection.is_some()),
-        )
-    }
-
-    pub(in crate::semantic) fn pin_source_backed_generation(
-        &self,
-        core_generation_id: &str,
-        semantic_documents: u64,
-    ) -> Result<Option<PinnedFlatGeneration>> {
-        semantic_owned_sidecar_result(
-            self.acknowledged_source_projection(core_generation_id, Some(semantic_documents))
-                .map(|projection| projection.and_then(|projection| projection.flat)),
-        )
-    }
-
-    pub(in crate::semantic) fn source_backed_generation_ready_exact(
-        &self,
-        core_generation_id: &str,
-        semantic_documents: u64,
-    ) -> Result<bool> {
-        semantic_owned_sidecar_result(
-            self.acknowledged_source_projection(core_generation_id, Some(semantic_documents))
-                .map(|projection| projection.is_some()),
-        )
-    }
-
-    fn acknowledged_source_projection(
-        &self,
-        core_generation_id: &str,
-        expected_semantic_documents: Option<u64>,
-    ) -> Result<Option<AcknowledgedSourceProjection>> {
-        (|| {
-            validate_generation_id(core_generation_id)?;
-            let Some(acknowledgement) = self.source_acknowledgement()? else {
-                return Ok(None);
-            };
-            if self.source_frontier()?.is_some() {
-                return Ok(None);
-            }
-            let fingerprint = source_contract_fingerprint()?;
-            if acknowledgement.contract_version != SOURCE_CONTRACT_VERSION
-                || acknowledgement.contract_fingerprint != fingerprint
-                || acknowledgement.core_generation_id != core_generation_id
-                || acknowledgement.semantic_policy_fingerprint != semantic_policy_fingerprint()?
-                || acknowledgement.consumer_build_id
-                    != source_consumer_build_id(&fingerprint, core_generation_id)
-                || expected_semantic_documents
-                    .is_some_and(|expected| acknowledgement.semantic_documents != expected)
-            {
-                return Ok(None);
-            }
-            let stored_documents: u64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM semantic_source_documents
-                 WHERE core_generation_id = ?1",
-                [core_generation_id],
-                |row| row.get(0),
-            )?;
-            if acknowledgement.projected_documents != stored_documents
-                || acknowledgement.projected_documents > acknowledgement.semantic_documents
-            {
-                return Ok(None);
-            }
-            let pinned = self.flat_pin_generation()?;
-            if acknowledgement.projected_documents == 0 {
-                let flat_matches = match pinned.as_ref() {
-                    Some(pinned) => {
-                        acknowledgement.flat_generation == pinned.generation()
-                            && acknowledgement.flat_generation_hash == pinned.generation_hash()
-                            && acknowledgement.flat_active_events
-                                == pinned.stats().active_events as u64
-                            && acknowledgement.flat_active_chunks
-                                == pinned.stats().active_chunks as u64
-                            && acknowledgement.flat_active_events == 0
-                            && acknowledgement.flat_active_chunks == 0
-                    }
-                    None => {
-                        acknowledgement.flat_generation == 0
-                            && acknowledgement.flat_generation_hash.is_empty()
-                            && acknowledgement.flat_active_events == 0
-                            && acknowledgement.flat_active_chunks == 0
-                    }
-                };
-                return Ok(flat_matches.then_some(AcknowledgedSourceProjection { flat: pinned }));
-            }
-            let Some(pinned) = pinned else {
-                return Ok(None);
-            };
-            let stats = pinned.stats();
-            let matches = acknowledgement.flat_generation != 0
-                && acknowledgement.flat_generation == pinned.generation()
-                && acknowledgement.flat_generation_hash == pinned.generation_hash()
-                && acknowledgement.flat_active_events == stats.active_events as u64
-                && acknowledgement.flat_active_chunks == stats.active_chunks as u64
-                && acknowledgement.flat_active_events == acknowledgement.projected_documents;
-            Ok(matches.then_some(AcknowledgedSourceProjection { flat: Some(pinned) }))
-        })()
-    }
-
-    fn begin_or_resume_source_generation(
-        &self,
-        generation: &SourceBackedSemanticGeneration,
-    ) -> Result<SourceProjectionFrontier> {
-        let fingerprint = source_contract_fingerprint()?;
-        if let Some(frontier) = self.source_frontier()? {
-            if frontier.contract_version == SOURCE_CONTRACT_VERSION
-                && frontier.contract_fingerprint == fingerprint
-                && frontier.core_generation_id == generation.core_generation_id
-                && frontier.semantic_policy_fingerprint == generation.semantic_policy_fingerprint
-                && frontier.semantic_documents == generation.semantic_documents
-            {
-                return Ok(frontier);
-            }
-        }
-        let frontier = SourceProjectionFrontier {
-            contract_version: SOURCE_CONTRACT_VERSION,
-            contract_fingerprint: fingerprint.clone(),
-            core_generation_id: generation.core_generation_id.clone(),
-            semantic_policy_fingerprint: generation.semantic_policy_fingerprint.clone(),
-            consumer_build_id: source_consumer_build_id(
-                &fingerprint,
-                &generation.core_generation_id,
-            ),
-            semantic_documents: generation.semantic_documents,
-            processed_documents: 0,
-            after_identity: None,
-            last_failure: None,
-        };
-        let transaction = self.conn.unchecked_transaction()?;
-        transaction.execute(
-            "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![SOURCE_FRONTIER_STATE, serde_json::to_string(&frontier)?],
-        )?;
-        transaction.execute(
-            "DELETE FROM semantic_maintenance_state WHERE key = ?1",
-            [SOURCE_ACKNOWLEDGEMENT_STATE],
-        )?;
-        transaction.commit()?;
-        Ok(frontier)
-    }
-
-    fn source_frontier(&self) -> Result<Option<SourceProjectionFrontier>> {
-        self.maintenance_json(SOURCE_FRONTIER_STATE)
-    }
-
-    fn source_acknowledgement(&self) -> Result<Option<SourceProjectionAcknowledgement>> {
-        self.maintenance_json(SOURCE_ACKNOWLEDGEMENT_STATE)
-    }
-
-    fn maintenance_json<T>(&self, key: &str) -> Result<Option<T>>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        let value = self
-            .conn
-            .query_row(
-                "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
-                [key],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        value
-            .map(|value| {
-                serde_json::from_str(&value).map_err(|error| {
-                    SemanticVectorStoreError::reset_required(format!(
-                        "semantic vector store has invalid {key} state: {error}"
-                    ))
-                    .into()
-                })
-            })
-            .transpose()
-    }
-
-    fn store_source_frontier(&self, frontier: &SourceProjectionFrontier) -> Result<()> {
-        self.store_maintenance_json(SOURCE_FRONTIER_STATE, frontier)
-    }
-
-    fn store_maintenance_json<T>(&self, key: &str, value: &T) -> Result<()>
-    where
-        T: Serialize,
-    {
-        self.conn.execute(
-            "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, serde_json::to_string(value)?],
-        )?;
-        Ok(())
-    }
-
-    fn stored_source_document(&self, event_id: Uuid) -> Result<Option<StoredSourceDocument>> {
-        self.conn
-            .query_row(
-                "SELECT stable_event_identity, source_text_sha256, core_generation_id
-                 FROM semantic_source_documents WHERE event_id = ?1",
-                [event_id.to_string()],
-                |row| {
-                    let stable_event_identity = row.get(0)?;
-                    let _source_text_sha256 = row.get::<_, String>(1)?;
-                    let _core_generation_id = row.get::<_, String>(2)?;
-                    Ok(StoredSourceDocument {
-                        stable_event_identity,
-                    })
-                },
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    fn store_resolved_source_document(
-        &self,
-        event_id: StableEntityId,
-        stable_identity: &[u8],
-        source_text_sha256: &str,
-        frontier: &SourceProjectionFrontier,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO semantic_source_documents
-             (event_id, stable_event_identity, source_text_sha256, core_generation_id,
-              consumer_build_id)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(event_id) DO UPDATE SET
-                stable_event_identity = excluded.stable_event_identity,
-                source_text_sha256 = excluded.source_text_sha256,
-                core_generation_id = excluded.core_generation_id,
-                consumer_build_id = excluded.consumer_build_id",
-            params![
-                event_id.as_uuid().to_string(),
+            resolved.push(ResolvedSourceDocument {
+                event_id: record.event_id,
                 stable_identity,
                 source_text_sha256,
-                frontier.core_generation_id,
-                frontier.consumer_build_id,
-            ],
-        )?;
-        Ok(())
-    }
+                seq: document.seq,
+            });
+        }
 
-    fn invalidate_source_event(&mut self, event_id: Uuid) -> Result<usize> {
-        self.delete_events(&[event_id])
-    }
+        let processed_semantic_documents = frontier
+            .processed_source_semantic_documents
+            .checked_add(semantic_records)
+            .ok_or_else(|| {
+                SemanticVectorStoreError::reset_required(
+                    "source-backed semantic source candidate count overflowed",
+                )
+            })?;
+        if processed_semantic_documents > source.aggregate.semantic_eligible_documents()
+            || (page.terminal
+                && processed_semantic_documents != source.aggregate.semantic_eligible_documents())
+        {
+            return Err(SemanticVectorStoreError::reset_required(
+                "source-backed semantic candidate count disagrees with its Core aggregate",
+            )
+            .into());
+        }
 
-    fn finish_source_generation(&mut self, frontier: &SourceProjectionFrontier) -> Result<usize> {
-        let mut statement = self.conn.prepare(
-            "SELECT event_id, source_text_sha256
-             FROM semantic_source_documents WHERE core_generation_id = ?1",
-        )?;
-        let rows = statement.query_map([&frontier.core_generation_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let current = rows
-            .map(|row| {
-                let (value, source_text_sha256) = row?;
-                Uuid::parse_str(&value)
-                    .map_err(|_| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            0,
-                            rusqlite::types::Type::Text,
-                            Box::new(SemanticVectorStoreError::reset_required(format!(
-                                "invalid source-backed semantic event id: {value}"
-                            ))),
-                        )
-                    })
-                    .map(|event_id| (event_id, source_text_sha256))
+        let metadata_updates = resolved
+            .iter()
+            .map(|document| {
+                let stable_identity_hash = Sha256::digest(&document.stable_identity);
+                let mut stable_identity = [0_u8; 32];
+                stable_identity.copy_from_slice(&stable_identity_hash);
+                Ok(FlatEventMetadataUpdate {
+                    event_id: document.event_id.as_uuid(),
+                    seq: document.seq,
+                    source_text_hash: FlatSourceHash::parse_hex(&document.source_text_sha256)
+                        .map_err(anyhow::Error::new)?,
+                    stable_identity_hash: stable_identity,
+                })
             })
-            .collect::<std::result::Result<HashMap<_, _>, _>>()?;
-        drop(statement);
-        let retired = self
-            .flat_active_events()?
-            .into_iter()
-            .map(|event| event.event_id)
-            .filter(|event_id| !current.contains_key(event_id))
-            .collect::<Vec<_>>();
-        let deleted = self.delete_events(&retired)?;
-        let pinned = self.flat_pin_generation()?;
-        let projected_documents = validate_flat_projection(frontier, &current, pinned.as_ref())?;
+            .collect::<Result<Vec<_>>>()?;
+        outcome.invalidated_chunks = retire.iter().try_fold(0_usize, |total, event_id| {
+            total
+                .checked_add(
+                    existing_events
+                        .get(event_id)
+                        .map_or(0, |event| event.chunk_count as usize),
+                )
+                .ok_or_else(|| {
+                    anyhow::Error::new(SemanticVectorStoreError::reset_required(
+                        "semantic invalidated chunk count overflowed",
+                    ))
+                })
+        })?;
+        let publication =
+            self.publish_source_page(&replacements, &metadata_updates, &retire, &existing_lookup)?;
+        frontier.processed_source_documents = processed_documents;
+        frontier.processed_source_semantic_documents = processed_semantic_documents;
+        if let Some(last) = page.records.last() {
+            frontier.after_identity = Some(last.event_id.encode_canonical()?.to_vec());
+        }
+        frontier.source_scan_complete = page.terminal;
+        frontier.last_failure = None;
+        frontier.flat_staging = Some(publication.staging.clone());
 
         let transaction = self.conn.transaction()?;
-        transaction.execute(
-            "DELETE FROM semantic_source_documents WHERE core_generation_id != ?1",
-            [&frontier.core_generation_id],
-        )?;
-        let acknowledgement = SourceProjectionAcknowledgement {
-            contract_version: frontier.contract_version,
-            contract_fingerprint: frontier.contract_fingerprint.clone(),
-            core_generation_id: frontier.core_generation_id.clone(),
-            semantic_policy_fingerprint: frontier.semantic_policy_fingerprint.clone(),
-            consumer_build_id: frontier.consumer_build_id.clone(),
-            semantic_documents: frontier.semantic_documents,
-            projected_documents,
-            flat_generation: pinned.as_ref().map_or(0, PinnedFlatGeneration::generation),
-            flat_generation_hash: pinned
-                .as_ref()
-                .map_or_else(String::new, |pinned| pinned.generation_hash().to_owned()),
-            flat_active_events: pinned
-                .as_ref()
-                .map_or(0, |pinned| pinned.stats().active_events as u64),
-            flat_active_chunks: pinned
-                .as_ref()
-                .map_or(0, |pinned| pinned.stats().active_chunks as u64),
-        };
-        transaction.execute(
-            "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![
-                SOURCE_ACKNOWLEDGEMENT_STATE,
-                serde_json::to_string(&acknowledgement)?
-            ],
-        )?;
-        transaction.execute(
-            "DELETE FROM semantic_maintenance_state WHERE key = ?1",
-            [SOURCE_FRONTIER_STATE],
-        )?;
+        commit_frontier_after_flat(&transaction, frontier, None)?;
         transaction.commit()?;
-        Ok(deleted)
+        #[cfg(test)]
+        if self.flat.take_source_frontier_commit_failure() {
+            return Err(anyhow!(
+                "injected failure after semantic source frontier commit"
+            ));
+        }
+
+        outcome.work_remaining = true;
+        Ok(outcome)
+    }
+
+    fn finish_active_source(
+        &mut self,
+        frontier: &mut SourceProjectionFrontier,
+        source: &SourceBackedSemanticSource,
+        states: &mut SourceProjectionStates,
+    ) -> Result<SourceBackedSemanticOutcome> {
+        let reconciliation_id = frontier
+            .active_source_reconciliation_id
+            .as_deref()
+            .ok_or_else(|| {
+                SemanticVectorStoreError::reset_required(
+                    "completed semantic source has no reconciliation identity",
+                )
+            })?;
+        let resume = self
+            .flat
+            .begin_source_reconciliation_view(
+                source.aggregate.source_identity_digest(),
+                reconciliation_id,
+                &frontier.flat_publication,
+                frontier.flat_staging.as_ref(),
+            )
+            .map_err(anyhow::Error::new)?;
+        if resume == FlatSourceStageResume::Restarted {
+            frontier.processed_source_documents = 0;
+            frontier.processed_source_semantic_documents = 0;
+            frontier.after_identity = None;
+            frontier.source_scan_complete = false;
+            frontier.flat_staging = None;
+            self.store_source_frontier(frontier)?;
+            return Ok(SourceBackedSemanticOutcome {
+                work_remaining: true,
+                ..SourceBackedSemanticOutcome::default()
+            });
+        }
+
+        let finalization = self
+            .flat
+            .finish_source_reconciliation_view(Some(FlatSourceReceiptInput {
+                source_identity_digest: source.aggregate.source_identity_digest().to_owned(),
+                source_reconciliation_id: reconciliation_id.to_owned(),
+                indexed_documents: source.aggregate.indexed_documents(),
+                semantic_eligible_documents: source.aggregate.semantic_eligible_documents(),
+                core_record_accumulator: source.aggregate.core_record_accumulator().to_owned(),
+                contract_fingerprint: frontier.contract_fingerprint.clone(),
+                semantic_policy_fingerprint: frontier.semantic_policy_fingerprint.clone(),
+            }))
+            .map_err(anyhow::Error::new)?;
+        #[cfg(test)]
+        if self.flat.take_source_finalization_failure() {
+            return Err(anyhow!(
+                "injected failure after semantic source finalization"
+            ));
+        }
+        let receipt = finalization.receipt.ok_or_else(|| {
+            SemanticVectorStoreError::reset_required(
+                "completed semantic source has no Flat-owned receipt",
+            )
+        })?;
+        let source_identity_digest = source.aggregate.source_identity_digest().to_owned();
+        states.insert(source_identity_digest.clone(), Some(receipt));
+        clear_active_source(frontier);
+        frontier.source_traversal_after_identity_digest = Some(source_identity_digest);
+        let transaction = self.conn.transaction()?;
+        commit_frontier_after_flat(&transaction, frontier, Some(&finalization.publication))?;
+        transaction.commit()?;
+        #[cfg(test)]
+        if self.flat.take_source_publication_commit_failure() {
+            return Err(anyhow!(
+                "injected failure after published semantic source frontier commit before staging acknowledgement"
+            ));
+        }
+        self.flat
+            .acknowledge_source_staging(&finalization.publication.token())
+            .map_err(anyhow::Error::new)?;
+        Ok(SourceBackedSemanticOutcome {
+            deleted_chunks: usize::try_from(finalization.deleted_chunks).unwrap_or(usize::MAX),
+            work_remaining: true,
+            ..SourceBackedSemanticOutcome::default()
+        })
+    }
+
+    fn reconcile_removed_source(
+        &mut self,
+        frontier: &mut SourceProjectionFrontier,
+        source_identity_digest: &str,
+        states: &mut SourceProjectionStates,
+    ) -> Result<SourceBackedSemanticOutcome> {
+        let removal_reconciliation_id = format!(
+            "remove-{}-{source_identity_digest}",
+            frontier.core_generation_id
+        );
+        let resume = self
+            .flat
+            .begin_source_reconciliation_view(
+                source_identity_digest,
+                &removal_reconciliation_id,
+                &frontier.flat_publication,
+                frontier.flat_staging.as_ref(),
+            )
+            .map_err(anyhow::Error::new)?;
+        if resume == FlatSourceStageResume::Restarted {
+            frontier.flat_staging = None;
+            self.store_source_frontier(frontier)?;
+            return Ok(SourceBackedSemanticOutcome {
+                work_remaining: true,
+                ..SourceBackedSemanticOutcome::default()
+            });
+        }
+        let finalization = self
+            .flat
+            .finish_source_reconciliation_view(None)
+            .map_err(anyhow::Error::new)?;
+        #[cfg(test)]
+        if self.flat.take_source_finalization_failure() {
+            return Err(anyhow!(
+                "injected failure after semantic source finalization"
+            ));
+        }
+        states.remove(source_identity_digest);
+        frontier.source_traversal_after_identity_digest = Some(source_identity_digest.to_owned());
+        clear_active_source(frontier);
+        let transaction = self.conn.transaction()?;
+        commit_frontier_after_flat(&transaction, frontier, Some(&finalization.publication))?;
+        transaction.commit()?;
+        #[cfg(test)]
+        if self.flat.take_source_publication_commit_failure() {
+            return Err(anyhow!(
+                "injected failure after published semantic source frontier commit before staging acknowledgement"
+            ));
+        }
+        self.flat
+            .acknowledge_source_staging(&finalization.publication.token())
+            .map_err(anyhow::Error::new)?;
+        Ok(SourceBackedSemanticOutcome {
+            deleted_chunks: usize::try_from(finalization.deleted_chunks).unwrap_or(usize::MAX),
+            work_remaining: true,
+            ..SourceBackedSemanticOutcome::default()
+        })
     }
 }
-
 /// Control-message exclusion is applied only after complete normalized Core
 /// content has crossed the generation pin.
 pub(in crate::semantic) fn semantic_core_content_is_control(text: &str) -> bool {

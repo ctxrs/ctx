@@ -63,7 +63,7 @@ pub(crate) use client_status::smoke_qualification_helper;
 #[cfg(test)]
 pub(crate) use client_status::status_with_helper_resolver;
 pub(crate) use client_status::{
-    smoke_helper_at_path, status, HelperSmoke, ProSetupRepairability, ProStatus,
+    smoke_helper_at_path, status, status_for_core, HelperSmoke, ProSetupRepairability, ProStatus,
 };
 
 #[cfg(unix)]

@@ -22,6 +22,15 @@ use super::*;
 
 const PATH: &str = "src/lib.rs";
 
+fn protocol_snapshot() -> ctx_pro_host_protocol::QuerySnapshotExpectation {
+    ctx_pro_host_protocol::QuerySnapshotExpectation::Core {
+        receipt: ctx_pro_host_protocol::CoreMaterializationReceiptIdentity {
+            core_generation_id: "a".repeat(64),
+            materializer_revision: "materializer-v1".to_owned(),
+        },
+    }
+}
+
 fn source(seed: u8) -> SourceKey {
     SourceKey::derive(
         "codex",
@@ -157,6 +166,7 @@ fn evidence(record: &CoreRecord, generation: &str, number: u32) -> NumberedEvide
 
 fn result(evidence: Vec<NumberedEvidence>) -> BlameResult {
     BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::File {
             path: PATH.to_owned(),
             repository: ResourceRef {

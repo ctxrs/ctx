@@ -186,16 +186,38 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
         .is_some_and(|count| count >= 1));
     assert_eq!(stdout["sources"][0]["status"], "published");
     assert!(stdout["sources"][0]["published_generation"].is_string());
-    assert!(
-        !serde_json::to_string(&stdout)
-            .unwrap()
-            .contains("current_source_progress"),
-        "progress details must remain stderr-only: {stdout:#}"
-    );
 
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(r#""type":"ctx_progress""#), "{stderr}");
     assert!(stderr.contains(r#""operation":"import""#), "{stderr}");
+}
+
+#[test]
+fn warm_no_op_import_progress_keeps_per_run_bytes_unknown() {
+    let temp = tempdir();
+    copy_dir_all(
+        Path::new(&provider_history_fixture("codex-sessions")),
+        &temp.path().join(".codex").join("sessions"),
+    );
+    ctx(&temp)
+        .args(["import", "--all", "--format=json", "--progress", "none"])
+        .assert()
+        .success();
+    let output = ctx(&temp)
+        .args(["import", "--all", "--format=json", "--progress", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let terminal = String::from_utf8(output.stderr)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["done"] == true && line["phase"] == "published")
+        .expect("terminal JSON progress event");
+    assert_eq!(terminal["completed_bytes"], 0);
+    assert_eq!(terminal["total_bytes"], 0);
+    assert_eq!(terminal["percent"], 0.0);
 }
 
 #[test]
@@ -620,19 +642,19 @@ fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
         (
             "missing",
             b"",
-            "invalid_source",
+            "missing manifest record for ctx-history-jsonl-v1",
             "invalid capture payload",
         ),
         (
             "unsupported",
             b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v999\"}\n",
-            "schema_incompatible",
+            "unsupported custom history schema version `ctx-history-jsonl-v999`",
             "unsupported provider schema",
         ),
         (
             "duplicate",
             b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n",
-            "invalid_source",
+            "duplicate manifest record at line 2",
             "invalid capture payload",
         ),
     ];
@@ -704,6 +726,153 @@ fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
         recovered["totals"]["current_rejected_records"], 1,
         "{recovered:#}"
     );
+}
+
+fn write_valid_explicit_custom_source(path: &Path, text: &str) {
+    fs::write(
+        path,
+        format!(
+            concat!(
+                "{{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}}\n",
+                "{{\"record_type\":\"source\",\"source_id\":\"explicit-receipt-source\",\"provider_key\":\"explicit-receipt-agent\",\"source_format\":\"explicit-receipt-jsonl\"}}\n",
+                "{{\"record_type\":\"session\",\"source_id\":\"explicit-receipt-source\",\"session_id\":\"explicit-receipt-session\",\"started_at\":\"2026-08-01T12:00:00Z\",\"agent_type\":\"primary\",\"is_primary\":true}}\n",
+                "{{\"record_type\":\"event\",\"source_id\":\"explicit-receipt-source\",\"session_id\":\"explicit-receipt-session\",\"event_index\":0,\"event_type\":\"message\",\"role\":\"user\",\"occurred_at\":\"2026-08-01T12:00:01Z\",\"payload\":{{\"text\":{text:?}}}}}\n",
+            ),
+            text = text,
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn explicit_import_reports_requested_route_failure_when_another_cold_route_publishes() {
+    let temp = tempdir();
+    write_codex_setup_session(&temp);
+    let _daemon = start_full_source_refresh_daemon(&temp);
+    let fixture = temp.path().join("cold-explicit-failure.jsonl");
+    fs::write(&fixture, b"").unwrap();
+
+    let output = ctx(&temp)
+        .args([
+            "import",
+            "--input-format",
+            "ctx-history-jsonl-v1",
+            "--path",
+            fixture.to_str().unwrap(),
+            "--no-daemon",
+            "--format=json",
+            "--progress",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["outcome"], "completed_with_source_failures",
+        "{report:#}"
+    );
+    assert_eq!(report["failure_scope"], "source", "{report:#}");
+    assert_eq!(report["failure_type"], "source_failure", "{report:#}");
+    assert!(
+        report["totals"].get("imported_sources").is_none(),
+        "{report:#}"
+    );
+    assert_eq!(report["totals"]["failed_sources"], 1, "{report:#}");
+    assert!(report["totals"]["current_indexed_documents"]
+        .as_u64()
+        .is_some_and(|count| count >= 1));
+
+    let source = &report["sources"][0];
+    assert_eq!(source["status"], "failure", "{source:#}");
+    assert_eq!(source["failure_scope"], "source", "{source:#}");
+    assert_eq!(source["failure_type"], "other", "{source:#}");
+    assert_eq!(source["source_failure_class"], "unreadable", "{source:#}");
+    assert_eq!(source["carried_forward"], false, "{source:#}");
+    assert_eq!(
+        source["daemon_request_metadata"]["operation"], "import",
+        "{source:#}"
+    );
+    assert_eq!(source["source_failure_total"], 1, "{source:#}");
+    assert!(source["successful_routes"]
+        .as_u64()
+        .is_some_and(|routes| routes >= 1));
+    assert!(source["source_identity"].is_string(), "{source:#}");
+    assert_eq!(source["detail"], source["error"], "{source:#}");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let terminal_progress = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["done"] == true)
+        .expect("terminal explicit-import progress event");
+    assert_eq!(terminal_progress["operation"], "import", "{stderr}");
+    assert_eq!(terminal_progress["phase"], "failed", "{stderr}");
+}
+
+#[test]
+fn explicit_import_reports_warm_carried_route_failure() {
+    let temp = tempdir();
+    let _daemon = start_full_source_refresh_daemon(&temp);
+    let fixture = temp.path().join("warm-explicit-failure.jsonl");
+    write_valid_explicit_custom_source(&fixture, "warm carried explicit route oracle");
+
+    let first = json_output(ctx(&temp).args([
+        "import",
+        "--input-format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        fixture.to_str().unwrap(),
+        "--no-daemon",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(first["outcome"], "success", "{first:#}");
+    assert_eq!(provider_core_counts(&data_root(&temp), "custom"), (1, 1));
+
+    fs::write(&fixture, b"").unwrap();
+    let carried = json_output(ctx(&temp).args([
+        "import",
+        "--input-format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        fixture.to_str().unwrap(),
+        "--no-daemon",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+
+    assert_eq!(
+        carried["outcome"], "completed_with_source_failures",
+        "{carried:#}"
+    );
+    assert_eq!(carried["failure_scope"], "source", "{carried:#}");
+    assert_eq!(carried["failure_type"], "source_failure", "{carried:#}");
+    assert!(
+        carried["totals"].get("imported_sources").is_none(),
+        "{carried:#}"
+    );
+    assert_eq!(carried["totals"]["failed_sources"], 1, "{carried:#}");
+    assert_eq!(
+        carried["totals"]["current_indexed_documents"], 1,
+        "{carried:#}"
+    );
+    let source = &carried["sources"][0];
+    assert_eq!(source["status"], "failure", "{source:#}");
+    assert_eq!(source["source_failure_total"], 1, "{source:#}");
+    assert_eq!(source["source_failure_class"], "unreadable", "{source:#}");
+    assert_eq!(source["carried_forward"], true, "{source:#}");
+    assert!(
+        source["successful_routes"]
+            .as_u64()
+            .is_some_and(|routes| routes > 0),
+        "{source:#}"
+    );
+    assert!(source["source_identity"].is_string(), "{source:#}");
+    assert_eq!(provider_core_counts(&data_root(&temp), "custom"), (1, 1));
 }
 
 #[test]
@@ -838,12 +1007,6 @@ fn import_all_discovers_and_imports_providers_together() {
         stdout["sources"][0]["source_format"],
         "provider_authoritative_all"
     );
-    assert!(
-        !serde_json::to_string(&stdout)
-            .unwrap()
-            .contains("current_source_progress"),
-        "progress details must remain stderr-only: {stdout:#}"
-    );
 
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(r#""type":"ctx_progress""#), "{stderr}");
@@ -922,7 +1085,7 @@ fn import_all_skips_empty_gemini_source() {
 }
 
 #[test]
-fn import_all_isolates_invalid_source_and_publishes_healthy_source() {
+fn import_all_publishes_valid_routes_and_reports_one_invalid_route() {
     let temp = finite_daemon_test_root();
     copy_dir_all(
         Path::new(&provider_history_fixture("codex-sessions")),
@@ -936,22 +1099,29 @@ fn import_all_isolates_invalid_source_and_publishes_healthy_source() {
         json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
     assert_eq!(imported["outcome"], "completed_with_source_failures");
     assert_eq!(imported["failure_scope"], "source");
-    assert_eq!(imported["totals"]["failed_sources"], 1);
     assert!(imported["totals"]["current_source_count"]
         .as_u64()
         .is_some_and(|count| count >= 1));
-    let failure = imported["sources"]
+    assert!(imported["totals"]["current_indexed_documents"]
+        .as_u64()
+        .is_some_and(|count| count >= 1));
+    let publication = &imported["sources"][0];
+    assert_eq!(
+        publication["daemon_request_metadata"]["operation"],
+        "import"
+    );
+    assert!(publication["successful_routes"]
+        .as_u64()
+        .is_some_and(|routes| routes > 0));
+    let failed = imported["sources"]
         .as_array()
         .unwrap()
         .iter()
         .find(|source| source["provider"] == "opencode")
-        .unwrap();
-    assert_eq!(failure["status"], "failure");
-    assert_eq!(failure["failure_scope"], "source");
-    assert_eq!(failure["source_failure_class"], "unreadable");
-    assert!(failure["detail"]
-        .as_str()
-        .is_some_and(|detail| detail.contains("not a database")));
+        .expect("typed opencode route failure");
+    assert_eq!(failed["status"], "failure");
+    assert_eq!(failed["source_failure_class"], "unreadable");
+    assert_eq!(failed["carried_forward"], false);
 }
 
 #[test]
@@ -965,9 +1135,10 @@ fn failed_import_attempt_does_not_count_as_indexed_history() {
         .args(["import", "--all", "--format=json", "--progress", "none"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "source-backed scan failed for opencode",
-        ));
+        .stderr(
+            predicate::str::contains("source-backed scan failed for opencode")
+                .and(predicate::str::contains("file is not a database")),
+        );
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert!(

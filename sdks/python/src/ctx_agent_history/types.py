@@ -59,15 +59,16 @@ class _StatusRequired(TypedDict):
 
 
 class Status(_StatusRequired, total=False):
+    # Operational counters are exact non-negative integers no greater than 2^53-1.
     dataRoot: Optional[str]
+    readOnly: bool
     indexedItems: int
+    indexedSessions: int
+    indexedEvents: int
     indexedSources: int
-    catalogedSessions: int
-    indexedCatalogSessions: int
-    pendingCatalogSessions: int
-    failedCatalogSessions: int
-    staleCatalogSessions: int
-    freshness: Freshness
+    historyEpoch: JsonObject
+    lexical: JsonObject
+    refresh: JsonObject
     semantic: JsonObject
     daemon: JsonObject
 

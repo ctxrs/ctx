@@ -3,6 +3,9 @@ use std::{path::PathBuf, sync::Arc};
 use crate::provider::providers::crush::native_path::source_backed::BoundDatabase;
 
 #[cfg(test)]
+use crate::provider_sources::SqliteSourceAccessError;
+
+#[cfg(test)]
 use super::shared::SqliteInventorySnapshotCounters;
 use super::*;
 
@@ -24,9 +27,9 @@ where
     fn discover(&self) -> SourceBackedRouteResult<SqliteInventoryCatalog<Self::Leaf>> {
         let inventory = bind_crush_inventory(
             &self.data_root,
-            self.inventory.observe().map_err(route_error)?,
+            self.inventory.observe().map_err(crush_route_error)?,
         )
-        .map_err(route_error)?;
+        .map_err(crush_route_error)?;
         let authority_fingerprint = sqlite_inventory_authority_fingerprint(&inventory.observation)?;
         let leaves = inventory
             .databases
@@ -54,11 +57,11 @@ where
                 leaf.clone(),
                 snapshot,
             )
-            .map_err(route_error)?;
+            .map_err(crush_route_error)?;
         #[cfg(test)]
         self.inventory.record_projection_pass();
-        let certificate = scan_crush_source(&source, sink).map_err(route_error)?;
-        if !finish_crush_source(source).map_err(route_error)? {
+        let certificate = scan_crush_source(&source, sink).map_err(crush_route_error)?;
+        if !finish_crush_source(source).map_err(crush_route_error)? {
             return Err(SourceBackedRouteError::new(
                 SourceBackedRouteErrorKind::SourceChanged,
                 "Crush source changed while its logical replacement was staged",
@@ -82,6 +85,14 @@ where
     }
 }
 
+fn crush_route_error(error: CrushSourceBackedErrorV0) -> SourceBackedRouteError {
+    let kind = match &error {
+        CrushSourceBackedErrorV0::SqliteSourceChanged => SourceBackedRouteErrorKind::SourceChanged,
+        _ => SourceBackedRouteErrorKind::InvalidSource,
+    };
+    SourceBackedRouteError::new(kind, error.to_string())
+}
+
 /// Registers Crush's selector-owned finite project inventory as logical SQLite
 /// leaves. Each admitted project database is acquired once, observed before
 /// replay, and projected only when its logical tables changed.
@@ -95,14 +106,6 @@ pub fn register_crush_source_backed_route<I>(
 where
     I: CrushProjectInventorySourceV0 + Send + Sync + 'static,
 {
-    let _legacy_compatibility = (
-        crush_exact_replay_matches,
-        closing_crush_observation,
-        open_crush_source,
-        CRUSH_DISCOVERY_REVISION,
-        CRUSH_FRONTIER_KIND,
-        CRUSH_SOURCE_SCHEMA_VARIANT,
-    );
     SqliteInventoryDocumentAdapter::register_replacement_document_tree_route_with_authority(
         registry,
         source,
@@ -116,4 +119,15 @@ where
             inventory,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crush_sqlite_source_change_remains_typed() {
+        let error = crush_route_error(SqliteSourceAccessError::SourceChanged.into());
+        assert_eq!(error.kind, SourceBackedRouteErrorKind::SourceChanged);
+    }
 }

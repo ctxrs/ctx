@@ -1,14 +1,263 @@
 use super::*;
 
-fn source_failure(index: usize) -> SourceBackedRefreshSourceFailure {
-    SourceBackedRefreshSourceFailure {
-        source_identity: format!("{index:064x}"),
-        provider: "codex".to_owned(),
-        class: SourceBackedRefreshSourceFailureClass::SourceChanged,
-        carried_forward: true,
-        source_selector: format!("/history/{index}.jsonl"),
-        detail: "source changed during refresh".to_owned(),
+fn empty_terminal_receipt_fixture() -> (tempfile::TempDir, Value, PinnedSourceBackedGeneration) {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let receipt = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                WriterOptions::default(),
+            )?
+            .commit(|_| true)?;
+            Ok(empty_test_publication(receipt.generation_id))
+        },
+    ));
+    coordinator.enqueue_periodic(&data_root).unwrap();
+    let run = coordinator.run_next(&data_root).expect("empty refresh");
+    assert!(!run.failed);
+    let pin = pin_published_generation(&data_root)
+        .unwrap()
+        .expect("empty published generation");
+    (temp, run.job, pin)
+}
+
+#[test]
+fn current_terminal_receipt_requires_compact_route_outcomes() {
+    let (_temp, response, pin) = empty_terminal_receipt_fixture();
+
+    for field in [
+        "selected_route_total",
+        "successful_route_total",
+        "source_failures",
+        "catalog_route_outcomes",
+    ] {
+        let mut missing = response.clone();
+        assert!(missing["receipt"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field)
+            .is_some());
+
+        let error = published_refresh_receipt(&missing, &pin)
+            .expect_err("missing current-protocol route outcome must fail");
+        assert!(
+            format!("{error:#}").contains(field),
+            "unexpected error for {field}: {error:#}"
+        );
     }
+}
+
+#[test]
+fn current_terminal_receipt_rejects_malformed_route_outcome_arrays() {
+    let (_temp, response, pin) = empty_terminal_receipt_fixture();
+    let cases = [
+        ("selected_route_total", json!(null)),
+        ("successful_route_total", json!({})),
+        ("source_failures", json!("none")),
+        ("catalog_route_outcomes", json!(17)),
+    ];
+
+    for (field, malformed_value) in cases {
+        let mut malformed = response.clone();
+        malformed["receipt"][field] = malformed_value;
+
+        let error = published_refresh_receipt(&malformed, &pin)
+            .expect_err("malformed current-protocol route outcome array must fail");
+        assert!(
+            format!("{error:#}").contains(field),
+            "unexpected error for {field}: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn current_terminal_receipt_rejects_inconsistent_route_outcome_partition() {
+    let (_temp, mut response, pin) = empty_terminal_receipt_fixture();
+    response["receipt"]["successful_route_total"] = json!(1);
+
+    let error = published_refresh_receipt(&response, &pin)
+        .expect_err("unselected successful route must fail partition validation");
+    assert!(
+        format!("{error:#}").contains("invalid route-result partition"),
+        "unexpected partition error: {error:#}"
+    );
+}
+
+#[test]
+fn catalog_outcomes_must_match_global_route_partition() {
+    let (_temp, response, pin) = empty_terminal_receipt_fixture();
+    let lineage = "11".repeat(32);
+    let route = "22".repeat(32);
+
+    let mut impossible_success = response.clone();
+    impossible_success["receipt"]["catalog_route_outcomes"] =
+        json!({ (lineage.clone()): [route.clone(), "s", true] });
+    let error = published_refresh_receipt(&impossible_success, &pin)
+        .expect_err("catalog success cannot exceed successful route total");
+    assert!(format!("{error:#}").contains("invalid route-result partition"));
+
+    let mut conflicting_shared_route = response;
+    conflicting_shared_route["receipt"]["catalog_route_outcomes"] = json!({
+        (lineage): [route.clone(), "s", false],
+        ("33".repeat(32)): [route, "f", "u"],
+    });
+    let error = published_refresh_receipt(&conflicting_shared_route, &pin)
+        .expect_err("shared route cannot have conflicting catalog outcomes");
+    assert!(format!("{error:#}").contains("disagree on a shared route result"));
+}
+
+#[test]
+fn successful_catalog_outcome_preserves_route_local_change() {
+    for changed in [false, true] {
+        let (_temp, mut response, pin) = empty_terminal_receipt_fixture();
+        let lineage = "11".repeat(32);
+        let route = "22".repeat(32);
+        response["receipt"]["selected_route_total"] = json!(1);
+        response["receipt"]["successful_route_total"] = json!(1);
+        response["receipt"]["catalog_route_outcomes"] = json!({ (lineage): [route, "s", changed] });
+
+        let receipt = published_refresh_receipt(&response, &pin).unwrap();
+        assert_eq!(receipt.catalog_route_outcomes.len(), 1);
+        assert_eq!(receipt.catalog_route_outcomes[0].changed, Some(changed));
+    }
+}
+
+#[test]
+fn successful_catalog_outcome_requires_route_local_change() {
+    let (_temp, mut response, pin) = empty_terminal_receipt_fixture();
+    response["receipt"]["selected_route_total"] = json!(1);
+    response["receipt"]["successful_route_total"] = json!(1);
+    response["receipt"]["catalog_route_outcomes"] =
+        json!({ ("11".repeat(32)): ["22".repeat(32), "s"] });
+
+    let error = published_refresh_receipt(&response, &pin)
+        .expect_err("successful compact outcome without changed fact must fail closed");
+    let detail = format!("{error:#}");
+    assert!(detail.contains("inconsistent fields"), "{detail}");
+}
+
+#[test]
+fn catalog_outcome_rejects_trailing_compact_fields() {
+    for outcome in [
+        json!(["22".repeat(32), "s", false, "extra"]),
+        json!(["22".repeat(32), "f", "u", "extra"]),
+    ] {
+        let (_temp, mut response, pin) = empty_terminal_receipt_fixture();
+        response["receipt"]["selected_route_total"] = json!(1);
+        response["receipt"]["catalog_route_outcomes"] = json!({ ("11".repeat(32)): outcome });
+
+        let error = published_refresh_receipt(&response, &pin)
+            .expect_err("compact catalog outcomes must reject trailing fields");
+        let detail = format!("{error:#}");
+        assert!(detail.contains("invalid width"), "{detail}");
+    }
+}
+
+#[test]
+fn current_terminal_receipt_preserves_legitimate_empty_route_outcomes() {
+    let (_temp, response, pin) = empty_terminal_receipt_fixture();
+    let receipt = published_refresh_receipt(&response, &pin)
+        .expect("present empty outcomes describe a legitimate empty current receipt");
+
+    assert_eq!(receipt.selected_route_total, 0);
+    assert_eq!(receipt.successful_route_total, 0);
+    assert!(receipt.selected_route_ids.is_empty());
+    assert!(receipt.successful_route_ids.is_empty());
+    assert!(receipt.catalog_route_outcomes.is_empty());
+    assert!(receipt.source_failures.is_empty());
+    assert_eq!(receipt.to_json()["outcome"], "completed");
+}
+
+#[test]
+fn terminal_response_is_transport_bounded_and_preserves_exact_catalog_outcome() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let catalog_lineage = format!("{:064x}", 255);
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let commit = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                WriterOptions::default(),
+            )?
+            .commit(|_| true)?;
+            let route_ids = (0..256)
+                .map(|index| format!("{index:064x}"))
+                .collect::<Vec<_>>();
+            let failed_route_outcomes = route_ids
+                .iter()
+                .map(|route_identity| SourceBackedRefreshRouteFailure {
+                    route_identity: route_identity.clone(),
+                    source_identity: "cd".repeat(32),
+                    provider: "opencode".to_owned(),
+                    class: "unreadable".to_owned(),
+                    carried_forward: false,
+                })
+                .collect();
+            let source_failures = route_ids
+                .iter()
+                .map(|route_identity| SourceBackedRefreshSourceFailure {
+                    route_identity: route_identity.clone(),
+                    source_identity: "cd".repeat(32),
+                    provider: "opencode".to_owned(),
+                    class: "unreadable".to_owned(),
+                    carried_forward: false,
+                    source_selector: "s".repeat(512),
+                    detail: "d".repeat(512),
+                })
+                .collect();
+            Ok(SourceBackedRefreshPublication {
+                generation_id: commit.generation_id,
+                published_explicit_source_catalog: execution
+                    .explicit_source_catalog
+                    .cloned()
+                    .expect("catalog authority"),
+                scanned_routes: route_ids.len(),
+                unsupported_routes: 0,
+                certified_source_count: 0,
+                certified_source_bytes: 0,
+                current: SourceBackedRefreshCurrent::default(),
+                timings: SourceBackedRefreshTimings::default(),
+                selected_route_ids: route_ids.clone(),
+                successful_route_ids: Vec::new(),
+                successful_route_changes: Default::default(),
+                failed_route_outcomes,
+                catalog_route_outcomes: route_ids
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(index, route_identity)| SourceBackedRefreshCatalogRouteOutcome {
+                            catalog_lineage: format!("{index:064x}"),
+                            route_identity: route_identity.clone(),
+                            outcome: "failed".to_owned(),
+                            failure_class: Some("unreadable".to_owned()),
+                            changed: None,
+                        },
+                    )
+                    .collect(),
+                source_failures,
+            })
+        },
+    ));
+    coordinator.enqueue_periodic(&data_root).unwrap();
+    let run = coordinator.run_next(&data_root).expect("bounded refresh");
+    assert!(!run.failed);
+    let wire = serde_json::to_vec(&run.job).unwrap();
+    assert!(wire.len() < SOURCE_REFRESH_RESPONSE_MAX_BYTES as usize);
+    let pin = pin_published_generation(&data_root)
+        .unwrap()
+        .expect("published generation");
+    let receipt = published_refresh_receipt(&run.job, &pin).unwrap();
+    assert_eq!(receipt.source_failure_total(), 256);
+    assert!(receipt.source_failures.len() < 256);
+    assert_eq!(
+        receipt.source_failures_omitted(),
+        256 - receipt.source_failures.len()
+    );
+    assert_eq!(receipt.catalog_route_outcomes.len(), 256);
+    assert!(receipt.catalog_route_outcomes.iter().any(|outcome| {
+        outcome.catalog_lineage == catalog_lineage && outcome.outcome == "failed"
+    }));
 }
 
 #[test]
@@ -24,6 +273,7 @@ fn explicit_catalog_request_retains_daemon_metadata_and_authority() {
                 "schema_version": 1,
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
+                "operation": "import",
                 "explicit_source_catalog": authority.to_json(),
             }),
         )
@@ -84,6 +334,7 @@ fn mismatched_catalog_publication_is_not_recorded_as_verified() {
                 "schema_version": 1,
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
+                "operation": "import",
                 "explicit_source_catalog": requested.to_json(),
             }),
         )
@@ -194,13 +445,12 @@ fn nonempty_explicit_catalog_publication_is_recorded_in_the_terminal_receipt() {
         &data_root,
         &index_root,
         None,
+        SourceBackedRefreshScope::All,
+        &BTreeSet::new(),
         &mut progress,
     )
     .unwrap();
     assert_eq!(publication.certified_source_count, 1);
-    assert_eq!(publication.scanned_routes, 1);
-    assert_eq!(publication.successful_routes, 1);
-    assert!(publication.source_failures.is_empty());
     assert_eq!(publication.published_explicit_source_catalog, authority);
 
     let generation_id = publication.generation_id.clone();
@@ -225,39 +475,6 @@ fn nonempty_explicit_catalog_publication_is_recorded_in_the_terminal_receipt() {
         run.job["receipt"]["published_explicit_source_catalog"],
         authority.to_json()
     );
-    let pin = pin_published_generation(&data_root).unwrap().unwrap();
-    let parsed = published_refresh_receipt(&run.job, &pin).unwrap();
-    assert_eq!(parsed.scanned_routes, 1);
-    assert_eq!(parsed.successful_routes, 1);
-    assert!(parsed.source_failures.is_empty());
-
-    let mut partial = run.job.clone();
-    let failure = source_failure(7).to_json();
-    partial["outcome"] = json!("completed_with_source_failures");
-    partial["successful_routes"] = json!(0);
-    partial["source_failure_total"] = json!(1);
-    partial["source_failures_omitted"] = json!(0);
-    partial["receipt"]["outcome"] = json!("completed_with_source_failures");
-    partial["receipt"]["successful_routes"] = json!(0);
-    partial["receipt"]["source_failures"] = json!({
-        "failures": [failure],
-        "omitted": 0,
-        "total": 1,
-    });
-    let partial_receipt = published_refresh_receipt(&partial, &pin).unwrap();
-    assert_eq!(
-        partial_receipt.terminal_outcome(),
-        "completed_with_source_failures"
-    );
-    assert_eq!(partial_receipt.successful_routes, 0);
-    assert_eq!(partial_receipt.source_failures.total(), 1);
-
-    let mut inconsistent = partial;
-    inconsistent["receipt"]["successful_routes"] = json!(1);
-    assert!(published_refresh_receipt(&inconsistent, &pin)
-        .unwrap_err()
-        .to_string()
-        .contains("result counts are inconsistent"));
     write_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root), &run.job).unwrap();
     let status =
         crate::semantic::source_epoch_status_report(&data_root, &AppConfig::default()).unwrap();
@@ -266,198 +483,5 @@ fn nonempty_explicit_catalog_publication_is_recorded_in_the_terminal_receipt() {
     assert_eq!(
         status.report["catalog"]["published_authority_present"],
         true
-    );
-}
-
-#[test]
-fn terminal_receipt_serializes_partial_source_results_without_route_identities() {
-    let coordinator = CoreRefreshEngine::new();
-    coordinator.enqueue_for_test(None);
-    let mut publication = test_publication("partial-generation");
-    publication.scanned_routes = 2;
-    publication.successful_routes = 1;
-    publication.source_failures = SourceBackedRefreshSourceFailures {
-        failures: vec![source_failure(1)],
-        omitted: 0,
-    };
-
-    let run = coordinator
-        .run_next_with(
-            |_, _| Ok(publication),
-            || Ok(Some("partial-generation".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .unwrap();
-    assert!(!run.failed);
-    assert_eq!(run.job["outcome"], "completed_with_source_failures");
-    assert_eq!(run.job["scanned_routes"], 2);
-    assert_eq!(run.job["successful_routes"], 1);
-    assert_eq!(run.job["source_failure_total"], 1);
-    assert_eq!(run.job["source_failures_omitted"], 0);
-    assert_eq!(run.job["receipt"]["source_failures"]["total"], 1);
-    assert_eq!(
-        run.job["receipt"]["source_failures"]["failures"][0]["source_selector"],
-        "/history/1.jsonl"
-    );
-    assert!(!run.job.to_string().contains("route_identity"));
-}
-
-#[test]
-fn source_failure_parser_enforces_hash_class_bounds_and_totals() {
-    let valid = json!({
-        "failures": [{
-            "source_identity": "01".repeat(32),
-            "provider": "codex",
-            "class": "source_changed",
-            "carried_forward": true,
-            "source_selector": "é".repeat(256),
-            "detail": "d".repeat(SOURCE_REFRESH_FAILURE_TEXT_MAX_BYTES),
-        }],
-        "omitted": 2,
-        "total": 3,
-    });
-    let parsed = required_source_failures(Some(&valid)).unwrap();
-    assert_eq!(parsed.total(), 3);
-    assert_eq!(parsed.failures.len(), 1);
-    assert_eq!(parsed.omitted, 2);
-
-    for (class, expected) in [
-        (
-            "unavailable",
-            SourceBackedRefreshSourceFailureClass::Unavailable,
-        ),
-        (
-            "source_changed",
-            SourceBackedRefreshSourceFailureClass::SourceChanged,
-        ),
-        (
-            "unreadable",
-            SourceBackedRefreshSourceFailureClass::Unreadable,
-        ),
-        (
-            "incompatible",
-            SourceBackedRefreshSourceFailureClass::Incompatible,
-        ),
-    ] {
-        let mut accepted = valid.clone();
-        accepted["failures"][0]["class"] = json!(class);
-        assert_eq!(
-            required_source_failures(Some(&accepted)).unwrap().failures[0].class,
-            expected
-        );
-    }
-
-    let mut invalid_hash = valid.clone();
-    invalid_hash["failures"][0]["source_identity"] = json!("AB".repeat(32));
-    assert!(required_source_failures(Some(&invalid_hash))
-        .unwrap_err()
-        .to_string()
-        .contains("identity is malformed"));
-
-    let mut invalid_class = valid.clone();
-    invalid_class["failures"][0]["class"] = json!("retryable");
-    assert!(required_source_failures(Some(&invalid_class))
-        .unwrap_err()
-        .to_string()
-        .contains("class is malformed"));
-
-    let mut invalid_provider = valid.clone();
-    invalid_provider["failures"][0]["provider"] = json!("not-a-provider");
-    assert!(required_source_failures(Some(&invalid_provider))
-        .unwrap_err()
-        .to_string()
-        .contains("provider is malformed"));
-
-    let mut oversized_selector = valid.clone();
-    oversized_selector["failures"][0]["source_selector"] = json!("é".repeat(257));
-    assert!(required_source_failures(Some(&oversized_selector))
-        .unwrap_err()
-        .to_string()
-        .contains("source_selector is too large"));
-
-    let mut oversized_detail = valid.clone();
-    oversized_detail["failures"][0]["detail"] =
-        json!("d".repeat(SOURCE_REFRESH_FAILURE_TEXT_MAX_BYTES + 1));
-    assert!(required_source_failures(Some(&oversized_detail))
-        .unwrap_err()
-        .to_string()
-        .contains("detail is too large"));
-
-    let mut inconsistent_total = valid.clone();
-    inconsistent_total["total"] = json!(4);
-    assert!(required_source_failures(Some(&inconsistent_total))
-        .unwrap_err()
-        .to_string()
-        .contains("inconsistent source failure totals"));
-
-    let rows = (0..=SOURCE_REFRESH_FAILURE_ROW_LIMIT)
-        .map(|index| source_failure(index).to_json())
-        .collect::<Vec<_>>();
-    let too_many = json!({
-        "failures": rows,
-        "omitted": 0,
-        "total": SOURCE_REFRESH_FAILURE_ROW_LIMIT + 1,
-    });
-    assert!(required_source_failures(Some(&too_many))
-        .unwrap_err()
-        .to_string()
-        .contains("too many source failure rows"));
-}
-
-#[test]
-fn source_result_partition_accepts_retained_history_and_rejects_no_usable_source() {
-    let failures = SourceBackedRefreshSourceFailures {
-        failures: vec![source_failure(1)],
-        omitted: 2,
-    };
-    validate_source_refresh_results(3, 0, &failures, 1).unwrap();
-    assert!(validate_source_refresh_results(4, 0, &failures, 1)
-        .unwrap_err()
-        .to_string()
-        .contains("result counts are inconsistent"));
-    assert!(validate_source_refresh_results(3, 0, &failures, 0)
-        .unwrap_err()
-        .to_string()
-        .contains("no usable source remains"));
-}
-
-#[test]
-fn maximum_source_failure_receipt_fits_the_bounded_ipc_response() {
-    let coordinator = CoreRefreshEngine::new();
-    let queued = coordinator.enqueue_for_test(None);
-    let request_id = request_id(&queued);
-    let mut publication = test_publication("maximum-wire-generation");
-    publication.scanned_routes = SOURCE_REFRESH_FAILURE_ROW_LIMIT;
-    publication.successful_routes = 0;
-    publication.source_failures = SourceBackedRefreshSourceFailures {
-        failures: (0..SOURCE_REFRESH_FAILURE_ROW_LIMIT)
-            .map(|index| {
-                let mut failure = source_failure(index);
-                failure.source_selector = "\0".repeat(SOURCE_REFRESH_FAILURE_TEXT_MAX_BYTES);
-                failure.detail = "\0".repeat(SOURCE_REFRESH_FAILURE_TEXT_MAX_BYTES);
-                failure
-            })
-            .collect(),
-        omitted: 0,
-    };
-
-    let run = coordinator
-        .run_next_with(
-            |_, _| Ok(publication),
-            || Ok(Some("maximum-wire-generation".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .unwrap();
-    assert!(!run.failed);
-    let response = coordinator.status(&request_id).unwrap();
-    let serialized = serde_json::to_vec(&response).unwrap();
-    assert!(serialized.len() > 384 * 1024, "{}", serialized.len());
-    assert!(
-        serialized.len() <= SOURCE_REFRESH_RESPONSE_MAX_BYTES as usize,
-        "maximum receipt serialized to {} bytes, over the {}-byte IPC cap",
-        serialized.len(),
-        SOURCE_REFRESH_RESPONSE_MAX_BYTES
     );
 }

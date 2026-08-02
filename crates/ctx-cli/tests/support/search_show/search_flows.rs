@@ -36,8 +36,6 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(setup_json["daemon_autostart"]["status"], "degraded");
     assert_eq!(setup_json["daemon_autostart"]["requested"], true);
     assert!(setup_json.get("background_indexing").is_none());
-    wait_for_test_daemon_source_refresh(&temp);
-
     let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
     assert_eq!(sources["schema_version"], 1);
     assert!(sources["sources"]

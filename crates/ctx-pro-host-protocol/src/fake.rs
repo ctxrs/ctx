@@ -309,6 +309,7 @@ impl FakeHelper {
             ),
         };
         HelperMessage::Blame(BlameResult {
+            snapshot: request.expected_snapshot,
             target,
             git_snapshot,
             matches: Vec::new(),

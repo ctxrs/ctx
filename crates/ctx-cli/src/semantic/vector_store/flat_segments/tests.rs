@@ -40,7 +40,7 @@ fn replacement(
 }
 
 fn visible_chunks(pinned: &PinnedFlatGeneration) -> Vec<(Uuid, u64, u32, Vec<f32>)> {
-    pinned
+    let mut chunks = pinned
         .scan_segments()
         .iter()
         .flat_map(PinnedScanSegment::chunks)
@@ -52,7 +52,9 @@ fn visible_chunks(pinned: &PinnedFlatGeneration) -> Vec<(Uuid, u64, u32, Vec<f32
                 chunk.vector.to_vec(),
             )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    chunks.sort_by_key(|chunk| (chunk.0, chunk.2));
+    chunks
 }
 
 #[test]
@@ -94,16 +96,14 @@ fn replacement_tombstone_and_read_only_enumeration_are_exact() -> FlatResult<()>
     assert_eq!(pinned.generation(), 2);
     assert_eq!(pinned.stats().active_events, 1);
     assert_eq!(pinned.stats().active_chunks, 1);
-    assert_eq!(pinned.stats().deleted_events, 1);
-    assert_eq!(
-        pinned.active_events(),
-        &[FlatActiveEvent {
-            event_id: first,
-            seq: 30,
-            source_text_hash: hash(3),
-            chunk_count: 1,
-        }]
-    );
+    assert_eq!(pinned.stats().deleted_events, 0);
+    let active = pinned.active_events();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].event_id, first);
+    assert_eq!(active[0].seq, 30);
+    assert_eq!(active[0].source_text_hash, hash(3));
+    assert_eq!(active[0].chunk_count, 1);
+    assert_eq!(active[0].source_identity_digest, UNSCOPED_SOURCE_IDENTITY);
     assert_eq!(
         visible_chunks(&pinned),
         vec![(first, 30, 7, vec![0.0, 0.0, 0.0, 1.0])]
@@ -139,7 +139,7 @@ fn replacement_tombstone_and_read_only_enumeration_are_exact() -> FlatResult<()>
         .vector;
     assert_eq!(active_vector.as_ptr() as usize % VECTOR_ALIGNMENT, 0);
     assert!(matches!(
-        read_only.delete_events(&[first]),
+        read_only.publish_replacement_event_chunks(&[], &[first]),
         Err(FlatStoreError::ReadOnly)
     ));
     Ok(())
@@ -258,6 +258,7 @@ fn interrupted_segment_commit_keeps_previous_manifest_active() -> FlatResult<()>
         root,
         &contract(),
         2,
+        &unscoped_source(),
         &[replacement(
             orphan,
             260,
@@ -313,8 +314,9 @@ fn corruption_is_rejected_and_model_change_atomically_resets_empty() -> FlatResu
     file.sync_all()
         .map_err(|source| io_error("sync corrupt vector fixture", &vector_path, source))?;
     drop(file);
+    let corrupt = FlatSegmentStore::open_read_only(root, contract())?;
     assert!(matches!(
-        FlatSegmentStore::open_read_only(root, contract()),
+        corrupt.pin_generation(),
         Err(FlatStoreError::Corrupt(_))
     ));
 
@@ -335,8 +337,9 @@ fn corruption_is_rejected_and_model_change_atomically_resets_empty() -> FlatResu
         .ok_or_else(|| FlatStoreError::Corrupt("expected old model generation".to_owned()))?;
     let mut changed = contract();
     changed.model_revision = "revision-2".to_owned();
+    let incompatible = FlatSegmentStore::open_read_only(other.path(), changed.clone())?;
     assert!(matches!(
-        FlatSegmentStore::open_read_only(other.path(), changed.clone()),
+        incompatible.active_stats(),
         Err(FlatStoreError::Incompatible(_))
     ));
     let _interrupted_reset =
@@ -387,8 +390,9 @@ fn manifest_checksum_corruption_is_rejected() -> FlatResult<()> {
     let bytes = serde_json::to_vec(&envelope)?;
     fs::write(&selected.path, bytes)
         .map_err(|source| io_error("corrupt manifest fixture", &selected.path, source))?;
+    let corrupt = FlatSegmentStore::open_read_only(root, contract())?;
     assert!(matches!(
-        FlatSegmentStore::open_read_only(root, contract()),
+        corrupt.active_stats(),
         Err(FlatStoreError::Corrupt(_))
     ));
     Ok(())

@@ -356,7 +356,14 @@ fn import_and_index_emit_closed_safe_summaries() {
         "--format=json",
         "--no-daemon",
     ]);
-    run(&["index", "status", "--format=json"]);
+    run(&[
+        "index",
+        "wait",
+        "--lexical",
+        "--format=json",
+        "--timeout-seconds",
+        "1",
+    ]);
 
     let events = read_analytics_events(&events_path);
     assert_eq!(events.len(), 2);
@@ -367,7 +374,8 @@ fn import_and_index_emit_closed_safe_summaries() {
     assert_eq!(import["provider_filter"], "codex");
     assert_eq!(import["import_outcome"], "success");
     let index = analytics_event_properties(&events[1]);
-    assert_eq!(index["index_operation"], "status");
+    assert_eq!(index["index_operation"], "wait");
+    assert_eq!(index["wait_outcome"], "ready");
     assert!(index["lexical_state"].as_str().is_some());
     for event in &events {
         assert_analytics_properties_are_allowlisted(analytics_event_properties(event));
@@ -575,17 +583,6 @@ fn analytics_payloads_omit_sensitive_command_data() {
     assert_eq!(search_properties["search_refresh_status"], "unknown");
     assert_eq!(search_properties["zero_result"], true);
     assert_eq!(search_properties["has_indexed_content_after_search"], false);
-    for retired_store_property in [
-        "had_existing_store_before_search",
-        "indexed_content_before_search_known",
-        "had_indexed_content_before_search",
-        "store_created_by_search",
-    ] {
-        assert!(
-            search_properties.get(retired_store_property).is_none(),
-            "Core search emitted retired Store property {retired_store_property}"
-        );
-    }
     assert!(search_properties.get("query_duration_bucket").is_some());
     assert!(search_properties.get("render_duration_bucket").is_some());
     assert_eq!(events[3]["events"][0]["outcome"], "failure");
@@ -663,17 +660,6 @@ fn search_analytics_reports_empty_source_backed_generation() {
     assert_eq!(properties["search_refresh_status"], "unknown");
     assert_eq!(properties["zero_result"], true);
     assert_eq!(properties["has_indexed_content_after_search"], false);
-    for retired_store_property in [
-        "had_existing_store_before_search",
-        "indexed_content_before_search_known",
-        "had_indexed_content_before_search",
-        "store_created_by_search",
-    ] {
-        assert!(
-            properties.get(retired_store_property).is_none(),
-            "Core search emitted retired Store property {retired_store_property}"
-        );
-    }
     assert!(data_root.join("search/lexical").is_dir());
     assert!(!data_root.join("relational.sqlite").exists());
     assert!(!data_root.join("work.sqlite").exists());
@@ -728,17 +714,6 @@ fn search_analytics_reports_existing_indexed_content() {
     let properties = analytics_event_properties(&events[0]);
     assert_eq!(properties["zero_result"], false);
     assert_eq!(properties["has_indexed_content_after_search"], true);
-    for retired_store_property in [
-        "had_existing_store_before_search",
-        "indexed_content_before_search_known",
-        "had_indexed_content_before_search",
-        "store_created_by_search",
-    ] {
-        assert!(
-            properties.get(retired_store_property).is_none(),
-            "Core search emitted retired Store property {retired_store_property}"
-        );
-    }
     assert_analytics_properties_are_allowlisted(properties);
 }
 

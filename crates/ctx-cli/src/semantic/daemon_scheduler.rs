@@ -5,6 +5,35 @@ pub(super) struct DaemonSidecarDrain {
     pub(super) semantic_attempted_generation: Option<String>,
 }
 
+pub(super) const DAEMON_CONSUMER_RETRY_QUERY_GRACE: StdDuration = StdDuration::from_secs(2);
+
+#[derive(Debug, Default)]
+pub(super) struct DaemonConsumerRetryDeferral {
+    pub(super) retry_at: Option<Instant>,
+}
+
+impl DaemonConsumerRetryDeferral {
+    fn defer_for_foreground_query(&mut self, now: Instant) -> bool {
+        let retry_at = self
+            .retry_at
+            .get_or_insert(now + DAEMON_CONSUMER_RETRY_QUERY_GRACE);
+        if now < *retry_at {
+            return true;
+        }
+        self.reset();
+        false
+    }
+
+    pub(super) fn remaining(&self, now: Instant) -> Option<StdDuration> {
+        self.retry_at
+            .and_then(|retry_at| retry_at.checked_duration_since(now))
+    }
+
+    fn reset(&mut self) {
+        self.retry_at = None;
+    }
+}
+
 fn immediate_follow_up(mut iteration: DaemonIteration) -> DaemonIteration {
     iteration.continue_immediately = true;
     iteration
@@ -22,24 +51,56 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
     let source_refresh_requested =
         source_refresh.is_some_and(CoreRefreshEngine::has_pending_request);
     if runtime.config.daemon.mode.runs_only_source_refresh() {
-        let iteration = run_pending_core_refresh(data_root, runtime, source_refresh)?;
-        runtime.initial_core_refresh_attempted |= iteration.is_some();
-        return Ok(iteration
-            .unwrap_or_else(|| DaemonIteration::new(false, false, DaemonCycleStateV1::unknown())));
+        runtime.consumer_retry_deferral.reset();
+        if let Some(activity) = query_activity {
+            activity.cancel_idle_wakeup();
+        }
+        if let Some(iteration) = run_pending_core_refresh(data_root, runtime, source_refresh)? {
+            return Ok(iteration);
+        }
+        return run_dirty_core_refresh(data_root, runtime, source_refresh);
     }
     let query_generation = query_activity.map(|activity| activity.snapshot().1);
-    if !source_refresh_requested
-        && daemon_foreground_query_preempts(query_activity, query_generation)
-    {
-        return Ok(DaemonIteration::new(
-            false,
-            false,
-            DaemonCycleStateV1::unknown(),
-        ));
-    }
     if source_refresh_requested {
-        runtime.initial_core_refresh_attempted = true;
+        runtime.consumer_retry_deferral.reset();
+        if let Some(activity) = query_activity {
+            activity.cancel_idle_wakeup();
+        }
         return run_core_refresh(data_root, runtime, source_refresh, false);
+    }
+    if daemon_foreground_query_preempts(query_activity, query_generation) {
+        if !daemon_consumer_retry_due(runtime) {
+            runtime.consumer_retry_deferral.reset();
+            if let Some(activity) = query_activity {
+                activity.cancel_idle_wakeup();
+            }
+            return Ok(DaemonIteration::new(
+                false,
+                false,
+                DaemonCycleStateV1::unknown(),
+            ));
+        }
+        if runtime
+            .consumer_retry_deferral
+            .defer_for_foreground_query(Instant::now())
+        {
+            if let Some(activity) = query_activity {
+                activity.wake_daemon_when_idle();
+            }
+            return Ok(DaemonIteration::new(
+                false,
+                false,
+                DaemonCycleStateV1::unknown(),
+            ));
+        }
+        if let Some(activity) = query_activity {
+            activity.cancel_idle_wakeup();
+        }
+    } else {
+        runtime.consumer_retry_deferral.reset();
+        if let Some(activity) = query_activity {
+            activity.cancel_idle_wakeup();
+        }
     }
     if let Some(iteration) = run_pending_core_pro_catch_up(data_root, runtime, source_refresh)? {
         return Ok(iteration);
@@ -69,19 +130,10 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
             DaemonCycleStateV1::unknown(),
         ));
     }
-    // This unconditional periodic admission is the daemon's initial tick only.
-    // Every later automatic refresh must already have been admitted by a
-    // filesystem, safety, or retry transition in the daemon loop; otherwise a
-    // deferred filesystem wake could fall through into equivalent work.
-    if runtime.initial_core_refresh_attempted {
-        return Ok(DaemonIteration::new(
-            false,
-            false,
-            DaemonCycleStateV1::unknown(),
-        ));
+    if runtime.history_retry.consecutive_failures > 0 {
+        return run_core_refresh(data_root, runtime, source_refresh, true);
     }
-    runtime.initial_core_refresh_attempted = true;
-    run_core_refresh(data_root, runtime, source_refresh, true)
+    run_dirty_core_refresh(data_root, runtime, source_refresh)
 }
 
 fn run_pending_core_semantic_catch_up(
@@ -103,6 +155,8 @@ fn run_pending_core_semantic_catch_up(
     };
     let generation_id = generation.generation_id();
     let page_continuation_pending = semantic_page_continuation_pending(data_root, generation_id);
+    let retry_due =
+        runtime.semantic_retry.consecutive_failures > 0 && runtime.semantic_retry.ready();
     if runtime.sidecar_drain.generation.as_deref() == Some(generation_id)
         && runtime
             .sidecar_drain
@@ -110,6 +164,7 @@ fn run_pending_core_semantic_catch_up(
             .as_deref()
             == Some(generation_id)
         && !page_continuation_pending
+        && !retry_due
     {
         return Ok(None);
     }
@@ -148,25 +203,54 @@ fn run_pending_core_pro_catch_up(
     if !daemon_mode_runs_core_pro_catch_up(runtime.config.daemon.mode) {
         return Ok(None);
     }
-    let Some(authority) = source_refresh.and_then(CoreRefreshEngine::pinned_core_publication)
-    else {
+    let retry_due = runtime.pro_retry.consecutive_failures > 0 && runtime.pro_retry.ready();
+    let retained_authority = source_refresh.and_then(CoreRefreshEngine::pinned_core_publication);
+    let installation_requires_recheck = retained_authority.is_none()
+        && runtime.sidecar_drain.pro_attempted_generation.is_some()
+        && pro_installation_requires_recheck(data_root);
+    let durable_check_required = retained_authority.is_none()
+        && (runtime.sidecar_drain.pro_attempted_generation.is_none()
+            || retry_due
+            || installation_requires_recheck);
+    let durable_authority = if durable_check_required {
+        pin_published_generation(data_root)?
+    } else {
+        None
+    };
+    let authority = retained_authority
+        .as_deref()
+        .map(SourceBackedProCoreAuthority::Retained)
+        .or_else(|| {
+            durable_authority
+                .as_ref()
+                .map(SourceBackedProCoreAuthority::Durable)
+        });
+    let Some(authority) = authority else {
         return Ok(None);
     };
     let generation = authority.generation_id();
-    if runtime.sidecar_drain.generation.as_deref() == Some(generation)
-        && runtime.sidecar_drain.pro_attempted_generation.as_deref() == Some(generation)
+    if runtime.sidecar_drain.pro_attempted_generation.as_deref() == Some(generation)
+        && !retry_due
+        && !installation_requires_recheck
     {
         return Ok(None);
     }
     prepare_pro_retry_for_generation(runtime, data_root, generation);
     if !runtime.pro_retry.ready() {
+        runtime.sidecar_drain.pro_attempted_generation = Some(generation.to_owned());
         return Ok(None);
     }
-    let run =
-        run_pro_catch_up_with_retry(data_root, runtime, generation, Some(authority.as_ref()))?;
+    let run = run_pro_catch_up_with_retry(data_root, runtime, generation, authority)?;
     runtime.sidecar_drain.pro_attempted_generation = Some(generation.to_owned());
     runtime.sidecar_drain.generation = Some(generation.to_owned());
     Ok(Some(core_pro_catch_up_iteration(run.did_work)))
+}
+
+fn pro_installation_requires_recheck(data_root: &Path) -> bool {
+    read_pro_status(data_root).is_some_and(|status| {
+        status.get("error_code").and_then(Value::as_str) == Some("pro_not_installed")
+            && ProFilesystemLayout::new(data_root).helper_path().exists()
+    })
 }
 
 fn core_pro_catch_up_iteration(did_work: bool) -> DaemonIteration {
@@ -191,14 +275,79 @@ fn run_pending_core_refresh(
         run.job.get("status").and_then(Value::as_str) == Some("failed")
     );
     let job = record_daemon_job_retry(&mut runtime.history_retry, run.job);
-    let published = completed_core_generation(&job).is_some();
     write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &job)?;
-    let iteration = DaemonIteration::new(run.did_work, run.failed, DaemonCycleStateV1::unknown());
-    Ok(Some(if published {
-        iteration.with_core_refresh_published()
-    } else {
-        iteration
-    }))
+    Ok(Some(DaemonIteration::new(
+        run.did_work,
+        run.failed,
+        DaemonCycleStateV1::unknown(),
+    )))
+}
+
+fn run_dirty_core_refresh(
+    data_root: &Path,
+    runtime: &mut DaemonRuntime,
+    source_refresh: Option<&CoreRefreshEngine>,
+) -> Result<DaemonIteration> {
+    let Some(source_refresh) = source_refresh else {
+        return Ok(DaemonIteration::new(
+            false,
+            false,
+            DaemonCycleStateV1::unknown(),
+        ));
+    };
+    if !source_refresh.enqueue_next_scheduled_refresh(data_root, source_route_ledger_now_ms())? {
+        return Ok(DaemonIteration::new(
+            false,
+            false,
+            DaemonCycleStateV1::unknown(),
+        ));
+    }
+    let Some(run) = source_refresh.run_next(data_root) else {
+        return Ok(DaemonIteration::new(
+            false,
+            false,
+            DaemonCycleStateV1::unknown(),
+        ));
+    };
+    let cold_all_refresh = run.scope == SourceBackedRefreshScope::All
+        && run.job.get("trigger").and_then(Value::as_str) == Some("periodic")
+        && run
+            .job
+            .get("previous_generation")
+            .is_none_or(Value::is_null);
+    debug_assert!(
+        matches!(run.scope, SourceBackedRefreshScope::Exact(_))
+            || (run.scope == SourceBackedRefreshScope::All
+                && run.job.get("trigger").and_then(Value::as_str) == Some("import"))
+            || cold_all_refresh,
+        "dirty-route work may become All only for cold startup or when a manual import upgrades the queued exact refresh"
+    );
+    write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &run.job)?;
+    let published_generation = (!run.failed
+        && run.job.get("status").and_then(Value::as_str) == Some("completed")
+        && run
+            .job
+            .get("post_publication_error")
+            .is_none_or(Value::is_null))
+    .then(|| {
+        run.job
+            .get("published_generation")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+    .flatten();
+    let iteration = DaemonIteration::new(run.did_work, false, daemon_core_cycle_state(&run.job));
+    if let Some(generation) = published_generation {
+        runtime.sidecar_drain.generation = Some(generation);
+        // A successor queued behind an exact-route fence must yield to the
+        // daemon loop once so pending watcher events enter the dirty-route
+        // ledger before that successor is admitted.
+        if source_refresh.has_pending_request() {
+            return Ok(iteration);
+        }
+        return Ok(immediate_follow_up(iteration));
+    }
+    Ok(iteration)
 }
 
 fn run_core_refresh(
@@ -244,7 +393,7 @@ fn run_pro_catch_up_with_retry(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     core_generation_id: &str,
-    authority: Option<&PinnedCorePublication>,
+    authority: SourceBackedProCoreAuthority<'_>,
 ) -> Result<SourceBackedProCatchUpRun> {
     prepare_pro_retry_for_generation(runtime, data_root, core_generation_id);
     if !runtime.pro_retry.ready() {
@@ -303,25 +452,22 @@ fn finish_core_refresh(
     write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &job)?;
     let failed = daemon_job_failed(&job);
     let state = daemon_core_cycle_state(&job);
-    let published_generation = (!failed).then(|| completed_core_generation(&job)).flatten();
+    let published_generation = (!failed
+        && job.get("status").and_then(Value::as_str) == Some("completed"))
+    .then(|| {
+        job.get("published_generation")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+    .flatten();
     if let Some(generation) = published_generation {
         runtime.sidecar_drain.generation = Some(generation);
-        Ok(immediate_follow_up(
-            DaemonIteration::new(did_work, false, state).with_core_refresh_published(),
-        ))
+        Ok(immediate_follow_up(DaemonIteration::new(
+            did_work, false, state,
+        )))
     } else {
         Ok(DaemonIteration::new(did_work, failed, state))
     }
-}
-
-fn completed_core_generation(job: &Value) -> Option<String> {
-    (job.get("status").and_then(Value::as_str) == Some("completed"))
-        .then(|| {
-            job.get("published_generation")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .flatten()
 }
 
 fn daemon_core_cycle_state(job: &Value) -> DaemonCycleStateV1 {
@@ -379,15 +525,37 @@ pub(super) fn restore_daemon_source_refresh_retry(runtime: &mut DaemonRuntime, d
 
 pub(super) fn restore_daemon_consumer_retries(runtime: &mut DaemonRuntime, data_root: &Path) {
     let pro = read_pro_status(data_root);
-    runtime.pro_retry.restore(pro.as_ref());
+    restore_consumer_retry(&mut runtime.pro_retry, pro.as_ref());
     let semantic = read_daemon_job_status(&daemon_semantic_job_path(data_root));
-    runtime.semantic_retry.restore(semantic.as_ref());
+    restore_consumer_retry(&mut runtime.semantic_retry, semantic.as_ref());
+}
+
+fn restore_consumer_retry(backoff: &mut DaemonRetryBackoff, status: Option<&Value>) {
+    backoff.restore(status);
+    let persisted_failures = status
+        .and_then(|status| status.get("consecutive_failures"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(u64::from(u32::MAX)) as u32;
+    if backoff.consecutive_failures == 0
+        && persisted_failures > 0
+        && status
+            .and_then(|status| status.get("retryable"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        backoff.consecutive_failures = persisted_failures;
+    }
+}
+
+pub(super) fn daemon_consumer_retry_due(runtime: &DaemonRuntime) -> bool {
+    (runtime.pro_retry.consecutive_failures > 0 && runtime.pro_retry.ready())
+        || (runtime.semantic_retry.consecutive_failures > 0 && runtime.semantic_retry.ready())
 }
 
 pub(super) fn daemon_retry_due(runtime: &DaemonRuntime) -> bool {
     (runtime.history_retry.consecutive_failures > 0 && runtime.history_retry.ready())
-        || (runtime.pro_retry.consecutive_failures > 0 && runtime.pro_retry.ready())
-        || (runtime.semantic_retry.consecutive_failures > 0 && runtime.semantic_retry.ready())
+        || daemon_consumer_retry_due(runtime)
 }
 
 fn core_refresh_failed_job(data_root: &Path, message: String) -> Value {
@@ -558,6 +726,13 @@ fn daemon_semantic_job_did_work(value: &Value) -> bool {
             .is_some_and(|records| records > 0)
 }
 
+fn source_route_ledger_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
 fn write_daemon_job_status_unless_deadline_skip(path: &Path, value: &Value) -> Result<()> {
     if value.get("status").and_then(Value::as_str) == Some("skipped")
         && value.get("reason").and_then(Value::as_str) == Some("daemon_deadline")
@@ -584,7 +759,9 @@ use std::{
 };
 
 use anyhow::Result;
+use ctx_history_capture::SourceBackedRefreshScope;
 use ctx_history_core::utc_now;
+use ctx_pro_host_protocol::ProFilesystemLayout;
 use serde_json::{json, Value};
 
 use crate::{
@@ -610,11 +787,9 @@ use super::{
     source_backed_pro_catch_up::{
         persist_status_json as persist_pro_status, read_status_json as read_pro_status,
         run_after_core_publication, status_generation as pro_status_generation,
-        SourceBackedProCatchUpRun,
+        SourceBackedProCatchUpRun, SourceBackedProCoreAuthority,
     },
-    source_backed_refresh_coordinator::{
-        pin_published_generation, CoreRefreshEngine, PinnedCorePublication,
-    },
+    source_backed_refresh_coordinator::{pin_published_generation, CoreRefreshEngine},
 };
 
 #[cfg(test)]

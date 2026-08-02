@@ -29,9 +29,9 @@ use super::{
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::source_backed::{
-        source_backed_base_removals, source_backed_base_sources, SourceBackedGenerationSink,
-        SourceBackedRevalidationTarget, SourceBackedRouteDriver, SourceBackedRouteError,
-        SourceBackedRouteErrorKind, SourceBackedRouteResult,
+        source_backed_base_sources, SourceBackedGenerationSink, SourceBackedRevalidationTarget,
+        SourceBackedRouteDriver, SourceBackedRouteError, SourceBackedRouteErrorKind,
+        SourceBackedRouteResult,
     },
     CaptureError, Result,
 };
@@ -710,21 +710,6 @@ fn capture(
             return Err(route_invalid(
                 "JSONL route source descriptor digest collision",
             ));
-        }
-    }
-    for removal in source_backed_base_removals(sink) {
-        let deletion = removal.deletion();
-        let inventory = deletion.inventory();
-        if adapter.owns(deletion.source())
-            && inventory.authority_namespace() == FAMILY_INVENTORY_AUTHORITY
-            && inventory.authority_key()
-                == &TypedKey::bytes(root.as_os_str().as_encoded_bytes().to_vec())
-                    .map_err(route_invalid)?
-        {
-            owned_sources.insert(
-                deletion.source().exact_descriptor_digest(),
-                deletion.source().clone(),
-            );
         }
     }
     let bases_by_descriptor = bases_by_descriptor(&bases)?;

@@ -65,15 +65,15 @@ impl SinkHarness {
             ) -> TestWorkerResult
             + Sync,
     {
-        let mut report_progress = |_| Ok(());
         let mut sink = SourceBackedGenerationSink {
             writer: &mut self.writer,
             owners: &mut self.owners,
             complete_inventories: &mut self.complete_inventories,
             route_index: 0,
             leaf_worker_budget: self.leaf_worker_budget,
-            automatic_missing_observed_at_unix_ms: None,
-            report_current_source_progress: &mut report_progress,
+            applied_removals: &mut Vec::new(),
+            record_progress: None,
+            current_source_progress: None,
         };
         sink.run_parallel_leaf_scans(jobs, worker_count, scan)
     }
@@ -627,15 +627,15 @@ fn worker_budget_reserves_indexers_runtime_and_caps_scanners() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let mut harness = SinkHarness::open(&temp.path().join("index"));
     harness.leaf_worker_budget = 6;
-    let mut report_progress = |_| Ok(());
     let sink = SourceBackedGenerationSink {
         writer: &mut harness.writer,
         owners: &mut harness.owners,
         complete_inventories: &mut harness.complete_inventories,
         route_index: 0,
         leaf_worker_budget: harness.leaf_worker_budget,
-        automatic_missing_observed_at_unix_ms: None,
-        report_current_source_progress: &mut report_progress,
+        applied_removals: &mut Vec::new(),
+        record_progress: None,
+        current_source_progress: None,
     };
     assert_eq!(sink.recommended_leaf_workers(0), 0);
     assert_eq!(sink.recommended_leaf_workers(2), 2);

@@ -58,9 +58,9 @@ impl<L> ObservedDocumentLeaf<L> {
 
     /// Selects whether the physical fingerprint is durable replay identity.
     ///
-    /// Ordinary files use `true`. Logical snapshots such as SQLite use
-    /// `false`: they scan once, then identical logical staging is discarded
-    /// without publishing a new generation.
+    /// Ordinary files and sources with a bounded, terminally revalidated
+    /// physical revision use `true`. Sources without such an authority use
+    /// `false` and must rescan before an identical staging result is discarded.
     pub(crate) fn with_durable_replay(
         physical_fingerprint: DocumentLeafFingerprint,
         provider_leaf: L,
@@ -251,6 +251,7 @@ pub(crate) enum DocumentLeafExecutionPolicy {
     #[default]
     Serial,
     Independent,
+    #[cfg(test)]
     IndependentCapped(usize),
 }
 pub(crate) trait ReplacementDocumentTree: Send + Sync + 'static {
@@ -286,8 +287,11 @@ pub(crate) trait ReplacementDocumentTree: Send + Sync + 'static {
     ) -> SourceBackedRouteResult<Option<SourceKey>> {
         match self.leaf_execution_policy() {
             DocumentLeafExecutionPolicy::Serial => Ok(None),
-            DocumentLeafExecutionPolicy::Independent
-            | DocumentLeafExecutionPolicy::IndependentCapped(_) => {
+            DocumentLeafExecutionPolicy::Independent => {
+                self.independent_leaf_source(authority, leaf).map(Some)
+            }
+            #[cfg(test)]
+            DocumentLeafExecutionPolicy::IndependentCapped(_) => {
                 self.independent_leaf_source(authority, leaf).map(Some)
             }
         }
@@ -470,6 +474,7 @@ where
             sink.recommended_leaf_workers(tree.leaves.len()),
             sink,
         )?,
+        #[cfg(test)]
         DocumentLeafExecutionPolicy::IndependentCapped(worker_count) => {
             scan_document_leaves_independently(
                 adapter,
@@ -733,12 +738,11 @@ where
     A: ReplacementDocumentTree,
 {
     let scan_result = {
-        let mut changed = if observed.replay_from_frontier {
-            ChangedDocumentSink::parallel(emitter)
-        } else {
-            ChangedDocumentSink::parallel_logical(emitter, logical_base.cloned())
-                .map_err(ParallelLeafScanWorkerError::provider)?
-        };
+        // Independent workers must complete their scans without waiting for
+        // the deterministic writer lane assigned to an earlier leaf. Stage
+        // each bounded leaf privately, then replay it in discovery order.
+        let mut changed = ChangedDocumentSink::parallel_logical(emitter, logical_base.cloned())
+            .map_err(ParallelLeafScanWorkerError::provider)?;
         (|| {
             let terminal =
                 adapter.scan_changed(authority, &observed.provider_leaf, &mut changed)?;

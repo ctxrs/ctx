@@ -37,7 +37,7 @@ test("wraps status, init, sources, import, and sync CLI commands", async () => {
   }));
 
   const status = await client.status();
-  await client.init({ catalogOnly: true });
+  await client.init();
   const sources = await client.sources();
   const imported = await client.import({ provider: "codex", resume: true });
   await client.sync({ all: true });
@@ -59,7 +59,6 @@ test("wraps status, init, sources, import, and sync CLI commands", async () => {
         "--format=json",
         "--progress",
         "none",
-        "--catalog-only",
       ],
       ["--data-root", "/tmp/ctx-sdk-test", "sources", "--format=json"],
       [
@@ -84,6 +83,61 @@ test("wraps status, init, sources, import, and sync CLI commands", async () => {
       ],
     ],
   );
+});
+
+test("status counters use the exact cross-SDK integer domain", async () => {
+  const maximum = Number.MAX_SAFE_INTEGER;
+  const accepted = toAgentHistoryEnvelope("status", {
+    initialized: true,
+    indexed_items: maximum,
+    indexed_sessions: maximum,
+    indexed_events: maximum,
+    indexed_sources: maximum,
+  });
+  assert.equal(accepted.status.indexedItems, maximum);
+  assert.equal(accepted.status.indexedSessions, maximum);
+  assert.equal(accepted.status.indexedEvents, maximum);
+  assert.equal(accepted.status.indexedSources, maximum);
+
+  for (const wireValue of ["9007199254740993", "18446744073709551615"]) {
+    const raw = JSON.parse(`{"initialized":true,"indexed_items":${wireValue}}`);
+    assert.throws(
+      () => toAgentHistoryEnvelope("status", raw),
+      (error) =>
+        error instanceof CtxParseError &&
+        error.details.field === "indexedItems" &&
+        error.details.maximum === maximum,
+    );
+  }
+
+  for (const wireValue of ["1.00000000000000001", "1e0"]) {
+    const { client } = mockClient(() => ({
+      stdout: `{"initialized":true,"indexed_items":${wireValue}}`,
+    }));
+    await assert.rejects(
+      () => client.status(),
+      (error) =>
+        error instanceof CtxParseError &&
+        error.details.field === "indexedItems" &&
+        error.details.maximum === maximum,
+    );
+  }
+});
+
+test("status counter lexeme checks do not reinterpret other operation payloads", async () => {
+  const { client } = mockClient(() => ({
+    stdout: '{"results":[],"indexed_items":1.5}',
+  }));
+  const response = await client.search("needle");
+  assert.equal(response.search.indexedItems, 1.5);
+});
+
+test("status counter lexeme checks ignore extension fields below the status root", async () => {
+  const { client } = mockClient(() => ({
+    stdout: '{"initialized":true,"daemon":{"indexed_items":1.5}}',
+  }));
+  const response = await client.status();
+  assert.equal(response.status.daemon.indexedItems, 1.5);
 });
 
 test("forces analytics off after ambient and user environment merging", async () => {

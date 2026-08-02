@@ -240,6 +240,11 @@ fn mcp_blame_returns_exact_typed_json_and_complete_text_fallback() {
     let result = &responses[1]["result"];
     assert!(result["isError"].is_null(), "{result:#}");
     let structured = &result["structuredContent"];
+    assert_eq!(structured["snapshot"]["kind"], "core");
+    assert_eq!(
+        structured["snapshot"]["receipt"]["materializer_revision"],
+        "pro-query-fixture-v1"
+    );
     assert_eq!(structured["target"]["kind"], "commit");
     assert_eq!(structured["matches"][0]["kind"], "commit");
     assert_eq!(structured["evidence"].as_array().map(Vec::len), Some(1));

@@ -75,9 +75,7 @@ pub struct HostedBackendConfig {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct InitOptions {
-    pub catalog_only: bool,
-}
+pub struct InitOptions;
 
 #[derive(Debug, Clone, Default)]
 pub struct ImportOptions {
@@ -228,11 +226,11 @@ impl AgentHistoryClient {
     }
 
     pub fn init(&self, options: InitOptions) -> Result<AgentHistoryEnvelope, AgentHistoryError> {
-        let mut args = vec!["setup", "--format=json", "--progress", "none"];
-        if options.catalog_only {
-            args.push("--catalog-only");
-        }
-        self.local_json(AgentHistoryOperation::Init, &args)
+        let _ = options;
+        self.local_json(
+            AgentHistoryOperation::Init,
+            &["setup", "--format=json", "--progress", "none"],
+        )
     }
 
     pub fn sources(&self) -> Result<AgentHistoryEnvelope, AgentHistoryError> {
@@ -777,35 +775,37 @@ fn decode_payload<T: DeserializeOwned>(
 }
 
 fn normalize_status(raw: &Value) -> Result<AgentHistoryStatus, AgentHistoryError> {
-    let mut value = camel_alias_object(
-        raw,
-        &[
-            ("schema_version", "schemaVersion"),
-            ("data_root", "dataRoot"),
-            ("indexed_items", "indexedItems"),
-            ("indexed_sources", "indexedSources"),
-            ("cataloged_sessions", "catalogedSessions"),
-            ("indexed_catalog_sessions", "indexedCatalogSessions"),
-            ("pending_catalog_sessions", "pendingCatalogSessions"),
-            ("failed_catalog_sessions", "failedCatalogSessions"),
-            ("stale_catalog_sessions", "staleCatalogSessions"),
-            ("local_only", "localOnly"),
-        ],
-    );
-    if let Some(object) = value.as_object_mut() {
-        if !object.contains_key("initialized") {
-            let initialized = object
-                .get("mode")
-                .and_then(Value::as_str)
-                .map(|mode| matches!(mode, "ready" | "catalog_only"))
-                .unwrap_or(true);
-            object.insert("initialized".to_owned(), Value::Bool(initialized));
-        }
-        if !object.contains_key("localOnly") {
-            object.insert("localOnly".to_owned(), Value::Bool(true));
+    let current = camelize_object_keys(raw);
+    let mut status = serde_json::Map::new();
+    for key in [
+        "initialized",
+        "readOnly",
+        "dataRoot",
+        "indexedItems",
+        "indexedSessions",
+        "indexedEvents",
+        "indexedSources",
+        "historyEpoch",
+        "lexical",
+        "refresh",
+        "semantic",
+        "daemon",
+    ] {
+        if let Some(value) = current.get(key) {
+            status.insert(key.to_owned(), value.clone());
         }
     }
-    decode_payload(camelize_object_keys(&value), "status")
+    status.entry("initialized".to_owned()).or_insert_with(|| {
+        Value::Bool(
+            current
+                .get("lexical")
+                .and_then(|lexical| lexical.get("generationId"))
+                .and_then(Value::as_str)
+                .is_some(),
+        )
+    });
+    status.insert("localOnly".to_owned(), Value::Bool(true));
+    decode_payload(Value::Object(status), "status")
 }
 
 fn normalize_import(raw: &Value) -> Result<ImportResult, AgentHistoryError> {

@@ -11,9 +11,9 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource, CoreRecord,
-    CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
+    derive_event_id, CaptureProvider, CertifiedSource, CoreRecord, CoreRecordError,
+    EventIdentityInput, NativeItemKey, ProjectionContractError, ScannedSourceCounts, SourceAnchor,
+    SourceKey, TypedKey,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -22,7 +22,6 @@ use crate::{
     common::io::ProviderSourceRoot,
     provider::{
         native_ingestion::{NATIVE_INGESTION_PAGE_MAX_BYTES, NATIVE_INGESTION_PAGE_MAX_UNITS},
-        normalization::provider_required_timestamp_seconds,
         source_backed::{
             SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
             SourceBackedRouteError, SourceBackedRouteResult,
@@ -52,17 +51,19 @@ const HERMES_LOGICAL_EVENT_KIND: &str = "hermes-message";
 const HERMES_SOURCE_SCHEMA_VARIANT: &str = "hermes-state-db-v1";
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "Hermes SQLite source must have an authorized parent and database leaf";
-const HERMES_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v1";
-const HERMES_SESSION_METADATA_MAX_CHARS: usize = 8 * 1024;
-const HERMES_PARENT_CHAIN_MAX_DEPTH: usize = 256;
+#[cfg(test)]
+const HERMES_LEGACY_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v1";
+const HERMES_SOURCE_PARSER_REVISION: &str = "hermes-source-backed-v2";
 const HERMES_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-snapshot-v1\0";
-const HERMES_LOGICAL_FINGERPRINT_DOMAIN: &[u8] = b"ctx-hermes-logical-fingerprint-v1\0";
+const HERMES_TREE_FINGERPRINT_DOMAIN: &[u8] = b"ctx-hermes-source-inventory-v1\0";
 const HERMES_SESSION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-session-v1\0";
 const HERMES_REJECTION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-rejection-v1\0";
 
+mod ancestry;
 mod contracts;
 mod replacement;
 
+use ancestry::{HermesSessionContext, HermesSessionContextMemo, HermesSessionResolution};
 pub(crate) use contracts::*;
 
 struct HermesSnapshotProjection {
@@ -73,14 +74,20 @@ struct HermesSnapshotProjection {
     native_candidate_query_batches: u64,
     native_hydration_query_batches: u64,
     max_native_rows_per_set: u64,
+    direct_context_query_batches: u64,
+    ancestry_query_batches: u64,
+    max_context_query_batches_per_page: u64,
+    max_direct_context_rows_per_query: u64,
+    max_ancestry_rows_per_query: u64,
+    max_direct_context_bytes_per_query: u64,
+    max_ancestry_bytes_per_query: u64,
+    peak_context_cache_rows: u64,
+    peak_context_cache_bytes: u64,
 }
 
 enum HermesSnapshotProjectionOutput {
     Page(HermesSourceBackedPage),
-    Progress {
-        rows_scanned: u64,
-        certified_bytes: u64,
-    },
+    Progress(SourceBackedCurrentSourceProgress),
 }
 
 #[cfg(test)]
@@ -91,7 +98,7 @@ fn project_hermes_snapshot(
 ) -> HermesSourceBackedResult<HermesSnapshotProjection> {
     project_hermes_snapshot_with_progress(candidate, conn, &mut |output| match output {
         HermesSnapshotProjectionOutput::Page(page) => emit(page),
-        HermesSnapshotProjectionOutput::Progress { .. } => Ok(()),
+        HermesSnapshotProjectionOutput::Progress(_) => Ok(()),
     })
 }
 
@@ -106,14 +113,29 @@ fn project_hermes_snapshot_with_progress(
         .to_str()
         .ok_or_else(|| HermesSourceBackedError::InvalidProfilePath(candidate.path.clone()))?
         .to_owned();
+    emit(HermesSnapshotProjectionOutput::Progress(
+        hermes_logical_progress(
+            SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
+            0,
+            0,
+        ),
+    ))?;
     let sqlite_user_version = conn
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(CaptureError::from)?;
     let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
     let schema = HermesSchema::detect(conn)?;
     let schema_evidence = hermes_schema_evidence(sqlite_user_version, &schema_fingerprint);
+    emit(HermesSnapshotProjectionOutput::Progress(
+        hermes_logical_progress(
+            SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
+            0,
+            0,
+        ),
+    ))?;
 
     let mut reader = HermesRowReader::new(conn, &schema)?;
+    let mut context_memo = HermesSessionContextMemo::new(conn, &schema, &candidate.source);
     let operation: HermesSourceBackedResult<(ScannedSourceCounts, [u8; 32], u64, u64, u64)> =
         (|| {
             let mut frontier = super::sqlite::HermesFrontier::initial();
@@ -122,13 +144,13 @@ fn project_hermes_snapshot_with_progress(
             let mut counts = ScannedSourceCounts::default();
             let mut page_records = Vec::new();
             let mut page_owned_bytes = 0_usize;
+            let mut page_completed_bytes = 0_u64;
             let mut decoded_rows = 0_u64;
             let mut emitted_pages = 0_u64;
             let mut peak_buffered_records = 0_u64;
-            emit(HermesSnapshotProjectionOutput::Progress {
-                rows_scanned: 0,
-                certified_bytes: 0,
-            })?;
+            emit(HermesSnapshotProjectionOutput::Progress(
+                hermes_logical_progress(SourceBackedCurrentSourceProgressStage::LogicalScan, 0, 0),
+            ))?;
 
             loop {
                 let native_page = reader.next_page(frontier)?;
@@ -147,8 +169,7 @@ fn project_hermes_snapshot_with_progress(
                         HermesNativeRecord::Rejected(_) => None,
                     })
                     .collect::<BTreeSet<_>>();
-                let session_contexts =
-                    load_session_contexts(conn, &schema, &candidate.source, &requested_sessions)?;
+                let session_contexts = context_memo.resolve_page(&requested_sessions)?;
                 for native in native_page {
                     decoded_rows = checked_add(decoded_rows, 1)?;
                     counts.complete_records = checked_add(counts.complete_records, 1)?;
@@ -197,12 +218,17 @@ fn project_hermes_snapshot_with_progress(
                                 .map_err(|_| HermesSourceBackedError::CountOverflow)?,
                         );
                         emit(HermesSnapshotProjectionOutput::Page(
-                            HermesSourceBackedPage { records },
+                            HermesSourceBackedPage {
+                                records,
+                                completed_bytes: page_completed_bytes,
+                            },
                         ))?;
                         emitted_pages = checked_add(emitted_pages, 1)?;
                         page_owned_bytes = 0;
+                        page_completed_bytes = 0;
                     }
                     page_owned_bytes = page_owned_bytes.saturating_add(owned_bytes);
+                    page_completed_bytes = checked_add(page_completed_bytes, observed_bytes)?;
                     page_records.push(record);
                     if page_records.len() == NATIVE_INGESTION_PAGE_MAX_UNITS {
                         let records = std::mem::take(&mut page_records);
@@ -211,16 +237,23 @@ fn project_hermes_snapshot_with_progress(
                                 .map_err(|_| HermesSourceBackedError::CountOverflow)?,
                         );
                         emit(HermesSnapshotProjectionOutput::Page(
-                            HermesSourceBackedPage { records },
+                            HermesSourceBackedPage {
+                                records,
+                                completed_bytes: page_completed_bytes,
+                            },
                         ))?;
                         emitted_pages = checked_add(emitted_pages, 1)?;
                         page_owned_bytes = 0;
+                        page_completed_bytes = 0;
                     }
                 }
-                emit(HermesSnapshotProjectionOutput::Progress {
-                    rows_scanned: counts.complete_records,
-                    certified_bytes: counts.certified_bytes,
-                })?;
+                emit(HermesSnapshotProjectionOutput::Progress(
+                    hermes_logical_progress(
+                        SourceBackedCurrentSourceProgressStage::LogicalScan,
+                        counts.complete_records,
+                        counts.certified_bytes,
+                    ),
+                ))?;
             }
             if !page_records.is_empty() {
                 peak_buffered_records = peak_buffered_records.max(
@@ -230,14 +263,18 @@ fn project_hermes_snapshot_with_progress(
                 emit(HermesSnapshotProjectionOutput::Page(
                     HermesSourceBackedPage {
                         records: page_records,
+                        completed_bytes: page_completed_bytes,
                     },
                 ))?;
                 emitted_pages = checked_add(emitted_pages, 1)?;
             }
-            emit(HermesSnapshotProjectionOutput::Progress {
-                rows_scanned: counts.complete_records,
-                certified_bytes: counts.certified_bytes,
-            })?;
+            emit(HermesSnapshotProjectionOutput::Progress(
+                hermes_logical_progress(
+                    SourceBackedCurrentSourceProgressStage::LogicalScan,
+                    counts.complete_records,
+                    counts.certified_bytes,
+                ),
+            ))?;
             Ok((
                 counts,
                 digest.finalize().into(),
@@ -247,7 +284,9 @@ fn project_hermes_snapshot_with_progress(
             ))
         })();
     let reader_counters = reader.counters();
+    let context_counters = context_memo.counters();
     drop(reader);
+    drop(context_memo);
 
     let (counts, content_digest, decoded_rows, emitted_pages, peak_buffered_records) = operation?;
     let certificate = SqliteLogicalSnapshot::new(
@@ -257,6 +296,8 @@ fn project_hermes_snapshot_with_progress(
         counts,
     )
     .certify(candidate.source.clone())?;
+    #[cfg(test)]
+    record_logical_row_traversal();
     Ok(HermesSnapshotProjection {
         certificate,
         decoded_rows,
@@ -265,6 +306,15 @@ fn project_hermes_snapshot_with_progress(
         native_candidate_query_batches: reader_counters.candidate_query_batches,
         native_hydration_query_batches: reader_counters.hydration_query_batches,
         max_native_rows_per_set: reader_counters.max_hydration_rows,
+        direct_context_query_batches: context_counters.direct_query_batches,
+        ancestry_query_batches: context_counters.ancestry_query_batches,
+        max_context_query_batches_per_page: context_counters.max_query_batches_per_page,
+        max_direct_context_rows_per_query: context_counters.max_direct_rows_per_query,
+        max_ancestry_rows_per_query: context_counters.max_ancestry_rows_per_query,
+        max_direct_context_bytes_per_query: context_counters.max_direct_bytes_per_query,
+        max_ancestry_bytes_per_query: context_counters.max_ancestry_bytes_per_query,
+        peak_context_cache_rows: context_counters.peak_cache_rows,
+        peak_context_cache_bytes: context_counters.peak_cache_bytes,
     })
 }
 
@@ -278,21 +328,7 @@ fn open_root_authorized_snapshot(
     data_root: &Path,
     path: &Path,
 ) -> HermesSourceBackedResult<(SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot)> {
-    open_root_authorized_snapshot_with_hook(data_root, path, || {})
-}
-
-#[cfg(test)]
-fn open_root_authorized_snapshot_with_hook(
-    data_root: &Path,
-    path: &Path,
-    after_authorize: impl FnOnce(),
-) -> HermesSourceBackedResult<(SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot)> {
-    open_root_authorized_snapshot_with_progress_and_hook(
-        data_root,
-        path,
-        after_authorize,
-        &mut |_| Ok(()),
-    )
+    open_root_authorized_snapshot_with_hook_and_progress(data_root, path, || {}, &mut |_| Ok(()))
 }
 
 fn open_root_authorized_snapshot_with_progress(
@@ -302,10 +338,24 @@ fn open_root_authorized_snapshot_with_progress(
         SourceBackedCurrentSourceProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> HermesSourceBackedResult<(SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot)> {
-    open_root_authorized_snapshot_with_progress_and_hook(data_root, path, || {}, report_progress)
+    open_root_authorized_snapshot_with_hook_and_progress(data_root, path, || {}, report_progress)
 }
 
-fn open_root_authorized_snapshot_with_progress_and_hook(
+#[cfg(test)]
+fn open_root_authorized_snapshot_with_hook(
+    data_root: &Path,
+    path: &Path,
+    after_authorize: impl FnOnce(),
+) -> HermesSourceBackedResult<(SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot)> {
+    open_root_authorized_snapshot_with_hook_and_progress(
+        data_root,
+        path,
+        after_authorize,
+        &mut |_| Ok(()),
+    )
+}
+
+fn open_root_authorized_snapshot_with_hook_and_progress(
     data_root: &Path,
     path: &Path,
     after_authorize: impl FnOnce(),
@@ -357,70 +407,6 @@ fn hermes_schema_evidence(sqlite_user_version: i64, schema_fingerprint: &str) ->
     .into_bytes()
 }
 
-fn observe_hermes_logical_snapshot_with_progress(
-    conn: &rusqlite::Connection,
-    report_progress: &mut dyn FnMut(
-        SourceBackedCurrentSourceProgress,
-    ) -> SourceBackedRouteResult<()>,
-) -> HermesSourceBackedResult<[u8; 32]> {
-    let sqlite_user_version = conn
-        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-        .map_err(CaptureError::from)?;
-    let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
-    let schema = HermesSchema::detect(conn)?;
-    let schema_evidence = hermes_schema_evidence(sqlite_user_version, &schema_fingerprint);
-    let mut reader = HermesRowReader::new(conn, &schema)?;
-    let mut frontier = super::sqlite::HermesFrontier::initial();
-    let mut digest = Sha256::new();
-    digest.update(HERMES_LOGICAL_FINGERPRINT_DOMAIN);
-    digest.update((HERMES_SOURCE_PARSER_REVISION.len() as u64).to_be_bytes());
-    digest.update(HERMES_SOURCE_PARSER_REVISION.as_bytes());
-    digest.update((schema_evidence.len() as u64).to_be_bytes());
-    digest.update(schema_evidence);
-    let mut rows = 0_u64;
-    let mut certified_bytes = 0_u64;
-    report_progress(hermes_logical_progress(
-        SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
-        rows,
-        certified_bytes,
-    ))?;
-    loop {
-        let page = reader.next_page(frontier)?;
-        if page.is_empty() {
-            break;
-        }
-        frontier = page
-            .last()
-            .map(|native| native.next_frontier)
-            .unwrap_or(frontier);
-        for native in page {
-            rows = checked_add(rows, 1)?;
-            let observed_bytes = u64::try_from(native.observed_bytes)
-                .map_err(|_| HermesSourceBackedError::CountOverflow)?;
-            certified_bytes = checked_add(certified_bytes, observed_bytes)?;
-            digest.update([match native.locator.phase {
-                HermesPhase::Sessions => 1,
-                HermesPhase::Messages => 2,
-            }]);
-            digest.update(native.ordinal.to_be_bytes());
-            digest.update(observed_bytes.to_be_bytes());
-            digest.update(native_record_digest(&native)?);
-        }
-        report_progress(hermes_logical_progress(
-            SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
-            rows,
-            certified_bytes,
-        ))?;
-    }
-    report_progress(hermes_logical_progress(
-        SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
-        rows,
-        certified_bytes,
-    ))?;
-    digest.update(rows.to_be_bytes());
-    Ok(digest.finalize().into())
-}
-
 fn hermes_logical_progress(
     stage: SourceBackedCurrentSourceProgressStage,
     rows_scanned: u64,
@@ -432,23 +418,33 @@ fn hermes_logical_progress(
     progress
 }
 
-#[derive(Debug, Clone)]
-struct HermesSessionContext {
-    session_id: StableEntityId,
-    parent_session_id: Option<StableEntityId>,
-    root_session_id: StableEntityId,
-    branch: Option<String>,
-    agent_type: String,
-    is_primary: bool,
-    workspace: Option<String>,
-    cwd: Option<String>,
+fn hermes_tree_fingerprint(source: &SourceKey) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(HERMES_TREE_FINGERPRINT_DOMAIN);
+    digest.update(source.exact_descriptor_digest());
+    digest.finalize().into()
 }
 
-#[derive(Debug, Clone)]
-enum HermesSessionResolution {
-    Context(Box<HermesSessionContext>),
-    Missing,
-    Rejected(String),
+#[cfg(test)]
+std::thread_local! {
+    static HERMES_LOGICAL_ROW_TRAVERSALS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_logical_row_traversals() {
+    HERMES_LOGICAL_ROW_TRAVERSALS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn logical_row_traversals() -> u64 {
+    HERMES_LOGICAL_ROW_TRAVERSALS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_logical_row_traversal() {
+    HERMES_LOGICAL_ROW_TRAVERSALS.with(|count| {
+        count.set(count.get().saturating_add(1));
+    });
 }
 
 fn project_native_row(
@@ -461,9 +457,9 @@ fn project_native_row(
     match native.record {
         HermesNativeRecord::Session(row) => {
             let context = match session_contexts.get(&row.id) {
-                Some(HermesSessionResolution::Context(context)) => context.as_ref().clone(),
+                Some(HermesSessionResolution::Context(context)) => context,
                 Some(HermesSessionResolution::Rejected(reason)) => {
-                    return Ok(rejected(reason.clone()));
+                    return Ok(rejected(reason.to_string()));
                 }
                 Some(HermesSessionResolution::Missing) | None => {
                     return Ok(rejected(format!(
@@ -483,9 +479,9 @@ fn project_native_row(
             prepared,
         } => {
             let context = match session_contexts.get(&row.session_id) {
-                Some(HermesSessionResolution::Context(context)) => context.as_ref().clone(),
+                Some(HermesSessionResolution::Context(context)) => context,
                 Some(HermesSessionResolution::Rejected(reason)) => {
-                    return Ok(rejected(reason.clone()));
+                    return Ok(rejected(reason.to_string()));
                 }
                 Some(HermesSessionResolution::Missing) | None => {
                     return Ok(rejected(format!(
@@ -510,16 +506,16 @@ fn rejected(reason: String) -> HermesSourceBackedRecord {
 fn project_session(
     source_path: &str,
     row: HermesSessionRow,
-    context: HermesSessionContext,
+    context: &HermesSessionContext,
 ) -> HermesSourceBackedResult<HermesSourceBackedSession> {
     Ok(HermesSourceBackedSession {
         provider_session_id: row.id,
         provider_parent_session_id: row.parent_session_id,
-        branch: context.branch,
+        branch: context.branch.clone(),
         source_path: source_path.to_owned(),
-        agent_type: context.agent_type,
-        workspace: context.workspace,
-        cwd: context.cwd,
+        agent_type: context.agent_type.clone(),
+        workspace: context.workspace.clone(),
+        cwd: context.cwd.clone(),
     })
 }
 
@@ -528,7 +524,7 @@ fn project_message(
     ordinal: u64,
     row: HermesMessageRow,
     prepared: Option<super::HermesPreparedCoreMessage>,
-    session: HermesSessionContext,
+    session: &HermesSessionContext,
 ) -> HermesSourceBackedResult<CoreRecord> {
     let native = match prepared {
         Some(prepared) => prepared.native,
@@ -567,7 +563,7 @@ fn project_message(
         source.clone(),
         native.provider_event_index,
         native.event_type.as_str(),
-        session.agent_type,
+        session.agent_type.clone(),
         session.is_primary,
         HERMES_SOURCE_PARSER_REVISION,
         body,
@@ -577,9 +573,9 @@ fn project_message(
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = Some(native.occurred_at.timestamp_millis());
     record.role = native.role.map(|role| role.as_str().to_owned());
-    record.branch = session.branch;
-    record.workspace = session.workspace;
-    record.cwd = session.cwd;
+    record.branch = session.branch.clone();
+    record.workspace = session.workspace.clone();
+    record.cwd = session.cwd.clone();
     if let Some(native_tool) = native_tool {
         record.content.structured_content = Some(serde_json::json!({
             "provider_native_tool": native_tool,
@@ -587,180 +583,6 @@ fn project_message(
     }
     record.validate_contract()?;
     Ok(record)
-}
-
-fn hermes_session_id(
-    source: &SourceKey,
-    provider_session_id: &str,
-) -> HermesSourceBackedResult<StableEntityId> {
-    let native_session_key = NativeSessionKey::native_id(
-        HERMES_SESSION_NAMESPACE,
-        TypedKey::utf8(provider_session_id)?,
-    )?;
-    Ok(derive_session_id(SessionIdentityInput {
-        source,
-        logical_session_kind: HERMES_LOGICAL_SESSION_KIND,
-        native_session_key: &native_session_key,
-    })?)
-}
-
-fn load_session_contexts(
-    conn: &rusqlite::Connection,
-    schema: &HermesSchema,
-    source: &SourceKey,
-    provider_session_ids: &BTreeSet<String>,
-) -> Result<BTreeMap<String, HermesSessionResolution>, CaptureError> {
-    let mut rows = BTreeMap::<String, HermesSessionRow>::new();
-    let mut pending = provider_session_ids.clone();
-    for _ in 0..=HERMES_PARENT_CHAIN_MAX_DEPTH {
-        if pending.is_empty() {
-            break;
-        }
-        let mut loaded = load_session_rows(conn, schema, &pending)?;
-        let mut parents = BTreeSet::new();
-        for id in pending {
-            if let Some(row) = loaded.remove(&id) {
-                if let Some(parent) = row.parent_session_id.as_ref() {
-                    if !rows.contains_key(parent) {
-                        parents.insert(parent.clone());
-                    }
-                }
-                rows.insert(id, row);
-            }
-        }
-        pending = parents;
-    }
-    if !pending.is_empty() {
-        return Err(CaptureError::InvalidPayload(format!(
-            "Hermes session ancestry exceeds the {HERMES_PARENT_CHAIN_MAX_DEPTH}-level bound"
-        )));
-    }
-    provider_session_ids
-        .iter()
-        .map(|provider_session_id| {
-            let resolution = match rows.get(provider_session_id) {
-                None => HermesSessionResolution::Missing,
-                Some(row) => match build_session_context(source, &rows, row) {
-                    Ok(context) => HermesSessionResolution::Context(Box::new(context)),
-                    Err(CaptureError::InvalidPayload(reason)) => {
-                        HermesSessionResolution::Rejected(reason)
-                    }
-                    Err(error) => return Err(error),
-                },
-            };
-            Ok((provider_session_id.clone(), resolution))
-        })
-        .collect()
-}
-
-fn build_session_context(
-    source: &SourceKey,
-    rows: &BTreeMap<String, HermesSessionRow>,
-    row: &HermesSessionRow,
-) -> Result<HermesSessionContext, CaptureError> {
-    provider_required_timestamp_seconds(row.started_at, "Hermes session started_at")?;
-    row.ended_at
-        .map(|value| provider_required_timestamp_seconds(value, "Hermes session ended_at"))
-        .transpose()?;
-    let session_id = hermes_session_id(source, &row.id)
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    let parent_session_id = row
-        .parent_session_id
-        .as_deref()
-        .map(|parent| hermes_session_id(source, parent))
-        .transpose()
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    let root_provider_session_id = root_provider_session_id(rows, row)?;
-    let root_session_id = hermes_session_id(source, &root_provider_session_id)
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    let is_primary = row.parent_session_id.is_none();
-    Ok(HermesSessionContext {
-        session_id,
-        parent_session_id,
-        root_session_id,
-        branch: bounded_optional(row.git_branch.as_deref(), HERMES_SESSION_METADATA_MAX_CHARS),
-        agent_type: if is_primary {
-            AgentType::Primary
-        } else {
-            AgentType::Subagent
-        }
-        .as_str()
-        .to_owned(),
-        is_primary,
-        workspace: bounded_optional(
-            row.git_repo_root.as_deref(),
-            HERMES_SESSION_METADATA_MAX_CHARS,
-        ),
-        cwd: bounded_optional(row.cwd.as_deref(), HERMES_SESSION_METADATA_MAX_CHARS),
-    })
-}
-
-fn load_session_rows(
-    conn: &rusqlite::Connection,
-    schema: &HermesSchema,
-    provider_session_ids: &BTreeSet<String>,
-) -> Result<BTreeMap<String, HermesSessionRow>, CaptureError> {
-    let mut loaded = BTreeMap::new();
-    for ids in provider_session_ids.iter().collect::<Vec<_>>().chunks(256) {
-        let placeholders = (1..=ids.len())
-            .map(|index| format!("?{index}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "select {} from sessions s
-             where typeof(s.id) = 'text' and s.id collate binary in ({placeholders})
-             order by s.id collate binary, s.rowid",
-            schema.sessions().projection()
-        );
-        let mut statement = conn.prepare(&sql)?;
-        let rows = statement.query_map(rusqlite::params_from_iter(ids.iter().copied()), |row| {
-            let values = schema.sessions().capture_values(row, 0)?;
-            super::layout::decode_hermes_session(schema, &values, 0)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
-        })?;
-        for row in rows {
-            let row = row?;
-            let id = row.id.clone();
-            if loaded.insert(id.clone(), row).is_some() {
-                return Err(CaptureError::InvalidPayload(format!(
-                    "Hermes session {id} is duplicated"
-                )));
-            }
-        }
-    }
-    Ok(loaded)
-}
-
-fn root_provider_session_id(
-    rows: &BTreeMap<String, HermesSessionRow>,
-    row: &HermesSessionRow,
-) -> Result<String, CaptureError> {
-    let mut root = row.id.clone();
-    let mut parent = row.parent_session_id.clone();
-    let mut visited = BTreeSet::new();
-    visited.insert(root.clone());
-    for _ in 0..HERMES_PARENT_CHAIN_MAX_DEPTH {
-        let Some(parent_id) = parent.take() else {
-            return Ok(root);
-        };
-        if !visited.insert(parent_id.clone()) {
-            return Err(CaptureError::InvalidPayload(format!(
-                "Hermes session {} has a cyclic parent chain",
-                row.id
-            )));
-        }
-        root.clone_from(&parent_id);
-        parent = rows
-            .get(&parent_id)
-            .and_then(|parent| parent.parent_session_id.clone());
-        if parent.is_none() {
-            return Ok(root);
-        }
-    }
-    Err(CaptureError::InvalidPayload(format!(
-        "Hermes session {} exceeds the {}-level parent bound",
-        row.id, HERMES_PARENT_CHAIN_MAX_DEPTH
-    )))
 }
 
 fn bound_projected_record(
@@ -902,14 +724,6 @@ fn decode_hex_nibble(value: u8) -> HermesSourceBackedResult<u8> {
         b'a'..=b'f' => Ok(value - b'a' + 10),
         _ => Err(HermesSourceBackedError::InvalidLogicalDigest),
     }
-}
-
-fn bounded_text(value: &str, limit: usize) -> String {
-    value.chars().take(limit).collect()
-}
-
-fn bounded_optional(value: Option<&str>, limit: usize) -> Option<String> {
-    value.map(|value| bounded_text(value, limit))
 }
 
 #[cfg(test)]

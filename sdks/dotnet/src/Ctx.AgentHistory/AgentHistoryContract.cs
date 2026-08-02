@@ -4,6 +4,8 @@ namespace Ctx.AgentHistory;
 
 internal static class AgentHistoryContract
 {
+    private const ulong MaximumExactStatusCounter = 9_007_199_254_740_991UL;
+
     public static JsonObject Envelope(string operation, JsonObject backend, string payloadName, JsonNode? payload)
     {
         var result = new JsonObject
@@ -20,7 +22,7 @@ internal static class AgentHistoryContract
     public static void EnsureSupportedSchema(JsonObject raw, string operation)
     {
         var schema = JsonHelpers.GetInt(raw, "schema_version") ?? JsonHelpers.GetInt(raw, "schemaVersion");
-        if (schema is not null && schema != CtxAgentHistoryVersions.SchemaVersion)
+        if (schema is not null && schema != 1 && schema != 2)
         {
             throw new CtxAgentHistoryProtocolException(
                 $"unsupported ctx schema version {schema}",
@@ -34,28 +36,46 @@ internal static class AgentHistoryContract
 
     public static JsonObject NormalizeStatus(JsonObject raw)
     {
-        var indexedCatalogSessions = JsonHelpers.GetInt(raw, "indexed_catalog_sessions")
-            ?? JsonHelpers.GetInt(raw, "indexedCatalogSessions");
-
-        var status = (JsonObject)CamelizePublic(raw)!;
-        var setupMode = JsonHelpers.GetString(raw, "mode");
-        SetIfAbsent(
-            status,
-            "initialized",
-            JsonHelpers.GetBool(raw, "initialized") ?? setupMode is "ready" or "catalog_only");
-        SetIfAbsent(status, "localOnly", JsonHelpers.GetBool(raw, "local_only") ?? JsonHelpers.GetBool(raw, "localOnly") ?? true);
-        SetIfAbsent(status, "dataRoot", JsonHelpers.GetString(raw, "data_root") ?? JsonHelpers.GetString(raw, "dataRoot"));
-        SetIfAbsent(status, "indexedItems", JsonHelpers.GetInt(raw, "indexed_items") ?? JsonHelpers.GetInt(raw, "indexedItems") ?? 0);
-        SetIfAbsent(status, "indexedSources", JsonHelpers.GetInt(raw, "indexed_sources") ?? JsonHelpers.GetInt(raw, "indexedSources") ?? 0);
-        SetIfAbsent(status, "catalogedSessions", JsonHelpers.GetInt(raw, "cataloged_sessions") ?? JsonHelpers.GetInt(raw, "catalogedSessions") ?? 0);
-        SetIfAbsent(status, "pendingCatalogSessions", JsonHelpers.GetInt(raw, "pending_catalog_sessions") ?? JsonHelpers.GetInt(raw, "pendingCatalogSessions") ?? 0);
-        SetIfAbsent(status, "failedCatalogSessions", JsonHelpers.GetInt(raw, "failed_catalog_sessions") ?? JsonHelpers.GetInt(raw, "failedCatalogSessions") ?? 0);
-        SetIfAbsent(status, "staleCatalogSessions", JsonHelpers.GetInt(raw, "stale_catalog_sessions") ?? JsonHelpers.GetInt(raw, "staleCatalogSessions") ?? 0);
-        if (indexedCatalogSessions is not null)
+        var current = (JsonObject)CamelizePublic(raw)!;
+        var lexical = current["lexical"] as JsonObject;
+        var status = new JsonObject
         {
-            SetIfAbsent(status, "indexedCatalogSessions", indexedCatalogSessions.Value);
+            ["initialized"] = JsonHelpers.GetBool(current, "initialized")
+                ?? !string.IsNullOrWhiteSpace(JsonHelpers.GetString(lexical ?? new JsonObject(), "generationId")),
+            ["localOnly"] = true
+        };
+        foreach (var key in new[]
+        {
+            "dataRoot", "readOnly", "indexedItems", "indexedSessions", "indexedEvents",
+            "indexedSources", "historyEpoch", "lexical", "refresh", "semantic", "daemon"
+        })
+        {
+            if (current[key] is JsonNode value)
+            {
+                if (key.StartsWith("indexed", StringComparison.Ordinal))
+                {
+                    ValidateStatusCounter(key, value);
+                }
+                status[key] = JsonHelpers.Clone(value);
+            }
         }
         return status;
+    }
+
+    private static void ValidateStatusCounter(string key, JsonNode value)
+    {
+        if (value is not JsonValue jsonValue
+            || !jsonValue.TryGetValue<ulong>(out var counter)
+            || counter > MaximumExactStatusCounter)
+        {
+            throw new CtxAgentHistoryProtocolException(
+                $"ctx status counter {key} is outside the exact JSON integer domain",
+                new JsonObject
+                {
+                    ["field"] = key,
+                    ["maximum"] = MaximumExactStatusCounter
+                });
+        }
     }
 
     public static JsonArray NormalizeSources(JsonObject raw)

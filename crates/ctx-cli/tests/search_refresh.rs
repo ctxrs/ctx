@@ -584,16 +584,27 @@ fn assert_daemon_publication(
         job["published_generation"], expected_generation,
         "{status:#}"
     );
-    assert_eq!(job["source_count"], expected_route_count, "{status:#}");
+    let latest_route_count = job["source_count"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("latest daemon refresh omitted source_count: {status:#}"));
     assert_eq!(job["progress"]["phase"], "published", "{status:#}");
     assert_eq!(
-        job["progress"]["completed_sources"], expected_route_count,
+        job["progress"]["completed_sources"], latest_route_count,
         "{status:#}"
     );
     assert_eq!(
-        job["progress"]["total_sources"], expected_route_count,
+        job["progress"]["total_sources"], latest_route_count,
         "{status:#}"
     );
+    // `core-refresh.json` is the daemon's mutable latest-job status, not the
+    // durable receipt for the search request that returned this generation.
+    // A watcher-driven periodic no-op may therefore replace that status before
+    // this read. Keep exact request-route assertions when the latest job is the
+    // manual search, while periodic snapshots are checked for self-consistency;
+    // callers retain the exact terminal request count from `freshness`.
+    if job["trigger"] == "search" {
+        assert_eq!(latest_route_count, expected_route_count, "{status:#}");
+    }
     assert_eq!(
         job["certified_source_count"], expected_source_count,
         "{status:#}"

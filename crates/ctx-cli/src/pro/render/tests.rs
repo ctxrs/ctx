@@ -27,6 +27,15 @@ use crate::pro::evidence_preview::{
 };
 use crate::ui::{ColorMode, Document, Line, RenderContext, StreamKind, TestContext, Token};
 
+fn protocol_snapshot() -> ctx_pro_host_protocol::QuerySnapshotExpectation {
+    ctx_pro_host_protocol::QuerySnapshotExpectation::Core {
+        receipt: ctx_pro_host_protocol::CoreMaterializationReceiptIdentity {
+            core_generation_id: "a".repeat(64),
+            materializer_revision: "materializer-v1".to_owned(),
+        },
+    }
+}
+
 fn context(width: usize) -> RenderContext {
     RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never))
 }
@@ -98,6 +107,7 @@ fn render_plain(result: &BlameResult, width: usize) -> String {
 fn file_preview_result(evidence_count: u32) -> BlameResult {
     let evidence = (1..=evidence_count).map(event_evidence).collect();
     BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::File {
             path: "src/lib.rs".to_owned(),
             repository: repository(),
@@ -115,6 +125,7 @@ fn file_preview_result(evidence_count: u32) -> BlameResult {
 
 fn commit_blame_result(evidence_count: u32) -> BlameResult {
     BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: resource(
                 "commit:0123456789abcdef0123456789abcdef01234567",
@@ -296,6 +307,7 @@ fn commit_match(
 fn commit_renderer_keeps_production_grouping_golden() {
     let commit = resource("commit:abcdef", ResourceKind::Commit, "abcdef");
     let result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: commit.clone(),
             repository: repository(),
@@ -356,6 +368,7 @@ fn pull_request_renderer_preserves_proof_edges_and_continuation_golden() {
     producer.direct_actor = Some(resource("agent:codex", ResourceKind::Agent, "codex"));
     producer.owning_root = Some(resource("run:root", ResourceKind::Run, "root"));
     let result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::PullRequest {
             selector: "https://gitlab.example.com/ctxrs/ctx/-/merge_requests/42".to_owned(),
             pull_request: pull_request.clone(),
@@ -445,6 +458,7 @@ fn paginated_pr_result(commit_page: bool) -> BlameResult {
         })
     };
     BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::PullRequest {
             selector: "42".to_owned(),
             pull_request: pull_request.clone(),
@@ -489,6 +503,7 @@ fn pull_request_activity_only_page_scopes_missing_commits_golden() {
 
 fn paginated_file_result() -> BlameResult {
     BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::File {
             path: "src/lib.rs".to_owned(),
             repository: repository(),
@@ -542,6 +557,7 @@ fn unavailable_file_context_keeps_the_plain_continuation_command() {
 #[test]
 fn empty_commit_page_has_a_concise_golden() {
     let result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: resource("commit:abcdef", ResourceKind::Commit, "abcdef"),
             repository: repository(),
@@ -562,6 +578,7 @@ fn empty_commit_page_has_a_concise_golden() {
 fn ambiguous_commit_never_implies_an_asserted_producer_golden() {
     let commit = resource("commit:abcdef", ResourceKind::Commit, "abcdef");
     let result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: commit.clone(),
             repository: repository(),
@@ -609,6 +626,7 @@ fn narrow_commit_uses_label_children_without_truncating_ids_golden() {
         ));
     }
     let result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: commit.clone(),
             repository: repository(),
@@ -645,6 +663,7 @@ fn many_attributions_keep_two_space_ancestry_at_reference_widths() {
         })
         .collect::<Vec<_>>();
     let result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::File {
             path: "src/long/authored/path/to/the/implementation.rs".to_owned(),
             repository: repository(),
@@ -742,6 +761,7 @@ fn core_evidence_keeps_generation_event_source_and_sequence() {
         evidence.citation.event_sequence,
     );
     let result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: commit.clone(),
             repository: repository(),
@@ -768,6 +788,7 @@ fn core_evidence_keeps_generation_event_source_and_sequence() {
 fn styled_output_strips_to_plain_and_plain_bytes_ignore_color() {
     let commit = resource("commit:abcdef", ResourceKind::Commit, "abcdef");
     let result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: commit.clone(),
             repository: repository(),

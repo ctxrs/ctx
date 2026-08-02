@@ -7,11 +7,16 @@ use std::{
 use ctx_history_core::{CaptureProvider, SourceKey};
 use sha2::{Digest, Sha256};
 
+use super::ordering::{
+    OPENCODE_HYDRATION_BATCH_BYTES, OPENCODE_HYDRATION_BATCH_ROWS,
+    OPENCODE_HYDRATION_SINGLETON_MAX_BYTES,
+};
 use super::{
-    observe_logical_source, open_root_authorized_snapshot_retained_with_progress,
+    observe_logical_source_with_progress, open_root_authorized_snapshot_retained_with_progress,
     opencode_family_source_backed_registrations, scan_pinned_source, OpenCodeLogicalObservation,
     OpenCodeScanOutput, OpenCodeSourceBackedError, OpenCodeSourceBackedRegistration,
-    OpenCodeSourceBackedResult, PARSER_REVISION, SQLITE_SOURCE_INVALID_REASON,
+    OpenCodeSourceBackedResult, SourceBackedCurrentSourceProgress, PARSER_REVISION,
+    SQLITE_SOURCE_INVALID_REASON,
 };
 use crate::{
     common::io::ProviderSourceRoot,
@@ -21,8 +26,7 @@ use crate::{
             DocumentLeafFingerprint, DocumentSourceTerminal, ObservedDocumentLeaf,
             ReplacementDocumentTree,
         },
-        invalid_route, SourceBackedCoordinatorResult, SourceBackedCurrentSourceProgress,
-        SourceBackedCurrentSourceProgressStage, SourceBackedProviderRegistry,
+        invalid_route, SourceBackedCoordinatorResult, SourceBackedProviderRegistry,
         SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
         SourceBackedRouteSelection,
     },
@@ -68,16 +72,29 @@ pub(super) struct OpenCodeSqliteWorkCounters {
     pub(super) immutable_snapshot_opens: u64,
     pub(super) copied_snapshot_opens: u64,
     pub(super) logical_online_backup_opens: u64,
-    pub(super) logical_online_backup_steps: u64,
-    pub(super) logical_online_backup_pages: u64,
     pub(super) source_bytes_copied: u64,
     pub(super) schema_probe_passes: u64,
+    pub(super) schema_event_validation_traversals: u64,
     pub(super) logical_fingerprint_passes: u64,
     pub(super) logical_row_traversals: u64,
     pub(super) projection_passes: u64,
     pub(super) logical_rows_projected: u64,
     pub(super) documents_staged: u64,
     pub(super) max_buffered_documents: u64,
+    pub(super) session_rows_scanned: u64,
+    pub(super) session_metadata_loads: u64,
+    pub(super) max_buffered_session_metadata: u64,
+    pub(super) max_session_ancestry_depth: u64,
+    pub(super) fallback_payload_hydrations: u64,
+    pub(super) max_buffered_payload_rows: u64,
+    pub(super) fallback_disk_sort: bool,
+    pub(super) fallback_sort_rows: u64,
+    pub(super) fallback_scratch_bytes: u64,
+    pub(super) ordering_data_statements: u64,
+    pub(super) ordering_sort_key_batches: u64,
+    pub(super) ordering_hydration_batches: u64,
+    pub(super) max_sort_key_batch_rows: u64,
+    pub(super) max_buffered_payload_bytes: u64,
     pub(super) exact_replays: u64,
     pub(super) terminal_fences: u64,
     pub(super) terminal_revalidations: u64,
@@ -154,20 +171,15 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
             snapshot,
             &mut |output| match output {
                 OpenCodeScanOutput::Begin(source) => sink.begin_source(source).map_err(Into::into),
+                OpenCodeScanOutput::CompletedBytes(bytes) => {
+                    sink.report_completed_bytes(bytes).map_err(Into::into)
+                }
                 OpenCodeScanOutput::Document(document) => {
                     sink.emit_core_record(document).map_err(Into::into)
                 }
-                OpenCodeScanOutput::Progress {
-                    rows_scanned,
-                    certified_bytes,
-                } => {
-                    let mut progress = SourceBackedCurrentSourceProgress::new(
-                        SourceBackedCurrentSourceProgressStage::LogicalScan,
-                    );
-                    progress.logical_rows_scanned = Some(rows_scanned);
-                    progress.logical_certified_bytes = Some(certified_bytes);
-                    sink.report_progress(progress).map_err(Into::into)
-                }
+                OpenCodeScanOutput::Progress(progress) => sink
+                    .report_current_source_progress(progress)
+                    .map_err(Into::into),
             },
         )
         .map_err(route_error)?;
@@ -187,6 +199,20 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
             work.documents_staged = scan.certificate.counts().indexed_documents;
             work.max_buffered_documents =
                 u64::from(scan.certificate.counts().indexed_documents != 0);
+            work.session_rows_scanned = scan.bounds.session_rows_scanned;
+            work.session_metadata_loads = scan.bounds.session_metadata_loads;
+            work.max_buffered_session_metadata = scan.bounds.max_buffered_session_metadata;
+            work.max_session_ancestry_depth = scan.bounds.max_session_ancestry_depth;
+            work.fallback_payload_hydrations = scan.bounds.fallback_payload_hydrations;
+            work.max_buffered_payload_rows = scan.bounds.max_buffered_payload_rows;
+            work.fallback_disk_sort = scan.bounds.fallback_disk_sort;
+            work.fallback_sort_rows = scan.bounds.fallback_sort_rows;
+            work.fallback_scratch_bytes = scan.bounds.fallback_scratch_bytes;
+            work.ordering_data_statements = scan.bounds.ordering_data_statements;
+            work.ordering_sort_key_batches = scan.bounds.ordering_sort_key_batches;
+            work.ordering_hydration_batches = scan.bounds.ordering_hydration_batches;
+            work.max_sort_key_batch_rows = scan.bounds.max_sort_key_batch_rows;
+            work.max_buffered_payload_bytes = scan.bounds.max_buffered_payload_bytes;
         }
         let observation = scan.certificate.observation().clone();
         Ok(DocumentSourceTerminal {
@@ -296,14 +322,14 @@ fn discover_document_tree_with_progress(
         SourceBackedCurrentSourceProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
-    match observe_present_document_tree(data_root, path, dialect, report_progress) {
+    match observe_present_document_tree_with_progress(data_root, path, dialect, report_progress) {
         Ok(tree) => Ok(tree),
         Err(error) if source_missing(&error) => observe_missing_document_tree(path),
         Err(error) => Err(error),
     }
 }
 
-fn observe_present_document_tree(
+fn observe_present_document_tree_with_progress(
     data_root: &Path,
     path: &std::path::Path,
     dialect: &'static crate::provider::providers::opencode::OpenCodeSqliteDialect,
@@ -313,7 +339,11 @@ fn observe_present_document_tree(
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
     let authorized =
         open_root_authorized_snapshot_retained_with_progress(data_root, path, report_progress)?;
-    let observation = observe_logical_source(authorized.sqlite_snapshot.connection()?, dialect)?;
+    let observation = observe_logical_source_with_progress(
+        authorized.sqlite_snapshot.connection()?,
+        dialect,
+        report_progress,
+    )?;
     let terminal_revalidate = authorized.sqlite_snapshot.terminal_revalidator();
     let leaf_fingerprint = DocumentLeafFingerprint::new(admitted_leaf_fingerprint(
         &observation.source,
@@ -322,6 +352,7 @@ fn observe_present_document_tree(
     let replay_from_frontier = authorized
         .sqlite_snapshot
         .admitted_revision_is_replay_safe();
+    let schema_event_validation_traversals = observation.schema.event_validation_traversals;
     let tree_fingerprint = leaf_fingerprint.as_bytes();
     Ok(CompleteDocumentTree::new(
         tree_fingerprint,
@@ -335,6 +366,7 @@ fn observe_present_document_tree(
                 terminal_revalidate,
                 work: Mutex::new(OpenCodeSqliteWorkCounters {
                     schema_probe_passes: 1,
+                    schema_event_validation_traversals,
                     ..OpenCodeSqliteWorkCounters::default()
                 }),
             },
@@ -344,10 +376,7 @@ fn observe_present_document_tree(
     ))
 }
 
-pub(super) fn admitted_leaf_fingerprint(
-    source: &SourceKey,
-    evidence: &SqliteSourceEvidence,
-) -> [u8; 32] {
+fn admitted_leaf_fingerprint(source: &SourceKey, evidence: &SqliteSourceEvidence) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"ctx.opencode-family-admitted-sqlite-revision-v1\0");
     digest.update(source.exact_descriptor_digest());
@@ -416,8 +445,6 @@ fn finalize_work_counters(
     work.immutable_snapshot_opens = snapshot.immutable_snapshot_opens();
     work.copied_snapshot_opens = snapshot.copied_snapshot_opens();
     work.logical_online_backup_opens = snapshot.logical_online_backup_opens();
-    work.logical_online_backup_steps = snapshot.logical_online_backup_steps();
-    work.logical_online_backup_pages = snapshot.logical_online_backup_pages();
     work.snapshot_opens = work
         .immutable_snapshot_opens
         .checked_add(work.copied_snapshot_opens)
@@ -432,8 +459,6 @@ fn finalize_work_counters(
     let counters = *work;
     if counters.snapshot_opens != 1
         || counters.logical_online_backup_opens != 1
-        || counters.logical_online_backup_steps == 0
-        || counters.logical_online_backup_pages == 0
         || counters.schema_probe_passes != 1
         || counters.logical_fingerprint_passes != 0
         || counters.terminal_fences != 1
@@ -442,6 +467,35 @@ fn finalize_work_counters(
         || counters.max_active_snapshots != 1
         || counters.projection_passes + counters.exact_replays != 1
         || counters.max_buffered_documents > 1
+        || counters.max_buffered_session_metadata > 1
+        || counters.max_session_ancestry_depth > 64
+        || counters.max_buffered_payload_rows > OPENCODE_HYDRATION_BATCH_ROWS as u64
+        || counters.max_sort_key_batch_rows > OPENCODE_HYDRATION_BATCH_ROWS as u64
+        || counters.max_buffered_payload_bytes > OPENCODE_HYDRATION_SINGLETON_MAX_BYTES
+        || (counters.max_buffered_payload_bytes > OPENCODE_HYDRATION_BATCH_BYTES
+            && counters.max_buffered_payload_rows != 1)
+        || counters.session_metadata_loads > counters.session_rows_scanned
+        || (counters.fallback_disk_sort
+            && counters.fallback_payload_hydrations != counters.logical_rows_projected)
+        || (!counters.fallback_disk_sort && counters.fallback_payload_hydrations != 0)
+        || (counters.fallback_disk_sort
+            && (counters.fallback_sort_rows != counters.logical_rows_projected
+                || counters.fallback_scratch_bytes == 0))
+        || (!counters.fallback_disk_sort
+            && (counters.fallback_sort_rows != 0 || counters.fallback_scratch_bytes != 0))
+        || (counters.fallback_disk_sort
+            && counters.ordering_data_statements
+                != 2_u64
+                    .saturating_add(counters.ordering_sort_key_batches)
+                    .saturating_add(counters.ordering_hydration_batches))
+        || (!counters.fallback_disk_sort
+            && (counters.ordering_data_statements != 0
+                || counters.ordering_sort_key_batches != 0
+                || counters.ordering_hydration_batches != 0
+                || counters.max_sort_key_batch_rows != 0
+                || counters.max_buffered_payload_bytes != 0))
+        || (leaf.observation.schema.message_part_indexed_streaming
+            && counters.schema_event_validation_traversals != 2)
         || (exact_replay
             && (counters.projection_passes != 0
                 || counters.logical_row_traversals != 0
@@ -474,7 +528,7 @@ fn source_missing(error: &OpenCodeSourceBackedError) -> bool {
     }
 }
 
-fn route_error(error: OpenCodeSourceBackedError) -> SourceBackedRouteError {
+pub(super) fn route_error(error: OpenCodeSourceBackedError) -> SourceBackedRouteError {
     let error = match error {
         OpenCodeSourceBackedError::Route(error) => return error,
         error => error,
@@ -497,6 +551,11 @@ fn route_error(error: OpenCodeSourceBackedError) -> SourceBackedRouteError {
                 SqliteSourceAccessError::SnapshotUnavailable { .. }
                 | SqliteSourceAccessError::UnsupportedSidecarIdentity { .. },
             ) => SourceBackedRouteErrorKind::Unavailable,
+            OpenCodeSourceBackedError::SqliteSource(error)
+                if error.is_retryable_resource_unavailable() =>
+            {
+                SourceBackedRouteErrorKind::Unavailable
+            }
             _ => SourceBackedRouteErrorKind::InvalidSource,
         };
     SourceBackedRouteError::new(kind, error.to_string())

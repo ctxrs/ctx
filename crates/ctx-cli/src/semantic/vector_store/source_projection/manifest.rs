@@ -1,21 +1,21 @@
-use std::collections::HashMap;
-
 use anyhow::{anyhow, Result};
 use ctx_history_core::{core_record_contract_fingerprint, StableEntityKind, IDENTITY_VERSION};
 use ctx_history_index::{current_source_generation_policy, CoreEventRecord};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
 use super::{SourceBackedSemanticGeneration, SourceBackedSemanticPage};
 use crate::semantic::{
-    model_contract::semantic_model_key, vector_store::flat_segments::PinnedFlatGeneration,
-    vector_store_schema::SemanticVectorStoreError, SemanticEventDocument,
+    model_contract::semantic_model_key,
+    vector_store::flat_segments::{
+        FlatPublicationToken, FlatSourceStagingToken, PinnedFlatGeneration,
+    },
+    SemanticEventDocument,
 };
 
 pub(super) const SOURCE_FRONTIER_STATE: &str = "core_semantic_frontier_v1";
 pub(super) const SOURCE_ACKNOWLEDGEMENT_STATE: &str = "core_semantic_acknowledgement_v1";
-pub(super) const SOURCE_CONTRACT_VERSION: u16 = 5;
+pub(super) const SOURCE_CONTRACT_VERSION: u16 = 10;
 const SOURCE_CONTRACT_DOMAIN: &[u8] = b"ctx-source-backed-semantic-contract-v1\0";
 const SOURCE_BUILD_DOMAIN: &[u8] = b"ctx-source-backed-semantic-build-v1\0";
 pub(super) const SOURCE_INPUT_LEXICAL_SCHEMA_VERSION: u32 = 16;
@@ -29,9 +29,30 @@ pub(super) struct SourceProjectionFrontier {
     pub(super) semantic_policy_fingerprint: String,
     pub(super) consumer_build_id: String,
     pub(super) semantic_documents: u64,
-    pub(super) processed_documents: u64,
+    pub(super) source_traversal_phase: SourceTraversalPhase,
+    pub(super) source_traversal_after_identity_digest: Option<String>,
+    pub(super) active_source_identity_digest: Option<String>,
+    pub(super) active_source_reconciliation_id: Option<String>,
+    pub(super) active_source_indexed_documents: u64,
+    pub(super) active_source_semantic_documents: u64,
+    pub(super) processed_source_documents: u64,
+    pub(super) processed_source_semantic_documents: u64,
     pub(super) after_identity: Option<Vec<u8>>,
+    pub(super) source_scan_complete: bool,
+    pub(super) removing_source: bool,
     pub(super) last_failure: Option<String>,
+    #[serde(default)]
+    pub(super) flat_publication: FlatPublicationToken,
+    #[serde(default)]
+    pub(super) flat_staging: Option<FlatSourceStagingToken>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum SourceTraversalPhase {
+    RemovingStaleSources,
+    ReconcilingSources,
+    Finalizing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +64,8 @@ pub(super) struct SourceProjectionAcknowledgement {
     pub(super) consumer_build_id: String,
     pub(super) semantic_documents: u64,
     pub(super) projected_documents: u64,
+    pub(super) source_receipt_count: u64,
+    pub(super) source_receipts_hash: String,
     #[serde(default)]
     pub(super) flat_generation: u64,
     #[serde(default)]
@@ -55,58 +78,7 @@ pub(super) struct SourceProjectionAcknowledgement {
 
 pub(super) struct AcknowledgedSourceProjection {
     pub(super) flat: Option<PinnedFlatGeneration>,
-}
-
-pub(super) fn validate_flat_projection(
-    frontier: &SourceProjectionFrontier,
-    source_documents: &HashMap<Uuid, String>,
-    pinned: Option<&PinnedFlatGeneration>,
-) -> Result<u64> {
-    let source_document_count = u64::try_from(source_documents.len())?;
-    if source_document_count > frontier.semantic_documents {
-        return Err(SemanticVectorStoreError::reset_required(format!(
-            "source-backed semantic completion has {source_document_count} projected documents, but only {} metadata-eligible records",
-            frontier.semantic_documents
-        ))
-        .into());
-    }
-    if source_document_count == 0 {
-        if pinned.is_some_and(|pinned| {
-            pinned.stats().active_events != 0 || pinned.stats().active_chunks != 0
-        }) {
-            return Err(SemanticVectorStoreError::reset_required(
-                "empty source-backed semantic generation has active flat F32 records",
-            )
-            .into());
-        }
-        return Ok(0);
-    }
-    let pinned = pinned.ok_or_else(|| {
-        SemanticVectorStoreError::reset_required(
-            "source-backed semantic completion has no flat F32 generation",
-        )
-    })?;
-    if pinned.stats().active_events as u64 != source_document_count
-        || pinned.active_events().len() != source_documents.len()
-    {
-        return Err(SemanticVectorStoreError::reset_required(
-            "source-backed semantic source-document count does not match flat F32 events",
-        )
-        .into());
-    }
-    for event in pinned.active_events() {
-        if event.chunk_count == 0
-            || source_documents
-                .get(&event.event_id)
-                .is_none_or(|hash| hash != &event.source_text_hash.to_hex())
-        {
-            return Err(SemanticVectorStoreError::reset_required(
-                "source-backed semantic source documents do not match flat F32 event metadata",
-            )
-            .into());
-        }
-    }
-    Ok(source_document_count)
+    pub(super) projected_documents: u64,
 }
 
 pub(super) fn validate_generation(generation: &SourceBackedSemanticGeneration) -> Result<()> {
@@ -139,6 +111,15 @@ pub(super) fn validate_page(
     if page.core_generation_id != frontier.core_generation_id {
         return Err(anyhow!(
             "source-backed semantic page generation does not match its durable frontier"
+        ));
+    }
+    if frontier.removing_source
+        || frontier.source_scan_complete
+        || frontier.active_source_identity_digest.as_deref()
+            != Some(page.source_identity_digest.as_str())
+    {
+        return Err(anyhow!(
+            "source-backed semantic page does not match its active source frontier"
         ));
     }
     let requested_after = page

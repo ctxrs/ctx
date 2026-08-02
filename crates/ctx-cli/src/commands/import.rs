@@ -27,6 +27,7 @@ pub(crate) use explicit_source_catalog::{
     explicit_source_for_import, load_explicit_source_catalog_authority,
     load_explicit_source_catalog_sources, upsert_explicit_source,
     validate_explicit_source_catalog_roots, ExplicitSourceCatalogAuthority,
+    ExplicitSourceCatalogRouteBinding,
 };
 use history_source_plugin::{run_history_source_plugin_import, HistorySourcePluginImportContext};
 pub(crate) use provider_refresh::{ProviderRefreshCollector, ProviderRefreshRuntimeFacts};

@@ -2,6 +2,7 @@ use super::*;
 use std::sync::Arc;
 
 mod merge_policy;
+mod routes;
 
 #[test]
 fn commit_binds_manifest_and_searchable_documents() {
@@ -22,7 +23,10 @@ fn commit_binds_manifest_and_searchable_documents() {
         receipt.generation_id
     );
     assert_eq!(receipt.manifest().sources, index.manifest().sources);
-    assert_eq!(receipt.manifest().removals, index.manifest().removals);
+    assert_eq!(
+        receipt.manifest().source_routes(),
+        index.manifest().source_routes()
+    );
     assert_eq!(index.manifest().indexed_documents, 1);
     assert_eq!(index.count_term("atomic").unwrap(), 1);
 }
@@ -284,8 +288,8 @@ fn unchanged_commit_returns_the_verified_base_without_republication() {
         initial_receipt.manifest().sources
     );
     assert_eq!(
-        unchanged.manifest().removals,
-        initial_receipt.manifest().removals
+        unchanged.manifest().source_routes(),
+        initial_receipt.manifest().source_routes()
     );
     assert_eq!(fs::read(&meta_path).unwrap(), meta_before);
     assert_eq!(
@@ -388,6 +392,59 @@ fn logical_rescan_retains_nonappendable_source_without_tantivy_artifacts() {
         managed_metadata_after.modified().unwrap(),
         managed_metadata_before.modified().unwrap()
     );
+}
+
+#[test]
+fn logical_rescan_advances_only_replay_frontier_without_rewriting_documents() {
+    let temp = tempdir().unwrap();
+    let source = source("logical-frontier.sqlite");
+    let base = appendable_certificate(&source, 1, 1, 10);
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "retained logical row"))
+        .unwrap();
+    initial.certify_source(base.clone()).unwrap();
+    let initial_receipt = initial.commit(|_| true).unwrap();
+    let initial_path = active_generation_path(temp.path());
+
+    let observation = base.observation().clone();
+    let current = CertifiedSource::certify_with_frontier(
+        observation.clone(),
+        observation,
+        base.parser_revision(),
+        *base.content_digest(),
+        base.counts(),
+        Some(
+            SourceFrontier::new(
+                "jsonl-byte-offset",
+                TypedKey::U64(11),
+                base.counts().certified_bytes,
+                *base.content_digest(),
+            )
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+    let mut retained = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let constructions = Arc::clone(&retained.index_writer_constructions);
+    retained.retain_source(current.clone()).unwrap();
+    let receipt = retained
+        .commit(|target| matches!(target, RevalidationTarget::Source(source) if source == &current))
+        .unwrap();
+
+    assert_eq!(constructions.load(Ordering::SeqCst), 1);
+    assert_ne!(receipt.generation_id, initial_receipt.generation_id);
+    assert_eq!(receipt.manifest().sources, vec![current]);
+    assert_eq!(
+        receipt.manifest().core_record_aggregates,
+        initial_receipt.manifest().core_record_aggregates
+    );
+    let published_path = active_generation_path(temp.path());
+    assert_ne!(published_path, initial_path);
+    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(verified.document_count(), 1);
+    assert_eq!(verified.count_term("retained").unwrap(), 1);
 }
 
 #[test]
@@ -707,11 +764,12 @@ fn exact_replay_witness_covers_removal_only_and_rejects_stale_inventory() {
 }
 
 #[test]
-fn automatic_missing_checkpoint_survives_reopen_reappearance_and_final_deletion() {
+fn certified_missing_route_grace_survives_reopen_reappearance_and_final_deletion() {
     const DELETE_AFTER: u32 = 3;
 
     let temp = tempdir().unwrap();
     let source = source("automatic-missing.jsonl");
+    let route_id = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
     let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
@@ -720,12 +778,25 @@ fn automatic_missing_checkpoint_survives_reopen_reappearance_and_final_deletion(
     initial
         .certify_source(appendable_certificate(&source, 1, 1, 10))
         .unwrap();
+    initial
+        .set_present_source_routes(vec![SourceRouteSnapshot::present(
+            route_id.clone(),
+            vec![source.clone()],
+        )
+        .unwrap()])
+        .unwrap();
     let initial = initial.commit(|_| true).unwrap();
 
     let present_inventory = complete_inventory(&source, 2, vec![source.clone()]);
     let mut noop = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     let replayed = stage_exact_replay(&mut noop, &source);
     noop.certify_complete_inventory(present_inventory.clone())
+        .unwrap();
+    noop.set_present_source_routes(vec![SourceRouteSnapshot::present(
+        route_id.clone(),
+        vec![source.clone()],
+    )
+    .unwrap()])
         .unwrap();
     let noop = noop
         .commit_with_complete_inventory_revalidation(
@@ -734,43 +805,33 @@ fn automatic_missing_checkpoint_survives_reopen_reappearance_and_final_deletion(
         )
         .unwrap();
     assert_eq!(noop.generation_id, initial.generation_id);
-    assert!(noop.manifest().source_catalog().is_empty());
+    assert!(noop
+        .manifest()
+        .source_route(&route_id)
+        .unwrap()
+        .missing_state()
+        .is_none());
 
-    let observe_missing = |revision, observed_at_unix_ms| {
-        let inventory = complete_inventory(&source, revision, Vec::new());
-        let deletion = CertifiedSourceDeletion::from_inventory(source.clone(), &inventory).unwrap();
+    let observe_missing = |observed_at_unix_ms| {
         let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-        writer
-            .certify_complete_inventory(inventory.clone())
-            .unwrap();
-        let deleted = writer
-            .observe_automatic_source_missing(
-                deletion,
-                inventory.clone(),
+        writer.set_present_source_routes(Vec::new()).unwrap();
+        let outcome = writer
+            .observe_certified_missing_route(
+                route_id.clone(),
                 observed_at_unix_ms,
                 DELETE_AFTER,
+                || true,
             )
             .unwrap();
-        let receipt = writer
-            .commit_with_complete_inventory_revalidation(
-                |target| {
-                    matches!(target, RevalidationTarget::Deletion(current) if current.verifies(&inventory))
-                },
-                |current| current == &inventory,
-            )
-            .unwrap();
-        (deleted, receipt)
+        let receipt = writer.commit(|_| true).unwrap();
+        (outcome.deleted(), receipt)
     };
 
-    let (deleted, first_missing) = observe_missing(3, 100);
+    let (deleted, first_missing) = observe_missing(100);
     assert!(!deleted);
     assert_eq!(first_missing.indexed_documents, 1);
-    assert!(first_missing.manifest().removals.is_empty());
-    let first_state = first_missing
-        .manifest()
-        .source_catalog()
-        .missing_source(&source)
-        .unwrap();
+    let first_state = first_missing.manifest().source_route(&route_id).unwrap();
+    let first_state = first_state.missing_state().unwrap();
     assert_eq!(first_state.consecutive_missing().get(), 1);
     assert_eq!(
         first_state.first_observation().generation_id(),
@@ -782,14 +843,11 @@ fn automatic_missing_checkpoint_survives_reopen_reappearance_and_final_deletion(
         first_state.last_observation()
     );
 
-    let (deleted, second_missing) = observe_missing(4, 200);
+    let (deleted, second_missing) = observe_missing(200);
     assert!(!deleted);
     assert_eq!(second_missing.indexed_documents, 1);
-    let second_state = second_missing
-        .manifest()
-        .source_catalog()
-        .missing_source(&source)
-        .unwrap();
+    let second_state = second_missing.manifest().source_route(&route_id).unwrap();
+    let second_state = second_state.missing_state().unwrap();
     assert_eq!(second_state.consecutive_missing().get(), 2);
     assert_eq!(
         second_state.first_observation(),
@@ -807,6 +865,13 @@ fn automatic_missing_checkpoint_survives_reopen_reappearance_and_final_deletion(
     reappeared
         .certify_complete_inventory(reappeared_inventory.clone())
         .unwrap();
+    reappeared
+        .set_present_source_routes(vec![SourceRouteSnapshot::present(
+            route_id.clone(),
+            vec![source.clone()],
+        )
+        .unwrap()])
+        .unwrap();
     let reappeared = reappeared
         .commit_with_complete_inventory_revalidation(
             |target| matches!(target, RevalidationTarget::Source(current) if current == &replayed),
@@ -814,60 +879,57 @@ fn automatic_missing_checkpoint_survives_reopen_reappearance_and_final_deletion(
         )
         .unwrap();
     assert_eq!(reappeared.indexed_documents, 1);
-    assert!(reappeared.manifest().source_catalog().is_empty());
-    assert!(reappeared.manifest().removals.is_empty());
+    assert!(reappeared
+        .manifest()
+        .source_route(&route_id)
+        .unwrap()
+        .missing_state()
+        .is_none());
 
-    let (deleted, missing_after_reset) = observe_missing(6, 300);
+    let (deleted, missing_after_reset) = observe_missing(300);
     assert!(!deleted);
     let reset_state = missing_after_reset
         .manifest()
-        .source_catalog()
-        .missing_source(&source)
+        .source_route(&route_id)
         .unwrap();
+    let reset_state = reset_state.missing_state().unwrap();
     assert_eq!(reset_state.consecutive_missing().get(), 1);
     assert_eq!(
         reset_state.first_observation().generation_id(),
         reappeared.generation_id
     );
 
-    let (deleted, second_after_reset) = observe_missing(7, 400);
+    let (deleted, second_after_reset) = observe_missing(400);
     assert!(!deleted);
     assert_eq!(
         second_after_reset
             .manifest()
-            .source_catalog()
-            .missing_source(&source)
+            .source_route(&route_id)
+            .unwrap()
+            .missing_state()
             .unwrap()
             .consecutive_missing()
             .get(),
         2
     );
 
-    let (deleted, final_deletion) = observe_missing(8, 500);
+    let (deleted, final_deletion) = observe_missing(500);
     assert!(deleted);
     assert_eq!(final_deletion.indexed_documents, 0);
-    assert!(final_deletion.manifest().source_catalog().is_empty());
-    assert_eq!(final_deletion.manifest().removals.len(), 1);
-    assert!(final_deletion.manifest().removals[0]
-        .deletion()
-        .source()
-        .exact_descriptor_eq(&source));
+    assert!(final_deletion.manifest().source_routes().is_empty());
     assert_eq!(
         VerifiedIndex::open(temp.path()).unwrap().document_count(),
         0
     );
 
-    let final_inventory = complete_inventory(&source, 8, Vec::new());
     let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    replay
-        .certify_complete_inventory(final_inventory.clone())
-        .unwrap();
-    let replay = replay
-        .commit_with_complete_inventory_revalidation(
-            |_| false,
-            |current| current == &final_inventory,
-        )
-        .unwrap();
+    replay.set_present_source_routes(Vec::new()).unwrap();
+    assert!(replay
+        .observe_certified_missing_route(route_id, 600, DELETE_AFTER, || true)
+        .unwrap()
+        .retained_sources()
+        .is_empty());
+    let replay = replay.commit(|_| false).unwrap();
     assert_eq!(replay.generation_id, final_deletion.generation_id);
 }
 
@@ -1416,116 +1478,4 @@ fn direct_core_record_rejects_noncurrent_policy_revisions() {
         writer.add_core_record(record),
         Err(IndexError::CoreRecordPolicyRevisionMismatch { .. })
     ));
-}
-
-#[test]
-fn source_stage_rollback_keeps_prior_candidate_checkpoint_and_discards_partial_source() {
-    let temp = tempdir().unwrap();
-    let source_a = source("stage-a.jsonl");
-    let source_b = source("stage-b.jsonl");
-    let source_c = source("stage-c.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    initial.begin_source(source_a.clone()).unwrap();
-    initial
-        .add_core_record(document(&source_a, 1, "retainedstagea"))
-        .unwrap();
-    initial
-        .certify_source(certificate(&source_a, 1, 1))
-        .unwrap();
-    initial.commit(|_| true).unwrap();
-
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    writer.begin_source_stage().unwrap();
-    writer.begin_source(source_b.clone()).unwrap();
-    writer
-        .add_core_record(document(&source_b, 1, "successfulstageb"))
-        .unwrap();
-    writer.certify_source(certificate(&source_b, 1, 1)).unwrap();
-    writer.finish_source_stage(|_| true, |_| true).unwrap();
-
-    writer.begin_source_stage().unwrap();
-    writer.begin_source(source_c.clone()).unwrap();
-    writer
-        .add_core_record(document(&source_c, 1, "partialstagec"))
-        .unwrap();
-    writer.rollback_source_stage().unwrap();
-    writer.commit(|_| true).unwrap();
-
-    let visible = VerifiedIndex::open(temp.path()).unwrap();
-    assert_eq!(visible.count_term("retainedstagea").unwrap(), 1);
-    assert_eq!(visible.count_term("successfulstageb").unwrap(), 1);
-    assert_eq!(visible.count_term("partialstagec").unwrap(), 0);
-}
-
-#[test]
-fn all_carried_base_sources_return_exact_base_without_candidate_churn() {
-    let temp = tempdir().unwrap();
-    let retained = source("carried-base.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    initial.begin_source(retained.clone()).unwrap();
-    initial
-        .add_core_record(document(&retained, 1, "carriedbase"))
-        .unwrap();
-    initial
-        .certify_source(certificate(&retained, 1, 1))
-        .unwrap();
-    let initial = initial.commit(|_| true).unwrap();
-
-    let mut carried = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    carried.carry_base_source(retained.clone()).unwrap();
-    let replay = carried
-        .commit(|_| panic!("carried source must not be revalidated"))
-        .unwrap();
-    assert_eq!(replay.generation_id, initial.generation_id);
-    assert_eq!(replay.opstamp, initial.opstamp);
-
-    let mut mutation = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    mutation.carry_base_source(retained.clone()).unwrap();
-    assert!(matches!(
-        mutation.begin_source(retained),
-        Err(IndexError::CarriedBaseSourceMutation(_))
-    ));
-}
-
-#[test]
-fn systemic_source_checkpoint_commit_failure_keeps_the_active_generation() {
-    let temp = tempdir().unwrap();
-    let source_a = source("checkpoint-systemic-a.jsonl");
-    let source_b = source("checkpoint-systemic-b.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    initial.begin_source(source_a.clone()).unwrap();
-    initial
-        .add_core_record(document(&source_a, 1, "activecheckpoint"))
-        .unwrap();
-    initial
-        .certify_source(certificate(&source_a, 1, 1))
-        .unwrap();
-    let initial = initial.commit(|_| true).unwrap();
-
-    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    candidate.begin_source_stage().unwrap();
-    candidate.begin_source(source_b.clone()).unwrap();
-    candidate
-        .add_core_record(document(&source_b, 1, "unpublishedcheckpoint"))
-        .unwrap();
-    candidate
-        .certify_source(certificate(&source_b, 1, 1))
-        .unwrap();
-    candidate.before_source_stage_commit = Some(Box::new(|_| {
-        Err(IndexError::WriterInvariant(
-            "injected source checkpoint commit failure",
-        ))
-    }));
-    assert!(matches!(
-        candidate.finish_source_stage(|_| true, |_| true),
-        Err(IndexError::WriterInvariant(
-            "injected source checkpoint commit failure"
-        ))
-    ));
-    drop(candidate);
-
-    let visible = VerifiedIndex::open(temp.path()).unwrap();
-    assert_eq!(visible.generation_id(), initial.generation_id);
-    assert_eq!(visible.count_term("activecheckpoint").unwrap(), 1);
-    assert_eq!(visible.count_term("unpublishedcheckpoint").unwrap(), 0);
 }

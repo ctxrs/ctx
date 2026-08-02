@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SourceRefreshRuntimeMetadata {
+    pub(super) operation: SourceBackedRefreshOperation,
     pub(super) daemon_mode: DaemonMode,
     pub(super) trigger: &'static str,
     pub(super) trigger_provenance: &'static str,
@@ -10,6 +11,7 @@ pub(super) struct SourceRefreshRuntimeMetadata {
 impl Default for SourceRefreshRuntimeMetadata {
     fn default() -> Self {
         Self {
+            operation: SourceBackedRefreshOperation::Refresh,
             daemon_mode: DaemonMode::Full,
             trigger: "search",
             trigger_provenance: "manual",
@@ -20,6 +22,7 @@ impl Default for SourceRefreshRuntimeMetadata {
 impl SourceRefreshRuntimeMetadata {
     pub(super) fn periodic() -> Self {
         Self {
+            operation: SourceBackedRefreshOperation::Refresh,
             daemon_mode: DaemonMode::Full,
             trigger: "periodic",
             trigger_provenance: "daemon_scheduler",
@@ -53,6 +56,7 @@ pub(super) fn source_refresh_runtime_metadata(data_root: &Path) -> SourceRefresh
         "manual"
     };
     SourceRefreshRuntimeMetadata {
+        operation: SourceBackedRefreshOperation::Refresh,
         daemon_mode,
         trigger: "search",
         trigger_provenance,
@@ -63,6 +67,7 @@ pub(super) fn source_catalog_refresh_runtime_metadata(
     data_root: &Path,
 ) -> SourceRefreshRuntimeMetadata {
     SourceRefreshRuntimeMetadata {
+        operation: SourceBackedRefreshOperation::Import,
         trigger: "import",
         trigger_provenance: "explicit_source_catalog",
         ..source_refresh_runtime_metadata(data_root)

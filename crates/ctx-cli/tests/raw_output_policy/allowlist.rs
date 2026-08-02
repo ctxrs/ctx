@@ -47,7 +47,7 @@ const ANALYTICS: TestOwner = TestOwner::behavioral(
     &["post_event_chunks", "failure_on_post", "is_ok"],
 );
 const INDEX: TestOwner = TestOwner::behavioral(
-    "src/commands/index_dashboard.rs::styled_rendering_strips_to_the_exact_plain_bytes",
+    "src/commands/index_dashboard.rs::styled_rendering_strips_to_plain_bytes",
     &["src/commands/index.rs"],
     &["render_dashboard", "strip_ansi", "render_plain"],
 );
@@ -281,7 +281,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         BLAME,
-        "run#1@862efb434b34b780",
+        "run_with#1@862efb434b34b780",
         StdoutConstructor,
         CapabilityProbe,
         TERMINAL_PROBE,
@@ -289,7 +289,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         BLAME,
-        "run#1@862efb434b34b780",
+        "run_with#1@862efb434b34b780",
         StderrConstructor,
         CapabilityProbe,
         TERMINAL_PROBE,
@@ -465,8 +465,8 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "render_stable_pro_error_json#1@58d077696a0c7270",
-        StderrConstructor,
+        "render_stable_pro_error_json#1@cb8255dedc3256c6",
+        OutputRawHelper,
         MachineProtocol,
         JSON_PROTOCOL,
         PRO_MACHINE_ERROR
@@ -857,7 +857,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PRO_RENDER,
-        "print_blame_result#1@8692675e47437164",
+        "print_blame_result_with_context#1@8692675e47437164",
         UiRawWriter,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -865,7 +865,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PRO_RENDER,
-        "print_blame_result#1@8692675e47437164",
+        "print_blame_result_with_context#1@8692675e47437164",
         DirectWrite,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -873,18 +873,26 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         PROGRESS,
-        "emit_status#1@42f90c85ef8445c5",
-        PrintMacro,
-        MachineProtocol,
-        JSON_PROTOCOL,
+        "emit_status#1@9d99ae52ba0872ab",
+        StderrConstructor,
+        Infrastructure,
+        SPECIALIZED_STREAM,
         PROGRESS_DELIVERY
     ),
     allow!(
         PROGRESS,
-        "emit_status#2@49803700added34c",
-        PrintMacro,
-        Infrastructure,
+        "write_progress#1@afd18c22c5ce7e22",
+        DirectWrite,
+        JustifiedPlainHuman,
         SPECIALIZED_STREAM,
+        PROGRESS_DELIVERY
+    ),
+    allow!(
+        PROGRESS,
+        "write_progress#2@7238ae0e2f4ab1cf",
+        DirectWrite,
+        MachineProtocol,
+        JSON_PROTOCOL,
         PROGRESS_DELIVERY
     ),
     allow!(

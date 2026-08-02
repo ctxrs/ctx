@@ -1,48 +1,134 @@
 import Foundation
 
 public struct AgentHistoryStatus: Codable, Equatable, Sendable {
+    public static let maximumExactCounter = 9_007_199_254_740_991
+
     public var initialized: Bool
     public var localOnly: Bool
+    public var readOnly: Bool?
     public var dataRoot: String?
     public var indexedItems: Int?
+    public var indexedSessions: Int?
+    public var indexedEvents: Int?
     public var indexedSources: Int?
-    public var catalogedSessions: Int?
-    public var indexedCatalogSessions: Int?
-    public var pendingCatalogSessions: Int?
-    public var failedCatalogSessions: Int?
-    public var staleCatalogSessions: Int?
-    public var freshness: AgentHistoryFreshness?
+    public var historyEpoch: JSONValue?
+    public var lexical: JSONValue?
+    public var refresh: JSONValue?
     public var semantic: JSONValue?
     public var daemon: JSONValue?
 
     public init(
         initialized: Bool,
         localOnly: Bool,
+        readOnly: Bool? = nil,
         dataRoot: String? = nil,
         indexedItems: Int? = nil,
+        indexedSessions: Int? = nil,
+        indexedEvents: Int? = nil,
         indexedSources: Int? = nil,
-        catalogedSessions: Int? = nil,
-        indexedCatalogSessions: Int? = nil,
-        pendingCatalogSessions: Int? = nil,
-        failedCatalogSessions: Int? = nil,
-        staleCatalogSessions: Int? = nil,
-        freshness: AgentHistoryFreshness? = nil,
+        historyEpoch: JSONValue? = nil,
+        lexical: JSONValue? = nil,
+        refresh: JSONValue? = nil,
         semantic: JSONValue? = nil,
         daemon: JSONValue? = nil
     ) {
         self.initialized = initialized
         self.localOnly = localOnly
+        self.readOnly = readOnly
         self.dataRoot = dataRoot
         self.indexedItems = indexedItems
+        self.indexedSessions = indexedSessions
+        self.indexedEvents = indexedEvents
         self.indexedSources = indexedSources
-        self.catalogedSessions = catalogedSessions
-        self.indexedCatalogSessions = indexedCatalogSessions
-        self.pendingCatalogSessions = pendingCatalogSessions
-        self.failedCatalogSessions = failedCatalogSessions
-        self.staleCatalogSessions = staleCatalogSessions
-        self.freshness = freshness
+        self.historyEpoch = historyEpoch
+        self.lexical = lexical
+        self.refresh = refresh
         self.semantic = semantic
         self.daemon = daemon
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case initialized
+        case localOnly
+        case readOnly
+        case dataRoot
+        case indexedItems
+        case indexedSessions
+        case indexedEvents
+        case indexedSources
+        case historyEpoch
+        case lexical
+        case refresh
+        case semantic
+        case daemon
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        initialized = try container.decode(Bool.self, forKey: .initialized)
+        localOnly = try container.decode(Bool.self, forKey: .localOnly)
+        readOnly = try container.decodeIfPresent(Bool.self, forKey: .readOnly)
+        dataRoot = try container.decodeIfPresent(String.self, forKey: .dataRoot)
+        indexedItems = try Self.decodeCounter(.indexedItems, from: container)
+        indexedSessions = try Self.decodeCounter(.indexedSessions, from: container)
+        indexedEvents = try Self.decodeCounter(.indexedEvents, from: container)
+        indexedSources = try Self.decodeCounter(.indexedSources, from: container)
+        historyEpoch = try container.decodeIfPresent(JSONValue.self, forKey: .historyEpoch)
+        lexical = try container.decodeIfPresent(JSONValue.self, forKey: .lexical)
+        refresh = try container.decodeIfPresent(JSONValue.self, forKey: .refresh)
+        semantic = try container.decodeIfPresent(JSONValue.self, forKey: .semantic)
+        daemon = try container.decodeIfPresent(JSONValue.self, forKey: .daemon)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(initialized, forKey: .initialized)
+        try container.encode(localOnly, forKey: .localOnly)
+        try container.encodeIfPresent(readOnly, forKey: .readOnly)
+        try container.encodeIfPresent(dataRoot, forKey: .dataRoot)
+        try Self.encodeCounter(indexedItems, forKey: .indexedItems, to: &container)
+        try Self.encodeCounter(indexedSessions, forKey: .indexedSessions, to: &container)
+        try Self.encodeCounter(indexedEvents, forKey: .indexedEvents, to: &container)
+        try Self.encodeCounter(indexedSources, forKey: .indexedSources, to: &container)
+        try container.encodeIfPresent(historyEpoch, forKey: .historyEpoch)
+        try container.encodeIfPresent(lexical, forKey: .lexical)
+        try container.encodeIfPresent(refresh, forKey: .refresh)
+        try container.encodeIfPresent(semantic, forKey: .semantic)
+        try container.encodeIfPresent(daemon, forKey: .daemon)
+    }
+
+    private static func decodeCounter(
+        _ key: CodingKeys,
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> Int? {
+        guard let value = try container.decodeIfPresent(Int.self, forKey: key) else {
+            return nil
+        }
+        guard value >= 0, value <= maximumExactCounter else {
+            throw DecodingError.dataCorruptedError(
+                forKey: key,
+                in: container,
+                debugDescription: "status counter exceeds maximum \(maximumExactCounter)"
+            )
+        }
+        return value
+    }
+
+    private static func encodeCounter(
+        _ value: Int?,
+        forKey key: CodingKeys,
+        to container: inout KeyedEncodingContainer<CodingKeys>
+    ) throws {
+        if let value, value < 0 || value > maximumExactCounter {
+            throw EncodingError.invalidValue(
+                value,
+                EncodingError.Context(
+                    codingPath: container.codingPath + [key],
+                    debugDescription: "status counter exceeds maximum \(maximumExactCounter)"
+                )
+            )
+        }
+        try container.encodeIfPresent(value, forKey: key)
     }
 }
 

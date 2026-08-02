@@ -81,6 +81,12 @@ def validate_schema(value, schema, root, path: str) -> None:
         expected = expected_type if isinstance(expected_type, list) else [expected_type]
         require(any(json_type_matches(value, item) for item in expected), f"{path}: bad type")
 
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema:
+            require(value >= schema["minimum"], f"{path}: below minimum")
+        if "maximum" in schema:
+            require(value <= schema["maximum"], f"{path}: above maximum")
+
     if isinstance(value, dict):
         forbidden_property_names = schema.get("propertyNames", {}).get("not", {}).get("enum", [])
         for key in value:
@@ -226,6 +232,22 @@ def validate_fixture(path: Path, schema: dict) -> None:
         validate_show_events(session_result, path)
 
 
+def validate_status_counter_domain(schema: dict) -> None:
+    status_schema = schema["$defs"]["status"]
+    maximum = 9_007_199_254_740_991
+    for key in ("indexedItems", "indexedSessions", "indexedEvents", "indexedSources"):
+        counter_schema = status_schema["properties"][key]
+        require(counter_schema.get("minimum") == 0, f"status.{key}: bad minimum")
+        require(counter_schema.get("maximum") == maximum, f"status.{key}: bad maximum")
+        validate_schema(maximum, counter_schema, schema, f"status.{key}")
+        for rejected in (maximum + 2, 18_446_744_073_709_551_615):
+            try:
+                validate_schema(rejected, counter_schema, schema, f"status.{key}")
+            except AssertionError:
+                continue
+            raise AssertionError(f"status.{key}: accepted out-of-domain value {rejected}")
+
+
 def validate_show_events(result: dict, path: Path) -> None:
     events = result.get("events")
     require(isinstance(events, list) and events, f"{path}: missing events[]")
@@ -255,6 +277,7 @@ def validate_show_events(result: dict, path: Path) -> None:
 def main() -> int:
     schema = json.loads((CONTRACT / "schema.json").read_text())
     require(schema.get("$id"), "schema missing $id")
+    validate_status_counter_domain(schema)
     for definition in ("searchHit", "eventResult", "sessionResult", "event", "citation"):
         forbidden = set(schema["$defs"][definition]["propertyNames"]["not"]["enum"])
         require(

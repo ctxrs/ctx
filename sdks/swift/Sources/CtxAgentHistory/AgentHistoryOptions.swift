@@ -1,11 +1,9 @@
 import Foundation
 
 public struct InitOptions: Sendable {
-    public var catalogOnly: Bool
     public var progress: String?
 
-    public init(catalogOnly: Bool = false, progress: String? = "none") {
-        self.catalogOnly = catalogOnly
+    public init(progress: String? = "none") {
         self.progress = progress
     }
 }

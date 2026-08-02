@@ -6,8 +6,7 @@
 //! [`GenerationWriter`] and no adapter can publish a generation by itself.
 
 use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     path::{Path, PathBuf},
     sync::Arc,
@@ -21,8 +20,8 @@ use ctx_history_core::{
     SourceKey, TypedKey,
 };
 use ctx_history_index::{
-    CommitReceipt, GenerationRemoval, GenerationWriter, IndexError, RevalidationTarget,
-    WriterOptions,
+    CommitReceipt, GenerationManifest, GenerationWriter, IndexError, RevalidationTarget,
+    SourceRouteIdentity, SourceRouteSnapshot, WriterOptions,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -54,12 +53,9 @@ use super::providers::{
     },
     continue_cli::native_path::{ContinueSourceBackedOutcome, ContinueSourceBackedReader},
     crush::native_path::source_backed::{
-        bind_inventory as bind_crush_inventory, closing_observation as closing_crush_observation,
-        exact_replay_matches as crush_exact_replay_matches,
-        finish_opened_source as finish_crush_source, open_source as open_crush_source,
+        bind_inventory as bind_crush_inventory, finish_opened_source as finish_crush_source,
         scan_source as scan_crush_source, CrushSourceBackedErrorV0, CrushSourceBackedResultV0,
-        CRUSH_DISCOVERY_REVISION, CRUSH_FRONTIER_KIND, CRUSH_PARSER_REVISION,
-        CRUSH_SOURCE_SCHEMA_VARIANT,
+        CRUSH_PARSER_REVISION,
     },
     deepagents::native_path::source_backed::DeepAgentsDatabaseSelectionV0,
     forgecode::nativepath::source_backed::ForgeCodeSourceSelectionV0,
@@ -98,9 +94,9 @@ use super::providers::{
     },
 };
 use crate::provider_sources::{
-    resolve_warp_discovery_authority, CrushDiscoveredProjectInventory,
+    path_presence, resolve_warp_discovery_authority, CrushDiscoveredProjectInventory,
     CrushProjectInventorySelector, CrushProjectInventorySelectorError, LingmaDiscoveryUnavailable,
-    LingmaInventorySelector, WarpDiscoveryUnavailable,
+    LingmaInventorySelector, PathPresence, WarpDiscoveryUnavailable,
 };
 use crate::{
     discover_provider_sources_with_context, provider_source_spec,
@@ -116,12 +112,14 @@ pub(crate) mod family;
 mod inventory;
 mod publication;
 mod registration;
+mod watch;
 
 pub use discovery::*;
 pub use driver::*;
 pub use inventory::*;
 pub use publication::*;
 pub use registration::*;
+pub use watch::*;
 
 pub(crate) fn source_backed_base_sources(
     sink: &SourceBackedGenerationSink<'_>,
@@ -137,15 +135,6 @@ pub(crate) fn source_backed_base_sources(
                 .cloned()
                 .collect()
         })
-        .unwrap_or_default()
-}
-
-pub(crate) fn source_backed_base_removals(
-    sink: &SourceBackedGenerationSink<'_>,
-) -> Vec<GenerationRemoval> {
-    sink.writer
-        .base_manifest()
-        .map(|manifest| manifest.removals.clone())
         .unwrap_or_default()
 }
 

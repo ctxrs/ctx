@@ -13,16 +13,29 @@ use ctx_history_index::{CoreSourceEventPage, VerifiedIndex, WriterOptions};
 use rusqlite::{params, Connection};
 use serde_json::json;
 
+use super::super::query::{
+    source_backed_event_order_sql, source_backed_event_sql,
+    source_backed_fallback_events_by_rowids_sql, source_backed_fallback_sort_key_sql,
+};
+use super::ordering::{
+    OPENCODE_HYDRATION_BATCH_BYTES, OPENCODE_HYDRATION_BATCH_ROWS,
+    OPENCODE_HYDRATION_SINGLETON_MAX_BYTES,
+};
 use super::*;
 use crate::{
     provider::source_backed::{
         refresh_source_backed_generation, refresh_source_backed_generation_with_detailed_progress,
-        SourceBackedCoordinatorError, SourceBackedCurrentSourceProgress,
+        refresh_source_backed_generation_with_progress, SourceBackedCoordinatorError,
         SourceBackedCurrentSourceProgressStage, SourceBackedProviderRegistry,
         SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
     },
     provider_sources::provider_source_for_path,
 };
+
+mod current_schema;
+mod temp_authority;
+
+use current_schema::create_current_fixture;
 
 fn write_current_schema(
     path: &Path,
@@ -69,6 +82,10 @@ fn write_current_schema(
                  time_updated integer not null,
                  data text not null
              );
+             create index message_session_time_created_id_idx
+                 on message(session_id, time_created, id);
+             create index part_message_id_id_idx on part(message_id, id);
+             create index part_session_idx on part(session_id);
              create table event (
                  id text primary key,
                  aggregate_id text not null,
@@ -139,35 +156,44 @@ fn scan_current_schema(
     OpenCodeLogicalObservation,
     OpenCodeSourceBackedScan,
     Vec<CoreRecord>,
-    [u8; 32],
 ) {
-    let authorized =
-        open_root_authorized_snapshot_retained(crate::test_provider_sqlite_data_root(), path)
-            .unwrap();
-    let observation = observe_logical_source(
-        authorized.sqlite_snapshot.connection().unwrap(),
-        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+    scan_current_schema_result(
+        path,
+        crate::test_provider_sqlite_data_root(),
+        OPENCODE_FALLBACK_SCRATCH_MAX_BYTES,
     )
-    .unwrap();
-    let admitted_fingerprint = super::adapter::admitted_leaf_fingerprint(
-        &observation.source,
-        authorized.sqlite_snapshot.evidence(),
-    );
+    .unwrap()
+}
+
+fn scan_current_schema_result(
+    path: &Path,
+    data_root: &Path,
+    scratch_limit: u64,
+) -> OpenCodeSourceBackedResult<(
+    OpenCodeLogicalObservation,
+    OpenCodeSourceBackedScan,
+    Vec<CoreRecord>,
+)> {
+    let authorized = open_root_authorized_snapshot_retained(data_root, path)?;
+    let observation = observe_logical_source(
+        authorized.sqlite_snapshot.connection()?,
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+    )?;
     let mut records = Vec::new();
-    let scan = scan_pinned_source(
+    let scan = scan_pinned_source_with_scratch_limit(
         path,
         &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
         &observation,
         authorized.sqlite_snapshot,
+        scratch_limit,
         &mut |output| {
             if let OpenCodeScanOutput::Document(record) = output {
                 records.push(record);
             }
             Ok(())
         },
-    )
-    .unwrap();
-    (observation, scan, records, admitted_fingerprint)
+    )?;
+    Ok((observation, scan, records))
 }
 
 #[test]
@@ -263,7 +289,7 @@ fn strict_native_tool_call_ambiguity_and_overflow_abstain_without_cross_call_inf
     let temp = crate::test_support_paths::tempdir().unwrap();
     let database = temp.path().join("overflow-opencode.db");
     drop(write_current_schema(&database, temp.path(), &overflow));
-    let (_, _, records, _) = scan_current_schema(&database);
+    let (_, _, records) = scan_current_schema(&database);
     let [record] = records.as_slice() else {
         panic!("expected the overflowing call to remain a Core record");
     };
@@ -449,34 +475,17 @@ fn refresh_fixture_with_work(
     index_root: &Path,
     registry: &SourceBackedProviderRegistry,
 ) -> super::adapter::OpenCodeSqliteWorkCounters {
-    refresh_fixture_with_work_and_progress(index_root, registry).0
-}
-
-fn refresh_fixture_with_work_and_progress(
-    index_root: &Path,
-    registry: &SourceBackedProviderRegistry,
-) -> (
-    super::adapter::OpenCodeSqliteWorkCounters,
-    Vec<SourceBackedCurrentSourceProgress>,
-) {
     let _ = super::adapter::take_last_work_counters();
-    let mut progress = Vec::new();
-    refresh_source_backed_generation_with_detailed_progress(
+    refresh_source_backed_generation(
         index_root,
         registry,
         WriterOptions {
             indexer_threads: 1,
             memory_bytes: 15_000_000,
         },
-        |update| {
-            if let Some(current) = update.current_source_progress {
-                progress.push(current);
-            }
-            Ok(())
-        },
     )
     .unwrap();
-    (super::adapter::take_last_work_counters().unwrap(), progress)
+    super::adapter::take_last_work_counters().unwrap()
 }
 
 fn create_indexed_synthetic_fixture(path: &Path, rows: i64) {
@@ -521,6 +530,374 @@ fn create_indexed_synthetic_fixture(path: &Path, rows: i64) {
             .execute(
                 "insert into session_message values (?1, 'session-1', 'message', ?2, ?2, ?2, ?3)",
                 params![format!("event-{sequence:08}"), sequence, body],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn rejection_heavy_scan_reports_authoritative_completed_bytes_before_finishing() {
+    const ROWS: i64 = 128;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_synthetic_fixture(&database, ROWS);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "update session_message set data = 'not-json' where seq < ?1",
+            [ROWS - 1],
+        )
+        .unwrap();
+    drop(connection);
+
+    let authorized =
+        open_root_authorized_snapshot_retained(crate::test_provider_sqlite_data_root(), &database)
+            .unwrap();
+    let observation = observe_logical_source(
+        authorized.sqlite_snapshot.connection().unwrap(),
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+    )
+    .unwrap();
+    let mut completed_bytes = Vec::new();
+    let mut accepted = 0_u64;
+    let scan = scan_pinned_source(
+        &database,
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+        &observation,
+        authorized.sqlite_snapshot,
+        &mut |output| {
+            match output {
+                OpenCodeScanOutput::Begin(_) => {}
+                OpenCodeScanOutput::CompletedBytes(bytes) => completed_bytes.push(bytes),
+                OpenCodeScanOutput::Document(_) => accepted = accepted.saturating_add(1),
+                OpenCodeScanOutput::Progress(_) => {}
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    let counts = scan.certificate.counts();
+    assert_eq!(counts.complete_records, ROWS as u64);
+    assert_eq!(counts.retained_records, 1);
+    assert_eq!(counts.rejected_records, (ROWS - 1) as u64);
+    assert_eq!(accepted, 1);
+    assert_eq!(completed_bytes.len(), ROWS as usize);
+    assert_eq!(completed_bytes.iter().sum::<u64>(), counts.certified_bytes);
+}
+
+#[test]
+fn rejection_heavy_production_refresh_advances_bytes_and_clears_them_terminally() {
+    const ROWS: i64 = 128;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_synthetic_fixture(&database, ROWS);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "update session_message set data = 'not-json' where seq < ?1",
+            [ROWS - 1],
+        )
+        .unwrap();
+    drop(connection);
+
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let source = provider_source_for_path(CaptureProvider::OpenCode, database.clone());
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        &data_root,
+    )
+    .unwrap();
+    let mut progress = Vec::new();
+    let refresh = refresh_source_backed_generation_with_progress(
+        &index_root,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+        |update| {
+            progress.push(update);
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    let counts = refresh.sources[0].counts();
+    assert_eq!(counts.retained_records, 1);
+    assert_eq!(counts.rejected_records, (ROWS - 1) as u64);
+    assert!(progress.iter().any(|update| {
+        update.phase == "refreshing"
+            && update.current_source.as_deref() == database.to_str()
+            && update.completed_records == Some(0)
+            && update.completed_bytes.is_some_and(|bytes| bytes > 0)
+    }));
+    let terminal = progress.last().expect("terminal refresh progress");
+    assert_eq!(terminal.phase, "committed");
+    assert!(terminal.current_source.is_none());
+    assert!(terminal.completed_records.is_none());
+    assert!(terminal.completed_bytes.is_none());
+}
+
+#[test]
+fn detailed_progress_reports_backup_fingerprint_and_one_pass_scan() {
+    const ROWS: i64 = 96;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_synthetic_fixture(&database, ROWS);
+    let source = provider_source_for_path(CaptureProvider::OpenCode, database);
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        &temp.path().join("data-root"),
+    )
+    .unwrap();
+    let mut progress = Vec::new();
+
+    let receipt = refresh_source_backed_generation_with_detailed_progress(
+        temp.path().join("index"),
+        &registry,
+        WriterOptions::default(),
+        |update| {
+            if let Some(progress_update) = update.current_source_progress {
+                progress.push(progress_update);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert!(progress.iter().any(|update| {
+        matches!(
+            update.stage,
+            SourceBackedCurrentSourceProgressStage::OnlineBackup
+                | SourceBackedCurrentSourceProgressStage::SourceFamilyCopy
+        )
+    }));
+    assert!(progress.iter().any(|update| {
+        update.stage == SourceBackedCurrentSourceProgressStage::LogicalFingerprint
+    }));
+    let scan = progress
+        .iter()
+        .filter(|update| update.stage == SourceBackedCurrentSourceProgressStage::LogicalScan)
+        .collect::<Vec<_>>();
+    assert_eq!(scan.first().unwrap().logical_rows_scanned, Some(0));
+    assert_eq!(scan.last().unwrap().logical_rows_scanned, Some(ROWS as u64));
+    assert_eq!(
+        scan.last().unwrap().logical_certified_bytes,
+        Some(receipt.sources[0].counts().certified_bytes)
+    );
+}
+
+#[test]
+fn detailed_progress_callback_failure_remains_systemic() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_synthetic_fixture(&database, 1);
+    let source = provider_source_for_path(CaptureProvider::OpenCode, database);
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        &temp.path().join("data-root"),
+    )
+    .unwrap();
+
+    let error = refresh_source_backed_generation_with_detailed_progress(
+        temp.path().join("index"),
+        &registry,
+        WriterOptions::default(),
+        |update| {
+            if update.current_source_progress.is_some() {
+                Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Unavailable,
+                    "injected OpenCode progress callback failure",
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::Progress(SourceBackedRouteError {
+            kind: SourceBackedRouteErrorKind::Unavailable,
+            detail,
+        }) if detail.contains("injected OpenCode progress callback failure")
+    ));
+}
+
+fn create_indexed_message_part_fixture(path: &Path, rows: i64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "create table session (
+                 id text primary key,
+                 parent_id text,
+                 directory text,
+                 branch text,
+                 agent text,
+                 time_created integer not null,
+                 time_updated integer not null
+             );
+             create table session_message (
+                 id text primary key,
+                 session_id text not null,
+                 type text not null,
+                 seq integer not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create table message (
+                 id text primary key,
+                 session_id text not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create table part (
+                 id text primary key,
+                 message_id text not null,
+                 session_id text not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create index message_session_time_created_id_idx
+                 on message(session_id, time_created, id);
+             create index part_message_id_id_idx on part(message_id, id);
+             create index part_message_time_id_idx
+                 on part(message_id, time_created, id);
+             create index part_session_idx on part(session_id);
+             insert into session values (
+                 'session-1', null, '/tmp/project', 'main', 'build', 0, 0
+             );",
+        )
+        .unwrap();
+    let transaction = connection.transaction().unwrap();
+    for sequence in 0..rows {
+        let message_id = format!("message-{sequence:08}");
+        transaction
+            .execute(
+                "insert into message values (?1, 'session-1', ?2, ?2, ?3)",
+                params![
+                    message_id,
+                    sequence,
+                    json!({"role": "user", "time": {"created": sequence}}).to_string()
+                ],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "insert into part values (?1, ?2, 'session-1', ?3, ?3, ?4)",
+                params![
+                    format!("part-{sequence:08}"),
+                    message_id,
+                    sequence,
+                    json!({
+                        "type": "text",
+                        "text": format!("synthetic current OpenCode part {sequence}")
+                    })
+                    .to_string()
+                ],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+}
+
+fn create_multisession_message_part_fixture(path: &Path, sessions: i64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "create table session (
+                 id text primary key,
+                 parent_id text,
+                 directory text,
+                 branch text,
+                 agent text,
+                 time_created integer not null,
+                 time_updated integer not null
+             );
+             create table message (
+                 id text primary key,
+                 session_id text not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create table part (
+                 id text primary key,
+                 message_id text not null,
+                 session_id text not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create index message_session_time_created_id_idx
+                 on message(session_id, time_created, id);
+             create index part_message_id_id_idx on part(message_id, id);
+             create index part_message_time_id_idx
+                 on part(message_id, time_created, id);
+             create index part_session_idx on part(session_id);",
+        )
+        .unwrap();
+    let metadata_padding = "m".repeat(4 * 1024);
+    let payload_padding = "p".repeat(4 * 1024);
+    let transaction = connection.transaction().unwrap();
+    for sequence in 0..sessions {
+        let session_id = format!("session-{sequence:08}");
+        let message_id = format!("message-{sequence:08}");
+        let parent_id = (sequence % 17 != 0).then(|| format!("session-{:08}", sequence - 1));
+        transaction
+            .execute(
+                "insert into session values (?1, ?2, '/tmp/project', 'main', ?3, ?4, ?4)",
+                params![
+                    session_id,
+                    parent_id,
+                    format!("agent-{sequence}-{metadata_padding}"),
+                    sequence
+                ],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "insert into message values (?1, ?2, ?3, ?3, ?4)",
+                params![
+                    message_id,
+                    session_id,
+                    sequence,
+                    json!({"role": "user", "time": {"created": sequence}}).to_string()
+                ],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "insert into part values (?1, ?2, ?3, ?4, ?4, ?5)",
+                params![
+                    format!("part-{sequence:08}"),
+                    message_id,
+                    session_id,
+                    sequence,
+                    json!({
+                        "type": "text",
+                        "text": format!("event-{sequence}-{payload_padding}")
+                    })
+                    .to_string()
+                ],
             )
             .unwrap();
     }
@@ -589,10 +966,6 @@ fn admitted_opencode_backup_stays_stable_across_later_wal_commit_and_next_open_a
         &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
     )
     .unwrap();
-    let admitted_fingerprint = super::adapter::admitted_leaf_fingerprint(
-        &observation.source,
-        authorized.sqlite_snapshot.evidence(),
-    );
     let terminal = authorized.sqlite_snapshot.terminal_revalidator();
     let OpenCodeAuthorizedSnapshot {
         source_root,
@@ -617,21 +990,11 @@ fn admitted_opencode_backup_stays_stable_across_later_wal_commit_and_next_open_a
     assert_eq!(admitted, vec!["admitted OpenCode message"]);
     drop((source_root, sqlite_authority));
 
-    let (_, _, refreshed, refreshed_fingerprint) = scan_current_schema(&database);
-    assert_ne!(refreshed_fingerprint, admitted_fingerprint);
+    let (_, _, refreshed) = scan_current_schema(&database);
     assert_eq!(
         refreshed
             .into_iter()
             .map(|record| record.content.normalized_body.unwrap_or_default())
-            .collect::<Vec<_>>(),
-        vec!["admitted OpenCode message", "later OpenCode message"]
-    );
-    let imported = project_fixture(&database, temp.path());
-    assert_eq!(
-        imported
-            .items
-            .into_iter()
-            .map(|item| item.core_record.content.normalized_body.unwrap_or_default())
             .collect::<Vec<_>>(),
         vec!["admitted OpenCode message", "later OpenCode message"]
     );
@@ -663,7 +1026,7 @@ fn unrelated_sibling_creation_does_not_invalidate_the_sqlite_source_family() {
 }
 
 #[test]
-fn indexed_synthetic_progress_uses_one_snapshot_and_one_logical_row_traversal() {
+fn indexed_synthetic_cold_and_changed_use_one_snapshot_and_one_logical_row_traversal() {
     const ROWS: u64 = 4_096;
     let temp = crate::test_support_paths::tempdir().unwrap();
     let database = temp.path().join("source/opencode.sqlite");
@@ -671,16 +1034,13 @@ fn indexed_synthetic_progress_uses_one_snapshot_and_one_logical_row_traversal() 
 
     let connection = Connection::open(&database).unwrap();
     let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
-    register_projection_function(&connection, dialect).unwrap();
     let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
     let mut sql = source_backed_event_sql(&schema);
     sql.push_str(source_backed_event_order_sql(&schema));
     let plan = connection
         .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
         .unwrap()
-        .query_map([MAX_PROVIDER_SQLITE_VALUE_BYTES as i64], |row| {
-            row.get::<_, String>(3)
-        })
+        .query_map([], |row| row.get::<_, String>(3))
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
@@ -706,46 +1066,19 @@ fn indexed_synthetic_progress_uses_one_snapshot_and_one_logical_row_traversal() 
     )
     .unwrap();
 
-    let (cold, cold_progress) = refresh_fixture_with_work_and_progress(&index_root, &registry);
+    let cold = refresh_fixture_with_work(&index_root, &registry);
     assert_eq!(cold.snapshot_opens, 1);
     assert_eq!(cold.logical_online_backup_opens, 1);
-    assert!(cold.logical_online_backup_steps > 0);
-    assert!(cold.logical_online_backup_pages > 0);
     assert_eq!(cold.schema_probe_passes, 1);
+    assert_eq!(cold.schema_event_validation_traversals, 2);
     assert_eq!(cold.logical_fingerprint_passes, 0);
     assert_eq!(cold.logical_row_traversals, 1);
     assert_eq!(cold.projection_passes, 1);
     assert_eq!(cold.logical_rows_projected, ROWS);
     assert_eq!(cold.documents_staged, ROWS);
-    assert!(cold_progress
-        .iter()
-        .any(|update| update.stage == SourceBackedCurrentSourceProgressStage::OnlineBackup));
-    assert!(!cold_progress.iter().any(|update| {
-        update.stage == SourceBackedCurrentSourceProgressStage::LogicalFingerprint
-    }));
-    let logical_scan = cold_progress
-        .iter()
-        .filter(|update| update.stage == SourceBackedCurrentSourceProgressStage::LogicalScan)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        logical_scan.len() as u64,
-        ROWS / LOGICAL_SCAN_PROGRESS_ROW_CADENCE + 2
-    );
-    assert_eq!(logical_scan[0].logical_rows_scanned, Some(0));
-    assert!(logical_scan.windows(2).all(|pair| {
-        pair[0].logical_rows_scanned <= pair[1].logical_rows_scanned
-            && pair[0].logical_certified_bytes <= pair[1].logical_certified_bytes
-    }));
-    assert_eq!(
-        logical_scan.last().unwrap().logical_rows_scanned,
-        Some(ROWS)
-    );
 
     let unchanged = refresh_fixture_with_work(&index_root, &registry);
     assert_eq!(unchanged.snapshot_opens, 1);
-    assert_eq!(unchanged.logical_online_backup_opens, 1);
-    assert!(unchanged.logical_online_backup_steps > 0);
-    assert!(unchanged.logical_online_backup_pages > 0);
     assert_eq!(unchanged.exact_replays, 1);
     assert_eq!(unchanged.logical_row_traversals, 0);
     assert_eq!(unchanged.logical_rows_projected, 0);
@@ -772,8 +1105,6 @@ fn indexed_synthetic_progress_uses_one_snapshot_and_one_logical_row_traversal() 
     let changed = refresh_fixture_with_work(&index_root, &registry);
     assert_eq!(changed.snapshot_opens, 1);
     assert_eq!(changed.logical_online_backup_opens, 1);
-    assert!(changed.logical_online_backup_steps > 0);
-    assert!(changed.logical_online_backup_pages > 0);
     assert_eq!(changed.logical_fingerprint_passes, 0);
     assert_eq!(changed.logical_row_traversals, 1);
     assert_eq!(changed.projection_passes, 1);
@@ -782,7 +1113,301 @@ fn indexed_synthetic_progress_uses_one_snapshot_and_one_logical_row_traversal() 
 }
 
 #[test]
-fn kilo_and_mimocode_progress_uses_one_online_backup_and_streaming_pass() {
+fn indexed_message_part_cold_scan_preserves_chronology_with_bounded_message_sort() {
+    const ROWS: u64 = 4_096;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_message_part_fixture(&database, ROWS as i64);
+
+    let connection = Connection::open(&database).unwrap();
+    let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+    let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
+    assert_eq!(schema.family, OpenCodeNativeSchemaFamily::MessagePart);
+    assert!(schema.message_part_indexed_streaming);
+    let sort_key_plan = connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            source_backed_fallback_sort_key_sql(&schema)
+        ))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let hydration_sql = source_backed_fallback_events_by_rowids_sql(&schema, 64);
+    let hydration_plan = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {hydration_sql}",))
+        .unwrap()
+        .query_map(
+            rusqlite::params_from_iter(std::iter::repeat_n(rusqlite::types::Null, 64)),
+            |row| row.get::<_, String>(3),
+        )
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        sort_key_plan
+            .iter()
+            .chain(&hydration_plan)
+            .all(|step| !step.contains("USE TEMP B-TREE")),
+        "indexed current-schema batches used SQLite temporary sorting: {sort_key_plan:?} {hydration_plan:?}"
+    );
+    assert!(
+        sort_key_plan
+            .iter()
+            .chain(&hydration_plan)
+            .all(|step| { !step.contains("CORRELATED") && !step.contains("VIRTUAL TABLE") }),
+        "indexed current-schema query repeated JSON-tree traversal in SQLite: {sort_key_plan:?} {hydration_plan:?}"
+    );
+    assert!(
+        hydration_plan
+            .iter()
+            .any(|step| step.contains("SEARCH p USING INTEGER PRIMARY KEY")),
+        "indexed current-schema hydration was not driven by requested part rowids: {hydration_plan:?}"
+    );
+    drop(connection);
+
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let source = provider_source_for_path(CaptureProvider::OpenCode, database);
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        &data_root,
+    )
+    .unwrap();
+
+    let cold = refresh_fixture_with_work(&index_root, &registry);
+    assert_eq!(cold.snapshot_opens, 1);
+    assert_eq!(cold.logical_online_backup_opens, 1);
+    assert_eq!(cold.schema_probe_passes, 1);
+    assert_eq!(cold.schema_event_validation_traversals, 2);
+    assert_eq!(cold.logical_fingerprint_passes, 0);
+    assert_eq!(cold.logical_row_traversals, 1);
+    assert_eq!(cold.projection_passes, 1);
+    assert_eq!(cold.logical_rows_projected, ROWS);
+    assert_eq!(cold.documents_staged, ROWS);
+    assert_eq!(cold.max_buffered_documents, 1);
+    assert!(cold.fallback_disk_sort);
+    assert_eq!(cold.fallback_sort_rows, ROWS);
+    assert_eq!(cold.fallback_payload_hydrations, ROWS);
+    assert!(cold.ordering_data_statements < ROWS / 8);
+    assert!(cold.ordering_sort_key_batches < ROWS / 8);
+    assert!(cold.ordering_hydration_batches < ROWS / 8);
+    assert!(cold.max_sort_key_batch_rows <= OPENCODE_HYDRATION_BATCH_ROWS as u64);
+    assert!(cold.max_buffered_payload_rows <= OPENCODE_HYDRATION_BATCH_ROWS as u64);
+    assert!(cold.max_buffered_payload_bytes <= OPENCODE_HYDRATION_BATCH_BYTES);
+}
+
+#[test]
+fn partial_or_incompatible_part_indexes_do_not_enable_unqualified_streaming() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_message_part_fixture(&database, 8);
+    let connection = Connection::open(&database).unwrap();
+    let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+
+    connection
+        .execute_batch(
+            "drop index part_message_id_id_idx;
+             create index partial_part_message_id_id_idx on part(message_id, id)
+                 where message_id <> '';",
+        )
+        .unwrap();
+    let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
+    assert!(!schema.message_part_indexed_streaming);
+
+    connection
+        .execute_batch(
+            "drop index partial_part_message_id_id_idx;
+             create index nocase_part_message_id_id_idx
+                 on part(message_id collate nocase, id);",
+        )
+        .unwrap();
+    let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
+    assert!(!schema.message_part_indexed_streaming);
+
+    connection
+        .execute_batch(
+            "drop index nocase_part_message_id_id_idx;
+             create index descending_part_message_id_id_idx
+                 on part(message_id desc, id);",
+        )
+        .unwrap();
+    let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
+    assert!(!schema.message_part_indexed_streaming);
+}
+
+#[test]
+fn message_part_v5_order_is_independent_of_index_presence() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("opencode.sqlite");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "text", "text": "later assistant part"}),
+    );
+    connection
+        .execute(
+            "insert into part values (
+                 'current-user-part', 'current-user', 'current-session',
+                 1782259200000, 1782259200000, ?1
+             )",
+            [json!({"type": "text", "text": "earlier user part"}).to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into part values (
+                 'part-z-early', 'current-assistant', 'current-session',
+                 1782259201001, 1782259201001, ?1
+             )",
+            [json!({"type": "text", "text": "earlier nonlexical part"}).to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into part values (
+                 'part-a-late', 'current-assistant', 'current-session',
+                 1782259201002, 1782259201002, ?1
+             )",
+            [json!({"type": "text", "text": "later nonlexical part"}).to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let (_, indexed_scan, indexed) = scan_current_schema(&database);
+    let indexed_order = indexed
+        .iter()
+        .map(|record| {
+            (
+                record.event_sequence,
+                record.content.normalized_body.clone().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        indexed_order,
+        vec![
+            (0, "earlier user part".to_owned()),
+            (1, "later assistant part".to_owned()),
+            (2, "earlier nonlexical part".to_owned()),
+            (3, "later nonlexical part".to_owned()),
+        ]
+    );
+
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute("drop index part_message_id_id_idx", [])
+        .unwrap();
+    drop(connection);
+    let (_, unindexed_scan, unindexed) = scan_current_schema(&database);
+    let unindexed_order = unindexed
+        .iter()
+        .map(|record| {
+            (
+                record.event_sequence,
+                record.content.normalized_body.clone().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(unindexed_order, indexed_order);
+    assert_eq!(unindexed_scan.source, indexed_scan.source);
+    assert_eq!(
+        unindexed_scan.certificate.counts(),
+        indexed_scan.certificate.counts()
+    );
+    assert_eq!(
+        unindexed_scan.certificate.content_digest(),
+        indexed_scan.certificate.content_digest()
+    );
+}
+
+#[test]
+fn relationship_mismatch_disables_indexed_streaming_without_changing_generation_evidence() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("opencode.sqlite");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "text", "text": "assistant part"}),
+    );
+    connection
+        .execute(
+            "insert into session values (
+                 'other-session', 'project-1', null, null, 'other-session', ?1,
+                 'Other session', '1.18.11', 'build', 1782259200000, 1782259202000
+             )",
+            [temp.path().to_string_lossy().as_ref()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "update part set session_id = 'other-session' where id = 'current-part'",
+            [],
+        )
+        .unwrap();
+    let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+    let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
+    assert!(!schema.message_part_indexed_streaming);
+    drop(connection);
+
+    let (_, indexed_scan, indexed_records) = scan_current_schema(&database);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute("drop index part_message_id_id_idx", [])
+        .unwrap();
+    drop(connection);
+    let (_, unindexed_scan, unindexed_records) = scan_current_schema(&database);
+
+    assert_eq!(unindexed_records, indexed_records);
+    assert_eq!(
+        unindexed_scan.certificate.counts(),
+        indexed_scan.certificate.counts()
+    );
+    assert_eq!(
+        unindexed_scan.certificate.content_digest(),
+        indexed_scan.certificate.content_digest()
+    );
+}
+
+#[test]
+fn unsafe_unreferenced_message_fails_with_complete_or_partial_part_index() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_message_part_fixture(&database, 8);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "insert into message values (
+                 'unreferenced', 'session-1', 'not-an-integer', 99, '{}'
+             )",
+            [],
+        )
+        .unwrap();
+    let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+    let indexed_error = OpenCodeNativeSchema::probe(&connection, dialect).unwrap_err();
+    assert!(indexed_error
+        .to_string()
+        .contains("message parent identity/order rows are unsafe"));
+
+    connection
+        .execute_batch(
+            "drop index part_message_id_id_idx;
+             create index partial_part_message_id_id_idx on part(message_id, id)
+                 where message_id <> '';",
+        )
+        .unwrap();
+    let partial_error = OpenCodeNativeSchema::probe(&connection, dialect).unwrap_err();
+    assert!(partial_error
+        .to_string()
+        .contains("message parent identity/order rows are unsafe"));
+}
+
+#[test]
+fn kilo_and_mimocode_opt_into_one_logical_online_backup_and_streaming_pass() {
     for provider in [CaptureProvider::Kilo, CaptureProvider::MiMoCode] {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let database = temp.path().join("source/history.sqlite");
@@ -797,71 +1422,13 @@ fn kilo_and_mimocode_progress_uses_one_online_backup_and_streaming_pass() {
         )
         .unwrap();
 
-        let (work, progress) =
-            refresh_fixture_with_work_and_progress(&temp.path().join("index"), &registry);
+        let work = refresh_fixture_with_work(&temp.path().join("index"), &registry);
         assert_eq!(work.snapshot_opens, 1, "{provider:?}");
         assert_eq!(work.logical_online_backup_opens, 1, "{provider:?}");
         assert_eq!(work.logical_fingerprint_passes, 0, "{provider:?}");
         assert_eq!(work.logical_row_traversals, 1, "{provider:?}");
         assert_eq!(work.logical_rows_projected, 32, "{provider:?}");
-        assert!(
-            progress
-                .iter()
-                .any(|update| update.stage == SourceBackedCurrentSourceProgressStage::OnlineBackup),
-            "{provider:?}"
-        );
-        assert!(
-            progress
-                .iter()
-                .any(|update| update.stage == SourceBackedCurrentSourceProgressStage::LogicalScan),
-            "{provider:?}"
-        );
     }
-}
-
-#[test]
-fn opencode_progress_callback_failure_stays_systemic_internal() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let database = temp.path().join("source/opencode.sqlite");
-    create_indexed_synthetic_fixture(&database, 1);
-    let source = provider_source_for_path(CaptureProvider::OpenCode, database);
-    let mut registry = SourceBackedProviderRegistry::new();
-    register_source_backed_route(
-        &mut registry,
-        source,
-        SourceBackedRouteSelection::ExplicitManual,
-        &temp.path().join("data-root"),
-    )
-    .unwrap();
-
-    let error = refresh_source_backed_generation_with_detailed_progress(
-        temp.path().join("index"),
-        &registry,
-        WriterOptions::default(),
-        |update| {
-            if update.current_source_progress.is_some() {
-                Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Unavailable,
-                    "injected OpenCode progress failure",
-                ))
-            } else {
-                Ok(())
-            }
-        },
-    )
-    .unwrap_err();
-
-    assert!(matches!(
-        error,
-        SourceBackedCoordinatorError::RouteScan {
-            source: SourceBackedRouteError {
-                kind: SourceBackedRouteErrorKind::Internal,
-                detail,
-            },
-            ..
-        } if detail.contains("progress callback failed")
-            && detail.contains("injected OpenCode progress failure")
-    ));
 }
 
 fn create_metadata_and_message_part_fixture(path: &Path) {
@@ -919,318 +1486,4 @@ fn create_agent_switched_fixture(path: &Path) {
              );"#,
         )
         .unwrap();
-}
-
-fn create_current_fixture(path: &Path) -> Connection {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let connection = Connection::open(path).unwrap();
-    connection
-        .execute_batch(
-            "create table session (
-                 id text primary key,
-                 time_created integer not null,
-                 time_updated integer not null
-             );
-             create table session_message (
-                 id text primary key,
-                 session_id text not null,
-                 type text not null,
-                 seq integer not null,
-                 time_created integer not null,
-                 time_updated integer not null,
-                 data text not null
-             );
-             insert into session values ('session-1', 1, 1);",
-        )
-        .unwrap();
-    connection
-}
-
-#[test]
-fn current_11811_shape_selects_populated_message_part_over_empty_session_message() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let database = temp.path().join("opencode.db");
-    let connection = write_current_schema(
-        &database,
-        temp.path(),
-        &json!({"type": "text", "text": "current OpenCode response"}),
-    );
-    let counts = connection
-        .query_row(
-            "select
-                 (select count(*) from event),
-                 (select count(*) from message),
-                 (select count(*) from part),
-                 (select count(*) from session),
-                 (select count(*) from session_message)",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )
-        .unwrap();
-    assert_eq!(counts, (9, 2, 1, 1, 0));
-
-    let schema = OpenCodeNativeSchema::probe(
-        &connection,
-        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
-    )
-    .unwrap();
-    assert_eq!(schema.family, OpenCodeNativeSchemaFamily::MessagePart);
-    assert!(!schema.capability_digest.is_empty());
-}
-
-#[test]
-fn independently_populated_representations_fail_closed() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let database = temp.path().join("opencode.db");
-    let connection = write_current_schema(
-        &database,
-        temp.path(),
-        &json!({"type": "text", "text": "message part representation"}),
-    );
-    connection
-        .execute(
-            "insert into session_message values (
-                 'competing-message', 'current-session', 'user', 1,
-                 1782259200000, 1782259200000, ?1
-             )",
-            [json!({
-                "role": "user",
-                "time": {"created": 1782259200000_i64},
-                "text": "session message representation"
-            })
-            .to_string()],
-        )
-        .unwrap();
-
-    let error = OpenCodeNativeSchema::probe(
-        &connection,
-        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains(
-        "ambiguous populated message schema families: session_message_seq, message_part"
-    ));
-}
-
-#[cfg(unix)]
-fn run_git(path: &Path, arguments: &[&str]) {
-    let status = Command::new("/usr/bin/git")
-        .arg("-C")
-        .arg(path)
-        .args(arguments)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .status()
-        .unwrap();
-    assert!(status.success(), "git {arguments:?} failed");
-}
-
-#[cfg(unix)]
-#[test]
-fn current_schema_projects_shared_repository_attribution_and_preserves_native_metadata() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let repository = temp.path().join("repository");
-    fs::create_dir(&repository).unwrap();
-    run_git(&repository, &["init", "-q"]);
-    run_git(&repository, &["config", "user.name", "ctx test"]);
-    run_git(
-        &repository,
-        &["config", "user.email", "ctx@example.invalid"],
-    );
-    run_git(
-        &repository,
-        &[
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/acme/opencode-current.git",
-        ],
-    );
-    fs::create_dir(repository.join("src")).unwrap();
-    fs::write(repository.join("src/lib.rs"), "pub fn current() {}\n").unwrap();
-    run_git(&repository, &["add", "src/lib.rs"]);
-    run_git(&repository, &["commit", "-qm", "fixture"]);
-
-    let database = temp.path().join("opencode.db");
-    let part_data = json!({
-        "type": "tool",
-        "tool": "edit",
-        "state": {
-            "input": {
-                "command": "git status --short",
-                "workdir": repository,
-                "path": "src/lib.rs"
-            }
-        }
-    });
-    let connection = write_current_schema(&database, &repository, &part_data);
-    drop(connection);
-    let mut permissions = fs::metadata(&database).unwrap().permissions();
-    permissions.set_readonly(true);
-    fs::set_permissions(&database, permissions).unwrap();
-
-    let (observation, scan, records, _) = scan_current_schema(&database);
-    assert_eq!(
-        observation.schema.family,
-        OpenCodeNativeSchemaFamily::MessagePart
-    );
-    assert_eq!(scan.certificate.counts().complete_records, 1);
-    assert_eq!(scan.certificate.counts().indexed_documents, 1);
-    let [record] = records.as_slice() else {
-        panic!("expected one current-schema Core record");
-    };
-    let old_lexical_body = "edit\ngit status --short";
-    let exact_unit = serde_json::to_string(&part_data).unwrap();
-    let expected_body = format!("{old_lexical_body}\n{exact_unit}");
-    assert_eq!(
-        record.content.normalized_body.as_deref(),
-        Some(expected_body.as_str())
-    );
-    assert_eq!(&expected_body[..old_lexical_body.len()], old_lexical_body);
-    assert!(record.content.structured_content.is_none());
-    assert_eq!(
-        record.provider_session_id.as_deref(),
-        Some("current-session")
-    );
-    assert!(record.native_event_id.is_some());
-    assert_eq!(
-        record.cwd.as_deref(),
-        Some(repository.to_string_lossy().as_ref())
-    );
-    assert_eq!(
-        record.metadata["provider_native_file_touches"],
-        json!(["src/lib.rs"])
-    );
-    assert!(record.metadata.contains_key("repository_association"));
-    assert_eq!(record.repository_bindings.len(), 1);
-    assert_eq!(
-        record.repository_bindings[0].logical_repository_id,
-        "forge:github.com/acme/opencode-current"
-    );
-    assert!(record.repository_bindings[0]
-        .evidence
-        .iter()
-        .any(|evidence| evidence.kind == RepositoryEvidenceKind::DeclaredToolWorkdir));
-    assert_eq!(record.repository_file_observations.len(), 1);
-    assert_eq!(
-        record.repository_file_observations[0].relative_path,
-        "src/lib.rs"
-    );
-    assert_eq!(
-        record.repository_file_observations[0].kind,
-        RepositoryFileObservationKind::Modified
-    );
-    let [invocation] = record.repository_file_invocation_evidence.as_slice() else {
-        panic!("expected one strict OpenCode invocation");
-    };
-    assert_eq!(invocation.operation_ordinal, 0);
-    assert_eq!(invocation.relative_path, "src/lib.rs");
-    assert_eq!(invocation.kind, RepositoryFileInvocationKind::Modify);
-    assert_eq!(invocation.tool_name.as_deref(), Some("edit"));
-    let body = record.content.normalized_body.as_deref().unwrap();
-    let range = invocation.normalized_text_range.unwrap();
-    assert_eq!(&body[range.start as usize..range.end as usize], exact_unit);
-    assert_eq!(
-        record
-            .repository_candidate_evidence
-            .paths(RepositoryCandidateKind::SessionCwd)
-            .collect::<Vec<_>>(),
-        vec![repository.to_string_lossy().as_ref()]
-    );
-    assert_eq!(
-        record
-            .repository_candidate_evidence
-            .paths(RepositoryCandidateKind::FileActivityPath)
-            .collect::<Vec<_>>(),
-        vec![repository.join("src/lib.rs").to_string_lossy().as_ref()]
-    );
-    record.validate_contract().unwrap();
-}
-
-#[cfg(unix)]
-#[test]
-fn indexed_exact_hydration_keeps_the_native_tool_call_body_authoritative() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let repository = temp.path().join("hydration-repository");
-    fs::create_dir(&repository).unwrap();
-    run_git(&repository, &["init", "-q"]);
-    fs::create_dir(repository.join("src")).unwrap();
-    fs::write(repository.join("src/hydrated.rs"), "pub fn hydrated() {}\n").unwrap();
-
-    let part_data = json!({
-        "type": "tool",
-        "tool": "write_file",
-        "state": {
-            "status": "running",
-            "input": {
-                "workdir": repository,
-                "path": "src/hydrated.rs",
-                "content": "pub fn hydrated() { exact(); }"
-            }
-        }
-    });
-    let database = temp.path().join("hydration-opencode.db");
-    drop(write_current_schema(&database, &repository, &part_data));
-
-    let page = project_fixture(&database, temp.path());
-    let [item] = page.items.as_slice() else {
-        panic!("expected one hydrated OpenCode tool-call record");
-    };
-    let record = &item.core_record;
-    let exact_unit = serde_json::to_string(&part_data).unwrap();
-    let old_lexical_body = "tool call: write_file";
-    let expected = format!("{old_lexical_body}\n{exact_unit}");
-    assert_eq!(
-        record.content.normalized_body.as_deref(),
-        Some(expected.as_str())
-    );
-    assert!(record.content.structured_content.is_none());
-    let [invocation] = record.repository_file_invocation_evidence.as_slice() else {
-        panic!("expected one hydrated strict invocation");
-    };
-    assert_eq!(invocation.kind, RepositoryFileInvocationKind::Write);
-    assert_eq!(invocation.relative_path, "src/hydrated.rs");
-    let range = invocation.normalized_text_range.unwrap();
-    assert_eq!(
-        &expected[range.start as usize..range.end as usize],
-        exact_unit
-    );
-    assert_eq!(&expected[..old_lexical_body.len()], old_lexical_body);
-    assert!(exact_unit.contains("pub fn hydrated() { exact(); }"));
-    record.validate_contract().unwrap();
-}
-
-#[test]
-fn failed_tool_result_record_never_invents_file_invocation_evidence() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let database = temp.path().join("failed-result-opencode.db");
-    drop(write_current_schema(
-        &database,
-        temp.path(),
-        &json!({
-            "type": "tool",
-            "tool": "edit_file",
-            "state": {
-                "status": "failed",
-                "input": {"path": "src/result-only.rs"},
-                "output": "provider-native failure"
-            }
-        }),
-    ));
-
-    let (_, scan, records, _) = scan_current_schema(&database);
-    assert_eq!(scan.certificate.counts().indexed_documents, 1);
-    let [record] = records.as_slice() else {
-        panic!("expected one retained failed-result record");
-    };
-    assert_eq!(record.event_type, "tool_output");
-    assert!(record.repository_file_invocation_evidence.is_empty());
 }

@@ -122,6 +122,7 @@ public sealed record AgentHistoryBackend
     internal static AgentHistoryBackend FromJson(JsonObject? json) => new(json ?? new JsonObject());
 }
 
+/// <summary>Status with native unsigned counters bounded to the exact cross-SDK JSON range.</summary>
 public sealed record AgentHistoryStatus
 {
     private readonly JsonObject _json;
@@ -131,30 +132,30 @@ public sealed record AgentHistoryStatus
         _json = JsonHelpers.CloneObject(json);
         Initialized = JsonHelpers.GetBool(json, "initialized") ?? false;
         LocalOnly = JsonHelpers.GetBool(json, "localOnly") ?? true;
+        ReadOnly = JsonHelpers.GetBool(json, "readOnly");
         DataRoot = JsonHelpers.GetString(json, "dataRoot");
-        IndexedItems = JsonHelpers.GetInt(json, "indexedItems");
-        IndexedSources = JsonHelpers.GetInt(json, "indexedSources");
-        CatalogedSessions = JsonHelpers.GetInt(json, "catalogedSessions");
-        IndexedCatalogSessions = JsonHelpers.GetInt(json, "indexedCatalogSessions");
-        PendingCatalogSessions = JsonHelpers.GetInt(json, "pendingCatalogSessions");
-        FailedCatalogSessions = JsonHelpers.GetInt(json, "failedCatalogSessions");
-        StaleCatalogSessions = JsonHelpers.GetInt(json, "staleCatalogSessions");
-        Freshness = Freshness.FromJson(json["freshness"] as JsonObject);
+        IndexedItems = JsonHelpers.GetUInt64(json, "indexedItems");
+        IndexedSessions = JsonHelpers.GetUInt64(json, "indexedSessions");
+        IndexedEvents = JsonHelpers.GetUInt64(json, "indexedEvents");
+        IndexedSources = JsonHelpers.GetUInt64(json, "indexedSources");
+        HistoryEpoch = JsonHelpers.CloneObject(json["historyEpoch"] as JsonObject);
+        Lexical = JsonHelpers.CloneObject(json["lexical"] as JsonObject);
+        Refresh = JsonHelpers.CloneObject(json["refresh"] as JsonObject);
         Semantic = JsonHelpers.CloneObject(json["semantic"] as JsonObject);
         Daemon = JsonHelpers.CloneObject(json["daemon"] as JsonObject);
     }
 
     public bool Initialized { get; }
     public bool LocalOnly { get; }
+    public bool? ReadOnly { get; }
     public string? DataRoot { get; }
-    public int? IndexedItems { get; }
-    public int? IndexedSources { get; }
-    public int? CatalogedSessions { get; }
-    public int? IndexedCatalogSessions { get; }
-    public int? PendingCatalogSessions { get; }
-    public int? FailedCatalogSessions { get; }
-    public int? StaleCatalogSessions { get; }
-    public Freshness? Freshness { get; }
+    public ulong? IndexedItems { get; }
+    public ulong? IndexedSessions { get; }
+    public ulong? IndexedEvents { get; }
+    public ulong? IndexedSources { get; }
+    public JsonObject HistoryEpoch { get; }
+    public JsonObject Lexical { get; }
+    public JsonObject Refresh { get; }
     public JsonObject Semantic { get; }
     public JsonObject Daemon { get; }
 

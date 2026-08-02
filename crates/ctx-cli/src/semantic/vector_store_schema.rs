@@ -15,7 +15,7 @@ use super::{
     },
 };
 
-pub(super) const SEMANTIC_VECTOR_SCHEMA_VERSION: i64 = 2;
+pub(super) const SEMANTIC_VECTOR_SCHEMA_VERSION: i64 = 5;
 pub(super) const SEMANTIC_VECTOR_BACKEND_FLAT_F32: &str = "flat-f32";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,9 +84,9 @@ pub(super) fn semantic_vector_failure_kind(
 
 impl SemanticVectorStore {
     pub(super) fn open(path: &Path) -> Result<Self> {
+        let conn = control::open_writable(path)?;
         let flat = FlatSegmentStore::open(path, active_model_contract())
             .map_err(semantic_flat_store_error)?;
-        let conn = control::open_writable(path)?;
         Ok(Self { conn, flat })
     }
 
@@ -152,6 +152,10 @@ fn semantic_flat_store_error(error: FlatStoreError) -> anyhow::Error {
         .into(),
         FlatStoreError::Incompatible(message) => SemanticVectorStoreError::reset_required(format!(
             "semantic flat F32 generation is incompatible; rebuild required: {message}"
+        ))
+        .into(),
+        FlatStoreError::LegacySchema(version) => SemanticVectorStoreError::reset_required(format!(
+            "semantic flat F32 generation uses legacy schema {version}; rebuild required"
         ))
         .into(),
         FlatStoreError::InvalidInput(message) => SemanticVectorStoreError::unavailable(format!(

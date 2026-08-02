@@ -28,6 +28,27 @@ fn unhex(value: &str) -> Vec<u8> {
         .collect()
 }
 
+fn assert_inventory_fields_match_actual(canonical: &Value, name: &str, actual: &Value) {
+    let declared = canonical["dto_fields"][name]["required"]
+        .as_array()
+        .expect("required DTO fields")
+        .iter()
+        .chain(
+            canonical["dto_fields"][name]["optional"]
+                .as_array()
+                .expect("optional DTO fields"),
+        )
+        .map(|field| field.as_str().expect("DTO field name"))
+        .collect::<BTreeSet<_>>();
+    let actual = actual
+        .as_object()
+        .expect("serialized DTO object")
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(declared, actual, "inventory field drift for {name}");
+}
+
 fn host_kind(message: &HostMessage) -> &'static str {
     match message {
         HostMessage::Hello(_) => "hello",
@@ -193,6 +214,26 @@ fn every_generated_frame_round_trips_and_names_match_typed_kinds() {
 }
 
 #[test]
+fn inventory_freezes_the_blame_result_snapshot_binding() {
+    let value = inventory();
+    let canonical = &value["canonical_inventory"];
+    let envelope = read_frame::<_, HelperEnvelope>(&mut Cursor::new(unhex(
+        value["golden_vectors"]["helper_frames"]["blame"]
+            .as_str()
+            .expect("blame response frame"),
+    )))
+    .expect("blame response");
+    let HelperMessage::Blame(result) = envelope.message else {
+        panic!("blame response kind");
+    };
+    assert_inventory_fields_match_actual(
+        canonical,
+        "BlameResult",
+        &serde_json::to_value(result).expect("blame response JSON"),
+    );
+}
+
+#[test]
 fn inventory_freezes_reviewed_status_axes_and_incremental_ack_subset() {
     let canonical = &inventory()["canonical_inventory"];
     assert_eq!(
@@ -242,4 +283,55 @@ fn inventory_freezes_reviewed_status_axes_and_incremental_ack_subset() {
         .as_array()
         .unwrap();
     assert!(ack.contains(&serde_json::json!("reconcile_sources")));
+    assert!(ack.contains(&serde_json::json!("acknowledgement_page_index")));
+    assert!(ack.contains(&serde_json::json!("acknowledgement_terminal")));
+    assert_eq!(
+        canonical["dto_fields"]["ApplyCoreSourceDeltaPageRequest"]["required"],
+        serde_json::json!(["page", "acknowledgement_page_index"])
+    );
+    assert_eq!(
+        canonical["bounds"]["core_source_acknowledgement_page_items"],
+        canonical["bounds"]["core_source_delta_page_items"]
+    );
+    assert!(
+        canonical["bounds"]["core_control_wire_bytes"]
+            .as_u64()
+            .unwrap()
+            < canonical["framing"]["maximum_payload_bytes"]
+                .as_u64()
+                .unwrap()
+    );
+}
+
+#[test]
+fn inventory_source_removal_and_reconciliation_fields_match_actual_dtos() {
+    let value = inventory();
+    let canonical = &value["canonical_inventory"];
+    let envelope = read_frame::<_, HelperEnvelope>(&mut Cursor::new(unhex(
+        value["golden_vectors"]["helper_frames"]["core_source_delta_page_applied"]
+            .as_str()
+            .expect("source acknowledgement frame"),
+    )))
+    .expect("source acknowledgement");
+    let HelperMessage::CoreSourceDeltaPageApplied(response) = envelope.message else {
+        panic!("source acknowledgement kind");
+    };
+    let removal = response
+        .reconcile_sources
+        .iter()
+        .find_map(|reconciliation| match &reconciliation.delta {
+            CoreSourceDelta::Removed(removal) => Some((reconciliation, removal)),
+            CoreSourceDelta::Present(_) => None,
+        })
+        .expect("golden removal reconciliation");
+    assert_inventory_fields_match_actual(
+        canonical,
+        "CoreSourceReconciliation",
+        &serde_json::to_value(removal.0).expect("reconciliation JSON"),
+    );
+    assert_inventory_fields_match_actual(
+        canonical,
+        "CoreSourceRemoval",
+        &serde_json::to_value(removal.1).expect("removal JSON"),
+    );
 }

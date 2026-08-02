@@ -11,6 +11,7 @@ public final class AgentHistoryClientTest {
     public static void main(String[] args) throws Exception {
         wrapsRawStatusAsTypedEnvelope();
         normalizesSetupJsonAsInitStatus();
+        rejectsStatusCountersOutsideExactCrossSDKDomain();
         acceptsCanonicalSearchFixture();
         camelizesSearchRetrievalJson();
         decodesAllCanonicalFixturesThroughTypedResponses();
@@ -43,22 +44,41 @@ public final class AgentHistoryClientTest {
     private static void normalizesSetupJsonAsInitStatus() {
         AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport(
                 "local-cli",
-                "{\"schema_version\":1,\"data_root\":\"/tmp/ctx\",\"mode\":\"ready\",\"indexed_items\":9,"
-                        + "\"catalog\":{\"cataloged_sessions\":1},\"import\":{\"resume\":false,\"totals\":{}},"
+                "{\"schema_version\":2,\"initialized\":true,\"data_root\":\"/tmp/ctx\","
+                        + "\"indexed_items\":9007199254740991,\"indexed_sessions\":9007199254740991,"
+                        + "\"indexed_events\":9007199254740991,\"indexed_sources\":9007199254740991,"
+                        + "\"lexical\":{\"status\":\"ready\",\"generation_id\":\"gen-9\"},"
+                        + "\"refresh\":{\"status\":\"ready\",\"generation_id\":\"gen-9\"},"
                         + "\"network_required\":false}"));
 
-        InitResponse response = client.init(AgentHistoryOptions.init().catalogOnly(true));
+        InitResponse response = client.init(AgentHistoryOptions.init());
 
         assertEquals("init", response.operation());
         assertEquals(Boolean.TRUE, response.getStatus().getInitialized());
         assertEquals(Boolean.TRUE, response.getStatus().getLocalOnly());
-        assertEquals(Integer.valueOf(9), response.getStatus().getIndexedItems());
+        assertEquals(Long.valueOf(StatusRecord.MAX_SAFE_COUNTER), response.getStatus().getIndexedItems());
+        assertEquals(Long.valueOf(StatusRecord.MAX_SAFE_COUNTER), response.getStatus().getIndexedSessions());
+        assertEquals(Long.valueOf(StatusRecord.MAX_SAFE_COUNTER), response.getStatus().getIndexedEvents());
+        assertEquals(Long.valueOf(StatusRecord.MAX_SAFE_COUNTER), response.getStatus().getIndexedSources());
+    }
+
+    private static void rejectsStatusCountersOutsideExactCrossSDKDomain() {
+        for (String rejected : new String[] {
+                "9007199254740993", "9223372036854775807", "1.00000000000000001", "1.5"
+        }) {
+            AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport(
+                    "local-cli",
+                    "{\"initialized\":true,\"indexed_items\":" + rejected + "}"));
+            assertProtocol(client::status);
+        }
     }
 
     private static void wrapsRawStatusAsTypedEnvelope() {
         AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport(
                 "local-cli",
-                "{\"schema_version\":1,\"initialized\":true,\"indexed_items\":2,\"local_only\":true}"));
+                "{\"schema_version\":1,\"initialized\":true,\"indexed_items\":2,"
+                        + "\"lexical\":{\"status\":\"ready\",\"generation_id\":\"gen-2\"},"
+                        + "\"refresh\":{\"status\":\"ready\"},\"future_counter\":7}"));
 
         StatusResponse response = client.status();
 
@@ -68,10 +88,11 @@ public final class AgentHistoryClientTest {
         assertEquals("local", response.getBackend().getKind());
         assertEquals(Boolean.TRUE, response.getStatus().getInitialized());
         assertEquals(Boolean.TRUE, response.getStatus().getLocalOnly());
-        assertEquals(Integer.valueOf(2), response.getStatus().getIndexedItems());
-        assertEquals(Integer.valueOf(2), AgentHistoryValue.integer(response.asMap().get("status") instanceof Map
+        assertEquals(Long.valueOf(2), response.getStatus().getIndexedItems());
+        assertEquals(Long.valueOf(2), AgentHistoryValue.longValue(response.asMap().get("status") instanceof Map
                 ? ((Map<?, ?>) response.asMap().get("status")).get("indexedItems")
                 : null));
+        assertEquals(null, response.getStatus().asMap().get("futureCounter"));
     }
 
     private static void acceptsCanonicalSearchFixture() throws Exception {
@@ -336,6 +357,16 @@ public final class AgentHistoryClientTest {
             return;
         }
         throw new AssertionError("expected validation error");
+    }
+
+    private static void assertProtocol(Runnable action) {
+        try {
+            action.run();
+        } catch (CtxAgentHistoryException.Protocol error) {
+            assertEquals("decode_error", error.code());
+            return;
+        }
+        throw new AssertionError("expected protocol error");
     }
 
     private static final class FakeTransport implements AgentHistoryTransport {

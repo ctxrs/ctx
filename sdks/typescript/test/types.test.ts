@@ -21,6 +21,7 @@ const status = await client.status();
 expectType<StatusEnvelope>(status);
 expectType<"status">(status.operation);
 expectType<boolean>(status.status.initialized);
+expectType<number | undefined>(status.status.indexedItems);
 // @ts-expect-error status envelopes do not expose a search payload.
 status.search.results;
 

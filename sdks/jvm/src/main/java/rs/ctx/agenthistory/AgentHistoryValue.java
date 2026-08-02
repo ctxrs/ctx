@@ -138,8 +138,7 @@ final class AgentHistoryValue {
             Map<String, Object> out = new LinkedHashMap<>();
             for (Map.Entry<?, ?> entry : map.entrySet()) {
                 String key = snakeToCamel(String.valueOf(entry.getKey()));
-                if ("databasePath".equals(key)
-                        || "configPath".equals(key)
+                if ("configPath".equals(key)
                         || "itemType".equals(key)
                         || "payloadType".equals(key)
                         || "recordType".equals(key)) {

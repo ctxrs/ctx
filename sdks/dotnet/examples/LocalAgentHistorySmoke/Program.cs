@@ -7,7 +7,7 @@ const string SessionId = "22222222-2222-4222-8222-222222222222";
 var client = CreateClient();
 
 var status = await client.StatusAsync();
-var initialized = await client.InitAsync(new InitOptions { CatalogOnly = true });
+var initialized = await client.InitAsync(new InitOptions());
 var imported = await client.ImportHistoryAsync(new ImportOptions { Provider = "codex", Resume = true });
 var synced = await client.SyncAsync(new ImportOptions { All = true });
 var search = await client.SearchAsync(new SearchOptions
@@ -106,11 +106,12 @@ internal sealed class FakeAgentHistoryTransport : IAgentHistoryTransport
     private static JsonObject Status()
     {
         var payload = Base();
-        payload["initialized"] = true;
         payload["local_only"] = true;
         payload["data_root"] = DataRoot;
         payload["indexed_items"] = 1;
         payload["indexed_sources"] = 1;
+        payload["lexical"] = new JsonObject { ["status"] = "ready", ["generation_id"] = "gen-1" };
+        payload["refresh"] = new JsonObject { ["status"] = "ready", ["generation_id"] = "gen-1" };
         return payload;
     }
 
@@ -118,8 +119,9 @@ internal sealed class FakeAgentHistoryTransport : IAgentHistoryTransport
     {
         var payload = Base();
         payload["data_root"] = DataRoot;
-        payload["mode"] = "catalog_only";
         payload["indexed_items"] = 1;
+        payload["lexical"] = new JsonObject { ["status"] = "ready", ["generation_id"] = "gen-1" };
+        payload["refresh"] = new JsonObject { ["status"] = "ready", ["generation_id"] = "gen-1" };
         payload["network_required"] = false;
         return payload;
     }

@@ -31,7 +31,7 @@ func run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	}
 	fmt.Fprintf(stdout, "status initialized=%t indexedItems=%d\n", status.Status.Initialized, status.Status.IndexedItems)
 
-	initResult, err := client.Init(ctx, ctxagenthistory.InitOptions{CatalogOnly: true})
+	initResult, err := client.Init(ctx, ctxagenthistory.InitOptions{})
 	if err != nil {
 		return fmt.Errorf("init: %w", err)
 	}
