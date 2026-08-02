@@ -290,35 +290,58 @@ pub(in crate::commands::source_index) fn search_snippet_fragment(
     body: &str,
     query_texts: &[&str],
 ) -> (String, bool) {
-    let grapheme_boundaries = body
-        .grapheme_indices(true)
-        .map(|(offset, _)| offset)
-        .chain(std::iter::once(body.len()))
-        .collect::<Vec<_>>();
-    let grapheme_count = grapheme_boundaries.len().saturating_sub(1);
+    let direct_ascii_offsets = ascii_grapheme_offsets_are_bytes(body);
+    let grapheme_count = if direct_ascii_offsets {
+        body.len()
+    } else {
+        body.graphemes(true).count()
+    };
     if grapheme_count <= SEARCH_SNIPPET_MAX_CHARS {
         return (body.to_owned(), false);
     }
 
     let start = query_match_range(body, query_texts).map_or(0, |matched| {
-        centered_snippet_start(&grapheme_boundaries, matched)
+        if direct_ascii_offsets {
+            centered_snippet_start_from_match(grapheme_count, matched.start, matched.end)
+        } else {
+            centered_snippet_start(body, grapheme_count, matched)
+        }
     });
     let end = start.saturating_add(SEARCH_SNIPPET_MAX_CHARS);
-    let snippet = body[grapheme_boundaries[start]..grapheme_boundaries[end]].to_owned();
+    let byte_range = if direct_ascii_offsets {
+        start..end
+    } else {
+        grapheme_byte_range(body, start, end)
+    };
+    let snippet = body[byte_range].to_owned();
     let truncated = start > 0 || end < grapheme_count;
     (snippet, truncated)
 }
 
-fn centered_snippet_start(grapheme_boundaries: &[usize], matched: Range<usize>) -> usize {
-    let grapheme_count = grapheme_boundaries.len().saturating_sub(1);
+fn centered_snippet_start(body: &str, grapheme_count: usize, matched: Range<usize>) -> usize {
+    let mut match_start = 0;
+    let mut match_end = 0;
+    for (index, (offset, _)) in body.grapheme_indices(true).enumerate() {
+        if offset <= matched.start {
+            match_start = index;
+        }
+        if offset < matched.end {
+            match_end = index.saturating_add(1);
+        } else {
+            break;
+        }
+    }
+    let match_start = match_start.min(grapheme_count.saturating_sub(1));
+    let match_end = match_end.min(grapheme_count);
+    centered_snippet_start_from_match(grapheme_count, match_start, match_end)
+}
+
+fn centered_snippet_start_from_match(
+    grapheme_count: usize,
+    match_start: usize,
+    match_end: usize,
+) -> usize {
     let latest_start = grapheme_count.saturating_sub(SEARCH_SNIPPET_MAX_CHARS);
-    let match_start = grapheme_boundaries
-        .partition_point(|offset| *offset <= matched.start)
-        .saturating_sub(1)
-        .min(grapheme_count.saturating_sub(1));
-    let match_end = grapheme_boundaries
-        .partition_point(|offset| *offset < matched.end)
-        .min(grapheme_count);
     let match_graphemes = match_end.saturating_sub(match_start).max(1);
     let leading_context = SEARCH_SNIPPET_MAX_CHARS
         .saturating_sub(match_graphemes)
@@ -328,8 +351,38 @@ fn centered_snippet_start(grapheme_boundaries: &[usize], matched: Range<usize>) 
         .min(latest_start)
 }
 
+fn ascii_grapheme_offsets_are_bytes(body: &str) -> bool {
+    let mut previous_was_carriage_return = false;
+    for byte in body.bytes() {
+        if !byte.is_ascii() || (previous_was_carriage_return && byte == b'\n') {
+            return false;
+        }
+        previous_was_carriage_return = byte == b'\r';
+    }
+    true
+}
+
+fn grapheme_byte_range(body: &str, start: usize, end: usize) -> Range<usize> {
+    let mut start_offset = None;
+    let mut end_offset = None;
+    for (index, (offset, _)) in body.grapheme_indices(true).enumerate() {
+        if index == start {
+            start_offset = Some(offset);
+        }
+        if index == end {
+            end_offset = Some(offset);
+            break;
+        }
+    }
+    start_offset.unwrap_or(body.len())..end_offset.unwrap_or(body.len())
+}
+
 fn query_match_range(body: &str, query_texts: &[&str]) -> Option<Range<usize>> {
-    let (folded_body, boundaries) = lowercase_with_original_boundaries(body);
+    let folded_body = if body.is_ascii() {
+        body.to_ascii_lowercase()
+    } else {
+        body.to_lowercase()
+    };
     let mut best_full_match = None;
     for query_text in query_texts {
         let query_text = query_text.trim();
@@ -338,7 +391,7 @@ fn query_match_range(body: &str, query_texts: &[&str]) -> Option<Range<usize>> {
         }
         update_preferred_match(
             &mut best_full_match,
-            folded_match_range(&folded_body, &boundaries, query_text),
+            folded_match_range(body, &folded_body, query_text),
             query_text.chars().count(),
         );
     }
@@ -355,7 +408,7 @@ fn query_match_range(body: &str, query_texts: &[&str]) -> Option<Range<usize>> {
             }
             update_preferred_match(
                 &mut best_term_match,
-                folded_match_range(&folded_body, &boundaries, term),
+                folded_match_range(body, &folded_body, term),
                 term.chars().count(),
             );
         }
@@ -382,33 +435,38 @@ fn update_preferred_match(
     }
 }
 
-fn lowercase_with_original_boundaries(value: &str) -> (String, Vec<(usize, usize)>) {
-    let mut folded = String::with_capacity(value.len());
-    let mut boundaries = Vec::with_capacity(value.chars().count().saturating_add(1));
-    for (original_offset, character) in value.char_indices() {
-        boundaries.push((folded.len(), original_offset));
-        folded.extend(character.to_lowercase());
-    }
-    boundaries.push((folded.len(), value.len()));
-    (folded, boundaries)
-}
-
-fn folded_match_range(
-    folded_body: &str,
-    boundaries: &[(usize, usize)],
-    query_text: &str,
-) -> Option<Range<usize>> {
+fn folded_match_range(body: &str, folded_body: &str, query_text: &str) -> Option<Range<usize>> {
     let folded_query = query_text.to_lowercase();
     if folded_query.is_empty() {
         return None;
     }
     let folded_start = folded_body.find(&folded_query)?;
     let folded_end = folded_start.saturating_add(folded_query.len());
-    let start_boundary = boundaries
-        .partition_point(|(folded_offset, _)| *folded_offset <= folded_start)
-        .saturating_sub(1);
-    let end_boundary = boundaries.partition_point(|(folded_offset, _)| *folded_offset < folded_end);
-    Some(boundaries[start_boundary].1..boundaries[end_boundary].1)
+    if body.is_ascii() {
+        return Some(folded_start..folded_end);
+    }
+    original_range_for_folded_match(body, folded_start, folded_end)
+}
+
+fn original_range_for_folded_match(
+    body: &str,
+    folded_start: usize,
+    folded_end: usize,
+) -> Option<Range<usize>> {
+    let mut folded_offset = 0_usize;
+    let mut original_start = None;
+    for (original_offset, character) in body.char_indices() {
+        let folded_character_bytes = character.to_lowercase().map(char::len_utf8).sum::<usize>();
+        let next_folded_offset = folded_offset.saturating_add(folded_character_bytes);
+        if original_start.is_none() && folded_start < next_folded_offset {
+            original_start = Some(original_offset);
+        }
+        if folded_end <= next_folded_offset {
+            return original_start.map(|start| start..original_offset + character.len_utf8());
+        }
+        folded_offset = next_folded_offset;
+    }
+    None
 }
 
 fn follow_up_command_prefix(data_root: &Path) -> String {

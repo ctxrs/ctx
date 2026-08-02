@@ -1,6 +1,7 @@
 use std::io::Write as _;
 
 use clap::Parser as _;
+use ctx_history_core::MAX_CORE_CONTENT_BYTES;
 use serde_json::{json, Value};
 use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
@@ -85,6 +86,80 @@ fn search_snippet_handles_start_end_and_no_match_fallback_truthfully() {
     let (snippet, truncated) = search_snippet_fragment(short, &[]);
     assert!(!truncated);
     assert_eq!(snippet, short);
+
+    let crlf = "\r\n".repeat(500);
+    let (snippet, truncated) = search_snippet_fragment(&crlf, &[]);
+    assert!(truncated);
+    assert_eq!(snippet, "\r\n".repeat(SEARCH_SNIPPET_MAX_CHARS));
+    assert_eq!(snippet.graphemes(true).count(), SEARCH_SNIPPET_MAX_CHARS);
+}
+
+#[test]
+fn search_snippet_handles_a_maximum_valid_core_body_without_offset_vectors() {
+    let needle = "NeEdLe";
+    let mut body = "x".repeat(MAX_CORE_CONTENT_BYTES - needle.len());
+    body.push_str(needle);
+
+    let (snippet, truncated) = search_snippet_fragment(&body, &["needle"]);
+
+    assert!(truncated);
+    assert_eq!(snippet, format!("{}{}", "x".repeat(314), needle));
+    assert_eq!(snippet.graphemes(true).count(), SEARCH_SNIPPET_MAX_CHARS);
+}
+
+#[test]
+fn search_snippet_keeps_exact_boundaries_for_a_maximum_valid_unicode_core_body() {
+    let combining = "e\u{301}";
+    let marker = "İSTANBUL";
+    let prefix_bytes = MAX_CORE_CONTENT_BYTES - marker.len();
+    let prefix_graphemes = prefix_bytes / combining.len();
+    let ascii_remainder = prefix_bytes % combining.len();
+    let mut body = combining.repeat(prefix_graphemes);
+    body.push_str(&"x".repeat(ascii_remainder));
+    body.push_str(marker);
+    assert_eq!(body.len(), MAX_CORE_CONTENT_BYTES);
+
+    let (snippet, truncated) = search_snippet_fragment(&body, &["i\u{307}stanbul"]);
+
+    let marker_graphemes = marker.graphemes(true).count();
+    let expected_combining = SEARCH_SNIPPET_MAX_CHARS - marker_graphemes - ascii_remainder;
+    let expected = format!(
+        "{}{}{}",
+        combining.repeat(expected_combining),
+        "x".repeat(ascii_remainder),
+        marker
+    );
+    assert!(truncated);
+    assert_eq!(snippet, expected);
+    assert_eq!(snippet.graphemes(true).count(), SEARCH_SNIPPET_MAX_CHARS);
+}
+
+#[test]
+fn search_snippet_preserves_exact_unicode_casefold_and_grapheme_boundaries() {
+    let combining = "e\u{301}";
+    let family = "👨‍👩‍👧‍👦";
+    let body = format!(
+        "{}İSTANBUL-Σ-{}-tail",
+        combining.repeat(360),
+        family.repeat(360)
+    );
+
+    let (expanded_case, expanded_truncated) = search_snippet_fragment(&body, &["i\u{307}stanbul"]);
+    let (inside_grapheme, inside_truncated) = search_snippet_fragment(&body, &["\u{301}"]);
+
+    assert!(expanded_truncated);
+    assert!(inside_truncated);
+    assert_eq!(
+        expanded_case.graphemes(true).count(),
+        SEARCH_SNIPPET_MAX_CHARS
+    );
+    assert_eq!(
+        inside_grapheme.graphemes(true).count(),
+        SEARCH_SNIPPET_MAX_CHARS
+    );
+    assert!(expanded_case.contains("İSTANBUL"));
+    assert_eq!(inside_grapheme.graphemes(true).next(), Some(combining));
+    assert!(!inside_grapheme.starts_with('\u{301}'));
 }
 
 fn context(width: usize, color: ColorMode) -> RenderContext {

@@ -105,11 +105,12 @@ fn exact_produced_object_hits_precede_twelve_mentions_and_deduplicate() {
         document(&source, 20, "created the certified repository outcome"),
         object_id.clone(),
     );
+    let repeated_object_id = format!("{} ", object_id.hex).repeat(64);
     let second_producer = with_produced_object(
         document(
             &source,
             21,
-            &format!("producer also mentions {}", object_id.hex),
+            &format!("producer also mentions {repeated_object_id}"),
         ),
         object_id.clone(),
     );
@@ -129,6 +130,7 @@ fn exact_produced_object_hits_precede_twelve_mentions_and_deduplicate() {
     records.extend([first_producer, second_producer]);
     let index = publish_records(&temp, &source, records);
 
+    crate::query::reset_stored_event_record_materializations();
     let candidates = index.search_event_candidates(&object_id.hex, 6).unwrap();
     assert_eq!(candidates.len(), 6);
     assert!(candidates[..2]
@@ -144,6 +146,11 @@ fn exact_produced_object_hits_precede_twelve_mentions_and_deduplicate() {
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         candidates.len()
+    );
+    assert_eq!(
+        crate::query::stored_event_record_materializations(),
+        candidates.len(),
+        "the exact-object and lexical-overlap tiers must decode each returned Core record once"
     );
     assert!(producer_ids.contains(
         &index.search_event_candidates(&object_id.hex, 1).unwrap()[0]
@@ -357,6 +364,39 @@ fn multi_term_search_ranks_full_coverage_before_one_term_partial_matches() {
             .event
             .event_id,
         exact.event_id
+    );
+}
+
+#[test]
+fn coverage_tiers_materialize_each_ranked_candidate_once_without_changing_order() {
+    let temp = tempdir().unwrap();
+    let source = source("coverage-decode-count.jsonl");
+    let full = document(&source, 1, "decodealpha decodebeta decodegamma");
+    let two_terms = document(
+        &source,
+        2,
+        &format!("{} {}", "decodealpha ".repeat(32), "decodebeta ".repeat(32)),
+    );
+    let one_term = document(&source, 3, &"decodealpha ".repeat(96));
+    let expected = vec![full.event_id, two_terms.event_id, one_term.event_id];
+    let index = publish_records(&temp, &source, vec![one_term, two_terms, full]);
+
+    crate::query::reset_stored_event_record_materializations();
+    let candidates = index
+        .search_event_candidates("decodealpha decodebeta decodegamma", 3)
+        .unwrap();
+
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.event.event_id)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        crate::query::stored_event_record_materializations(),
+        candidates.len(),
+        "overlapping lower-coverage tiers must not decode selected Core records again"
     );
 }
 
