@@ -83,10 +83,17 @@ pub(crate) fn run_explicit_source_catalog_import(
         .find(|failure| failure.route_identity == requested_outcome.route_identity);
     let requested_failure_class = requested_outcome.failure_class.as_deref();
     let requested_failed = requested_failure_class.is_some();
+    let requested_changed = if requested_succeeded {
+        requested_outcome
+            .changed
+            .context("successful explicit source route has no change result")?
+    } else {
+        false
+    };
 
     let summary = ProviderImportSummary {
-        imported: usize::from(requested_succeeded && receipt.generation_changed),
-        skipped: usize::from(requested_succeeded && !receipt.generation_changed),
+        imported: usize::from(requested_succeeded && requested_changed),
+        skipped: usize::from(requested_succeeded && !requested_changed),
         ..ProviderImportSummary::default()
     };
     if requested_succeeded {
@@ -120,7 +127,7 @@ pub(crate) fn run_explicit_source_catalog_import(
         current_certified_source_bytes: Some(current.certified_source_bytes),
         current_sources_with_rejections: Some(current.sources_with_rejections),
         removed_source_count: Some(current.removed_source_count),
-        work_result: if requested_succeeded && receipt.generation_changed {
+        work_result: if requested_succeeded && requested_changed {
             ProviderImportWorkResult::Changed
         } else {
             ProviderImportWorkResult::NoOp
@@ -185,7 +192,7 @@ pub(crate) fn run_explicit_source_catalog_import(
             "other"
         }
     });
-    let route_change = if requested_succeeded && receipt.generation_changed {
+    let route_change = if requested_succeeded && requested_changed {
         "changed"
     } else {
         "no_op"

@@ -125,6 +125,7 @@ pub(crate) struct SourceBackedRefreshCatalogRouteOutcome {
     pub(crate) route_identity: String,
     pub(crate) outcome: String,
     pub(crate) failure_class: Option<String>,
+    pub(crate) changed: Option<bool>,
 }
 
 impl SourceBackedRefreshCatalogRouteOutcome {
@@ -136,7 +137,9 @@ impl SourceBackedRefreshCatalogRouteOutcome {
             _ => "?",
         };
         let mut fields = vec![json!(self.route_identity), json!(outcome)];
-        if let Some(class) = self.failure_class.as_deref() {
+        if let Some(changed) = self.changed {
+            fields.push(json!(changed));
+        } else if let Some(class) = self.failure_class.as_deref() {
             let class = match class {
                 "unavailable" => "u",
                 "source_changed" => "c",

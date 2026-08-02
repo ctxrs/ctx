@@ -485,7 +485,7 @@ fn required_catalog_route_outcomes(
     let values = value.as_object().ok_or_else(|| {
         anyhow!("published daemon source refresh receipt catalog_route_outcomes must be an object")
     })?;
-    let mut route_results = BTreeMap::<String, (String, Option<String>)>::new();
+    let mut route_results = BTreeMap::<String, (String, Option<String>, Option<bool>)>::new();
     values
         .iter()
         .map(|(catalog_lineage, value)| {
@@ -513,22 +513,31 @@ fn required_catalog_route_outcomes(
                 Some("n") => "not_selected",
                 _ => bail!("published daemon source refresh catalog route outcome is invalid"),
             };
-            let failure_class = match fields.get(2).and_then(Value::as_str) {
-                None => None,
-                Some("u") => Some("unavailable".to_owned()),
-                Some("c") => Some("source_changed".to_owned()),
-                Some("r") => Some("unreadable".to_owned()),
-                Some("i") => Some("incompatible".to_owned()),
-                Some(_) => {
-                    bail!("published daemon source refresh catalog failure class is invalid")
+            let (failure_class, changed) = match outcome {
+                "succeeded" if fields.len() == 3 => {
+                    let changed = fields.get(2).and_then(Value::as_bool).ok_or_else(|| {
+                        anyhow!("published daemon successful catalog route outcome has no changed fact")
+                    })?;
+                    (None, Some(changed))
                 }
+                "failed" if fields.len() == 3 => {
+                    let class = match fields.get(2).and_then(Value::as_str) {
+                        Some("u") => "unavailable",
+                        Some("c") => "source_changed",
+                        Some("r") => "unreadable",
+                        Some("i") => "incompatible",
+                        _ => bail!(
+                            "published daemon source refresh catalog failure class is invalid"
+                        ),
+                    };
+                    (Some(class.to_owned()), None)
+                }
+                "not_selected" if fields.len() == 2 => (None, None),
+                _ => bail!(
+                    "published daemon source refresh catalog route outcome has inconsistent fields"
+                ),
             };
-            if (outcome == "failed") != failure_class.is_some()
-                || (outcome != "failed" && fields.len() != 2)
-            {
-                bail!("published daemon source refresh catalog route outcome has inconsistent failure class");
-            }
-            let result = (outcome.to_owned(), failure_class.clone());
+            let result = (outcome.to_owned(), failure_class.clone(), changed);
             if route_results
                 .insert(route_identity.clone(), result.clone())
                 .is_some_and(|previous| previous != result)
@@ -540,6 +549,7 @@ fn required_catalog_route_outcomes(
                 route_identity,
                 outcome: outcome.to_owned(),
                 failure_class,
+                changed,
             })
         })
         .collect()

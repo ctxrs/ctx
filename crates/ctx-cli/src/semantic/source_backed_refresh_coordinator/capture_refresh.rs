@@ -275,10 +275,26 @@ fn refresh_all_provider_sources_route_local(
         .iter()
         .map(|identity| identity.as_str())
         .collect::<BTreeSet<_>>();
+    let successful_route_changes = receipt
+        .successful_route_outcomes
+        .iter()
+        .map(|outcome| (outcome.route_identity.as_str(), outcome.changed))
+        .collect::<BTreeMap<_, _>>();
+    if successful_route_changes
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        != successful_routes
+    {
+        bail!("capture-owned source refresh receipt has inconsistent successful route outcomes");
+    }
     let catalog_route_outcomes = catalog_route_bindings
         .into_iter()
         .map(|binding| {
             let failure = failed_by_route.get(binding.route_identity.as_str());
+            let changed = successful_route_changes
+                .get(binding.route_identity.as_str())
+                .copied();
             let outcome = if failure.is_some() {
                 "failed"
             } else if successful_routes.contains(binding.route_identity.as_str()) {
@@ -292,6 +308,7 @@ fn refresh_all_provider_sources_route_local(
                 route_identity: binding.route_identity,
                 outcome,
                 failure_class: failure.map(|failure| failure.class.clone()),
+                changed,
             }
         })
         .collect();

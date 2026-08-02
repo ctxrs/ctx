@@ -92,19 +92,66 @@ fn catalog_outcomes_must_match_global_route_partition() {
 
     let mut impossible_success = response.clone();
     impossible_success["receipt"]["catalog_route_outcomes"] =
-        json!({ (lineage.clone()): [route.clone(), "s"] });
+        json!({ (lineage.clone()): [route.clone(), "s", true] });
     let error = published_refresh_receipt(&impossible_success, &pin)
         .expect_err("catalog success cannot exceed successful route total");
     assert!(format!("{error:#}").contains("invalid route-result partition"));
 
     let mut conflicting_shared_route = response;
     conflicting_shared_route["receipt"]["catalog_route_outcomes"] = json!({
-        (lineage): [route.clone(), "s"],
+        (lineage): [route.clone(), "s", false],
         ("33".repeat(32)): [route, "f", "u"],
     });
     let error = published_refresh_receipt(&conflicting_shared_route, &pin)
         .expect_err("shared route cannot have conflicting catalog outcomes");
     assert!(format!("{error:#}").contains("disagree on a shared route result"));
+}
+
+#[test]
+fn successful_catalog_outcome_preserves_route_local_change() {
+    for changed in [false, true] {
+        let (_temp, mut response, pin) = empty_terminal_receipt_fixture();
+        let lineage = "11".repeat(32);
+        let route = "22".repeat(32);
+        response["receipt"]["selected_route_total"] = json!(1);
+        response["receipt"]["successful_route_total"] = json!(1);
+        response["receipt"]["catalog_route_outcomes"] = json!({ (lineage): [route, "s", changed] });
+
+        let receipt = published_refresh_receipt(&response, &pin).unwrap();
+        assert_eq!(receipt.catalog_route_outcomes.len(), 1);
+        assert_eq!(receipt.catalog_route_outcomes[0].changed, Some(changed));
+    }
+}
+
+#[test]
+fn successful_catalog_outcome_requires_route_local_change() {
+    let (_temp, mut response, pin) = empty_terminal_receipt_fixture();
+    response["receipt"]["selected_route_total"] = json!(1);
+    response["receipt"]["successful_route_total"] = json!(1);
+    response["receipt"]["catalog_route_outcomes"] =
+        json!({ ("11".repeat(32)): ["22".repeat(32), "s"] });
+
+    let error = published_refresh_receipt(&response, &pin)
+        .expect_err("successful compact outcome without changed fact must fail closed");
+    let detail = format!("{error:#}");
+    assert!(detail.contains("inconsistent fields"), "{detail}");
+}
+
+#[test]
+fn catalog_outcome_rejects_trailing_compact_fields() {
+    for outcome in [
+        json!(["22".repeat(32), "s", false, "extra"]),
+        json!(["22".repeat(32), "f", "u", "extra"]),
+    ] {
+        let (_temp, mut response, pin) = empty_terminal_receipt_fixture();
+        response["receipt"]["selected_route_total"] = json!(1);
+        response["receipt"]["catalog_route_outcomes"] = json!({ ("11".repeat(32)): outcome });
+
+        let error = published_refresh_receipt(&response, &pin)
+            .expect_err("compact catalog outcomes must reject trailing fields");
+        let detail = format!("{error:#}");
+        assert!(detail.contains("invalid width"), "{detail}");
+    }
 }
 
 #[test]
@@ -183,6 +230,7 @@ fn terminal_response_is_transport_bounded_and_preserves_exact_catalog_outcome() 
                             route_identity: route_identity.clone(),
                             outcome: "failed".to_owned(),
                             failure_class: Some("unreadable".to_owned()),
+                            changed: None,
                         },
                     )
                     .collect(),

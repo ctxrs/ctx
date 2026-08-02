@@ -20,8 +20,8 @@ use ctx_history_core::{
     SourceKey, TypedKey,
 };
 use ctx_history_index::{
-    CommitReceipt, GenerationWriter, IndexError, RevalidationTarget, SourceRouteIdentity,
-    SourceRouteSnapshot, WriterOptions,
+    CommitReceipt, GenerationManifest, GenerationWriter, IndexError, RevalidationTarget,
+    SourceRouteIdentity, SourceRouteSnapshot, WriterOptions,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;

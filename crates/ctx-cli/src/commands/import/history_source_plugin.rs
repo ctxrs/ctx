@@ -82,10 +82,22 @@ pub(crate) fn run_history_source_plugin_import(
         .as_ref()
         .context("history source plugin refresh has no authoritative terminal receipt")?;
     let published_generation = refresh.pin.generation_id().to_owned();
+    let catalog_lineage = upsert.catalog_lineage_hex();
+    let requested_outcome = receipt
+        .catalog_route_outcomes
+        .iter()
+        .find(|outcome| outcome.catalog_lineage == catalog_lineage)
+        .context("history source plugin refresh has no exact catalog-lineage result")?;
+    if requested_outcome.outcome != "succeeded" {
+        bail!("history source plugin refresh did not publish its exact catalog route");
+    }
+    let route_changed = requested_outcome
+        .changed
+        .context("successful history source plugin route has no change result")?;
 
     let summary = ProviderImportSummary {
-        imported: usize::from(receipt.generation_changed),
-        skipped: usize::from(!receipt.generation_changed),
+        imported: usize::from(route_changed),
+        skipped: usize::from(!route_changed),
         ..ProviderImportSummary::default()
     };
     context.provider_refreshes.record_success_with_facts(
@@ -111,7 +123,7 @@ pub(crate) fn run_history_source_plugin_import(
         current_certified_source_bytes: Some(current.certified_source_bytes),
         current_sources_with_rejections: Some(current.sources_with_rejections),
         removed_source_count: Some(current.removed_source_count),
-        work_result: if receipt.generation_changed {
+        work_result: if route_changed {
             ProviderImportWorkResult::Changed
         } else {
             ProviderImportWorkResult::NoOp
@@ -163,7 +175,7 @@ pub(crate) fn run_history_source_plugin_import(
             "source_files": stats.files,
             "source_bytes": stats.bytes,
             "catalog_changed": upsert.changed,
-            "catalog_lineage": upsert.catalog_lineage_hex(),
+            "catalog_lineage": catalog_lineage,
             "catalog_authority": upsert.authority.to_json(),
             "previous_generation": receipt.previous_generation,
             "published_generation": published_generation,
@@ -174,7 +186,7 @@ pub(crate) fn run_history_source_plugin_import(
                 "trigger": "import",
                 "trigger_provenance": "history_source_plugin",
             },
-            "change": if receipt.generation_changed { "changed" } else { "no_op" },
+            "change": if route_changed { "changed" } else { "no_op" },
             "current_source_count": current.source_count,
             "current_indexed_documents": current.indexed_documents,
             "current_complete_records": current.complete_records,

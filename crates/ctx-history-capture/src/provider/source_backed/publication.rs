@@ -305,10 +305,17 @@ pub struct SourceBackedRefreshReceipt {
     pub certified_source_bytes: u64,
     pub selected_route_ids: Vec<SourceRouteIdentity>,
     pub successful_route_ids: Vec<SourceRouteIdentity>,
+    pub successful_route_outcomes: Vec<SourceBackedSuccessfulRouteOutcome>,
     pub failed_routes: Vec<SourceBackedFailedRouteOutcome>,
     pub source_failures: SourceBackedSourceFailures,
     pub carried_unselected_route_ids: Vec<SourceRouteIdentity>,
     pub carried_failed_route_ids: Vec<SourceRouteIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBackedSuccessfulRouteOutcome {
+    pub route_identity: SourceRouteIdentity,
+    pub changed: bool,
 }
 
 #[cfg(test)]
@@ -485,8 +492,17 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
     let mut failed_routes = BTreeMap::<SourceRouteIdentity, SourceBackedFailedRoute>::new();
     let mut carried_unselected_route_ids = BTreeSet::new();
 
-    let (commit, applied_removals, commit_duration) = {
+    let (commit, applied_removals, commit_duration, base_route_content) = {
         let mut writer = GenerationWriter::open(index_root, writer_options.clone())?;
+        let base_route_content = selected_route_ids
+            .iter()
+            .map(|route_identity| {
+                (
+                    route_identity.clone(),
+                    source_route_content_fingerprint(writer.base_manifest(), route_identity),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let base_route_ids = writer
             .base_manifest()
             .map(|manifest| {
@@ -857,13 +873,30 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                     .any(|owner| owner.inventory == *inventory)
             },
         )?;
-        (commit, applied_removals, commit_started.elapsed())
+        (
+            commit,
+            applied_removals,
+            commit_started.elapsed(),
+            base_route_content,
+        )
     };
 
     let successful_route_ids = selected_route_ids
         .iter()
         .filter(|identity| !failed_routes.contains_key(*identity))
         .cloned()
+        .collect::<Vec<_>>();
+    let successful_route_outcomes = successful_route_ids
+        .iter()
+        .cloned()
+        .map(|route_identity| SourceBackedSuccessfulRouteOutcome {
+            changed: base_route_content.get(&route_identity)
+                != Some(&source_route_content_fingerprint(
+                    Some(commit.manifest()),
+                    &route_identity,
+                )),
+            route_identity,
+        })
         .collect::<Vec<_>>();
     for route in &registry.routes {
         if route
@@ -911,6 +944,7 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         certified_source_bytes,
         selected_route_ids: selected_route_ids.into_iter().collect(),
         successful_route_ids,
+        successful_route_outcomes,
         carried_unselected_route_ids: carried_unselected_route_ids.into_iter().collect(),
         carried_failed_route_ids: failed_routes
             .values()
@@ -923,6 +957,45 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             .map(SourceBackedFailedRouteOutcome::from)
             .collect(),
     })
+}
+
+fn source_route_content_fingerprint(
+    manifest: Option<&GenerationManifest>,
+    route_identity: &SourceRouteIdentity,
+) -> [u8; 32] {
+    let sources = manifest
+        .and_then(|manifest| manifest.source_route(route_identity))
+        .map(SourceRouteSnapshot::sources)
+        .unwrap_or_default();
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.source-route-content-v1\0");
+    digest.update((sources.len() as u64).to_be_bytes());
+    for source in sources {
+        digest.update(source.identity().digest());
+        match manifest.and_then(|manifest| source_core_record_aggregate(manifest, source)) {
+            Some(aggregate) => {
+                digest.update([1]);
+                digest.update(aggregate.indexed_documents().to_be_bytes());
+                digest.update(aggregate.semantic_eligible_documents().to_be_bytes());
+                digest.update(aggregate.core_record_accumulator().as_bytes());
+            }
+            None => digest.update([0]),
+        }
+    }
+    digest.finalize().into()
+}
+
+fn source_core_record_aggregate<'manifest>(
+    manifest: &'manifest GenerationManifest,
+    source: &SourceKey,
+) -> Option<&'manifest ctx_history_index::SourceCoreRecordAggregate> {
+    manifest
+        .sources
+        .binary_search_by_key(&source.identity().digest(), |candidate| {
+            candidate.observation().source().identity().digest()
+        })
+        .ok()
+        .and_then(|index| manifest.core_record_aggregates.get(index))
 }
 
 fn bounded_source_failures<'a>(

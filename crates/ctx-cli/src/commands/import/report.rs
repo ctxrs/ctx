@@ -93,7 +93,7 @@ fn import_totals_json(totals: &ImportTotals) -> Value {
 
 fn render_import_report_human(context: &RenderContext, report: &ImportReport) -> Document {
     let totals = &report.totals;
-    let rejected_records = rejected_record_count(totals);
+    let rejected_records = u64::try_from(totals.failed).unwrap_or(u64::MAX);
     let (state, title, detail) = import_outcome_copy(totals);
     let mut document = outcome(
         context,
@@ -269,7 +269,7 @@ fn import_outcome_copy(totals: &ImportTotals) -> (OutcomeState, &'static str, St
             ),
         );
     }
-    let rejected_records = rejected_record_count(totals);
+    let rejected_records = u64::try_from(totals.failed).unwrap_or(u64::MAX);
     if totals.failed_sources > 0 || rejected_records > 0 {
         let mut details = Vec::new();
         if totals.failed_sources > 0 {
@@ -308,14 +308,6 @@ fn import_outcome_copy(totals: &ImportTotals) -> (OutcomeState, &'static str, St
             "No source changes were found.".to_owned()
         },
     )
-}
-
-fn rejected_record_count(totals: &ImportTotals) -> u64 {
-    if totals.failed > 0 {
-        u64::try_from(totals.failed).unwrap_or(u64::MAX)
-    } else {
-        totals.current_rejected_records.unwrap_or(0)
-    }
 }
 
 fn counted_failure(count: u64, singular: &str, plural: &str) -> String {
@@ -598,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_rejections_remain_a_human_warning_with_diagnosis() {
+    fn persisted_rejections_remain_current_index_diagnostics_on_a_noop() {
         let report = ImportReport {
             resume: true,
             totals: ImportTotals {
@@ -615,18 +607,15 @@ mod tests {
         let rendered =
             render_import_report_human(&context(80, ColorMode::Never), &report).render_plain();
         assert!(
-            rendered.starts_with("! History import completed with rejections\n"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("2 records were rejected; imported history remains available."),
+            rendered.starts_with("✓ History import completed\nNo source changes were found.\n"),
             "{rendered}"
         );
         assert!(
             rendered.contains("Searchable events        7"),
             "{rendered}"
         );
-        assert!(rendered.ends_with("Next\n  ctx doctor\n"), "{rendered}");
+        assert!(!rendered.contains("records were rejected"), "{rendered}");
+        assert!(!rendered.contains("ctx doctor"), "{rendered}");
     }
 
     #[test]

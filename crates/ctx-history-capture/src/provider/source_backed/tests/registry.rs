@@ -29,6 +29,11 @@ fn heterogeneous_routes_publish_one_core_generation() {
     assert_eq!(receipt.certified_source_count, 2);
     assert_eq!(receipt.certified_source_bytes, 2);
     assert_eq!(receipt.sources.len(), 2);
+    assert_eq!(receipt.successful_route_outcomes.len(), 2);
+    assert!(receipt
+        .successful_route_outcomes
+        .iter()
+        .all(|outcome| outcome.changed));
     assert!(receipt.removals.is_empty());
     assert!(receipt.scan_stage_duration > Duration::ZERO);
     assert!(receipt.commit_duration > Duration::ZERO);
@@ -272,6 +277,36 @@ fn warm_success_advances_while_failed_route_is_carried_exactly() {
     }
     assert!(warm.sources.contains(&first_v2_certificate));
     assert_eq!(warm.commit.indexed_documents, 2);
+}
+
+#[test]
+fn successful_route_outcomes_distinguish_changed_and_unchanged_routes() {
+    let (first_v1, _) = revisioned_receipt_route(1);
+    let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 9);
+    let first_id = first_v1.metadata.route_identity.clone().unwrap();
+    let second_id = second.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(first_v1);
+    initial_registry.register(second.clone());
+    let temp = tempdir().unwrap();
+    refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+        .unwrap();
+
+    let (first_v2, _) = revisioned_receipt_route(2);
+    let mut warm_registry = SourceBackedProviderRegistry::new();
+    warm_registry.register(first_v2);
+    warm_registry.register(second);
+    let warm =
+        refresh_source_backed_generation(temp.path(), &warm_registry, WriterOptions::default())
+            .unwrap();
+
+    let changed = warm
+        .successful_route_outcomes
+        .iter()
+        .map(|outcome| (&outcome.route_identity, outcome.changed))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(changed.get(&first_id), Some(&true));
+    assert_eq!(changed.get(&second_id), Some(&false));
 }
 
 #[test]
@@ -1142,6 +1177,10 @@ fn source_record_progress_resets_per_route_and_is_absent_outside_scans() {
     .unwrap();
 
     assert_eq!(replay.commit.generation_id, initial.commit.generation_id);
+    assert!(replay
+        .successful_route_outcomes
+        .iter()
+        .all(|outcome| !outcome.changed));
 
     let active = updates
         .iter()
