@@ -88,6 +88,7 @@ pub(super) struct DaemonIteration {
     pub(super) failed: bool,
     pub(super) telemetry_state: DaemonCycleStateV1,
     pub(super) continue_immediately: bool,
+    pub(super) core_refresh_published: bool,
     pub(super) provider_refresh_events: Vec<PublicEventV1>,
 }
 
@@ -98,8 +99,14 @@ impl DaemonIteration {
             failed,
             telemetry_state,
             continue_immediately: false,
+            core_refresh_published: false,
             provider_refresh_events: Vec::new(),
         }
+    }
+
+    pub(super) fn with_core_refresh_published(mut self) -> Self {
+        self.core_refresh_published = true;
+        self
     }
 
     #[cfg(test)]
@@ -107,6 +114,41 @@ impl DaemonIteration {
         self.provider_refresh_events = events;
         self
     }
+}
+
+fn complete_core_refresh_wakeup_transition(
+    iteration: &DaemonIteration,
+    wakeup: &DaemonWakeup,
+    next_safety_reconcile: &mut Instant,
+    completed_at: Instant,
+    safety_interval: StdDuration,
+) {
+    if !iteration.core_refresh_published {
+        return;
+    }
+
+    // A successful all-provider publication satisfies the current automatic
+    // reconciliation boundary. Filesystem dirt arriving during the run or
+    // before the next safety deadline is deliberately collapsed into that
+    // safety reconciliation instead of becoming an immediate equivalent
+    // refresh. Explicit requests live in the coordinator queue and IPC wake
+    // bit, neither of which is gated.
+    wakeup.defer_filesystem_until_safety();
+    *next_safety_reconcile = completed_at + safety_interval;
+}
+
+fn begin_safety_reconciliation_if_due(
+    wakeup: &DaemonWakeup,
+    next_safety_reconcile: &mut Instant,
+    observed_at: Instant,
+    safety_interval: StdDuration,
+) -> bool {
+    if observed_at < *next_safety_reconcile {
+        return false;
+    }
+    wakeup.release_filesystem_at_safety();
+    *next_safety_reconcile = observed_at + safety_interval;
+    true
 }
 
 #[derive(Default)]
@@ -117,6 +159,7 @@ pub(super) struct DaemonRuntime {
     pub(super) semantic_retry: DaemonRetryBackoff,
     pub(super) semantic_blocked_job: Option<Value>,
     pub(super) sidecar_drain: DaemonSidecarDrain,
+    pub(super) initial_core_refresh_attempted: bool,
     pub(super) config: AppConfig,
 }
 
@@ -773,6 +816,13 @@ pub(super) fn run_daemon_inner(
                     .as_ref()
                     .map(|service| service.source_refresh.as_ref()),
             )?;
+            complete_core_refresh_wakeup_transition(
+                &iteration,
+                &wakeup,
+                &mut next_safety_reconcile,
+                Instant::now(),
+                safety_interval,
+            );
             let continue_immediately = iteration.continue_immediately;
             let cycle_duration = cycle_started.elapsed();
             let iteration_events =
@@ -832,7 +882,15 @@ pub(super) fn run_daemon_inner(
             if wake.shutdown {
                 break;
             }
-            let safety_due = wake.timed_out && Instant::now() >= next_safety_reconcile;
+            let wake_observed_at = Instant::now();
+            // A real event at or just after the deadline must not starve the
+            // safety reconciliation by making this a non-timeout wake.
+            let safety_due = begin_safety_reconciliation_if_due(
+                &wakeup,
+                &mut next_safety_reconcile,
+                wake_observed_at,
+                safety_interval,
+            );
             let retry_wakeup_due = wake.timed_out && daemon_retry_due(&runtime);
             if retry_wakeup_due {
                 wakeup.record_scheduled_retry_wakeup();
@@ -840,10 +898,7 @@ pub(super) fn run_daemon_inner(
             let source_retry_due = retry_wakeup_due
                 && runtime.history_retry.consecutive_failures > 0
                 && runtime.history_retry.ready();
-            if safety_due {
-                next_safety_reconcile = Instant::now() + safety_interval;
-            }
-            if wake.filesystem || safety_due || source_retry_due {
+            if wake.filesystem_refresh || safety_due || source_retry_due {
                 if let Some(source_refresh) = refresh_service
                     .as_ref()
                     .map(|service| service.source_refresh.as_ref())

@@ -22,11 +22,10 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
     let source_refresh_requested =
         source_refresh.is_some_and(CoreRefreshEngine::has_pending_request);
     if runtime.config.daemon.mode.runs_only_source_refresh() {
-        return Ok(
-            run_pending_core_refresh(data_root, runtime, source_refresh)?.unwrap_or_else(|| {
-                DaemonIteration::new(false, false, DaemonCycleStateV1::unknown())
-            }),
-        );
+        let iteration = run_pending_core_refresh(data_root, runtime, source_refresh)?;
+        runtime.initial_core_refresh_attempted |= iteration.is_some();
+        return Ok(iteration
+            .unwrap_or_else(|| DaemonIteration::new(false, false, DaemonCycleStateV1::unknown())));
     }
     let query_generation = query_activity.map(|activity| activity.snapshot().1);
     if !source_refresh_requested
@@ -39,6 +38,7 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
         ));
     }
     if source_refresh_requested {
+        runtime.initial_core_refresh_attempted = true;
         return run_core_refresh(data_root, runtime, source_refresh, false);
     }
     if let Some(iteration) = run_pending_core_pro_catch_up(data_root, runtime, source_refresh)? {
@@ -69,6 +69,18 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
             DaemonCycleStateV1::unknown(),
         ));
     }
+    // This unconditional periodic admission is the daemon's initial tick only.
+    // Every later automatic refresh must already have been admitted by a
+    // filesystem, safety, or retry transition in the daemon loop; otherwise a
+    // deferred filesystem wake could fall through into equivalent work.
+    if runtime.initial_core_refresh_attempted {
+        return Ok(DaemonIteration::new(
+            false,
+            false,
+            DaemonCycleStateV1::unknown(),
+        ));
+    }
+    runtime.initial_core_refresh_attempted = true;
     run_core_refresh(data_root, runtime, source_refresh, true)
 }
 
@@ -179,12 +191,14 @@ fn run_pending_core_refresh(
         run.job.get("status").and_then(Value::as_str) == Some("failed")
     );
     let job = record_daemon_job_retry(&mut runtime.history_retry, run.job);
+    let published = completed_core_generation(&job).is_some();
     write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &job)?;
-    Ok(Some(DaemonIteration::new(
-        run.did_work,
-        run.failed,
-        DaemonCycleStateV1::unknown(),
-    )))
+    let iteration = DaemonIteration::new(run.did_work, run.failed, DaemonCycleStateV1::unknown());
+    Ok(Some(if published {
+        iteration.with_core_refresh_published()
+    } else {
+        iteration
+    }))
 }
 
 fn run_core_refresh(
@@ -289,22 +303,25 @@ fn finish_core_refresh(
     write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &job)?;
     let failed = daemon_job_failed(&job);
     let state = daemon_core_cycle_state(&job);
-    let published_generation = (!failed
-        && job.get("status").and_then(Value::as_str) == Some("completed"))
-    .then(|| {
-        job.get("published_generation")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    })
-    .flatten();
+    let published_generation = (!failed).then(|| completed_core_generation(&job)).flatten();
     if let Some(generation) = published_generation {
         runtime.sidecar_drain.generation = Some(generation);
-        Ok(immediate_follow_up(DaemonIteration::new(
-            did_work, false, state,
-        )))
+        Ok(immediate_follow_up(
+            DaemonIteration::new(did_work, false, state).with_core_refresh_published(),
+        ))
     } else {
         Ok(DaemonIteration::new(did_work, failed, state))
     }
+}
+
+fn completed_core_generation(job: &Value) -> Option<String> {
+    (job.get("status").and_then(Value::as_str) == Some("completed"))
+        .then(|| {
+            job.get("published_generation")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .flatten()
 }
 
 fn daemon_core_cycle_state(job: &Value) -> DaemonCycleStateV1 {
