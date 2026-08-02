@@ -141,7 +141,10 @@ or requires a hosted research agent.
   daemon freshness, and blame. It consumes a bounded feed from a pinned Core
   generation and does not depend on semantic readiness. Repository roots are inferred from
   canonical activity rather than accepted as setup flags.
-- The only public Pro query is `ctx blame file|commit|pr`. It returns typed,
+- The only public Pro query is `ctx blame <target> [--type file|commit|pr]`.
+  The explicit `ctx blame file|commit|pr` forms remain compatible. Shorthand
+  auto-detection is conservative and ambiguous targets fail with an actionable
+  `invalid_request`; explicit `--type` is authoritative. Blame returns typed,
   bounded matches with complete deduplicated canonical evidence. OSS
   `ctx show session|event` remains available; there are no Pro show, timeline,
   facts, or related aliases. Blame may

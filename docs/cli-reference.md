@@ -471,10 +471,28 @@ ctx data root preserves that identity and its selected backend; copying
 The public Pro query surface is:
 
 ```bash
+ctx blame <target> [--type file|commit|pr] [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
+
+# Explicit compatibility forms
 ctx blame file <path> [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
 ctx blame commit <sha> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
 ctx blame pr <positive-number-or-canonical-url> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
 ```
+
+Without `--type`, shorthand classification is deterministic and conservative:
+positive PR numbers and canonical supported PR/MR URLs select PR blame; 4-64
+character hexadecimal Git object IDs select commit blame; and path-shaped
+targets containing `/`, `\`, or a filename extension select file blame. Other
+targets fail with `invalid_request` and direct the caller to `--type`. Explicit
+`--type file|commit|pr` is authoritative. Use it for bare filenames, a
+hexadecimal filename, or any target whose intended kind is otherwise ambiguous.
+The selected value remains subject to that target kind's existing validation
+contract.
+
+The `file`, `commit`, and `pr` subcommands remain supported compatibility forms
+with their existing arguments and output behavior. Those three words therefore
+retain subcommand precedence as the first token; for example, use
+`ctx blame file file` to query a file literally named `file`.
 
 There are no Pro `show`, `timeline`, `facts`, or `related` compatibility
 aliases. OSS `ctx show session|event` remains unchanged. The CLI blame limit defaults to 20
@@ -958,6 +976,7 @@ ctx pro uninstall (--delete-data|--keep-data) --format json
 ctx referral create <codename> --format json
 ctx referral status --format json
 ctx referral payout [--no-open] [--country <CC>] [--entity-type <individual|company>] --format json
+ctx blame <target> [--type file|commit|pr] --format json
 ctx blame file <path> --format json
 ctx blame commit <sha> --format json
 ctx blame pr <number-or-url> [--repository <logical-repository>] --format json

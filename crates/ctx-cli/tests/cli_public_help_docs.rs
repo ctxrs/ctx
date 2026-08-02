@@ -238,6 +238,20 @@ fn pro_uninstall_help_uses_local_pro_data_terminology() {
 #[test]
 fn blame_help_explains_launch_targets_and_bounds() {
     let temp = tempdir();
+    let output = ctx(&temp)
+        .args(["blame", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(output).unwrap();
+    assert!(help.contains("ctx blame [OPTIONS] <TARGET>"), "{help}");
+    assert!(help.contains("ctx blame <COMMAND>"), "{help}");
+    assert!(help.contains("--type <TYPE>"), "{help}");
+    assert!(help.contains("possible values: file, commit, pr"), "{help}");
+    assert!(help.contains("overrides auto-detection"), "{help}");
+
     for args in [
         vec!["blame", "file", "--help"],
         vec!["blame", "commit", "--help"],
@@ -289,6 +303,12 @@ fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
     assert!(stderr.contains("END >= START"));
     let stderr = failure_stderr(ctx(&temp).args(["blame", "pr", "0", "--repository", "ctxrs/ctx"]));
     assert!(stderr.contains("positive decimal number"));
+    let stderr = failure_stderr(ctx(&temp).args(["blame", "42"]));
+    assert!(
+        stderr.contains("pull request number requires a repository selector"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("pro_not_installed"), "{stderr}");
     for repository in ["", "   "] {
         let stderr = failure_stderr(ctx(&temp).args([
             "blame",
@@ -302,6 +322,30 @@ fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
         assert!(stderr.contains("repository selector"), "{stderr}");
         assert!(!stderr.contains("pro_not_installed"), "{stderr}");
     }
+
+    for args in [
+        &["blame", "main"][..],
+        &["blame", "main", "--format=json"][..],
+    ] {
+        let stderr = failure_stderr(ctx(&temp).args(args));
+        assert!(stderr.contains("invalid_request"), "{stderr}");
+        assert!(stderr.contains("target type is ambiguous"), "{stderr}");
+        assert!(stderr.contains("--type file"), "{stderr}");
+        assert!(stderr.contains("--type commit"), "{stderr}");
+        assert!(stderr.contains("--type pr"), "{stderr}");
+        assert!(!stderr.contains("pro_not_installed"), "{stderr}");
+    }
+
+    let stderr = failure_stderr(ctx(&temp).args([
+        "blame",
+        "src/lib.rs",
+        "--type",
+        "unknown",
+        "--format=json",
+    ]));
+    assert!(stderr.contains("invalid value 'unknown'"), "{stderr}");
+    assert!(stderr.contains("file, commit, pr"), "{stderr}");
+    assert!(!stderr.contains("pro_not_installed"), "{stderr}");
 }
 
 #[test]
