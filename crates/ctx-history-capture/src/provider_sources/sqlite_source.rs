@@ -80,6 +80,21 @@ pub(crate) enum SqliteSourceAccessError {
         #[source]
         source: rusqlite::Error,
     },
+    #[error("private SQLite scratch resource is unavailable during {operation}: {source}")]
+    ScratchSqliteUnavailable {
+        operation: &'static str,
+        #[source]
+        source: rusqlite::Error,
+    },
+    #[error(
+        "private SQLite scratch resource is unavailable during {operation} for {path:?}: {source}"
+    )]
+    ScratchIoUnavailable {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("SQLite source control {operation} failed with code {code}")]
     SqliteControl { operation: &'static str, code: i32 },
     #[error("SQLite source connection is not read-only")]
@@ -105,6 +120,35 @@ pub(crate) enum SqliteSourceAccessError {
     },
     #[error("SQLite source snapshot transaction is no longer active")]
     SnapshotNotActive,
+}
+
+impl SqliteSourceAccessError {
+    pub(crate) const fn is_retryable_resource_unavailable(&self) -> bool {
+        matches!(
+            self,
+            Self::ScratchSqliteUnavailable { .. } | Self::ScratchIoUnavailable { .. }
+        )
+    }
+
+    pub(crate) fn private_scratch_sqlite(operation: &'static str, source: rusqlite::Error) -> Self {
+        let resource_failure = matches!(
+            &source,
+            rusqlite::Error::SqliteFailure(error, _)
+                if matches!(
+                    error.code,
+                    rusqlite::ErrorCode::DiskFull
+                        | rusqlite::ErrorCode::OutOfMemory
+                        | rusqlite::ErrorCode::SystemIoFailure
+                        | rusqlite::ErrorCode::CannotOpen
+                        | rusqlite::ErrorCode::PermissionDenied
+                )
+        );
+        if resource_failure || operation.starts_with("closing") {
+            Self::ScratchSqliteUnavailable { operation, source }
+        } else {
+            Self::Sqlite { operation, source }
+        }
+    }
 }
 
 pub(crate) type SqliteSourceAccessResult<T> = Result<T, SqliteSourceAccessError>;

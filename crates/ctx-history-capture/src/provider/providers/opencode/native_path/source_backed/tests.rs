@@ -12,9 +12,13 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 
 use super::super::query::{
+    source_backed_event_order_sql, source_backed_event_sql,
     source_backed_fallback_events_by_rowids_sql, source_backed_fallback_sort_key_sql,
 };
-use super::ordering::{OPENCODE_HYDRATION_BATCH_BYTES, OPENCODE_HYDRATION_BATCH_ROWS};
+use super::ordering::{
+    OPENCODE_HYDRATION_BATCH_BYTES, OPENCODE_HYDRATION_BATCH_ROWS,
+    OPENCODE_HYDRATION_SINGLETON_MAX_BYTES,
+};
 use super::*;
 use crate::{
     provider::source_backed::{
@@ -812,7 +816,7 @@ fn indexed_synthetic_cold_and_changed_use_one_snapshot_and_one_logical_row_trave
     assert_eq!(cold.snapshot_opens, 1);
     assert_eq!(cold.logical_online_backup_opens, 1);
     assert_eq!(cold.schema_probe_passes, 1);
-    assert_eq!(cold.schema_event_validation_traversals, 3);
+    assert_eq!(cold.schema_event_validation_traversals, 2);
     assert_eq!(cold.logical_fingerprint_passes, 0);
     assert_eq!(cold.logical_row_traversals, 1);
     assert_eq!(cold.projection_passes, 1);

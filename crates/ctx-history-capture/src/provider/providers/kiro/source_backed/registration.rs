@@ -32,7 +32,8 @@ use ctx_history_core::SourceKey;
 use super::super::{
     absolute_kiro_path,
     scan::{
-        KIRO_HYDRATION_BATCH_BYTES, KIRO_HYDRATION_BATCH_ROWS, KIRO_KEY_BATCH_ROWS,
+        KIRO_HYDRATION_BATCH_BYTES, KIRO_HYDRATION_BATCH_ROWS, KIRO_HYDRATION_SINGLETON_MAX_BYTES,
+        KIRO_KEY_BATCH_BYTES, KIRO_KEY_BATCH_ROWS, KIRO_KEY_SINGLETON_MEMORY_BYTES,
         KIRO_ORDER_SCRATCH_MAX_BYTES,
     },
     KiroSqliteDatabase,
@@ -73,7 +74,7 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
         let source = kiro_source_key().map_err(route_error)?;
-        match observe_kiro_inventory(&self.data_root, &self.path).map_err(route_error)? {
+        match observe_kiro_inventory(&self.data_root, &self.path).map_err(kiro_scan_error)? {
             KiroPhysicalInventory::Present(present) => {
                 let fingerprint = present.logical_fingerprint;
                 Ok(CompleteDocumentTree::new(
@@ -216,7 +217,11 @@ fn validate_scan_receipt(scan: &KiroSourceBackedScan) -> SourceBackedRouteResult
         || scan.peak_buffered_rows != indexed.min(page_rows)
         || ordering.rows != scan.decoded_rows
         || ordering.max_key_batch_rows > KIRO_KEY_BATCH_ROWS as u64
+        || ordering.max_key_batch_bytes > KIRO_KEY_SINGLETON_MEMORY_BYTES as u64
+        || (ordering.max_key_batch_bytes > KIRO_KEY_BATCH_BYTES as u64
+            && ordering.max_key_batch_rows != 1)
         || ordering.max_hydration_batch_rows > KIRO_HYDRATION_BATCH_ROWS as u64
+        || ordering.max_hydration_batch_bytes > KIRO_HYDRATION_SINGLETON_MAX_BYTES
         || (ordering.max_hydration_batch_bytes > KIRO_HYDRATION_BATCH_BYTES
             && ordering.max_hydration_batch_rows != 1)
         || expected_statements != Some(ordering.data_statements)
@@ -367,9 +372,14 @@ fn invalid_database_leaf(path: &Path) -> CaptureError {
     }
 }
 
-fn kiro_scan_error(error: KiroSourceBackedErrorV0) -> SourceBackedRouteError {
+pub(super) fn kiro_scan_error(error: KiroSourceBackedErrorV0) -> SourceBackedRouteError {
     match error {
         KiroSourceBackedErrorV0::Route(error) => error,
+        KiroSourceBackedErrorV0::SqliteSource(error)
+            if error.is_retryable_resource_unavailable() =>
+        {
+            SourceBackedRouteError::new(SourceBackedRouteErrorKind::Unavailable, error.to_string())
+        }
         error => route_error(error),
     }
 }

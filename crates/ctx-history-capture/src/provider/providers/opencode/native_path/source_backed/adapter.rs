@@ -7,7 +7,10 @@ use std::{
 use ctx_history_core::{CaptureProvider, SourceKey};
 use sha2::{Digest, Sha256};
 
-use super::ordering::{OPENCODE_HYDRATION_BATCH_BYTES, OPENCODE_HYDRATION_BATCH_ROWS};
+use super::ordering::{
+    OPENCODE_HYDRATION_BATCH_BYTES, OPENCODE_HYDRATION_BATCH_ROWS,
+    OPENCODE_HYDRATION_SINGLETON_MAX_BYTES,
+};
 use super::{
     observe_logical_source, open_root_authorized_snapshot_retained,
     opencode_family_source_backed_registrations, scan_pinned_source, OpenCodeLogicalObservation,
@@ -429,6 +432,7 @@ fn finalize_work_counters(
         || counters.max_session_ancestry_depth > 64
         || counters.max_buffered_payload_rows > OPENCODE_HYDRATION_BATCH_ROWS as u64
         || counters.max_sort_key_batch_rows > OPENCODE_HYDRATION_BATCH_ROWS as u64
+        || counters.max_buffered_payload_bytes > OPENCODE_HYDRATION_SINGLETON_MAX_BYTES
         || (counters.max_buffered_payload_bytes > OPENCODE_HYDRATION_BATCH_BYTES
             && counters.max_buffered_payload_rows != 1)
         || counters.session_metadata_loads > counters.session_rows_scanned
@@ -485,7 +489,7 @@ fn source_missing(error: &OpenCodeSourceBackedError) -> bool {
     }
 }
 
-fn route_error(error: OpenCodeSourceBackedError) -> SourceBackedRouteError {
+pub(super) fn route_error(error: OpenCodeSourceBackedError) -> SourceBackedRouteError {
     let error = match error {
         OpenCodeSourceBackedError::Route(error) => return error,
         error => error,
@@ -508,6 +512,11 @@ fn route_error(error: OpenCodeSourceBackedError) -> SourceBackedRouteError {
                 SqliteSourceAccessError::SnapshotUnavailable { .. }
                 | SqliteSourceAccessError::UnsupportedSidecarIdentity { .. },
             ) => SourceBackedRouteErrorKind::Unavailable,
+            OpenCodeSourceBackedError::SqliteSource(error)
+                if error.is_retryable_resource_unavailable() =>
+            {
+                SourceBackedRouteErrorKind::Unavailable
+            }
             _ => SourceBackedRouteErrorKind::InvalidSource,
         };
     SourceBackedRouteError::new(kind, error.to_string())

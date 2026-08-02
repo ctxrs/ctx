@@ -7,15 +7,17 @@ use super::{
 
 mod sql;
 
+#[cfg(test)]
 pub(super) fn source_backed_event_sql(schema: &OpenCodeNativeSchema) -> String {
     sql::source_backed_event_source_sql(schema)
 }
 
+#[cfg(test)]
 pub(super) fn source_backed_event_order_sql(schema: &OpenCodeNativeSchema) -> &'static str {
     sql::source_backed_event_order_sql(schema)
 }
 
-pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema) -> &'static str {
+pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema) -> String {
     sql::source_backed_fallback_sort_key_sql(schema)
 }
 

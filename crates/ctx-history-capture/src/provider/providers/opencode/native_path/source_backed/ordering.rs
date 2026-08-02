@@ -1,6 +1,10 @@
 use std::{collections::HashMap, path::Path};
 
-use rusqlite::{params_from_iter, types::Value, Connection, StatementStatus};
+use rusqlite::{
+    params_from_iter,
+    types::{Value, ValueRef},
+    Connection, StatementStatus,
+};
 
 use super::{
     checked_add, decode_source_event_row, OpenCodeSourceBackedError, OpenCodeSourceBackedResult,
@@ -17,16 +21,30 @@ use crate::{
         OpenCodeSqliteDialect,
     },
     provider_sources::SqliteSourceAccessError,
-    CaptureError,
+    CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
 
 pub(super) const OPENCODE_FALLBACK_SCRATCH_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(super) const OPENCODE_HYDRATION_BATCH_ROWS: usize = 64;
 pub(super) const OPENCODE_HYDRATION_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+// Message-part hydration can retain one independently bounded message value
+// and one part value. A singleton may exceed the rollover target, but never
+// this finite two-value product envelope.
+pub(super) const OPENCODE_HYDRATION_SINGLETON_MAX_BYTES: u64 =
+    2 * MAX_PROVIDER_SQLITE_VALUE_BYTES as u64;
 const OPENCODE_SORT_KEY_BATCH_ROWS: usize = 64;
 const OPENCODE_SORT_KEY_BATCH_BYTES: usize = 1024 * 1024;
+const OPENCODE_SORT_KEY_SINGLETON_MAX_BYTES: usize = 32 * 1024;
 const OPENCODE_SORT_KEY_COLUMNS: usize = 7;
-const OPENCODE_FALLBACK_ORDER_TABLE: &str = "create table opencode_fallback_order (
+const OPENCODE_PRIVATE_ORDER_SCHEMA: &str = "create table opencode_session_order (
+         source_rowid integer primary key,
+         session_identity text not null
+     );
+     create index opencode_session_order_idx on opencode_session_order (
+         session_identity collate binary,
+         source_rowid
+     );
+     create table opencode_fallback_order (
          source_rowid integer primary key,
          session_identity text not null,
          message_time integer not null,
@@ -44,6 +62,10 @@ const OPENCODE_FALLBACK_ORDER_TABLE: &str = "create table opencode_fallback_orde
          source_rowid
      );
      begin immediate";
+const OPENCODE_SESSION_KEY_SCAN: &str = "select rowid, id from session";
+const OPENCODE_SESSION_ORDER_SCAN: &str = "select session_identity
+       from opencode_session_order indexed by opencode_session_order_idx
+      order by session_identity collate binary, source_rowid";
 const OPENCODE_FALLBACK_ORDER_SCAN: &str = "select source_rowid, payload_bytes
        from opencode_fallback_order indexed by opencode_fallback_order_idx
       order by session_identity collate binary,
@@ -70,6 +92,126 @@ struct HydrationRequest {
     source_rowid: i64,
 }
 
+pub(super) fn initialize_ordering_scratch(scratch: &Connection) -> OpenCodeSourceBackedResult<()> {
+    scratch
+        .execute_batch(OPENCODE_PRIVATE_ORDER_SCHEMA)
+        .map_err(|source| {
+            private_scratch_error("creating the private OpenCode ordering indexes", source)
+        })?;
+    if query_plan_uses_temp_sort(scratch, OPENCODE_SESSION_ORDER_SCAN).map_err(|source| {
+        private_scratch_error(
+            "verifying the private OpenCode session ordering index",
+            source,
+        )
+    })? || query_plan_uses_temp_sort(scratch, OPENCODE_FALLBACK_ORDER_SCAN).map_err(
+        |source| {
+            private_scratch_error(
+                "verifying the private OpenCode event ordering index",
+                source,
+            )
+        },
+    )? {
+        return Err(CaptureError::SystemInvariant(
+            "OpenCode private ordering indexes would use SQLite temporary sorting",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+pub(super) fn stream_ordered_session_identities(
+    source: &Connection,
+    scratch: &Connection,
+    visit: &mut dyn FnMut(&str) -> OpenCodeSourceBackedResult<()>,
+) -> OpenCodeSourceBackedResult<()> {
+    if query_plan_uses_temp_sort(source, OPENCODE_SESSION_KEY_SCAN)? {
+        return Err(CaptureError::SystemInvariant(
+            "OpenCode session key discovery would use SQLite temporary storage",
+        )
+        .into());
+    }
+    let mut statement = source.prepare(OPENCODE_SESSION_KEY_SCAN)?;
+    let mut rows = statement.query([])?;
+    let mut pending = Vec::<Vec<Value>>::with_capacity(OPENCODE_SORT_KEY_BATCH_ROWS);
+    while let Some(row) = rows.next()? {
+        let source_rowid = row.get::<_, i64>(0)?;
+        let identity = match row.get_ref(1)? {
+            ValueRef::Text(value)
+                if value.len() <= super::SOURCE_BACKED_MAX_NATIVE_IDENTITY_BYTES
+                    && std::str::from_utf8(value).is_ok_and(|value| !value.trim().is_empty()) =>
+            {
+                String::from_utf8(value.to_vec()).map_err(|_| {
+                    CaptureError::InvalidPayload(
+                        "OpenCode NativePath session identity/order rows are unsafe".to_owned(),
+                    )
+                })?
+            }
+            _ => {
+                return Err(CaptureError::InvalidPayload(
+                    "OpenCode NativePath session identity/order rows are unsafe".to_owned(),
+                )
+                .into())
+            }
+        };
+        pending.push(vec![Value::Integer(source_rowid), Value::Text(identity)]);
+        if pending.len() == OPENCODE_SORT_KEY_BATCH_ROWS {
+            insert_value_batch(
+                scratch,
+                "opencode_session_order",
+                2,
+                &pending,
+                "writing the private OpenCode session ordering index",
+            )?;
+            pending.clear();
+        }
+    }
+    if !pending.is_empty() {
+        insert_value_batch(
+            scratch,
+            "opencode_session_order",
+            2,
+            &pending,
+            "writing the private OpenCode session ordering index",
+        )?;
+    }
+    drop(rows);
+    require_no_ambient_temp(
+        &statement,
+        "OpenCode session key discovery unexpectedly used SQLite temporary storage",
+    )?;
+
+    let mut ordered = scratch
+        .prepare(OPENCODE_SESSION_ORDER_SCAN)
+        .map_err(|source| {
+            private_scratch_error(
+                "reading the private OpenCode session ordering index",
+                source,
+            )
+        })?;
+    let mut rows = ordered.query([]).map_err(|source| {
+        private_scratch_error("opening the private OpenCode session order stream", source)
+    })?;
+    while let Some(row) = rows.next().map_err(|source| {
+        private_scratch_error(
+            "streaming the private OpenCode session ordering index",
+            source,
+        )
+    })? {
+        let identity = row.get::<_, String>(0).map_err(|source| {
+            private_scratch_error(
+                "decoding the private OpenCode session ordering index",
+                source,
+            )
+        })?;
+        visit(&identity)?;
+    }
+    drop(rows);
+    require_no_ambient_temp(
+        &ordered,
+        "OpenCode private session ordering index unexpectedly used SQLite temporary storage",
+    )
+}
+
 pub(super) fn stream_fallback_ordered_events(
     source: &Connection,
     scratch: &Connection,
@@ -78,22 +220,10 @@ pub(super) fn stream_fallback_ordered_events(
     dialect: &OpenCodeSqliteDialect,
     consume_event: &mut dyn FnMut(SourceEventRow) -> OpenCodeSourceBackedResult<()>,
 ) -> OpenCodeSourceBackedResult<FallbackSortStats> {
-    scratch
-        .execute_batch(OPENCODE_FALLBACK_ORDER_TABLE)
-        .map_err(|source| {
-            private_scratch_error("creating the private OpenCode ordering index", source)
-        })?;
-    if query_plan_uses_temp_sort(source, source_backed_fallback_sort_key_sql(schema))? {
+    let sort_key_sql = source_backed_fallback_sort_key_sql(schema);
+    if query_plan_uses_temp_sort(source, &sort_key_sql)? {
         return Err(CaptureError::SystemInvariant(
             "OpenCode fallback key discovery would use SQLite temporary sorting",
-        )
-        .into());
-    }
-    if query_plan_uses_temp_sort(scratch, OPENCODE_FALLBACK_ORDER_SCAN).map_err(|source| {
-        private_scratch_error("verifying the private OpenCode ordering index", source)
-    })? {
-        return Err(CaptureError::SystemInvariant(
-            "OpenCode private ordering index would use SQLite temporary sorting",
         )
         .into());
     }
@@ -115,7 +245,7 @@ pub(super) fn stream_fallback_ordered_events(
         ..FallbackSortStats::default()
     };
     let mut inserted_rows = 0_u64;
-    let mut sort_keys = source.prepare(source_backed_fallback_sort_key_sql(schema))?;
+    let mut sort_keys = source.prepare(&sort_key_sql)?;
     let mut sort_key_rows = sort_keys.query([])?;
     let mut pending_keys = Vec::<Vec<Value>>::with_capacity(OPENCODE_SORT_KEY_BATCH_ROWS);
     let mut pending_key_bytes = 0_usize;
@@ -124,6 +254,12 @@ pub(super) fn stream_fallback_ordered_events(
             .map(|column| row.get::<_, Value>(column))
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let row_bytes = values.iter().map(value_memory_bytes).sum::<usize>();
+        if row_bytes > OPENCODE_SORT_KEY_SINGLETON_MAX_BYTES {
+            return Err(CaptureError::InvalidPayload(
+                "OpenCode ordering key exceeds its finite singleton memory bound".to_owned(),
+            )
+            .into());
+        }
         if !pending_keys.is_empty()
             && (pending_keys.len() == OPENCODE_SORT_KEY_BATCH_ROWS
                 || pending_key_bytes.saturating_add(row_bytes) > OPENCODE_SORT_KEY_BATCH_BYTES)
@@ -151,12 +287,10 @@ pub(super) fn stream_fallback_ordered_events(
         record_sort_key_batch(&mut stats, pending_keys.len())?;
     }
     drop(sort_key_rows);
-    if sort_keys.get_status(StatementStatus::Sort) != 0 {
-        return Err(CaptureError::SystemInvariant(
-            "OpenCode fallback key discovery unexpectedly used SQLite temporary sorting",
-        )
-        .into());
-    }
+    require_no_ambient_temp(
+        &sort_keys,
+        "OpenCode fallback key discovery unexpectedly used SQLite temporary storage",
+    )?;
 
     stats.scratch_bytes = measure_scratch_database(scratch, scratch_path)?;
     stats.data_statements = checked_add(stats.data_statements, 1)?;
@@ -182,6 +316,12 @@ pub(super) fn stream_fallback_ordered_events(
         let payload_bytes = u64::try_from(payload_bytes).map_err(|_| {
             CaptureError::SystemInvariant("OpenCode ordering payload bound became negative")
         })?;
+        if payload_bytes > hydration_singleton_max_bytes(schema) {
+            return Err(CaptureError::InvalidPayload(
+                "OpenCode source row exceeds the finite hydration singleton bound".to_owned(),
+            )
+            .into());
+        }
         if !pending.is_empty()
             && (pending.len() == OPENCODE_HYDRATION_BATCH_ROWS
                 || pending_bytes.saturating_add(payload_bytes) > OPENCODE_HYDRATION_BATCH_BYTES)
@@ -199,12 +339,10 @@ pub(super) fn stream_fallback_ordered_events(
         record_hydration_batch(&mut stats, pending.len(), pending_bytes)?;
     }
     drop(ordered_rows);
-    if ordered.get_status(StatementStatus::Sort) != 0 {
-        return Err(CaptureError::SystemInvariant(
-            "OpenCode private ordering index unexpectedly used SQLite temporary sorting",
-        )
-        .into());
-    }
+    require_no_ambient_temp(
+        &ordered,
+        "OpenCode private ordering index unexpectedly used SQLite temporary storage",
+    )?;
     if stats.rows != inserted_rows {
         return Err(CaptureError::SystemInvariant(
             "OpenCode private ordering index did not preserve every source row",
@@ -218,12 +356,28 @@ fn insert_sort_key_batch(
     scratch: &Connection,
     rows: &[Vec<Value>],
 ) -> OpenCodeSourceBackedResult<()> {
+    insert_value_batch(
+        scratch,
+        "opencode_fallback_order",
+        OPENCODE_SORT_KEY_COLUMNS,
+        rows,
+        "writing the private OpenCode ordering index",
+    )
+}
+
+fn insert_value_batch(
+    scratch: &Connection,
+    table: &str,
+    columns: usize,
+    rows: &[Vec<Value>],
+    operation: &'static str,
+) -> OpenCodeSourceBackedResult<()> {
     let mut parameter = 1_usize;
     let tuples = rows
         .iter()
         .map(|row| {
-            debug_assert_eq!(row.len(), OPENCODE_SORT_KEY_COLUMNS);
-            let tuple = (0..OPENCODE_SORT_KEY_COLUMNS)
+            debug_assert_eq!(row.len(), columns);
+            let tuple = (0..columns)
                 .map(|_| {
                     let placeholder = format!("?{parameter}");
                     parameter += 1;
@@ -235,13 +389,11 @@ fn insert_sort_key_batch(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let sql = format!("insert into opencode_fallback_order values {tuples}");
+    let sql = format!("insert into {table} values {tuples}");
     scratch
         .execute(&sql, params_from_iter(rows.iter().flatten()))
         .map(|_| ())
-        .map_err(|source| {
-            private_scratch_error("writing the private OpenCode ordering index", source)
-        })
+        .map_err(|source| private_scratch_error(operation, source))
 }
 
 fn hydrate_requested_events(
@@ -268,12 +420,10 @@ fn hydrate_requested_events(
         }
     }
     drop(source_rows);
-    if point.get_status(StatementStatus::Sort) != 0 {
-        return Err(CaptureError::SystemInvariant(
-            "OpenCode batched payload hydration unexpectedly used SQLite temporary sorting",
-        )
-        .into());
-    }
+    require_no_ambient_temp(
+        &point,
+        "OpenCode batched payload hydration unexpectedly used SQLite temporary storage",
+    )?;
     for request in requests {
         let event = events.remove(&request.source_rowid).ok_or_else(|| {
             CaptureError::SystemInvariant(
@@ -359,7 +509,8 @@ fn query_plan_uses_temp_sort(connection: &Connection, sql: &str) -> rusqlite::Re
     let mut statement = connection.prepare(&explain)?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
-        if row.get::<_, String>(3)?.contains("USE TEMP B-TREE") {
+        let detail = row.get::<_, String>(3)?;
+        if detail.contains("USE TEMP B-TREE") || detail.contains("AUTOMATIC") {
             return Ok(true);
         }
     }
@@ -378,11 +529,32 @@ fn query_plan_with_nulls_uses_temp_sort(
         parameters,
     )))?;
     while let Some(row) = rows.next()? {
-        if row.get::<_, String>(3)?.contains("USE TEMP B-TREE") {
+        let detail = row.get::<_, String>(3)?;
+        if detail.contains("USE TEMP B-TREE") || detail.contains("AUTOMATIC") {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn require_no_ambient_temp(
+    statement: &rusqlite::Statement<'_>,
+    detail: &'static str,
+) -> OpenCodeSourceBackedResult<()> {
+    if statement.get_status(StatementStatus::Sort) != 0
+        || statement.get_status(StatementStatus::AutoIndex) != 0
+    {
+        return Err(CaptureError::SystemInvariant(detail).into());
+    }
+    Ok(())
+}
+
+fn hydration_singleton_max_bytes(schema: &OpenCodeNativeSchema) -> u64 {
+    if schema.family == crate::provider::providers::opencode::native_path::model::OpenCodeNativeSchemaFamily::MessagePart {
+        OPENCODE_HYDRATION_SINGLETON_MAX_BYTES
+    } else {
+        MAX_PROVIDER_SQLITE_VALUE_BYTES as u64
+    }
 }
 
 fn value_memory_bytes(value: &Value) -> usize {
@@ -397,5 +569,5 @@ fn private_scratch_error(
     operation: &'static str,
     source: rusqlite::Error,
 ) -> OpenCodeSourceBackedError {
-    SqliteSourceAccessError::Sqlite { operation, source }.into()
+    SqliteSourceAccessError::private_scratch_sqlite(operation, source).into()
 }

@@ -30,6 +30,8 @@ use super::{
     SqliteSourceSnapshotStrategy, SQLITE_SHM_MAX_BYTES, SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
 };
 
+mod scratch;
+
 fn create_database(path: &Path, value: &str) {
     let connection = Connection::open(path).unwrap();
     connection
@@ -446,7 +448,7 @@ fn sidecar_creation_during_immutable_open_is_fail_closed() {
     );
 
     assert!(matches!(
-        result,
+        &result,
         Err(SqliteSourceAccessError::SourceChanged)
     ));
 }

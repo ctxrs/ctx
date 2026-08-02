@@ -19,8 +19,17 @@ use super::{
 pub(super) const KIRO_ORDER_SCRATCH_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(super) const KIRO_HYDRATION_BATCH_ROWS: usize = 64;
 pub(super) const KIRO_HYDRATION_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+// One valid Kiro source row can exceed the rollover target, but its retained
+// strings remain bounded by the provider's 16 MiB record contract. The extra
+// bytes account for the two fixed-width timestamps included by the SQL bound.
+pub(super) const KIRO_HYDRATION_SINGLETON_MAX_BYTES: u64 =
+    MAX_PROVIDER_SQLITE_VALUE_BYTES as u64 + 16;
 pub(super) const KIRO_KEY_BATCH_ROWS: usize = 64;
-const KIRO_KEY_BATCH_BYTES: usize = 1024 * 1024;
+pub(super) const KIRO_KEY_BATCH_BYTES: usize = 1024 * 1024;
+// Kiro uses `key` as a Core typed identity and cwd. Keep it within the shared
+// 64 KiB typed-key envelope before copying it into the ordering batch.
+pub(super) const KIRO_NATIVE_KEY_MAX_BYTES: usize = 64 * 1024;
+pub(super) const KIRO_KEY_SINGLETON_MEMORY_BYTES: usize = KIRO_NATIVE_KEY_MAX_BYTES + 256;
 const KIRO_KEY_COLUMNS: usize = 4;
 const KIRO_ORDER_TABLE: &str = "create table kiro_row_order (
          source_rowid integer primary key,
@@ -47,6 +56,7 @@ pub(super) struct KiroOrderingStats {
     pub(super) key_batches: u64,
     pub(super) hydration_batches: u64,
     pub(super) max_key_batch_rows: u64,
+    pub(super) max_key_batch_bytes: u64,
     pub(super) max_hydration_batch_rows: u64,
     pub(super) max_hydration_batch_bytes: u64,
 }
@@ -114,7 +124,7 @@ impl<'a> KiroRowOrderer<'a> {
             .into());
         }
 
-        self.populate_order_index(&key_sql)?;
+        self.populate_order_index(phase, &key_sql)?;
         let before = self.stats.rows;
         self.stream_ordered_payloads(phase, visit)?;
         let decoded = self
@@ -143,22 +153,60 @@ impl<'a> KiroRowOrderer<'a> {
         Ok(self.stats)
     }
 
-    fn populate_order_index(&mut self, sql: &str) -> KiroSourceBackedResultV0<()> {
+    fn populate_order_index(
+        &mut self,
+        phase: KiroPhase,
+        sql: &str,
+    ) -> KiroSourceBackedResultV0<()> {
         self.stats.data_statements = checked_add(self.stats.data_statements, 1)?;
         let mut statement = self.source.prepare(sql)?;
         let mut rows = statement.query([])?;
         let mut pending = Vec::<Vec<Value>>::with_capacity(KIRO_KEY_BATCH_ROWS);
         let mut pending_bytes = 0_usize;
         while let Some(row) = rows.next()? {
+            let source_rowid = row.get::<_, i64>(0)?;
+            match row.get_ref(2)? {
+                ValueRef::Text(key) if key.len() <= KIRO_NATIVE_KEY_MAX_BYTES => {}
+                ValueRef::Text(_) => {
+                    return Err(KiroSourceBackedErrorV0::UncertifiableRow {
+                        relation: phase.table(),
+                        rowid: source_rowid,
+                        reason: "Kiro conversation key exceeds the Core typed-key bound",
+                    })
+                }
+                _ => {
+                    return Err(KiroSourceBackedErrorV0::UncertifiableRow {
+                        relation: phase.table(),
+                        rowid: source_rowid,
+                        reason: "Kiro conversation key has an unsupported SQLite storage class",
+                    })
+                }
+            }
+            let payload_bytes = u64::try_from(row.get::<_, i64>(3)?).map_err(|_| {
+                CaptureError::SystemInvariant("Kiro source payload bound became negative")
+            })?;
+            if payload_bytes > KIRO_HYDRATION_SINGLETON_MAX_BYTES {
+                return Err(KiroSourceBackedErrorV0::UncertifiableRow {
+                    relation: phase.table(),
+                    rowid: source_rowid,
+                    reason: "row exceeds the finite Kiro hydration singleton bound",
+                });
+            }
             let values = (0..KIRO_KEY_COLUMNS)
                 .map(|column| row.get::<_, Value>(column))
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let row_bytes = values.iter().map(value_memory_bytes).sum::<usize>();
+            if row_bytes > KIRO_KEY_SINGLETON_MEMORY_BYTES {
+                return Err(CaptureError::SystemInvariant(
+                    "Kiro ordering key exceeded its finite singleton memory bound",
+                )
+                .into());
+            }
             if !pending.is_empty()
                 && (pending.len() == KIRO_KEY_BATCH_ROWS
                     || pending_bytes.saturating_add(row_bytes) > KIRO_KEY_BATCH_BYTES)
             {
-                self.insert_key_batch(&pending)?;
+                self.insert_key_batch(&pending, pending_bytes)?;
                 pending.clear();
                 pending_bytes = 0;
             }
@@ -166,7 +214,7 @@ impl<'a> KiroRowOrderer<'a> {
             pending.push(values);
         }
         if !pending.is_empty() {
-            self.insert_key_batch(&pending)?;
+            self.insert_key_batch(&pending, pending_bytes)?;
         }
         drop(rows);
         if statement.get_status(StatementStatus::Sort) != 0 {
@@ -178,7 +226,11 @@ impl<'a> KiroRowOrderer<'a> {
         Ok(())
     }
 
-    fn insert_key_batch(&mut self, rows: &[Vec<Value>]) -> KiroSourceBackedResultV0<()> {
+    fn insert_key_batch(
+        &mut self,
+        rows: &[Vec<Value>],
+        bytes: usize,
+    ) -> KiroSourceBackedResultV0<()> {
         let mut parameter = 1_usize;
         let tuples = rows
             .iter()
@@ -203,9 +255,11 @@ impl<'a> KiroRowOrderer<'a> {
                 private_scratch_error("writing the private Kiro ordering index", source)
             })?;
         let rows = u64::try_from(rows.len()).map_err(|_| KiroSourceBackedErrorV0::CountOverflow)?;
+        let bytes = u64::try_from(bytes).map_err(|_| KiroSourceBackedErrorV0::CountOverflow)?;
         self.stats.key_batches = checked_add(self.stats.key_batches, 1)?;
         self.stats.data_statements = checked_add(self.stats.data_statements, 1)?;
         self.stats.max_key_batch_rows = self.stats.max_key_batch_rows.max(rows);
+        self.stats.max_key_batch_bytes = self.stats.max_key_batch_bytes.max(bytes);
         Ok(())
     }
 
@@ -235,6 +289,13 @@ impl<'a> KiroRowOrderer<'a> {
             let payload_bytes = u64::try_from(payload_bytes).map_err(|_| {
                 CaptureError::SystemInvariant("Kiro ordering payload bound became negative")
             })?;
+            if payload_bytes > KIRO_HYDRATION_SINGLETON_MAX_BYTES {
+                return Err(KiroSourceBackedErrorV0::UncertifiableRow {
+                    relation: phase.table(),
+                    rowid: source_rowid,
+                    reason: "row exceeds the finite Kiro hydration singleton bound",
+                });
+            }
             if !pending.is_empty()
                 && (pending.len() == KIRO_HYDRATION_BATCH_ROWS
                     || pending_bytes.saturating_add(payload_bytes) > KIRO_HYDRATION_BATCH_BYTES)
@@ -524,5 +585,5 @@ fn private_scratch_error(
     operation: &'static str,
     source: rusqlite::Error,
 ) -> KiroSourceBackedErrorV0 {
-    SqliteSourceAccessError::Sqlite { operation, source }.into()
+    SqliteSourceAccessError::private_scratch_sqlite(operation, source).into()
 }

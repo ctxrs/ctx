@@ -23,6 +23,7 @@ pub(super) fn source_backed_event_source_sql(schema: &OpenCodeNativeSchema) -> S
     }
 }
 
+#[cfg(test)]
 pub(super) fn source_backed_event_order_sql(schema: &OpenCodeNativeSchema) -> &'static str {
     match schema.family {
         OpenCodeNativeSchemaFamily::SessionMessageSeq => {
@@ -96,9 +97,20 @@ fn part_event_source_sql(schema: &OpenCodeNativeSchema) -> String {
     part_event_source_sql_with_payload(schema, schema.message_part_indexed_streaming)
 }
 
-pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema) -> &'static str {
-    if schema.message_part_indexed_streaming {
-        "select p.rowid, m.session_id, m.time_created,
+pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema) -> String {
+    match schema.family {
+        OpenCodeNativeSchemaFamily::SessionMessageSeq => {
+            row_sort_key_sql("session_message", "x.seq")
+        }
+        OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq => {
+            row_sort_key_sql("session_message", "x.time_created")
+        }
+        OpenCodeNativeSchemaFamily::SessionEntry => {
+            row_sort_key_sql("session_entry", "x.time_created")
+        }
+        OpenCodeNativeSchemaFamily::LegacyMessage => row_sort_key_sql("message", "x.time_created"),
+        OpenCodeNativeSchemaFamily::MessagePart if schema.message_part_indexed_streaming => {
+            "select p.rowid, m.session_id, m.time_created,
                 m.id, p.time_created, p.id,
                 (case when typeof(p.data) in ('text', 'blob')
                       then octet_length(p.data) else 0 end)
@@ -106,8 +118,9 @@ pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema)
                         then octet_length(m.data) else 0 end)
            from message m
            cross join part p on p.message_id = m.id"
-    } else {
-        "select p.rowid, p.session_id,
+                .to_owned()
+        }
+        OpenCodeNativeSchemaFamily::MessagePart => "select p.rowid, p.session_id,
                 coalesce(m.time_created, p.time_created),
                 p.message_id, p.time_created, p.id,
                 (case when typeof(p.data) in ('text', 'blob')
@@ -116,19 +129,37 @@ pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema)
                         then octet_length(m.data) else 0 end)
            from part p
            left join message m on m.id = p.message_id"
+            .to_owned(),
     }
+}
+
+fn row_sort_key_sql(table: &str, order: &str) -> String {
+    format!(
+        "select x.rowid, x.session_id, {order}, x.id, 0, '',
+                case when typeof(x.data) in ('text', 'blob')
+                     then octet_length(x.data) else 0 end
+           from {table} x"
+    )
 }
 
 pub(super) fn source_backed_fallback_events_by_rowids_sql(
     schema: &OpenCodeNativeSchema,
     rows: usize,
 ) -> String {
-    let mut sql = part_event_source_sql_with_payload(schema, true);
     let placeholders = (1..=rows)
         .map(|parameter| format!("?{parameter}"))
         .collect::<Vec<_>>()
         .join(", ");
-    sql.push_str(&format!(" where p.rowid in ({placeholders})"));
+    let mut sql = match schema.family {
+        OpenCodeNativeSchemaFamily::MessagePart => part_event_source_sql_with_payload(schema, true),
+        _ => source_backed_event_source_sql(schema),
+    };
+    let alias = if schema.family == OpenCodeNativeSchemaFamily::MessagePart {
+        "p"
+    } else {
+        "x"
+    };
+    sql.push_str(&format!(" where {alias}.rowid in ({placeholders})"));
     sql
 }
 

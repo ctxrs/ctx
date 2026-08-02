@@ -7,8 +7,9 @@ use super::super::{kiro_source_key, scan_kiro_snapshot, KiroSourceBackedErrorV0}
 use crate::{
     provider::providers::kiro::native_path::{
         scan::{
-            KIRO_HYDRATION_BATCH_BYTES, KIRO_HYDRATION_BATCH_ROWS, KIRO_KEY_BATCH_ROWS,
-            KIRO_ORDER_SCRATCH_MAX_BYTES,
+            KIRO_HYDRATION_BATCH_BYTES, KIRO_HYDRATION_BATCH_ROWS,
+            KIRO_HYDRATION_SINGLETON_MAX_BYTES, KIRO_KEY_BATCH_BYTES, KIRO_KEY_BATCH_ROWS,
+            KIRO_NATIVE_KEY_MAX_BYTES, KIRO_ORDER_SCRATCH_MAX_BYTES,
         },
         KiroSqliteDatabase,
     },
@@ -116,8 +117,12 @@ fn assert_bounded_ordering(scan: &super::super::KiroSourceBackedScan, rows: u64)
     assert_eq!(ordering.rows, rows);
     assert_eq!(scan.decoded_rows, rows);
     assert!(ordering.max_key_batch_rows <= KIRO_KEY_BATCH_ROWS as u64);
+    assert!(ordering.max_key_batch_bytes <= KIRO_KEY_BATCH_BYTES as u64);
     assert!(ordering.max_hydration_batch_rows <= KIRO_HYDRATION_BATCH_ROWS as u64);
-    assert!(ordering.max_hydration_batch_bytes <= KIRO_HYDRATION_BATCH_BYTES);
+    assert!(ordering.max_hydration_batch_bytes <= KIRO_HYDRATION_SINGLETON_MAX_BYTES);
+    if ordering.max_hydration_batch_bytes > KIRO_HYDRATION_BATCH_BYTES {
+        assert_eq!(ordering.max_hydration_batch_rows, 1);
+    }
     assert_eq!(
         ordering.data_statements,
         ordering.phases * 4 + ordering.key_batches + ordering.hydration_batches
@@ -125,6 +130,93 @@ fn assert_bounded_ordering(scan: &super::super::KiroSourceBackedScan, rows: u64)
     assert!(ordering.data_statements < rows / 8);
     assert!(ordering.key_batches < rows / 8);
     assert!(ordering.hydration_batches < rows / 8);
+}
+
+#[test]
+fn kiro_valid_payload_over_rollover_target_is_one_finite_singleton() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("provider/kiro.sqlite");
+    let data_root = temp.path().join("ctx-data");
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "create table conversations_v2 (
+                 key text not null,
+                 conversation_id text not null,
+                 value text not null,
+                 created_at integer,
+                 updated_at integer
+             )",
+        )
+        .unwrap();
+    let payload = json!({
+        "history": [{
+            "user": {
+                "content": {"Prompt": {"prompt": "p".repeat(9 * 1024 * 1024)}},
+                "timestamp": "2026-08-02T00:00:00Z"
+            }
+        }]
+    })
+    .to_string();
+    assert!(payload.len() as u64 > KIRO_HYDRATION_BATCH_BYTES);
+    connection
+        .execute(
+            "insert into conversations_v2 values ('/workspace/large', 'large-conversation', ?1, 1, 1)",
+            [payload],
+        )
+        .unwrap();
+    drop(connection);
+
+    let (scan, emitted) =
+        scan_fixture(&database, &data_root, KIRO_ORDER_SCRATCH_MAX_BYTES).unwrap();
+    assert_eq!(emitted, 1);
+    assert_eq!(scan.ordering.max_hydration_batch_rows, 1);
+    assert!(scan.ordering.max_hydration_batch_bytes > KIRO_HYDRATION_BATCH_BYTES);
+    assert!(scan.ordering.max_hydration_batch_bytes <= KIRO_HYDRATION_SINGLETON_MAX_BYTES);
+}
+
+#[test]
+fn kiro_key_over_one_mib_is_rejected_before_key_batching() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("provider/kiro.sqlite");
+    let data_root = temp.path().join("ctx-data");
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "create table conversations_v2 (
+                 key text not null,
+                 conversation_id text not null,
+                 value text not null,
+                 created_at integer,
+                 updated_at integer
+             )",
+        )
+        .unwrap();
+    let key = format!("/workspace/{}", "k".repeat(1024 * 1024));
+    assert!(key.len() > KIRO_KEY_BATCH_BYTES);
+    assert!(key.len() > KIRO_NATIVE_KEY_MAX_BYTES);
+    connection
+        .execute(
+            "insert into conversations_v2 values (?1, 'oversized-key', ?2, 1, 1)",
+            params![
+                key,
+                json!({"history": [{"user": {"content": {"Prompt": {"prompt": "small"}}}}]})
+                    .to_string()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = scan_fixture(&database, &data_root, KIRO_ORDER_SCRATCH_MAX_BYTES).unwrap_err();
+    assert!(matches!(
+        error,
+        KiroSourceBackedErrorV0::UncertifiableRow {
+            reason: "Kiro conversation key exceeds the Core typed-key bound",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -210,16 +302,22 @@ fn kiro_bounded_scratch_enospc_is_typed_and_preserves_provider() {
 
     let error = scan_fixture(&database, &data_root, SCRATCH_LIMIT).unwrap_err();
 
-    match error {
-        KiroSourceBackedErrorV0::SqliteSource(SqliteSourceAccessError::Sqlite {
-            operation,
-            source: rusqlite::Error::SqliteFailure(error, _),
-        }) => {
-            assert_eq!(operation, "writing the private Kiro ordering index");
+    match &error {
+        KiroSourceBackedErrorV0::SqliteSource(
+            SqliteSourceAccessError::ScratchSqliteUnavailable {
+                operation,
+                source: rusqlite::Error::SqliteFailure(error, _),
+            },
+        ) => {
+            assert_eq!(*operation, "writing the private Kiro ordering index");
             assert_eq!(error.code, rusqlite::ErrorCode::DiskFull);
         }
         other => panic!("unexpected bounded Kiro scratch error: {other:?}"),
     }
+    assert_eq!(
+        super::super::registration::kiro_scan_error(error).kind,
+        crate::provider::source_backed::SourceBackedRouteErrorKind::Unavailable
+    );
     assert_eq!(directory_file_bytes(&provider), before);
     assert_eq!(
         fs::read_dir(data_root.join("tmp/provider-sqlite-scratch"))

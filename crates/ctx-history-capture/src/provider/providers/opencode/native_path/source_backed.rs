@@ -24,10 +24,7 @@ use super::{
         OpenCodeNativeEventKind, OpenCodeNativeFileTouch, OpenCodeNativeRejectionKind,
         OpenCodeNativeSchemaFamily,
     },
-    query::{
-        source_backed_decode_order, source_backed_event_order_sql, source_backed_event_sql,
-        source_backed_native_record_identity,
-    },
+    query::{source_backed_decode_order, source_backed_native_record_identity},
     schema::OpenCodeNativeSchema,
 };
 use crate::{
@@ -85,7 +82,8 @@ mod value;
 
 pub(crate) use adapter::register as register_source_backed_route;
 use ordering::{
-    stream_fallback_ordered_events, FallbackSortStats, OPENCODE_FALLBACK_SCRATCH_MAX_BYTES,
+    initialize_ordering_scratch, stream_fallback_ordered_events, stream_ordered_session_identities,
+    OPENCODE_FALLBACK_SCRATCH_MAX_BYTES,
 };
 use projection::{core_record, decode_source_event_row, retained_projection};
 use value::SqliteSourceValue;
@@ -261,40 +259,31 @@ fn scan_pinned_source_with_scratch_limit(
 ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
     let working = {
         let connection = sqlite_snapshot.connection()?;
-        let session_scan =
-            scan_session_evidence(connection, &observation.schema, &observation.source)?;
-        emit(OpenCodeScanOutput::Begin(observation.source.clone()))?;
-        let external_message_part =
-            observation.schema.family == OpenCodeNativeSchemaFamily::MessagePart;
-        let streamed = if external_message_part {
-            sqlite_snapshot.with_private_scratch_database(
-                "opencode-order-",
-                scratch_limit,
-                |scratch, scratch_path| {
-                    stream_logical_rows(
-                        connection,
-                        &observation.schema,
-                        dialect,
-                        path,
-                        &observation.source,
-                        session_scan,
-                        Some((scratch, scratch_path)),
-                        emit,
-                    )
-                },
-            )?
-        } else {
-            stream_logical_rows(
-                connection,
-                &observation.schema,
-                dialect,
-                path,
-                &observation.source,
-                session_scan,
-                None,
-                emit,
-            )?
-        };
+        let streamed = sqlite_snapshot.with_private_scratch_database(
+            "opencode-order-",
+            scratch_limit,
+            |scratch, scratch_path| {
+                initialize_ordering_scratch(scratch)?;
+                let session_scan = scan_session_evidence(
+                    connection,
+                    scratch,
+                    &observation.schema,
+                    &observation.source,
+                )?;
+                emit(OpenCodeScanOutput::Begin(observation.source.clone()))?;
+                stream_logical_rows(
+                    connection,
+                    &observation.schema,
+                    dialect,
+                    path,
+                    &observation.source,
+                    session_scan,
+                    scratch,
+                    scratch_path,
+                    emit,
+                )
+            },
+        )?;
         let schema_evidence = relevant_schema_evidence(&observation.schema);
         let logical_snapshot = SqliteLogicalSnapshot::new(
             PARSER_REVISION,
@@ -343,16 +332,10 @@ fn stream_logical_rows(
     path: &Path,
     source: &SourceKey,
     session_scan: SessionScanState,
-    fallback_scratch: Option<(&Connection, &Path)>,
+    scratch: &Connection,
+    scratch_path: &Path,
     emit: &mut dyn FnMut(OpenCodeScanOutput) -> OpenCodeSourceBackedResult<()>,
 ) -> OpenCodeSourceBackedResult<StreamedLogicalRows> {
-    let external_message_part = fallback_scratch.is_some();
-    if external_message_part && schema.family != OpenCodeNativeSchemaFamily::MessagePart {
-        return Err(CaptureError::SystemInvariant(
-            "OpenCode fallback ordering scratch does not match its schema route",
-        )
-        .into());
-    }
     let session_by_id_sql = format!("{} where id = ?1", session_source_sql(schema));
     let mut session_by_id = connection.prepare(&session_by_id_sql)?;
     let mut parent_by_id = connection.prepare(&session_parent_sql(schema))?;
@@ -450,31 +433,14 @@ fn stream_logical_rows(
             )?;
             emit(OpenCodeScanOutput::Document(document))
         };
-        if let Some((scratch, scratch_path)) = fallback_scratch {
-            stream_fallback_ordered_events(
-                connection,
-                scratch,
-                scratch_path,
-                schema,
-                dialect,
-                &mut consume_event,
-            )?
-        } else if schema.family == OpenCodeNativeSchemaFamily::MessagePart {
-            return Err(CaptureError::SystemInvariant(
-                "OpenCode message-part ordering lacks its private scratch database",
-            )
-            .into());
-        } else {
-            let mut sql = source_backed_event_sql(schema);
-            sql.push_str(source_backed_event_order_sql(schema));
-            let mut statement = connection.prepare(&sql)?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                consume_event(decode_source_event_row(row, schema, dialect, None)?)?;
-            }
-            drop(rows);
-            FallbackSortStats::default()
-        }
+        stream_fallback_ordered_events(
+            connection,
+            scratch,
+            scratch_path,
+            schema,
+            dialect,
+            &mut consume_event,
+        )?
     };
     let fallback_payload_hydrations = fallback_stats.rows;
     Ok(StreamedLogicalRows {
@@ -488,7 +454,7 @@ fn stream_logical_rows(
             max_session_ancestry_depth,
             fallback_payload_hydrations,
             max_buffered_payload_rows: fallback_stats.max_hydration_batch_rows,
-            fallback_disk_sort: external_message_part,
+            fallback_disk_sort: true,
             fallback_sort_rows: fallback_stats.rows,
             fallback_scratch_bytes: fallback_stats.scratch_bytes,
             ordering_data_statements: fallback_stats.data_statements,
@@ -502,25 +468,38 @@ fn stream_logical_rows(
 
 fn scan_session_evidence(
     connection: &Connection,
+    scratch: &Connection,
     schema: &OpenCodeNativeSchema,
     source: &SourceKey,
 ) -> OpenCodeSourceBackedResult<SessionScanState> {
     let mut content_hasher = Sha256::new();
     content_hasher.update(b"ctx-opencode-family-logical-content-v2\0");
-    let mut sql = session_source_sql(schema);
-    sql.push_str(" order by id collate binary");
-    let mut statement = connection.prepare(&sql)?;
+    let session_by_id_sql = format!("{} where id = ?1", session_source_sql(schema));
+    let mut session_by_id = connection.prepare(&session_by_id_sql)?;
     let mut parent_by_id = connection.prepare(&session_parent_sql(schema))?;
-    let mut rows = statement.query([])?;
     let mut session_rows_scanned = 0_u64;
     let mut max_session_ancestry_depth = 0_u64;
-    while let Some(row) = rows.next()? {
-        let (identity, raw) = decode_session_row(row)?;
-        let (session, ancestry_depth) = source_session(&mut parent_by_id, source, identity, raw)?;
+    stream_ordered_session_identities(connection, scratch, &mut |identity| {
+        let mut rows = session_by_id.query([identity])?;
+        let Some(row) = rows.next()? else {
+            return Err(OpenCodeSourceBackedError::MissingSession(
+                identity.to_owned(),
+            ));
+        };
+        let (actual_identity, raw) = decode_session_row(row)?;
+        if actual_identity != identity {
+            return Err(OpenCodeSourceBackedError::MissingSession(
+                identity.to_owned(),
+            ));
+        }
+        drop(rows);
+        let (session, ancestry_depth) =
+            source_session(&mut parent_by_id, source, actual_identity, raw)?;
         hash_session(&mut content_hasher, &session);
         session_rows_scanned = checked_add(session_rows_scanned, 1)?;
         max_session_ancestry_depth = max_session_ancestry_depth.max(ancestry_depth);
-    }
+        Ok(())
+    })?;
     Ok(SessionScanState {
         content_hasher,
         session_rows_scanned,
@@ -760,6 +739,18 @@ fn open_root_authorized_snapshot_retained_with_hook(
         .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
     connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    // Every corpus-sized ordering/index is externalized below. Disable
+    // SQLite's query-time automatic indexes so an accepted no-index schema
+    // cannot silently rebuild source-cardinality state in temp_store=MEMORY.
+    connection.pragma_update(None, "automatic_index", "OFF")?;
+    let automatic_index: i64 =
+        connection.pragma_query_value(None, "automatic_index", |row| row.get(0))?;
+    if automatic_index != 0 {
+        return Err(SqliteSourceAccessError::SnapshotUnavailable {
+            reason: "OpenCode source automatic-index suppression was not enforced".to_owned(),
+        }
+        .into());
+    }
     Ok(OpenCodeAuthorizedSnapshot {
         source_root,
         sqlite_authority,

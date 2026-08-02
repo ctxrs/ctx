@@ -490,22 +490,6 @@ fn validate_native_ordering_rows(
             "OpenCode NativePath {table} contains a non-integer native ordering value"
         )));
     }
-    if family == OpenCodeNativeSchemaFamily::SessionMessageSeq {
-        let duplicate_order: i64 = conn.query_row(
-            "select exists(
-                 select 1 from session_message
-                 group by session_id, seq
-                 having count(*) > 1
-             )",
-            [],
-            |row| row.get(0),
-        )?;
-        if duplicate_order != 0 {
-            return Err(CaptureError::InvalidPayload(
-                "OpenCode NativePath explicit session_message sequence is not unique".to_owned(),
-            ));
-        }
-    }
     Ok(())
 }
 
@@ -549,7 +533,7 @@ fn message_part_has_unsafe_relationships(conn: &Connection) -> Result<bool> {
 
 fn native_validation_traversals(family: OpenCodeNativeSchemaFamily) -> u64 {
     match family {
-        OpenCodeNativeSchemaFamily::SessionMessageSeq => 3,
+        OpenCodeNativeSchemaFamily::SessionMessageSeq => 2,
         OpenCodeNativeSchemaFamily::MessagePart => 4,
         OpenCodeNativeSchemaFamily::SessionMessageSynthesizedSeq
         | OpenCodeNativeSchemaFamily::SessionEntry

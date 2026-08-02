@@ -14,7 +14,10 @@ fn assert_batched_ordering(scan: &OpenCodeSourceBackedScan, rows: u64) {
     assert_eq!(scan.bounds.fallback_payload_hydrations, rows);
     assert!(scan.bounds.max_sort_key_batch_rows <= OPENCODE_HYDRATION_BATCH_ROWS as u64);
     assert!(scan.bounds.max_buffered_payload_rows <= OPENCODE_HYDRATION_BATCH_ROWS as u64);
-    assert!(scan.bounds.max_buffered_payload_bytes <= OPENCODE_HYDRATION_BATCH_BYTES);
+    assert!(scan.bounds.max_buffered_payload_bytes <= OPENCODE_HYDRATION_SINGLETON_MAX_BYTES);
+    if scan.bounds.max_buffered_payload_bytes > OPENCODE_HYDRATION_BATCH_BYTES {
+        assert_eq!(scan.bounds.max_buffered_payload_rows, 1);
+    }
     assert_eq!(
         scan.bounds.ordering_data_statements,
         2 + scan.bounds.ordering_sort_key_batches + scan.bounds.ordering_hydration_batches
@@ -24,6 +27,227 @@ fn assert_batched_ordering(scan: &OpenCodeSourceBackedScan, rows: u64) {
         assert!(scan.bounds.ordering_sort_key_batches < rows / 8);
         assert!(scan.bounds.ordering_hydration_batches < rows / 8);
     }
+}
+
+fn create_noindex_nocase_sequence_fixture(
+    path: &Path,
+    sessions: u64,
+    rows: u64,
+    reverse_insertion: bool,
+) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "create table session (
+                 id text collate nocase primary key,
+                 parent_id text,
+                 directory text,
+                 branch text,
+                 agent text,
+                 time_created integer not null,
+                 time_updated integer not null
+             );
+             create table session_message (
+                 id text primary key,
+                 session_id text not null,
+                 type text not null,
+                 seq integer not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );",
+        )
+        .unwrap();
+    let transaction = connection.transaction().unwrap();
+    for insertion in 0..sessions {
+        let index = if reverse_insertion {
+            sessions - insertion - 1
+        } else {
+            insertion
+        };
+        let prefix = if index.is_multiple_of(2) { "z" } else { "A" };
+        transaction
+            .execute(
+                "insert into session values (?1, null, '/tmp/project', 'main', 'build', ?2, ?2)",
+                params![
+                    format!("{prefix}-session-{index:04}"),
+                    i64::try_from(index).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    for insertion in 0..rows {
+        let logical = if reverse_insertion {
+            rows - insertion - 1
+        } else {
+            insertion
+        };
+        let session_index = logical % sessions;
+        let sequence = logical / sessions;
+        let prefix = if session_index.is_multiple_of(2) {
+            "z"
+        } else {
+            "A"
+        };
+        transaction
+            .execute(
+                "insert into session_message values (?1, ?2, 'message', ?3, ?4, ?4, ?5)",
+                params![
+                    format!("event-{logical:08}"),
+                    format!("{prefix}-session-{session_index:04}"),
+                    i64::try_from(sequence).unwrap(),
+                    i64::try_from(logical).unwrap(),
+                    json!({
+                        "role": "user",
+                        "time": {"created": logical},
+                        "text": format!("deterministic no-index event {logical}")
+                    })
+                    .to_string(),
+                ],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+}
+
+fn explain_details(connection: &Connection, sql: &str) -> Vec<String> {
+    connection
+        .prepare(&format!("explain query plan {sql}"))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+#[test]
+fn noindex_nocase_direct_schema_uses_bounded_binary_ordering_deterministically() {
+    const SESSIONS: u64 = 256;
+    const ROWS: u64 = 4_096;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let forward = temp.path().join("forward/opencode.sqlite");
+    let reverse = temp.path().join("reverse/opencode.sqlite");
+    create_noindex_nocase_sequence_fixture(&forward, SESSIONS, ROWS, false);
+    create_noindex_nocase_sequence_fixture(&reverse, SESSIONS, ROWS, true);
+
+    let connection = Connection::open(&forward).unwrap();
+    let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+    let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
+    assert_eq!(schema.family, OpenCodeNativeSchemaFamily::SessionMessageSeq);
+    let mut legacy_event_sql = source_backed_event_sql(&schema);
+    legacy_event_sql.push_str(source_backed_event_order_sql(&schema));
+    let legacy_event_plan = explain_details(&connection, &legacy_event_sql);
+    let mut legacy_session_sql = session_source_sql(&schema);
+    legacy_session_sql.push_str(" order by id collate binary");
+    let legacy_session_plan = explain_details(&connection, &legacy_session_sql);
+    let legacy_duplicate_plan = explain_details(
+        &connection,
+        "select session_id, seq from session_message group by session_id, seq",
+    );
+    assert!(legacy_event_plan
+        .iter()
+        .any(|step| step.contains("USE TEMP B-TREE")));
+    assert!(legacy_session_plan
+        .iter()
+        .any(|step| step.contains("USE TEMP B-TREE")));
+    assert!(legacy_duplicate_plan
+        .iter()
+        .any(|step| step.contains("USE TEMP B-TREE")));
+    for plan in [
+        explain_details(&connection, "select rowid, id from session"),
+        explain_details(&connection, &source_backed_fallback_sort_key_sql(&schema)),
+    ] {
+        assert!(
+            plan.iter()
+                .all(|step| { !step.contains("USE TEMP B-TREE") && !step.contains("AUTOMATIC") }),
+            "bounded key discovery unexpectedly requested ambient temp state: {plan:?}"
+        );
+    }
+    drop(connection);
+
+    let (_, forward_scan, forward_records) = scan_current_schema_result(
+        &forward,
+        &temp.path().join("forward-data"),
+        OPENCODE_FALLBACK_SCRATCH_MAX_BYTES,
+    )
+    .unwrap();
+    let (_, reverse_scan, reverse_records) = scan_current_schema_result(
+        &reverse,
+        &temp.path().join("reverse-data"),
+        OPENCODE_FALLBACK_SCRATCH_MAX_BYTES,
+    )
+    .unwrap();
+    assert_batched_ordering(&forward_scan, ROWS);
+    assert_batched_ordering(&reverse_scan, ROWS);
+    assert_eq!(forward_scan.certificate, reverse_scan.certificate);
+    assert_eq!(forward_records, reverse_records);
+}
+
+#[test]
+fn duplicate_sequence_check_uses_external_binary_ordering() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_noindex_nocase_sequence_fixture(&database, 2, 4, false);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "update session_message set seq = 0 where id = 'event-00000002'",
+            [],
+        )
+        .unwrap();
+    let schema = OpenCodeNativeSchema::probe(
+        &connection,
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+    )
+    .unwrap();
+    assert_eq!(schema.family, OpenCodeNativeSchemaFamily::SessionMessageSeq);
+    drop(connection);
+
+    let error = scan_current_schema_result(
+        &database,
+        &temp.path().join("data"),
+        OPENCODE_FALLBACK_SCRATCH_MAX_BYTES,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        OpenCodeSourceBackedError::Capture(CaptureError::InvalidPayload(detail))
+            if detail.contains("sequence is not unique")
+    ));
+}
+
+#[test]
+fn oversized_valid_payload_is_one_finite_hydration_singleton() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_synthetic_fixture(&database, 0);
+    let payload = json!({
+        "role": "user",
+        "time": {"created": 1},
+        "text": "x".repeat(9 * 1024 * 1024),
+    })
+    .to_string();
+    assert!(payload.len() as u64 > OPENCODE_HYDRATION_BATCH_BYTES);
+    Connection::open(&database)
+        .unwrap()
+        .execute(
+            "insert into session_message values ('large-event', 'session-1', 'message', 0, 1, 1, ?1)",
+            [payload],
+        )
+        .unwrap();
+
+    let (_, scan, records) = scan_current_schema_result(
+        &database,
+        &temp.path().join("data"),
+        OPENCODE_FALLBACK_SCRATCH_MAX_BYTES,
+    )
+    .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_batched_ordering(&scan, 1);
+    assert_eq!(scan.bounds.max_buffered_payload_rows, 1);
+    assert!(scan.bounds.max_buffered_payload_bytes > OPENCODE_HYDRATION_BATCH_BYTES);
+    assert!(scan.bounds.max_buffered_payload_bytes <= OPENCODE_HYDRATION_SINGLETON_MAX_BYTES);
 }
 
 fn drop_message_part_stream_indexes(path: &Path) {
@@ -268,16 +492,22 @@ fn fallback_scratch_enospc_is_typed_and_preserves_the_provider() {
 
     let error = scan_current_schema_result(&database, &data_root, SCRATCH_LIMIT).unwrap_err();
 
-    match error {
-        OpenCodeSourceBackedError::SqliteSource(SqliteSourceAccessError::Sqlite {
-            operation,
-            source: rusqlite::Error::SqliteFailure(error, _),
-        }) => {
-            assert_eq!(operation, "writing the private OpenCode ordering index");
+    match &error {
+        OpenCodeSourceBackedError::SqliteSource(
+            SqliteSourceAccessError::ScratchSqliteUnavailable {
+                operation,
+                source: rusqlite::Error::SqliteFailure(error, _),
+            },
+        ) => {
+            assert!(operation.starts_with("writing the private OpenCode"));
             assert_eq!(error.code, rusqlite::ErrorCode::DiskFull);
         }
         other => panic!("unexpected bounded-scratch error: {other:?}"),
     }
+    assert_eq!(
+        super::super::adapter::route_error(error).kind,
+        crate::provider::source_backed::SourceBackedRouteErrorKind::Unavailable
+    );
     assert_eq!(directory_file_bytes(&provider), before);
     let scratch_root = data_root.join("tmp/provider-sqlite-scratch");
     assert_eq!(fs::read_dir(scratch_root).unwrap().count(), 0);
@@ -313,14 +543,18 @@ fn unwritable_fallback_scratch_root_is_typed_and_preserves_the_provider() {
     )
     .unwrap_err();
 
-    match error {
-        OpenCodeSourceBackedError::SqliteSource(SqliteSourceAccessError::Io {
-            operation, ..
-        }) => assert_eq!(
-            operation,
+    match &error {
+        OpenCodeSourceBackedError::SqliteSource(
+            SqliteSourceAccessError::ScratchIoUnavailable { operation, .. },
+        ) => assert_eq!(
+            *operation,
             "creating the private provider SQLite scratch root"
         ),
         other => panic!("unexpected unavailable-scratch error: {other:?}"),
     }
+    assert_eq!(
+        super::super::adapter::route_error(error).kind,
+        crate::provider::source_backed::SourceBackedRouteErrorKind::Unavailable
+    );
     assert_eq!(directory_file_bytes(&provider), before);
 }
