@@ -8,6 +8,10 @@ mod commercial_deletion;
 mod commercial_lifecycle;
 mod commercial_production_record;
 mod credential_vault;
+#[allow(
+    dead_code,
+    reason = "the target-aware projector is wired by follow-up CLI hydration plumbing"
+)]
 pub(crate) mod evidence_preview;
 mod graph_key_deletion;
 mod helper_command;
