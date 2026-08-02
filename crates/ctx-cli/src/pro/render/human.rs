@@ -3,8 +3,13 @@ use ctx_pro_host_protocol::{BlameResult, ResolvedBlameTarget};
 use crate::ui::{Document, RenderContext};
 
 use super::{commit, evidence, file, pull_request, target};
+use crate::pro::evidence_preview::EvidencePreviewModel;
 
-pub(super) fn render(result: &BlameResult, context: &RenderContext) -> Document {
+pub(super) fn render(
+    result: &BlameResult,
+    context: &RenderContext,
+    previews: Option<&EvidencePreviewModel>,
+) -> Document {
     let mut document = Document::new();
     target::render(&mut document, context, result);
     document.push_blank();
@@ -19,5 +24,8 @@ pub(super) fn render(result: &BlameResult, context: &RenderContext) -> Document 
     }
     evidence::render_continuation(&mut document, context, result);
     evidence::render_list(&mut document, context, result);
+    if let Some(previews) = previews {
+        evidence::render_previews(&mut document, context, previews);
+    }
     document
 }

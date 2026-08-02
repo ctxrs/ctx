@@ -1,8 +1,11 @@
-use std::io::Write as _;
+use std::{
+    io::{self, Write as _},
+    sync::{Arc, Mutex},
+};
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, EventIdentityInput, NativeItemKey, NativeSessionKey,
-    SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
+    RepositoryFileObservationKind, SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
 };
 use ctx_pro_host_protocol::{
     AgentAttribution, BlameContinuation, BlameMatch, BlameResult, CommitBlameMatch, CommitFactType,
@@ -16,7 +19,12 @@ use unicode_width::UnicodeWidthStr as _;
 
 use super::{
     layout::{enum_heading, enum_text},
-    render_blame_document,
+    print_blame_result, print_blame_result_with_evidence_preview, render_blame_document,
+    render_blame_document_with_evidence_preview,
+};
+use crate::pro::evidence_preview::{
+    EvidencePreview, EvidencePreviewKind, EvidencePreviewModel,
+    MAX_EVIDENCE_PREVIEW_AGGREGATE_BYTES, MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
 };
 use crate::ui::{ColorMode, Document, RenderContext, StreamKind, TestContext, Token};
 
@@ -24,8 +32,96 @@ fn context(width: usize) -> RenderContext {
     RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never))
 }
 
+#[derive(Clone, Default)]
+struct SharedWriter {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SharedWriter {
+    fn text(&self) -> String {
+        String::from_utf8(self.bytes.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl io::Write for SharedWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.bytes
+            .lock()
+            .map_err(|_| io::Error::other("shared preview writer was poisoned"))?
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 fn render_plain(result: &BlameResult, width: usize) -> String {
     render_blame_document(result, &context(width)).render_plain()
+}
+
+fn preview_result(file: bool, evidence_count: u32) -> BlameResult {
+    let evidence = (1..=evidence_count).map(event_evidence).collect();
+    if file {
+        BlameResult {
+            target: ResolvedBlameTarget::File {
+                path: "src/lib.rs".to_owned(),
+                repository: repository(),
+                requested_lines: None,
+            },
+            git_snapshot: Some(GitSnapshot {
+                head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                worktree_status: WorktreeStatus::Clean,
+            }),
+            matches: Vec::new(),
+            evidence,
+            next: None,
+        }
+    } else {
+        BlameResult {
+            target: ResolvedBlameTarget::Commit {
+                commit: resource(
+                    "commit:0123456789abcdef0123456789abcdef01234567",
+                    ResourceKind::Commit,
+                    "0123456789abcdef0123456789abcdef01234567",
+                ),
+                repository: repository(),
+            },
+            git_snapshot: None,
+            matches: Vec::new(),
+            evidence,
+            next: None,
+        }
+    }
+}
+
+fn preview(
+    result: &BlameResult,
+    numbers: Vec<u32>,
+    kind: EvidencePreviewKind,
+    excerpt: impl Into<String>,
+) -> EvidencePreview {
+    let citation = result
+        .evidence
+        .iter()
+        .find(|evidence| Some(evidence.number) == numbers.first().copied())
+        .unwrap();
+    EvidencePreview {
+        evidence_numbers: numbers,
+        event_id: citation.citation.event_id,
+        event_sequence: citation.citation.event_sequence,
+        kind,
+        excerpt: excerpt.into(),
+    }
+}
+
+fn render_preview_plain(
+    result: &BlameResult,
+    model: &EvidencePreviewModel,
+    width: usize,
+) -> String {
+    render_blame_document_with_evidence_preview(result, &context(width), Some(model)).render_plain()
 }
 
 fn resource(id: &str, kind: ResourceKind, display: &str) -> ResourceRef {
@@ -636,5 +732,221 @@ fn wire_enums_are_humanized_in_human_output() {
     assert_eq!(
         enum_heading(PullRequestCommitRelationship::ContainsCommit),
         "Contains commit"
+    );
+}
+
+#[test]
+fn opted_in_file_and_commit_previews_follow_their_numbered_evidence() {
+    for file in [true, false] {
+        let result = preview_result(file, 1);
+        let kind = if file {
+            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified)
+        } else {
+            EvidencePreviewKind::Commit
+        };
+        let model = EvidencePreviewModel {
+            previews: vec![preview(&result, vec![1], kind, "exact target-bearing unit")],
+        };
+        let rendered = render_preview_plain(&result, &model, 80);
+        let evidence = rendered.find("\nEvidence\n").unwrap();
+        let preview = rendered.find("\nEvidence preview\n").unwrap();
+
+        assert!(evidence < preview, "{rendered}");
+        assert!(rendered.contains("explicitly requested"), "{rendered}");
+        assert!(rendered.contains("Evidence citations above"), "{rendered}");
+        assert!(rendered.contains("  [1]\n"), "{rendered}");
+        assert!(
+            rendered.contains("      exact target-bearing unit"),
+            "{rendered}"
+        );
+        if file {
+            assert!(rendered.contains("Exact cited file evidence (modified)"));
+        } else {
+            assert!(rendered.contains("Exact cited commit evidence"));
+        }
+    }
+}
+
+#[test]
+fn requested_but_unavailable_preview_is_content_free_and_default_output_is_unchanged() {
+    let result = preview_result(false, 0);
+    let default = render_blame_document(&result, &context(80)).render_plain();
+    let requested = render_preview_plain(
+        &result,
+        &EvidencePreviewModel {
+            previews: Vec::new(),
+        },
+        80,
+    );
+
+    assert!(!default.contains("Evidence preview"));
+    assert!(requested.starts_with(default.trim_end()), "{requested}");
+    assert!(requested.contains("Exact cited local-history evidence was requested"));
+    assert!(requested.contains("unavailable"));
+    assert!(requested.contains("result."));
+    assert!(!requested.contains("generation"));
+    assert!(!requested.contains("digest"));
+}
+
+#[test]
+fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_truncation() {
+    let result = preview_result(true, 5);
+    let exact = "Z".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES);
+    let mut previews = vec![preview(
+        &result,
+        vec![1, 2],
+        EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+        exact.clone(),
+    )];
+    for number in 3..=5 {
+        previews.push(preview(
+            &result,
+            vec![number],
+            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+            exact.clone(),
+        ));
+    }
+    let model = EvidencePreviewModel { previews };
+    let styled_context =
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 32).color(ColorMode::Always));
+    let mut section = Document::new();
+    super::evidence::render_previews(&mut section, &styled_context, &model);
+    let styled = section.render(&styled_context);
+    let plain = section.render_plain();
+
+    assert!(styled.len() <= MAX_EVIDENCE_PREVIEW_AGGREGATE_BYTES);
+    assert_eq!(plain.matches("    Event\n").count(), 3);
+    assert!(plain.contains("  [1] [2]\n"), "{plain}");
+    assert_eq!(
+        plain.chars().filter(|character| *character == 'Z').count(),
+        3 * MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
+        "one or more exact 512-byte excerpts were truncated"
+    );
+    assert!(!plain.contains("  [5]\n"), "fourth preview was rendered");
+}
+
+#[test]
+fn sanitizer_expansion_omits_the_complete_item_instead_of_truncating_it() {
+    let result = preview_result(true, 1);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+            "\0".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES),
+        )],
+    };
+    let rendered = render_preview_plain(&result, &model, 80);
+
+    assert!(
+        rendered.contains("requested but is unavailable"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("    Event\n"), "{rendered}");
+    assert!(!rendered.contains("\\u{0000}"), "{rendered}");
+}
+
+#[test]
+fn preview_is_safe_and_stable_at_supported_widths_and_across_color() {
+    let result = preview_result(true, 1);
+    let family = "👨‍👩‍👧‍👦";
+    let persian = "می‌روم";
+    let combining = "e\u{0301}";
+    let excerpt = format!("{family} {persian} {combining} bad\u{202e}name\u{1b}\tend");
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+            excerpt,
+        )],
+    };
+
+    for width in [32, 48, 80, 120] {
+        let plain_context = context(width);
+        let styled_context = RenderContext::for_test(
+            TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Always),
+        );
+        let plain_document =
+            render_blame_document_with_evidence_preview(&result, &plain_context, Some(&model));
+        let styled_document =
+            render_blame_document_with_evidence_preview(&result, &styled_context, Some(&model));
+        let plain = plain_document.render_plain();
+        let styled = styled_document.render(&styled_context);
+        let mut stripped = anstream::StripStream::new(Vec::new());
+        stripped.write_all(styled.as_bytes()).unwrap();
+        let stripped = String::from_utf8(stripped.into_inner()).unwrap();
+
+        assert_eq!(stripped, plain, "width {width}");
+        for legitimate in [family, persian, combining] {
+            assert!(plain.contains(legitimate), "width {width}: {plain}");
+        }
+        for visible in ["\\u{202e}", "\\x1b", "\\t"] {
+            assert!(plain.contains(visible), "width {width}: {plain}");
+        }
+        assert!(!plain.contains('\u{202e}'));
+        assert!(!plain.contains('\u{1b}'));
+        let event_id = result.evidence[0].citation.event_id.to_string();
+        let preview_section = plain.split("\nEvidence preview\n").nth(1).unwrap();
+        for line in preview_section.lines() {
+            assert!(
+                line.width() < width || line.contains(&event_id),
+                "width {width} overflow: {line:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn preview_bytes_are_accounted_and_json_bytes_remain_exactly_unchanged() {
+    let result = preview_result(false, 1);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            EvidencePreviewKind::Commit,
+            "exact commit evidence",
+        )],
+    };
+    let default_bytes =
+        crate::ui::canonical_human_output_bytes(|context| render_blame_document(&result, context));
+
+    for color in [ColorMode::Never, ColorMode::Always] {
+        let writer = SharedWriter::default();
+        let captured = writer.clone();
+        let stdout_context =
+            RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 80).color(color));
+        let stderr_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stderr));
+        let mut ui =
+            crate::ui::Ui::with_writers(writer, stdout_context, io::sink(), stderr_context);
+        let measured =
+            print_blame_result_with_evidence_preview(&result, false, &model, &mut ui).unwrap();
+        ui.flush().unwrap();
+        assert!(captured.text().contains("Evidence preview"));
+        assert!(measured > default_bytes);
+        assert_eq!(
+            measured,
+            crate::ui::canonical_human_output_bytes(|context| {
+                render_blame_document_with_evidence_preview(&result, context, Some(&model))
+            })
+        );
+    }
+
+    let writer = SharedWriter::default();
+    let captured = writer.clone();
+    let pipe = RenderContext::for_test(TestContext::pipe(StreamKind::Stdout));
+    let mut ui = crate::ui::Ui::with_writers(writer, pipe, io::sink(), pipe);
+    let measured =
+        print_blame_result_with_evidence_preview(&result, true, &model, &mut ui).unwrap();
+    ui.flush().unwrap();
+    let mut expected = serde_json::to_string_pretty(&result).unwrap();
+    expected.push('\n');
+    assert_eq!(captured.text(), expected);
+    assert_eq!(measured, expected.len());
+
+    let mut default_ui = crate::ui::Ui::with_writers(io::sink(), pipe, io::sink(), pipe);
+    assert_eq!(
+        print_blame_result(&result, true, &mut default_ui).unwrap(),
+        expected.len()
     );
 }

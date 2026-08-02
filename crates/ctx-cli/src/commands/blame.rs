@@ -14,8 +14,10 @@ use crate::{
         ProHostOperationV1, ProSurfaceV1,
     },
     output::JsonOutputFormat,
-    pro::{print_blame_result, DEFAULT_BLAME_LIMIT},
+    pro::{print_blame_result, print_blame_result_with_evidence_preview, DEFAULT_BLAME_LIMIT},
 };
+
+mod evidence_hydration;
 
 #[derive(Debug, Args)]
 #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
@@ -72,6 +74,12 @@ pub(crate) struct BlameArgs {
         requires = "target"
     )]
     pub(crate) format: JsonOutputFormat,
+    #[arg(
+        long,
+        requires = "target",
+        help = "Include exact cited local-history evidence in human output for this invocation"
+    )]
+    pub(crate) evidence_preview: bool,
 }
 
 impl BlameArgs {
@@ -84,9 +92,9 @@ impl BlameArgs {
         }
     }
 
-    fn into_query(self) -> Result<(BlameTarget, u32, Option<String>, bool)> {
+    fn into_query(self) -> Result<(BlameTarget, u32, Option<String>, bool, bool)> {
         if let Some(target) = self.explicit_target {
-            return Ok(explicit_query(target));
+            return validated_query(explicit_query(target));
         }
         let target = self
             .target
@@ -119,7 +127,13 @@ impl BlameArgs {
                 repository: self.repository,
             },
         };
-        Ok((target, self.limit, self.cursor, self.format.is_json()))
+        validated_query((
+            target,
+            self.limit,
+            self.cursor,
+            self.format.is_json(),
+            self.evidence_preview,
+        ))
     }
 }
 
@@ -171,6 +185,11 @@ pub(crate) struct FileBlameArgs {
     pub(crate) cursor: Option<String>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,
+    #[arg(
+        long,
+        help = "Include exact cited local-history evidence in human output for this invocation"
+    )]
+    pub(crate) evidence_preview: bool,
 }
 
 #[derive(Debug, Args)]
@@ -197,6 +216,11 @@ pub(crate) struct CommitBlameArgs {
     pub(crate) cursor: Option<String>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,
+    #[arg(
+        long,
+        help = "Include exact cited local-history evidence in human output for this invocation"
+    )]
+    pub(crate) evidence_preview: bool,
 }
 
 #[derive(Debug, Args)]
@@ -223,9 +247,14 @@ pub(crate) struct PullRequestBlameArgs {
     pub(crate) cursor: Option<String>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,
+    #[arg(
+        long,
+        help = "Include exact cited local-history evidence in human output for this invocation"
+    )]
+    pub(crate) evidence_preview: bool,
 }
 
-fn explicit_query(target: BlameTargetArgs) -> (BlameTarget, u32, Option<String>, bool) {
+fn explicit_query(target: BlameTargetArgs) -> (BlameTarget, u32, Option<String>, bool, bool) {
     match target {
         BlameTargetArgs::File(args) => (
             BlameTarget::File {
@@ -236,6 +265,7 @@ fn explicit_query(target: BlameTargetArgs) -> (BlameTarget, u32, Option<String>,
             args.limit,
             args.cursor,
             args.format.is_json(),
+            args.evidence_preview,
         ),
         BlameTargetArgs::Commit(args) => (
             BlameTarget::Commit {
@@ -245,6 +275,7 @@ fn explicit_query(target: BlameTargetArgs) -> (BlameTarget, u32, Option<String>,
             args.limit,
             args.cursor,
             args.format.is_json(),
+            args.evidence_preview,
         ),
         BlameTargetArgs::PullRequest(args) => (
             BlameTarget::PullRequest {
@@ -254,8 +285,20 @@ fn explicit_query(target: BlameTargetArgs) -> (BlameTarget, u32, Option<String>,
             args.limit,
             args.cursor,
             args.format.is_json(),
+            args.evidence_preview,
         ),
     }
+}
+
+fn validated_query(
+    query: (BlameTarget, u32, Option<String>, bool, bool),
+) -> Result<(BlameTarget, u32, Option<String>, bool, bool)> {
+    if query.3 && query.4 {
+        return Err(anyhow!(
+            "invalid_request: --evidence-preview is only available for human output; remove it or use --format text"
+        ));
+    }
+    Ok(query)
 }
 
 fn classify_target(target: &str) -> Option<BlameTargetType> {
@@ -294,7 +337,33 @@ pub(crate) fn run(
     local_usage: &mut crate::local_usage::CliUsage,
     ui: &mut crate::ui::Ui,
 ) -> Result<()> {
-    let (target, limit, cursor, json) = args.into_query()?;
+    run_with(
+        args,
+        data_root,
+        local_usage,
+        ui,
+        crate::pro::blame,
+        evidence_hydration::hydrate_evidence_previews,
+    )
+}
+
+fn run_with(
+    args: BlameArgs,
+    data_root: PathBuf,
+    local_usage: &mut crate::local_usage::CliUsage,
+    ui: &mut crate::ui::Ui,
+    blame: impl FnOnce(
+        &std::path::Path,
+        BlameTarget,
+        u32,
+        Option<String>,
+    ) -> Result<ctx_pro_host_protocol::BlameResult>,
+    hydrate: impl FnOnce(
+        &std::path::Path,
+        &ctx_pro_host_protocol::BlameResult,
+    ) -> crate::pro::evidence_preview::EvidencePreviewModel,
+) -> Result<()> {
+    let (target, limit, cursor, json, evidence_preview) = args.into_query()?;
     target
         .validate()
         .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
@@ -305,13 +374,16 @@ pub(crate) fn run(
     let target_kind = ProBlameTargetV1::from_protocol(&target);
     let mut telemetry = ProBlameTelemetryV1::new(Some(target_kind), ProSurfaceV1::Cli);
     let result = (|| {
-        let result = present_blame_result(
-            crate::pro::blame(&data_root, target, limit, cursor),
-            json,
-            ui,
-        )?;
+        let result = present_blame_result(blame(&data_root, target, limit, cursor), json, ui)?;
         telemetry.complete(result.matches.len(), result.next.is_some());
-        emit_blame_result(&result, json, local_usage, ui, print_blame_result)?;
+        let previews = evidence_preview.then(|| hydrate(&data_root, &result));
+        if let Some(previews) = previews.as_ref() {
+            emit_blame_result(&result, json, local_usage, ui, |result, json, ui| {
+                print_blame_result_with_evidence_preview(result, json, previews, ui)
+            })?;
+        } else {
+            emit_blame_result(&result, json, local_usage, ui, print_blame_result)?;
+        }
         let eligible = referral_cta_eligible(&result, json, interactive_human);
         crate::pro::show_cta_once(&data_root, eligible, ui);
         Ok(())
@@ -758,6 +830,108 @@ mod tests {
                 panic!("expected blame command");
             };
             assert_eq!(args.into_query().unwrap().0, expected, "{arguments:?}");
+        }
+    }
+
+    #[test]
+    fn evidence_preview_is_explicit_and_available_on_universal_and_nested_targets() {
+        for arguments in [
+            &["ctx", "blame", "src/lib.rs", "--evidence-preview"][..],
+            &["ctx", "blame", "file", "src/lib.rs", "--evidence-preview"],
+            &["ctx", "blame", "commit", "abc1234", "--evidence-preview"],
+            &[
+                "ctx",
+                "blame",
+                "pr",
+                "42",
+                "--repository",
+                "forge:github.com/ctxrs/ctx",
+                "--evidence-preview",
+            ],
+        ] {
+            let cli = crate::Cli::try_parse_from(arguments).unwrap();
+            let crate::cli::CommandRoot::Blame(args) = cli.command else {
+                panic!("expected blame command");
+            };
+            let query = args.into_query().unwrap();
+            assert!(query.4, "{arguments:?}");
+        }
+
+        let cli = crate::Cli::try_parse_from(["ctx", "blame", "file", "src/lib.rs"]).unwrap();
+        let crate::cli::CommandRoot::Blame(args) = cli.command else {
+            panic!("expected blame command");
+        };
+        assert!(!args.into_query().unwrap().4);
+    }
+
+    #[test]
+    fn json_preview_conflict_stops_before_pro_or_evidence_access() {
+        for arguments in [
+            &[
+                "ctx",
+                "blame",
+                "src/lib.rs",
+                "--evidence-preview",
+                "--format",
+                "json",
+            ][..],
+            &[
+                "ctx",
+                "blame",
+                "file",
+                "src/lib.rs",
+                "--evidence-preview",
+                "--format=json",
+            ],
+            &[
+                "ctx",
+                "blame",
+                "commit",
+                "abc1234",
+                "--evidence-preview",
+                "--format=json",
+            ],
+            &[
+                "ctx",
+                "blame",
+                "pr",
+                "42",
+                "--repository",
+                "forge:github.com/ctxrs/ctx",
+                "--evidence-preview",
+                "--format=json",
+            ],
+        ] {
+            let cli = crate::Cli::try_parse_from(arguments).unwrap();
+            let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
+            let crate::cli::CommandRoot::Blame(args) = cli.command else {
+                panic!("expected blame command");
+            };
+            let pro_calls = std::cell::Cell::new(0usize);
+            let evidence_reads = std::cell::Cell::new(0usize);
+            let mut ui = sink_ui();
+            let error = run_with(
+                args,
+                PathBuf::from("/unused"),
+                &mut usage,
+                &mut ui,
+                |_, _, _, _| {
+                    pro_calls.set(pro_calls.get() + 1);
+                    panic!("JSON conflict reached Pro")
+                },
+                |_, _| {
+                    evidence_reads.set(evidence_reads.get() + 1);
+                    panic!("JSON conflict reached evidence hydration")
+                },
+            )
+            .unwrap_err();
+            assert_eq!(pro_calls.get(), 0, "{arguments:?}");
+            assert_eq!(evidence_reads.get(), 0, "{arguments:?}");
+            assert_eq!(
+                error.to_string(),
+                "invalid_request: --evidence-preview is only available for human output; remove it or use --format text"
+            );
+            assert!(!error.to_string().contains("/unused"));
         }
     }
 

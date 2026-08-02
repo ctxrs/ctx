@@ -44,7 +44,6 @@ pub(super) fn neutralize_controls(text: &str) -> String {
 /// Callers must sanitize history bodies before passing them to shared layout so
 /// wrapping and measurement operate on the same plain ASCII escape text that
 /// the terminal will receive.
-#[cfg_attr(not(test), allow(dead_code))] // Remove when the preview renderer calls this seam.
 pub(crate) fn sanitize_untrusted_history_body_for_terminal(text: &str) -> String {
     let mut safe = String::with_capacity(text.len());
     for character in text.chars() {

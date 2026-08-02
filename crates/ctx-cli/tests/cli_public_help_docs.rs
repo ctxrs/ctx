@@ -249,6 +249,11 @@ fn blame_help_explains_launch_targets_and_bounds() {
     assert!(help.contains("ctx blame [OPTIONS] <TARGET>"), "{help}");
     assert!(help.contains("ctx blame <COMMAND>"), "{help}");
     assert!(help.contains("--type <TYPE>"), "{help}");
+    assert!(help.contains("--evidence-preview"), "{help}");
+    assert!(
+        help.contains("exact cited local-history evidence"),
+        "{help}"
+    );
     assert!(help.contains("possible values: file, commit, pr"), "{help}");
     assert!(help.contains("overrides auto-detection"), "{help}");
 
@@ -279,6 +284,14 @@ fn blame_help_explains_launch_targets_and_bounds() {
             "{args:?} help omitted the limit contract:\n{help}"
         );
         assert!(help.contains("--cursor <CURSOR>"));
+        assert!(help.contains("--evidence-preview"), "{args:?}:\n{help}");
+        assert!(
+            help.contains("exact cited local-history evidence"),
+            "{args:?}:\n{help}"
+        );
+        for secret in ["generation", "project", "heuristic", "Codex"] {
+            assert!(!help.contains(secret), "{args:?} leaked {secret}:\n{help}");
+        }
         if args.as_slice() == ["blame", "file", "--help"] {
             assert!(
                 help.contains("--lines <START[:END]>"),
