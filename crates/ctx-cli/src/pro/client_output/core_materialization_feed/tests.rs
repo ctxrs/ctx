@@ -579,6 +579,30 @@ fn event_page_cas_mismatch_fails_closed_after_one_exchange() {
 }
 
 #[test]
+fn event_page_is_authoritatively_validated_before_exchange() {
+    let source = source("invalid-page.jsonl");
+    let page = CoreEventDeltaPage {
+        materialization_id: "d".repeat(64),
+        core_generation_id: "a".repeat(64),
+        reconciliation: CoreSourceReconciliation {
+            delta: CoreSourceDelta::Present(CoreSourceState {
+                source,
+                core_record_accumulator: "0".repeat(64),
+                event_count: 0,
+            }),
+        },
+        page_index: 0,
+        terminal: false,
+        deltas: Vec::new(),
+    };
+    let mut consumer = Consumer::new();
+
+    let error = send_event_delta_page(&mut consumer, page).unwrap_err();
+    assert!(error.to_string().contains("invalid_request"));
+    assert_eq!(consumer.event_exchanges, 0);
+}
+
+#[test]
 fn generation_mismatched_delta_ack_fails_closed() {
     let temp = tempdir().unwrap();
     let source = source("mismatch.jsonl");

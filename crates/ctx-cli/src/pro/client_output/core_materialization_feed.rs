@@ -8,14 +8,14 @@ use ctx_history_index::{
 use ctx_pro_host_protocol::{
     core_record_sha256, ApplyCoreEventDeltaPageRequest, ApplyCoreSourceDeltaPageRequest,
     BeginCoreMaterializationRequest, Capability, CoreEventDelta, CoreEventDeltaPage,
-    CoreEventDeltaPageApplied, CoreEventReplacement, CoreEventState, CoreEventStatePage,
-    CoreEventStatePageRequest, CoreEventTombstone, CoreGenerationHead, CoreMaterializationBegan,
-    CoreMaterializationFinished, CoreMaterializationReceipt, CoreMaterializationReceiptIdentity,
-    CoreSourceDelta, CoreSourceDeltaPage, CoreSourceDeltaPageApplied, CoreSourceReconciliation,
-    CoreSourceRemoval, CoreSourceState, FinishCoreMaterializationRequest, HelperMessage,
-    HostMessage, StatusRequest, MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
-    MAX_CORE_EVENT_DELTA_PAGE_ITEMS, MAX_CORE_EVENT_STATE_PAGE_ITEMS,
-    MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
+    CoreEventDeltaPageApplied, CoreEventDeltaPageBuilder, CoreEventReplacement, CoreEventState,
+    CoreEventStatePage, CoreEventStatePageRequest, CoreEventTombstone, CoreGenerationHead,
+    CoreMaterializationBegan, CoreMaterializationFinished, CoreMaterializationReceipt,
+    CoreMaterializationReceiptIdentity, CoreSourceDelta, CoreSourceDeltaPage,
+    CoreSourceDeltaPageApplied, CoreSourceReconciliation, CoreSourceRemoval, CoreSourceState,
+    FinishCoreMaterializationRequest, HelperMessage, HostMessage, StatusRequest,
+    MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES, MAX_CORE_EVENT_DELTA_PAGE_ITEMS,
+    MAX_CORE_EVENT_STATE_PAGE_ITEMS, MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
 };
 use sha2::{Digest, Sha256};
 
@@ -416,8 +416,13 @@ fn reconcile_source_events<C: CoreMaterializationConsumer>(
     let mut current_cursor = None;
     let mut current_terminal = current_source.is_none();
     let mut current = VecDeque::<ctx_history_core::CoreRecord>::new();
-    let mut pending = Vec::<CoreEventDelta>::new();
-    let mut event_page_index = 0_u32;
+    let mut page_builder = CoreEventDeltaPageBuilder::new(
+        materialization_id,
+        index.generation_id(),
+        reconciliation.clone(),
+        0,
+    )
+    .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
     let mut pages = 0_u64;
     let mut mutations = 0_u64;
 
@@ -515,65 +520,16 @@ fn reconcile_source_events<C: CoreMaterializationConsumer>(
         mutations = mutations
             .checked_add(1)
             .ok_or_else(|| anyhow!("invalid_request: Core event mutation count overflowed"))?;
-        if pending.len() == MAX_CORE_EVENT_DELTA_PAGE_ITEMS {
-            send_event_delta_page(
-                consumer,
-                materialization_id,
-                index.generation_id(),
-                &reconciliation,
-                event_page_index,
-                false,
-                std::mem::take(&mut pending),
-            )?;
+        if let Some(page) = page_builder
+            .push(delta)
+            .map_err(|error| anyhow!("invalid_request: {}", error.message))?
+        {
+            send_event_delta_page(consumer, page)?;
             pages = pages.saturating_add(1);
-            event_page_index = event_page_index
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("invalid_request: Core event delta page overflowed"))?;
-        }
-        pending.push(delta);
-        let candidate = event_delta_page(
-            materialization_id,
-            index.generation_id(),
-            &reconciliation,
-            event_page_index,
-            false,
-            pending.clone(),
-        );
-        if candidate.is_err() {
-            let overflow = pending
-                .pop()
-                .ok_or_else(|| anyhow!("internal: empty Core event delta page"))?;
-            if pending.is_empty() {
-                return Err(anyhow!(
-                    "invalid_request: one Core event delta exceeds its page bound"
-                ));
-            }
-            send_event_delta_page(
-                consumer,
-                materialization_id,
-                index.generation_id(),
-                &reconciliation,
-                event_page_index,
-                false,
-                std::mem::take(&mut pending),
-            )?;
-            pages = pages.saturating_add(1);
-            event_page_index = event_page_index
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("invalid_request: Core event delta page overflowed"))?;
-            pending.push(overflow);
         }
     }
 
-    send_event_delta_page(
-        consumer,
-        materialization_id,
-        index.generation_id(),
-        &reconciliation,
-        event_page_index,
-        true,
-        pending,
-    )?;
+    send_event_delta_page(consumer, page_builder.finish())?;
     pages = pages.saturating_add(1);
     Ok(EventReconciliationReport { pages, mutations })
 }
@@ -623,49 +579,17 @@ fn next_current_records(
     Ok((records, next_cursor, terminal))
 }
 
-fn event_delta_page(
-    materialization_id: &str,
-    generation_id: &str,
-    reconciliation: &CoreSourceReconciliation,
-    page_index: u32,
-    terminal: bool,
-    deltas: Vec<CoreEventDelta>,
-) -> Result<CoreEventDeltaPage> {
-    let page = CoreEventDeltaPage {
-        materialization_id: materialization_id.to_owned(),
-        core_generation_id: generation_id.to_owned(),
-        reconciliation: reconciliation.clone(),
-        page_index,
-        terminal,
-        deltas,
-    };
-    page.validate()
-        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
-    Ok(page)
-}
-
-#[allow(clippy::too_many_arguments)]
 fn send_event_delta_page<C: CoreMaterializationConsumer>(
     consumer: &mut C,
-    materialization_id: &str,
-    generation_id: &str,
-    reconciliation: &CoreSourceReconciliation,
-    page_index: u32,
-    terminal: bool,
-    deltas: Vec<CoreEventDelta>,
+    page: CoreEventDeltaPage,
 ) -> Result<()> {
-    let page = event_delta_page(
-        materialization_id,
-        generation_id,
-        reconciliation,
-        page_index,
-        terminal,
-        deltas,
-    )?;
+    page.validate()
+        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+    let acknowledgement_identity = page.acknowledgement_identity();
     let request = ApplyCoreEventDeltaPageRequest { page };
-    let response = consumer.apply_event_delta(request.clone())?;
+    let response = consumer.apply_event_delta(request)?;
     response
-        .validate_for(&request.page)
+        .validate_for_identity(&acknowledgement_identity)
         .map_err(|error| anyhow!("invalid_response: {}", error.message))
 }
 

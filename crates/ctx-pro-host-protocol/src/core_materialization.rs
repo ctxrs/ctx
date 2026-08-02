@@ -7,7 +7,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{ErrorClass, ProtocolError};
 
+mod page_builder;
 mod validation;
+pub use page_builder::CoreEventDeltaPageBuilder;
 #[cfg(test)]
 use validation::canonical_sha256;
 pub use validation::{core_materialization_id, core_record_sha256, core_source_snapshot_sha256};
@@ -785,9 +787,11 @@ pub struct CoreEventDeltaPage {
 
 impl CoreEventDeltaPage {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        validate_sha256(&self.materialization_id, "Core materialization ID")?;
-        validate_sha256(&self.core_generation_id, "Core generation ID")?;
-        self.reconciliation.validate()?;
+        validate_core_event_delta_page_header(
+            &self.materialization_id,
+            &self.core_generation_id,
+            &self.reconciliation,
+        )?;
         if self.deltas.len() > MAX_CORE_EVENT_DELTA_PAGE_ITEMS
             || (!self.terminal && self.deltas.is_empty())
         {
@@ -852,6 +856,56 @@ impl CoreEventDeltaPage {
                 })
         })
     }
+
+    /// Captures only the fields needed to validate the page acknowledgement.
+    ///
+    /// The page must already have passed [`Self::validate`]. Keeping this
+    /// compact identity lets a producer move the owned page into transport
+    /// without retaining or revalidating the complete request.
+    pub fn acknowledgement_identity(&self) -> CoreEventDeltaPageAcknowledgementIdentity {
+        let mut additions = 0_u32;
+        let mut replacements = 0_u32;
+        let mut tombstones = 0_u32;
+        for delta in &self.deltas {
+            match delta {
+                CoreEventDelta::Added(_) => additions += 1,
+                CoreEventDelta::Replaced(_) => replacements += 1,
+                CoreEventDelta::Tombstoned(_) => tombstones += 1,
+            }
+        }
+        CoreEventDeltaPageAcknowledgementIdentity {
+            materialization_id: self.materialization_id.clone(),
+            core_generation_id: self.core_generation_id.clone(),
+            source: self.reconciliation.delta.source().clone(),
+            page_index: self.page_index,
+            additions,
+            replacements,
+            tombstones,
+            terminal: self.terminal,
+        }
+    }
+}
+
+fn validate_core_event_delta_page_header(
+    materialization_id: &str,
+    core_generation_id: &str,
+    reconciliation: &CoreSourceReconciliation,
+) -> Result<(), ProtocolError> {
+    validate_sha256(materialization_id, "Core materialization ID")?;
+    validate_sha256(core_generation_id, "Core generation ID")?;
+    reconciliation.validate()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreEventDeltaPageAcknowledgementIdentity {
+    materialization_id: String,
+    core_generation_id: String,
+    source: SourceKey,
+    page_index: u32,
+    additions: u32,
+    replacements: u32,
+    tombstones: u32,
+    terminal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -883,34 +937,24 @@ pub struct CoreEventDeltaPageApplied {
 impl CoreEventDeltaPageApplied {
     pub fn validate_for(&self, page: &CoreEventDeltaPage) -> Result<(), ProtocolError> {
         page.validate()?;
+        self.validate_for_identity(&page.acknowledgement_identity())
+    }
+
+    pub fn validate_for_identity(
+        &self,
+        identity: &CoreEventDeltaPageAcknowledgementIdentity,
+    ) -> Result<(), ProtocolError> {
         self.source
             .validate_contract()
             .map_err(|error| invalid_contract("Core event delta acknowledgement source", error))?;
-        let additions = page
-            .deltas
-            .iter()
-            .filter(|delta| matches!(delta, CoreEventDelta::Added(_)))
-            .count();
-        let replacements = page
-            .deltas
-            .iter()
-            .filter(|delta| matches!(delta, CoreEventDelta::Replaced(_)))
-            .count();
-        let tombstones = page
-            .deltas
-            .iter()
-            .filter(|delta| matches!(delta, CoreEventDelta::Tombstoned(_)))
-            .count();
-        if self.materialization_id != page.materialization_id
-            || self.core_generation_id != page.core_generation_id
-            || !self
-                .source
-                .exact_descriptor_eq(page.reconciliation.delta.source())
-            || self.page_index != page.page_index
-            || usize::try_from(self.additions).ok() != Some(additions)
-            || usize::try_from(self.replacements).ok() != Some(replacements)
-            || usize::try_from(self.tombstones).ok() != Some(tombstones)
-            || self.terminal != page.terminal
+        if self.materialization_id != identity.materialization_id
+            || self.core_generation_id != identity.core_generation_id
+            || !self.source.exact_descriptor_eq(&identity.source)
+            || self.page_index != identity.page_index
+            || self.additions != identity.additions
+            || self.replacements != identity.replacements
+            || self.tombstones != identity.tombstones
+            || self.terminal != identity.terminal
         {
             return Err(ProtocolError::new(
                 ErrorClass::Sequence,

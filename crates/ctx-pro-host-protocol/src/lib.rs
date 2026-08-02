@@ -70,9 +70,10 @@ mod core_materialization;
 pub use core_materialization::{
     core_materialization_id, core_record_sha256, core_source_snapshot_sha256,
     ApplyCoreEventDeltaPageRequest, ApplyCoreSourceDeltaPageRequest,
-    BeginCoreMaterializationRequest, CoreEventDelta, CoreEventDeltaPage, CoreEventDeltaPageApplied,
-    CoreEventReplacement, CoreEventState, CoreEventStatePage, CoreEventStatePageRequest,
-    CoreEventTombstone, CoreGenerationHead, CoreMaterializationBegan,
+    BeginCoreMaterializationRequest, CoreEventDelta, CoreEventDeltaPage,
+    CoreEventDeltaPageAcknowledgementIdentity, CoreEventDeltaPageApplied,
+    CoreEventDeltaPageBuilder, CoreEventReplacement, CoreEventState, CoreEventStatePage,
+    CoreEventStatePageRequest, CoreEventTombstone, CoreGenerationHead, CoreMaterializationBegan,
     CoreMaterializationBeginAcknowledgementIdentity, CoreMaterializationFinished,
     CoreMaterializationReceipt, CoreMaterializationReceiptIdentity, CoreSourceDelta,
     CoreSourceDeltaPage, CoreSourceDeltaPageAcknowledgementIdentity, CoreSourceDeltaPageApplied,

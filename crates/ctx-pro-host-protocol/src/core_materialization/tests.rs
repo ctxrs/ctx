@@ -158,6 +158,112 @@ fn head(sources: &[CoreSourceState]) -> CoreGenerationHead {
     .unwrap()
 }
 
+fn reconciliation(source: &SourceKey, event_count: usize) -> CoreSourceReconciliation {
+    CoreSourceReconciliation {
+        delta: CoreSourceDelta::Present(state(
+            source.clone(),
+            1,
+            u64::try_from(event_count).unwrap(),
+        )),
+    }
+}
+
+fn ordered_additions(source: &SourceKey, count: usize, body_bytes: usize) -> Vec<CoreEventDelta> {
+    let mut deltas = (0..count)
+        .map(|index| {
+            CoreEventDelta::Added(record(
+                source,
+                u64::try_from(index + 1).unwrap(),
+                "x".repeat(body_bytes),
+                false,
+            ))
+        })
+        .collect::<Vec<_>>();
+    deltas.sort_by_key(|delta| delta.event_id().digest());
+    deltas
+}
+
+fn legacy_event_delta_pages(
+    reconciliation: &CoreSourceReconciliation,
+    deltas: Vec<CoreEventDelta>,
+) -> Vec<CoreEventDeltaPage> {
+    let materialization_id = "d".repeat(64);
+    let generation_id = "a".repeat(64);
+    let mut pages = Vec::new();
+    let mut pending = Vec::new();
+    let mut page_index = 0_u32;
+    for delta in deltas {
+        if pending.len() == MAX_CORE_EVENT_DELTA_PAGE_ITEMS {
+            let page = CoreEventDeltaPage {
+                materialization_id: materialization_id.clone(),
+                core_generation_id: generation_id.clone(),
+                reconciliation: reconciliation.clone(),
+                page_index,
+                terminal: false,
+                deltas: std::mem::take(&mut pending),
+            };
+            page.validate().unwrap();
+            pages.push(page);
+            page_index += 1;
+        }
+        pending.push(delta);
+        let candidate = CoreEventDeltaPage {
+            materialization_id: materialization_id.clone(),
+            core_generation_id: generation_id.clone(),
+            reconciliation: reconciliation.clone(),
+            page_index,
+            terminal: false,
+            deltas: pending.clone(),
+        };
+        if candidate.validate().is_err() {
+            let overflow = pending.pop().unwrap();
+            assert!(!pending.is_empty(), "legacy singleton exceeded its page");
+            let page = CoreEventDeltaPage {
+                materialization_id: materialization_id.clone(),
+                core_generation_id: generation_id.clone(),
+                reconciliation: reconciliation.clone(),
+                page_index,
+                terminal: false,
+                deltas: std::mem::take(&mut pending),
+            };
+            page.validate().unwrap();
+            pages.push(page);
+            page_index += 1;
+            pending.push(overflow);
+        }
+    }
+    let page = CoreEventDeltaPage {
+        materialization_id,
+        core_generation_id: generation_id,
+        reconciliation: reconciliation.clone(),
+        page_index,
+        terminal: true,
+        deltas: pending,
+    };
+    page.validate().unwrap();
+    pages.push(page);
+    pages
+}
+
+fn linear_event_delta_pages(
+    reconciliation: CoreSourceReconciliation,
+    deltas: Vec<CoreEventDelta>,
+) -> Vec<CoreEventDeltaPage> {
+    let mut builder =
+        CoreEventDeltaPageBuilder::new("d".repeat(64), "a".repeat(64), reconciliation, 0).unwrap();
+    let mut pages = Vec::new();
+    for delta in deltas {
+        if let Some(page) = builder.push(delta).unwrap() {
+            page.validate().unwrap();
+            pages.push(page);
+        }
+    }
+    let page = builder.finish();
+    page.validate().unwrap();
+    pages.push(page);
+    pages
+}
+
 #[test]
 fn complete_core_event_delta_page_transports_long_body_and_two_repository_scopes() {
     let source = source(1);
@@ -224,6 +330,8 @@ fn event_delta_acknowledgement_uses_compact_identity_after_request_moves() {
             false,
         ))],
     };
+    page.validate().unwrap();
+    let identity = page.acknowledgement_identity();
     let request = ApplyCoreEventDeltaPageRequest { page };
     let mut acknowledgement = CoreEventDeltaPageApplied {
         materialization_id: request.page.materialization_id.clone(),
@@ -236,18 +344,149 @@ fn event_delta_acknowledgement_uses_compact_identity_after_request_moves() {
         terminal: true,
         replayed: false,
     };
-    let expected_page = request.page.clone();
     drop(request);
 
-    acknowledgement.validate_for(&expected_page).unwrap();
+    acknowledgement.validate_for_identity(&identity).unwrap();
     acknowledgement.page_index = 8;
     assert_eq!(
         acknowledgement
-            .validate_for(&expected_page)
+            .validate_for_identity(&identity)
             .unwrap_err()
             .class,
         ErrorClass::Sequence
     );
+}
+
+#[test]
+fn linear_event_delta_builder_preserves_legacy_page_bytes_and_item_boundaries() {
+    let source = source(3);
+    let deltas = ordered_additions(&source, MAX_CORE_EVENT_DELTA_PAGE_ITEMS + 1, 64);
+    let reconciliation = reconciliation(&source, deltas.len());
+
+    let legacy = legacy_event_delta_pages(&reconciliation, deltas.clone());
+    let linear = linear_event_delta_pages(reconciliation, deltas);
+
+    assert_eq!(linear, legacy);
+    assert_eq!(linear.len(), 2);
+    assert_eq!(linear[0].deltas.len(), MAX_CORE_EVENT_DELTA_PAGE_ITEMS);
+    assert_eq!(linear[1].deltas.len(), 1);
+    assert!(!linear[0].terminal);
+    assert!(linear[1].terminal);
+    for (linear, legacy) in linear.iter().zip(legacy) {
+        assert_eq!(
+            serde_json::to_vec(linear).unwrap(),
+            serde_json::to_vec(&legacy).unwrap()
+        );
+    }
+}
+
+#[test]
+fn linear_event_delta_builder_charges_exact_encoded_bytes_and_rejects_singletons() {
+    let source = source(4);
+    let mut deltas = ordered_additions(&source, 2, 128);
+    let first = deltas.remove(0);
+    let second = deltas.remove(0);
+    let reconciliation = reconciliation(&source, 2);
+    let exact_singleton = CoreEventDeltaPage {
+        materialization_id: "d".repeat(64),
+        core_generation_id: "a".repeat(64),
+        reconciliation: reconciliation.clone(),
+        page_index: 0,
+        terminal: false,
+        deltas: vec![first.clone()],
+    };
+    let exact_wire_bytes = serde_json::to_vec(&exact_singleton).unwrap().len();
+
+    let mut builder = CoreEventDeltaPageBuilder::with_test_limits(
+        "d".repeat(64),
+        "a".repeat(64),
+        reconciliation.clone(),
+        0,
+        MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
+        exact_wire_bytes,
+    )
+    .unwrap();
+    assert!(builder.push(first.clone()).unwrap().is_none());
+    builder.finish().validate().unwrap();
+
+    let second_singleton_wire_bytes = serde_json::to_vec(&CoreEventDeltaPage {
+        materialization_id: "d".repeat(64),
+        core_generation_id: "a".repeat(64),
+        reconciliation: reconciliation.clone(),
+        page_index: 1,
+        terminal: false,
+        deltas: vec![second.clone()],
+    })
+    .unwrap()
+    .len();
+    let mut splitting = CoreEventDeltaPageBuilder::with_test_limits(
+        "d".repeat(64),
+        "a".repeat(64),
+        reconciliation.clone(),
+        0,
+        MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
+        exact_wire_bytes.max(second_singleton_wire_bytes),
+    )
+    .unwrap();
+    assert!(splitting.push(first.clone()).unwrap().is_none());
+    let completed = splitting.push(second).unwrap().unwrap();
+    assert_eq!(completed, exact_singleton);
+    completed.validate().unwrap();
+    splitting.finish().validate().unwrap();
+
+    let mut too_small = CoreEventDeltaPageBuilder::with_test_limits(
+        "d".repeat(64),
+        "a".repeat(64),
+        reconciliation,
+        0,
+        MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
+        exact_wire_bytes - 1,
+    )
+    .unwrap();
+    let error = too_small.push(first).unwrap_err();
+    assert_eq!(error.class, ErrorClass::Bounds);
+    assert_eq!(error.message, "one Core event delta exceeds its page bound");
+}
+
+#[test]
+#[ignore = "manual scaling measurement"]
+fn core_event_delta_page_builder_scaling() {
+    const ITERATIONS: usize = 64;
+    const SAMPLES: usize = 7;
+
+    let source = source(5);
+    let deltas = ordered_additions(&source, MAX_CORE_EVENT_DELTA_PAGE_ITEMS, 1024);
+    let reconciliation = reconciliation(&source, deltas.len());
+
+    for count in [32_usize, 64, 128, 256] {
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = std::time::Instant::now();
+            for _ in 0..ITERATIONS {
+                let mut builder = CoreEventDeltaPageBuilder::new(
+                    "d".repeat(64),
+                    "a".repeat(64),
+                    reconciliation.clone(),
+                    0,
+                )
+                .unwrap();
+                for delta in deltas.iter().take(count).cloned() {
+                    assert!(builder.push(delta).unwrap().is_none());
+                }
+                let page = builder.finish();
+                page.validate().unwrap();
+                let acknowledgement_identity = page.acknowledgement_identity();
+                std::hint::black_box((page, acknowledgement_identity));
+            }
+            samples.push(started.elapsed().as_nanos() / u128::try_from(ITERATIONS).unwrap());
+        }
+        samples.sort_unstable();
+        let median_ns = samples[SAMPLES / 2];
+        eprintln!(
+            "core_event_delta_page_builder count={count} median_ns={median_ns} ns_per_delta={}",
+            median_ns / u128::try_from(count).unwrap()
+        );
+    }
 }
 
 #[test]
