@@ -20,7 +20,7 @@ use crate::semantic::{
 
 pub(super) const CONTROL_FILE: &str = "state.sqlite";
 const CONTROL_APPLICATION_ID: i64 = 0x4354_584D; // "CTXM"
-const CONTROL_SCHEMA_VERSION: i64 = 4;
+const CONTROL_SCHEMA_VERSION: i64 = 5;
 const MODEL_CONTRACT_STATE: &str = "projection_model_contract";
 pub(super) const FULL_REBUILD_STATE: &str = "projection_full_rebuild_v1";
 
@@ -129,7 +129,6 @@ fn prepare_schema(connection: &Connection) -> Result<()> {
             DROP TABLE IF EXISTS semantic_index_stats;
             DROP TABLE IF EXISTS semantic_maintenance_state;
             DROP TABLE IF EXISTS semantic_source_documents;
-            DROP TABLE IF EXISTS semantic_source_receipts;
             "#,
         )?;
         create_schema(&transaction, true)?;
@@ -154,7 +153,6 @@ fn prepare_schema(connection: &Connection) -> Result<()> {
     if stored_contract.as_deref() != Some(expected_contract.as_str()) {
         let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Exclusive)?;
         transaction.execute("DELETE FROM semantic_dirty_events", [])?;
-        transaction.execute("DELETE FROM semantic_source_receipts", [])?;
         transaction.execute("DELETE FROM semantic_maintenance_state", [])?;
         transaction.execute(
             "UPDATE semantic_index_stats SET dirty_items = 0 WHERE id = 1",
@@ -193,17 +191,6 @@ fn create_schema(transaction: &Transaction<'_>, requires_full_rebuild: bool) -> 
         CREATE TABLE semantic_maintenance_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
-        );
-        CREATE TABLE semantic_source_receipts (
-            source_identity_digest TEXT PRIMARY KEY,
-            indexed_documents INTEGER NOT NULL CHECK(indexed_documents >= 0),
-            semantic_eligible_documents INTEGER NOT NULL
-                CHECK(semantic_eligible_documents >= 0),
-            core_record_accumulator TEXT NOT NULL,
-            contract_fingerprint TEXT NOT NULL,
-            semantic_policy_fingerprint TEXT NOT NULL,
-            owned_event_count INTEGER NOT NULL CHECK(owned_event_count >= 0),
-            owned_event_ids_hash TEXT NOT NULL
         );
         "#,
     )?;
@@ -244,7 +231,6 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         "semantic_dirty_events",
         "semantic_index_stats",
         "semantic_maintenance_state",
-        "semantic_source_receipts",
     ];
     for table in expected_tables {
         let exists = connection.query_row(
@@ -290,4 +276,26 @@ fn user_table_count(connection: &Connection) -> Result<usize> {
         |row| row.get::<_, i64>(0),
     )?;
     usize::try_from(count).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_control_database_has_no_obsolete_source_receipts_table() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let connection = open_writable(temporary.path())?;
+        let obsolete = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema
+                WHERE type = 'table' AND name = 'semantic_source_receipts'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        assert!(!obsolete);
+        assert_eq!(user_table_count(&connection)?, 3);
+        Ok(())
+    }
 }

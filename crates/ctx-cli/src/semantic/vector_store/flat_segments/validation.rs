@@ -137,38 +137,44 @@ pub(super) fn validate_mutation_payload(
                 "segment generation {generation} mutations are not uniquely sorted"
             )));
         }
-        if kind == SegmentKind::Base && mutation.kind != MutationKind::Replace {
-            return Err(FlatStoreError::Corrupt(format!(
-                "base segment generation {generation} contains a deletion"
-            )));
-        }
-        match mutation.kind {
-            MutationKind::Replace
-                if mutation.vector_generation == 0 || mutation.chunk_count == 0 =>
-            {
-                return Err(FlatStoreError::Corrupt(format!(
-                    "segment generation {generation} has an invalid replacement locator"
-                )));
-            }
-            MutationKind::Replace => {}
-            MutationKind::Delete
-                if mutation.seq != 0
-                    || mutation.source_text_hash.as_bytes() != &[0; 32]
-                    || mutation.stable_identity_hash != [0; 32]
-                    || mutation.vector_generation != 0
-                    || mutation.first_vector_ordinal != 0
-                    || mutation.chunk_count != 0 =>
-            {
-                return Err(FlatStoreError::Corrupt(format!(
-                    "segment generation {generation} deletion has non-zero authority fields"
-                )));
-            }
-            MutationKind::Delete => {}
-        }
+        validate_mutation_for_segment(&mutation, kind, generation)?;
         previous = Some(mutation.event_id);
         mutations.push(mutation);
     }
     Ok(mutations)
+}
+
+pub(super) fn validate_mutation_for_segment(
+    mutation: &EventMutation,
+    kind: SegmentKind,
+    generation: u64,
+) -> FlatResult<()> {
+    if kind == SegmentKind::Base && mutation.kind != MutationKind::Replace {
+        return Err(FlatStoreError::Corrupt(format!(
+            "base segment generation {generation} contains a deletion"
+        )));
+    }
+    match mutation.kind {
+        MutationKind::Replace if mutation.vector_generation == 0 || mutation.chunk_count == 0 => {
+            Err(FlatStoreError::Corrupt(format!(
+                "segment generation {generation} has an invalid replacement locator"
+            )))
+        }
+        MutationKind::Replace => Ok(()),
+        MutationKind::Delete
+            if mutation.seq != 0
+                || mutation.source_text_hash.as_bytes() != &[0; 32]
+                || mutation.stable_identity_hash != [0; 32]
+                || mutation.vector_generation != 0
+                || mutation.first_vector_ordinal != 0
+                || mutation.chunk_count != 0 =>
+        {
+            Err(FlatStoreError::Corrupt(format!(
+                "segment generation {generation} deletion has non-zero authority fields"
+            )))
+        }
+        MutationKind::Delete => Ok(()),
+    }
 }
 
 pub(super) fn validate_metadata_payload(

@@ -17,6 +17,7 @@ pub(super) const NORMALIZED_NORM_SQUARED_TOLERANCE: f64 = 1.0e-3;
 pub(super) const MANIFESTS_DIRECTORY: &str = "flat_manifests";
 pub(super) const SEGMENTS_DIRECTORY: &str = "flat_segments";
 pub(super) const WRITER_LOCK_FILE: &str = "flat_writer.lock";
+pub(super) const TRANSACTION_LOCK_FILE: &str = "flat_transaction.lock";
 pub(super) const MANIFEST_PREFIX: &str = "flat-manifest-";
 pub(super) const SEGMENT_PREFIX: &str = "flat-segment-";
 pub(super) const TEMP_PREFIX: &str = ".flat-tmp-";
@@ -105,10 +106,17 @@ pub(super) struct ArtifactDescriptor {
     pub(super) payload_sha256: String,
 }
 
+#[derive(Clone)]
 pub(super) struct SelectedManifest {
     pub(super) envelope: ManifestEnvelope,
     pub(super) generation_hash: String,
     pub(super) path: PathBuf,
+}
+
+pub(super) struct PreparedManifest {
+    pub(super) envelope: ManifestEnvelope,
+    pub(super) generation_hash: String,
+    pub(super) bytes: Vec<u8>,
 }
 
 pub(super) struct StagedSegment {

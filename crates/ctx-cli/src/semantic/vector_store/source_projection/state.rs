@@ -10,7 +10,7 @@ use super::manifest::{
     semantic_policy_fingerprint, source_consumer_build_id, source_contract_fingerprint,
     validate_generation_id, AcknowledgedSourceProjection, SourceProjectionAcknowledgement,
     SourceProjectionFrontier, SourceTraversalPhase, SOURCE_ACKNOWLEDGEMENT_STATE,
-    SOURCE_CONTRACT_VERSION, SOURCE_FRONTIER_STATE, SOURCE_REPLAY_FRONTIER_STATE,
+    SOURCE_CONTRACT_VERSION, SOURCE_FRONTIER_STATE,
 };
 use super::{
     SemanticVectorStore, SourceBackedGenerationPin, SourceBackedSemanticGeneration,
@@ -65,28 +65,39 @@ impl SemanticVectorStore {
             .flat
             .active_publication_token()
             .map_err(anyhow::Error::new)?;
-        if let Some(frontier) = self.source_frontier()? {
-            if publication_is_lost(&frontier.flat_publication, &current)? {
-                let replay = self
-                    .maintenance_json::<SourceProjectionFrontier>(SOURCE_REPLAY_FRONTIER_STATE)?
-                    .ok_or_else(|| {
-                        SemanticVectorStoreError::reset_required(
-                            "semantic Flat publication was lost without a replay frontier",
-                        )
-                    })?;
-                if publication_is_lost(&replay.flat_publication, &current)? {
-                    return Err(SemanticVectorStoreError::reset_required(
-                        "semantic Flat rollback predates its replay frontier",
-                    )
-                    .into());
+        if let Some(mut frontier) = self.source_frontier()? {
+            match publication_order(&frontier.flat_publication, &current)? {
+                std::cmp::Ordering::Greater => {
+                    restart_generation_frontier(&mut frontier, current);
+                    let transaction = self.conn.unchecked_transaction()?;
+                    store_frontier(&transaction, &frontier)?;
+                    transaction.execute(
+                        "DELETE FROM semantic_maintenance_state WHERE key = ?1",
+                        [SOURCE_ACKNOWLEDGEMENT_STATE],
+                    )?;
+                    transaction.commit()?;
                 }
-                let transaction = self.conn.unchecked_transaction()?;
-                store_frontier(&transaction, &replay)?;
-                transaction.execute(
-                    "DELETE FROM semantic_maintenance_state WHERE key = ?1",
-                    [SOURCE_ACKNOWLEDGEMENT_STATE],
-                )?;
-                transaction.commit()?;
+                std::cmp::Ordering::Less => {
+                    let source = frontier
+                        .active_source_identity_digest
+                        .as_deref()
+                        .ok_or_else(|| {
+                            SemanticVectorStoreError::reset_required(
+                                "active Flat publication is ahead of an idle semantic frontier",
+                            )
+                        })?;
+                    if !self
+                        .flat
+                        .retained_source_candidate(source, &frontier.flat_publication, &current)
+                        .map_err(anyhow::Error::new)?
+                    {
+                        return Err(SemanticVectorStoreError::reset_required(
+                            "active Flat publication disagrees with retained source candidate",
+                        )
+                        .into());
+                    }
+                }
+                std::cmp::Ordering::Equal => {}
             }
             return Ok(());
         }
@@ -95,29 +106,28 @@ impl SemanticVectorStore {
             let acknowledged = FlatPublicationToken {
                 generation: acknowledgement.flat_generation,
                 generation_hash: (!acknowledgement.flat_generation_hash.is_empty())
-                    .then_some(acknowledgement.flat_generation_hash),
+                    .then_some(acknowledgement.flat_generation_hash.clone()),
             };
-            if publication_is_lost(&acknowledged, &current)? {
-                let replay = self
-                    .maintenance_json::<SourceProjectionFrontier>(SOURCE_REPLAY_FRONTIER_STATE)?
-                    .ok_or_else(|| {
-                        SemanticVectorStoreError::reset_required(
-                            "acknowledged semantic Flat publication was lost without replay state",
-                        )
-                    })?;
-                if publication_is_lost(&replay.flat_publication, &current)? {
-                    return Err(SemanticVectorStoreError::reset_required(
-                        "acknowledged semantic Flat rollback predates its replay frontier",
-                    )
-                    .into());
+            match publication_order(&acknowledged, &current)? {
+                std::cmp::Ordering::Greater => {
+                    let frontier = frontier_from_acknowledgement(&acknowledgement, current);
+                    let transaction = self.conn.unchecked_transaction()?;
+                    store_frontier(&transaction, &frontier)?;
+                    transaction.execute(
+                        "DELETE FROM semantic_maintenance_state WHERE key = ?1",
+                        [SOURCE_ACKNOWLEDGEMENT_STATE],
+                    )?;
+                    transaction.commit()?;
                 }
-                let transaction = self.conn.unchecked_transaction()?;
-                store_frontier(&transaction, &replay)?;
-                transaction.execute(
-                    "DELETE FROM semantic_maintenance_state WHERE key = ?1",
-                    [SOURCE_ACKNOWLEDGEMENT_STATE],
-                )?;
-                transaction.commit()?;
+                std::cmp::Ordering::Less => {
+                    if !self.flat_authority_matches_acknowledgement(&acknowledgement)? {
+                        return Err(SemanticVectorStoreError::reset_required(
+                            "active Flat publication is ahead of its final acknowledgement",
+                        )
+                        .into());
+                    }
+                }
+                std::cmp::Ordering::Equal => {}
             }
         }
         Ok(())
@@ -184,6 +194,29 @@ impl SemanticVectorStore {
                 })?;
         }
         Ok((receipt_count, hex(&digest.finalize()), projected_documents))
+    }
+
+    fn flat_authority_matches_acknowledgement(
+        &self,
+        acknowledgement: &SourceProjectionAcknowledgement,
+    ) -> Result<bool> {
+        let states =
+            source_projection_states(self.flat.source_states().map_err(anyhow::Error::new)?);
+        if states.values().any(Option::is_none) {
+            return Ok(false);
+        }
+        let (receipt_count, receipt_hash, projected_documents) =
+            self.source_receipts_summary(&states)?;
+        let stats = self.flat.active_stats().map_err(anyhow::Error::new)?;
+        Ok(acknowledgement.source_receipt_count == receipt_count
+            && acknowledgement.source_receipts_hash == receipt_hash
+            && acknowledgement.projected_documents == projected_documents
+            && acknowledgement.flat_active_events == stats.active_events as u64
+            && acknowledgement.flat_active_chunks == stats.active_chunks as u64
+            && self
+                .flat
+                .source_receipts_match_active_authority()
+                .map_err(anyhow::Error::new)?)
     }
 
     pub(super) fn finish_source_generation(
@@ -261,6 +294,12 @@ impl SemanticVectorStore {
             [SOURCE_FRONTIER_STATE],
         )?;
         transaction.commit()?;
+        #[cfg(test)]
+        if self.flat.take_source_acknowledgement_failure() {
+            return Err(anyhow::anyhow!(
+                "injected failure after semantic source acknowledgement"
+            ));
+        }
         Ok(SourceBackedSemanticOutcome {
             ready: true,
             ..SourceBackedSemanticOutcome::default()
@@ -351,12 +390,15 @@ impl SemanticVectorStore {
             return Ok(None);
         }
         let manifest_stats = self.flat.active_stats().map_err(anyhow::Error::new)?;
-        let manifest_matches = acknowledgement.flat_generation == manifest_stats.generation
+        let exact_publication = acknowledgement.flat_generation == manifest_stats.generation
             && acknowledgement.flat_generation_hash
                 == manifest_stats
                     .generation_hash
                     .as_deref()
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+        let lossless_compaction = manifest_stats.generation > acknowledgement.flat_generation
+            && self.flat_authority_matches_acknowledgement(&acknowledgement)?;
+        let manifest_matches = (exact_publication || lossless_compaction)
             && acknowledgement.flat_active_events == manifest_stats.active_events as u64
             && acknowledgement.flat_active_chunks == manifest_stats.active_chunks as u64
             && acknowledgement.flat_active_events == acknowledgement.projected_documents
@@ -369,8 +411,12 @@ impl SemanticVectorStore {
             let Some(pinned) = self.flat_pin_generation()? else {
                 return Ok(None);
             };
-            if pinned.generation() != acknowledgement.flat_generation
-                || pinned.generation_hash() != acknowledgement.flat_generation_hash
+            if pinned.generation() != manifest_stats.generation
+                || pinned.generation_hash()
+                    != manifest_stats
+                        .generation_hash
+                        .as_deref()
+                        .unwrap_or_default()
                 || pinned.stats().active_events as u64 != acknowledgement.flat_active_events
                 || pinned.stats().active_chunks as u64 != acknowledgement.flat_active_chunks
             {
@@ -428,6 +474,7 @@ impl SemanticVectorStore {
                 .flat
                 .active_publication_token()
                 .map_err(anyhow::Error::new)?,
+            flat_staging: None,
         };
         let transaction = self.conn.unchecked_transaction()?;
         store_frontier(&transaction, &frontier)?;
@@ -459,6 +506,7 @@ impl SemanticVectorStore {
         frontier.after_identity = None;
         frontier.source_scan_complete = false;
         frontier.removing_source = false;
+        frontier.flat_staging = None;
         frontier.last_failure = None;
         self.store_source_frontier(frontier)
     }
@@ -477,6 +525,7 @@ impl SemanticVectorStore {
         frontier.after_identity = None;
         frontier.source_scan_complete = true;
         frontier.removing_source = true;
+        frontier.flat_staging = None;
         frontier.last_failure = None;
         self.store_source_frontier(frontier)
     }
@@ -484,36 +533,67 @@ impl SemanticVectorStore {
 
 pub(super) fn commit_frontier_after_flat(
     transaction: &Transaction<'_>,
-    replay: &SourceProjectionFrontier,
     frontier: &mut SourceProjectionFrontier,
-    publication: &FlatPublishOutcome,
+    publication: Option<&FlatPublishOutcome>,
 ) -> Result<()> {
-    frontier.flat_publication = publication.token();
-    transaction.execute(
-        "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![SOURCE_REPLAY_FRONTIER_STATE, serde_json::to_string(replay)?],
-    )?;
+    if let Some(publication) = publication {
+        frontier.flat_publication = publication.token();
+        frontier.flat_staging = None;
+    }
     store_frontier(transaction, frontier)
 }
 
-fn publication_is_lost(
+fn publication_order(
     expected: &FlatPublicationToken,
     current: &FlatPublicationToken,
-) -> Result<bool> {
-    if current.generation > expected.generation {
-        return Ok(false);
+) -> Result<std::cmp::Ordering> {
+    match expected.generation.cmp(&current.generation) {
+        std::cmp::Ordering::Equal if current.generation_hash != expected.generation_hash => {
+            Err(SemanticVectorStoreError::reset_required(
+                "semantic Flat publication generation has a different manifest hash",
+            )
+            .into())
+        }
+        ordering => Ok(ordering),
     }
-    if current.generation < expected.generation {
-        return Ok(true);
+}
+
+fn restart_generation_frontier(
+    frontier: &mut SourceProjectionFrontier,
+    current: FlatPublicationToken,
+) {
+    frontier.source_traversal_phase = SourceTraversalPhase::RemovingStaleSources;
+    frontier.source_traversal_after_identity_digest = None;
+    clear_active_source(frontier);
+    frontier.flat_publication = current;
+}
+
+fn frontier_from_acknowledgement(
+    acknowledgement: &SourceProjectionAcknowledgement,
+    current: FlatPublicationToken,
+) -> SourceProjectionFrontier {
+    SourceProjectionFrontier {
+        contract_version: acknowledgement.contract_version,
+        contract_fingerprint: acknowledgement.contract_fingerprint.clone(),
+        core_generation_id: acknowledgement.core_generation_id.clone(),
+        semantic_policy_fingerprint: acknowledgement.semantic_policy_fingerprint.clone(),
+        consumer_build_id: acknowledgement.consumer_build_id.clone(),
+        semantic_documents: acknowledgement.semantic_documents,
+        source_traversal_phase: SourceTraversalPhase::RemovingStaleSources,
+        source_traversal_after_identity_digest: None,
+        active_source_identity_digest: None,
+        active_source_reconciliation_id: None,
+        active_source_indexed_documents: 0,
+        active_source_semantic_documents: 0,
+        processed_source_documents: 0,
+        processed_source_semantic_documents: 0,
+        after_identity: None,
+        source_scan_complete: false,
+        removing_source: false,
+        last_failure: None,
+        flat_publication: current,
+        flat_staging: None,
     }
-    if current.generation_hash == expected.generation_hash {
-        return Ok(false);
-    }
-    Err(SemanticVectorStoreError::reset_required(
-        "semantic Flat publication generation has a different manifest hash",
-    )
-    .into())
 }
 
 pub(super) fn store_frontier(
@@ -538,6 +618,7 @@ pub(super) fn clear_active_source(frontier: &mut SourceProjectionFrontier) {
     frontier.after_identity = None;
     frontier.source_scan_complete = false;
     frontier.removing_source = false;
+    frontier.flat_staging = None;
     frontier.last_failure = None;
 }
 

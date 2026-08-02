@@ -8,7 +8,7 @@ use super::{
     vector_store::{
         flat_segments::{
             FlatActiveEventLookup, FlatChunk, FlatEventMetadataUpdate, FlatEventReplacement,
-            FlatPublishOutcome, FlatSourceHash, PinnedFlatGeneration,
+            FlatSourceHash, FlatSourcePageOutcome, PinnedFlatGeneration,
         },
         SemanticChunkDocument, SemanticVectorStore,
     },
@@ -78,7 +78,8 @@ impl SemanticVectorStore {
         items: &[(SemanticChunkDocument, Vec<f32>)],
         authority_updates: &[FlatEventMetadataUpdate],
         event_ids: &[Uuid],
-    ) -> Result<FlatPublishOutcome> {
+        existing: &FlatActiveEventLookup,
+    ) -> Result<FlatSourcePageOutcome> {
         semantic_owned_sidecar_result((|| {
             if items.iter().any(|(_, embedding)| {
                 embedding.len() != SEMANTIC_DIMENSIONS
@@ -92,7 +93,7 @@ impl SemanticVectorStore {
             let replacements = grouped_replacements(items)?;
             let publication = self
                 .flat
-                .publish_source_event_page(&replacements, authority_updates, event_ids)
+                .publish_source_event_page(&replacements, authority_updates, event_ids, existing)
                 .map_err(anyhow::Error::new)?;
             Ok(publication)
         })())

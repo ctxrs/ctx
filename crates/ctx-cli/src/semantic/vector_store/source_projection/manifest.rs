@@ -6,14 +6,16 @@ use sha2::{Digest, Sha256};
 
 use super::{SourceBackedSemanticGeneration, SourceBackedSemanticPage};
 use crate::semantic::{
-    model_contract::semantic_model_key, vector_store::flat_segments::FlatPublicationToken,
-    vector_store::flat_segments::PinnedFlatGeneration, SemanticEventDocument,
+    model_contract::semantic_model_key,
+    vector_store::flat_segments::{
+        FlatPublicationToken, FlatSourceStagingToken, PinnedFlatGeneration,
+    },
+    SemanticEventDocument,
 };
 
 pub(super) const SOURCE_FRONTIER_STATE: &str = "core_semantic_frontier_v1";
 pub(super) const SOURCE_ACKNOWLEDGEMENT_STATE: &str = "core_semantic_acknowledgement_v1";
-pub(super) const SOURCE_REPLAY_FRONTIER_STATE: &str = "core_semantic_replay_frontier_v1";
-pub(super) const SOURCE_CONTRACT_VERSION: u16 = 9;
+pub(super) const SOURCE_CONTRACT_VERSION: u16 = 10;
 const SOURCE_CONTRACT_DOMAIN: &[u8] = b"ctx-source-backed-semantic-contract-v1\0";
 const SOURCE_BUILD_DOMAIN: &[u8] = b"ctx-source-backed-semantic-build-v1\0";
 pub(super) const SOURCE_INPUT_LEXICAL_SCHEMA_VERSION: u32 = 15;
@@ -41,6 +43,8 @@ pub(super) struct SourceProjectionFrontier {
     pub(super) last_failure: Option<String>,
     #[serde(default)]
     pub(super) flat_publication: FlatPublicationToken,
+    #[serde(default)]
+    pub(super) flat_staging: Option<FlatSourceStagingToken>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File, OpenOptions},
-    io::{BufWriter, Read, Seek, SeekFrom, Write},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -21,7 +21,10 @@ mod catalog;
 mod manifest;
 mod pinned;
 mod recovery;
+mod source_compaction;
 mod source_reconciliation;
+mod source_stage_log;
+mod source_staging;
 mod validation;
 
 use artifacts::*;
@@ -32,6 +35,9 @@ pub(in crate::semantic) use pinned::PinnedFlatGeneration;
 #[cfg(test)]
 pub(in crate::semantic) use pinned::PinnedScanSegment;
 use recovery::*;
+use source_compaction::*;
+use source_stage_log::*;
+use source_staging::*;
 use validation::*;
 
 pub(in crate::semantic) type FlatResult<T> = std::result::Result<T, FlatStoreError>;
@@ -186,6 +192,13 @@ pub(in crate::semantic) struct FlatActiveEventLookup {
 }
 
 impl FlatActiveEventLookup {
+    pub(in crate::semantic) fn from_events(mut events: Vec<FlatActiveEvent>) -> Self {
+        events.sort_by_key(|event| event.event_id);
+        Self {
+            events: Arc::new(events),
+        }
+    }
+
     pub(in crate::semantic) fn event(&self, event_id: Uuid) -> Option<&FlatActiveEvent> {
         self.events
             .binary_search_by_key(&event_id, |event| event.event_id)
@@ -232,6 +245,25 @@ pub(in crate::semantic) struct FlatPublishOutcome {
 pub(in crate::semantic) struct FlatSourceFinalization {
     pub(in crate::semantic) publication: FlatPublishOutcome,
     pub(in crate::semantic) receipt: Option<FlatSourceReceipt>,
+    pub(in crate::semantic) deleted_chunks: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::semantic) struct FlatSourceStagingToken {
+    pub(in crate::semantic) source_reconciliation_id: String,
+    pub(in crate::semantic) page_sequence: u64,
+    pub(in crate::semantic) page_hash: String,
+}
+
+pub(in crate::semantic) struct FlatSourcePageOutcome {
+    pub(in crate::semantic) staging: FlatSourceStagingToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::semantic) enum FlatSourceStageResume {
+    Ready,
+    Restarted,
 }
 
 impl FlatPublishOutcome {
@@ -275,6 +307,8 @@ pub(in crate::semantic) struct FlatSegmentStore {
     contract: FlatModelContract,
     mode: StoreMode,
     pinned: Mutex<Option<PinnedFlatGeneration>>,
+    source_generation: Mutex<Option<FlatSourceGenerationView>>,
+    source_stage: Mutex<Option<FlatSourceStage>>,
     reconciliation_view: Mutex<Option<FlatReconciliationView>>,
     vectors_touched: AtomicU64,
     vector_bytes_touched: AtomicU64,
@@ -292,7 +326,24 @@ pub(in crate::semantic) struct FlatSegmentStore {
     #[cfg(test)]
     source_publication_count: AtomicU64,
     #[cfg(test)]
+    global_manifest_parse_count: AtomicU64,
+    #[cfg(test)]
+    global_manifest_serialization_count: AtomicU64,
+    #[cfg(test)]
+    global_segment_directory_scan_count: AtomicU64,
+    #[cfg(test)]
+    staging_peak_event_records: AtomicU64,
+    #[cfg(test)]
     fail_after_source_frontier_commit: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_after_source_finalization: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_after_source_acknowledgement: std::sync::atomic::AtomicBool,
+}
+
+struct FlatSourceGenerationView {
+    _transaction_lock: FileLock,
+    selected: Option<SelectedManifest>,
 }
 
 #[derive(Clone)]
@@ -306,7 +357,8 @@ struct FlatReconciliationView {
     retirement_event_ids: Option<Vec<Uuid>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FlatSourceScope {
     source_identity_digest: String,
     source_reconciliation_id: String,
@@ -319,14 +371,6 @@ struct FlatReconciliationEventPage {
 }
 
 impl FlatReconciliationView {
-    fn event(&self, event_id: Uuid) -> Option<&FlatActiveEvent> {
-        match self.updates.get(&event_id) {
-            Some(Some(event)) => Some(event),
-            Some(None) => None,
-            None => self.lookup.event(event_id),
-        }
-    }
-
     fn current_events(&self) -> Vec<FlatActiveEvent> {
         let mut events = self
             .lookup
@@ -338,29 +382,6 @@ impl FlatReconciliationView {
             .collect::<Vec<_>>();
         events.sort_by_key(|event| event.event_id);
         events
-    }
-
-    fn touched_lookup(
-        &self,
-        replacements: &[FlatEventReplacement],
-        authority_updates: &[FlatEventMetadataUpdate],
-        tombstones: &[Uuid],
-    ) -> FlatActiveEventLookup {
-        let mut ids = replacements
-            .iter()
-            .map(|replacement| replacement.event_id)
-            .chain(authority_updates.iter().map(|update| update.event_id))
-            .chain(tombstones.iter().copied())
-            .collect::<Vec<_>>();
-        ids.sort_unstable();
-        ids.dedup();
-        FlatActiveEventLookup {
-            events: Arc::new(
-                ids.into_iter()
-                    .filter_map(|event_id| self.event(event_id).cloned())
-                    .collect(),
-            ),
-        }
     }
 
     fn apply_publication(&mut self, staged: &StagedSegment) {
@@ -410,6 +431,8 @@ impl FlatSegmentStore {
             contract,
             mode: StoreMode::ReadWrite,
             pinned: Mutex::new(None),
+            source_generation: Mutex::new(None),
+            source_stage: Mutex::new(None),
             reconciliation_view: Mutex::new(None),
             vectors_touched: AtomicU64::new(0),
             vector_bytes_touched: AtomicU64::new(0),
@@ -427,7 +450,19 @@ impl FlatSegmentStore {
             #[cfg(test)]
             source_publication_count: AtomicU64::new(0),
             #[cfg(test)]
+            global_manifest_parse_count: AtomicU64::new(0),
+            #[cfg(test)]
+            global_manifest_serialization_count: AtomicU64::new(0),
+            #[cfg(test)]
+            global_segment_directory_scan_count: AtomicU64::new(0),
+            #[cfg(test)]
+            staging_peak_event_records: AtomicU64::new(0),
+            #[cfg(test)]
             fail_after_source_frontier_commit: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_after_source_finalization: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_after_source_acknowledgement: std::sync::atomic::AtomicBool::new(false),
         };
         let recovery = store.recover_internal()?;
         #[cfg(test)]
@@ -454,6 +489,8 @@ impl FlatSegmentStore {
             contract,
             mode: StoreMode::ReadOnly,
             pinned: Mutex::new(None),
+            source_generation: Mutex::new(None),
+            source_stage: Mutex::new(None),
             reconciliation_view: Mutex::new(None),
             vectors_touched: AtomicU64::new(0),
             vector_bytes_touched: AtomicU64::new(0),
@@ -471,7 +508,19 @@ impl FlatSegmentStore {
             #[cfg(test)]
             source_publication_count: AtomicU64::new(0),
             #[cfg(test)]
+            global_manifest_parse_count: AtomicU64::new(0),
+            #[cfg(test)]
+            global_manifest_serialization_count: AtomicU64::new(0),
+            #[cfg(test)]
+            global_segment_directory_scan_count: AtomicU64::new(0),
+            #[cfg(test)]
+            staging_peak_event_records: AtomicU64::new(0),
+            #[cfg(test)]
             fail_after_source_frontier_commit: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_after_source_finalization: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_after_source_acknowledgement: std::sync::atomic::AtomicBool::new(false),
         };
         Ok(store)
     }
@@ -481,6 +530,17 @@ impl FlatSegmentStore {
         &self.recovery
     }
     pub(in crate::semantic) fn pin_generation(&self) -> FlatResult<Option<PinnedFlatGeneration>> {
+        let generation = self.source_generation.lock().map_err(|_| {
+            FlatStoreError::Corrupt("flat source generation lock is poisoned".to_owned())
+        })?;
+        if let Some(generation) = generation.as_ref() {
+            let Some(selected) = generation.selected.as_ref() else {
+                self.clear_pinned()?;
+                return Ok(None);
+            };
+            return self.load_pinned(selected).map(Some);
+        }
+        drop(generation);
         let _guard = self.lock_shared()?;
         let Some(selected) = select_manifest(&self.root, &self.contract)? else {
             self.clear_pinned()?;
@@ -491,6 +551,17 @@ impl FlatSegmentStore {
     }
 
     pub(in crate::semantic) fn active_stats(&self) -> FlatResult<FlatActiveStats> {
+        let generation = self.source_generation.lock().map_err(|_| {
+            FlatStoreError::Corrupt("flat source generation lock is poisoned".to_owned())
+        })?;
+        if let Some(generation) = generation.as_ref() {
+            return Ok(generation
+                .selected
+                .as_ref()
+                .map(manifest_stats)
+                .unwrap_or_default());
+        }
+        drop(generation);
         let _guard = self.lock_shared()?;
         Ok(select_manifest(&self.root, &self.contract)?
             .as_ref()
@@ -507,6 +578,17 @@ impl FlatSegmentStore {
     }
 
     pub(in crate::semantic) fn source_states(&self) -> FlatResult<Vec<FlatSourceState>> {
+        let generation = self.source_generation.lock().map_err(|_| {
+            FlatStoreError::Corrupt("flat source generation lock is poisoned".to_owned())
+        })?;
+        if let Some(generation) = generation.as_ref() {
+            return Ok(generation
+                .selected
+                .as_ref()
+                .map(|selected| manifest_source_states(&selected.envelope.manifest))
+                .unwrap_or_default());
+        }
+        drop(generation);
         let _guard = self.lock_shared()?;
         let Some(selected) = select_manifest(&self.root, &self.contract)? else {
             return Ok(Vec::new());
@@ -529,6 +611,12 @@ impl FlatSegmentStore {
         self.source_catalog_records_replayed
             .store(0, Ordering::Relaxed);
         self.source_publication_count.store(0, Ordering::Relaxed);
+        self.global_manifest_parse_count.store(0, Ordering::Relaxed);
+        self.global_manifest_serialization_count
+            .store(0, Ordering::Relaxed);
+        self.global_segment_directory_scan_count
+            .store(0, Ordering::Relaxed);
+        self.staging_peak_event_records.store(0, Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -557,6 +645,64 @@ impl FlatSegmentStore {
     }
 
     #[cfg(test)]
+    pub(in crate::semantic) fn global_manifest_parse_count(&self) -> u64 {
+        self.global_manifest_parse_count.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn global_manifest_serialization_count(&self) -> u64 {
+        self.global_manifest_serialization_count
+            .load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn global_segment_directory_scan_count(&self) -> u64 {
+        self.global_segment_directory_scan_count
+            .load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn staging_peak_event_records(&self) -> u64 {
+        self.staging_peak_event_records.load(Ordering::Relaxed)
+    }
+
+    pub(in crate::semantic) fn begin_source_generation_view(&self) -> FlatResult<()> {
+        self.require_writable()?;
+        let mut generation = self.source_generation.lock().map_err(|_| {
+            FlatStoreError::Corrupt("flat source generation lock is poisoned".to_owned())
+        })?;
+        if generation.is_some() {
+            return Ok(());
+        }
+        let transaction_lock = self.lock_transaction()?;
+        let selected = {
+            let _guard = self.lock_shared()?;
+            select_manifest(&self.root, &self.contract)?
+        };
+        #[cfg(test)]
+        self.global_manifest_parse_count
+            .fetch_add(1, Ordering::Relaxed);
+        *generation = Some(FlatSourceGenerationView {
+            _transaction_lock: transaction_lock,
+            selected,
+        });
+        Ok(())
+    }
+
+    pub(in crate::semantic) fn end_source_generation_view(&self) -> FlatResult<()> {
+        let mut stage = self.source_stage.lock().map_err(|_| {
+            FlatStoreError::Corrupt("flat source stage lock is poisoned".to_owned())
+        })?;
+        *stage = None;
+        drop(stage);
+        let mut generation = self.source_generation.lock().map_err(|_| {
+            FlatStoreError::Corrupt("flat source generation lock is poisoned".to_owned())
+        })?;
+        *generation = None;
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(in crate::semantic) fn fail_after_source_frontier_commit_once(&self) {
         self.fail_after_source_frontier_commit
             .store(true, Ordering::Relaxed);
@@ -569,8 +715,33 @@ impl FlatSegmentStore {
     }
 
     #[cfg(test)]
+    pub(in crate::semantic) fn fail_after_source_finalization_once(&self) {
+        self.fail_after_source_finalization
+            .store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn take_source_finalization_failure(&self) -> bool {
+        self.fail_after_source_finalization
+            .swap(false, Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn fail_after_source_acknowledgement_once(&self) {
+        self.fail_after_source_acknowledgement
+            .store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn take_source_acknowledgement_failure(&self) -> bool {
+        self.fail_after_source_acknowledgement
+            .swap(false, Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
     pub(in crate::semantic) fn rollback_active_manifest(&self) -> FlatResult<FlatPublicationToken> {
         self.require_writable()?;
+        let _transaction = self.lock_transaction()?;
         let _guard = self.lock_exclusive()?;
         let selected = select_manifest(&self.root, &self.contract)?.ok_or_else(|| {
             FlatStoreError::InvalidInput("flat manifest rollback has no publication".to_owned())
@@ -593,6 +764,7 @@ impl FlatSegmentStore {
     ) -> FlatResult<FlatPublishOutcome> {
         self.require_writable()?;
         validate_publication_input(&self.contract, replacements, tombstones)?;
+        let _transaction = self.lock_transaction()?;
         let _guard = self.lock_exclusive()?;
         let current = self.load_current_locked()?;
         if replacements.is_empty() && tombstones.is_empty() {
@@ -762,6 +934,10 @@ impl FlatSegmentStore {
 
     fn lock_exclusive(&self) -> FlatResult<FileLock> {
         FileLock::exclusive(&lock_path(&self.root))
+    }
+
+    fn lock_transaction(&self) -> FlatResult<FileLock> {
+        FileLock::exclusive(&transaction_lock_path(&self.root))
     }
 }
 

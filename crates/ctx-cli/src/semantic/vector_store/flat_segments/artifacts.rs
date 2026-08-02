@@ -70,6 +70,22 @@ pub(super) fn load_catalog_mutations(
     validate_mutation_payload(&mapping, &header, descriptor.kind, descriptor.generation)
 }
 
+pub(super) fn load_catalog_mutations_in_directory(
+    directory: &Path,
+    contract: &FlatModelContract,
+    descriptor: &SegmentDescriptor,
+) -> FlatResult<Vec<EventMutation>> {
+    let mapping = map_artifact_in_directory(
+        directory,
+        descriptor,
+        &descriptor.mutations,
+        ArtifactRole::Mutations,
+        contract,
+    )?;
+    let header = decode_header(&mapping)?;
+    validate_mutation_payload(&mapping, &header, descriptor.kind, descriptor.generation)
+}
+
 pub(super) fn validate_staged_segment(
     root: &Path,
     contract: &FlatModelContract,
@@ -79,6 +95,50 @@ pub(super) fn validate_staged_segment(
     Ok(())
 }
 
+pub(super) fn validate_staged_segment_in_directory(
+    directory: &Path,
+    contract: &FlatModelContract,
+    descriptor: &SegmentDescriptor,
+) -> FlatResult<()> {
+    let vectors = map_artifact_in_directory(
+        directory,
+        descriptor,
+        &descriptor.vectors,
+        ArtifactRole::Vectors,
+        contract,
+    )?;
+    let metadata = map_artifact_in_directory(
+        directory,
+        descriptor,
+        &descriptor.metadata,
+        ArtifactRole::Metadata,
+        contract,
+    )?;
+    let mutation_map = map_artifact_in_directory(
+        directory,
+        descriptor,
+        &descriptor.mutations,
+        ArtifactRole::Mutations,
+        contract,
+    )?;
+    let vector_header = decode_header(&vectors)?;
+    let metadata_header = decode_header(&metadata)?;
+    let mutation_header = decode_header(&mutation_map)?;
+    validate_vector_payload(&vectors, &vector_header, contract)?;
+    let mutations = validate_mutation_payload(
+        &mutation_map,
+        &mutation_header,
+        descriptor.kind,
+        descriptor.generation,
+    )?;
+    validate_metadata_payload(
+        &metadata,
+        &metadata_header,
+        &mutations,
+        descriptor.generation,
+    )
+}
+
 pub(super) fn map_artifact(
     root: &Path,
     segment: &SegmentDescriptor,
@@ -86,8 +146,18 @@ pub(super) fn map_artifact(
     role: ArtifactRole,
     contract: &FlatModelContract,
 ) -> FlatResult<Mmap> {
+    map_artifact_in_directory(&segments_directory(root), segment, artifact, role, contract)
+}
+
+pub(super) fn map_artifact_in_directory(
+    directory: &Path,
+    segment: &SegmentDescriptor,
+    artifact: &ArtifactDescriptor,
+    role: ArtifactRole,
+    contract: &FlatModelContract,
+) -> FlatResult<Mmap> {
     validate_artifact_name(&artifact.file, segment.generation, role)?;
-    let path = segments_directory(root).join(&artifact.file);
+    let path = directory.join(&artifact.file);
     let metadata = symlink_metadata_file(&path)?;
     if metadata.len() != artifact.file_bytes {
         return Err(FlatStoreError::Corrupt(format!(
@@ -132,6 +202,10 @@ pub(super) fn metadata_at(mapping: &Mmap, ordinal: usize) -> FlatChunkMetadata {
 }
 
 pub(super) fn publish_manifest(root: &Path, manifest: Manifest) -> FlatResult<SelectedManifest> {
+    publish_prepared_manifest(root, prepare_manifest(manifest)?)
+}
+
+pub(super) fn prepare_manifest(manifest: Manifest) -> FlatResult<PreparedManifest> {
     let manifest_bytes = serde_json::to_vec(&manifest)?;
     let digest = encode_hex(Sha256::digest(&manifest_bytes).as_slice());
     let envelope = ManifestEnvelope {
@@ -146,6 +220,22 @@ pub(super) fn publish_manifest(root: &Path, manifest: Manifest) -> FlatResult<Se
             "manifest exceeds the safe size limit; compact first".to_owned(),
         ));
     }
+    Ok(PreparedManifest {
+        envelope,
+        generation_hash: digest,
+        bytes,
+    })
+}
+
+pub(super) fn publish_prepared_manifest(
+    root: &Path,
+    prepared: PreparedManifest,
+) -> FlatResult<SelectedManifest> {
+    let PreparedManifest {
+        envelope,
+        generation_hash: digest,
+        bytes,
+    } = prepared;
     let directory = manifests_directory(root);
     let final_path = directory.join(manifest_name(envelope.manifest.generation, &digest));
     let temporary = unique_temporary_path(&directory, "manifest");
@@ -203,6 +293,22 @@ pub(super) fn write_event_segment(
     source: &FlatSourceScope,
     input: EventSegmentInput<'_>,
 ) -> FlatResult<StagedSegment> {
+    write_event_segment_in_directory(
+        &segments_directory(root),
+        contract,
+        generation,
+        source,
+        input,
+    )
+}
+
+pub(super) fn write_event_segment_in_directory(
+    directory: &Path,
+    contract: &FlatModelContract,
+    generation: u64,
+    source: &FlatSourceScope,
+    input: EventSegmentInput<'_>,
+) -> FlatResult<StagedSegment> {
     let EventSegmentInput {
         replacements,
         authority_updates,
@@ -224,10 +330,9 @@ pub(super) fn write_event_segment(
                 FlatStoreError::InvalidInput("publication vector count overflow".to_owned())
             })
         })?;
-    let directory = segments_directory(root);
     let stride = usize_from_u32(vector_stride(contract.dimensions)?, "vector stride")?;
-    let mut vectors = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Vectors)?;
-    let mut metadata = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Metadata)?;
+    let mut vectors = StagedArtifactWriter::new(directory, generation, ArtifactRole::Vectors)?;
+    let mut metadata = StagedArtifactWriter::new(directory, generation, ArtifactRole::Metadata)?;
     let mut vector_scratch = vec![0_u8; stride];
     let mut first_ordinals = HashMap::with_capacity(ordered_replacements.len());
     let mut next_ordinal = 0_u64;
@@ -280,7 +385,7 @@ pub(super) fn write_event_segment(
         ));
     }
 
-    let mut mutations = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Mutations)?;
+    let mut mutations = StagedArtifactWriter::new(directory, generation, ArtifactRole::Mutations)?;
     let mut ordered_mutations = replacements
         .iter()
         .map(|replacement| {
@@ -382,55 +487,6 @@ pub(super) fn write_event_segment(
             mutations,
         },
         mutations: ordered_mutations,
-    })
-}
-
-pub(super) fn write_catalog_segment(
-    root: &Path,
-    contract: &FlatModelContract,
-    generation: u64,
-    source: &FlatSourceScope,
-    kind: SegmentKind,
-    mutations: &[EventMutation],
-) -> FlatResult<StagedSegment> {
-    let mut ordered = mutations.to_vec();
-    ordered.sort_by_key(|mutation| mutation.event_id);
-    if ordered
-        .windows(2)
-        .any(|pair| pair[0].event_id == pair[1].event_id)
-    {
-        return Err(FlatStoreError::InvalidInput(
-            "catalog publication repeats an event".to_owned(),
-        ));
-    }
-    let directory = segments_directory(root);
-    let stride = vector_stride(contract.dimensions)?;
-    let vectors = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Vectors)?
-        .finalize(0, stride, contract.dimensions)?;
-    let metadata = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Metadata)?
-        .finalize(0, METADATA_RECORD_BYTES as u32, 0)?;
-    let mut mutation_writer =
-        StagedArtifactWriter::new(&directory, generation, ArtifactRole::Mutations)?;
-    for mutation in &ordered {
-        mutation_writer.write_payload(&encode_mutation_record(*mutation))?;
-    }
-    let mutation_count = u64::try_from(ordered.len())
-        .map_err(|_| FlatStoreError::InvalidInput("mutation count overflow".to_owned()))?;
-    let mutations = mutation_writer.finalize(mutation_count, MUTATION_RECORD_BYTES as u32, 0)?;
-    Ok(StagedSegment {
-        descriptor: SegmentDescriptor {
-            format_version: SEGMENT_FORMAT_VERSION,
-            generation,
-            kind,
-            vector_count: 0,
-            mutation_count,
-            source_identity_digest: source.source_identity_digest.clone(),
-            source_reconciliation_id: source.source_reconciliation_id.clone(),
-            vectors,
-            metadata,
-            mutations,
-        },
-        mutations: ordered,
     })
 }
 
@@ -725,10 +781,12 @@ pub(super) fn ensure_store_directories(root: &Path) -> FlatResult<()> {
             .map_err(|source| io_error("create flat store directory", &directory, source))?;
         ensure_real_directory(&directory)?;
     }
-    let lock = lock_path(root);
-    let file = open_lock(&lock, true)?;
-    file.sync_all()
-        .map_err(|source| io_error("sync flat writer lock", &lock, source))?;
+    ensure_source_stage_directory(root)?;
+    for lock in [lock_path(root), transaction_lock_path(root)] {
+        let file = open_lock(&lock, true)?;
+        file.sync_all()
+            .map_err(|source| io_error("sync flat writer lock", &lock, source))?;
+    }
     sync_directory(root)
 }
 
@@ -736,8 +794,11 @@ pub(super) fn validate_existing_store_directories(root: &Path) -> FlatResult<()>
     ensure_real_directory(root)?;
     ensure_real_directory(&manifests_directory(root))?;
     ensure_real_directory(&segments_directory(root))?;
+    ensure_real_directory(&source_stage_directory(root))?;
     let lock = lock_path(root);
     let _ = symlink_metadata_file(&lock)?;
+    let transaction_lock = transaction_lock_path(root);
+    let _ = symlink_metadata_file(&transaction_lock)?;
     Ok(())
 }
 
@@ -777,6 +838,10 @@ pub(super) fn lock_path(root: &Path) -> PathBuf {
     root.join(WRITER_LOCK_FILE)
 }
 
+pub(super) fn transaction_lock_path(root: &Path) -> PathBuf {
+    root.join(TRANSACTION_LOCK_FILE)
+}
+
 pub(super) fn create_new_file(path: &Path) -> FlatResult<File> {
     OpenOptions::new()
         .read(true)
@@ -797,13 +862,48 @@ pub(super) fn unique_temporary_path(directory: &Path, purpose: &str) -> PathBuf 
 
 pub(super) fn commit_unique_file(temporary: &Path, final_path: &Path) -> FlatResult<()> {
     if final_path.exists() {
+        if files_equal(temporary, final_path)? {
+            fs::remove_file(temporary)
+                .map_err(|source| io_error("remove duplicate Flat temporary", temporary, source))?;
+            return Ok(());
+        }
         return Err(FlatStoreError::Corrupt(format!(
-            "immutable flat artifact already exists: {}",
+            "immutable flat artifact already exists with different bytes: {}",
             final_path.display()
         )));
     }
     fs::rename(temporary, final_path)
         .map_err(|source| io_error("publish immutable flat artifact", final_path, source))
+}
+
+fn files_equal(left: &Path, right: &Path) -> FlatResult<bool> {
+    let left_metadata = symlink_metadata_file(left)?;
+    let right_metadata = symlink_metadata_file(right)?;
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+    let left_file =
+        File::open(left).map_err(|source| io_error("open Flat duplicate", left, source))?;
+    let right_file =
+        File::open(right).map_err(|source| io_error("open Flat duplicate", right, source))?;
+    let mut left_reader = BufReader::new(left_file);
+    let mut right_reader = BufReader::new(right_file);
+    let mut left_buffer = [0_u8; 64 * 1024];
+    let mut right_buffer = [0_u8; 64 * 1024];
+    loop {
+        let left_read = left_reader
+            .read(&mut left_buffer)
+            .map_err(|source| io_error("read Flat duplicate", left, source))?;
+        let right_read = right_reader
+            .read(&mut right_buffer)
+            .map_err(|source| io_error("read Flat duplicate", right, source))?;
+        if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
+            return Ok(false);
+        }
+        if left_read == 0 {
+            return Ok(true);
+        }
+    }
 }
 
 #[cfg(unix)]

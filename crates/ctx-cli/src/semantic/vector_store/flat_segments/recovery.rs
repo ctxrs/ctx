@@ -3,6 +3,7 @@ use super::*;
 impl FlatSegmentStore {
     pub(in crate::semantic) fn compact(&self) -> FlatResult<FlatPublishOutcome> {
         self.require_writable()?;
+        let _transaction = self.lock_transaction()?;
         let _guard = self.lock_exclusive()?;
         let Some(current) = self.load_current_locked()? else {
             return Ok(noop_outcome(None));
@@ -31,12 +32,48 @@ impl FlatSegmentStore {
                 "manifest counters disagree before full compaction".to_owned(),
             ));
         }
-        let mut groups = BTreeMap::<String, Vec<FlatActiveEvent>>::new();
+        let mut groups = BTreeMap::<String, (String, Vec<FlatActiveEvent>)>::new();
+        for snapshot in &current.envelope.manifest.source_snapshots {
+            let reconciliation_id = snapshot
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.source_reconciliation_id.clone())
+                .or_else(|| {
+                    current
+                        .envelope
+                        .manifest
+                        .segments
+                        .iter()
+                        .find(|descriptor| {
+                            descriptor.generation == snapshot.generation
+                                && descriptor.source_identity_digest
+                                    == snapshot.source_identity_digest
+                                && descriptor.kind == SegmentKind::Base
+                        })
+                        .map(|descriptor| descriptor.source_reconciliation_id.clone())
+                })
+                .ok_or_else(|| {
+                    FlatStoreError::Corrupt(format!(
+                        "source {} has no compaction reconciliation authority",
+                        snapshot.source_identity_digest
+                    ))
+                })?;
+            groups.insert(
+                snapshot.source_identity_digest.clone(),
+                (reconciliation_id, Vec::new()),
+            );
+        }
         for event in events.iter() {
-            groups
+            let (reconciliation_id, source_events) = groups
                 .entry(event.source_identity_digest.clone())
-                .or_default()
-                .push(event.clone());
+                .or_insert_with(|| (event.source_reconciliation_id.clone(), Vec::new()));
+            if *reconciliation_id != event.source_reconciliation_id {
+                return Err(FlatStoreError::Corrupt(format!(
+                    "source {} has mixed reconciliation authority",
+                    event.source_identity_digest
+                )));
+            }
+            source_events.push(event.clone());
         }
         let mut generation = current.envelope.manifest.generation;
         let mut staged = Vec::new();
@@ -50,21 +87,7 @@ impl FlatSegmentStore {
                 generation,
             )?);
         } else {
-            for (source_identity_digest, source_events) in &groups {
-                let source_reconciliation_id = source_events
-                    .first()
-                    .map(|event| event.source_reconciliation_id.clone())
-                    .ok_or_else(|| {
-                        FlatStoreError::Corrupt("empty source event group".to_owned())
-                    })?;
-                if source_events
-                    .iter()
-                    .any(|event| event.source_reconciliation_id != source_reconciliation_id)
-                {
-                    return Err(FlatStoreError::Corrupt(format!(
-                        "source {source_identity_digest} has mixed reconciliation authority"
-                    )));
-                }
+            for (source_identity_digest, (source_reconciliation_id, source_events)) in &groups {
                 generation = generation.checked_add(1).ok_or_else(|| {
                     FlatStoreError::Corrupt("manifest generation overflow".to_owned())
                 })?;
@@ -74,7 +97,7 @@ impl FlatSegmentStore {
                     generation,
                     &FlatSourceScope {
                         source_identity_digest: source_identity_digest.clone(),
-                        source_reconciliation_id,
+                        source_reconciliation_id: source_reconciliation_id.clone(),
                     },
                     source_events,
                     &current.envelope.manifest,
@@ -91,6 +114,7 @@ impl FlatSegmentStore {
         manifest.active_events = u64::try_from(events.len())
             .map_err(|_| FlatStoreError::Corrupt("active event count is too large".to_owned()))?;
         manifest.active_chunks = active_chunks;
+        manifest.source_snapshots = current.envelope.manifest.source_snapshots.clone();
         manifest.segments = staged
             .into_iter()
             .map(|segment| segment.descriptor)
@@ -98,7 +122,7 @@ impl FlatSegmentStore {
         let snapshots = manifest
             .segments
             .iter()
-            .filter(|segment| segment.vector_count != 0)
+            .filter(|segment| segment.source_identity_digest != UNSCOPED_SOURCE_IDENTITY)
             .map(|segment| (segment.source_identity_digest.clone(), segment.generation))
             .collect::<Vec<_>>();
         for (source, generation) in snapshots {
@@ -135,6 +159,7 @@ impl FlatSegmentStore {
     }
 
     pub(super) fn recover_internal(&self) -> FlatResult<FlatRecoveryReport> {
+        let _transaction = self.lock_transaction()?;
         let _guard = self.lock_exclusive()?;
         let mut report = remove_temporary_files(&self.root)?;
         let selected = match select_manifest_any(&self.root) {
