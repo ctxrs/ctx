@@ -220,6 +220,7 @@ pub struct AgentAttribution {
     pub id: String,
     pub relationship: ProductionRelationship,
     pub producing_session: ResourceRef,
+    pub parent_session: Option<ResourceRef>,
     pub direct_actor: Option<ResourceRef>,
     pub owning_root: Option<ResourceRef>,
     pub confidence: FactConfidence,
@@ -278,6 +279,7 @@ pub struct CommitBlameMatch {
     pub predicate: CommitPredicate,
     pub subject: ResourceRef,
     pub object: Option<ResourceRef>,
+    pub parent_session: Option<ResourceRef>,
     pub fact_occurred_at_ms: Option<i64>,
     pub confidence: FactConfidence,
     pub state: FactState,
@@ -731,6 +733,9 @@ impl AgentAttribution {
     ) -> Result<(), ProtocolError> {
         validate_bounded_text(&self.id, "agent attribution ID")?;
         validate_resource_kind(&self.producing_session, ResourceKind::Session)?;
+        if let Some(resource) = &self.parent_session {
+            validate_resource_kind(resource, ResourceKind::Session)?;
+        }
         if let Some(resource) = &self.direct_actor {
             resource.validate()?;
         }
@@ -772,6 +777,9 @@ impl CommitBlameMatch {
         validate_resource_kind(&self.subject, ResourceKind::Commit)?;
         if let Some(object) = &self.object {
             object.validate()?;
+        }
+        if let Some(resource) = &self.parent_session {
+            validate_resource_kind(resource, ResourceKind::Session)?;
         }
         if let Some(resource) = &self.direct_actor {
             resource.validate()?;

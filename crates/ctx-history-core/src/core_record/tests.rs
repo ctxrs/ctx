@@ -1058,7 +1058,13 @@ fn pull_request_outcome_must_match_its_referenced_repository_binding() {
         record.validate_contract(),
         Err(CoreRecordError::InvalidRepositoryOutcome)
     ));
-    record.repository_bindings[0].aliases[0].name = "ctx".to_owned();
+    record.repository_bindings[0].aliases.push(RepositoryAlias {
+        kind: RepositoryAliasKind::Forge,
+        host: "GITHUB.COM".to_owned(),
+        namespace: vec!["ctxrs".to_owned()],
+        name: "ctx".to_owned(),
+        remote_name: Some("origin".to_owned()),
+    });
     record.validate_contract().unwrap();
 }
 

@@ -117,6 +117,7 @@ fn render_commit_match(out: &mut String, value: &Value) {
     }
     push_resource(out, "subject", value.get("subject"), "  ");
     push_resource(out, "object", value.get("object"), "  ");
+    push_resource(out, "parent_session", value.get("parent_session"), "  ");
     push_resource(out, "direct_actor", value.get("direct_actor"), "  ");
     push_resource(out, "owning_root", value.get("owning_root"), "  ");
     push_number_list(out, "evidence_numbers", value.get("evidence_numbers"), "  ");
@@ -168,6 +169,7 @@ fn render_attribution(out: &mut String, value: &Value, indent: &str) {
         value.get("producing_session"),
         indent,
     );
+    push_resource(out, "parent_session", value.get("parent_session"), indent);
     push_resource(out, "direct_actor", value.get("direct_actor"), indent);
     push_resource(out, "owning_root", value.get("owning_root"), indent);
     push_scalar(out, "confidence", value.get("confidence"), indent);
@@ -319,5 +321,37 @@ mod tests {
         assert!(rendered.contains("event_id: 33333333-3333-4333-8333-333333333333"));
         assert!(!rendered.contains("payload_type"));
         assert!(!rendered.contains("omitted"));
+    }
+
+    #[test]
+    fn attribution_fallback_includes_the_immediate_parent_session() {
+        let value = json!({
+            "id": "fact:producer",
+            "relationship": "produced_by",
+            "producing_session": {
+                "id": "session:worker",
+                "kind": "session",
+                "display": "worker"
+            },
+            "parent_session": {
+                "id": "session:manager",
+                "kind": "session",
+                "display": "manager"
+            },
+            "direct_actor": null,
+            "owning_root": {
+                "id": "run:root",
+                "kind": "run",
+                "display": "root"
+            },
+            "confidence": "explicit",
+            "state": "asserted",
+            "evidence_numbers": [1]
+        });
+        let mut rendered = String::new();
+        render_attribution(&mut rendered, &value, "");
+
+        assert!(rendered.contains("parent_session.display: manager"));
+        assert!(rendered.contains("owning_root.display: root"));
     }
 }

@@ -53,9 +53,13 @@ fn render_attribution(
     if let Some(actor) = &value.direct_actor {
         push_role_resource(document, context, indent + 2, "direct actor", actor);
     }
-    if let Some(root) = &value.owning_root {
-        push_role_resource(document, context, indent + 2, "owning root", root);
-    }
+    render_session_lineage(
+        document,
+        context,
+        indent + 2,
+        value.parent_session.as_ref(),
+        value.owning_root.as_ref(),
+    );
     push_enum_field(
         document,
         context,
@@ -80,4 +84,26 @@ fn render_attribution(
         METADATA_LABEL_WIDTH,
         &value.evidence_numbers,
     );
+}
+
+pub(super) fn render_session_lineage(
+    document: &mut Document,
+    context: &RenderContext,
+    indent: usize,
+    parent_session: Option<&ctx_pro_host_protocol::ResourceRef>,
+    owning_root: Option<&ctx_pro_host_protocol::ResourceRef>,
+) {
+    match (parent_session, owning_root) {
+        (Some(parent), Some(root)) if parent.display == root.display => {
+            push_role_resource(document, context, indent, "delegated/owned by", parent);
+        }
+        (parent, root) => {
+            if let Some(parent) = parent {
+                push_role_resource(document, context, indent, "parent session", parent);
+            }
+            if let Some(root) = root {
+                push_role_resource(document, context, indent, "owning root", root);
+            }
+        }
+    }
 }

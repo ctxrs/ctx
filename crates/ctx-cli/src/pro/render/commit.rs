@@ -9,6 +9,7 @@ use super::layout::{
     push_notice, push_references, push_resource_primary, push_role_resource, same_resource,
     state_token, timestamp_text, METADATA_LABEL_WIDTH,
 };
+use super::relationships::render_session_lineage;
 
 pub(super) fn render(
     document: &mut Document,
@@ -118,9 +119,13 @@ fn render_match(
     if let Some(actor) = &value.direct_actor {
         push_role_resource(document, context, metadata_indent, "direct actor", actor);
     }
-    if let Some(root) = &value.owning_root {
-        push_role_resource(document, context, metadata_indent, "owning root", root);
-    }
+    render_session_lineage(
+        document,
+        context,
+        metadata_indent,
+        value.parent_session.as_ref(),
+        value.owning_root.as_ref(),
+    );
     if let Some(time) = value.fact_occurred_at_ms {
         let time = timestamp_text(time);
         push_field(
