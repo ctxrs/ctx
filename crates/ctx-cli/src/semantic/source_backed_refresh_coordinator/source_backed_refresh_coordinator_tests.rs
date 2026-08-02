@@ -1,6 +1,6 @@
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, Barrier,
+    mpsc, Arc, Barrier,
 };
 
 use ctx_history_capture::{
@@ -82,6 +82,40 @@ fn request_id(response: &Value) -> String {
         .to_owned()
 }
 
+struct RunningRefreshGate {
+    started: mpsc::Receiver<()>,
+    release: Option<mpsc::SyncSender<()>>,
+}
+
+impl RunningRefreshGate {
+    fn new() -> (Self, mpsc::SyncSender<()>, mpsc::Receiver<()>) {
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        (
+            Self {
+                started: started_rx,
+                release: Some(release_tx),
+            },
+            started_tx,
+            release_rx,
+        )
+    }
+
+    fn wait_until_started(&self) {
+        self.started
+            .recv_timeout(StdDuration::from_secs(5))
+            .expect("refresh runner entered executor");
+    }
+
+    fn release(mut self) {
+        self.release
+            .take()
+            .expect("refresh release sender")
+            .send(())
+            .expect("release refresh runner");
+    }
+}
+
 fn test_catalog_authority(revision: u64, digest_byte: u8) -> ExplicitSourceCatalogAuthority {
     ExplicitSourceCatalogAuthority::from_json(&json!({
         "schema_version": 1,
@@ -98,9 +132,9 @@ fn test_catalog_authority(revision: u64, digest_byte: u8) -> ExplicitSourceCatal
 mod receipt_tests;
 
 #[test]
-fn differing_catalog_authority_queues_a_serial_successor() {
+fn differing_catalog_authority_queues_one_successor_behind_a_running_refresh() {
     let temp = tempfile::tempdir().unwrap();
-    let coordinator = CoreRefreshEngine::new();
+    let coordinator = Arc::new(CoreRefreshEngine::new());
     let first_authority = test_catalog_authority(1, 0x11);
     let second_authority = test_catalog_authority(2, 0x22);
     let request = |authority: &ExplicitSourceCatalogAuthority| {
@@ -119,28 +153,48 @@ fn differing_catalog_authority_queues_a_serial_successor() {
     };
 
     let first = request(&first_authority);
-    let second = request(&second_authority);
-    let second_replay = request(&second_authority);
     let first_request_id = request_id(&first);
+    let (gate, runner_started, runner_release) = RunningRefreshGate::new();
+
+    let (second, second_replay) = std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_request_id = first_request_id.clone();
+        let runner_authority = first_authority.clone();
+        scope.spawn(move || {
+            let first_run = runner
+                .run_next_with(
+                    |request_id, _| {
+                        assert_eq!(request_id, runner_request_id);
+                        runner_started.send(()).expect("signal running refresh");
+                        let _ = runner_release.recv();
+                        let mut publication = test_publication("catalog-generation-1");
+                        publication.published_explicit_source_catalog = runner_authority;
+                        Ok(publication)
+                    },
+                    || Ok(Some("catalog-generation-1".to_owned())),
+                    |_| Ok(()),
+                    |_| Ok(()),
+                )
+                .expect("running first catalog refresh");
+            assert!(!first_run.failed);
+        });
+        gate.wait_until_started();
+
+        let second = request(&second_authority);
+        let second_replay = request(&second_authority);
+        gate.release();
+        (second, second_replay)
+    });
+
     let second_request_id = request_id(&second);
     assert_ne!(first_request_id, second_request_id);
     assert_eq!(request_id(&second_replay), second_request_id);
     assert_eq!(second_replay["coalesced_requests"], 1);
-
-    let first_run = coordinator
-        .run_next_with(
-            |request_id, _| {
-                assert_eq!(request_id, first_request_id);
-                let mut publication = test_publication("catalog-generation-1");
-                publication.published_explicit_source_catalog = first_authority.clone();
-                Ok(publication)
-            },
-            || Ok(Some("catalog-generation-1".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .unwrap();
-    assert!(!first_run.failed);
+    assert_eq!(second["request_state"], "queued");
+    assert_eq!(
+        coordinator.status(&first_request_id).unwrap()["request_state"],
+        "published"
+    );
     let queued_second = coordinator.status(&second_request_id).unwrap();
     assert_eq!(queued_second["request_state"], "queued");
     assert_eq!(queued_second["previous_generation"], "catalog-generation-1");
@@ -749,25 +803,246 @@ fn concurrent_refresh_request_uses_active_generation_without_reopening_inflight_
 }
 
 #[test]
-fn wait_request_during_running_refresh_queues_one_fresh_successor() {
+fn wait_request_with_equivalent_catalog_attaches_to_running_refresh() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = Arc::new(CoreRefreshEngine::new());
-    let first = coordinator.enqueue(None);
+    let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
+    let first = coordinator.enqueue_periodic(temp.path()).unwrap();
+    assert_eq!(first["trigger"], "periodic");
     let first_request_id = request_id(&first);
-    let started = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
+    let (gate, runner_started, runner_release) = RunningRefreshGate::new();
+    let executor_runs = Arc::new(AtomicUsize::new(0));
 
-    std::thread::scope(|scope| {
+    let attached = std::thread::scope(|scope| {
         let runner = Arc::clone(&coordinator);
-        let runner_started = Arc::clone(&started);
-        let runner_release = Arc::clone(&release);
+        let runner_authority = authority.clone();
+        let runner_executor_runs = Arc::clone(&executor_runs);
+        scope.spawn(move || {
+            let run = runner
+                .run_next_with(
+                    |_, _| {
+                        runner_executor_runs.fetch_add(1, Ordering::SeqCst);
+                        runner_started.send(()).expect("signal running refresh");
+                        let _ = runner_release.recv();
+                        let mut publication = test_publication("generation-1");
+                        publication.published_explicit_source_catalog = runner_authority;
+                        Ok(publication)
+                    },
+                    || Ok(Some("generation-1".to_owned())),
+                    |_| Ok(()),
+                    |_| Ok(()),
+                )
+                .expect("running refresh");
+            assert!(!run.failed);
+        });
+        gate.wait_until_started();
+
+        let attached = coordinator
+            .handle_ipc_request(
+                temp.path(),
+                &json!({
+                    "op": SOURCE_REFRESH_REQUEST_OP,
+                    "mode": "wait",
+                    "explicit_source_catalog": authority.to_json(),
+                }),
+            )
+            .unwrap()
+            .expect("wait refresh response");
+        gate.release();
+        attached
+    });
+
+    assert_eq!(request_id(&attached), first_request_id);
+    assert_eq!(attached["request_state"], "running");
+    assert_eq!(attached["coalesced_requests"], 1);
+    assert_eq!(attached["trigger"], "import");
+    assert_eq!(attached["trigger_provenance"], "explicit_source_catalog");
+    assert_eq!(executor_runs.load(Ordering::SeqCst), 1);
+    let terminal = coordinator.status(&first_request_id).unwrap();
+    assert_eq!(terminal["request_state"], "published");
+    assert_eq!(terminal["receipt"]["published_generation"], "generation-1");
+    assert!(coordinator
+        .run_next_with(
+            |_, _| panic!("equivalent wait launched a successor executor"),
+            || Ok(Some("generation-1".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .is_none());
+}
+
+#[test]
+fn multiple_equivalent_waiters_share_one_request_and_terminal_receipt() {
+    const WAITERS: usize = 8;
+
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = Arc::new(CoreRefreshEngine::new());
+    let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
+    let first = coordinator.enqueue_periodic(temp.path()).unwrap();
+    let first_request_id = request_id(&first);
+    let (gate, runner_started, runner_release) = RunningRefreshGate::new();
+    let executor_runs = Arc::new(AtomicUsize::new(0));
+
+    let waiter_responses = std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_authority = authority.clone();
+        let runner_executor_runs = Arc::clone(&executor_runs);
+        scope.spawn(move || {
+            let run = runner
+                .run_next_with(
+                    |_, _| {
+                        runner_executor_runs.fetch_add(1, Ordering::SeqCst);
+                        runner_started.send(()).expect("signal running refresh");
+                        let _ = runner_release.recv();
+                        let mut publication = test_publication("shared-generation");
+                        publication.published_explicit_source_catalog = runner_authority;
+                        Ok(publication)
+                    },
+                    || Ok(Some("shared-generation".to_owned())),
+                    |_| Ok(()),
+                    |_| Ok(()),
+                )
+                .expect("running refresh");
+            assert!(!run.failed);
+        });
+        gate.wait_until_started();
+
+        let responses = (0..WAITERS)
+            .map(|_| {
+                coordinator
+                    .handle_ipc_request(
+                        temp.path(),
+                        &json!({
+                            "op": SOURCE_REFRESH_REQUEST_OP,
+                            "mode": "wait",
+                            "explicit_source_catalog": authority.to_json(),
+                        }),
+                    )
+                    .unwrap()
+                    .expect("wait refresh response")
+            })
+            .collect::<Vec<_>>();
+        gate.release();
+        responses
+    });
+
+    assert!(waiter_responses
+        .iter()
+        .all(|response| request_id(response) == first_request_id));
+    assert_eq!(executor_runs.load(Ordering::SeqCst), 1);
+    let terminal = coordinator.status(&first_request_id).unwrap();
+    assert_eq!(terminal["request_state"], "published");
+    assert_eq!(terminal["coalesced_requests"], WAITERS as u64);
+    assert_eq!(terminal["trigger"], "import");
+    assert_eq!(
+        terminal["receipt"]["published_generation"],
+        "shared-generation"
+    );
+    assert!(waiter_responses
+        .iter()
+        .all(|response| { coordinator.status(&request_id(response)).as_ref() == Some(&terminal) }));
+    assert!(!coordinator.has_pending_request());
+}
+
+#[test]
+fn equivalent_waiters_share_the_same_terminal_failure_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = Arc::new(CoreRefreshEngine::new());
+    let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
+    let first = coordinator.enqueue_periodic(temp.path()).unwrap();
+    let first_request_id = request_id(&first);
+    let (gate, runner_started, runner_release) = RunningRefreshGate::new();
+
+    let waiter_request_ids = std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        scope.spawn(move || {
+            let run = runner
+                .run_next_with(
+                    |_, _| {
+                        runner_started.send(()).expect("signal running refresh");
+                        let _ = runner_release.recv();
+                        Err(anyhow!("injected equivalent refresh failure"))
+                    },
+                    || Ok(None),
+                    |_| Ok(()),
+                    |_| Ok(()),
+                )
+                .expect("running refresh");
+            assert!(run.failed);
+        });
+        gate.wait_until_started();
+
+        let request_ids = (0..2)
+            .map(|_| {
+                coordinator
+                    .handle_ipc_request(
+                        temp.path(),
+                        &json!({
+                            "op": SOURCE_REFRESH_REQUEST_OP,
+                            "mode": "wait",
+                            "explicit_source_catalog": authority.to_json(),
+                        }),
+                    )
+                    .unwrap()
+                    .and_then(|response| {
+                        response
+                            .get("request_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .expect("wait refresh request ID")
+            })
+            .collect::<Vec<_>>();
+        gate.release();
+        request_ids
+    });
+
+    assert!(waiter_request_ids
+        .iter()
+        .all(|request_id| request_id == &first_request_id));
+    let terminal = coordinator.status(&first_request_id).unwrap();
+    assert_eq!(terminal["request_state"], "failed");
+    assert!(terminal["receipt"].is_null());
+    assert!(terminal["last_error"]
+        .as_str()
+        .is_some_and(|error| error.contains("injected equivalent refresh failure")));
+    assert!(waiter_request_ids
+        .iter()
+        .all(|request_id| { coordinator.status(request_id).as_ref() == Some(&terminal) }));
+    assert!(!coordinator.has_pending_request());
+}
+
+#[test]
+fn explicit_fresh_after_admitted_snapshot_queues_one_successor() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = Arc::new(CoreRefreshEngine::new());
+    let authority = test_catalog_authority(1, 0x11);
+    let first = coordinator
+        .handle_ipc_request(
+            temp.path(),
+            &json!({
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "mode": "background",
+                "explicit_source_catalog": authority.to_json(),
+            }),
+        )
+        .unwrap()
+        .expect("background refresh response");
+    let first_request_id = request_id(&first);
+    let (gate, runner_started, runner_release) = RunningRefreshGate::new();
+
+    let (successor, replay) = std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_authority = authority.clone();
         scope.spawn(move || {
             runner
                 .run_next_with(
                     |_, _| {
-                        runner_started.wait();
-                        runner_release.wait();
-                        Ok(test_publication("generation-1"))
+                        runner_started.send(()).expect("signal running refresh");
+                        let _ = runner_release.recv();
+                        let mut publication = test_publication("generation-1");
+                        publication.published_explicit_source_catalog = runner_authority;
+                        Ok(publication)
                     },
                     || Ok(Some("generation-1".to_owned())),
                     |_| Ok(()),
@@ -775,7 +1050,7 @@ fn wait_request_during_running_refresh_queues_one_fresh_successor() {
                 )
                 .expect("running refresh");
         });
-        started.wait();
+        gate.wait_until_started();
 
         let request = || {
             coordinator
@@ -784,32 +1059,38 @@ fn wait_request_during_running_refresh_queues_one_fresh_successor() {
                     &json!({
                         "op": SOURCE_REFRESH_REQUEST_OP,
                         "mode": "wait",
+                        "explicit_source_catalog": authority.to_json(),
+                        "fresh_after_admitted_snapshot": true,
                     }),
                 )
                 .unwrap()
-                .expect("wait refresh response")
+                .expect("fresh-after-admitted-snapshot response")
         };
         let successor = request();
         let replay = request();
-        assert_ne!(request_id(&successor), first_request_id);
-        assert_eq!(request_id(&replay), request_id(&successor));
-        assert_eq!(replay["coalesced_requests"], 1);
-        release.wait();
+        gate.release();
+        (successor, replay)
     });
 
+    let successor_request_id = request_id(&successor);
+    assert_ne!(successor_request_id, first_request_id);
+    assert_eq!(request_id(&replay), successor_request_id);
+    assert_eq!(replay["coalesced_requests"], 1);
     let successor_run = coordinator
         .run_next_with(
-            |_, _| Ok(test_publication("generation-2")),
+            |_, _| {
+                let mut publication = test_publication("generation-2");
+                publication.published_explicit_source_catalog = authority;
+                Ok(publication)
+            },
             || Ok(Some("generation-2".to_owned())),
             |_| Ok(()),
             |_| Ok(()),
         )
         .expect("fresh successor");
     assert!(!successor_run.failed);
-    assert_eq!(
-        successor_run.job["published_generation"],
-        Value::String("generation-2".to_owned())
-    );
+    assert_eq!(request_id(&successor_run.job), successor_request_id);
+    assert!(!coordinator.has_pending_request());
 }
 
 #[test]
@@ -1015,6 +1296,91 @@ fn trailing_publication_failure_keeps_committed_success() {
         coordinator.status(&request_id).unwrap()["request_state"],
         "published"
     );
+}
+
+#[test]
+fn recovered_wait_after_restart_attaches_to_equivalent_running_attempt() {
+    let temp = tempfile::tempdir().unwrap();
+    let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
+    let first = CoreRefreshEngine::new();
+    let interrupted = first.enqueue_periodic(temp.path()).unwrap();
+    let interrupted_request_id = request_id(&interrupted);
+    let crash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = first.run_next_with(
+            |_, _| panic!("injected daemon process interruption"),
+            || Ok(None),
+            |_| Ok(()),
+            |_| Ok(()),
+        );
+    }));
+    assert!(crash.is_err());
+    let running_job = first
+        .set_progress(
+            &interrupted_request_id,
+            "refreshing",
+            0,
+            1,
+            Some("interrupted-source".to_owned()),
+        )
+        .expect("interrupted running job");
+    write_daemon_job_status(
+        &daemon_source_backed_refresh_job_path(temp.path()),
+        &running_job,
+    )
+    .unwrap();
+    drop(first);
+
+    let restarted = Arc::new(CoreRefreshEngine::new());
+    let active = restarted.enqueue_periodic(temp.path()).unwrap();
+    let active_request_id = request_id(&active);
+    assert_ne!(active_request_id, interrupted_request_id);
+    let (gate, runner_started, runner_release) = RunningRefreshGate::new();
+
+    let recovered = std::thread::scope(|scope| {
+        let runner = Arc::clone(&restarted);
+        let runner_authority = authority.clone();
+        scope.spawn(move || {
+            let run = runner
+                .run_next_with(
+                    |_, _| {
+                        runner_started.send(()).expect("signal running refresh");
+                        let _ = runner_release.recv();
+                        let mut publication = test_publication("restart-generation");
+                        publication.published_explicit_source_catalog = runner_authority;
+                        Ok(publication)
+                    },
+                    || Ok(Some("restart-generation".to_owned())),
+                    |_| Ok(()),
+                    |_| Ok(()),
+                )
+                .expect("restarted running refresh");
+            assert!(!run.failed);
+        });
+        gate.wait_until_started();
+
+        let recovered = restarted
+            .handle_ipc_request(
+                temp.path(),
+                &json!({
+                    "op": SOURCE_REFRESH_REQUEST_OP,
+                    "mode": "wait",
+                    "explicit_source_catalog": authority.to_json(),
+                }),
+            )
+            .unwrap()
+            .expect("recovered wait refresh response");
+        gate.release();
+        recovered
+    });
+
+    assert_eq!(request_id(&recovered), active_request_id);
+    let terminal = restarted.status(&active_request_id).unwrap();
+    assert_eq!(terminal["request_state"], "published");
+    assert_eq!(
+        terminal["receipt"]["published_generation"],
+        "restart-generation"
+    );
+    assert!(!restarted.has_pending_request());
 }
 
 #[test]
