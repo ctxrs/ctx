@@ -18,14 +18,15 @@ use sha2::{Digest, Sha256};
 
 use super::{
     certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
+    open_root_handle_sqlite_source_online_backup_after_database_copy_for_test,
     open_root_handle_sqlite_source_online_backup_before_identity_check_for_test,
     open_root_handle_sqlite_source_snapshot,
     open_root_handle_sqlite_source_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
     open_root_handle_sqlite_source_snapshot_for_test, retain_sqlite_source_directory_authority,
-    SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceComponent,
-    SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot, SqliteSourceSnapshotStrategy,
-    SQLITE_SHM_MAX_BYTES, SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+    run_online_backup_with_deadline_for_test, SqliteLogicalSnapshot, SqliteSourceAccessError,
+    SqliteSourceComponent, SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
+    SqliteSourceSnapshotStrategy, SQLITE_SHM_MAX_BYTES, SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
 };
 
 fn create_database(path: &Path, value: &str) {
@@ -458,8 +459,8 @@ fn bounded_active_wal_copy_has_one_retained_snapshot_lifecycle() {
     assert_eq!(snapshot.copied_bytes(), expected_copied);
     assert_eq!(
         snapshot.family_revalidation_count(),
-        2,
-        "acquisition keeps only the post-pin and final evidence fences"
+        4,
+        "copied acquisition fences the DB/WAL family before and after the copy, then post-pin and final evidence"
     );
     let counters = parent.snapshot_counters();
     assert_eq!(counters.copied_snapshot_opens(), 1);
@@ -628,6 +629,49 @@ fn oversized_shared_memory_is_typed_unavailable_before_hashing() {
     assert!(matches!(
         result,
         Err(SqliteSourceAccessError::SnapshotTooLarge { .. })
+    ));
+}
+
+#[test]
+fn logical_online_backup_enforces_the_shared_memory_bound_before_opening_sqlite() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let shared_memory = database.with_file_name("provider.sqlite-shm");
+    create_database(&database, "expected");
+    let file = File::create(&shared_memory).unwrap();
+    file.set_len(SQLITE_SHM_MAX_BYTES + 1).unwrap();
+    let parent = retain_parent(temp.path());
+
+    let result = parent.open_logical_online_backup_snapshot(OsStr::new("provider.sqlite"));
+
+    assert!(matches!(
+        result,
+        Err(SqliteSourceAccessError::SnapshotTooLarge {
+            length,
+            maximum: SQLITE_SHM_MAX_BYTES,
+            ..
+        }) if length == SQLITE_SHM_MAX_BYTES + 1
+    ));
+    assert_eq!(parent.snapshot_counters().logical_online_backup_opens(), 0);
+}
+
+#[test]
+fn logical_online_backup_checks_an_expired_deadline_before_a_bounded_step() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("source.sqlite");
+    let destination_path = temp.path().join("destination.sqlite");
+    create_database(&source_path, "expected");
+    let source =
+        Connection::open_with_flags(&source_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let destination = Connection::open(&destination_path).unwrap();
+
+    let result = run_online_backup_with_deadline_for_test(&source, &destination, Instant::now());
+
+    assert!(matches!(
+        result,
+        Err(SqliteSourceAccessError::SnapshotUnavailable { reason })
+            if reason.contains("five-minute deadline")
     ));
 }
 
@@ -931,6 +975,127 @@ fn logical_online_backup_keeps_admitted_content_during_commit_and_next_refresh_a
     refreshed.finish().unwrap();
 }
 
+#[test]
+fn logical_online_backup_terminal_fence_allows_same_object_wal_growth() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let writer = create_persistent_wal(&database);
+    #[cfg(unix)]
+    let wal = database.with_file_name("provider.sqlite-wal");
+    #[cfg(unix)]
+    let wal_identity = fs::metadata(&wal).unwrap();
+    let parent = retain_parent(temp.path());
+    let snapshot = parent
+        .open_logical_online_backup_snapshot(OsStr::new("provider.sqlite"))
+        .unwrap();
+    assert_eq!(read_values(&snapshot), ["from-wal"]);
+    let fence = snapshot.seal().unwrap();
+
+    writer
+        .execute("INSERT INTO messages (body) VALUES ('after-seal')", [])
+        .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(fs::metadata(&wal).unwrap().ino(), wal_identity.ino());
+    }
+    fence.revalidate().unwrap();
+    let refreshed = parent
+        .open_logical_online_backup_snapshot(OsStr::new("provider.sqlite"))
+        .unwrap();
+    assert_eq!(read_values(&refreshed), ["from-wal", "after-seal"]);
+    refreshed.finish().unwrap();
+}
+
+#[test]
+fn logical_online_backup_fails_closed_when_an_optional_wal_appears_after_preflight() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    create_database(&database, "before-wal");
+    let writer = Connection::open(&database).unwrap();
+    let mode: String = writer
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    writer.execute_batch("PRAGMA wal_autocheckpoint=0").unwrap();
+    let wal = database.with_file_name("provider.sqlite-wal");
+    assert!(!wal.exists());
+    let parent = retain_parent(temp.path());
+
+    let result = open_root_handle_sqlite_source_online_backup_before_identity_check_for_test(
+        &parent,
+        OsStr::new("provider.sqlite"),
+        || {
+            writer
+                .execute("INSERT INTO messages (body) VALUES ('new-in-wal')", [])
+                .unwrap();
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+    let refreshed = parent
+        .open_logical_online_backup_snapshot(OsStr::new("provider.sqlite"))
+        .unwrap();
+    assert_eq!(read_values(&refreshed), ["before-wal", "new-in-wal"]);
+    refreshed.finish().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn logical_online_backup_rejects_wal_leaf_replacement_during_named_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let _writer = create_persistent_wal(&database);
+    let wal = database.with_file_name("provider.sqlite-wal");
+    let retained_wal = database.with_file_name("provider.sqlite-retained-wal");
+    let parent = retain_parent(temp.path());
+
+    let result = open_root_handle_sqlite_source_online_backup_before_identity_check_for_test(
+        &parent,
+        OsStr::new("provider.sqlite"),
+        || {
+            fs::rename(&wal, &retained_wal).unwrap();
+            fs::copy(&retained_wal, &wal).unwrap();
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+}
+
+#[test]
+fn logical_online_backup_rejects_checkpoint_during_copied_family_acquisition() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let writer = create_persistent_wal(&database);
+    drop(writer);
+    let shared_memory = database.with_file_name("provider.sqlite-shm");
+    fs::remove_file(&shared_memory).unwrap();
+    let parent = retain_parent(temp.path());
+
+    let result = open_root_handle_sqlite_source_online_backup_after_database_copy_for_test(
+        &parent,
+        OsStr::new("provider.sqlite"),
+        || {
+            let checkpointer = Connection::open(&database).unwrap();
+            checkpointer
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+}
+
 #[cfg(unix)]
 #[test]
 fn logical_online_backup_terminal_fence_rejects_database_leaf_replacement() {
@@ -945,6 +1110,29 @@ fn logical_online_backup_terminal_fence_rejects_database_leaf_replacement() {
 
     fs::rename(&database, temp.path().join("admitted.sqlite")).unwrap();
     create_database(&database, "replacement");
+    assert!(matches!(
+        fence.revalidate(),
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn logical_online_backup_terminal_fence_rejects_wal_leaf_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let _writer = create_persistent_wal(&database);
+    let wal = database.with_file_name("provider.sqlite-wal");
+    let retained_wal = database.with_file_name("provider.sqlite-retained-wal");
+    let parent = retain_parent(temp.path());
+    let snapshot = parent
+        .open_logical_online_backup_snapshot(OsStr::new("provider.sqlite"))
+        .unwrap();
+    let fence = snapshot.seal().unwrap();
+
+    fs::rename(&wal, &retained_wal).unwrap();
+    fs::copy(&retained_wal, &wal).unwrap();
+
     assert!(matches!(
         fence.revalidate(),
         Err(SqliteSourceAccessError::SourceChanged)

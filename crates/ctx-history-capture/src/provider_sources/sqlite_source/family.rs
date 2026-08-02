@@ -121,6 +121,18 @@ impl SqliteSourceFamily {
     pub(super) fn capture_revision_evidence(
         &self,
     ) -> SqliteSourceAccessResult<SqliteFamilyEvidence> {
+        let shared_memory = self
+            .shared_memory
+            .as_ref()
+            .map(SqliteFamilyMember::capture_state)
+            .transpose()?;
+        if let Some(state) = &shared_memory {
+            enforce_member_length_bound(
+                &self.shared_memory_path,
+                state.length,
+                SQLITE_SHM_MAX_BYTES,
+            )?;
+        }
         Ok(SqliteFamilyEvidence {
             parent_identity: self.authority.identity.clone(),
             database: self.database.capture_state()?,
@@ -129,11 +141,7 @@ impl SqliteSourceFamily {
                 .as_ref()
                 .map(SqliteFamilyMember::capture_state)
                 .transpose()?,
-            shared_memory: self
-                .shared_memory
-                .as_ref()
-                .map(SqliteFamilyMember::capture_state)
-                .transpose()?,
+            shared_memory,
             wal_token: self
                 .wal
                 .as_ref()
@@ -143,12 +151,58 @@ impl SqliteSourceFamily {
         })
     }
 
-    pub(super) fn revalidate_database_identity(
+    /// Revalidates the authorized SQLite family topology without treating
+    /// ordinary writes to retained members as source replacement.
+    ///
+    /// Logical-online-backup snapshots admit a SQLite read view, so DB/WAL/SHM
+    /// metadata and bytes may advance after that view is pinned. The pathname
+    /// topology may not: every member that existed at admission must still
+    /// resolve to the same retained object, absent members must remain absent,
+    /// and rollback journals remain unavailable. This closes named-open and
+    /// checkpoint replacement races while allowing same-object WAL growth.
+    pub(super) fn revalidate_logical_identity(
         &self,
-        expected_identity: &NativeFileIdentity,
+        expected: &SqliteFamilyEvidence,
     ) -> SqliteSourceAccessResult<()> {
-        self.authority
-            .revalidate_database_identity(self.database_name(), expected_identity)
+        #[cfg(test)]
+        let _ =
+            self.revalidation_count
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    Some(count.saturating_add(1))
+                });
+        self.authority.revalidate()?;
+        if self.authority.identity != expected.parent_identity {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        self.database
+            .revalidate_identity(&self.authority, &expected.database.identity)?;
+        revalidate_optional_member_identity(
+            &self.authority,
+            self.wal.as_ref(),
+            expected.wal.as_ref(),
+            &self.wal_name,
+            &self.wal_path,
+            None,
+        )?;
+        revalidate_optional_member_identity(
+            &self.authority,
+            self.shared_memory.as_ref(),
+            expected.shared_memory.as_ref(),
+            &self.shared_memory_name,
+            &self.shared_memory_path,
+            Some(SQLITE_SHM_MAX_BYTES),
+        )?;
+        if SqliteFamilyMember::open_optional(
+            &self.authority,
+            self.journal_name.clone(),
+            self.journal_path.clone(),
+        )
+        .map_err(map_revalidation_error)?
+        .is_some()
+        {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        Ok(())
     }
 
     pub(super) fn revalidate(
@@ -305,6 +359,25 @@ impl SqliteFamilyMember {
         }
     }
 
+    fn revalidate_identity(
+        &self,
+        authority: &SqliteSourceDirectoryAuthority,
+        expected: &NativeFileIdentity,
+    ) -> SqliteSourceAccessResult<()> {
+        let retained = self.capture_state().map_err(map_revalidation_error)?;
+        if &retained.identity != expected {
+            return Err(SqliteSourceAccessError::SourceChanged);
+        }
+        let named = Self::open(authority, self.name.clone(), self.path.clone())
+            .map_err(map_revalidation_error)?;
+        let named_state = named.capture_state().map_err(map_revalidation_error)?;
+        if &named_state.identity == expected {
+            Ok(())
+        } else {
+            Err(SqliteSourceAccessError::SourceChanged)
+        }
+    }
+
     fn bounded_token(&self) -> SqliteSourceAccessResult<[u8; 32]> {
         let state = self.capture_state()?;
         let mut file =
@@ -356,13 +429,7 @@ impl SqliteFamilyMember {
 
     fn content_digest(&self) -> SqliteSourceAccessResult<[u8; 32]> {
         let state = self.capture_state()?;
-        if state.length > SQLITE_SHM_MAX_BYTES {
-            return Err(SqliteSourceAccessError::SnapshotTooLarge {
-                path: self.path.clone(),
-                length: state.length,
-                maximum: SQLITE_SHM_MAX_BYTES,
-            });
-        }
+        enforce_member_length_bound(&self.path, state.length, SQLITE_SHM_MAX_BYTES)?;
         let mut file =
             self.opened
                 .file()
@@ -395,6 +462,66 @@ impl SqliteFamilyMember {
             remaining -= requested as u64;
         }
         Ok(digest.finalize().into())
+    }
+}
+
+fn enforce_member_length_bound(
+    path: &Path,
+    length: u64,
+    maximum: u64,
+) -> SqliteSourceAccessResult<()> {
+    if length > maximum {
+        Err(SqliteSourceAccessError::SnapshotTooLarge {
+            path: path.to_path_buf(),
+            length,
+            maximum,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn revalidate_optional_member_identity(
+    authority: &SqliteSourceDirectoryAuthority,
+    member: Option<&SqliteFamilyMember>,
+    expected: Option<&NativeFileState>,
+    name: &OsStr,
+    path: &Path,
+    maximum_length: Option<u64>,
+) -> SqliteSourceAccessResult<()> {
+    match (member, expected) {
+        (Some(member), Some(expected)) => {
+            let retained = member.capture_state().map_err(map_revalidation_error)?;
+            if let Some(maximum) = maximum_length {
+                enforce_member_length_bound(path, retained.length, maximum)?;
+            }
+            if retained.identity != expected.identity {
+                return Err(SqliteSourceAccessError::SourceChanged);
+            }
+            let named =
+                SqliteFamilyMember::open(authority, name.to_os_string(), path.to_path_buf())
+                    .map_err(map_revalidation_error)?;
+            let named_state = named.capture_state().map_err(map_revalidation_error)?;
+            if let Some(maximum) = maximum_length {
+                enforce_member_length_bound(path, named_state.length, maximum)?;
+            }
+            if named_state.identity == expected.identity {
+                Ok(())
+            } else {
+                Err(SqliteSourceAccessError::SourceChanged)
+            }
+        }
+        (None, None) => {
+            if SqliteFamilyMember::open_optional(authority, name.to_os_string(), path.to_path_buf())
+                .map_err(map_revalidation_error)?
+                .is_some()
+            {
+                Err(SqliteSourceAccessError::SourceChanged)
+            } else {
+                Ok(())
+            }
+        }
+        _ => Err(SqliteSourceAccessError::SourceChanged),
     }
 }
 

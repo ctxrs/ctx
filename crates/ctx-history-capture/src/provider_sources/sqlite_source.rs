@@ -10,10 +10,10 @@
 //! immutable URI mode or copy an exact DB/WAL family, with bounded I/O, to a
 //! private directory below the ctx data root. An explicit logical-online-backup
 //! policy instead retains a private logical DB while allowing later commits on
-//! the same authorized database object. Rollback journals remain typed
-//! unavailable because recovery could require database writes. SHM is bounded
-//! volatile lock coordination; provider DB/WAL bytes and directory entries are
-//! never mutated.
+//! the same authorized database and WAL objects. Family-member replacement or
+//! appearance remains fail-closed. Rollback journals remain typed unavailable
+//! because recovery could require database writes. SHM is bounded volatile lock
+//! coordination; provider DB/WAL bytes and directory entries are never mutated.
 
 use std::{
     ffi::{c_char, c_void, OsStr, OsString},
@@ -123,8 +123,9 @@ pub(crate) enum SqliteSourceSnapshotStrategy {
 /// caller. Logical online backup is an explicit provider opt-in: it pins a
 /// short source transaction, copies that view into private ctx storage through
 /// SQLite's backup API, and thereafter fences only the approved parent and
-/// main-database object identity. Ordinary commits on that same object cannot
-/// invalidate the admitted private snapshot.
+/// admitted DB/WAL/SHM object identities. Ordinary commits and WAL growth on
+/// those same objects cannot invalidate the admitted private snapshot, while
+/// sidecar appearance, disappearance, and replacement remain fail-closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SqliteSourceSnapshotPolicy {
     StrictPhysicalFamily,
@@ -538,23 +539,6 @@ impl SqliteSourceDirectoryAuthority {
             Err(SqliteSourceAccessError::SourceChanged)
         }
     }
-
-    fn revalidate_database_identity(
-        &self,
-        database_name: &OsStr,
-        expected_identity: &NativeFileIdentity,
-    ) -> SqliteSourceAccessResult<()> {
-        self.revalidate()?;
-        let path = self.path.join(database_name);
-        let database = SqliteFamilyMember::open(self, database_name.to_os_string(), path)
-            .map_err(map_revalidation_error)?;
-        let state = database.capture_state().map_err(map_revalidation_error)?;
-        if &state.identity == expected_identity {
-            Ok(())
-        } else {
-            Err(SqliteSourceAccessError::SourceChanged)
-        }
-    }
 }
 
 /// A sealed compact witness for the exact SQLite family that backed one
@@ -562,7 +546,7 @@ impl SqliteSourceDirectoryAuthority {
 ///
 /// The witness retains no provider handles. Commit-time validation reopens the
 /// approved parent through the same no-follow capability path, certifies the
-/// main database, any non-empty WAL, and relevant SHM state. This bounds live
+/// main database, any admitted WAL, and relevant SHM identity. This bounds live
 /// descriptors by active workers rather than total discovered databases.
 #[must_use = "revalidate the terminal fence before publishing snapshot observations"]
 #[derive(Debug)]
@@ -611,10 +595,9 @@ impl SqliteSourceTerminalFence {
                 family.revalidate(&self.inner.native_evidence)?;
             }
             SqliteSourceSnapshotPolicy::LogicalOnlineBackup => {
-                authority.revalidate_database_identity(
-                    &self.inner.database_name,
-                    &self.inner.native_evidence.database.identity,
-                )?;
+                let family = SqliteSourceFamily::open(&authority, &self.inner.database_name, || {})
+                    .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+                family.revalidate_logical_identity(&self.inner.native_evidence)?;
             }
         }
         self.inner.snapshot_context.record_terminal_revalidation()
@@ -749,7 +732,7 @@ impl SqliteSourceReadSnapshot {
                 family.revalidate(&self.native_evidence)
             }
             SqliteSourceSnapshotPolicy::LogicalOnlineBackup => {
-                family.revalidate_database_identity(&self.native_evidence.database.identity)
+                family.revalidate_logical_identity(&self.native_evidence)
             }
         }
     }
@@ -835,10 +818,11 @@ use snapshot::open_root_handle_sqlite_source_snapshot_with_policy;
 #[cfg(test)]
 use snapshot::{
     certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
+    open_root_handle_sqlite_source_online_backup_after_database_copy_for_test,
     open_root_handle_sqlite_source_online_backup_before_identity_check_for_test,
     open_root_handle_sqlite_source_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
-    open_root_handle_sqlite_source_snapshot_for_test,
+    open_root_handle_sqlite_source_snapshot_for_test, run_online_backup_with_deadline_for_test,
 };
 pub(crate) use snapshot::{
     open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,

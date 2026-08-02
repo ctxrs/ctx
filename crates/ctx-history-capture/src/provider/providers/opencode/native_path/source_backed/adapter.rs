@@ -69,6 +69,9 @@ pub(super) struct OpenCodeSqliteWorkCounters {
     pub(super) logical_online_backup_opens: u64,
     pub(super) source_bytes_copied: u64,
     pub(super) schema_probe_passes: u64,
+    /// Number of 1,000-opcode progress callbacks consumed by schema preflight.
+    /// Projection-row traversal is accounted separately below.
+    pub(super) schema_preflight_progress_callbacks: u64,
     pub(super) logical_fingerprint_passes: u64,
     pub(super) logical_row_traversals: u64,
     pub(super) projection_passes: u64,
@@ -269,6 +272,7 @@ fn observe_present_document_tree(
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
     let authorized = open_root_authorized_snapshot_retained(data_root, path)?;
     let observation = observe_logical_source(authorized.sqlite_snapshot.connection()?, dialect)?;
+    let schema_preflight_progress_callbacks = observation.schema_preflight_progress_callbacks;
     let terminal_revalidate = authorized.sqlite_snapshot.terminal_revalidator();
     let leaf_fingerprint = DocumentLeafFingerprint::new(admitted_leaf_fingerprint(
         &observation.source,
@@ -290,6 +294,7 @@ fn observe_present_document_tree(
                 terminal_revalidate,
                 work: Mutex::new(OpenCodeSqliteWorkCounters {
                     schema_probe_passes: 1,
+                    schema_preflight_progress_callbacks,
                     ..OpenCodeSqliteWorkCounters::default()
                 }),
             },
@@ -444,7 +449,10 @@ fn route_error(error: OpenCodeSourceBackedError) -> SourceBackedRouteError {
             OpenCodeSourceBackedError::SqliteSource(
                 SqliteSourceAccessError::SnapshotUnavailable { .. }
                 | SqliteSourceAccessError::UnsupportedSidecarIdentity { .. },
-            ) => SourceBackedRouteErrorKind::Unavailable,
+            )
+            | OpenCodeSourceBackedError::SchemaPreflightBudgetExceeded => {
+                SourceBackedRouteErrorKind::Unavailable
+            }
             _ => SourceBackedRouteErrorKind::InvalidSource,
         };
     SourceBackedRouteError::new(kind, error.to_string())
