@@ -137,6 +137,24 @@ pub struct SourceBackedRefreshReceipt {
     pub carried_failed_route_ids: Vec<SourceRouteIdentity>,
 }
 
+#[cfg(test)]
+pub fn assert_carried_route_failure(
+    receipt: &SourceBackedRefreshReceipt,
+    retained_generation: &str,
+    class: SourceBackedSourceFailureClass,
+) {
+    assert_eq!(receipt.commit.generation_id, retained_generation);
+    assert!(receipt.successful_route_ids.is_empty());
+    assert_eq!(receipt.failed_routes.len(), 1);
+    let failure = &receipt.failed_routes[0];
+    assert_eq!(failure.class, class);
+    assert!(failure.carried_forward);
+    assert_eq!(
+        receipt.carried_failed_route_ids,
+        vec![failure.route_identity.clone()]
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceBackedCertifiedRemoval {
     pub deletion: CertifiedSourceDeletion,

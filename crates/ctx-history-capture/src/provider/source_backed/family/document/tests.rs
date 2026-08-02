@@ -14,8 +14,9 @@ use sha2::{Digest, Sha256};
 use super::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, source_backed_leaf_worker_budget,
-        SourceBackedCoordinatorError, SourceBackedProviderRegistry,
+        assert_carried_route_failure, refresh_source_backed_generation,
+        source_backed_leaf_worker_budget, SourceBackedProviderRegistry,
+        SourceBackedSourceFailureClass,
     },
     ProviderCatalogSupport, ProviderImportSupport, ProviderSourceKind, ProviderSourceStatus,
     AUGGIE_SESSION_JSON_SOURCE_FORMAT,
@@ -649,9 +650,12 @@ fn independent_leaf_runner_has_one_vs_four_parity_and_bounded_peak_work() {
     let retained_generation = parallel_deleted.commit.generation_id;
     parallel_runner.replace(1, 2, "terminal tree race");
     parallel_runner.state.lock().unwrap().mutate_on_revalidate = true;
-    assert!(
-        refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options())
-            .is_err()
+    let failed =
+        refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options());
+    assert_carried_route_failure(
+        &failed.unwrap(),
+        &retained_generation,
+        SourceBackedSourceFailureClass::SourceChanged,
     );
     assert_eq!(
         VerifiedIndex::open(&parallel_root).unwrap().generation_id(),
@@ -897,18 +901,13 @@ fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
 
     let retained_generation = deleted.commit.generation_id;
     adapter.state.lock().unwrap().available = false;
-    let error =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap_err();
-    assert!(matches!(
-        error,
-        SourceBackedCoordinatorError::RouteScan {
-            source: SourceBackedRouteError {
-                kind: SourceBackedRouteErrorKind::Unavailable,
-                ..
-            },
-            ..
-        }
-    ));
+    let failed =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_carried_route_failure(
+        &failed,
+        &retained_generation,
+        SourceBackedSourceFailureClass::Unavailable,
+    );
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         retained_generation
@@ -1095,14 +1094,26 @@ fn active_source_family_contract_document_replacement_tree_rejects_races_duplica
         .unwrap()
         .generation_id()
         .to_owned();
-    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    let failed =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_carried_route_failure(
+        &failed,
+        &before,
+        SourceBackedSourceFailureClass::SourceChanged,
+    );
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         before
     );
 
     adapter.state.lock().unwrap().mutate_on_revalidate = true;
-    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    let failed =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_carried_route_failure(
+        &failed,
+        &before,
+        SourceBackedSourceFailureClass::SourceChanged,
+    );
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         before

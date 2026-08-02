@@ -655,7 +655,11 @@ mod tests {
                 Ok(())
             },
         );
-        assert!(result.is_err());
+        assert_carried_route_failure(
+            &result.unwrap(),
+            &retained,
+            SourceBackedSourceFailureClass::SourceChanged,
+        );
         assert_eq!(
             VerifiedIndex::open(&delayed_index).unwrap().generation_id(),
             retained
@@ -693,12 +697,17 @@ mod tests {
             serde_json::to_vec(&message("event-1", "duplicate")).unwrap(),
         )
         .unwrap();
-        assert!(refresh_source_backed_generation(
+        let failed = refresh_source_backed_generation(
             &duplicate_index,
             &duplicate_registry,
             WriterOptions::default(),
         )
-        .is_err());
+        .unwrap();
+        assert_carried_route_failure(
+            &failed,
+            &retained,
+            SourceBackedSourceFailureClass::Unreadable,
+        );
         assert_eq!(
             VerifiedIndex::open(&duplicate_index)
                 .unwrap()
@@ -738,12 +747,17 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(refresh_source_backed_generation(
+        let failed = refresh_source_backed_generation(
             &parse_index,
             &failing_registry,
             WriterOptions::default(),
         )
-        .is_err());
+        .unwrap();
+        assert_carried_route_failure(
+            &failed,
+            &retained,
+            SourceBackedSourceFailureClass::Unreadable,
+        );
         assert_eq!(
             VerifiedIndex::open(&parse_index).unwrap().generation_id(),
             retained

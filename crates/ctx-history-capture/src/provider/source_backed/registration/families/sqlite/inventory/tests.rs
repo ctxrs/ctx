@@ -499,12 +499,17 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
         .unwrap();
     parallel_provider.set_after_seal_action(TestAfterSealAction::MutateDatabase);
     let retained_generation = parallel_deleted.commit.generation_id;
-    assert!(refresh_source_backed_generation(
+    let failed = refresh_source_backed_generation(
         &parallel_index_root,
         &parallel_registry,
-        writer_options()
+        writer_options(),
     )
-    .is_err());
+    .unwrap();
+    assert_carried_route_failure(
+        &failed,
+        &retained_generation,
+        SourceBackedSourceFailureClass::SourceChanged,
+    );
     assert_eq!(
         VerifiedIndex::open(&parallel_index_root)
             .unwrap()
@@ -514,12 +519,17 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
 
     let settled = publish(&parallel_index_root, &parallel_registry);
     catalog.lock().unwrap()[0].path = provider_dir.join("unavailable.sqlite");
-    assert!(refresh_source_backed_generation(
+    let failed = refresh_source_backed_generation(
         &parallel_index_root,
         &parallel_registry,
-        writer_options()
+        writer_options(),
     )
-    .is_err());
+    .unwrap();
+    assert_carried_route_failure(
+        &failed,
+        &settled.commit.generation_id,
+        SourceBackedSourceFailureClass::Unreadable,
+    );
     assert_eq!(
         VerifiedIndex::open(&parallel_index_root)
             .unwrap()
@@ -713,7 +723,13 @@ fn nonempty_wal_creation_fails_closed_and_clean_retry_succeeds() {
     let cold = publish(&index_root, &registry);
 
     provider.set_after_seal_action(TestAfterSealAction::CreateNonemptyWal);
-    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    let failed =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_carried_route_failure(
+        &failed,
+        &cold.commit.generation_id,
+        SourceBackedSourceFailureClass::SourceChanged,
+    );
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         cold.commit.generation_id
@@ -744,7 +760,13 @@ fn concurrent_mutation_before_and_after_seal_fails_closed_and_retries() {
         .execute("update messages set body = 'replacement' where id = 1", [])
         .unwrap();
     provider.state.lock().unwrap().mutate_before_finish = true;
-    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    let failed =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_carried_route_failure(
+        &failed,
+        &cold.commit.generation_id,
+        SourceBackedSourceFailureClass::Unreadable,
+    );
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         cold.commit.generation_id
@@ -752,7 +774,13 @@ fn concurrent_mutation_before_and_after_seal_fails_closed_and_retries() {
 
     let replacement = publish(&index_root, &registry);
     provider.set_after_seal_action(TestAfterSealAction::MutateDatabase);
-    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    let failed =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_carried_route_failure(
+        &failed,
+        &replacement.commit.generation_id,
+        SourceBackedSourceFailureClass::SourceChanged,
+    );
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         replacement.commit.generation_id

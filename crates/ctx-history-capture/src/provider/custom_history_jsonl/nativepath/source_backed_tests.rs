@@ -11,8 +11,9 @@ use serde_json::{json, Value};
 use super::source_backed::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, register_custom_history_source_backed_route,
-        SourceBackedCoordinatorError, SourceBackedProviderRegistry, SourceBackedRouteErrorKind,
+        assert_carried_route_failure, refresh_source_backed_generation,
+        register_custom_history_source_backed_route, SourceBackedProviderRegistry,
+        SourceBackedSourceFailureClass,
     },
     test_support_paths::tempdir,
     CaptureError, ProviderCatalogSupport, ProviderImportSupport, ProviderSource,
@@ -628,19 +629,13 @@ fn structural_manifest_failure_retains_the_published_generation_and_restores() {
     assert_eq!(initial.commit.indexed_documents, 1);
 
     fs::write(&path, []).unwrap();
-    let error = refresh_source_backed_generation(&index_root, &registry, WriterOptions::default())
-        .expect_err("a missing manifest must abort publication");
-    match error {
-        SourceBackedCoordinatorError::RouteScan { provider, source } => {
-            assert_eq!(provider, CaptureProvider::Custom);
-            assert_eq!(source.kind, SourceBackedRouteErrorKind::InvalidSource);
-            assert!(
-                source.detail.contains("missing manifest record"),
-                "{source}"
-            );
-        }
-        error => panic!("expected a custom source scan failure, got {error:?}"),
-    }
+    let failed =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_carried_route_failure(
+        &failed,
+        &initial_generation,
+        SourceBackedSourceFailureClass::Unreadable,
+    );
     let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.generation_id(), initial_generation);
     assert_eq!(retained.document_count(), 1);

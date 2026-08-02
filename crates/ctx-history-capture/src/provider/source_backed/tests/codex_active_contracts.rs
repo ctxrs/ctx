@@ -2,6 +2,20 @@ use std::io::Write;
 
 use super::*;
 
+fn assert_cold_route_failure(
+    error: SourceBackedCoordinatorError,
+    class: SourceBackedSourceFailureClass,
+) {
+    match error {
+        SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes } => {
+            assert_eq!(failed_routes.len(), 1);
+            assert_eq!(failed_routes[0].class, class);
+            assert!(!failed_routes[0].carried_forward);
+        }
+        error => panic!("expected one unusable source route, got {error:?}"),
+    }
+}
+
 #[test]
 fn active_source_family_contract_explicit_codex_append_catches_up() {
     let temp = tempdir().unwrap();
@@ -424,7 +438,7 @@ fn active_source_family_contract_codex_tree_rejects_captured_session_removal() {
         },
     )
     .unwrap_err();
-    assert!(error.to_string().contains("changed"));
+    assert_cold_route_failure(error, SourceBackedSourceFailureClass::SourceChanged);
     assert!(VerifiedIndex::open(&index).is_err());
 }
 
@@ -476,8 +490,12 @@ fn active_source_family_contract_codex_tree_rejects_deleted_source_reappearance(
             },
         );
     });
-    let error = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap_err();
-    assert!(error.to_string().contains("inventory"));
+    let failed = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+    assert_carried_route_failure(
+        &failed,
+        &seeded_generation,
+        SourceBackedSourceFailureClass::SourceChanged,
+    );
     let preserved = VerifiedIndex::open(&index).unwrap();
     assert_eq!(preserved.generation_id(), seeded_generation);
     assert_eq!(
@@ -551,6 +569,6 @@ fn active_source_family_contract_codex_tree_rejects_root_replacement_with_same_l
         },
     )
     .unwrap_err();
-    assert!(error.to_string().contains("inventory"));
+    assert_cold_route_failure(error, SourceBackedSourceFailureClass::SourceChanged);
     assert!(VerifiedIndex::open(&index).is_err());
 }
