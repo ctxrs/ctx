@@ -306,6 +306,48 @@ impl CoreRefreshEngine {
         self.lock_state().dirty_routes.next_due_at_ms().is_some()
     }
 
+    /// Projects only durable retained-route missing grace back into the exact
+    /// watcher ledger. Healthy routes never enter this safety path.
+    pub(in crate::semantic) fn schedule_pending_missing_route_rechecks(
+        &self,
+        data_root: &Path,
+        observed_at_ms: u64,
+    ) -> Result<usize> {
+        let Some(index) = open_published_generation(data_root)? else {
+            return Ok(0);
+        };
+        let generation_id = index.generation_id().to_owned();
+        let pending = index
+            .manifest()
+            .source_routes()
+            .iter()
+            .filter(|route| route.missing_state().is_some())
+            .map(|route| route.route_identity().clone())
+            .collect::<Vec<_>>();
+
+        let mut state = self.lock_state();
+        if !state.watch_routes_initialized {
+            return Ok(0);
+        }
+        if state
+            .current_published_generation
+            .as_deref()
+            .is_some_and(|current| current != generation_id.as_str())
+        {
+            // Publication advanced after this safety read. The next safety
+            // pass will inspect its exact active manifest.
+            return Ok(0);
+        }
+        let pending = pending
+            .into_iter()
+            .filter(|route| state.known_route_ids.contains(route))
+            .collect::<Vec<_>>();
+        let watermark = state.dirty_routes.seed_watermark();
+        Ok(state
+            .dirty_routes
+            .seed_clean_exact_routes(pending, watermark, observed_at_ms))
+    }
+
     pub(in crate::semantic) fn enqueue_next_scheduled_refresh(
         &self,
         data_root: &Path,
@@ -441,9 +483,9 @@ impl CoreRefreshEngine {
                     .and_then(Value::as_str)
                     .filter(|request_id| !request_id.is_empty())
                     .ok_or_else(|| anyhow!("daemon source refresh request ID is missing"))?;
-                let status = self.status(request_id).ok_or_else(|| {
-                    anyhow!("daemon source refresh request `{request_id}` is unknown")
-                })?;
+                let status = self
+                    .status(request_id)
+                    .unwrap_or_else(|| unknown_refresh_request_response(request_id));
                 Ok(Some(status))
             }
             _ => Ok(None),

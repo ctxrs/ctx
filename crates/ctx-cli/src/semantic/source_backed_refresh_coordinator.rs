@@ -51,6 +51,7 @@ use super::{
 };
 
 mod capture_refresh;
+mod client;
 mod coordinator_state;
 mod current_state;
 
@@ -61,6 +62,11 @@ use capture_refresh::{
 use capture_refresh::{
     execute_capture_owned_refresh_with, refresh_all_provider_sources,
     reject_blocking_automatic_registry_issues,
+};
+use client::unknown_refresh_request_response;
+pub(crate) use client::{
+    coordinate_import_source_backed_refresh, coordinate_source_backed_refresh,
+    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshObservation,
 };
 #[cfg(test)]
 use coordinator_state::CaptureOwnedSourceBackedRefreshExecutor;
@@ -76,6 +82,8 @@ const SEARCH_DIRECTORY: &str = "search";
 const LEXICAL_DIRECTORY: &str = "lexical";
 const SOURCE_REFRESH_REQUEST_OP: &str = "source_refresh_request";
 const SOURCE_REFRESH_STATUS_OP: &str = "source_refresh_status";
+const SOURCE_REFRESH_UNKNOWN_REQUEST_STATE: &str = "request_unknown";
+const SOURCE_REFRESH_UNKNOWN_REQUEST_ERROR_CODE: &str = "source_refresh_request_unknown";
 const SOURCE_REFRESH_ATTEMPT_HISTORY: usize = 64;
 const SOURCE_REFRESH_ACTIVE_PENDING_LIMIT: usize = 8;
 const SOURCE_REFRESH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
@@ -149,29 +157,6 @@ impl SourceBackedRefreshMode {
         }
     }
 }
-
-#[derive(Debug)]
-pub(crate) struct SourceBackedRefreshDaemonUnavailable {
-    detail: Option<String>,
-}
-
-impl SourceBackedRefreshDaemonUnavailable {
-    fn new(detail: Option<String>) -> Self {
-        Self { detail }
-    }
-}
-
-impl fmt::Display for SourceBackedRefreshDaemonUnavailable {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("the ctx daemon is unavailable for source-backed refresh")?;
-        if let Some(detail) = self.detail.as_deref() {
-            write!(formatter, ": {detail}")?;
-        }
-        formatter.write_str("; no foreground writer was started")
-    }
-}
-
-impl std::error::Error for SourceBackedRefreshDaemonUnavailable {}
 
 /// Provider-neutral publication returned by the capture-owned refresh
 /// executor after it atomically advances the source-backed generation.
@@ -335,331 +320,6 @@ impl PinnedSourceBackedGeneration {
     pub(crate) fn from_index(index: VerifiedIndex) -> Self {
         Self { index }
     }
-}
-
-#[allow(dead_code)] // Request metadata is retained for CLI/status integrations.
-pub(crate) struct SourceBackedRefreshObservation {
-    pub(crate) mode: SourceBackedRefreshMode,
-    pub(crate) status: String,
-    pub(crate) request_id: Option<String>,
-    pub(crate) daemon_available: bool,
-    pub(crate) source_count: usize,
-    pub(crate) receipt: Option<SourceBackedRefreshReceipt>,
-    pub(crate) pin: PinnedSourceBackedGeneration,
-}
-
-/// Coordinates source-backed refresh without ever falling back to a foreground
-/// writer. The returned reader is already pinned to one verified generation.
-pub(crate) fn coordinate_source_backed_refresh(
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, true, false)
-}
-
-pub(crate) fn coordinate_import_source_backed_refresh(
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
-    allow_daemon_autostart: bool,
-) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_with_catalog(
-        data_root,
-        mode,
-        explicit_source_catalog,
-        allow_daemon_autostart,
-        true,
-    )
-}
-
-fn coordinate_source_backed_refresh_with_catalog(
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
-    allow_daemon_autostart: bool,
-    fail_on_source_failure: bool,
-) -> Result<SourceBackedRefreshObservation> {
-    if mode == SourceBackedRefreshMode::Off {
-        if explicit_source_catalog.is_some() {
-            bail!("explicit source catalog imports require daemon refresh mode `wait`");
-        }
-        let pin = pin_published_generation(data_root)?.ok_or_else(|| {
-            anyhow!("the Core index does not exist; retry with daemon refresh enabled")
-        })?;
-        return Ok(SourceBackedRefreshObservation {
-            mode,
-            status: "off".to_owned(),
-            request_id: None,
-            daemon_available: false,
-            source_count: 0,
-            receipt: None,
-            pin,
-        });
-    }
-
-    let config = AppConfig::load(data_root)
-        .context("load daemon configuration before source-backed refresh")?;
-    if allow_daemon_autostart && config.daemon.enabled {
-        super::daemon_autostart::autostart_daemon_and_wait(
-            data_root,
-            &config,
-            crate::DaemonTriggerCommandArg::Search,
-        )
-        .context("start or recover enabled daemon before source-backed refresh")?;
-    }
-
-    let request = compact_json(json!({
-        "schema_version": 1,
-        "op": SOURCE_REFRESH_REQUEST_OP,
-        "mode": mode.as_str(),
-        "fail_on_source_failure": fail_on_source_failure,
-        "explicit_source_catalog": explicit_source_catalog
-            .map(ExplicitSourceCatalogAuthority::to_json),
-    }));
-    let response = match daemon_source_refresh_request(
-        data_root,
-        request,
-        SOURCE_REFRESH_IPC_TIMEOUT,
-        SOURCE_REFRESH_RESPONSE_MAX_BYTES,
-    ) {
-        Ok(Some(response)) => response,
-        Ok(None) => return daemon_unavailable_fallback(data_root, mode, None),
-        Err(error)
-            if error
-                .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
-                .is_some() =>
-        {
-            return daemon_unavailable_fallback(data_root, mode, Some(error))
-        }
-        Err(error) => return Err(error.context("request daemon-owned source-backed refresh")),
-    };
-    validate_daemon_refresh_response(&response)?;
-    let request_id = response
-        .get("request_id")
-        .and_then(Value::as_str)
-        .filter(|request_id| !request_id.is_empty())
-        .ok_or_else(|| anyhow!("daemon source refresh response has no request ID"))?
-        .to_owned();
-
-    if mode == SourceBackedRefreshMode::Background {
-        let pin = pin_published_generation(data_root)?.ok_or_else(|| {
-            anyhow!(
-                "daemon source refresh was queued but no published generation exists; retry with --refresh wait"
-            )
-        })?;
-        return Ok(SourceBackedRefreshObservation {
-            mode,
-            status: response
-                .get("request_state")
-                .and_then(Value::as_str)
-                .unwrap_or("queued")
-                .to_owned(),
-            request_id: Some(request_id),
-            daemon_available: true,
-            source_count: response_source_count(&response),
-            receipt: None,
-            pin,
-        });
-    }
-
-    wait_for_published_generation(
-        data_root,
-        request_id,
-        mode,
-        explicit_source_catalog,
-        allow_daemon_autostart,
-        fail_on_source_failure,
-    )
-}
-
-fn wait_for_published_generation(
-    data_root: &Path,
-    mut request_id: String,
-    mode: SourceBackedRefreshMode,
-    expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
-    allow_daemon_autostart: bool,
-    fail_on_source_failure: bool,
-) -> Result<SourceBackedRefreshObservation> {
-    loop {
-        let response = match daemon_source_refresh_request(
-            data_root,
-            compact_json(json!({
-                "schema_version": 1,
-                "op": SOURCE_REFRESH_STATUS_OP,
-                "request_id": request_id,
-            })),
-            SOURCE_REFRESH_IPC_TIMEOUT,
-            SOURCE_REFRESH_RESPONSE_MAX_BYTES,
-        ) {
-            Ok(Some(response)) => response,
-            Ok(None) => {
-                request_id = recover_wait_refresh_request(
-                    data_root,
-                    expected_catalog,
-                    allow_daemon_autostart,
-                    fail_on_source_failure,
-                )
-                .with_context(|| {
-                    format!("recover daemon while waiting for source refresh request {request_id}")
-                })?;
-                continue;
-            }
-            Err(error)
-                if error
-                    .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
-                    .is_some() =>
-            {
-                request_id = recover_wait_refresh_request(
-                    data_root,
-                    expected_catalog,
-                    allow_daemon_autostart,
-                    fail_on_source_failure,
-                )
-                .with_context(|| {
-                        format!(
-                            "recover unavailable daemon while waiting for source refresh request {request_id}: {error:#}"
-                        )
-                    })?;
-                continue;
-            }
-            Err(error) => {
-                return Err(error.context("wait for daemon-owned source-backed refresh publication"))
-            }
-        };
-        validate_daemon_refresh_response(&response)?;
-        match response.get("request_state").and_then(Value::as_str) {
-            Some("published") => {
-                if let Some(expected_catalog) = expected_catalog {
-                    let published_catalog = response
-                        .get("published_explicit_source_catalog")
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "published daemon source refresh has no explicit source catalog authority"
-                            )
-                        })
-                        .and_then(ExplicitSourceCatalogAuthority::from_json)?;
-                    if &published_catalog != expected_catalog {
-                        bail!(
-                            "daemon published an unexpected explicit source catalog authority: expected {:?}, published {:?}",
-                            expected_catalog,
-                            published_catalog
-                        );
-                    }
-                }
-                let expected = response
-                    .get("published_generation")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        anyhow!("published daemon source refresh has no generation ID")
-                    })?;
-                let pin = pin_retained_generation(data_root, expected).with_context(|| {
-                    format!(
-                        "daemon published Core generation {expected}, but its retained terminal generation cannot be opened"
-                    )
-                })?;
-                let receipt = published_refresh_receipt(&response, &pin)?;
-                return Ok(SourceBackedRefreshObservation {
-                    mode,
-                    status: "published".to_owned(),
-                    request_id: Some(request_id),
-                    daemon_available: true,
-                    source_count: response_source_count(&response),
-                    receipt: Some(receipt),
-                    pin,
-                });
-            }
-            Some("failed") => {
-                let error = response
-                    .get("last_error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("source-backed refresh failed");
-                let retained = response
-                    .get("published_generation")
-                    .and_then(Value::as_str)
-                    .or_else(|| response.get("previous_generation").and_then(Value::as_str))
-                    .map(|generation| format!("; retained generation {generation}"))
-                    .unwrap_or_default();
-                let detail =
-                    format!("daemon-owned source-backed refresh failed: {error}{retained}");
-                match response.get("failure_type").and_then(Value::as_str) {
-                    Some("unsupported_schema") => {
-                        return Err(CaptureError::UnsupportedSchema(detail).into())
-                    }
-                    Some("malformed_source") => {
-                        return Err(CaptureError::InvalidPayload(detail).into())
-                    }
-                    _ => {}
-                }
-                return Err(anyhow!("{detail}"));
-            }
-            Some("queued" | "running") => {
-                std::thread::sleep(SOURCE_REFRESH_POLL_INTERVAL);
-            }
-            Some(state) => {
-                return Err(anyhow!(
-                    "daemon source refresh request {request_id} has unknown state `{state}`"
-                ));
-            }
-            None => {
-                return Err(anyhow!(
-                    "daemon source refresh response has no request state"
-                ))
-            }
-        }
-    }
-}
-
-fn recover_wait_refresh_request(
-    data_root: &Path,
-    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
-    allow_daemon_autostart: bool,
-    fail_on_source_failure: bool,
-) -> Result<String> {
-    if !allow_daemon_autostart {
-        return Err(SourceBackedRefreshDaemonUnavailable::new(Some(
-            "the explicit source import disabled daemon autostart".to_owned(),
-        ))
-        .into());
-    }
-    let config =
-        AppConfig::load(data_root).context("load daemon configuration for refresh recovery")?;
-    if !config.daemon.enabled {
-        return Err(SourceBackedRefreshDaemonUnavailable::new(Some(
-            "daemon was disabled while waiting for source refresh".to_owned(),
-        ))
-        .into());
-    }
-    super::daemon_autostart::autostart_daemon_and_wait(
-        data_root,
-        &config,
-        crate::DaemonTriggerCommandArg::Search,
-    )
-    .context("restart daemon-owned source refresh service")?;
-    let response = daemon_source_refresh_request(
-        data_root,
-        compact_json(json!({
-            "schema_version": 1,
-            "op": SOURCE_REFRESH_REQUEST_OP,
-            "mode": SourceBackedRefreshMode::Wait.as_str(),
-            "fail_on_source_failure": fail_on_source_failure,
-            "explicit_source_catalog": explicit_source_catalog
-                .map(ExplicitSourceCatalogAuthority::to_json),
-        })),
-        SOURCE_REFRESH_IPC_TIMEOUT,
-        SOURCE_REFRESH_RESPONSE_MAX_BYTES,
-    )?
-    .ok_or_else(|| {
-        SourceBackedRefreshDaemonUnavailable::new(Some(
-            "restarted daemon did not publish a source refresh endpoint".to_owned(),
-        ))
-    })?;
-    validate_daemon_refresh_response(&response)?;
-    response
-        .get("request_id")
-        .and_then(Value::as_str)
-        .filter(|request_id| !request_id.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("recovered daemon source refresh response has no request ID"))
 }
 
 fn published_refresh_receipt(
@@ -924,50 +584,6 @@ fn required_u64_from_value(value: Option<&Value>, field: &str) -> Result<u64> {
         .ok_or_else(|| anyhow!("published daemon source refresh receipt has invalid {field}"))
 }
 
-fn daemon_unavailable_fallback(
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    error: Option<anyhow::Error>,
-) -> Result<SourceBackedRefreshObservation> {
-    if mode == SourceBackedRefreshMode::Background {
-        if let Some(pin) = pin_published_generation(data_root)? {
-            return Ok(SourceBackedRefreshObservation {
-                mode,
-                status: "daemon_unavailable".to_owned(),
-                request_id: None,
-                daemon_available: false,
-                source_count: 0,
-                receipt: None,
-                pin,
-            });
-        }
-    }
-    Err(SourceBackedRefreshDaemonUnavailable::new(error.map(|error| format!("{error:#}"))).into())
-}
-
-fn validate_daemon_refresh_response(response: &Value) -> Result<()> {
-    if response.get("ok").and_then(Value::as_bool) == Some(true) {
-        return Ok(());
-    }
-    Err(anyhow!(
-        "{}",
-        response
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("daemon source refresh request failed")
-    ))
-}
-
-fn response_source_count(response: &Value) -> usize {
-    response
-        .get("progress")
-        .and_then(|progress| progress.get("total_sources"))
-        .or_else(|| response.get("source_count"))
-        .and_then(Value::as_u64)
-        .and_then(|count| usize::try_from(count).ok())
-        .unwrap_or(0)
-}
-
 pub(super) fn pin_published_generation(
     data_root: &Path,
 ) -> Result<Option<PinnedSourceBackedGeneration>> {
@@ -999,6 +615,14 @@ pub(crate) fn pin_active_verified_generation(
 #[cfg(test)]
 #[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests_retained_generation_tests.rs"]
 mod retained_generation_tests;
+
+#[cfg(test)]
+#[path = "source_backed_refresh_coordinator/pending_missing_tests.rs"]
+mod pending_missing_tests;
+
+#[cfg(test)]
+#[path = "source_backed_refresh_coordinator/restart_recovery_tests.rs"]
+mod restart_recovery_tests;
 
 #[cfg(test)]
 #[path = "source_backed_refresh_coordinator/source_backed_refresh_coordinator_tests.rs"]

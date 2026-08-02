@@ -288,6 +288,20 @@ impl CoreRefreshEngine {
         find_attempt(&state, request_id).map(|attempt| attempt.fail_on_source_failure)
     }
 
+    #[cfg(test)]
+    pub(in crate::semantic) fn request_authority_for_test(
+        &self,
+        request_id: &str,
+    ) -> Option<(ExplicitSourceCatalogAuthority, bool)> {
+        let state = self.lock_state();
+        find_attempt(&state, request_id).and_then(|attempt| {
+            attempt
+                .requested_explicit_source_catalog
+                .clone()
+                .map(|catalog| (catalog, attempt.fail_on_source_failure))
+        })
+    }
+
     fn admit_refresh_scope(
         &self,
         request_id: &str,

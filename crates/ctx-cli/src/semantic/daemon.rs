@@ -309,6 +309,16 @@ impl DaemonWatchRuntime {
                 );
             }
         }
+        if matches!(trigger, WatchCatalogReconcileTrigger::SafetyTimeout) {
+            if let Some(source_refresh) = source_refresh {
+                if let Err(error) = source_refresh.schedule_pending_missing_route_rechecks(
+                    data_root,
+                    source_route_ledger_now_ms(),
+                ) {
+                    let _ = write_degraded_wakeup_receipt(data_root, &error);
+                }
+            }
+        }
     }
 }
 

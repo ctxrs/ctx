@@ -711,7 +711,7 @@ fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
             executor_calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(
                 execution.scope,
-                ctx_history_capture::SourceBackedRefreshScope::exact([executor_route.clone()])
+                ctx_history_capture::SourceBackedRefreshScope::All
             );
             let writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,

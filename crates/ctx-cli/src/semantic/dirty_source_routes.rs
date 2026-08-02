@@ -194,6 +194,41 @@ impl DirtySourceRoutes {
         }
     }
 
+    /// Schedules exact safety work only when no watcher/manual observation for
+    /// that route is already pending or admitted.
+    ///
+    /// The caller owns the durable authority for selecting these routes. This
+    /// ledger only prevents a safety projection from manufacturing a second
+    /// observation while newer route work is already in flight.
+    pub(super) fn seed_clean_exact_routes<I>(
+        &mut self,
+        routes: I,
+        watermark: EventWatermark,
+        observed_at_ms: u64,
+    ) -> usize
+    where
+        I: IntoIterator<Item = SourceRouteIdentity>,
+    {
+        self.current_watcher_epoch = Some(
+            self.current_watcher_epoch
+                .unwrap_or(watermark.watcher_epoch)
+                .max(watermark.watcher_epoch),
+        );
+        let mut scheduled = 0_usize;
+        for route in routes {
+            self.watermarks
+                .entry(route.clone())
+                .and_modify(|current| *current = (*current).max(watermark))
+                .or_insert(watermark);
+            if self.dirty.contains_key(&route) {
+                continue;
+            }
+            self.mark_dirty(route, observed_at_ms);
+            scheduled = scheduled.saturating_add(1);
+        }
+        scheduled
+    }
+
     /// Earliest time at which any non-blocked, non-admitted route can run.
     pub(super) fn next_due_at_ms(&self) -> Option<u64> {
         if self.dirty.is_empty() {
@@ -439,6 +474,28 @@ mod tests {
 
         ledger.seed_exact_routes(Vec::new(), watermark(1, 0), 10);
         assert!(ledger.is_empty());
+        assert_eq!(ledger.next_due_at_ms(), None);
+    }
+
+    #[test]
+    fn safety_seed_deduplicates_pending_and_permanently_blocked_work() {
+        let mut ledger = DirtySourceRoutes::default();
+        let route = route(9);
+        let watermark = watermark(1, 1);
+
+        assert_eq!(
+            ledger.seed_clean_exact_routes([route.clone()], watermark, 100),
+            1
+        );
+        assert_eq!(
+            ledger.seed_clean_exact_routes([route.clone()], watermark, 110),
+            0
+        );
+        let admission = ledger.admit_next(350).expect("safety admission");
+        assert!(ledger.permanent_failure(&admission));
+        assert_eq!(ledger.next_due_at_ms(), None);
+
+        assert_eq!(ledger.seed_clean_exact_routes([route], watermark, 400), 0);
         assert_eq!(ledger.next_due_at_ms(), None);
     }
 
