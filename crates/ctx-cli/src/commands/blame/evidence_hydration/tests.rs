@@ -221,8 +221,10 @@ fn one_strict_bounded_batch_deduplicates_ids_and_caps_citations() {
             assert_eq!(ids, &[first.event_id.as_uuid(), second.event_id.as_uuid()]);
             assert_eq!(maximum_events, 2);
             assert_eq!(budget, evidence_hydration_budget(2));
-            assert_eq!(budget.maximum_encoded_core_bytes, 2 * 64 * 1_024);
-            assert_eq!(budget.maximum_content_bytes, 2 * 64 * 1_024);
+            assert_eq!(budget.aggregate.maximum_encoded_core_bytes, 2 * 64 * 1_024);
+            assert_eq!(budget.aggregate.maximum_content_bytes, 2 * 64 * 1_024);
+            assert_eq!(budget.per_record.maximum_encoded_core_bytes, 64 * 1_024);
+            assert_eq!(budget.per_record.maximum_content_bytes, 64 * 1_024);
             Ok(Some(HydratedEvidenceBatch {
                 generation_id: generation.clone(),
                 records: vec![event_record(first.clone()), event_record(second.clone())],
@@ -429,7 +431,7 @@ fn evicted_real_core_records_are_normal_omissions_without_persistence() {
 }
 
 #[test]
-fn compact_eval_envelope_fits_one_record_budget_and_larger_records_fail_closed() {
+fn compact_eval_envelope_fits_and_mixed_oversized_records_fail_closed() {
     const MEASURED_MAX_BODY_CHARS: usize = 40_206;
 
     let temp = tempfile::tempdir().unwrap();
@@ -463,16 +465,22 @@ fn compact_eval_envelope_fits_one_record_budget_and_larger_records_fail_closed()
     );
     assert_eq!(compact_model.previews.len(), 1);
 
-    let oversized = core_record(11, 1, format!("{}{}", "x".repeat(64 * 1_024), suffix));
+    let oversized = core_record(12, 1, format!("{}{}", "x".repeat(64 * 1_024), suffix));
     assert!(oversized.encode_stored().unwrap().len() > 64 * 1_024);
-    let oversized_generation = publish(&index_root, &oversized, 2);
-    let oversized_model = hydrate_evidence_previews(
+    let mixed_generation = publish(&index_root, &oversized, 2);
+    let mixed_model = hydrate_evidence_previews(
         &data_root,
-        &result(vec![evidence(&oversized, &oversized_generation, 1)]),
+        &result(vec![
+            evidence(&compact, &mixed_generation, 1),
+            evidence(&oversized, &mixed_generation, 2),
+        ]),
     );
-    assert!(oversized_model.previews.is_empty());
+    assert!(mixed_model.previews.is_empty());
     assert_eq!(
         evidence_hydration_budget(MAX_EVIDENCE_PREVIEW_CITATIONS),
-        CoreEventPageBudget::new(3 * 64 * 1_024, 3 * 64 * 1_024)
+        EvidenceHydrationBudget {
+            aggregate: CoreEventPageBudget::new(3 * 64 * 1_024, 3 * 64 * 1_024),
+            per_record: CoreEventPageBudget::new(64 * 1_024, 64 * 1_024),
+        }
     );
 }

@@ -4,16 +4,25 @@ use super::*;
 enum CoreEventBatchBudgetMode {
     LegacyBounded,
     Paged,
-    Strict,
+    Strict {
+        per_record_budget: Option<CoreEventPageBudget>,
+    },
 }
 
 impl CoreEventBatchBudgetMode {
     fn admits_oversized_singleton(self) -> bool {
-        self == Self::Paged
+        matches!(self, Self::Paged)
     }
 
     fn preflights_before_decode(self) -> bool {
-        self == Self::Strict
+        matches!(self, Self::Strict { .. })
+    }
+
+    fn per_record_budget(self) -> Option<CoreEventPageBudget> {
+        match self {
+            Self::Strict { per_record_budget } => per_record_budget,
+            Self::LegacyBounded | Self::Paged => None,
+        }
     }
 }
 
@@ -269,7 +278,37 @@ impl VerifiedIndex {
             maximum_events,
             budget.maximum_encoded_core_bytes,
             budget.maximum_content_bytes,
-            CoreEventBatchBudgetMode::Strict,
+            CoreEventBatchBudgetMode::Strict {
+                per_record_budget: None,
+            },
+        )
+    }
+
+    /// Returns a complete requested-order Core batch only when it fits the
+    /// aggregate ceilings and every individual record fits the independent
+    /// per-record ceilings.
+    ///
+    /// Content size is checked from FAST metadata for the complete candidate
+    /// set before any stored read. Encoded size is checked on the one raw
+    /// stored field before Core decode, so a record cannot borrow unused
+    /// aggregate capacity from another requested ID.
+    pub fn core_events_by_ids_with_strict_per_record_budget(
+        &self,
+        event_ids: &[Uuid],
+        maximum_events: usize,
+        aggregate_budget: CoreEventPageBudget,
+        per_record_budget: CoreEventPageBudget,
+    ) -> Result<Option<CoreEventBatch>> {
+        validate_core_event_page_budget(aggregate_budget)?;
+        validate_core_event_page_budget(per_record_budget)?;
+        self.core_event_batch_by_ids(
+            event_ids,
+            maximum_events,
+            aggregate_budget.maximum_encoded_core_bytes,
+            aggregate_budget.maximum_content_bytes,
+            CoreEventBatchBudgetMode::Strict {
+                per_record_budget: Some(per_record_budget),
+            },
         )
     }
 
@@ -306,6 +345,7 @@ impl VerifiedIndex {
                 .collect::<Vec<_>>(),
         );
         let addresses = self.searcher.search(&query, &DocSetCollector)?;
+        let per_record_budget = budget_mode.per_record_budget();
         let candidates = if budget_mode.preflights_before_decode() {
             let mut by_event_id = BTreeMap::new();
             for address in addresses {
@@ -322,6 +362,13 @@ impl VerifiedIndex {
                 }
             }
             if by_event_id.len() != requested.len() {
+                return Ok(None);
+            }
+            if per_record_budget.is_some_and(|budget| {
+                by_event_id
+                    .values()
+                    .any(|(_, content_bytes)| *content_bytes > budget.maximum_content_bytes)
+            }) {
                 return Ok(None);
             }
             let mut ordered = Vec::with_capacity(event_ids.len());
@@ -360,11 +407,15 @@ impl VerifiedIndex {
                 if remaining_encoded_core_bytes == 0 {
                     return Ok(None);
                 }
+                let record_encoded_core_bytes = per_record_budget
+                    .map_or(remaining_encoded_core_bytes, |budget| {
+                        remaining_encoded_core_bytes.min(budget.maximum_encoded_core_bytes)
+                    });
                 let Some(record) = stored_core_event_record_if_encoded_size_at_most(
                     &self.searcher,
                     address,
                     fields,
-                    remaining_encoded_core_bytes,
+                    record_encoded_core_bytes,
                 )?
                 else {
                     return Ok(None);
