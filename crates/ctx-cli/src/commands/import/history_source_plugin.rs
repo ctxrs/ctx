@@ -57,7 +57,7 @@ pub(crate) fn run_history_source_plugin_import(
             "Cataloging provider-owned history source plugin path for {}.",
             source.label()
         ),
-    );
+    )?;
 
     let started = Instant::now();
     establish_private_data_root(&context.data_root)
@@ -75,6 +75,7 @@ pub(crate) fn run_history_source_plugin_import(
         context.config,
         context.args.no_daemon,
         ImportCoreRefreshRequest::ExplicitCatalog(&upsert.authority),
+        &progress,
     )?;
     let receipt = refresh
         .receipt
@@ -139,8 +140,8 @@ pub(crate) fn run_history_source_plugin_import(
             prepared.source().label()
         )
     };
-    progress.finish_line();
-    progress.done("published", completion, stats.bytes);
+    progress.finish_line()?;
+    progress.done("published", completion, stats.bytes)?;
 
     Ok(ImportReport {
         resume: context.args.resume,

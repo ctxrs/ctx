@@ -4,9 +4,12 @@ use anyhow::{bail, Context, Result};
 
 use crate::{
     config::AppConfig,
+    progress::ProgressReporter,
     semantic::{
         autostart_daemon_and_wait, coordinate_core_refresh_without_autostart,
-        coordinate_source_backed_refresh, SourceBackedRefreshMode, SourceBackedRefreshObservation,
+        coordinate_core_refresh_without_autostart_with_progress, coordinate_source_backed_refresh,
+        coordinate_source_backed_refresh_with_progress, SourceBackedRefreshMode,
+        SourceBackedRefreshObservation,
     },
     DaemonTriggerCommandArg,
 };
@@ -27,20 +30,45 @@ pub(super) fn wait_for_import_core_refresh(
     config: &AppConfig,
     no_daemon: bool,
     request: ImportCoreRefreshRequest<'_>,
+    progress: &ProgressReporter,
 ) -> Result<SourceBackedRefreshObservation> {
     if !no_daemon {
         autostart_daemon_and_wait(data_root, config, DaemonTriggerCommandArg::Import)?;
     }
 
-    let refresh = match request {
-        ImportCoreRefreshRequest::Automatic if no_daemon => {
+    let mut observe_progress = |update: &crate::semantic::SourceBackedRefreshProgress| {
+        progress.source_refresh(update).map_err(anyhow::Error::new)
+    };
+    let refresh = match (request, progress.is_enabled()) {
+        (ImportCoreRefreshRequest::Automatic, false) if no_daemon => {
             coordinate_core_refresh_without_autostart(data_root, SourceBackedRefreshMode::Wait)
         }
-        ImportCoreRefreshRequest::Automatic => {
+        (ImportCoreRefreshRequest::Automatic, false) => {
             coordinate_source_backed_refresh(data_root, SourceBackedRefreshMode::Wait)
         }
-        ImportCoreRefreshRequest::ExplicitCatalog(authority) => {
+        (ImportCoreRefreshRequest::ExplicitCatalog(authority), false) => {
             SourceBackedRefreshMode::Wait.coordinate_explicit_source_catalog(data_root, authority)
+        }
+        (ImportCoreRefreshRequest::Automatic, true) if no_daemon => {
+            coordinate_core_refresh_without_autostart_with_progress(
+                data_root,
+                SourceBackedRefreshMode::Wait,
+                &mut observe_progress,
+            )
+        }
+        (ImportCoreRefreshRequest::Automatic, true) => {
+            coordinate_source_backed_refresh_with_progress(
+                data_root,
+                SourceBackedRefreshMode::Wait,
+                &mut observe_progress,
+            )
+        }
+        (ImportCoreRefreshRequest::ExplicitCatalog(authority), true) => {
+            SourceBackedRefreshMode::Wait.coordinate_explicit_source_catalog_with_progress(
+                data_root,
+                authority,
+                &mut observe_progress,
+            )
         }
     }
     .context("publish provider inputs through the Core refresh engine")?;

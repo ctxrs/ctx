@@ -186,6 +186,12 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
         .is_some_and(|count| count >= 1));
     assert_eq!(stdout["sources"][0]["status"], "published");
     assert!(stdout["sources"][0]["published_generation"].is_string());
+    assert!(
+        !serde_json::to_string(&stdout)
+            .unwrap()
+            .contains("current_source_progress"),
+        "progress details must remain stderr-only: {stdout:#}"
+    );
 
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(r#""type":"ctx_progress""#), "{stderr}");
@@ -831,6 +837,12 @@ fn import_all_discovers_and_imports_providers_together() {
     assert_eq!(
         stdout["sources"][0]["source_format"],
         "provider_authoritative_all"
+    );
+    assert!(
+        !serde_json::to_string(&stdout)
+            .unwrap()
+            .contains("current_source_progress"),
+        "progress details must remain stderr-only: {stdout:#}"
     );
 
     let stderr = String::from_utf8(output.stderr).unwrap();

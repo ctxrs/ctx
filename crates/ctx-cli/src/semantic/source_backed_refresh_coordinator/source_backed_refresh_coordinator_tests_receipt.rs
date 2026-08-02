@@ -182,7 +182,8 @@ fn nonempty_explicit_catalog_publication_is_recorded_in_the_terminal_receipt() {
         DiscoveryPlatform::Linux,
         DiscoveryPlatformDirs::default(),
     );
-    let mut progress = |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+    let mut progress =
+        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
     let publication = refresh_all_provider_sources(
         &discovery,
         DiscoveryReport {

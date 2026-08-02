@@ -11,14 +11,19 @@ use std::{
 use std::fs;
 
 use anyhow::{anyhow, bail, Context, Result};
+#[cfg(test)]
+use ctx_history_capture::SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress;
 use ctx_history_capture::{
     build_automatic_source_backed_registry_from_report,
     discover_provider_sources_with_context_and_work_budget, source_backed_refresh_work_budget,
     validate_provider_source_roots_outside_data_root, CaptureError, DiscoveryContext,
     DiscoveryReport, ProviderSourceStatus, SourceBackedAutomaticRegistryIssue,
-    SourceBackedAutomaticUnavailableReason, SourceBackedProviderRegistry,
-    SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress, SourceBackedRouteError,
-    SourceBackedRouteErrorKind, SourceBackedRouteResult,
+    SourceBackedAutomaticUnavailableReason,
+    SourceBackedCurrentSourceProgress as CaptureSourceBackedCurrentSourceProgress,
+    SourceBackedCurrentSourceProgressStage as CaptureSourceBackedCurrentSourceProgressStage,
+    SourceBackedDetailedRefreshProgress as CaptureSourceBackedDetailedRefreshProgress,
+    SourceBackedProviderRegistry, SourceBackedRouteError, SourceBackedRouteErrorKind,
+    SourceBackedRouteResult,
     SourceBackedSourceFailureClass as CaptureSourceBackedSourceFailureClass,
 };
 use ctx_history_core::{utc_now, CaptureProvider, CertifiedSource, ScannedSourceCounts};
@@ -61,10 +66,11 @@ use coordinator_state::CaptureOwnedSourceBackedRefreshExecutor;
 pub(in crate::semantic) use coordinator_state::CoreRefreshEngine;
 use coordinator_state::SourceBackedRefreshProgressUpdate;
 pub(crate) use coordinator_state::{
-    PinnedCorePublication, SourceBackedRefreshExecution, SourceBackedRefreshExecutor,
-    SourceBackedRefreshReceipt, SourceBackedRefreshSourceFailure,
-    SourceBackedRefreshSourceFailureClass, SourceBackedRefreshSourceFailures,
-    SourceBackedRefreshTimings,
+    PinnedCorePublication, SourceBackedCurrentSourceProgress,
+    SourceBackedCurrentSourceProgressStage, SourceBackedRefreshExecution,
+    SourceBackedRefreshExecutor, SourceBackedRefreshProgress, SourceBackedRefreshReceipt,
+    SourceBackedRefreshSourceFailure, SourceBackedRefreshSourceFailureClass,
+    SourceBackedRefreshSourceFailures, SourceBackedRefreshTimings,
 };
 pub(crate) use current_state::SourceBackedRefreshCurrent;
 
@@ -85,6 +91,7 @@ const SOURCE_REFRESH_BUILD_ISSUE_LIMIT: usize = 8;
 const SOURCE_REFRESH_FAILURE_ROW_LIMIT: usize = 64;
 const SOURCE_REFRESH_FAILURE_TEXT_MAX_BYTES: usize = 512;
 const TERMINAL_COVERAGE_ERROR_CODE: &str = "all_provider_terminal_coverage_unavailable";
+type RefreshProgressObserver<'a> = dyn FnMut(&SourceBackedRefreshProgress) -> Result<()> + 'a;
 #[cfg(test)]
 thread_local! {
     static VERIFIED_INDEX_OPEN_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
@@ -143,7 +150,22 @@ impl SourceBackedRefreshMode {
         data_root: &Path,
         authority: &ExplicitSourceCatalogAuthority,
     ) -> Result<SourceBackedRefreshObservation> {
-        coordinate_source_backed_refresh_with_catalog(data_root, self, Some(authority), false)
+        coordinate_source_backed_refresh_with_catalog(data_root, self, Some(authority), false, None)
+    }
+
+    pub(crate) fn coordinate_explicit_source_catalog_with_progress(
+        self,
+        data_root: &Path,
+        authority: &ExplicitSourceCatalogAuthority,
+        observer: &mut RefreshProgressObserver<'_>,
+    ) -> Result<SourceBackedRefreshObservation> {
+        coordinate_source_backed_refresh_with_catalog(
+            data_root,
+            self,
+            Some(authority),
+            false,
+            Some(observer),
+        )
     }
 }
 
@@ -346,14 +368,30 @@ pub(crate) fn coordinate_source_backed_refresh(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, true)
+    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, true, None)
+}
+
+pub(crate) fn coordinate_source_backed_refresh_with_progress(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+    observer: &mut RefreshProgressObserver<'_>,
+) -> Result<SourceBackedRefreshObservation> {
+    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, true, Some(observer))
 }
 
 pub(crate) fn coordinate_core_refresh_without_autostart(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, false)
+    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, false, None)
+}
+
+pub(crate) fn coordinate_core_refresh_without_autostart_with_progress(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+    observer: &mut RefreshProgressObserver<'_>,
+) -> Result<SourceBackedRefreshObservation> {
+    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, false, Some(observer))
 }
 
 fn coordinate_source_backed_refresh_with_catalog(
@@ -361,6 +399,7 @@ fn coordinate_source_backed_refresh_with_catalog(
     mode: SourceBackedRefreshMode,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     allow_daemon_autostart: bool,
+    progress_observer: Option<&mut RefreshProgressObserver<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
     if mode == SourceBackedRefreshMode::Off {
         if explicit_source_catalog.is_some() {
@@ -450,6 +489,7 @@ fn coordinate_source_backed_refresh_with_catalog(
         mode,
         explicit_source_catalog,
         allow_daemon_autostart,
+        progress_observer,
     )
 }
 
@@ -459,7 +499,9 @@ fn wait_for_published_generation(
     mode: SourceBackedRefreshMode,
     expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
     allow_daemon_autostart: bool,
+    progress_observer: Option<&mut RefreshProgressObserver<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
+    let mut progress_observer = progress_observer.map(RefreshProgressObserverState::new);
     loop {
         let response = match daemon_source_refresh_request(
             data_root,
@@ -481,6 +523,9 @@ fn wait_for_published_generation(
                 .with_context(|| {
                     format!("recover daemon while waiting for source refresh request {request_id}")
                 })?;
+                if let Some(observer) = progress_observer.as_mut() {
+                    observer.reset();
+                }
                 continue;
             }
             Err(error)
@@ -498,6 +543,9 @@ fn wait_for_published_generation(
                             "recover unavailable daemon while waiting for source refresh request {request_id}: {error:#}"
                         )
                     })?;
+                if let Some(observer) = progress_observer.as_mut() {
+                    observer.reset();
+                }
                 continue;
             }
             Err(error) => {
@@ -577,6 +625,9 @@ fn wait_for_published_generation(
                 return Err(anyhow!("{detail}"));
             }
             Some("queued" | "running") => {
+                if let Some(observer) = progress_observer.as_mut() {
+                    observer.observe(&response)?;
+                }
                 std::thread::sleep(SOURCE_REFRESH_POLL_INTERVAL);
             }
             Some(state) => {
@@ -590,6 +641,34 @@ fn wait_for_published_generation(
                 ))
             }
         }
+    }
+}
+
+struct RefreshProgressObserverState<'observer, 'callback> {
+    observer: &'observer mut RefreshProgressObserver<'callback>,
+    last_observed: Option<SourceBackedRefreshProgress>,
+}
+
+impl<'observer, 'callback> RefreshProgressObserverState<'observer, 'callback> {
+    fn new(observer: &'observer mut RefreshProgressObserver<'callback>) -> Self {
+        Self {
+            observer,
+            last_observed: None,
+        }
+    }
+
+    fn observe(&mut self, response: &Value) -> Result<()> {
+        let progress = SourceBackedRefreshProgress::from_status_json(response)?;
+        if self.last_observed.as_ref() == Some(&progress) {
+            return Ok(());
+        }
+        (self.observer)(&progress).context("report daemon source refresh progress")?;
+        self.last_observed = Some(progress);
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.last_observed = None;
     }
 }
 

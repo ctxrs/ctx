@@ -352,6 +352,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
             update.completed_sources,
             update.total_sources,
             update.current_source,
+            update.current_source_progress,
         ));
         Ok(())
     };
@@ -387,35 +388,52 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
             assert_eq!(observed_data_root, data_root);
             assert_eq!(observed_index_root, index_root);
             assert!(observed_explicit_source_catalog.is_none());
-            progress(CaptureSourceBackedRefreshProgress {
-                phase: "discovering",
-                completed_sources: 0,
-                total_sources: 2,
-                current_source: None,
-                stage_duration: StdDuration::ZERO,
-                elapsed: StdDuration::ZERO,
-                certified_source_count: None,
-                certified_source_bytes: None,
+            progress(CaptureSourceBackedDetailedRefreshProgress {
+                progress: CaptureSourceBackedRefreshProgress {
+                    phase: "discovering",
+                    completed_sources: 0,
+                    total_sources: 2,
+                    current_source: None,
+                    stage_duration: StdDuration::ZERO,
+                    elapsed: StdDuration::ZERO,
+                    certified_source_count: None,
+                    certified_source_bytes: None,
+                },
+                current_source_progress: None,
             })?;
-            progress(CaptureSourceBackedRefreshProgress {
-                phase: "refreshing",
-                completed_sources: 1,
-                total_sources: 2,
-                current_source: Some("provider-wide-route".to_owned()),
-                stage_duration: StdDuration::ZERO,
-                elapsed: StdDuration::ZERO,
-                certified_source_count: None,
-                certified_source_bytes: None,
+            progress(CaptureSourceBackedDetailedRefreshProgress {
+                progress: CaptureSourceBackedRefreshProgress {
+                    phase: "refreshing",
+                    completed_sources: 1,
+                    total_sources: 2,
+                    current_source: Some("provider-wide-route".to_owned()),
+                    stage_duration: StdDuration::ZERO,
+                    elapsed: StdDuration::ZERO,
+                    certified_source_count: None,
+                    certified_source_bytes: None,
+                },
+                current_source_progress: Some(CaptureSourceBackedCurrentSourceProgress {
+                    stage: CaptureSourceBackedCurrentSourceProgressStage::LogicalScan,
+                    snapshot_pages_completed: None,
+                    snapshot_pages_total: None,
+                    snapshot_bytes_completed: None,
+                    snapshot_bytes_total: None,
+                    logical_rows_scanned: Some(1_234),
+                    logical_certified_bytes: Some(8_192),
+                }),
             })?;
-            progress(CaptureSourceBackedRefreshProgress {
-                phase: "verifying",
-                completed_sources: 2,
-                total_sources: 2,
-                current_source: None,
-                stage_duration: StdDuration::ZERO,
-                elapsed: StdDuration::ZERO,
-                certified_source_count: None,
-                certified_source_bytes: None,
+            progress(CaptureSourceBackedDetailedRefreshProgress {
+                progress: CaptureSourceBackedRefreshProgress {
+                    phase: "verifying",
+                    completed_sources: 2,
+                    total_sources: 2,
+                    current_source: None,
+                    stage_duration: StdDuration::ZERO,
+                    elapsed: StdDuration::ZERO,
+                    certified_source_count: None,
+                    certified_source_bytes: None,
+                },
+                current_source_progress: None,
             })?;
             Ok(test_publication("all-provider-generation"))
         },
@@ -428,17 +446,180 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
     assert_eq!(
         updates.into_inner().unwrap(),
         vec![
-            ("discovering".to_owned(), 0, 0, None),
-            ("discovering".to_owned(), 0, 2, None),
+            ("discovering".to_owned(), 0, 0, None, None),
+            ("discovering".to_owned(), 0, 2, None, None),
             (
                 "refreshing".to_owned(),
                 1,
                 2,
                 Some("provider-wide-route".to_owned()),
+                Some(SourceBackedCurrentSourceProgress {
+                    stage: SourceBackedCurrentSourceProgressStage::LogicalScan,
+                    snapshot_pages_completed: None,
+                    snapshot_pages_total: None,
+                    snapshot_bytes_completed: None,
+                    snapshot_bytes_total: None,
+                    logical_rows_scanned: Some(1_234),
+                    logical_certified_bytes: Some(8_192),
+                }),
             ),
-            ("verifying".to_owned(), 2, 2, None),
+            ("verifying".to_owned(), 2, 2, None, None),
         ]
     );
+}
+
+#[test]
+fn detailed_refresh_progress_status_round_trips_every_optional_counter() {
+    let progress = SourceBackedRefreshProgress {
+        phase: "refreshing".to_owned(),
+        completed_sources: 2,
+        total_sources: 6,
+        current_source: Some("source.db".to_owned()),
+        current_source_progress: Some(SourceBackedCurrentSourceProgress {
+            stage: SourceBackedCurrentSourceProgressStage::OnlineBackup,
+            snapshot_pages_completed: Some(10),
+            snapshot_pages_total: Some(20),
+            snapshot_bytes_completed: Some(40_960),
+            snapshot_bytes_total: Some(81_920),
+            logical_rows_scanned: Some(30),
+            logical_certified_bytes: Some(12_345),
+        }),
+    };
+    let status = json!({"progress": progress.to_json()});
+
+    let parsed = SourceBackedRefreshProgress::from_status_json(&status).unwrap();
+
+    assert_eq!(parsed, progress);
+    assert_eq!(
+        status["progress"]["current_source_progress"]["stage"],
+        "online_backup"
+    );
+    assert_eq!(
+        status["progress"]["current_source_progress"]["logical_certified_bytes"],
+        12_345
+    );
+}
+
+#[test]
+fn wait_progress_observer_deduplicates_exact_status_and_propagates_failures() {
+    let mut observed = Vec::new();
+    let mut response = json!({
+        "progress": {
+            "phase": "refreshing",
+            "completed_sources": 1,
+            "total_sources": 2,
+            "current_source": "source.db",
+            "current_source_progress": {
+                "stage": "logical_scan",
+                "snapshot_pages_completed": null,
+                "snapshot_pages_total": null,
+                "snapshot_bytes_completed": null,
+                "snapshot_bytes_total": null,
+                "logical_rows_scanned": 100,
+                "logical_certified_bytes": 4096
+            }
+        }
+    });
+    {
+        let mut observer = |progress: &SourceBackedRefreshProgress| {
+            observed.push(progress.clone());
+            Ok(())
+        };
+        let mut state = RefreshProgressObserverState::new(&mut observer);
+        state.observe(&response).unwrap();
+        state.observe(&response).unwrap();
+        response["progress"]["current_source_progress"]["logical_rows_scanned"] = json!(200);
+        state.observe(&response).unwrap();
+    }
+    assert_eq!(observed.len(), 2);
+    assert_eq!(
+        observed[1]
+            .current_source_progress
+            .unwrap()
+            .logical_rows_scanned,
+        Some(200)
+    );
+
+    let mut failing = |_: &SourceBackedRefreshProgress| Err(anyhow!("injected observer failure"));
+    let error = RefreshProgressObserverState::new(&mut failing)
+        .observe(&response)
+        .expect_err("observer failures must remain systemic");
+    assert!(error
+        .to_string()
+        .contains("report daemon source refresh progress"));
+    assert!(format!("{error:#}").contains("injected observer failure"));
+}
+
+#[test]
+fn source_transitions_and_terminal_states_clear_detailed_progress() {
+    for fail in [false, true] {
+        let coordinator = CoreRefreshEngine::new();
+        let request = coordinator.enqueue(Some("generation-1".to_owned()));
+        assert!(!request_id(&request).is_empty());
+        let run = coordinator
+            .run_next_with(
+                |request_id, coordinator| {
+                    let detailed = SourceBackedCurrentSourceProgress {
+                        stage: SourceBackedCurrentSourceProgressStage::LogicalScan,
+                        snapshot_pages_completed: None,
+                        snapshot_pages_total: None,
+                        snapshot_bytes_completed: None,
+                        snapshot_bytes_total: None,
+                        logical_rows_scanned: Some(100),
+                        logical_certified_bytes: Some(4_096),
+                    };
+                    let active = coordinator
+                        .set_detailed_progress(
+                            request_id,
+                            "refreshing",
+                            0,
+                            1,
+                            Some("source-a".to_owned()),
+                            Some(detailed),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        active["progress"]["current_source_progress"]["stage"],
+                        "logical_scan"
+                    );
+                    assert_eq!(
+                        coordinator.status(request_id).unwrap()["progress"]
+                            ["current_source_progress"]["logical_rows_scanned"],
+                        100
+                    );
+                    let transitioned = coordinator
+                        .set_progress(request_id, "verifying", 1, 1, None)
+                        .unwrap();
+                    assert!(transitioned["progress"]
+                        .get("current_source_progress")
+                        .is_none());
+                    coordinator.set_detailed_progress(
+                        request_id,
+                        "refreshing",
+                        0,
+                        1,
+                        Some("source-a".to_owned()),
+                        Some(detailed),
+                    );
+                    if fail {
+                        Err(anyhow!("injected terminal failure"))
+                    } else {
+                        Ok(test_publication("generation-2"))
+                    }
+                },
+                || {
+                    Ok(Some(
+                        if fail { "generation-1" } else { "generation-2" }.to_owned(),
+                    ))
+                },
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(run.failed, fail);
+        assert!(run.job["progress"].get("current_source").is_none());
+        assert!(run.job["progress"].get("current_source_progress").is_none());
+    }
 }
 
 #[test]
@@ -471,7 +652,8 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
         }],
         issues: Vec::new(),
     };
-    let mut progress = |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+    let mut progress =
+        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
 
     let first = refresh_all_provider_sources(
         &discovery,
@@ -565,7 +747,8 @@ fn automatic_refresh_replaces_a_zstd_settings_generation() {
         }],
         issues: Vec::new(),
     };
-    let mut progress = |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+    let mut progress =
+        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
     let baseline = refresh_all_provider_sources(
         &discovery,
         report.clone(),
@@ -599,8 +782,9 @@ fn automatic_refresh_replaces_a_zstd_settings_generation() {
     let run = coordinator
         .run_next_with(
             |_, _| {
-                let mut progress =
-                    |_: CaptureSourceBackedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+                let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| {
+                    Ok::<(), SourceBackedRouteError>(())
+                };
                 refresh_all_provider_sources(
                     &discovery,
                     report,

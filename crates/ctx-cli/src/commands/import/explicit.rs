@@ -51,7 +51,7 @@ pub(crate) fn run_explicit_source_catalog_import(
             source.path.display(),
             format_bytes(stats.bytes)
         ),
-    );
+    )?;
 
     let started = Instant::now();
     let upsert = upsert_explicit_source(&context.data_root, &source)?;
@@ -60,6 +60,7 @@ pub(crate) fn run_explicit_source_catalog_import(
         context.config,
         context.args.no_daemon,
         ImportCoreRefreshRequest::ExplicitCatalog(&upsert.authority),
+        &progress,
     )?;
     let receipt = refresh
         .receipt
@@ -124,8 +125,8 @@ pub(crate) fn run_explicit_source_catalog_import(
     } else {
         "Published the source for indexing.".to_owned()
     };
-    progress.finish_line();
-    progress.done("published", completion, stats.bytes);
+    progress.finish_line()?;
+    progress.done("published", completion, stats.bytes)?;
     Ok(ImportReport {
         resume: context.args.resume,
         totals,

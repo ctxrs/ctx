@@ -79,6 +79,11 @@ fn import_totals_json(totals: &ImportTotals) -> Value {
             unreachable!("per-run import totals are always an object")
         };
         output.extend(per_run);
+    } else if totals.failed_sources > 0 {
+        let Value::Object(output) = &mut value else {
+            unreachable!("import totals are always an object")
+        };
+        output.insert("failed_sources".to_owned(), json!(totals.failed_sources));
     }
     value
 }
@@ -171,8 +176,8 @@ fn source_failure_fields(report: &ImportReport) -> Vec<(String, String)> {
         .sources
         .iter()
         .filter(|source| {
-            source.get("status").and_then(Value::as_str) == Some("failed")
-                && source.get("failure_type").and_then(Value::as_str) == Some("source")
+            source.get("status").and_then(Value::as_str) == Some("failure")
+                && source.get("failure_scope").and_then(Value::as_str) == Some("source")
                 && source
                     .get("source_identity")
                     .and_then(Value::as_str)
@@ -190,7 +195,7 @@ fn source_failure_fields(report: &ImportReport) -> Vec<(String, String)> {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown provider");
             let class = source
-                .get("class")
+                .get("source_failure_class")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
             let retained = if source
@@ -205,6 +210,7 @@ fn source_failure_fields(report: &ImportReport) -> Vec<(String, String)> {
             let detail = source
                 .get("detail")
                 .and_then(Value::as_str)
+                .or_else(|| source.get("error").and_then(Value::as_str))
                 .unwrap_or("no detail reported");
             (
                 format!("Source {}", index.saturating_add(1)),
@@ -618,7 +624,6 @@ mod tests {
         let report = ImportReport {
             resume: false,
             totals: ImportTotals {
-                per_run_counts_available: true,
                 failed_sources: 2,
                 current_source_count: Some(2),
                 current_indexed_documents: Some(7),
@@ -634,14 +639,27 @@ mod tests {
                     "source_failures_omitted": 1,
                 }),
                 json!({
-                    "status": "failed",
-                    "failure_type": "source",
+                    "status": "failure",
+                    "failure_scope": "source",
+                    "failure_type": "other",
                     "source_identity": source_identity,
                     "provider": "codex",
-                    "class": "source_changed",
+                    "source_failure_class": "source_changed",
                     "carried_forward": true,
                     "source_selector": "/history/session.jsonl",
                     "detail": "source changed during refresh",
+                    "error": "source changed during refresh",
+                    "source_files": 0,
+                    "source_bytes": 0,
+                    "imported_sessions": 0,
+                    "imported_events": 0,
+                    "imported_edges": 0,
+                    "skipped_sessions": 0,
+                    "skipped_events": 0,
+                    "skipped_edges": 0,
+                    "skipped": 0,
+                    "rejected_records": 0,
+                    "rejections": [],
                 }),
             ],
         };
@@ -649,9 +667,23 @@ mod tests {
         let json = import_report_json(&report);
         assert_eq!(json["outcome"], "completed_with_source_failures");
         assert_eq!(json["failure_scope"], "source");
-        assert_eq!(json["totals"]["imported_sources"], 0);
         assert_eq!(json["totals"]["failed_sources"], 2);
+        for unsupported in [
+            "source_files",
+            "source_bytes",
+            "imported_sources",
+            "imported_sessions",
+            "imported_events",
+            "imported_edges",
+        ] {
+            assert!(json["totals"].get(unsupported).is_none(), "{json:#}");
+        }
         assert_eq!(json["sources"][1]["source_identity"], source_identity);
+        assert_eq!(json["sources"][1]["failure_scope"], "source");
+        assert_eq!(json["sources"][1]["failure_type"], "other");
+        assert_eq!(json["sources"][1]["source_failure_class"], "source_changed");
+        assert_eq!(json["sources"][1]["imported_events"], 0);
+        assert_eq!(json["sources"][1]["rejections"], json!([]));
 
         let rendered =
             render_import_report_human(&context(120, ColorMode::Never), &report).render_plain();

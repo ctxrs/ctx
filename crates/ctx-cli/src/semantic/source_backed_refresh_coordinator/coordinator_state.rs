@@ -5,14 +5,13 @@ mod generation_observation;
 mod read_model;
 mod runtime_metadata;
 pub(crate) use generation_authority::PinnedCorePublication;
-use read_model::{
-    SourceBackedRefreshAttempt, SourceBackedRefreshProgress, SourceBackedRefreshState,
-};
 pub(crate) use read_model::{
-    SourceBackedRefreshReceipt, SourceBackedRefreshSourceFailure,
+    SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
+    SourceBackedRefreshProgress, SourceBackedRefreshReceipt, SourceBackedRefreshSourceFailure,
     SourceBackedRefreshSourceFailureClass, SourceBackedRefreshSourceFailures,
     SourceBackedRefreshTimings,
 };
+use read_model::{SourceBackedRefreshAttempt, SourceBackedRefreshState};
 use runtime_metadata::{
     source_catalog_refresh_runtime_metadata, source_refresh_runtime_metadata,
     SourceRefreshRuntimeMetadata,
@@ -23,6 +22,7 @@ pub(super) struct SourceBackedRefreshProgressUpdate {
     pub(super) completed_sources: usize,
     pub(super) total_sources: usize,
     pub(super) current_source: Option<String>,
+    pub(super) current_source_progress: Option<SourceBackedCurrentSourceProgress>,
 }
 
 /// Daemon-owned execution context passed to the capture refresh callback.
@@ -47,11 +47,29 @@ impl SourceBackedRefreshExecution<'_> {
         total_sources: usize,
         current_source: Option<String>,
     ) -> Result<()> {
+        self.report_detailed_progress(
+            phase,
+            completed_sources,
+            total_sources,
+            current_source,
+            None,
+        )
+    }
+
+    pub(crate) fn report_detailed_progress(
+        &self,
+        phase: &str,
+        completed_sources: usize,
+        total_sources: usize,
+        current_source: Option<String>,
+        current_source_progress: Option<SourceBackedCurrentSourceProgress>,
+    ) -> Result<()> {
         (self.report_progress)(SourceBackedRefreshProgressUpdate {
             phase: phase.to_owned(),
             completed_sources,
             total_sources,
             current_source,
+            current_source_progress,
         })
     }
 }
@@ -553,6 +571,7 @@ impl CoreRefreshEngine {
         find_attempt(&state, request_id).and_then(|attempt| attempt.receipt.clone())
     }
 
+    #[cfg(test)]
     pub(super) fn set_progress(
         &self,
         request_id: &str,
@@ -560,6 +579,25 @@ impl CoreRefreshEngine {
         completed_sources: usize,
         total_sources: usize,
         current_source: Option<String>,
+    ) -> Option<Value> {
+        self.set_detailed_progress(
+            request_id,
+            phase,
+            completed_sources,
+            total_sources,
+            current_source,
+            None,
+        )
+    }
+
+    pub(super) fn set_detailed_progress(
+        &self,
+        request_id: &str,
+        phase: &str,
+        completed_sources: usize,
+        total_sources: usize,
+        current_source: Option<String>,
+        current_source_progress: Option<SourceBackedCurrentSourceProgress>,
     ) -> Option<Value> {
         let mut state = self.lock_state();
         let attempt = find_attempt_mut(&mut state, request_id)?;
@@ -571,6 +609,7 @@ impl CoreRefreshEngine {
             completed_sources,
             total_sources,
             current_source,
+            current_source_progress,
         };
         Some(attempt.job_json())
     }
@@ -656,6 +695,7 @@ impl CoreRefreshEngine {
             let attempt = find_attempt_mut(&mut state, &request_id)?;
             attempt.finished_at_ms = Some(utc_now().timestamp_millis());
             attempt.progress.current_source = None;
+            attempt.progress.current_source_progress = None;
             if observed_for_status.is_some() {
                 attempt.published_generation = observed_for_status.clone();
             }

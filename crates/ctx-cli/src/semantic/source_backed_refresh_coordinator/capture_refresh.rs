@@ -9,15 +9,7 @@ pub(super) fn execute_source_backed_refresh(
 ) -> Result<SourceBackedRefreshPublication> {
     let index_root = source_backed_index_root(data_root);
     let report_progress = |update: SourceBackedRefreshProgressUpdate| {
-        record_source_backed_refresh_progress(
-            data_root,
-            coordinator,
-            request_id,
-            &update.phase,
-            update.completed_sources,
-            update.total_sources,
-            update.current_source,
-        )
+        record_source_backed_refresh_progress(data_root, coordinator, request_id, update)
     };
     executor.refresh(SourceBackedRefreshExecution {
         data_root,
@@ -48,7 +40,7 @@ where
         &Path,
         &Path,
         Option<&ExplicitSourceCatalogAuthority>,
-        &mut dyn FnMut(CaptureSourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
+        &mut dyn FnMut(CaptureSourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
     ) -> Result<SourceBackedRefreshPublication>,
 {
     let discovery = discovery.clone().with_data_root(execution.data_root);
@@ -69,13 +61,15 @@ where
             .context("validate explicit provider roots before source-refresh state writes")?;
     }
     execution.report_progress("discovering", 0, 0, None)?;
-    let mut report_progress = |update: CaptureSourceBackedRefreshProgress| {
+    let mut report_progress = |update: CaptureSourceBackedDetailedRefreshProgress| {
+        let progress = update.progress;
         execution
-            .report_progress(
-                update.phase,
-                update.completed_sources,
-                update.total_sources,
-                update.current_source,
+            .report_detailed_progress(
+                progress.phase,
+                progress.completed_sources,
+                progress.total_sources,
+                progress.current_source,
+                update.current_source_progress.map(current_source_progress),
             )
             .map_err(|error| {
                 SourceBackedRouteError::new(
@@ -103,7 +97,7 @@ pub(super) fn refresh_all_provider_sources(
     index_root: &Path,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     report_progress: &mut dyn FnMut(
-        CaptureSourceBackedRefreshProgress,
+        CaptureSourceBackedDetailedRefreshProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> Result<SourceBackedRefreshPublication> {
     let loaded_catalog;
@@ -132,7 +126,7 @@ pub(super) fn refresh_all_provider_sources(
     reject_unowned_retained_source_families(&build.registry, &retained_sources)?;
     let (executor, _issues) = build.into_refresh_executor(WriterOptions::default());
     let receipt = executor
-        .refresh(index_root, report_progress)
+        .refresh_with_detailed_progress(index_root, report_progress)
         .context("run capture-owned all-provider source-backed refresh")?;
     let current =
         SourceBackedRefreshCurrent::from_sources(&receipt.sources, receipt.removals.len())?;
@@ -309,19 +303,44 @@ fn record_source_backed_refresh_progress(
     data_root: &Path,
     coordinator: &CoreRefreshEngine,
     request_id: &str,
-    phase: &str,
-    completed_sources: usize,
-    total_sources: usize,
-    current_source: Option<String>,
+    update: SourceBackedRefreshProgressUpdate,
 ) -> Result<()> {
-    if let Some(job) = coordinator.set_progress(
+    if let Some(job) = coordinator.set_detailed_progress(
         request_id,
-        phase,
-        completed_sources,
-        total_sources,
-        current_source,
+        &update.phase,
+        update.completed_sources,
+        update.total_sources,
+        update.current_source,
+        update.current_source_progress,
     ) {
         write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
     }
     Ok(())
+}
+
+fn current_source_progress(
+    progress: CaptureSourceBackedCurrentSourceProgress,
+) -> SourceBackedCurrentSourceProgress {
+    SourceBackedCurrentSourceProgress {
+        stage: match progress.stage {
+            CaptureSourceBackedCurrentSourceProgressStage::SourceFamilyCopy => {
+                SourceBackedCurrentSourceProgressStage::SourceFamilyCopy
+            }
+            CaptureSourceBackedCurrentSourceProgressStage::OnlineBackup => {
+                SourceBackedCurrentSourceProgressStage::OnlineBackup
+            }
+            CaptureSourceBackedCurrentSourceProgressStage::LogicalFingerprint => {
+                SourceBackedCurrentSourceProgressStage::LogicalFingerprint
+            }
+            CaptureSourceBackedCurrentSourceProgressStage::LogicalScan => {
+                SourceBackedCurrentSourceProgressStage::LogicalScan
+            }
+        },
+        snapshot_pages_completed: progress.snapshot_pages_completed,
+        snapshot_pages_total: progress.snapshot_pages_total,
+        snapshot_bytes_completed: progress.snapshot_bytes_completed,
+        snapshot_bytes_total: progress.snapshot_bytes_total,
+        logical_rows_scanned: progress.logical_rows_scanned,
+        logical_certified_bytes: progress.logical_certified_bytes,
+    }
 }
