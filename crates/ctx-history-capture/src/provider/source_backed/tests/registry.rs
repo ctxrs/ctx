@@ -612,6 +612,10 @@ fn all_failed_warm_refresh_returns_unchanged_base_but_cold_refresh_has_no_public
         WriterOptions::default(),
     )
     .unwrap_err();
+    let display = error.to_string();
+    assert!(display.contains("source-backed scan failed for gemini"));
+    assert!(display.contains("unavailable"));
+    assert!(display.contains("source is temporarily unavailable"));
     assert!(matches!(
         error,
         SourceBackedCoordinatorError::NoUsableSourceRoutes { failures }
@@ -773,6 +777,15 @@ fn source_failure_receipts_are_row_and_detail_bounded() {
     let SourceBackedCoordinatorError::NoUsableSourceRoutes { failures } = error else {
         panic!("unexpected bounded failure result: {error:?}");
     };
+    let display = failures.to_string();
+    assert_eq!(
+        display
+            .matches("source-backed scan failed for gemini")
+            .count(),
+        3
+    );
+    assert!(display.contains("62 additional source failure(s) omitted"));
+    assert!(display.len() <= 2_048);
     assert_eq!(failures.total(), MAX_RECORDED_SOURCE_BACKED_FAILURES + 1);
     assert_eq!(
         failures.failures().len(),

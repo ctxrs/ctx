@@ -1,3 +1,5 @@
+use std::fmt;
+
 use super::super::*;
 
 pub type SourceBackedCoordinatorResult<T> = Result<T, SourceBackedCoordinatorError>;
@@ -107,6 +109,53 @@ impl SourceBackedSourceFailures {
     }
 }
 
+impl fmt::Display for SourceBackedSourceFailures {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const MAX_DISPLAYED_FAILURES: usize = 3;
+
+        for (index, failure) in self
+            .failures
+            .iter()
+            .take(MAX_DISPLAYED_FAILURES)
+            .enumerate()
+        {
+            if index != 0 {
+                formatter.write_str("; ")?;
+            }
+            write!(
+                formatter,
+                "source-backed scan failed for {}: {}: {}",
+                failure.provider.as_str(),
+                failure.class.display_label(),
+                failure.detail
+            )?;
+        }
+        let undisplayed = self
+            .total()
+            .saturating_sub(self.failures.len().min(MAX_DISPLAYED_FAILURES));
+        if undisplayed != 0 {
+            write!(
+                formatter,
+                "; {undisplayed} additional source failure(s) omitted"
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl SourceBackedSourceFailureClass {
+    fn display_label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable (provider source unavailable)",
+            Self::SourceChanged => {
+                "source_changed (provider source changed during bounded capture)"
+            }
+            Self::Unreadable => "invalid_source (invalid capture payload)",
+            Self::Incompatible => "unsupported (unsupported provider schema)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceBackedDeletionDisposition {
     Deferred,
@@ -185,7 +234,9 @@ pub enum SourceBackedCoordinatorError {
     RetainedDeletionRecertification { source_id: String, detail: String },
     #[error("source-backed refresh progress callback failed: {0}")]
     Progress(SourceBackedRouteError),
-    #[error("source-backed refresh completed with source failures but no usable source route")]
+    #[error(
+        "source-backed refresh completed with source failures but no usable source route: {failures}"
+    )]
     NoUsableSourceRoutes {
         failures: SourceBackedSourceFailures,
     },

@@ -922,7 +922,7 @@ fn import_all_skips_empty_gemini_source() {
 }
 
 #[test]
-fn import_all_fails_atomically_when_one_source_is_invalid() {
+fn import_all_isolates_invalid_source_and_publishes_healthy_source() {
     let temp = finite_daemon_test_root();
     copy_dir_all(
         Path::new(&provider_history_fixture("codex-sessions")),
@@ -932,19 +932,26 @@ fn import_all_fails_atomically_when_one_source_is_invalid() {
     fs::create_dir_all(&opencode_dir).unwrap();
     fs::write(opencode_dir.join("opencode.db"), b"not sqlite").unwrap();
 
-    let output = ctx(&temp)
-        .args(["import", "--all", "--format=json", "--progress", "none"])
-        .assert()
-        .failure()
-        .get_output()
-        .clone();
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("source-backed scan failed for opencode")
-            && stderr.contains("not a database"),
-        "{stderr}"
-    );
+    let imported =
+        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
+    assert_eq!(imported["outcome"], "completed_with_source_failures");
+    assert_eq!(imported["failure_scope"], "source");
+    assert_eq!(imported["totals"]["failed_sources"], 1);
+    assert!(imported["totals"]["current_source_count"]
+        .as_u64()
+        .is_some_and(|count| count >= 1));
+    let failure = imported["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["provider"] == "opencode")
+        .unwrap();
+    assert_eq!(failure["status"], "failure");
+    assert_eq!(failure["failure_scope"], "source");
+    assert_eq!(failure["source_failure_class"], "unreadable");
+    assert!(failure["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("not a database")));
 }
 
 #[test]
