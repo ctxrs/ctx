@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest as _, Sha256};
 
 pub(super) struct SourceBackedRefreshPlan<'a> {
     pub(super) explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
@@ -181,10 +182,13 @@ fn refresh_all_provider_sources_route_local(
         .as_ref()
         .map(|index| index.manifest().sources.clone())
         .unwrap_or_default();
-    if matches!(scope, SourceBackedRefreshScope::All) {
+    let registry_failures = if matches!(scope, SourceBackedRefreshScope::All) {
         reject_blocking_automatic_registry_issues(&build.issues)?;
         reject_unowned_retained_source_families(&build.registry, &retained_sources)?;
-    }
+        automatic_registry_route_failures(&build.issues)?
+    } else {
+        Vec::new()
+    };
     let physical_scope = if scope == SourceBackedRefreshScope::All && !covered_route_ids.is_empty()
     {
         let current_route_ids = build
@@ -197,6 +201,15 @@ fn refresh_all_provider_sources_route_local(
     } else {
         scope
     };
+    if retained_generation.is_none()
+        && !registry_failures.is_empty()
+        && selected_registry_route_count(&build.registry, &physical_scope) == 0
+    {
+        return Err(SourceBackedCoordinatorError::NoUsableSourceRoutes {
+            failed_routes: registry_failures,
+        }
+        .into());
+    }
     let (executor, _issues) = build.into_refresh_executor(WriterOptions::default());
     let receipt = executor
         .refresh_scope(index_root, physical_scope, report_progress)
@@ -232,6 +245,7 @@ fn refresh_all_provider_sources_route_local(
         source_failures: receipt
             .failed_routes
             .iter()
+            .chain(registry_failures.iter())
             .map(|failure| SourceBackedRefreshSourceFailure {
                 route_identity: failure.route_identity.as_str().to_owned(),
                 source_identity: failure.source_identity.clone(),
@@ -305,31 +319,21 @@ fn source_backed_discovery_context() -> Result<DiscoveryContext> {
     Ok(DiscoveryContext::from_process(home))
 }
 
+/// Rejects only registry issues whose unsafe root makes route-local execution
+/// incapable of establishing a safe publication boundary.
 pub(super) fn reject_blocking_automatic_registry_issues(
     issues: &[SourceBackedAutomaticRegistryIssue],
 ) -> Result<()> {
-    // Missing automatic roots are not evidence that another explicit route for
-    // the same provider family is unavailable. Exact retained-source coverage
-    // is enforced below by the registered routes and again by publication
-    // recertification, so a genuinely unowned retained source still fails
-    // closed without rejecting a distinct explicit root at this coarse layer.
     let mut blocker_count = 0usize;
     let mut blocker_details = Vec::new();
     for issue in issues {
         let SourceBackedAutomaticRegistryIssue::Unavailable { source, reason } = issue else {
             continue;
         };
-        let blocks_publication = match reason {
-            SourceBackedAutomaticUnavailableReason::SourceStatus(
-                ProviderSourceStatus::Missing | ProviderSourceStatus::Unknown,
-            ) => false,
-            SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap { .. } => true,
-            SourceBackedAutomaticUnavailableReason::SourceStatus(_)
-            | SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. }
-            | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { .. }
-            | SourceBackedAutomaticUnavailableReason::RegistrationRejected { .. } => source.exists,
-        };
-        if !blocks_publication {
+        if !matches!(
+            reason,
+            SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap { .. }
+        ) {
             continue;
         }
         blocker_count = blocker_count.saturating_add(1);
@@ -349,12 +353,112 @@ pub(super) fn reject_blocking_automatic_registry_issues(
     let omitted = if omitted == 0 {
         String::new()
     } else {
-        format!("; {omitted} additional blocking issue(s) omitted")
+        format!("; {omitted} additional systemic safety issue(s) omitted")
     };
     Err(anyhow!(
-        "{TERMINAL_COVERAGE_ERROR_CODE}: capture automatic registry has {blocker_count} blocking detected or retained-provider issue(s): {}{omitted}",
+        "{TERMINAL_COVERAGE_ERROR_CODE}: capture automatic registry has {blocker_count} systemic safety issue(s): {}{omitted}",
         blocker_details.join("; ")
     ))
+}
+
+pub(super) fn automatic_registry_route_failures(
+    issues: &[SourceBackedAutomaticRegistryIssue],
+) -> Result<Vec<ctx_history_capture::SourceBackedFailedRoute>> {
+    let mut failures = BTreeMap::new();
+    for issue in issues {
+        let SourceBackedAutomaticRegistryIssue::Unavailable { source, reason } = issue else {
+            continue;
+        };
+        let Some(class) = automatic_registry_issue_failure_class(source, reason) else {
+            continue;
+        };
+        let route_identity = automatic_registry_issue_route_identity(source)?;
+        failures.entry(route_identity.clone()).or_insert_with(|| {
+            ctx_history_capture::SourceBackedFailedRoute {
+                route_identity,
+                source_identity: automatic_registry_issue_source_identity(source),
+                provider: source.provider,
+                class,
+                carried_forward: false,
+            }
+        });
+    }
+    Ok(failures.into_values().collect())
+}
+
+fn automatic_registry_issue_failure_class(
+    source: &ctx_history_capture::ProviderSource,
+    reason: &SourceBackedAutomaticUnavailableReason,
+) -> Option<SourceBackedSourceFailureClass> {
+    match reason {
+        SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap { .. }
+        | SourceBackedAutomaticUnavailableReason::SourceStatus(
+            ProviderSourceStatus::Missing | ProviderSourceStatus::Unknown,
+        ) => None,
+        SourceBackedAutomaticUnavailableReason::SourceStatus(_) if source.exists => {
+            Some(SourceBackedSourceFailureClass::Unavailable)
+        }
+        SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. }
+        | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { .. }
+        | SourceBackedAutomaticUnavailableReason::RegistrationRejected { .. }
+            if source.exists =>
+        {
+            Some(SourceBackedSourceFailureClass::Incompatible)
+        }
+        SourceBackedAutomaticUnavailableReason::SourceStatus(_)
+        | SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. }
+        | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { .. }
+        | SourceBackedAutomaticUnavailableReason::RegistrationRejected { .. } => None,
+    }
+}
+
+fn automatic_registry_issue_route_identity(
+    source: &ctx_history_capture::ProviderSource,
+) -> Result<SourceRouteIdentity> {
+    SourceRouteIdentity::from_sha256(automatic_registry_issue_identity(
+        b"ctx.automatic-registry-failure-route-v1\0",
+        source,
+    ))
+    .map_err(Into::into)
+}
+
+fn automatic_registry_issue_source_identity(
+    source: &ctx_history_capture::ProviderSource,
+) -> String {
+    automatic_registry_issue_identity(b"ctx.source-failure-identity-v1\0", source)
+}
+
+fn automatic_registry_issue_identity(
+    domain: &[u8],
+    source: &ctx_history_capture::ProviderSource,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    digest.update(source.provider.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(source.source_format.as_bytes());
+    digest.update([0]);
+    let path = source.path.as_os_str().as_encoded_bytes();
+    digest.update((path.len() as u64).to_be_bytes());
+    digest.update(path);
+    format!("{:x}", digest.finalize())
+}
+
+fn selected_registry_route_count(
+    registry: &SourceBackedProviderRegistry,
+    scope: &SourceBackedRefreshScope,
+) -> usize {
+    registry
+        .routes()
+        .filter(|route| route.selection.is_some())
+        .filter(|route| match scope {
+            SourceBackedRefreshScope::All => true,
+            SourceBackedRefreshScope::Exact(selected) => route
+                .route_identity
+                .as_ref()
+                .is_some_and(|identity| selected.contains(identity)),
+        })
+        .count()
 }
 
 fn reject_unowned_retained_source_families(
