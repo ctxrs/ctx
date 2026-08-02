@@ -390,7 +390,11 @@ fn complexity_oracle_reads_only_changed_source_records() -> Result<()> {
     assert_eq!(outcome.records_scanned, 4);
     assert_eq!(builder.calls.len(), 4);
     assert_eq!(source_rows(&store, &stable_digest)?, stable_rows);
-    assert_eq!(store.flat_active_event_snapshot_count(), 0);
+    assert_eq!(
+        store.flat_active_event_snapshot_count(),
+        1,
+        "one changed source must retain one flat reconciliation view"
+    );
     assert_eq!(active_events(&store)?, 104);
     assert_eq!(
         store.flat_pin_generation()?.unwrap().generation(),
@@ -401,6 +405,71 @@ fn complexity_oracle_reads_only_changed_source_records() -> Result<()> {
         store.source_backed_generation_pin_exact(target.generation_id(), 104)?,
         SourceBackedGenerationPin::Ready(_)
     ));
+    Ok(())
+}
+
+#[test]
+fn multi_page_reconciliation_constructs_one_flat_view() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let record_count = MAX_SOURCE_EVENT_PAGE_ITEMS + 4;
+    let initial = fixture.publish("view-a", &[(0, bodies("initial", record_count))])?;
+    let target = fixture.publish("view-b", &[(0, bodies("rewritten", record_count))])?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
+    reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
+
+    store.reset_flat_active_event_snapshot_count();
+    let outcome = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
+    assert_eq!(outcome.records_read, record_count);
+    assert_eq!(outcome.records_embedded, record_count);
+    assert_eq!(outcome.records_reused, 0);
+    let pin = store
+        .flat_pin_generation()?
+        .ok_or_else(|| anyhow!("multi-page reconciliation did not publish a flat generation"))?;
+    assert_eq!(pin.stats().active_events, record_count);
+    assert!(
+        pin.stats().segment_count < 16,
+        "bounded compaction must keep the segment set below its threshold"
+    );
+    assert_eq!(
+        store.flat_active_event_snapshot_count(),
+        1,
+        "two changed Core pages must share one generation-bound flat view"
+    );
+    Ok(())
+}
+
+#[test]
+fn multi_page_restart_reconstructs_one_view_for_remaining_pages() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let record_count = MAX_SOURCE_EVENT_PAGE_ITEMS + 4;
+    let index = fixture.publish("view-restart", &[(0, bodies("restart", record_count))])?;
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
+    {
+        let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+        let transition =
+            store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
+        assert_eq!(transition.records_read, 0);
+        let first_page =
+            store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
+        assert_eq!(first_page.records_read, MAX_SOURCE_EVENT_PAGE_ITEMS);
+        assert_eq!(first_page.records_embedded, MAX_SOURCE_EVENT_PAGE_ITEMS);
+        assert!(first_page.work_remaining);
+    }
+
+    let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
+    restarted.reset_flat_active_event_snapshot_count();
+    let resumed = reconcile_all(&mut restarted, &index, &mut builder, &mut embedder)?;
+    assert_eq!(resumed.records_read, 4);
+    assert_eq!(resumed.records_embedded, 4);
+    assert_eq!(active_events(&restarted)?, record_count);
+    assert_eq!(
+        restarted.flat_active_event_snapshot_count(),
+        1,
+        "restart must reconstruct one view for all remaining pages"
+    );
     Ok(())
 }
 
@@ -584,25 +653,28 @@ fn core_advance_mid_catch_up_never_pins_mixed_generation() -> Result<()> {
 
 #[test]
 fn policy_model_or_chunk_revision_forces_full_rebuild() -> Result<()> {
-    let fixture = Fixture::new(2)?;
-    let index = fixture.publish(
-        "revision",
-        &[(0, bodies("first", 3)), (1, bodies("second", 2))],
-    )?;
+    let fixture = Fixture::new(1)?;
+    let index = fixture.publish("revision", &[(0, bodies("first", 130))])?;
     let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
     let chunks_before = embedder.chunks;
+    store.reset_flat_active_event_snapshot_count();
 
     let mut revised = SourceBackedSemanticGeneration::from_verified_index(&index)?;
     revised.semantic_policy_fingerprint = "f".repeat(64);
     builder.calls.clear();
     let rebuilt = reconcile_generation(&mut store, &index, &revised, &mut builder, &mut embedder)?;
-    assert_eq!(rebuilt.records_read, 5);
-    assert_eq!(rebuilt.records_embedded, 5);
-    assert_eq!(builder.calls.len(), 5);
+    assert_eq!(rebuilt.records_read, 130);
+    assert_eq!(rebuilt.records_embedded, 130);
+    assert_eq!(builder.calls.len(), 130);
     assert!(embedder.chunks > chunks_before);
+    assert_eq!(
+        store.flat_active_event_snapshot_count(),
+        1,
+        "policy replacement must retain one flat view"
+    );
     Ok(())
 }
 
@@ -672,13 +744,11 @@ fn policy_rebuild_persists_linear_source_traversal_across_restart() -> Result<()
 
 #[test]
 fn control_reset_retires_unowned_flat_vectors_before_rebuild() -> Result<()> {
-    let fixture = Fixture::new(2)?;
-    let initial = fixture.publish(
-        "reset-a",
-        &[(0, bodies("retained", 3)), (1, bodies("removed", 2))],
-    )?;
+    let fixture = Fixture::new(1)?;
+    let record_count = MAX_SOURCE_EVENT_PAGE_ITEMS + 4;
+    let initial = fixture.publish("reset-a", &[(0, bodies("retained", record_count))])?;
     let target = fixture.publish("reset-b", &[(0, bodies("retained", 3))])?;
-    let removed_event = fixture.event_id(1, 1)?;
+    let removed_event = fixture.event_id(0, u64::try_from(record_count - 1)?)?;
     let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
@@ -689,20 +759,17 @@ fn control_reset_retires_unowned_flat_vectors_before_rebuild() -> Result<()> {
     control.pragma_update(None, "user_version", 2)?;
     drop(control);
     let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
-
-    let cleanup = store.reconcile_source_backed_index(
-        &target,
-        &mut CoreBuilder::default(),
-        &mut MarkerEmbedder::default(),
-    )?;
-    assert_eq!(cleanup.records_read, 0);
-    assert_eq!(cleanup.deleted_chunks, 5);
-    assert!(cleanup.work_remaining);
-
+    store.reset_flat_active_event_snapshot_count();
     builder.calls.clear();
     let rebuilt = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
     assert_eq!(rebuilt.records_read, 3);
     assert_eq!(rebuilt.records_embedded, 3);
+    assert_eq!(rebuilt.deleted_chunks, record_count);
+    assert_eq!(
+        store.flat_active_event_snapshot_count(),
+        2,
+        "two-page reset drain and replacement each retain one flat view"
+    );
     assert_eq!(active_events(&store)?, 3);
     assert!(store
         .flat_pin_generation()?

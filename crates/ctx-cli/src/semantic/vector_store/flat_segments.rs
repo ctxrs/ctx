@@ -179,10 +179,23 @@ pub(in crate::semantic) struct FlatSegmentStore {
     mode: StoreMode,
     validated: Mutex<Option<ValidatedGeneration>>,
     pinned: Mutex<Option<PinnedFlatGeneration>>,
+    reconciliation_view: Mutex<Option<FlatReconciliationView>>,
     #[cfg(test)]
     recovery: FlatRecoveryReport,
     #[cfg(test)]
     active_event_snapshot_count: AtomicU64,
+}
+
+struct FlatReconciliationView {
+    id: String,
+    lookup: FlatActiveEventLookup,
+    after_event_id: Option<Uuid>,
+    pending_event_page: Option<FlatReconciliationEventPage>,
+}
+
+struct FlatReconciliationEventPage {
+    event_ids: Vec<Uuid>,
+    after_event_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +219,7 @@ impl FlatSegmentStore {
             mode: StoreMode::ReadWrite,
             validated: Mutex::new(None),
             pinned: Mutex::new(None),
+            reconciliation_view: Mutex::new(None),
             #[cfg(test)]
             recovery: FlatRecoveryReport::default(),
             #[cfg(test)]
@@ -237,6 +251,7 @@ impl FlatSegmentStore {
             mode: StoreMode::ReadOnly,
             validated: Mutex::new(None),
             pinned: Mutex::new(None),
+            reconciliation_view: Mutex::new(None),
             #[cfg(test)]
             recovery: FlatRecoveryReport::default(),
             #[cfg(test)]
@@ -272,9 +287,115 @@ impl FlatSegmentStore {
     }
 
     pub(in crate::semantic) fn active_event_lookup(&self) -> FlatResult<FlatActiveEventLookup> {
+        if let Some(lookup) = self.reconciliation_lookup()? {
+            return Ok(lookup);
+        }
+        #[cfg(test)]
+        self.active_event_snapshot_count
+            .fetch_add(1, Ordering::Relaxed);
         Ok(FlatActiveEventLookup {
             pinned: self.pin_generation()?,
         })
+    }
+
+    /// Retains one immutable flat generation for a complete reconciliation.
+    pub(in crate::semantic) fn begin_reconciliation_view(&self, id: &str) -> FlatResult<()> {
+        if id.is_empty() {
+            return Err(FlatStoreError::InvalidInput(
+                "flat reconciliation view id cannot be empty".to_owned(),
+            ));
+        }
+        let replace_existing = {
+            let view = self.reconciliation_view.lock().map_err(|_| {
+                FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
+            })?;
+            match view.as_ref() {
+                Some(view) if view.id == id => return Ok(()),
+                Some(_) => true,
+                None => false,
+            }
+        };
+        if replace_existing {
+            self.finish_reconciliation_view()?;
+        }
+
+        let pinned = self.pin_generation()?;
+        let lookup = FlatActiveEventLookup { pinned };
+        #[cfg(test)]
+        self.active_event_snapshot_count
+            .fetch_add(1, Ordering::Relaxed);
+        let mut view = self.reconciliation_view.lock().map_err(|_| {
+            FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
+        })?;
+        *view = Some(FlatReconciliationView {
+            id: id.to_owned(),
+            lookup,
+            after_event_id: None,
+            pending_event_page: None,
+        });
+        Ok(())
+    }
+
+    pub(in crate::semantic) fn reconciliation_event_ids(
+        &self,
+        id: &str,
+        limit: usize,
+    ) -> FlatResult<Vec<Uuid>> {
+        if limit == 0 {
+            return Err(FlatStoreError::InvalidInput(
+                "flat reconciliation event page limit cannot be zero".to_owned(),
+            ));
+        }
+        let mut current = self.reconciliation_view.lock().map_err(|_| {
+            FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
+        })?;
+        let view = current
+            .as_mut()
+            .filter(|view| view.id == id)
+            .ok_or_else(|| {
+                FlatStoreError::InvalidInput(
+                    "flat reconciliation event page has no matching view".to_owned(),
+                )
+            })?;
+        if let Some(pending) = view.pending_event_page.as_ref() {
+            return Ok(pending.event_ids.clone());
+        }
+        let Some(pinned) = view.lookup.pinned.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let events = pinned.active_events();
+        let start = view.after_event_id.map_or(0, |after| {
+            events.partition_point(|event| event.event_id <= after)
+        });
+        let event_ids = events[start..]
+            .iter()
+            .take(limit)
+            .map(|event| event.event_id)
+            .collect::<Vec<_>>();
+        if let Some(after_event_id) = event_ids.last().copied() {
+            view.pending_event_page = Some(FlatReconciliationEventPage {
+                event_ids: event_ids.clone(),
+                after_event_id,
+            });
+        }
+        Ok(event_ids)
+    }
+
+    pub(in crate::semantic) fn finish_reconciliation_view(&self) -> FlatResult<()> {
+        let mut current = self.reconciliation_view.lock().map_err(|_| {
+            FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
+        })?;
+        // A generation can be superseded after its receipts are durable
+        // without opening a page for the replacement generation.
+        *current = None;
+        Ok(())
+    }
+
+    fn reconciliation_lookup(&self) -> FlatResult<Option<FlatActiveEventLookup>> {
+        let view = self.reconciliation_view.lock().map_err(|_| {
+            FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
+        })?;
+        Ok(view.as_ref().map(|view| view.lookup.clone()))
     }
 
     #[cfg(test)]
@@ -326,6 +447,7 @@ impl FlatSegmentStore {
         manifest.segments.push(staged.descriptor);
         let selected = publish_manifest(&self.root, manifest)?;
         self.remember_validated(&selected)?;
+        self.record_reconciliation_publication(tombstones)?;
         self.clear_pinned()?;
         let _ = cleanup_obsolete_locked(&self.root, &selected);
         Ok(FlatPublishOutcome {
@@ -366,6 +488,29 @@ impl FlatSegmentStore {
         })?;
         *guard = Some(pinned.clone());
         Ok(pinned)
+    }
+
+    fn record_reconciliation_publication(&self, tombstones: &[Uuid]) -> FlatResult<()> {
+        let mut current = self.reconciliation_view.lock().map_err(|_| {
+            FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
+        })?;
+        let Some(view) = current.as_mut() else {
+            return Ok(());
+        };
+        let tombstones = tombstones.iter().copied().collect::<HashSet<_>>();
+        if view.pending_event_page.as_ref().is_some_and(|pending| {
+            pending.event_ids.len() == tombstones.len()
+                && pending
+                    .event_ids
+                    .iter()
+                    .all(|event_id| tombstones.contains(event_id))
+        }) {
+            let pending = view.pending_event_page.take().ok_or_else(|| {
+                FlatStoreError::Corrupt("flat reconciliation event page was lost".to_owned())
+            })?;
+            view.after_event_id = Some(pending.after_event_id);
+        }
+        Ok(())
     }
 
     fn is_validated(&self, selected: &SelectedManifest) -> FlatResult<bool> {
