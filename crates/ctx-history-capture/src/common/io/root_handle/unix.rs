@@ -268,11 +268,15 @@ fn open_component(
     let descriptor = unsafe { libc::openat(parent, name.as_ptr(), flags) };
     if descriptor < 0 {
         let cause = io::Error::last_os_error();
-        return Err(classify_open_component_error(
-            parent,
-            name.as_c_str(),
-            cause,
-        ));
+        return match cause.raw_os_error() {
+            Some(libc::ELOOP) => Err(AuthorityOpenError::Rejected(
+                "symlinked provider source path components are rejected",
+            )),
+            Some(libc::ENXIO | libc::ENODEV) => Err(AuthorityOpenError::Rejected(
+                "provider source paths must be regular files or directories",
+            )),
+            _ => Err(cause.into()),
+        };
     }
     let file = unsafe { File::from_raw_fd(descriptor) };
     let metadata = file.metadata()?;
@@ -282,46 +286,6 @@ fn open_component(
         ));
     }
     Ok(file)
-}
-
-fn classify_open_component_error(
-    parent: libc::c_int,
-    name: &CStr,
-    cause: io::Error,
-) -> AuthorityOpenError {
-    match cause.raw_os_error() {
-        Some(libc::ELOOP) => {
-            AuthorityOpenError::Rejected("symlinked provider source path components are rejected")
-        }
-        // BSD kernels also use ENOTDIR for O_NOFOLLOW | O_DIRECTORY against a
-        // symlink. Reclassify only when no-follow metadata confirms that case.
-        Some(libc::ENOTDIR) if component_is_symlink(parent, name) => {
-            AuthorityOpenError::Rejected("symlinked provider source path components are rejected")
-        }
-        Some(libc::ENXIO) | Some(libc::ENODEV) | Some(libc::EOPNOTSUPP) => {
-            AuthorityOpenError::Rejected(
-                "provider source paths must be regular files or directories",
-            )
-        }
-        _ => AuthorityOpenError::Io(cause),
-    }
-}
-
-fn component_is_symlink(parent: libc::c_int, name: &CStr) -> bool {
-    let mut metadata = MaybeUninit::<libc::stat>::uninit();
-    let result = unsafe {
-        libc::fstatat(
-            parent,
-            name.as_ptr(),
-            metadata.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if result != 0 {
-        return false;
-    }
-    let metadata = unsafe { metadata.assume_init() };
-    metadata.st_mode & libc::S_IFMT == libc::S_IFLNK
 }
 
 fn classify_opened(file: File) -> Result<OpenedPath, AuthorityOpenError> {
@@ -469,25 +433,8 @@ fn current_errno() -> libc::c_int {
     unsafe { *errno_location() }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
-    #[test]
-    fn eopnotsupp_is_classified_as_a_special_file_rejection() {
-        let error = super::classify_open_component_error(
-            libc::AT_FDCWD,
-            c"unused",
-            std::io::Error::from_raw_os_error(libc::EOPNOTSUPP),
-        );
-
-        assert!(matches!(
-            error,
-            super::AuthorityOpenError::Rejected(
-                "provider source paths must be regular files or directories"
-            )
-        ));
-    }
-
-    #[cfg(target_os = "linux")]
     #[test]
     fn filesystem_policy_rejects_network_fuse_and_virtual_roots() {
         const NFS_SUPER_MAGIC: i64 = 0x6969;
