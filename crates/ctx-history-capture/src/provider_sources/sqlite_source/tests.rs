@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{Seek, SeekFrom, Write},
@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
+    open_root_handle_sqlite_source_online_backup_before_identity_check_for_test,
     open_root_handle_sqlite_source_snapshot,
     open_root_handle_sqlite_source_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
@@ -103,6 +104,22 @@ fn directory_file_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
         .map(|entry| {
             let entry = entry.unwrap();
             (entry.file_name(), fs::read(entry.path()).unwrap())
+        })
+        .collect()
+}
+
+fn directory_names(path: &Path) -> BTreeSet<OsString> {
+    fs::read_dir(path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect()
+}
+
+fn provider_content_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
+    directory_file_bytes(path)
+        .into_iter()
+        .filter(|(name, _)| {
+            name == OsStr::new("provider.sqlite") || name == OsStr::new("provider.sqlite-wal")
         })
         .collect()
 }
@@ -847,6 +864,120 @@ fn logical_snapshot_ignores_wal_growth_when_rows_are_unchanged() {
     assert_ne!(second.evidence().revision(), &first_source_revision);
     assert_eq!(second_logical, first_logical);
     second.finish().unwrap();
+}
+
+#[test]
+fn logical_online_backup_is_one_private_snapshot_without_provider_content_or_name_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let _writer = create_persistent_wal(&database);
+    let before_names = directory_names(temp.path());
+    let before_content = provider_content_bytes(temp.path());
+    let parent = retain_parent(temp.path());
+
+    let snapshot = parent
+        .open_logical_online_backup_snapshot(OsStr::new("provider.sqlite"))
+        .unwrap();
+    assert_eq!(
+        snapshot.strategy(),
+        SqliteSourceSnapshotStrategy::LogicalOnlineBackup
+    );
+    assert_eq!(read_values(&snapshot), vec!["from-wal"]);
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.immutable_snapshot_opens(), 0);
+    assert_eq!(counters.copied_snapshot_opens(), 0);
+    assert_eq!(counters.logical_online_backup_opens(), 1);
+    assert_eq!(counters.source_bytes_copied(), 0);
+    assert!(counters.logical_online_backup_bytes() > 0);
+    assert_eq!(counters.active_snapshots(), 1);
+    assert_eq!(counters.max_active_snapshots(), 1);
+
+    let fence = snapshot.seal().unwrap();
+    fence.revalidate().unwrap();
+    assert_eq!(parent.snapshot_counters().active_snapshots(), 0);
+    assert_eq!(directory_names(temp.path()), before_names);
+    assert_eq!(provider_content_bytes(temp.path()), before_content);
+}
+
+#[test]
+fn logical_online_backup_keeps_admitted_content_during_commit_and_next_refresh_advances() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let writer = create_persistent_wal(&database);
+    let parent = retain_parent(temp.path());
+
+    let admitted = open_root_handle_sqlite_source_online_backup_before_identity_check_for_test(
+        &parent,
+        OsStr::new("provider.sqlite"),
+        || {
+            writer
+                .execute("INSERT INTO messages (body) VALUES ('later-commit')", [])
+                .unwrap();
+        },
+    )
+    .unwrap();
+    assert!(!admitted.admitted_revision_is_replay_safe());
+    assert_eq!(read_values(&admitted), vec!["from-wal"]);
+    let first_revision = *admitted.evidence().revision();
+    let fence = admitted.seal().unwrap();
+    fence.revalidate().unwrap();
+
+    let refreshed = parent
+        .open_logical_online_backup_snapshot(OsStr::new("provider.sqlite"))
+        .unwrap();
+    assert!(refreshed.admitted_revision_is_replay_safe());
+    assert_eq!(read_values(&refreshed), vec!["from-wal", "later-commit"]);
+    assert_eq!(refreshed.evidence().revision(), &first_revision);
+    refreshed.finish().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn logical_online_backup_terminal_fence_rejects_database_leaf_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    create_database(&database, "admitted");
+    let parent = retain_parent(temp.path());
+    let snapshot = parent
+        .open_logical_online_backup_snapshot(OsStr::new("provider.sqlite"))
+        .unwrap();
+    let fence = snapshot.seal().unwrap();
+
+    fs::rename(&database, temp.path().join("admitted.sqlite")).unwrap();
+    create_database(&database, "replacement");
+    assert!(matches!(
+        fence.revalidate(),
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn logical_online_backup_rejects_database_leaf_symlink_replacement_during_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let attacker = outside.path().join("attacker.sqlite");
+    create_database(&database, "admitted");
+    create_database(&attacker, "attacker");
+    let attacker_before = fs::read(&attacker).unwrap();
+    let parent = retain_parent(temp.path());
+
+    let result = open_root_handle_sqlite_source_online_backup_before_identity_check_for_test(
+        &parent,
+        OsStr::new("provider.sqlite"),
+        || {
+            fs::rename(&database, temp.path().join("admitted.sqlite")).unwrap();
+            symlink(&attacker, &database).unwrap();
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+    assert_eq!(fs::read(attacker).unwrap(), attacker_before);
+    assert_eq!(parent.snapshot_counters().logical_online_backup_opens(), 0);
 }
 
 #[cfg(unix)]

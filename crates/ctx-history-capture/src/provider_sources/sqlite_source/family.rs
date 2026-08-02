@@ -114,6 +114,43 @@ impl SqliteSourceFamily {
         })
     }
 
+    /// Captures the bounded physical revision used only as conservative
+    /// admitted-snapshot routing evidence. SHM content is deliberately not
+    /// hashed because it is volatile reader coordination and is not part of
+    /// the revision digest.
+    pub(super) fn capture_revision_evidence(
+        &self,
+    ) -> SqliteSourceAccessResult<SqliteFamilyEvidence> {
+        Ok(SqliteFamilyEvidence {
+            parent_identity: self.authority.identity.clone(),
+            database: self.database.capture_state()?,
+            wal: self
+                .wal
+                .as_ref()
+                .map(SqliteFamilyMember::capture_state)
+                .transpose()?,
+            shared_memory: self
+                .shared_memory
+                .as_ref()
+                .map(SqliteFamilyMember::capture_state)
+                .transpose()?,
+            wal_token: self
+                .wal
+                .as_ref()
+                .map(SqliteFamilyMember::bounded_token)
+                .transpose()?,
+            shared_memory_token: None,
+        })
+    }
+
+    pub(super) fn revalidate_database_identity(
+        &self,
+        expected_identity: &NativeFileIdentity,
+    ) -> SqliteSourceAccessResult<()> {
+        self.authority
+            .revalidate_database_identity(self.database_name(), expected_identity)
+    }
+
     pub(super) fn revalidate(
         &self,
         expected: &SqliteFamilyEvidence,
@@ -197,7 +234,7 @@ pub(super) struct SqliteFamilyMember {
 }
 
 impl SqliteFamilyMember {
-    fn open(
+    pub(super) fn open(
         authority: &SqliteSourceDirectoryAuthority,
         name: OsString,
         path: PathBuf,
@@ -241,7 +278,7 @@ impl SqliteFamilyMember {
         self.opened.file()
     }
 
-    fn capture_state(&self) -> SqliteSourceAccessResult<NativeFileState> {
+    pub(super) fn capture_state(&self) -> SqliteSourceAccessResult<NativeFileState> {
         NativeFileState::read(
             self.opened.file(),
             &self.path,
@@ -460,6 +497,14 @@ impl SqliteSourceEvidence {
 }
 
 impl SqliteFamilyEvidence {
+    pub(super) fn revision_token(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(EVIDENCE_DOMAIN);
+        digest.update(b"admitted-revision\0");
+        self.hash_into(&mut digest);
+        digest.finalize().into()
+    }
+
     fn hash_into(&self, digest: &mut Sha256) {
         self.parent_identity.hash_into(digest);
         self.database.hash_into(digest);
@@ -479,6 +524,16 @@ impl SqliteFamilyEvidence {
 }
 
 impl SqliteSnapshotEvidence {
+    pub(super) fn same_database_view(&self, other: &Self) -> bool {
+        // SQLite's backup API may advance the destination schema cookie so an
+        // already-open destination connection reloads its schema. The provider
+        // user/application versions and exact page inventory remain stable.
+        self.schema.user_version == other.schema.user_version
+            && self.schema.application_id == other.schema.application_id
+            && self.source.page_count == other.source.page_count
+            && self.source.freelist_count == other.source.freelist_count
+    }
+
     fn hash_into(&self, digest: &mut Sha256) {
         digest.update(self.schema.schema_version.to_le_bytes());
         digest.update(self.schema.user_version.to_le_bytes());

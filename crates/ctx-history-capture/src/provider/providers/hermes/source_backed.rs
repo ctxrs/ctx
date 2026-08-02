@@ -26,9 +26,9 @@ use crate::{
         sqlite::sqlite_schema_fingerprint,
     },
     provider_sources::{
-        open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        ProviderSource, SqliteLogicalSnapshot, SqliteSourceAccessError,
-        SqliteSourceDirectoryAuthority, SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        retain_sqlite_source_directory_authority, ProviderSource, SqliteLogicalSnapshot,
+        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, HERMES_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -260,8 +260,7 @@ fn open_root_authorized_snapshot_with_hook(
         .map_err(CaptureError::from)?;
     let sqlite_authority =
         retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
-    let sqlite_snapshot =
-        open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
+    let sqlite_snapshot = sqlite_authority.open_logical_online_backup_snapshot(database_leaf)?;
     after_authorize();
     sqlite_snapshot.revalidate()?;
     let connection = sqlite_snapshot.connection()?;
