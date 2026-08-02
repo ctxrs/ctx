@@ -96,6 +96,8 @@ mod daemon_retry;
 mod daemon_status;
 mod daemon_supervisor;
 mod daemon_wakeup;
+#[allow(dead_code)] // Pure daemon-owned route ledger; integration lands separately.
+mod dirty_source_routes;
 #[cfg(test)]
 use daemon_retry::*;
 mod source_status;
