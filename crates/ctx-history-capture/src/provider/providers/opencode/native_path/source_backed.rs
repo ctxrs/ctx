@@ -25,7 +25,8 @@ use super::{
     },
     model::{OpenCodeNativeEventKind, OpenCodeNativeFileTouch, OpenCodeNativeSchemaFamily},
     query::{
-        source_backed_decode_order, source_backed_event_sql, source_backed_native_record_identity,
+        source_backed_decode_order, source_backed_event_order_sql, source_backed_event_sql,
+        source_backed_native_record_identity,
     },
     schema::OpenCodeNativeSchema,
 };
@@ -33,12 +34,14 @@ use crate::{
     common::io::ProviderSourceRoot,
     provider::{
         normalization::provider_required_timestamp_millis,
-        providers::opencode::OpenCodeSqliteDialect, source_backed::SourceBackedRouteError,
+        providers::opencode::OpenCodeSqliteDialect,
+        source_backed::{
+            SourceBackedCurrentSourceProgress, SourceBackedRouteError, SourceBackedRouteResult,
+        },
     },
     provider_sources::{
-        open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceDirectoryAuthority,
-        SqliteSourceReadSnapshot,
+        retain_sqlite_source_directory_authority, SqliteLogicalSnapshot, SqliteSourceAccessError,
+        SqliteSourceDirectoryAuthority, SqliteSourceProgressError, SqliteSourceReadSnapshot,
     },
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -50,6 +53,7 @@ const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
 const SOURCE_BACKED_MAX_FILE_TOUCHES: usize = 32;
+const LOGICAL_SCAN_PROGRESS_ROW_CADENCE: u64 = 4_096;
 const SQLITE_SOURCE_INVALID_REASON: &str =
     "OpenCode-family history database must be a regular file";
 
@@ -161,8 +165,6 @@ struct WorkingScan {
 struct OpenCodeLogicalObservation {
     source: SourceKey,
     schema: OpenCodeNativeSchema,
-    fingerprint: [u8; 32],
-    logical_rows: u64,
 }
 
 #[derive(Debug)]
@@ -178,6 +180,10 @@ struct OpenCodeAuthorizedSnapshot {
 enum OpenCodeScanOutput {
     Begin(SourceKey),
     Document(CoreRecord),
+    Progress {
+        rows_scanned: u64,
+        certified_bytes: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -298,21 +304,7 @@ fn observe_logical_source(
 ) -> OpenCodeSourceBackedResult<OpenCodeLogicalObservation> {
     let schema = OpenCodeNativeSchema::probe(connection, dialect)?;
     let source = source_key(dialect, schema.family)?;
-    let mut hasher = Sha256::new();
-    hasher.update(b"ctx-opencode-family-logical-leaf-v1\0");
-    hasher.update(source.exact_descriptor_digest());
-    hash_bytes(&mut hasher, &relevant_schema_evidence(&schema));
-    hash_logical_table(connection, &mut hasher, "session")?;
-    if schema.family == OpenCodeNativeSchemaFamily::MessagePart {
-        hash_logical_table(connection, &mut hasher, "message")?;
-    }
-    let logical_rows = hash_logical_table(connection, &mut hasher, schema.family.event_table())?;
-    Ok(OpenCodeLogicalObservation {
-        source,
-        schema,
-        fingerprint: hasher.finalize().into(),
-        logical_rows,
-    })
+    Ok(OpenCodeLogicalObservation { source, schema })
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -337,7 +329,7 @@ fn stream_logical_rows(
     hasher.update(b"ctx-opencode-family-logical-content-v2\0");
     hash_sessions(&mut hasher, sessions);
     let mut sql = source_backed_event_sql(schema);
-    sql.push_str(" order by 3, 4, 5, 6, 2, 1");
+    sql.push_str(source_backed_event_order_sql(schema));
     let max_json_bytes = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
     let mut statement = connection.prepare(&sql)?;
@@ -345,12 +337,22 @@ fn stream_logical_rows(
     let mut counts = ScannedSourceCounts::default();
     let mut session_sequences = HashMap::<String, u64>::new();
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
+    emit(OpenCodeScanOutput::Progress {
+        rows_scanned: 0,
+        certified_bytes: 0,
+    })?;
 
     while let Some(row) = rows.next()? {
         let event = decode_source_event_row(row, schema, dialect)?;
         hash_source_event(&mut hasher, &event);
         counts.complete_records = checked_add(counts.complete_records, 1)?;
         counts.certified_bytes = checked_add(counts.certified_bytes, event.content_bytes)?;
+        if counts.complete_records % LOGICAL_SCAN_PROGRESS_ROW_CADENCE == 0 {
+            emit(OpenCodeScanOutput::Progress {
+                rows_scanned: counts.complete_records,
+                certified_bytes: counts.certified_bytes,
+            })?;
+        }
         let disposition = projection_disposition(&event.projection);
         let retained = retained_projection(&event.projection);
         match disposition {
@@ -385,6 +387,10 @@ fn stream_logical_rows(
         )?;
         emit(OpenCodeScanOutput::Document(document))?;
     }
+    emit(OpenCodeScanOutput::Progress {
+        rows_scanned: counts.complete_records,
+        certified_bytes: counts.certified_bytes,
+    })?;
     Ok(StreamedLogicalRows {
         counts,
         content_digest: hasher.finalize().into(),
@@ -517,6 +523,7 @@ fn schema_family_for_source(
     })
 }
 
+#[cfg(test)]
 fn open_root_authorized_snapshot_retained(
     data_root: &Path,
     path: &Path,
@@ -524,10 +531,42 @@ fn open_root_authorized_snapshot_retained(
     open_root_authorized_snapshot_retained_with_hook(data_root, path, || {})
 }
 
+#[cfg(test)]
 fn open_root_authorized_snapshot_retained_with_hook(
     data_root: &Path,
     path: &Path,
     after_authorize: impl FnOnce(),
+) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
+    open_root_authorized_snapshot_retained_with_progress_and_hook(
+        data_root,
+        path,
+        after_authorize,
+        &mut |_| Ok(()),
+    )
+}
+
+fn open_root_authorized_snapshot_retained_with_progress(
+    data_root: &Path,
+    path: &Path,
+    report_progress: &mut dyn FnMut(
+        SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()>,
+) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
+    open_root_authorized_snapshot_retained_with_progress_and_hook(
+        data_root,
+        path,
+        || {},
+        report_progress,
+    )
+}
+
+fn open_root_authorized_snapshot_retained_with_progress_and_hook(
+    data_root: &Path,
+    path: &Path,
+    after_authorize: impl FnOnce(),
+    report_progress: &mut dyn FnMut(
+        SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
     let parent = path
         .parent()
@@ -546,8 +585,12 @@ fn open_root_authorized_snapshot_retained_with_hook(
         .map_err(CaptureError::from)?;
     let sqlite_authority =
         retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
-    let sqlite_snapshot =
-        open_root_handle_sqlite_source_snapshot(&sqlite_authority, database_leaf)?;
+    let sqlite_snapshot = sqlite_authority
+        .open_logical_online_backup_snapshot_with_progress(database_leaf, report_progress)
+        .map_err(|error| match error {
+            SqliteSourceProgressError::Source(error) => OpenCodeSourceBackedError::from(error),
+            SqliteSourceProgressError::Progress(error) => OpenCodeSourceBackedError::from(error),
+        })?;
     after_authorize();
     sqlite_snapshot.revalidate()?;
     source_directory.revalidate()?;
@@ -575,53 +618,6 @@ fn relevant_schema_evidence(schema: &OpenCodeNativeSchema) -> Vec<u8> {
         hasher.update([u8::from(schema.session_columns.contains(column))]);
     }
     hasher.finalize().to_vec()
-}
-
-fn hash_logical_table(
-    connection: &Connection,
-    hasher: &mut Sha256,
-    table: &str,
-) -> OpenCodeSourceBackedResult<u64> {
-    hash_str(hasher, table);
-    let quoted = format!("\"{}\"", table.replace('"', "\"\""));
-    let mut statement = connection.prepare(&format!("select * from {quoted} order by id"))?;
-    let column_count = statement.column_count();
-    hasher.update((column_count as u64).to_le_bytes());
-    for column in statement.column_names() {
-        hash_str(hasher, column);
-    }
-    let mut rows = statement.query([])?;
-    let mut row_count = 0_u64;
-    while let Some(row) = rows.next()? {
-        row_count = checked_add(row_count, 1)?;
-        for column in 0..column_count {
-            hash_logical_value(hasher, row.get_ref(column)?);
-        }
-    }
-    hasher.update(row_count.to_le_bytes());
-    Ok(row_count)
-}
-
-fn hash_logical_value(hasher: &mut Sha256, value: ValueRef<'_>) {
-    match value {
-        ValueRef::Null => hasher.update([0]),
-        ValueRef::Integer(value) => {
-            hasher.update([1]);
-            hasher.update(value.to_le_bytes());
-        }
-        ValueRef::Real(value) => {
-            hasher.update([2]);
-            hasher.update(value.to_bits().to_le_bytes());
-        }
-        ValueRef::Text(value) => {
-            hasher.update([3]);
-            hash_bytes(hasher, value);
-        }
-        ValueRef::Blob(value) => {
-            hasher.update([4]);
-            hash_bytes(hasher, value);
-        }
-    }
 }
 
 fn hash_sessions(hasher: &mut Sha256, sessions: &BTreeMap<String, SourceSession>) {

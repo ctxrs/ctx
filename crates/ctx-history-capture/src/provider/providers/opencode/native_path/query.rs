@@ -11,6 +11,10 @@ pub(super) fn source_backed_event_sql(schema: &OpenCodeNativeSchema) -> String {
     sql::source_backed_event_source_sql(schema)
 }
 
+pub(super) fn source_backed_event_order_sql(schema: &OpenCodeNativeSchema) -> &'static str {
+    sql::source_backed_event_order_sql(schema)
+}
+
 pub(super) fn source_backed_decode_order(
     order_tag: i64,
     session_identity: &str,

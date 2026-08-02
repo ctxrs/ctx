@@ -9,15 +9,7 @@ pub(super) fn execute_source_backed_refresh(
 ) -> Result<SourceBackedRefreshPublication> {
     let index_root = source_backed_index_root(data_root);
     let report_progress = |update: SourceBackedRefreshProgressUpdate| {
-        record_source_backed_refresh_progress(
-            data_root,
-            coordinator,
-            request_id,
-            &update.phase,
-            update.completed_sources,
-            update.total_sources,
-            update.current_source,
-        )
+        record_source_backed_refresh_progress(data_root, coordinator, request_id, update)
     };
     executor.refresh(SourceBackedRefreshExecution {
         data_root,
@@ -48,7 +40,7 @@ where
         &Path,
         &Path,
         Option<&ExplicitSourceCatalogAuthority>,
-        &mut dyn FnMut(CaptureSourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
+        &mut dyn FnMut(CaptureSourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
     ) -> Result<SourceBackedRefreshPublication>,
 {
     let discovery = discovery.clone().with_data_root(execution.data_root);
@@ -69,13 +61,15 @@ where
             .context("validate explicit provider roots before source-refresh state writes")?;
     }
     execution.report_progress("discovering", 0, 0, None)?;
-    let mut report_progress = |update: CaptureSourceBackedRefreshProgress| {
+    let mut report_progress = |update: CaptureSourceBackedDetailedRefreshProgress| {
+        let progress = update.progress;
         execution
-            .report_progress(
-                update.phase,
-                update.completed_sources,
-                update.total_sources,
-                update.current_source,
+            .report_detailed_progress(
+                progress.phase,
+                progress.completed_sources,
+                progress.total_sources,
+                progress.current_source,
+                update.current_source_progress.map(current_source_progress),
             )
             .map_err(|error| {
                 SourceBackedRouteError::new(
@@ -103,7 +97,7 @@ pub(super) fn refresh_all_provider_sources(
     index_root: &Path,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     report_progress: &mut dyn FnMut(
-        CaptureSourceBackedRefreshProgress,
+        CaptureSourceBackedDetailedRefreshProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> Result<SourceBackedRefreshPublication> {
     let loaded_catalog;
@@ -132,7 +126,7 @@ pub(super) fn refresh_all_provider_sources(
     reject_unowned_retained_source_families(&build.registry, &retained_sources)?;
     let (executor, _issues) = build.into_refresh_executor(WriterOptions::default());
     let receipt = executor
-        .refresh(index_root, report_progress)
+        .refresh_with_detailed_progress(index_root, report_progress)
         .context("run capture-owned all-provider source-backed refresh")?;
     let current =
         SourceBackedRefreshCurrent::from_sources(&receipt.sources, receipt.removals.len())?;
@@ -144,10 +138,47 @@ pub(super) fn refresh_all_provider_sources(
             "capture-owned source refresh receipt does not match its retained generation cardinalities"
         );
     }
+    let source_failures = SourceBackedRefreshSourceFailures {
+        failures: receipt
+            .source_failures
+            .failures()
+            .iter()
+            .map(|failure| SourceBackedRefreshSourceFailure {
+                source_identity: failure.source_identity.clone(),
+                provider: failure.provider.as_str().to_owned(),
+                class: match failure.class {
+                    CaptureSourceBackedSourceFailureClass::Unavailable => {
+                        SourceBackedRefreshSourceFailureClass::Unavailable
+                    }
+                    CaptureSourceBackedSourceFailureClass::SourceChanged => {
+                        SourceBackedRefreshSourceFailureClass::SourceChanged
+                    }
+                    CaptureSourceBackedSourceFailureClass::Unreadable => {
+                        SourceBackedRefreshSourceFailureClass::Unreadable
+                    }
+                    CaptureSourceBackedSourceFailureClass::Incompatible => {
+                        SourceBackedRefreshSourceFailureClass::Incompatible
+                    }
+                },
+                carried_forward: failure.carried_forward,
+                source_selector: failure.source_selector.clone(),
+                detail: failure.detail.clone(),
+            })
+            .collect(),
+        omitted: receipt.source_failures.omitted(),
+    };
+    validate_source_refresh_results(
+        receipt.scanned_routes,
+        receipt.successful_routes,
+        &source_failures,
+        current.source_count,
+    )?;
     Ok(SourceBackedRefreshPublication {
         generation_id: receipt.commit.generation_id,
         published_explicit_source_catalog,
         scanned_routes: receipt.scanned_routes,
+        successful_routes: receipt.successful_routes,
+        source_failures,
         unsupported_routes: receipt.unsupported_routes.len(),
         certified_source_count: receipt.certified_source_count,
         certified_source_bytes: receipt.certified_source_bytes,
@@ -272,19 +303,44 @@ fn record_source_backed_refresh_progress(
     data_root: &Path,
     coordinator: &CoreRefreshEngine,
     request_id: &str,
-    phase: &str,
-    completed_sources: usize,
-    total_sources: usize,
-    current_source: Option<String>,
+    update: SourceBackedRefreshProgressUpdate,
 ) -> Result<()> {
-    if let Some(job) = coordinator.set_progress(
+    if let Some(job) = coordinator.set_detailed_progress(
         request_id,
-        phase,
-        completed_sources,
-        total_sources,
-        current_source,
+        &update.phase,
+        update.completed_sources,
+        update.total_sources,
+        update.current_source,
+        update.current_source_progress,
     ) {
         write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)?;
     }
     Ok(())
+}
+
+fn current_source_progress(
+    progress: CaptureSourceBackedCurrentSourceProgress,
+) -> SourceBackedCurrentSourceProgress {
+    SourceBackedCurrentSourceProgress {
+        stage: match progress.stage {
+            CaptureSourceBackedCurrentSourceProgressStage::SourceFamilyCopy => {
+                SourceBackedCurrentSourceProgressStage::SourceFamilyCopy
+            }
+            CaptureSourceBackedCurrentSourceProgressStage::OnlineBackup => {
+                SourceBackedCurrentSourceProgressStage::OnlineBackup
+            }
+            CaptureSourceBackedCurrentSourceProgressStage::LogicalFingerprint => {
+                SourceBackedCurrentSourceProgressStage::LogicalFingerprint
+            }
+            CaptureSourceBackedCurrentSourceProgressStage::LogicalScan => {
+                SourceBackedCurrentSourceProgressStage::LogicalScan
+            }
+        },
+        snapshot_pages_completed: progress.snapshot_pages_completed,
+        snapshot_pages_total: progress.snapshot_pages_total,
+        snapshot_bytes_completed: progress.snapshot_bytes_completed,
+        snapshot_bytes_total: progress.snapshot_bytes_total,
+        logical_rows_scanned: progress.logical_rows_scanned,
+        logical_certified_bytes: progress.logical_certified_bytes,
+    }
 }

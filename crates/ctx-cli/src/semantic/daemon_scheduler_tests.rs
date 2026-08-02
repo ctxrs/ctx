@@ -69,6 +69,8 @@ fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefr
         published_explicit_source_catalog:
             crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
         scanned_routes: 0,
+        successful_routes: 0,
+        source_failures: Default::default(),
         unsupported_routes: 0,
         certified_source_count: 0,
         certified_source_bytes: 0,
@@ -272,6 +274,8 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
         published_explicit_source_catalog:
             crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
         scanned_routes: 1,
+        successful_routes: 1,
+        source_failures: Default::default(),
         unsupported_routes: 0,
         certified_source_count: 1,
         certified_source_bytes: 128,

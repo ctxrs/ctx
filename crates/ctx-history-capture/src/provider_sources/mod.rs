@@ -49,7 +49,7 @@ pub(crate) use sqlite_source::SqliteSourceSnapshotCounters;
 pub(crate) use sqlite_source::{
     open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
     SqliteLogicalSnapshot, SqliteSourceAccessError, SqliteSourceDirectoryAuthority,
-    SqliteSourceEvidence, SqliteSourceReadSnapshot,
+    SqliteSourceEvidence, SqliteSourceProgressError, SqliteSourceReadSnapshot,
 };
 pub use types::{
     DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderCatalogSupport,

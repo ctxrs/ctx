@@ -35,6 +35,7 @@ const WAKE_SHUTDOWN: u8 = 1 << 2;
 #[derive(Debug, Default)]
 struct DaemonWakeupState {
     pending: u8,
+    filesystem_deferred_until_safety: bool,
     filesystem_signals: u64,
     ipc_signals: u64,
     shutdown_signals: u64,
@@ -48,6 +49,7 @@ struct DaemonWakeupState {
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct DaemonWake {
     pub(super) filesystem: bool,
+    pub(super) filesystem_refresh: bool,
     pub(super) shutdown: bool,
     pub(super) timed_out: bool,
 }
@@ -73,7 +75,6 @@ impl DaemonWakeup {
 
     fn signal(&self, reason: u8) {
         let mut state = self.lock_state();
-        state.pending |= reason;
         if reason == WAKE_FILESYSTEM {
             state.filesystem_signals = state.filesystem_signals.saturating_add(1);
         } else if reason == WAKE_IPC {
@@ -81,6 +82,7 @@ impl DaemonWakeup {
         } else if reason == WAKE_SHUTDOWN {
             state.shutdown_signals = state.shutdown_signals.saturating_add(1);
         }
+        state.pending |= reason;
         self.changed.notify_one();
     }
 
@@ -101,8 +103,10 @@ impl DaemonWakeup {
             state.timeout_wakeups = state.timeout_wakeups.saturating_add(1);
         }
         let pending = std::mem::take(&mut state.pending);
+        let filesystem = pending & WAKE_FILESYSTEM != 0;
         DaemonWake {
-            filesystem: pending & WAKE_FILESYSTEM != 0,
+            filesystem,
+            filesystem_refresh: filesystem && !state.filesystem_deferred_until_safety,
             shutdown: pending & WAKE_SHUTDOWN != 0,
             timed_out,
         }
@@ -120,6 +124,23 @@ impl DaemonWakeup {
     pub(super) fn record_scheduled_retry_wakeup(&self) {
         let mut state = self.lock_state();
         state.scheduled_retry_wakeups = state.scheduled_retry_wakeups.saturating_add(1);
+    }
+
+    pub(super) fn defer_filesystem_until_safety(&self) {
+        let mut state = self.lock_state();
+        // Filesystem notifications are level-triggered dirty work, not a count
+        // of refreshes owed. Once an all-provider refresh publishes, carrying
+        // notifications accumulated during or shortly after that synchronous
+        // run into the next wait would immediately enqueue equivalent work.
+        // Collapse automatic debt through the safety boundary; IPC requests
+        // and shutdown retain their immediacy.
+        state.pending &= !WAKE_FILESYSTEM;
+        state.filesystem_deferred_until_safety = true;
+    }
+
+    pub(super) fn release_filesystem_at_safety(&self) {
+        let mut state = self.lock_state();
+        state.filesystem_deferred_until_safety = false;
     }
 
     fn snapshot(&self) -> Value {
@@ -690,6 +711,33 @@ mod tests {
         assert!(!wake.shutdown);
         assert!(!wake.timed_out);
         assert_eq!(wakeup.snapshot()["ipc_signals"], 1);
+    }
+
+    #[test]
+    fn deferring_filesystem_debt_preserves_ipc_immediacy() {
+        let wakeup = DaemonWakeup::default();
+        wakeup.defer_filesystem_until_safety();
+        // This event is after the successful publication transition, not a bit
+        // that happened to be pending when publication completed.
+        wakeup.signal_filesystem();
+        wakeup.signal_ipc();
+
+        let wake = wakeup.wait(Duration::ZERO);
+
+        assert!(wake.filesystem);
+        assert!(!wake.filesystem_refresh);
+        assert!(!wake.shutdown);
+        assert!(
+            !wake.timed_out,
+            "the retained IPC signal must wake immediately"
+        );
+
+        wakeup.release_filesystem_at_safety();
+        wakeup.signal_filesystem();
+        let safety_wake = wakeup.wait(Duration::ZERO);
+        assert!(safety_wake.filesystem);
+        assert!(safety_wake.filesystem_refresh);
+        assert!(!safety_wake.timed_out);
     }
 
     #[test]

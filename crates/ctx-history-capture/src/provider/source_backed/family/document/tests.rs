@@ -15,7 +15,8 @@ use super::*;
 use crate::{
     provider::source_backed::{
         refresh_source_backed_generation, source_backed_leaf_worker_budget,
-        SourceBackedCoordinatorError, SourceBackedProviderRegistry,
+        SourceBackedCoordinatorError, SourceBackedProviderRegistry, SourceBackedRefreshOutcome,
+        SourceBackedRefreshReceipt, SourceBackedSourceFailureClass,
         AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES,
     },
     ProviderCatalogSupport, ProviderImportSupport, ProviderSourceKind, ProviderSourceStatus,
@@ -481,6 +482,42 @@ fn publish(
     refresh_source_backed_generation(root, registry, writer_options()).unwrap()
 }
 
+fn assert_document_source_failure(
+    receipt: &SourceBackedRefreshReceipt,
+    class: SourceBackedSourceFailureClass,
+    selector: &Path,
+) {
+    assert_eq!(
+        receipt.outcome,
+        SourceBackedRefreshOutcome::CompletedWithSourceFailures
+    );
+    assert_eq!(receipt.successful_routes, 0);
+    assert_eq!(receipt.source_failures.total(), 1);
+    assert_eq!(receipt.source_failures.omitted(), 0);
+    let failure = &receipt.source_failures.failures()[0];
+    assert_eq!(failure.provider, CaptureProvider::Auggie);
+    assert_eq!(failure.class, class);
+    assert!(failure.carried_forward);
+    assert_eq!(failure.source_selector, selector.display().to_string());
+    assert!(!failure.detail.is_empty());
+    assert_eq!(failure.source_identity.len(), 64);
+}
+
+fn assert_cold_document_source_failure(error: SourceBackedCoordinatorError, selector: &Path) {
+    let SourceBackedCoordinatorError::NoUsableSourceRoutes { failures } = error else {
+        panic!("expected a cold source-scoped failure, got {error:?}");
+    };
+    assert_eq!(failures.total(), 1);
+    assert_eq!(failures.omitted(), 0);
+    let failure = &failures.failures()[0];
+    assert_eq!(failure.provider, CaptureProvider::Auggie);
+    assert_eq!(failure.class, SourceBackedSourceFailureClass::SourceChanged);
+    assert!(!failure.carried_forward);
+    assert_eq!(failure.source_selector, selector.display().to_string());
+    assert!(!failure.detail.is_empty());
+    assert_eq!(failure.source_identity.len(), 64);
+}
+
 fn publish_with_reopened_route(
     index_root: &Path,
     selected_root: &Path,
@@ -678,17 +715,36 @@ fn independent_leaf_runner_has_one_vs_four_parity_and_bounded_peak_work() {
     assert_eq!(serial_runner.total_scans(), 0);
     assert_eq!(parallel_runner.total_scans(), 0);
 
-    let retained_generation = parallel_deleted.commit.generation_id;
+    let retained_generation = parallel_deleted.commit.generation_id.clone();
     parallel_runner.replace(1, 2, "terminal tree race");
     parallel_runner.state.lock().unwrap().mutate_on_revalidate = true;
-    assert!(
+    let failed =
         refresh_source_backed_generation(&parallel_root, &parallel_registry, writer_options())
-            .is_err()
+            .unwrap();
+    assert_document_source_failure(
+        &failed,
+        SourceBackedSourceFailureClass::SourceChanged,
+        temp.path(),
     );
+    assert_eq!(failed.commit.generation_id, retained_generation);
+    assert_eq!(failed.sources, parallel_deleted.sources);
     assert_eq!(
         VerifiedIndex::open(&parallel_root).unwrap().generation_id(),
         retained_generation
     );
+    assert_eq!(
+        VerifiedIndex::open(&parallel_root)
+            .unwrap()
+            .manifest()
+            .sources,
+        parallel_deleted.sources
+    );
+
+    let retried = publish(&parallel_root, &parallel_registry);
+    assert_eq!(retried.outcome, SourceBackedRefreshOutcome::Completed);
+    assert_eq!(retried.successful_routes, 1);
+    assert!(retried.source_failures.is_empty());
+    assert_ne!(retried.commit.generation_id, retained_generation);
 }
 
 #[test]
@@ -953,24 +1009,33 @@ fn active_source_family_contract_document_replacement_lifecycle_is_exact() {
         ))
     ));
 
-    let retained_generation = deleted.commit.generation_id;
+    let retained_generation = deleted.commit.generation_id.clone();
     adapter.state.lock().unwrap().available = false;
-    let error =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap_err();
-    assert!(matches!(
-        error,
-        SourceBackedCoordinatorError::RouteScan {
-            source: SourceBackedRouteError {
-                kind: SourceBackedRouteErrorKind::Unavailable,
-                ..
-            },
-            ..
-        }
-    ));
+    let failed =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_document_source_failure(
+        &failed,
+        SourceBackedSourceFailureClass::Unavailable,
+        temp.path(),
+    );
+    assert_eq!(failed.commit.generation_id, retained_generation);
+    assert_eq!(failed.sources, deleted.sources);
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         retained_generation
     );
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().manifest().sources,
+        deleted.sources
+    );
+
+    adapter.state.lock().unwrap().available = true;
+    let retried = publish(&index_root, &registry);
+    assert_eq!(retried.outcome, SourceBackedRefreshOutcome::Completed);
+    assert_eq!(retried.successful_routes, 1);
+    assert!(retried.source_failures.is_empty());
+    assert_eq!(retried.commit.generation_id, retained_generation);
+    assert_eq!(retried.sources, deleted.sources);
 }
 
 #[test]
@@ -1153,27 +1218,46 @@ fn active_source_family_contract_document_replacement_tree_rejects_races_duplica
 
     adapter.reset_scan_counts();
     adapter.state.lock().unwrap().parser_v2 = true;
-    publish(&index_root, &registry);
+    let parser_changed = publish(&index_root, &registry);
     assert_eq!(adapter.scan_count(1), 1);
 
     adapter.replace(1, 2, "observation race");
     adapter.state.lock().unwrap().mutate_before_scan = Some(1);
-    let before = VerifiedIndex::open(&index_root)
-        .unwrap()
-        .generation_id()
-        .to_owned();
-    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    let before = parser_changed.commit.generation_id.clone();
+    let observation_failure =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_document_source_failure(
+        &observation_failure,
+        SourceBackedSourceFailureClass::SourceChanged,
+        temp.path(),
+    );
+    assert_eq!(observation_failure.commit.generation_id, before);
+    assert_eq!(observation_failure.sources, parser_changed.sources);
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         before
     );
 
     adapter.state.lock().unwrap().mutate_on_revalidate = true;
-    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    let terminal_failure =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_document_source_failure(
+        &terminal_failure,
+        SourceBackedSourceFailureClass::SourceChanged,
+        temp.path(),
+    );
+    assert_eq!(terminal_failure.commit.generation_id, before);
+    assert_eq!(terminal_failure.sources, parser_changed.sources);
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         before
     );
+
+    let retried = publish(&index_root, &registry);
+    assert_eq!(retried.outcome, SourceBackedRefreshOutcome::Completed);
+    assert_eq!(retried.successful_routes, 1);
+    assert!(retried.source_failures.is_empty());
+    assert_ne!(retried.commit.generation_id, before);
 
     let duplicate_physical = SyntheticAdapter::new(vec![
         SyntheticLeaf {
@@ -1190,12 +1274,13 @@ fn active_source_family_contract_document_replacement_tree_rejects_races_duplica
         },
     ]);
     let duplicate_registry = fixture_registry(temp.path(), duplicate_physical.clone());
-    assert!(refresh_source_backed_generation(
+    let duplicate_physical_error = refresh_source_backed_generation(
         temp.path().join("duplicate-physical"),
         &duplicate_registry,
-        writer_options()
+        writer_options(),
     )
-    .is_err());
+    .unwrap_err();
+    assert_cold_document_source_failure(duplicate_physical_error, temp.path());
     assert_eq!(duplicate_physical.scan_count(8), 0);
 
     let duplicate_source = SyntheticAdapter::new(vec![
@@ -1213,12 +1298,22 @@ fn active_source_family_contract_document_replacement_tree_rejects_races_duplica
         },
     ]);
     let duplicate_registry = fixture_registry(temp.path(), duplicate_source);
-    assert!(refresh_source_backed_generation(
+    let duplicate_source_error = refresh_source_backed_generation(
         temp.path().join("duplicate-source"),
         &duplicate_registry,
-        writer_options()
+        writer_options(),
     )
-    .is_err());
+    .unwrap_err();
+    match duplicate_source_error {
+        SourceBackedCoordinatorError::RouteScan { provider, source } => {
+            assert_eq!(provider, CaptureProvider::Auggie);
+            assert_eq!(source.kind, SourceBackedRouteErrorKind::Internal);
+            assert!(source
+                .detail
+                .contains("source replacement has already started"));
+        }
+        error => panic!("expected a duplicate-source writer failure, got {error:?}"),
+    }
     assert_eq!(cold.sources.len(), 1);
 }
 

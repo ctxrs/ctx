@@ -6,14 +6,14 @@
 //! reparse-point, cross-filesystem, and non-regular members, and never asks
 //! SQLite to create or update files in the provider directory.
 //!
-//! A certified sidecar-free database is opened through SQLite's immutable URI
-//! mode. A database with WAL or SHM state is copied once, with bounded I/O, to a
-//! private temporary directory below the ctx data root; SQLite may create its
-//! own SHM only there. Rollback journals remain typed unavailable because
-//! recovery could require database writes. Source DB identity and non-empty WAL
-//! state are authoritative; absent and zero-byte WALs are equivalent, while SHM
-//! is bounded volatile lock coordination. Concurrent commits, rewrites,
-//! truncation, and authoritative component replacement therefore fail closed.
+//! Strict snapshots open a certified sidecar-free database through SQLite's
+//! immutable URI mode or copy an exact DB/WAL family, with bounded I/O, to a
+//! private directory below the ctx data root. An explicit logical-online-backup
+//! policy instead retains a private logical DB while allowing later commits on
+//! the same authorized database object. Rollback journals remain typed
+//! unavailable because recovery could require database writes. SHM is bounded
+//! volatile lock coordination; provider DB/WAL bytes and directory entries are
+//! never mutated.
 
 use std::{
     ffi::{c_char, c_void, OsStr, OsString},
@@ -29,16 +29,19 @@ use rusqlite::{config::DbConfig, ffi, Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use thiserror::Error;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use url::Url;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 
 use crate::{
     common::io::{
         OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderSourceDirectory,
         ProviderSourceRoot,
+    },
+    provider::source_backed::{
+        SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
     },
     CaptureError,
 };
@@ -110,11 +113,41 @@ pub(crate) enum SqliteSourceAccessError {
 
 pub(crate) type SqliteSourceAccessResult<T> = Result<T, SqliteSourceAccessError>;
 
+#[derive(Debug)]
+pub(crate) enum SqliteSourceProgressError<E> {
+    Source(SqliteSourceAccessError),
+    Progress(E),
+}
+
+impl<E> From<SqliteSourceAccessError> for SqliteSourceProgressError<E> {
+    fn from(error: SqliteSourceAccessError) -> Self {
+        Self::Source(error)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SqliteSourceSnapshotStrategy {
     #[cfg(target_os = "linux")]
     ImmutableMain,
     CopiedFamily,
+    LogicalOnlineBackup,
+}
+
+/// Selects how one authorized provider SQLite leaf is stabilized.
+///
+/// The strict physical-family policy remains the default for every existing
+/// caller. Logical online backup is an explicit provider opt-in: it pins a
+/// short source transaction, copies that view into private ctx storage through
+/// SQLite's backup API, and thereafter fences only the approved parent and
+/// main-database object identity. Unix opens active WAL state through the
+/// retained `/dev/fd` database authority. Platforms without a descriptor-path
+/// alias first certify and copy the exact family; a writer race during that
+/// pre-admission copy remains a retryable `SourceChanged`. Ordinary commits
+/// after admission cannot invalidate the private snapshot on any platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqliteSourceSnapshotPolicy {
+    StrictPhysicalFamily,
+    LogicalOnlineBackup,
 }
 
 /// Content-free work and concurrency counters for one retained SQLite
@@ -123,7 +156,12 @@ pub(crate) enum SqliteSourceSnapshotStrategy {
 pub(crate) struct SqliteSourceSnapshotCounters {
     immutable_snapshot_opens: u64,
     copied_snapshot_opens: u64,
+    logical_online_backup_opens: u64,
     source_bytes_copied: u64,
+    logical_online_backup_bytes: u64,
+    logical_online_backup_steps: u64,
+    logical_online_backup_pages: u64,
+    logical_online_backup_busy_retries: u64,
     #[cfg(test)]
     logical_projection_passes: u64,
     #[cfg(test)]
@@ -151,8 +189,30 @@ impl SqliteSourceSnapshotCounters {
         self.copied_snapshot_opens
     }
 
+    pub(crate) const fn logical_online_backup_opens(self) -> u64 {
+        self.logical_online_backup_opens
+    }
+
     pub(crate) const fn source_bytes_copied(self) -> u64 {
         self.source_bytes_copied
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn logical_online_backup_bytes(self) -> u64 {
+        self.logical_online_backup_bytes
+    }
+
+    pub(crate) const fn logical_online_backup_steps(self) -> u64 {
+        self.logical_online_backup_steps
+    }
+
+    pub(crate) const fn logical_online_backup_pages(self) -> u64 {
+        self.logical_online_backup_pages
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn logical_online_backup_busy_retries(self) -> u64 {
+        self.logical_online_backup_busy_retries
     }
 
     #[cfg(test)]
@@ -225,6 +285,46 @@ impl SqliteSourceSnapshotContext {
         Ok(())
     }
 
+    fn record_logical_online_backup_bytes(&self, bytes: u64) -> SqliteSourceAccessResult<()> {
+        let mut counters = self.lock();
+        counters.logical_online_backup_bytes = checked_counter_add(
+            counters.logical_online_backup_bytes,
+            bytes,
+            "logical online-backup bytes",
+        )?;
+        Ok(())
+    }
+
+    fn record_logical_online_backup_step(&self) -> SqliteSourceAccessResult<()> {
+        let mut counters = self.lock();
+        counters.logical_online_backup_steps = checked_counter_add(
+            counters.logical_online_backup_steps,
+            1,
+            "logical online-backup steps",
+        )?;
+        Ok(())
+    }
+
+    fn record_logical_online_backup_pages(&self, pages: u64) -> SqliteSourceAccessResult<()> {
+        let mut counters = self.lock();
+        counters.logical_online_backup_pages = checked_counter_add(
+            counters.logical_online_backup_pages,
+            pages,
+            "logical online-backup pages",
+        )?;
+        Ok(())
+    }
+
+    fn record_logical_online_backup_busy_retry(&self) -> SqliteSourceAccessResult<()> {
+        let mut counters = self.lock();
+        counters.logical_online_backup_busy_retries = checked_counter_add(
+            counters.logical_online_backup_busy_retries,
+            1,
+            "logical online-backup busy retries",
+        )?;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn record_logical_projection(
         &self,
@@ -272,6 +372,13 @@ impl SqliteSourceSnapshotContext {
             SqliteSourceSnapshotStrategy::CopiedFamily => {
                 next.copied_snapshot_opens =
                     checked_counter_add(next.copied_snapshot_opens, 1, "copied snapshot opens")?;
+            }
+            SqliteSourceSnapshotStrategy::LogicalOnlineBackup => {
+                next.logical_online_backup_opens = checked_counter_add(
+                    next.logical_online_backup_opens,
+                    1,
+                    "logical online-backup opens",
+                )?;
             }
         }
         next.active_snapshots = checked_counter_add(next.active_snapshots, 1, "active snapshots")?;
@@ -446,6 +553,30 @@ impl SqliteSourceDirectoryAuthority {
         self.snapshot_context.snapshot()
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn open_logical_online_backup_snapshot(
+        &self,
+        database_name: &OsStr,
+    ) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
+        open_root_handle_sqlite_source_snapshot_with_policy(
+            self,
+            database_name,
+            SqliteSourceSnapshotPolicy::LogicalOnlineBackup,
+        )
+    }
+
+    pub(crate) fn open_logical_online_backup_snapshot_with_progress<E>(
+        &self,
+        database_name: &OsStr,
+        report_progress: impl FnMut(SourceBackedCurrentSourceProgress) -> Result<(), E>,
+    ) -> Result<SqliteSourceReadSnapshot, SqliteSourceProgressError<E>> {
+        open_root_handle_sqlite_source_logical_snapshot_with_progress(
+            self,
+            database_name,
+            report_progress,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn record_logical_projection(
         &self,
@@ -485,15 +616,34 @@ impl SqliteSourceDirectoryAuthority {
             Err(SqliteSourceAccessError::SourceChanged)
         }
     }
+
+    fn revalidate_database_identity(
+        &self,
+        database_name: &OsStr,
+        expected_identity: &NativeFileIdentity,
+    ) -> SqliteSourceAccessResult<()> {
+        self.revalidate()?;
+        let path = self.path.join(database_name);
+        let database = SqliteFamilyMember::open(self, database_name.to_os_string(), path)
+            .map_err(map_revalidation_error)?;
+        let state = database.capture_state().map_err(map_revalidation_error)?;
+        if &state.identity == expected_identity {
+            Ok(())
+        } else {
+            Err(SqliteSourceAccessError::SourceChanged)
+        }
+    }
 }
 
-/// A sealed compact witness for the exact SQLite family that backed one
+/// A sealed compact witness for the authorized SQLite source object behind one
 /// completed read snapshot.
 ///
 /// The witness retains no provider handles. Commit-time validation reopens the
-/// approved parent through the same no-follow capability path, certifies the
-/// main database, any non-empty WAL, and relevant SHM state. This bounds live
-/// descriptors by active workers rather than total discovered databases.
+/// approved parent through the same no-follow capability path. Strict policy
+/// certifies the exact DB/WAL/SHM family; logical-online-backup policy certifies
+/// the parent and main-database object identities while allowing writer
+/// progress on that object. This bounds live provider descriptors by active
+/// workers rather than total discovered databases.
 #[must_use = "revalidate the terminal fence before publishing snapshot observations"]
 #[derive(Debug)]
 struct SqliteSourceTerminalFenceInner {
@@ -502,6 +652,8 @@ struct SqliteSourceTerminalFenceInner {
     database_name: OsString,
     native_evidence: SqliteFamilyEvidence,
     evidence: SqliteSourceEvidence,
+    policy: SqliteSourceSnapshotPolicy,
+    _retained_snapshot_directory: Option<TempDir>,
     snapshot_context: Arc<SqliteSourceSnapshotContext>,
 }
 
@@ -532,9 +684,19 @@ impl SqliteSourceTerminalFence {
             &self.inner.approved_parent_path,
         )
         .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
-        let family = SqliteSourceFamily::open(&authority, &self.inner.database_name, || {})
-            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
-        family.revalidate(&self.inner.native_evidence)?;
+        match self.inner.policy {
+            SqliteSourceSnapshotPolicy::StrictPhysicalFamily => {
+                let family = SqliteSourceFamily::open(&authority, &self.inner.database_name, || {})
+                    .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+                family.revalidate(&self.inner.native_evidence)?;
+            }
+            SqliteSourceSnapshotPolicy::LogicalOnlineBackup => {
+                authority.revalidate_database_identity(
+                    &self.inner.database_name,
+                    &self.inner.native_evidence.database.identity,
+                )?;
+            }
+        }
         self.inner.snapshot_context.record_terminal_revalidation()
     }
 }
@@ -584,6 +746,8 @@ pub(crate) struct SqliteSourceReadSnapshot {
     native_evidence: SqliteFamilyEvidence,
     sqlite_evidence: SqliteSnapshotEvidence,
     evidence: SqliteSourceEvidence,
+    policy: SqliteSourceSnapshotPolicy,
+    admitted_revision_is_replay_safe: bool,
     #[cfg(test)]
     strategy: SqliteSourceSnapshotStrategy,
     #[cfg(test)]
@@ -606,6 +770,10 @@ impl SqliteSourceReadSnapshot {
 
     pub(crate) fn evidence(&self) -> &SqliteSourceEvidence {
         &self.evidence
+    }
+
+    pub(crate) fn admitted_revision_is_replay_safe(&self) -> bool {
+        self.admitted_revision_is_replay_safe
     }
 
     /// Retains a content-free terminal revalidator before ownership of this
@@ -652,10 +820,18 @@ impl SqliteSourceReadSnapshot {
         if current_sqlite_evidence != self.sqlite_evidence {
             return Err(SqliteSourceAccessError::SourceChanged);
         }
-        self.family
+        let family = self
+            .family
             .as_ref()
-            .ok_or(SqliteSourceAccessError::SnapshotNotActive)?
-            .revalidate(&self.native_evidence)
+            .ok_or(SqliteSourceAccessError::SnapshotNotActive)?;
+        match self.policy {
+            SqliteSourceSnapshotPolicy::StrictPhysicalFamily => {
+                family.revalidate(&self.native_evidence)
+            }
+            SqliteSourceSnapshotPolicy::LogicalOnlineBackup => {
+                family.revalidate_database_identity(&self.native_evidence.database.identity)
+            }
+        }
     }
 
     /// Ends this read snapshot and retains its exact physical source-family
@@ -679,6 +855,10 @@ impl SqliteSourceReadSnapshot {
         let database_name = family.database_name().to_os_string();
         let data_root = self.snapshot_context.data_root.clone();
         drop(family);
+        let retained_snapshot_directory = match self.policy {
+            SqliteSourceSnapshotPolicy::StrictPhysicalFamily => None,
+            SqliteSourceSnapshotPolicy::LogicalOnlineBackup => self._snapshot_directory.take(),
+        };
         let fence = SqliteSourceTerminalFence {
             inner: Arc::new(SqliteSourceTerminalFenceInner {
                 data_root,
@@ -686,6 +866,8 @@ impl SqliteSourceReadSnapshot {
                 database_name,
                 native_evidence: self.native_evidence.clone(),
                 evidence: self.evidence.clone(),
+                policy: self.policy,
+                _retained_snapshot_directory: retained_snapshot_directory,
                 snapshot_context: Arc::clone(&self.snapshot_context),
             }),
         };
@@ -732,9 +914,14 @@ pub(crate) use logical::SqliteLogicalSnapshot;
 #[cfg(test)]
 use snapshot::{
     certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
+    open_root_handle_sqlite_source_online_backup_before_identity_check_for_test,
     open_root_handle_sqlite_source_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
     open_root_handle_sqlite_source_snapshot_for_test,
+};
+use snapshot::{
+    open_root_handle_sqlite_source_logical_snapshot_with_progress,
+    open_root_handle_sqlite_source_snapshot_with_policy,
 };
 pub(crate) use snapshot::{
     open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,

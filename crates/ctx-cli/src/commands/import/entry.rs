@@ -125,7 +125,7 @@ pub(crate) fn insert_import_error_analytics(
 pub(crate) fn import_report_analytics_outcome(
     totals: &ImportTotals,
 ) -> (&'static str, &'static str) {
-    if totals.imported_sources == 0 && totals.failed_sources > 0 {
+    if !totals.has_usable_source_result() && totals.failed_sources > 0 {
         return ("failure", "source");
     }
     match (totals.failed_sources > 0, totals.failed > 0) {

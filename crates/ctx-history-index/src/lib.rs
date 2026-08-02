@@ -133,6 +133,18 @@ pub fn generation_incompatibility_requires_rebuild(error: &IndexError) -> bool {
 #[cfg(test)]
 type GenerationPathHook = Box<dyn FnOnce(&Path) + Send>;
 
+#[cfg(test)]
+type SourceStageCommitHook = Box<dyn FnOnce(&Path) -> Result<()> + Send>;
+
+#[derive(Clone)]
+struct SourceStageCheckpoint {
+    complete_inventories: Vec<CertifiedSourceInventory>,
+    pending: HashMap<String, PendingSource>,
+    deletions: HashMap<SourceKey, GenerationRemoval>,
+    observed_missing: HashMap<SourceKey, SourceCatalogMissingState>,
+    source_identities: HashMap<Uuid, [u8; 32]>,
+}
+
 pub struct GenerationWriter {
     root: PathBuf,
     index: Index,
@@ -150,10 +162,14 @@ pub struct GenerationWriter {
     deletions: HashMap<SourceKey, GenerationRemoval>,
     observed_missing: HashMap<SourceKey, SourceCatalogMissingState>,
     source_identities: HashMap<Uuid, [u8; 32]>,
+    carried_base_sources: HashSet<SourceKey>,
+    active_source_stage: Option<SourceStageCheckpoint>,
     #[cfg(test)]
     index_writer_constructions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     before_writer_handoff: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(test)]
+    before_source_stage_commit: Option<SourceStageCommitHook>,
     #[cfg(test)]
     after_candidate_commit: Option<GenerationPathHook>,
     #[cfg(test)]
@@ -331,10 +347,14 @@ impl GenerationWriter {
             deletions: HashMap::new(),
             observed_missing: HashMap::new(),
             source_identities,
+            carried_base_sources: HashSet::new(),
+            active_source_stage: None,
             #[cfg(test)]
             index_writer_constructions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             before_writer_handoff: None,
+            #[cfg(test)]
+            before_source_stage_commit: None,
             #[cfg(test)]
             after_candidate_commit: None,
             #[cfg(test)]
@@ -348,6 +368,181 @@ impl GenerationWriter {
     /// Tantivy's exclusive writer lock.
     pub fn base_manifest(&self) -> Option<&GenerationManifest> {
         self.base_manifest.as_ref()
+    }
+
+    /// Starts an opaque source-local savepoint inside the unpublished candidate.
+    /// Only one source stage may be active at a time.
+    pub fn begin_source_stage(&mut self) -> Result<()> {
+        if self.active_source_stage.is_some() {
+            return Err(IndexError::SourceStageAlreadyActive);
+        }
+        self.active_source_stage = Some(SourceStageCheckpoint {
+            complete_inventories: self.complete_inventories.clone(),
+            pending: self.pending.clone(),
+            deletions: self.deletions.clone(),
+            observed_missing: self.observed_missing.clone(),
+            source_identities: self.source_identities.clone(),
+        });
+        Ok(())
+    }
+
+    /// Revalidates and checkpoints the active source without publishing it.
+    /// Tantivy commits here are private to the disposable candidate generation.
+    pub fn finish_source_stage<F, I>(
+        &mut self,
+        mut revalidate: F,
+        mut revalidate_inventory: I,
+    ) -> Result<()>
+    where
+        F: FnMut(RevalidationTarget<'_>) -> bool,
+        I: FnMut(&CertifiedSourceInventory) -> bool,
+    {
+        let checkpoint = self
+            .active_source_stage
+            .as_ref()
+            .ok_or(IndexError::SourceStageNotActive)?;
+        for (token, pending) in &self.pending {
+            if checkpoint.pending.contains_key(token) {
+                continue;
+            }
+            let certificate = pending.certificate.as_ref().ok_or_else(|| {
+                IndexError::SourceNotCertified(pending.source.identity().to_string())
+            })?;
+            if !revalidate(RevalidationTarget::Source(certificate)) {
+                return Err(IndexError::SourceInvalidated(
+                    pending.source.identity().to_string(),
+                ));
+            }
+        }
+        for (source, removal) in &self.deletions {
+            if checkpoint.deletions.contains_key(source) {
+                continue;
+            }
+            if !revalidate(RevalidationTarget::Deletion(removal.deletion())) {
+                return Err(IndexError::SourceInvalidated(source.identity().to_string()));
+            }
+        }
+        for inventory in self
+            .complete_inventories
+            .iter()
+            .skip(checkpoint.complete_inventories.len())
+        {
+            if !revalidate_inventory(inventory) {
+                return Err(IndexError::CompleteInventoryInvalidated {
+                    provider: inventory.observation().provider().to_owned(),
+                    authority_namespace: inventory.observation().authority_namespace().to_owned(),
+                });
+            }
+        }
+        #[cfg(test)]
+        if let Some(hook) = self.before_source_stage_commit.take() {
+            hook(&self.candidate_path()?)?;
+        }
+        if let Some(writer) = self.writer.as_mut() {
+            writer.commit()?;
+        }
+        self.active_source_stage = None;
+        Ok(())
+    }
+
+    /// Discards only the active source's manifest and Tantivy operations.
+    /// Earlier successful source checkpoints remain in the candidate.
+    pub fn rollback_source_stage(&mut self) -> Result<()> {
+        let checkpoint = self
+            .active_source_stage
+            .take()
+            .ok_or(IndexError::SourceStageNotActive)?;
+        if let Some(writer) = self.writer.as_mut() {
+            writer.rollback()?;
+            writer.set_merge_policy(Box::new(LexicalMergePolicy::default()));
+        }
+        self.complete_inventories = checkpoint.complete_inventories;
+        self.pending = checkpoint.pending;
+        self.deletions = checkpoint.deletions;
+        self.observed_missing = checkpoint.observed_missing;
+        self.source_identities = checkpoint.source_identities;
+        Ok(())
+    }
+
+    /// Marks one exact locked-base contribution as carried after its source
+    /// route failed. Carried content is immutable for the rest of this run.
+    pub fn carry_base_source(&mut self, source: SourceKey) -> Result<()> {
+        if self.active_source_stage.is_some() {
+            return Err(IndexError::SourceStageAlreadyActive);
+        }
+        let retained = self.base_manifest.as_ref().is_some_and(|base| {
+            base.sources.iter().any(|candidate| {
+                candidate
+                    .observation()
+                    .source()
+                    .exact_descriptor_eq(&source)
+            }) || base
+                .removals
+                .iter()
+                .any(|candidate| candidate.source().exact_descriptor_eq(&source))
+                || base
+                    .source_catalog()
+                    .missing_sources()
+                    .iter()
+                    .any(|candidate| candidate.source().exact_descriptor_eq(&source))
+        });
+        if !retained {
+            return Err(IndexError::BaseSourceNotRetained(
+                source.identity().to_string(),
+            ));
+        }
+        self.carried_base_sources.insert(source);
+        Ok(())
+    }
+
+    pub fn is_base_source_carried(&self, source: &SourceKey) -> bool {
+        self.carried_base_sources
+            .iter()
+            .any(|candidate| candidate.exact_descriptor_eq(source))
+    }
+
+    /// Returns whether the currently staged result retains at least one
+    /// certified source contribution.
+    pub fn has_result_certified_sources(&self) -> bool {
+        let mut sources = self
+            .base_manifest
+            .as_ref()
+            .map(|base| {
+                base.sources
+                    .iter()
+                    .map(|source| source.observation().source().clone())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        for source in self.deletions.keys() {
+            sources.remove(source);
+        }
+        sources.extend(
+            self.pending
+                .values()
+                .filter(|pending| pending.certificate.is_some())
+                .map(|pending| pending.source.clone()),
+        );
+        !sources.is_empty()
+    }
+
+    fn reject_carried_base_source_mutation(&self, source: &SourceKey) -> Result<()> {
+        if let Some(carried) = self.carried_base_sources.iter().find(|candidate| {
+            candidate.exact_descriptor_eq(source)
+                || candidate.is_same_lineage_descriptor_replacement(source)
+        }) {
+            return Err(IndexError::CarriedBaseSourceMutation(
+                carried.identity().to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn require_no_active_source_stage(&self) -> Result<()> {
+        if self.active_source_stage.is_some() {
+            return Err(IndexError::SourceStageAlreadyActive);
+        }
+        Ok(())
     }
 
     /// Registers one complete provider inventory captured by the current
@@ -382,7 +577,13 @@ impl GenerationWriter {
         let Some(base) = self.base_manifest.as_ref() else {
             return Ok(None);
         };
-        if !self.observed_missing.is_empty() || !base.source_catalog().is_empty() {
+        if !self.observed_missing.is_empty()
+            || base
+                .source_catalog()
+                .missing_sources()
+                .iter()
+                .any(|missing| !self.is_base_source_carried(missing.source()))
+        {
             // Missing-state creation, advancement, and reset are manifest
             // mutations even though last-good Core documents stay untouched.
             return Ok(None);
@@ -394,19 +595,22 @@ impl GenerationWriter {
             !self
                 .pending
                 .contains_key(&source_token(base_source.observation().source()))
+                && !self.is_base_source_carried(base_source.observation().source())
         }) {
             return Err(IndexError::IncompleteExactReplayCoverage {
                 source_id: missing.observation().source().identity().to_string(),
             });
         }
-        if self.pending.len() != base.sources.len() {
-            return Ok(None);
-        }
-
-        let retained_sources_are_exact = base.sources.iter().all(|base_source| {
-            self.pending
-                .get(&source_token(base_source.observation().source()))
-                .is_some_and(|pending| {
+        let retained_sources_are_exact = self.pending.values().all(|pending| {
+            base.sources
+                .iter()
+                .find(|base_source| {
+                    base_source
+                        .observation()
+                        .source()
+                        .exact_descriptor_eq(&pending.source)
+                })
+                .is_some_and(|base_source| {
                     matches!(
                         (&pending.mode, &pending.certificate),
                         (
@@ -423,7 +627,17 @@ impl GenerationWriter {
         if !retained_sources_are_exact {
             return Ok(None);
         }
-        if self.complete_inventories.is_empty() {
+        if self.complete_inventories.is_empty()
+            && (self.carried_base_sources.is_empty()
+                || base
+                    .sources
+                    .iter()
+                    .any(|source| !self.is_base_source_carried(source.observation().source()))
+                || base
+                    .removals
+                    .iter()
+                    .any(|removal| !self.is_base_source_carried(removal.source())))
+        {
             // Without a certified current inventory this is not an admissible
             // exact no-op. Preserve compatibility for mutation-oriented
             // callers by taking the ordinary IndexWriter publication path.
@@ -449,17 +663,19 @@ impl GenerationWriter {
             }
         }
         if let Some(missing) = base.sources.iter().find(|source| {
-            !covered_sources.contains(&source.observation().source().identity().digest())
+            !self.is_base_source_carried(source.observation().source())
+                && !covered_sources.contains(&source.observation().source().identity().digest())
         }) {
             return Err(IndexError::IncompleteExactReplayCoverage {
                 source_id: missing.observation().source().identity().to_string(),
             });
         }
         if let Some(missing) = base.removals.iter().find(|removal| {
-            !self
-                .complete_inventories
-                .iter()
-                .any(|inventory| removal.deletion().verifies(inventory))
+            !self.is_base_source_carried(removal.source())
+                && !self
+                    .complete_inventories
+                    .iter()
+                    .any(|inventory| removal.deletion().verifies(inventory))
         }) {
             return Err(IndexError::IncompleteExactReplayCoverage {
                 source_id: missing.source().identity().to_string(),
@@ -474,6 +690,7 @@ impl GenerationWriter {
     /// Documents can then be submitted as they are parsed; no whole-source or
     /// whole-batch DTO is retained by this writer.
     pub fn begin_source(&mut self, source: SourceKey) -> Result<()> {
+        self.reject_carried_base_source_mutation(&source)?;
         register_compact_identity(
             &mut self.source_identities,
             source.identity(),
@@ -511,6 +728,7 @@ impl GenerationWriter {
     /// The provider must hash the entire previously certified prefix while it
     /// parses the delta and submit a matching [`CertifiedSourceAppend`].
     pub fn begin_source_append(&mut self, source: SourceKey) -> Result<&CertifiedSource> {
+        self.reject_carried_base_source_mutation(&source)?;
         register_compact_identity(
             &mut self.source_identities,
             source.identity(),
@@ -708,6 +926,7 @@ impl GenerationWriter {
     ) -> Result<()> {
         let removal = GenerationRemoval::new(proof, inventory)?;
         let source = removal.source();
+        self.reject_carried_base_source_mutation(source)?;
         register_compact_identity(
             &mut self.source_identities,
             source.identity(),
@@ -743,6 +962,7 @@ impl GenerationWriter {
         }
         GenerationRemoval::new(proof.clone(), inventory.clone())?;
         let source = proof.source().clone();
+        self.reject_carried_base_source_mutation(&source)?;
         let source_id = source.identity().to_string();
         let token = source_token(&source);
         if self.pending.contains_key(&token)

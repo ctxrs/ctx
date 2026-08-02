@@ -1417,3 +1417,115 @@ fn direct_core_record_rejects_noncurrent_policy_revisions() {
         Err(IndexError::CoreRecordPolicyRevisionMismatch { .. })
     ));
 }
+
+#[test]
+fn source_stage_rollback_keeps_prior_candidate_checkpoint_and_discards_partial_source() {
+    let temp = tempdir().unwrap();
+    let source_a = source("stage-a.jsonl");
+    let source_b = source("stage-b.jsonl");
+    let source_c = source("stage-c.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source_a.clone()).unwrap();
+    initial
+        .add_core_record(document(&source_a, 1, "retainedstagea"))
+        .unwrap();
+    initial
+        .certify_source(certificate(&source_a, 1, 1))
+        .unwrap();
+    initial.commit(|_| true).unwrap();
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source_stage().unwrap();
+    writer.begin_source(source_b.clone()).unwrap();
+    writer
+        .add_core_record(document(&source_b, 1, "successfulstageb"))
+        .unwrap();
+    writer.certify_source(certificate(&source_b, 1, 1)).unwrap();
+    writer.finish_source_stage(|_| true, |_| true).unwrap();
+
+    writer.begin_source_stage().unwrap();
+    writer.begin_source(source_c.clone()).unwrap();
+    writer
+        .add_core_record(document(&source_c, 1, "partialstagec"))
+        .unwrap();
+    writer.rollback_source_stage().unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let visible = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(visible.count_term("retainedstagea").unwrap(), 1);
+    assert_eq!(visible.count_term("successfulstageb").unwrap(), 1);
+    assert_eq!(visible.count_term("partialstagec").unwrap(), 0);
+}
+
+#[test]
+fn all_carried_base_sources_return_exact_base_without_candidate_churn() {
+    let temp = tempdir().unwrap();
+    let retained = source("carried-base.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(retained.clone()).unwrap();
+    initial
+        .add_core_record(document(&retained, 1, "carriedbase"))
+        .unwrap();
+    initial
+        .certify_source(certificate(&retained, 1, 1))
+        .unwrap();
+    let initial = initial.commit(|_| true).unwrap();
+
+    let mut carried = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    carried.carry_base_source(retained.clone()).unwrap();
+    let replay = carried
+        .commit(|_| panic!("carried source must not be revalidated"))
+        .unwrap();
+    assert_eq!(replay.generation_id, initial.generation_id);
+    assert_eq!(replay.opstamp, initial.opstamp);
+
+    let mut mutation = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    mutation.carry_base_source(retained.clone()).unwrap();
+    assert!(matches!(
+        mutation.begin_source(retained),
+        Err(IndexError::CarriedBaseSourceMutation(_))
+    ));
+}
+
+#[test]
+fn systemic_source_checkpoint_commit_failure_keeps_the_active_generation() {
+    let temp = tempdir().unwrap();
+    let source_a = source("checkpoint-systemic-a.jsonl");
+    let source_b = source("checkpoint-systemic-b.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source_a.clone()).unwrap();
+    initial
+        .add_core_record(document(&source_a, 1, "activecheckpoint"))
+        .unwrap();
+    initial
+        .certify_source(certificate(&source_a, 1, 1))
+        .unwrap();
+    let initial = initial.commit(|_| true).unwrap();
+
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    candidate.begin_source_stage().unwrap();
+    candidate.begin_source(source_b.clone()).unwrap();
+    candidate
+        .add_core_record(document(&source_b, 1, "unpublishedcheckpoint"))
+        .unwrap();
+    candidate
+        .certify_source(certificate(&source_b, 1, 1))
+        .unwrap();
+    candidate.before_source_stage_commit = Some(Box::new(|_| {
+        Err(IndexError::WriterInvariant(
+            "injected source checkpoint commit failure",
+        ))
+    }));
+    assert!(matches!(
+        candidate.finish_source_stage(|_| true, |_| true),
+        Err(IndexError::WriterInvariant(
+            "injected source checkpoint commit failure"
+        ))
+    ));
+    drop(candidate);
+
+    let visible = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(visible.generation_id(), initial.generation_id);
+    assert_eq!(visible.count_term("activecheckpoint").unwrap(), 1);
+    assert_eq!(visible.count_term("unpublishedcheckpoint").unwrap(), 0);
+}

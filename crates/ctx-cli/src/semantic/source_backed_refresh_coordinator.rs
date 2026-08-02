@@ -11,18 +11,22 @@ use std::{
 use std::fs;
 
 use anyhow::{anyhow, bail, Context, Result};
+#[cfg(test)]
+use ctx_history_capture::SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress;
 use ctx_history_capture::{
     build_automatic_source_backed_registry_from_report,
     discover_provider_sources_with_context_and_work_budget, source_backed_refresh_work_budget,
     validate_provider_source_roots_outside_data_root, CaptureError, DiscoveryContext,
     DiscoveryReport, ProviderSourceStatus, SourceBackedAutomaticRegistryIssue,
-    SourceBackedAutomaticUnavailableReason, SourceBackedProviderRegistry,
-    SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress, SourceBackedRouteError,
-    SourceBackedRouteErrorKind, SourceBackedRouteResult,
+    SourceBackedAutomaticUnavailableReason,
+    SourceBackedCurrentSourceProgress as CaptureSourceBackedCurrentSourceProgress,
+    SourceBackedCurrentSourceProgressStage as CaptureSourceBackedCurrentSourceProgressStage,
+    SourceBackedDetailedRefreshProgress as CaptureSourceBackedDetailedRefreshProgress,
+    SourceBackedProviderRegistry, SourceBackedRouteError, SourceBackedRouteErrorKind,
+    SourceBackedRouteResult,
+    SourceBackedSourceFailureClass as CaptureSourceBackedSourceFailureClass,
 };
-#[cfg(test)]
-use ctx_history_core::CaptureProvider;
-use ctx_history_core::{utc_now, CertifiedSource, ScannedSourceCounts};
+use ctx_history_core::{utc_now, CaptureProvider, CertifiedSource, ScannedSourceCounts};
 use ctx_history_index::{
     generation_incompatibility_requires_rebuild, IndexError, VerifiedIndex, WriterOptions,
 };
@@ -62,8 +66,11 @@ use coordinator_state::CaptureOwnedSourceBackedRefreshExecutor;
 pub(in crate::semantic) use coordinator_state::CoreRefreshEngine;
 use coordinator_state::SourceBackedRefreshProgressUpdate;
 pub(crate) use coordinator_state::{
-    PinnedCorePublication, SourceBackedRefreshExecution, SourceBackedRefreshExecutor,
-    SourceBackedRefreshReceipt, SourceBackedRefreshTimings,
+    PinnedCorePublication, SourceBackedCurrentSourceProgress,
+    SourceBackedCurrentSourceProgressStage, SourceBackedRefreshExecution,
+    SourceBackedRefreshExecutor, SourceBackedRefreshProgress, SourceBackedRefreshReceipt,
+    SourceBackedRefreshSourceFailure, SourceBackedRefreshSourceFailureClass,
+    SourceBackedRefreshSourceFailures, SourceBackedRefreshTimings,
 };
 pub(crate) use current_state::SourceBackedRefreshCurrent;
 
@@ -75,9 +82,16 @@ const SOURCE_REFRESH_ATTEMPT_HISTORY: usize = 64;
 const SOURCE_REFRESH_ACTIVE_PENDING_LIMIT: usize = 8;
 const SOURCE_REFRESH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
 const SOURCE_REFRESH_IPC_TIMEOUT: StdDuration = StdDuration::from_secs(2);
-const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
+// Capture bounds each of 64 failure rows to two 512-byte text fields. JSON
+// control-character escaping can expand each input byte sixfold, so 512 KiB
+// retains the complete bounded receipt plus response metadata.
+const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 512 * 1024;
 const SOURCE_REFRESH_BUILD_ISSUE_LIMIT: usize = 8;
+// Wire validation mirrors the capture receipt's public bounded-row contract.
+const SOURCE_REFRESH_FAILURE_ROW_LIMIT: usize = 64;
+const SOURCE_REFRESH_FAILURE_TEXT_MAX_BYTES: usize = 512;
 const TERMINAL_COVERAGE_ERROR_CODE: &str = "all_provider_terminal_coverage_unavailable";
+type RefreshProgressObserver<'a> = dyn FnMut(&SourceBackedRefreshProgress) -> Result<()> + 'a;
 #[cfg(test)]
 thread_local! {
     static VERIFIED_INDEX_OPEN_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
@@ -136,7 +150,22 @@ impl SourceBackedRefreshMode {
         data_root: &Path,
         authority: &ExplicitSourceCatalogAuthority,
     ) -> Result<SourceBackedRefreshObservation> {
-        coordinate_source_backed_refresh_with_catalog(data_root, self, Some(authority), false)
+        coordinate_source_backed_refresh_with_catalog(data_root, self, Some(authority), false, None)
+    }
+
+    pub(crate) fn coordinate_explicit_source_catalog_with_progress(
+        self,
+        data_root: &Path,
+        authority: &ExplicitSourceCatalogAuthority,
+        observer: &mut RefreshProgressObserver<'_>,
+    ) -> Result<SourceBackedRefreshObservation> {
+        coordinate_source_backed_refresh_with_catalog(
+            data_root,
+            self,
+            Some(authority),
+            false,
+            Some(observer),
+        )
     }
 }
 
@@ -171,6 +200,8 @@ pub(crate) struct SourceBackedRefreshPublication {
     /// Exact explicit-source catalog snapshot registered into this publication.
     pub(crate) published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
     pub(crate) scanned_routes: usize,
+    pub(crate) successful_routes: usize,
+    pub(crate) source_failures: SourceBackedRefreshSourceFailures,
     pub(crate) unsupported_routes: usize,
     pub(crate) certified_source_count: usize,
     pub(crate) certified_source_bytes: u64,
@@ -236,6 +267,12 @@ fn verify_source_backed_publication(
     {
         bail!("Core refresh publication facts do not match its exact verified generation");
     }
+    validate_source_refresh_results(
+        publication.scanned_routes,
+        publication.successful_routes,
+        &publication.source_failures,
+        publication.current.source_count,
+    )?;
     Ok(())
 }
 
@@ -331,14 +368,30 @@ pub(crate) fn coordinate_source_backed_refresh(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, true)
+    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, true, None)
+}
+
+pub(crate) fn coordinate_source_backed_refresh_with_progress(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+    observer: &mut RefreshProgressObserver<'_>,
+) -> Result<SourceBackedRefreshObservation> {
+    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, true, Some(observer))
 }
 
 pub(crate) fn coordinate_core_refresh_without_autostart(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, false)
+    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, false, None)
+}
+
+pub(crate) fn coordinate_core_refresh_without_autostart_with_progress(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+    observer: &mut RefreshProgressObserver<'_>,
+) -> Result<SourceBackedRefreshObservation> {
+    coordinate_source_backed_refresh_with_catalog(data_root, mode, None, false, Some(observer))
 }
 
 fn coordinate_source_backed_refresh_with_catalog(
@@ -346,6 +399,7 @@ fn coordinate_source_backed_refresh_with_catalog(
     mode: SourceBackedRefreshMode,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     allow_daemon_autostart: bool,
+    progress_observer: Option<&mut RefreshProgressObserver<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
     if mode == SourceBackedRefreshMode::Off {
         if explicit_source_catalog.is_some() {
@@ -435,6 +489,7 @@ fn coordinate_source_backed_refresh_with_catalog(
         mode,
         explicit_source_catalog,
         allow_daemon_autostart,
+        progress_observer,
     )
 }
 
@@ -444,7 +499,9 @@ fn wait_for_published_generation(
     mode: SourceBackedRefreshMode,
     expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
     allow_daemon_autostart: bool,
+    progress_observer: Option<&mut RefreshProgressObserver<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
+    let mut progress_observer = progress_observer.map(RefreshProgressObserverState::new);
     loop {
         let response = match daemon_source_refresh_request(
             data_root,
@@ -466,6 +523,9 @@ fn wait_for_published_generation(
                 .with_context(|| {
                     format!("recover daemon while waiting for source refresh request {request_id}")
                 })?;
+                if let Some(observer) = progress_observer.as_mut() {
+                    observer.reset();
+                }
                 continue;
             }
             Err(error)
@@ -483,6 +543,9 @@ fn wait_for_published_generation(
                             "recover unavailable daemon while waiting for source refresh request {request_id}: {error:#}"
                         )
                     })?;
+                if let Some(observer) = progress_observer.as_mut() {
+                    observer.reset();
+                }
                 continue;
             }
             Err(error) => {
@@ -562,6 +625,9 @@ fn wait_for_published_generation(
                 return Err(anyhow!("{detail}"));
             }
             Some("queued" | "running") => {
+                if let Some(observer) = progress_observer.as_mut() {
+                    observer.observe(&response)?;
+                }
                 std::thread::sleep(SOURCE_REFRESH_POLL_INTERVAL);
             }
             Some(state) => {
@@ -575,6 +641,34 @@ fn wait_for_published_generation(
                 ))
             }
         }
+    }
+}
+
+struct RefreshProgressObserverState<'observer, 'callback> {
+    observer: &'observer mut RefreshProgressObserver<'callback>,
+    last_observed: Option<SourceBackedRefreshProgress>,
+}
+
+impl<'observer, 'callback> RefreshProgressObserverState<'observer, 'callback> {
+    fn new(observer: &'observer mut RefreshProgressObserver<'callback>) -> Self {
+        Self {
+            observer,
+            last_observed: None,
+        }
+    }
+
+    fn observe(&mut self, response: &Value) -> Result<()> {
+        let progress = SourceBackedRefreshProgress::from_status_json(response)?;
+        if self.last_observed.as_ref() == Some(&progress) {
+            return Ok(());
+        }
+        (self.observer)(&progress).context("report daemon source refresh progress")?;
+        self.last_observed = Some(progress);
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.last_observed = None;
     }
 }
 
@@ -673,6 +767,25 @@ fn published_refresh_receipt(
         sources_with_rejections: required_usize(current_value, "current_sources_with_rejections")?,
         removed_source_count: required_usize(current_value, "removed_source_count")?,
     };
+    let scanned_routes = required_usize(value, "scanned_routes")?;
+    let successful_routes = required_usize(value, "successful_routes")?;
+    let source_failures = required_source_failures(value.get("source_failures"))?;
+    let outcome = required_source_refresh_outcome(value.get("outcome"))?;
+    if outcome
+        != if source_failures.is_empty() {
+            "completed"
+        } else {
+            "completed_with_source_failures"
+        }
+    {
+        bail!("published daemon source refresh receipt has inconsistent outcome");
+    }
+    validate_source_refresh_results(
+        scanned_routes,
+        successful_routes,
+        &source_failures,
+        current.source_count,
+    )?;
 
     let top_previous_generation = optional_generation(response.get("previous_generation"))?;
     let top_published_generation = required_generation(
@@ -689,15 +802,31 @@ fn published_refresh_receipt(
             anyhow!("published daemon source refresh has no explicit source catalog authority")
         })
         .and_then(ExplicitSourceCatalogAuthority::from_json)?;
+    let top_scanned_routes =
+        required_usize_from_value(response.get("scanned_routes"), "scanned_routes")?;
+    let top_successful_routes =
+        required_usize_from_value(response.get("successful_routes"), "successful_routes")?;
+    let top_source_failure_total =
+        required_usize_from_value(response.get("source_failure_total"), "source_failure_total")?;
+    let top_source_failures_omitted = required_usize_from_value(
+        response.get("source_failures_omitted"),
+        "source_failures_omitted",
+    )?;
+    let top_outcome = required_source_refresh_outcome(response.get("outcome"))?;
     let identity_changed = previous_generation.as_deref() != Some(published_generation.as_str());
     if previous_generation != top_previous_generation
         || published_generation != top_published_generation
         || generation_changed != top_generation_changed
         || generation_changed != identity_changed
         || published_explicit_source_catalog != top_published_explicit_source_catalog
+        || scanned_routes != top_scanned_routes
+        || successful_routes != top_successful_routes
+        || source_failures.total() != top_source_failure_total
+        || source_failures.omitted != top_source_failures_omitted
+        || outcome != top_outcome
     {
         bail!(
-            "published daemon source refresh receipt has inconsistent publication identity facts"
+            "published daemon source refresh receipt has inconsistent publication or result facts"
         );
     }
 
@@ -727,7 +856,139 @@ fn published_refresh_receipt(
         generation_changed,
         published_explicit_source_catalog,
         current,
+        scanned_routes,
+        successful_routes,
+        source_failures,
     })
+}
+
+fn required_source_refresh_outcome(value: Option<&Value>) -> Result<&str> {
+    match value.and_then(Value::as_str) {
+        Some(outcome @ ("completed" | "completed_with_source_failures")) => Ok(outcome),
+        _ => bail!("published daemon source refresh receipt has invalid outcome"),
+    }
+}
+
+fn required_source_failures(value: Option<&Value>) -> Result<SourceBackedRefreshSourceFailures> {
+    let value = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("published daemon source refresh source failures are malformed"))?;
+    let failures = value
+        .get("failures")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("published daemon source refresh failure rows are malformed"))?;
+    if failures.len() > SOURCE_REFRESH_FAILURE_ROW_LIMIT {
+        bail!("published daemon source refresh has too many source failure rows");
+    }
+    let omitted = required_usize(value, "omitted")?;
+    let total = required_usize(value, "total")?;
+    if failures.len().checked_add(omitted) != Some(total) {
+        bail!("published daemon source refresh has inconsistent source failure totals");
+    }
+
+    let failures = failures
+        .iter()
+        .map(|failure| {
+            let failure = failure.as_object().ok_or_else(|| {
+                anyhow!("published daemon source refresh source failure row is malformed")
+            })?;
+            let source_identity = required_nonempty_string(failure, "source_identity")?;
+            if !is_sha256_identity(&source_identity) {
+                bail!("published daemon source refresh source failure identity is malformed");
+            }
+            let provider = required_nonempty_string(failure, "provider")?;
+            provider.parse::<CaptureProvider>().map_err(|_| {
+                anyhow!("published daemon source refresh source failure provider is malformed")
+            })?;
+            let class = required_nonempty_string(failure, "class")?;
+            let class = SourceBackedRefreshSourceFailureClass::parse(&class).ok_or_else(|| {
+                anyhow!("published daemon source refresh source failure class is malformed")
+            })?;
+            let carried_forward = failure
+                .get("carried_forward")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "published daemon source refresh source failure has no carried_forward fact"
+                    )
+                })?;
+            let source_selector = required_bounded_string(failure, "source_selector")?;
+            let detail = required_bounded_string(failure, "detail")?;
+            Ok(SourceBackedRefreshSourceFailure {
+                source_identity,
+                provider,
+                class,
+                carried_forward,
+                source_selector,
+                detail,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(SourceBackedRefreshSourceFailures { failures, omitted })
+}
+
+fn required_nonempty_string(value: &serde_json::Map<String, Value>, field: &str) -> Result<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            anyhow!("published daemon source refresh source failure has invalid {field}")
+        })
+}
+
+fn required_bounded_string(value: &serde_json::Map<String, Value>, field: &str) -> Result<String> {
+    let value = value.get(field).and_then(Value::as_str).ok_or_else(|| {
+        anyhow!("published daemon source refresh source failure has invalid {field}")
+    })?;
+    if value.len() > SOURCE_REFRESH_FAILURE_TEXT_MAX_BYTES {
+        bail!("published daemon source refresh source failure {field} is too large");
+    }
+    Ok(value.to_owned())
+}
+
+fn is_sha256_identity(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_source_refresh_results(
+    scanned_routes: usize,
+    successful_routes: usize,
+    source_failures: &SourceBackedRefreshSourceFailures,
+    current_source_count: usize,
+) -> Result<()> {
+    if source_failures.failures.len() > SOURCE_REFRESH_FAILURE_ROW_LIMIT {
+        bail!("source-backed refresh has too many source failure rows");
+    }
+    for failure in &source_failures.failures {
+        if !is_sha256_identity(&failure.source_identity) {
+            bail!("source-backed refresh source failure identity is malformed");
+        }
+        failure
+            .provider
+            .parse::<CaptureProvider>()
+            .map_err(|_| anyhow!("source-backed refresh source failure provider is malformed"))?;
+        if failure.source_selector.len() > SOURCE_REFRESH_FAILURE_TEXT_MAX_BYTES {
+            bail!("source-backed refresh source failure source_selector is too large");
+        }
+        if failure.detail.len() > SOURCE_REFRESH_FAILURE_TEXT_MAX_BYTES {
+            bail!("source-backed refresh source failure detail is too large");
+        }
+    }
+    if successful_routes.checked_add(source_failures.total()) != Some(scanned_routes) {
+        bail!(
+            "source-backed refresh result counts are inconsistent: scanned {scanned_routes}, successful {successful_routes}, failed {}",
+            source_failures.total()
+        );
+    }
+    if !source_failures.is_empty() && current_source_count == 0 {
+        bail!("source-backed refresh completed with source failures but no usable source remains");
+    }
+    Ok(())
 }
 
 fn optional_generation(value: Option<&Value>) -> Result<Option<String>> {

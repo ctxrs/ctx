@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     provider::source_backed::{
         family::document::DocumentLeafExecutionPolicy, source_backed_leaf_worker_budget,
+        SourceBackedRefreshOutcome, SourceBackedRefreshReceipt, SourceBackedSourceFailureClass,
         AUTOMATIC_SOURCE_DELETION_MISSING_INVENTORIES,
     },
     provider_sources::ProviderCatalogSupport,
@@ -548,34 +549,83 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
         )
         .unwrap();
     parallel_provider.set_after_seal_action(TestAfterSealAction::MutateDatabase);
-    let retained_generation = parallel_deleted.commit.generation_id;
-    assert!(refresh_source_backed_generation(
+    let retained_generation = parallel_deleted.commit.generation_id.clone();
+    let terminal_failed = refresh_source_backed_generation(
         &parallel_index_root,
         &parallel_registry,
-        writer_options()
+        writer_options(),
     )
-    .is_err());
+    .unwrap();
+    assert_sqlite_source_failure(
+        &terminal_failed,
+        SourceBackedSourceFailureClass::SourceChanged,
+        &selected_database,
+    );
+    assert_eq!(terminal_failed.commit.generation_id, retained_generation);
+    assert_eq!(terminal_failed.sources, parallel_deleted.sources);
     assert_eq!(
         VerifiedIndex::open(&parallel_index_root)
             .unwrap()
             .generation_id(),
         retained_generation
     );
+    assert_eq!(
+        VerifiedIndex::open(&parallel_index_root)
+            .unwrap()
+            .manifest()
+            .sources,
+        parallel_deleted.sources
+    );
 
     let settled = publish(&parallel_index_root, &parallel_registry);
+    assert_eq!(settled.outcome, SourceBackedRefreshOutcome::Completed);
+    assert_eq!(settled.successful_routes, 1);
+    assert!(settled.source_failures.is_empty());
+    assert_ne!(settled.commit.generation_id, retained_generation);
+    let available_path = catalog.lock().unwrap()[0].path.clone();
     catalog.lock().unwrap()[0].path = provider_dir.join("unavailable.sqlite");
-    assert!(refresh_source_backed_generation(
+    let unavailable = refresh_source_backed_generation(
         &parallel_index_root,
         &parallel_registry,
-        writer_options()
+        writer_options(),
     )
-    .is_err());
+    .unwrap();
+    assert_sqlite_source_failure(
+        &unavailable,
+        SourceBackedSourceFailureClass::Unreadable,
+        &selected_database,
+    );
+    assert_eq!(
+        unavailable.commit.generation_id,
+        settled.commit.generation_id
+    );
+    assert_eq!(unavailable.sources, settled.sources);
     assert_eq!(
         VerifiedIndex::open(&parallel_index_root)
             .unwrap()
             .generation_id(),
         settled.commit.generation_id
     );
+    assert_eq!(
+        VerifiedIndex::open(&parallel_index_root)
+            .unwrap()
+            .manifest()
+            .sources,
+        settled.sources
+    );
+    catalog.lock().unwrap()[0].path = available_path;
+    let unavailable_retried = publish(&parallel_index_root, &parallel_registry);
+    assert_eq!(
+        unavailable_retried.outcome,
+        SourceBackedRefreshOutcome::Completed
+    );
+    assert_eq!(unavailable_retried.successful_routes, 1);
+    assert!(unavailable_retried.source_failures.is_empty());
+    assert_eq!(
+        unavailable_retried.commit.generation_id,
+        settled.commit.generation_id
+    );
+    assert_eq!(unavailable_retried.sources, settled.sources);
     assert_no_snapshot_temp_leak(&serial_data_root);
     assert_no_snapshot_temp_leak(&parallel_data_root);
 }
@@ -763,16 +813,32 @@ fn nonempty_wal_creation_fails_closed_and_clean_retry_succeeds() {
     let cold = publish(&index_root, &registry);
 
     provider.set_after_seal_action(TestAfterSealAction::CreateNonemptyWal);
-    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    let failed =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_sqlite_source_failure(
+        &failed,
+        SourceBackedSourceFailureClass::SourceChanged,
+        &database,
+    );
+    assert_eq!(failed.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(failed.sources, cold.sources);
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         cold.commit.generation_id
+    );
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().manifest().sources,
+        cold.sources
     );
     assert!(fs::metadata(&wal).unwrap().len() > 0);
 
     fs::remove_file(&wal).unwrap();
     let retried = publish(&index_root, &registry);
+    assert_eq!(retried.outcome, SourceBackedRefreshOutcome::Completed);
+    assert_eq!(retried.successful_routes, 1);
+    assert!(retried.source_failures.is_empty());
     assert_eq!(retried.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(retried.sources, cold.sources);
     assert_no_snapshot_temp_leak(&data_root);
     drop(writer);
 }
@@ -794,20 +860,57 @@ fn concurrent_mutation_before_and_after_seal_fails_closed_and_retries() {
         .execute("update messages set body = 'replacement' where id = 1", [])
         .unwrap();
     provider.state.lock().unwrap().mutate_before_finish = true;
-    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    let before_finish_failed =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_sqlite_source_failure(
+        &before_finish_failed,
+        SourceBackedSourceFailureClass::Unreadable,
+        &database,
+    );
+    assert_eq!(
+        before_finish_failed.commit.generation_id,
+        cold.commit.generation_id
+    );
+    assert_eq!(before_finish_failed.sources, cold.sources);
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         cold.commit.generation_id
     );
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().manifest().sources,
+        cold.sources
+    );
 
     let replacement = publish(&index_root, &registry);
+    assert_eq!(replacement.outcome, SourceBackedRefreshOutcome::Completed);
+    assert_eq!(replacement.successful_routes, 1);
+    assert!(replacement.source_failures.is_empty());
+    assert_ne!(replacement.commit.generation_id, cold.commit.generation_id);
     provider.set_after_seal_action(TestAfterSealAction::MutateDatabase);
-    assert!(refresh_source_backed_generation(&index_root, &registry, writer_options()).is_err());
+    let after_seal_failed =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert_sqlite_source_failure(
+        &after_seal_failed,
+        SourceBackedSourceFailureClass::SourceChanged,
+        &database,
+    );
+    assert_eq!(
+        after_seal_failed.commit.generation_id,
+        replacement.commit.generation_id
+    );
+    assert_eq!(after_seal_failed.sources, replacement.sources);
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
         replacement.commit.generation_id
     );
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().manifest().sources,
+        replacement.sources
+    );
     let retried = publish(&index_root, &registry);
+    assert_eq!(retried.outcome, SourceBackedRefreshOutcome::Completed);
+    assert_eq!(retried.successful_routes, 1);
+    assert!(retried.source_failures.is_empty());
     assert_ne!(
         retried.commit.generation_id,
         replacement.commit.generation_id
@@ -887,6 +990,27 @@ fn writer_options() -> WriterOptions {
         indexer_threads: 1,
         memory_bytes: 15_000_000,
     }
+}
+
+fn assert_sqlite_source_failure(
+    receipt: &SourceBackedRefreshReceipt,
+    class: SourceBackedSourceFailureClass,
+    selector: &Path,
+) {
+    assert_eq!(
+        receipt.outcome,
+        SourceBackedRefreshOutcome::CompletedWithSourceFailures
+    );
+    assert_eq!(receipt.successful_routes, 0);
+    assert_eq!(receipt.source_failures.total(), 1);
+    assert_eq!(receipt.source_failures.omitted(), 0);
+    let failure = &receipt.source_failures.failures()[0];
+    assert_eq!(failure.provider, CaptureProvider::Shelley);
+    assert_eq!(failure.class, class);
+    assert!(failure.carried_forward);
+    assert_eq!(failure.source_selector, selector.display().to_string());
+    assert!(!failure.detail.is_empty());
+    assert_eq!(failure.source_identity.len(), 64);
 }
 
 fn effective_test_leaf_worker_count(requested_workers: usize, leaf_count: usize) -> usize {

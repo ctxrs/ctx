@@ -6,6 +6,10 @@ use std::{
     },
 };
 
+use super::super::source_backed_refresh_coordinator::{
+    SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshPublication,
+    SourceBackedRefreshTimings,
+};
 use super::*;
 use crate::analytics::{ProviderRefreshCompletedV1, Surface};
 
@@ -172,6 +176,302 @@ fn test_daemon_run_args() -> DaemonRunArgs {
     }
 }
 
+fn source_refresh_only_runtime() -> DaemonRuntime {
+    let mut config = AppConfig::default();
+    config.daemon.mode = DaemonMode::SourceRefreshOnly;
+    DaemonRuntime {
+        config,
+        ..DaemonRuntime::default()
+    }
+}
+
+fn mark_core_sidecars_drained(
+    runtime: &mut DaemonRuntime,
+    coordinator: &CoreRefreshEngine,
+) -> Result<()> {
+    let generation = coordinator
+        .pinned_core_publication()
+        .ok_or_else(|| anyhow!("published Core generation was not pinned"))?
+        .generation_id()
+        .to_owned();
+    runtime.sidecar_drain.generation = Some(generation.clone());
+    runtime.sidecar_drain.pro_attempted_generation = Some(generation.clone());
+    runtime.sidecar_drain.semantic_attempted_generation = Some(generation);
+    Ok(())
+}
+
+fn publish_empty_source_refresh(
+    execution: SourceBackedRefreshExecution<'_>,
+) -> Result<SourceBackedRefreshPublication> {
+    let writer = ctx_history_index::GenerationWriter::open(
+        execution.index_root,
+        ctx_history_index::WriterOptions::default(),
+    )?;
+    let receipt = writer.commit(|_| true)?;
+    Ok(SourceBackedRefreshPublication {
+        generation_id: receipt.generation_id,
+        published_explicit_source_catalog:
+            crate::commands::import::load_explicit_source_catalog_authority(execution.data_root)?,
+        scanned_routes: 0,
+        successful_routes: 0,
+        source_failures: Default::default(),
+        unsupported_routes: 0,
+        certified_source_count: 0,
+        certified_source_bytes: 0,
+        current: SourceBackedRefreshCurrent::default(),
+        timings: SourceBackedRefreshTimings::default(),
+    })
+}
+
+#[test]
+fn filesystem_event_after_publication_waits_for_later_safety_reconciliation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor_calls = Arc::clone(&calls);
+    let executor_wakeup = Arc::clone(&wakeup);
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            if executor_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                executor_wakeup.signal_filesystem();
+            }
+            publish_empty_source_refresh(execution)
+        },
+    ));
+    let mut runtime = DaemonRuntime::default();
+
+    let first = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )?;
+    assert!(first.core_refresh_published);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let completed_at = Instant::now();
+    let safety_interval = daemon_safety_reconcile_interval(0);
+    let mut next_safety_reconcile = completed_at;
+    complete_core_refresh_wakeup_transition(
+        &first,
+        &wakeup,
+        &mut next_safety_reconcile,
+        completed_at,
+        safety_interval,
+    );
+    assert_eq!(
+        next_safety_reconcile,
+        completed_at + safety_interval,
+        "publication must start the existing safety cadence from fresh work"
+    );
+    let in_flight_deferred = wakeup.wait(StdDuration::ZERO);
+    assert!(!in_flight_deferred.filesystem);
+    assert!(in_flight_deferred.timed_out);
+
+    // Reproduce the active-writer case: the provider event arrives after
+    // publication, while the next safety reconciliation is still in the
+    // future. It becomes bounded dirty state without admitting a refresh.
+    wakeup.signal_filesystem();
+    let deferred = wakeup.wait(StdDuration::ZERO);
+    assert!(deferred.filesystem);
+    assert!(!deferred.filesystem_refresh);
+    assert!(!deferred.timed_out);
+    mark_core_sidecars_drained(&mut runtime, &coordinator)?;
+    let no_immediate_second = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )?;
+    assert!(!no_immediate_second.did_work);
+    let still_no_immediate_second = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )?;
+    assert!(!still_no_immediate_second.did_work);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // A later safety reconciliation remains authoritative. Repeated automatic
+    // admission before it runs is level-triggered and produces one follow-up.
+    // The event can win the wake race at the exact deadline without starving
+    // safety merely because that wake was not a timeout.
+    wakeup.signal_filesystem();
+    let deadline_wake = wakeup.wait(StdDuration::ZERO);
+    assert!(!deadline_wake.timed_out);
+    assert!(!deadline_wake.filesystem_refresh);
+    let safety_at = next_safety_reconcile;
+    assert!(begin_safety_reconciliation_if_due(
+        &wakeup,
+        &mut next_safety_reconcile,
+        safety_at,
+        safety_interval,
+    ));
+    coordinator.enqueue_periodic(temp.path())?;
+    coordinator.enqueue_periodic(temp.path())?;
+    let safety_follow_up = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )?;
+    assert!(safety_follow_up.core_refresh_published);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    mark_core_sidecars_drained(&mut runtime, &coordinator)?;
+    let drained = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )?;
+    assert!(!drained.did_work);
+    let idle = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )?;
+    assert!(!idle.did_work);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[test]
+fn explicit_refresh_request_remains_immediate_after_automatic_defer() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor_calls = Arc::clone(&calls);
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            executor_calls.fetch_add(1, Ordering::SeqCst);
+            publish_empty_source_refresh(execution)
+        },
+    ));
+    coordinator.enqueue_for_test(None);
+    let mut runtime = source_refresh_only_runtime();
+    let wakeup = DaemonWakeup::default();
+
+    let first = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )?;
+    let completed_at = Instant::now();
+    let mut next_safety_reconcile = completed_at;
+    complete_core_refresh_wakeup_transition(
+        &first,
+        &wakeup,
+        &mut next_safety_reconcile,
+        completed_at,
+        daemon_safety_reconcile_interval(0),
+    );
+
+    let response = coordinator
+        .handle_ipc_request(
+            temp.path(),
+            &json!({
+                "op": "source_refresh_request",
+                "mode": "wait",
+            }),
+        )?
+        .ok_or_else(|| anyhow!("explicit refresh request was not handled"))?;
+    let explicit_request_id = response["request_id"]
+        .as_str()
+        .filter(|request_id| !request_id.is_empty())
+        .ok_or_else(|| anyhow!("explicit refresh response had no request ID"))?
+        .to_owned();
+    assert!(coordinator.has_pending_request());
+    wakeup.signal_filesystem();
+    wakeup.signal_ipc();
+    let explicit_wake = wakeup.wait(StdDuration::ZERO);
+    assert!(!explicit_wake.timed_out);
+    assert!(!explicit_wake.filesystem_refresh);
+
+    let explicit = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )?;
+    assert!(explicit.core_refresh_published);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let job = read_daemon_job_status(&daemon_core_refresh_job_path(temp.path()))
+        .ok_or_else(|| anyhow!("explicit refresh job was not persisted"))?;
+    assert_eq!(job["request_id"], explicit_request_id);
+    Ok(())
+}
+
+#[test]
+fn failed_refresh_keeps_filesystem_retry_debt_and_safety_deadline() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let executor_wakeup = Arc::clone(&wakeup);
+    let coordinator =
+        CoreRefreshEngine::with_executor(Arc::new(move |_: SourceBackedRefreshExecution<'_>| {
+            executor_wakeup.signal_filesystem();
+            Err(anyhow!("synthetic source refresh failure"))
+        }));
+    coordinator.enqueue_for_test(None);
+    let mut runtime = source_refresh_only_runtime();
+
+    let failed = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )?;
+    assert!(failed.failed);
+    assert!(!failed.core_refresh_published);
+    assert_eq!(runtime.history_retry.consecutive_failures, 1);
+
+    let completed_at = Instant::now();
+    let safety_interval = daemon_safety_reconcile_interval(0);
+    let original_deadline = completed_at + safety_interval;
+    let mut next_safety_reconcile = original_deadline;
+    complete_core_refresh_wakeup_transition(
+        &failed,
+        &wakeup,
+        &mut next_safety_reconcile,
+        completed_at,
+        safety_interval,
+    );
+    assert_eq!(next_safety_reconcile, original_deadline);
+    let retry_wake = wakeup.wait(StdDuration::ZERO);
+    assert!(retry_wake.filesystem);
+    assert!(retry_wake.filesystem_refresh);
+    assert!(!retry_wake.timed_out);
+    Ok(())
+}
+
 #[test]
 fn semantic_runtime_is_requested_only_for_supported_full_daemons() {
     let mut config = AppConfig::default();
@@ -254,6 +554,8 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                             execution.data_root,
                         )?,
                     scanned_routes: 1,
+                    successful_routes: 1,
+                    source_failures: Default::default(),
                     unsupported_routes: 0,
                     certified_source_count: 0,
                     certified_source_bytes: 0,
@@ -352,6 +654,8 @@ fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
                         execution.data_root,
                     )?,
                 scanned_routes: 1,
+                successful_routes: 1,
+                source_failures: Default::default(),
                 unsupported_routes: 0,
                 certified_source_count: 0,
                 certified_source_bytes: 0,

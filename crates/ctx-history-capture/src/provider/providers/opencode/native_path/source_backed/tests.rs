@@ -14,7 +14,10 @@ use serde_json::json;
 use super::*;
 use crate::{
     provider::source_backed::{
-        refresh_source_backed_generation, SourceBackedProviderRegistry, SourceBackedRouteSelection,
+        refresh_source_backed_generation, refresh_source_backed_generation_with_detailed_progress,
+        SourceBackedCoordinatorError, SourceBackedCurrentSourceProgress,
+        SourceBackedCurrentSourceProgressStage, SourceBackedProviderRegistry,
+        SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
     },
     provider_sources::provider_source_for_path,
 };
@@ -134,6 +137,7 @@ fn scan_current_schema(
     OpenCodeLogicalObservation,
     OpenCodeSourceBackedScan,
     Vec<CoreRecord>,
+    [u8; 32],
 ) {
     let authorized =
         open_root_authorized_snapshot_retained(crate::test_provider_sqlite_data_root(), path)
@@ -143,6 +147,10 @@ fn scan_current_schema(
         &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
     )
     .unwrap();
+    let admitted_fingerprint = super::adapter::admitted_leaf_fingerprint(
+        &observation.source,
+        authorized.sqlite_snapshot.evidence(),
+    );
     let mut records = Vec::new();
     let scan = scan_pinned_source(
         path,
@@ -157,7 +165,7 @@ fn scan_current_schema(
         },
     )
     .unwrap();
-    (observation, scan, records)
+    (observation, scan, records, admitted_fingerprint)
 }
 
 #[test]
@@ -305,6 +313,400 @@ fn project_fixture(database: &Path, root: &Path) -> CoreSourceEventPage {
         .unwrap()
         .core_source_event_page(&source, None, 16)
         .unwrap()
+}
+
+fn refresh_fixture_with_work(
+    index_root: &Path,
+    registry: &SourceBackedProviderRegistry,
+) -> super::adapter::OpenCodeSqliteWorkCounters {
+    refresh_fixture_with_work_and_progress(index_root, registry).0
+}
+
+fn refresh_fixture_with_work_and_progress(
+    index_root: &Path,
+    registry: &SourceBackedProviderRegistry,
+) -> (
+    super::adapter::OpenCodeSqliteWorkCounters,
+    Vec<SourceBackedCurrentSourceProgress>,
+) {
+    let _ = super::adapter::take_last_work_counters();
+    let mut progress = Vec::new();
+    refresh_source_backed_generation_with_detailed_progress(
+        index_root,
+        registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+        |update| {
+            if let Some(current) = update.current_source_progress {
+                progress.push(current);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    (super::adapter::take_last_work_counters().unwrap(), progress)
+}
+
+fn create_indexed_synthetic_fixture(path: &Path, rows: i64) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "create table session (
+                 id text primary key,
+                 parent_id text,
+                 directory text,
+                 branch text,
+                 agent text,
+                 time_created integer not null,
+                 time_updated integer not null
+             );
+             create table session_message (
+                 id text primary key,
+                 session_id text not null,
+                 type text not null,
+                 seq integer not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create unique index session_message_session_seq_idx
+                 on session_message(session_id, seq);
+             insert into session values (
+                 'session-1', null, '/tmp/project', 'main', 'build', 0, 0
+             );",
+        )
+        .unwrap();
+    let transaction = connection.transaction().unwrap();
+    for sequence in 0..rows {
+        let body = json!({
+            "role": "user",
+            "time": {"created": sequence},
+            "text": format!("synthetic OpenCode event {sequence}")
+        })
+        .to_string();
+        transaction
+            .execute(
+                "insert into session_message values (?1, 'session-1', 'message', ?2, ?2, ?2, ?3)",
+                params![format!("event-{sequence:08}"), sequence, body],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn admitted_opencode_backup_stays_stable_across_later_wal_commit_and_next_open_advances() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let writer = Connection::open(&database).unwrap();
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .execute_batch(
+            "create table session (
+                 id text primary key,
+                 time_created integer not null,
+                 time_updated integer not null
+             );
+             create table session_message (
+                 id text primary key,
+                 session_id text not null,
+                 type text not null,
+                 seq integer not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create unique index session_message_session_seq_idx
+                 on session_message(session_id, seq);
+             insert into session values ('session-1', 1, 1);",
+        )
+        .unwrap();
+    writer
+        .execute(
+            "insert into session_message values (
+                 'message-1', 'session-1', 'message', 1, 1, 1, ?1
+             )",
+            [json!({"role": "user", "text": "admitted OpenCode message"}).to_string()],
+        )
+        .unwrap();
+    let data_root = temp.path().join("data-root");
+    let authorized =
+        open_root_authorized_snapshot_retained_with_hook(&data_root, &database, || {
+            writer
+                .execute(
+                    "insert into session_message values (
+                         'message-2', 'session-1', 'message', 2, 2, 2, ?1
+                     )",
+                    [json!({"role": "assistant", "text": "later OpenCode message"}).to_string()],
+                )
+                .unwrap();
+        })
+        .unwrap();
+    assert_eq!(
+        authorized
+            .sqlite_authority
+            .snapshot_counters()
+            .logical_online_backup_opens(),
+        1
+    );
+    let observation = observe_logical_source(
+        authorized.sqlite_snapshot.connection().unwrap(),
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+    )
+    .unwrap();
+    let admitted_fingerprint = super::adapter::admitted_leaf_fingerprint(
+        &observation.source,
+        authorized.sqlite_snapshot.evidence(),
+    );
+    let terminal = authorized.sqlite_snapshot.terminal_revalidator();
+    let OpenCodeAuthorizedSnapshot {
+        source_root,
+        sqlite_authority,
+        sqlite_snapshot,
+    } = authorized;
+    let mut admitted = Vec::new();
+    scan_pinned_source(
+        &database,
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+        &observation,
+        sqlite_snapshot,
+        &mut |output| {
+            if let OpenCodeScanOutput::Document(record) = output {
+                admitted.push(record.content.normalized_body.unwrap_or_default());
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    terminal().unwrap();
+    assert_eq!(admitted, vec!["admitted OpenCode message"]);
+    drop((source_root, sqlite_authority));
+
+    let (_, _, refreshed, refreshed_fingerprint) = scan_current_schema(&database);
+    assert_ne!(refreshed_fingerprint, admitted_fingerprint);
+    assert_eq!(
+        refreshed
+            .into_iter()
+            .map(|record| record.content.normalized_body.unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["admitted OpenCode message", "later OpenCode message"]
+    );
+    let imported = project_fixture(&database, temp.path());
+    assert_eq!(
+        imported
+            .items
+            .into_iter()
+            .map(|item| item.core_record.content.normalized_body.unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["admitted OpenCode message", "later OpenCode message"]
+    );
+}
+
+#[test]
+fn indexed_synthetic_progress_uses_one_snapshot_and_one_logical_row_traversal() {
+    const ROWS: u64 = 4_096;
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_synthetic_fixture(&database, ROWS as i64);
+
+    let connection = Connection::open(&database).unwrap();
+    let dialect = &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT;
+    register_projection_function(&connection, dialect).unwrap();
+    let schema = OpenCodeNativeSchema::probe(&connection, dialect).unwrap();
+    let mut sql = source_backed_event_sql(&schema);
+    sql.push_str(source_backed_event_order_sql(&schema));
+    let plan = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap()
+        .query_map([MAX_PROVIDER_SQLITE_VALUE_BYTES as i64], |row| {
+            row.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(plan.iter().any(|step| {
+        step.contains("session_message_session_seq_idx")
+            || step.contains("sqlite_autoindex_session_message")
+    }));
+    assert!(
+        plan.iter().all(|step| !step.contains("USE TEMP B-TREE")),
+        "unexpected query plan: {plan:?}"
+    );
+    drop(connection);
+
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let source = provider_source_for_path(CaptureProvider::OpenCode, database.clone());
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        &data_root,
+    )
+    .unwrap();
+
+    let (cold, cold_progress) = refresh_fixture_with_work_and_progress(&index_root, &registry);
+    assert_eq!(cold.snapshot_opens, 1);
+    assert_eq!(cold.logical_online_backup_opens, 1);
+    assert!(cold.logical_online_backup_steps > 0);
+    assert!(cold.logical_online_backup_pages > 0);
+    assert_eq!(cold.schema_probe_passes, 1);
+    assert_eq!(cold.logical_fingerprint_passes, 0);
+    assert_eq!(cold.logical_row_traversals, 1);
+    assert_eq!(cold.projection_passes, 1);
+    assert_eq!(cold.logical_rows_projected, ROWS);
+    assert_eq!(cold.documents_staged, ROWS);
+    assert!(cold_progress
+        .iter()
+        .any(|update| update.stage == SourceBackedCurrentSourceProgressStage::OnlineBackup));
+    assert!(!cold_progress.iter().any(|update| {
+        update.stage == SourceBackedCurrentSourceProgressStage::LogicalFingerprint
+    }));
+    let logical_scan = cold_progress
+        .iter()
+        .filter(|update| update.stage == SourceBackedCurrentSourceProgressStage::LogicalScan)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        logical_scan.len() as u64,
+        ROWS / LOGICAL_SCAN_PROGRESS_ROW_CADENCE + 2
+    );
+    assert_eq!(logical_scan[0].logical_rows_scanned, Some(0));
+    assert!(logical_scan.windows(2).all(|pair| {
+        pair[0].logical_rows_scanned <= pair[1].logical_rows_scanned
+            && pair[0].logical_certified_bytes <= pair[1].logical_certified_bytes
+    }));
+    assert_eq!(
+        logical_scan.last().unwrap().logical_rows_scanned,
+        Some(ROWS)
+    );
+
+    let unchanged = refresh_fixture_with_work(&index_root, &registry);
+    assert_eq!(unchanged.snapshot_opens, 1);
+    assert_eq!(unchanged.logical_online_backup_opens, 1);
+    assert!(unchanged.logical_online_backup_steps > 0);
+    assert!(unchanged.logical_online_backup_pages > 0);
+    assert_eq!(unchanged.exact_replays, 1);
+    assert_eq!(unchanged.logical_row_traversals, 0);
+    assert_eq!(unchanged.logical_rows_projected, 0);
+
+    let connection = Connection::open(&database).unwrap();
+    let sequence = ROWS as i64;
+    connection
+        .execute(
+            "insert into session_message values (?1, 'session-1', 'message', ?2, ?2, ?2, ?3)",
+            params![
+                format!("event-{sequence:08}"),
+                sequence,
+                json!({
+                    "role": "assistant",
+                    "time": {"created": sequence},
+                    "text": "changed synthetic event"
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let changed = refresh_fixture_with_work(&index_root, &registry);
+    assert_eq!(changed.snapshot_opens, 1);
+    assert_eq!(changed.logical_online_backup_opens, 1);
+    assert!(changed.logical_online_backup_steps > 0);
+    assert!(changed.logical_online_backup_pages > 0);
+    assert_eq!(changed.logical_fingerprint_passes, 0);
+    assert_eq!(changed.logical_row_traversals, 1);
+    assert_eq!(changed.projection_passes, 1);
+    assert_eq!(changed.logical_rows_projected, ROWS + 1);
+    assert_eq!(changed.documents_staged, ROWS + 1);
+}
+
+#[test]
+fn kilo_and_mimocode_progress_uses_one_online_backup_and_streaming_pass() {
+    for provider in [CaptureProvider::Kilo, CaptureProvider::MiMoCode] {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let database = temp.path().join("source/history.sqlite");
+        create_indexed_synthetic_fixture(&database, 32);
+        let source = provider_source_for_path(provider, database);
+        let mut registry = SourceBackedProviderRegistry::new();
+        register_source_backed_route(
+            &mut registry,
+            source,
+            SourceBackedRouteSelection::ExplicitManual,
+            &temp.path().join("data-root"),
+        )
+        .unwrap();
+
+        let (work, progress) =
+            refresh_fixture_with_work_and_progress(&temp.path().join("index"), &registry);
+        assert_eq!(work.snapshot_opens, 1, "{provider:?}");
+        assert_eq!(work.logical_online_backup_opens, 1, "{provider:?}");
+        assert_eq!(work.logical_fingerprint_passes, 0, "{provider:?}");
+        assert_eq!(work.logical_row_traversals, 1, "{provider:?}");
+        assert_eq!(work.logical_rows_projected, 32, "{provider:?}");
+        assert!(
+            progress
+                .iter()
+                .any(|update| update.stage == SourceBackedCurrentSourceProgressStage::OnlineBackup),
+            "{provider:?}"
+        );
+        assert!(
+            progress
+                .iter()
+                .any(|update| update.stage == SourceBackedCurrentSourceProgressStage::LogicalScan),
+            "{provider:?}"
+        );
+    }
+}
+
+#[test]
+fn opencode_progress_callback_failure_stays_systemic_internal() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("source/opencode.sqlite");
+    create_indexed_synthetic_fixture(&database, 1);
+    let source = provider_source_for_path(CaptureProvider::OpenCode, database);
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_source_backed_route(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        &temp.path().join("data-root"),
+    )
+    .unwrap();
+
+    let error = refresh_source_backed_generation_with_detailed_progress(
+        temp.path().join("index"),
+        &registry,
+        WriterOptions::default(),
+        |update| {
+            if update.current_source_progress.is_some() {
+                Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Unavailable,
+                    "injected OpenCode progress failure",
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::RouteScan {
+            source: SourceBackedRouteError {
+                kind: SourceBackedRouteErrorKind::Internal,
+                detail,
+            },
+            ..
+        } if detail.contains("progress callback failed")
+            && detail.contains("injected OpenCode progress failure")
+    ));
 }
 
 fn create_metadata_and_message_part_fixture(path: &Path) {
@@ -523,7 +925,7 @@ fn current_schema_projects_shared_repository_attribution_and_preserves_native_me
     permissions.set_readonly(true);
     fs::set_permissions(&database, permissions).unwrap();
 
-    let (observation, scan, records) = scan_current_schema(&database);
+    let (observation, scan, records, _) = scan_current_schema(&database);
     assert_eq!(
         observation.schema.family,
         OpenCodeNativeSchemaFamily::MessagePart

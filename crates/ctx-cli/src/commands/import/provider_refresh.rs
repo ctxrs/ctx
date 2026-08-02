@@ -492,7 +492,7 @@ fn refresh_result(
     canonical_pro_result: ProviderProResult,
     output_pro_result: ProviderProResult,
 ) -> ProviderRefreshResult {
-    if totals.imported_sources == 0 && totals.failed_sources > 0 {
+    if !totals.has_usable_source_result() && totals.failed_sources > 0 {
         ProviderRefreshResult::Failure
     } else if totals.failed_sources > 0
         || totals.failed > 0

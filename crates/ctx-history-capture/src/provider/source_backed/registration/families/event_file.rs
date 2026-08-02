@@ -426,6 +426,27 @@ mod tests {
         events: Vec<Vec<EventRecord>>,
     }
 
+    fn assert_openhands_source_failure(
+        receipt: &SourceBackedRefreshReceipt,
+        class: SourceBackedSourceFailureClass,
+        selector: &Path,
+    ) {
+        assert_eq!(
+            receipt.outcome,
+            SourceBackedRefreshOutcome::CompletedWithSourceFailures
+        );
+        assert_eq!(receipt.successful_routes, 0);
+        assert_eq!(receipt.source_failures.total(), 1);
+        assert_eq!(receipt.source_failures.omitted(), 0);
+        let failure = &receipt.source_failures.failures()[0];
+        assert_eq!(failure.provider, CaptureProvider::OpenHands);
+        assert_eq!(failure.class, class);
+        assert!(failure.carried_forward);
+        assert_eq!(failure.source_selector, selector.display().to_string());
+        assert!(!failure.detail.is_empty());
+        assert_eq!(failure.source_identity.len(), 64);
+    }
+
     #[test]
     fn openhands_direct_route_replays_without_reopening_or_reading_bodies() {
         let temp = crate::test_support_paths::tempdir().unwrap();
@@ -631,16 +652,15 @@ mod tests {
             write_message(&delayed_root, "conversation-delayed", "event-1", "before");
         let delayed_index = temp.path().join("delayed-index");
         let delayed_registry = registry(&delayed_root);
-        let retained = refresh_source_backed_generation(
+        let delayed_initial = refresh_source_backed_generation(
             &delayed_index,
             &delayed_registry,
             WriterOptions::default(),
         )
-        .unwrap()
-        .commit
-        .generation_id;
+        .unwrap();
+        let retained = delayed_initial.commit.generation_id.clone();
         let delayed = delayed_event.clone();
-        let result = refresh_source_backed_generation_with_progress(
+        let delayed_failed = refresh_source_backed_generation_with_progress(
             &delayed_index,
             &delayed_registry,
             WriterOptions::default(),
@@ -654,11 +674,46 @@ mod tests {
                 }
                 Ok(())
             },
+        )
+        .unwrap();
+        assert_openhands_source_failure(
+            &delayed_failed,
+            SourceBackedSourceFailureClass::SourceChanged,
+            &delayed_root,
         );
-        assert!(result.is_err());
+        assert_eq!(delayed_failed.commit.generation_id, retained);
+        assert_eq!(delayed_failed.sources, delayed_initial.sources);
         assert_eq!(
             VerifiedIndex::open(&delayed_index).unwrap().generation_id(),
             retained
+        );
+        assert_eq!(
+            VerifiedIndex::open(&delayed_index)
+                .unwrap()
+                .manifest()
+                .sources,
+            delayed_initial.sources
+        );
+        let delayed_retried = refresh_source_backed_generation(
+            &delayed_index,
+            &delayed_registry,
+            WriterOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            delayed_retried.outcome,
+            SourceBackedRefreshOutcome::Completed
+        );
+        assert_eq!(delayed_retried.successful_routes, 1);
+        assert!(delayed_retried.source_failures.is_empty());
+        assert_ne!(delayed_retried.commit.generation_id, retained);
+        assert_eq!(
+            VerifiedIndex::open(&delayed_index)
+                .unwrap()
+                .search_event_candidates("mutated after scan", 8)
+                .unwrap()
+                .len(),
+            1
         );
 
         let duplicate_root = temp.path().join("duplicate");
@@ -670,14 +725,13 @@ mod tests {
         );
         let duplicate_index = temp.path().join("duplicate-index");
         let duplicate_registry = registry(&duplicate_root);
-        let retained = refresh_source_backed_generation(
+        let duplicate_initial = refresh_source_backed_generation(
             &duplicate_index,
             &duplicate_registry,
             WriterOptions::default(),
         )
-        .unwrap()
-        .commit
-        .generation_id;
+        .unwrap();
+        let retained = duplicate_initial.commit.generation_id.clone();
         write_message(
             &duplicate_root,
             "conversation-duplicate",
@@ -689,22 +743,51 @@ mod tests {
             .join("conversation-duplicate")
             .join("event-1-copy.json");
         fs::write(
-            duplicate_path,
+            &duplicate_path,
             serde_json::to_vec(&message("event-1", "duplicate")).unwrap(),
         )
         .unwrap();
-        assert!(refresh_source_backed_generation(
+        let duplicate_failed = refresh_source_backed_generation(
             &duplicate_index,
             &duplicate_registry,
             WriterOptions::default(),
         )
-        .is_err());
+        .unwrap();
+        assert_openhands_source_failure(
+            &duplicate_failed,
+            SourceBackedSourceFailureClass::Unreadable,
+            &duplicate_root,
+        );
+        assert_eq!(duplicate_failed.commit.generation_id, retained);
+        assert_eq!(duplicate_failed.sources, duplicate_initial.sources);
         assert_eq!(
             VerifiedIndex::open(&duplicate_index)
                 .unwrap()
                 .generation_id(),
             retained
         );
+        assert_eq!(
+            VerifiedIndex::open(&duplicate_index)
+                .unwrap()
+                .manifest()
+                .sources,
+            duplicate_initial.sources
+        );
+        fs::remove_file(&duplicate_path).unwrap();
+        let duplicate_retried = refresh_source_backed_generation(
+            &duplicate_index,
+            &duplicate_registry,
+            WriterOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            duplicate_retried.outcome,
+            SourceBackedRefreshOutcome::Completed
+        );
+        assert_eq!(duplicate_retried.successful_routes, 1);
+        assert!(duplicate_retried.source_failures.is_empty());
+        assert_eq!(duplicate_retried.commit.generation_id, retained);
+        assert_eq!(duplicate_retried.sources, duplicate_initial.sources);
 
         let parse_root = temp.path().join("parse");
         let parse_event = write_message(&parse_root, "conversation-parse-00", "event-1", "before");
@@ -718,15 +801,15 @@ mod tests {
         }
         let parse_index = temp.path().join("parse-index");
         let parse_registry = registry(&parse_root);
-        let retained = refresh_source_backed_generation(
+        let parse_initial = refresh_source_backed_generation(
             &parse_index,
             &parse_registry,
             WriterOptions::default(),
         )
-        .unwrap()
-        .commit
-        .generation_id;
-        fs::write(parse_event, b"{not-json").unwrap();
+        .unwrap();
+        let retained = parse_initial.commit.generation_id.clone();
+        let valid_parse_event = fs::read(&parse_event).unwrap();
+        fs::write(&parse_event, b"{not-json").unwrap();
         let mut failing_registry = SourceBackedProviderRegistry::new();
         register_openhands_route_with_options(
             &mut failing_registry,
@@ -738,15 +821,49 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(refresh_source_backed_generation(
+        let parse_failed = refresh_source_backed_generation(
             &parse_index,
             &failing_registry,
             WriterOptions::default(),
         )
-        .is_err());
+        .unwrap();
+        assert_openhands_source_failure(
+            &parse_failed,
+            SourceBackedSourceFailureClass::Unreadable,
+            &parse_root,
+        );
+        assert_eq!(parse_failed.commit.generation_id, retained);
+        assert_eq!(parse_failed.sources, parse_initial.sources);
         assert_eq!(
             VerifiedIndex::open(&parse_index).unwrap().generation_id(),
             retained
+        );
+        assert_eq!(
+            VerifiedIndex::open(&parse_index)
+                .unwrap()
+                .manifest()
+                .sources,
+            parse_initial.sources
+        );
+        fs::write(parse_event, valid_parse_event).unwrap();
+        let parse_retried = refresh_source_backed_generation(
+            &parse_index,
+            &parse_registry,
+            WriterOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(parse_retried.outcome, SourceBackedRefreshOutcome::Completed);
+        assert_eq!(parse_retried.successful_routes, 1);
+        assert!(parse_retried.source_failures.is_empty());
+        assert_ne!(parse_retried.commit.generation_id, retained);
+        assert_eq!(parse_retried.sources.len(), parse_initial.sources.len());
+        assert_eq!(
+            VerifiedIndex::open(&parse_index)
+                .unwrap()
+                .search_event_candidates("before", 8)
+                .unwrap()
+                .len(),
+            1
         );
     }
 

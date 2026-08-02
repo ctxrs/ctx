@@ -32,6 +32,10 @@ pub(crate) struct ImportTotals {
 }
 
 impl ImportTotals {
+    pub(crate) fn has_usable_source_result(&self) -> bool {
+        self.imported_sources > 0 || self.current_source_count.unwrap_or_default() > 0
+    }
+
     pub(crate) fn add(&mut self, summary: &ProviderImportSummary, stats: &SourceStats) {
         self.per_run_counts_available = true;
         self.source_files += stats.files;

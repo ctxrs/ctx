@@ -160,6 +160,14 @@ pub enum IndexError {
     IndexMemoryTooSmall { actual: usize, minimum: usize },
     #[error("source replacement has already started for {0}")]
     DuplicateSource(String),
+    #[error("source-scoped staging is already active")]
+    SourceStageAlreadyActive,
+    #[error("source-scoped staging is not active")]
+    SourceStageNotActive,
+    #[error("carried base source {0} cannot be mutated")]
+    CarriedBaseSourceMutation(String),
+    #[error("source {0} is not retained by the locked base generation")]
+    BaseSourceNotRetained(String),
     #[error("source {0} was observed missing more than once in one refresh")]
     DuplicateSourceMissingObservation(String),
     #[error("source {0} cannot enter deletion grace because it is not retained")]

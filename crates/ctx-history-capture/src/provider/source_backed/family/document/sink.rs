@@ -289,6 +289,20 @@ enum ChangedDocumentTarget<'sink, 'writer> {
 }
 
 impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
+    pub(crate) fn report_progress(
+        &mut self,
+        progress: SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()> {
+        match &mut self.target {
+            ChangedDocumentTarget::Generation(sink) => {
+                sink.report_current_source_progress(progress)
+            }
+            ChangedDocumentTarget::Parallel(_) => Err(document_internal(
+                "current-source progress is not supported for independent document leaves",
+            )),
+        }
+    }
+
     pub(super) fn new(sink: &'sink mut SourceBackedGenerationSink<'writer>) -> Self {
         Self {
             target: ChangedDocumentTarget::Generation(sink),

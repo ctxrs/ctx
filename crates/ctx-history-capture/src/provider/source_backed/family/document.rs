@@ -14,10 +14,10 @@ use crate::provider::source_backed::{
     executable_route, route_coordinator_error, source_backed_base_sources, ParallelLeafScanBegin,
     ParallelLeafScanCancelled, ParallelLeafScanComplete, ParallelLeafScanEmitter,
     ParallelLeafScanError, ParallelLeafScanJob, ParallelLeafScanWorkerError,
-    SourceBackedCoordinatorResult, SourceBackedGenerationSink, SourceBackedProviderRegistry,
-    SourceBackedRevalidationTarget, SourceBackedRouteDriver, SourceBackedRouteError,
-    SourceBackedRouteErrorKind, SourceBackedRouteResult, SourceBackedRouteSelection,
-    SourceBackedSelectorAuthority,
+    SourceBackedCoordinatorResult, SourceBackedCurrentSourceProgress, SourceBackedGenerationSink,
+    SourceBackedProviderRegistry, SourceBackedRevalidationTarget, SourceBackedRouteDriver,
+    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+    SourceBackedRouteSelection, SourceBackedSelectorAuthority,
 };
 use crate::ProviderSource;
 use ctx_history_core::{
@@ -301,6 +301,15 @@ pub(crate) trait ReplacementDocumentTree: Send + Sync + 'static {
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
         self.discover_complete()
     }
+    fn discover_complete_with_progress(
+        &self,
+        base_sources: &[CertifiedSource],
+        _report_progress: &mut dyn FnMut(
+            SourceBackedCurrentSourceProgress,
+        ) -> SourceBackedRouteResult<()>,
+    ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
+        self.discover_complete_with_base(base_sources)
+    }
     fn scan_changed(
         &self,
         authority: &Self::TreeAuthority,
@@ -428,7 +437,9 @@ where
     A: ReplacementDocumentTree,
 {
     let base_sources = source_backed_base_sources(sink, |source| adapter.owns_source(source));
-    let mut tree = adapter.discover_complete_with_base(&base_sources)?;
+    let mut tree = adapter.discover_complete_with_progress(&base_sources, &mut |progress| {
+        sink.report_current_source_progress(progress)
+    })?;
     validate_unique_leaf_fingerprints(&tree.leaves)?;
     bind_durable_replay_sources(adapter, &mut tree)?;
     let mut replayable = HashMap::new();
