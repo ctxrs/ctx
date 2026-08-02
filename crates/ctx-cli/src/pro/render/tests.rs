@@ -338,6 +338,7 @@ fn direct_commit_blame_shows_its_parent_session() {
     ));
     value.owning_root = Some(resource("run:root", ResourceKind::Run, "root"));
     let result = BlameResult {
+        snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit,
             repository: repository(),
