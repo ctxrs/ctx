@@ -1,7 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use ctx_history_core::{SourceKey, StableEntityId};
@@ -9,9 +6,9 @@ use ctx_history_index::{
     CoreEventRecord, SemanticEligibility, SourceCoreRecordAggregate, SourceEventCursor,
     VerifiedIndex, LEXICAL_SCHEMA_VERSION, MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
-use rusqlite::{params, OptionalExtension, Transaction};
-use serde::{Deserialize, Serialize};
+use rusqlite::params;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use uuid::Uuid;
 
 use super::control::FULL_REBUILD_STATE;
@@ -25,20 +22,18 @@ use crate::semantic::{
 };
 
 mod manifest;
+mod state;
 
 use manifest::{
     semantic_policy_fingerprint, source_consumer_build_id, source_contract_fingerprint,
     validate_generation, validate_generation_id, validate_page, validate_resolved_document,
-    AcknowledgedSourceProjection, SourceProjectionAcknowledgement, SourceProjectionFrontier,
-    SourceTraversalPhase, SOURCE_ACKNOWLEDGEMENT_STATE, SOURCE_CONTRACT_VERSION,
-    SOURCE_FRONTIER_STATE, SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
+    AcknowledgedSourceProjection, SourceProjectionFrontier, SourceTraversalPhase,
+    SOURCE_ACKNOWLEDGEMENT_STATE, SOURCE_CONTRACT_VERSION, SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
 };
+use state::{clear_active_source, source_reconciliation_id, store_frontier, store_source_receipt};
 
 const SEARCH_DIRECTORY: &str = "search";
 const SEMANTIC_DIRECTORY: &str = "semantic";
-const SOURCE_RECONCILIATION_DOMAIN: &[u8] = b"ctx-semantic-source-reconciliation-v1\0";
-const SOURCE_RECEIPT_DOMAIN: &[u8] = b"ctx-semantic-source-receipt-v1\0";
-const RECEIPT_SET_DOMAIN: &[u8] = b"ctx-semantic-source-receipt-set-v1\0";
 
 pub(in crate::semantic) fn source_backed_semantic_vector_path(data_root: &Path) -> PathBuf {
     data_root.join(SEARCH_DIRECTORY).join(SEMANTIC_DIRECTORY)
@@ -176,35 +171,6 @@ pub(in crate::semantic) enum SourceBackedGenerationPin {
     NotReady,
     ReadyEmpty,
     Ready(PinnedFlatGeneration),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct SourceProjectionReceipt {
-    source_identity_digest: String,
-    indexed_documents: u64,
-    semantic_eligible_documents: u64,
-    core_record_accumulator: String,
-    contract_fingerprint: String,
-    semantic_policy_fingerprint: String,
-    owned_event_count: u64,
-    owned_event_ids_hash: String,
-}
-
-impl SourceProjectionReceipt {
-    fn matches(
-        &self,
-        source: &SourceBackedSemanticSource,
-        contract_fingerprint: &str,
-        policy_fingerprint: &str,
-    ) -> bool {
-        self.source_identity_digest == source.aggregate.source_identity_digest()
-            && self.indexed_documents == source.aggregate.indexed_documents()
-            && self.semantic_eligible_documents == source.aggregate.semantic_eligible_documents()
-            && self.core_record_accumulator == source.aggregate.core_record_accumulator()
-            && self.contract_fingerprint == contract_fingerprint
-            && self.semantic_policy_fingerprint == policy_fingerprint
-            && self.owned_event_count <= self.semantic_eligible_documents
-    }
 }
 
 #[derive(Debug)]
@@ -943,380 +909,7 @@ impl SemanticVectorStore {
         frontier.last_failure = None;
         self.store_source_frontier(frontier)
     }
-
-    fn source_frontier(&self) -> Result<Option<SourceProjectionFrontier>> {
-        self.maintenance_json(SOURCE_FRONTIER_STATE)
-    }
-
-    fn source_acknowledgement(&self) -> Result<Option<SourceProjectionAcknowledgement>> {
-        self.maintenance_json(SOURCE_ACKNOWLEDGEMENT_STATE)
-    }
-
-    fn maintenance_json<T>(&self, key: &str) -> Result<Option<T>>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        let value = self
-            .conn
-            .query_row(
-                "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
-                [key],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        value
-            .map(|value| {
-                serde_json::from_str(&value).map_err(|error| {
-                    SemanticVectorStoreError::reset_required(format!(
-                        "semantic vector store has invalid {key} state: {error}"
-                    ))
-                    .into()
-                })
-            })
-            .transpose()
-    }
-
-    fn store_source_frontier(&self, frontier: &SourceProjectionFrontier) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![SOURCE_FRONTIER_STATE, serde_json::to_string(frontier)?],
-        )?;
-        Ok(())
-    }
-
-    fn source_document_ids(
-        &self,
-        source_identity_digest: &str,
-        except_reconciliation_id: Option<&str>,
-    ) -> Result<Vec<Uuid>> {
-        self.flat
-            .source_event_ids_except_reconciliation(
-                source_identity_digest,
-                except_reconciliation_id,
-                MAX_SOURCE_EVENT_PAGE_ITEMS,
-            )
-            .map_err(anyhow::Error::new)
-    }
-
-    fn source_receipts(&self) -> Result<BTreeMap<String, SourceProjectionReceipt>> {
-        let mut statement = self.conn.prepare(
-            "SELECT source_identity_digest, indexed_documents,
-                    semantic_eligible_documents, core_record_accumulator,
-                    contract_fingerprint, semantic_policy_fingerprint,
-                    owned_event_count, owned_event_ids_hash
-             FROM semantic_source_receipts ORDER BY source_identity_digest",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok(SourceProjectionReceipt {
-                source_identity_digest: row.get(0)?,
-                indexed_documents: row.get(1)?,
-                semantic_eligible_documents: row.get(2)?,
-                core_record_accumulator: row.get(3)?,
-                contract_fingerprint: row.get(4)?,
-                semantic_policy_fingerprint: row.get(5)?,
-                owned_event_count: row.get(6)?,
-                owned_event_ids_hash: row.get(7)?,
-            })
-        })?;
-        rows.map(|row| row.map(|receipt| (receipt.source_identity_digest.clone(), receipt)))
-            .collect::<std::result::Result<_, _>>()
-            .map_err(Into::into)
-    }
-
-    fn source_receipt(
-        &self,
-        source_identity_digest: &str,
-    ) -> Result<Option<SourceProjectionReceipt>> {
-        self.conn
-            .query_row(
-                "SELECT source_identity_digest, indexed_documents,
-                        semantic_eligible_documents, core_record_accumulator,
-                        contract_fingerprint, semantic_policy_fingerprint,
-                        owned_event_count, owned_event_ids_hash
-                 FROM semantic_source_receipts WHERE source_identity_digest = ?1",
-                [source_identity_digest],
-                |row| {
-                    Ok(SourceProjectionReceipt {
-                        source_identity_digest: row.get(0)?,
-                        indexed_documents: row.get(1)?,
-                        semantic_eligible_documents: row.get(2)?,
-                        core_record_accumulator: row.get(3)?,
-                        contract_fingerprint: row.get(4)?,
-                        semantic_policy_fingerprint: row.get(5)?,
-                        owned_event_count: row.get(6)?,
-                        owned_event_ids_hash: row.get(7)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    fn next_source_receipt_identity(&self, after: Option<&str>) -> Result<Option<String>> {
-        let value = match after {
-            Some(after) => self
-                .conn
-                .query_row(
-                    "SELECT source_identity_digest FROM semantic_source_receipts
-                     WHERE source_identity_digest > ?1
-                     ORDER BY source_identity_digest LIMIT 1",
-                    [after],
-                    |row| row.get(0),
-                )
-                .optional()?,
-            None => self
-                .conn
-                .query_row(
-                    "SELECT source_identity_digest FROM semantic_source_receipts
-                     ORDER BY source_identity_digest LIMIT 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?,
-        };
-        Ok(value)
-    }
-
-    fn build_source_receipt(
-        &self,
-        source: &SourceBackedSemanticSource,
-        contract_fingerprint: &str,
-        policy_fingerprint: &str,
-        reconciliation_id: &str,
-    ) -> Result<SourceProjectionReceipt> {
-        let lookup = self
-            .flat
-            .source_event_lookup(source.aggregate.source_identity_digest())
-            .map_err(anyhow::Error::new)?;
-        let mut count = 0_u64;
-        let mut digest = Sha256::new();
-        digest.update(SOURCE_RECEIPT_DOMAIN);
-        for event in lookup.events() {
-            if event.source_reconciliation_id != reconciliation_id {
-                return Err(SemanticVectorStoreError::reset_required(
-                    "semantic source retained stale ownership after source completion",
-                )
-                .into());
-            }
-            digest.update(event.event_id.as_bytes());
-            digest.update([0]);
-            digest.update(event.seq.to_be_bytes());
-            digest.update(event.source_text_hash.as_bytes());
-            digest.update(event.stable_identity_hash);
-            digest.update([0]);
-            count = count.checked_add(1).ok_or_else(|| {
-                SemanticVectorStoreError::reset_required(
-                    "semantic source ownership count overflowed",
-                )
-            })?;
-        }
-        if count > source.aggregate.semantic_eligible_documents() {
-            return Err(SemanticVectorStoreError::reset_required(
-                "semantic source owns more vectors than its Core aggregate permits",
-            )
-            .into());
-        }
-        Ok(SourceProjectionReceipt {
-            source_identity_digest: source.aggregate.source_identity_digest().to_owned(),
-            indexed_documents: source.aggregate.indexed_documents(),
-            semantic_eligible_documents: source.aggregate.semantic_eligible_documents(),
-            core_record_accumulator: source.aggregate.core_record_accumulator().to_owned(),
-            contract_fingerprint: contract_fingerprint.to_owned(),
-            semantic_policy_fingerprint: policy_fingerprint.to_owned(),
-            owned_event_count: count,
-            owned_event_ids_hash: hex(&digest.finalize()),
-        })
-    }
-
-    fn source_receipts_summary(&self) -> Result<(u64, String, u64)> {
-        let receipts = self.source_receipts()?;
-        let mut digest = Sha256::new();
-        digest.update(RECEIPT_SET_DOMAIN);
-        let mut projected_documents = 0_u64;
-        for receipt in receipts.values() {
-            digest.update(serde_json::to_vec(receipt)?);
-            digest.update([0]);
-            projected_documents = projected_documents
-                .checked_add(receipt.owned_event_count)
-                .ok_or_else(|| {
-                    SemanticVectorStoreError::reset_required(
-                        "semantic source receipt count overflowed",
-                    )
-                })?;
-        }
-        Ok((
-            u64::try_from(receipts.len())?,
-            hex(&digest.finalize()),
-            projected_documents,
-        ))
-    }
-
-    fn finish_source_generation(
-        &mut self,
-        frontier: &SourceProjectionFrontier,
-        generation: &SourceBackedSemanticGeneration,
-    ) -> Result<SourceBackedSemanticOutcome> {
-        let receipts = self.source_receipts()?;
-        let contract_fingerprint = source_contract_fingerprint()?;
-        if receipts.len() != generation.sources.len()
-            || generation.sources.iter().any(|source| {
-                receipts
-                    .get(source.aggregate.source_identity_digest())
-                    .is_none_or(|receipt| {
-                        !receipt.matches(
-                            source,
-                            &contract_fingerprint,
-                            &generation.semantic_policy_fingerprint,
-                        )
-                    })
-            })
-        {
-            return Err(SemanticVectorStoreError::reset_required(
-                "semantic generation receipts do not match target Core source aggregates",
-            )
-            .into());
-        }
-
-        let (source_receipt_count, source_receipts_hash, receipt_documents) =
-            self.source_receipts_summary()?;
-        if receipt_documents > frontier.semantic_documents {
-            return Err(SemanticVectorStoreError::reset_required(
-                "semantic source receipts exceed metadata-eligible Core records",
-            )
-            .into());
-        }
-        self.flat
-            .finish_reconciliation_view()
-            .map_err(anyhow::Error::new)?;
-        let stats = self.flat.active_stats().map_err(anyhow::Error::new)?;
-        if stats.active_events as u64 != receipt_documents
-            || (receipt_documents == 0 && stats.active_chunks != 0)
-            || (receipt_documents != 0 && stats.active_chunks < stats.active_events)
-        {
-            return Err(SemanticVectorStoreError::reset_required(
-                "semantic source receipts do not match flat manifest counters",
-            )
-            .into());
-        }
-        let acknowledgement = SourceProjectionAcknowledgement {
-            contract_version: frontier.contract_version,
-            contract_fingerprint: frontier.contract_fingerprint.clone(),
-            core_generation_id: frontier.core_generation_id.clone(),
-            semantic_policy_fingerprint: frontier.semantic_policy_fingerprint.clone(),
-            consumer_build_id: frontier.consumer_build_id.clone(),
-            semantic_documents: frontier.semantic_documents,
-            projected_documents: receipt_documents,
-            source_receipt_count,
-            source_receipts_hash,
-            flat_generation: stats.generation,
-            flat_generation_hash: stats.generation_hash.unwrap_or_default(),
-            flat_active_events: stats.active_events as u64,
-            flat_active_chunks: stats.active_chunks as u64,
-        };
-        let transaction = self.conn.transaction()?;
-        transaction.execute(
-            "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![
-                SOURCE_ACKNOWLEDGEMENT_STATE,
-                serde_json::to_string(&acknowledgement)?
-            ],
-        )?;
-        transaction.execute(
-            "DELETE FROM semantic_maintenance_state WHERE key = ?1",
-            [SOURCE_FRONTIER_STATE],
-        )?;
-        transaction.commit()?;
-        Ok(SourceBackedSemanticOutcome {
-            ready: true,
-            ..SourceBackedSemanticOutcome::default()
-        })
-    }
 }
-
-fn store_frontier(
-    transaction: &Transaction<'_>,
-    frontier: &SourceProjectionFrontier,
-) -> Result<()> {
-    transaction.execute(
-        "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![SOURCE_FRONTIER_STATE, serde_json::to_string(frontier)?],
-    )?;
-    Ok(())
-}
-
-fn store_source_receipt(
-    transaction: &Transaction<'_>,
-    receipt: &SourceProjectionReceipt,
-) -> Result<()> {
-    transaction.execute(
-        "INSERT INTO semantic_source_receipts
-         (source_identity_digest, indexed_documents, semantic_eligible_documents,
-          core_record_accumulator, contract_fingerprint, semantic_policy_fingerprint,
-          owned_event_count, owned_event_ids_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(source_identity_digest) DO UPDATE SET
-            indexed_documents = excluded.indexed_documents,
-            semantic_eligible_documents = excluded.semantic_eligible_documents,
-            core_record_accumulator = excluded.core_record_accumulator,
-            contract_fingerprint = excluded.contract_fingerprint,
-            semantic_policy_fingerprint = excluded.semantic_policy_fingerprint,
-            owned_event_count = excluded.owned_event_count,
-            owned_event_ids_hash = excluded.owned_event_ids_hash",
-        params![
-            receipt.source_identity_digest,
-            receipt.indexed_documents,
-            receipt.semantic_eligible_documents,
-            receipt.core_record_accumulator,
-            receipt.contract_fingerprint,
-            receipt.semantic_policy_fingerprint,
-            receipt.owned_event_count,
-            receipt.owned_event_ids_hash,
-        ],
-    )?;
-    Ok(())
-}
-
-fn clear_active_source(frontier: &mut SourceProjectionFrontier) {
-    frontier.active_source_identity_digest = None;
-    frontier.active_source_reconciliation_id = None;
-    frontier.active_source_indexed_documents = 0;
-    frontier.active_source_semantic_documents = 0;
-    frontier.processed_source_documents = 0;
-    frontier.processed_source_semantic_documents = 0;
-    frontier.after_identity = None;
-    frontier.source_scan_complete = false;
-    frontier.removing_source = false;
-    frontier.last_failure = None;
-}
-
-fn source_reconciliation_id(
-    contract_fingerprint: &str,
-    semantic_policy_fingerprint: &str,
-    aggregate: &SourceCoreRecordAggregate,
-) -> String {
-    let mut digest = Sha256::new();
-    digest.update(SOURCE_RECONCILIATION_DOMAIN);
-    digest.update(contract_fingerprint.as_bytes());
-    digest.update(semantic_policy_fingerprint.as_bytes());
-    digest.update(aggregate.source_identity_digest().as_bytes());
-    digest.update(aggregate.indexed_documents().to_be_bytes());
-    digest.update(aggregate.semantic_eligible_documents().to_be_bytes());
-    digest.update(aggregate.core_record_accumulator().as_bytes());
-    hex(&digest.finalize())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
-}
-
 /// Control-message exclusion is applied only after complete normalized Core
 /// content has crossed the generation pin.
 pub(in crate::semantic) fn semantic_core_content_is_control(text: &str) -> bool {
