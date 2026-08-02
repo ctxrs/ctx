@@ -28,6 +28,27 @@ fn unhex(value: &str) -> Vec<u8> {
         .collect()
 }
 
+fn assert_inventory_fields_match_actual(canonical: &Value, name: &str, actual: &Value) {
+    let declared = canonical["dto_fields"][name]["required"]
+        .as_array()
+        .expect("required DTO fields")
+        .iter()
+        .chain(
+            canonical["dto_fields"][name]["optional"]
+                .as_array()
+                .expect("optional DTO fields"),
+        )
+        .map(|field| field.as_str().expect("DTO field name"))
+        .collect::<BTreeSet<_>>();
+    let actual = actual
+        .as_object()
+        .expect("serialized DTO object")
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(declared, actual, "inventory field drift for {name}");
+}
+
 fn host_kind(message: &HostMessage) -> &'static str {
     match message {
         HostMessage::Hello(_) => "hello",
@@ -258,5 +279,38 @@ fn inventory_freezes_reviewed_status_axes_and_incremental_ack_subset() {
             < canonical["framing"]["maximum_payload_bytes"]
                 .as_u64()
                 .unwrap()
+    );
+}
+
+#[test]
+fn inventory_source_removal_and_reconciliation_fields_match_actual_dtos() {
+    let value = inventory();
+    let canonical = &value["canonical_inventory"];
+    let envelope = read_frame::<_, HelperEnvelope>(&mut Cursor::new(unhex(
+        value["golden_vectors"]["helper_frames"]["core_source_delta_page_applied"]
+            .as_str()
+            .expect("source acknowledgement frame"),
+    )))
+    .expect("source acknowledgement");
+    let HelperMessage::CoreSourceDeltaPageApplied(response) = envelope.message else {
+        panic!("source acknowledgement kind");
+    };
+    let removal = response
+        .reconcile_sources
+        .iter()
+        .find_map(|reconciliation| match &reconciliation.delta {
+            CoreSourceDelta::Removed(removal) => Some((reconciliation, removal)),
+            CoreSourceDelta::Present(_) => None,
+        })
+        .expect("golden removal reconciliation");
+    assert_inventory_fields_match_actual(
+        canonical,
+        "CoreSourceReconciliation",
+        &serde_json::to_value(removal.0).expect("reconciliation JSON"),
+    );
+    assert_inventory_fields_match_actual(
+        canonical,
+        "CoreSourceRemoval",
+        &serde_json::to_value(removal.1).expect("removal JSON"),
     );
 }

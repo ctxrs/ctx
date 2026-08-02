@@ -18,6 +18,7 @@ pub use control::{
 pub use page_builder::CoreEventDeltaPageBuilder;
 #[cfg(test)]
 use validation::canonical_sha256;
+pub(crate) use validation::encoded_len;
 pub use validation::{core_materialization_id, core_record_sha256, core_source_snapshot_sha256};
 use validation::{
     core_record_content_bytes, core_source_delta_exact_eq, invalid_contract,
@@ -319,10 +320,14 @@ pub struct ApplyCoreSourceDeltaPageRequest {
 
 impl ApplyCoreSourceDeltaPageRequest {
     pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.validate_with_control_wire_bound(MAX_CORE_CONTROL_WIRE_BYTES)
+    }
+
+    fn validate_with_control_wire_bound(&self, maximum: usize) -> Result<(), ProtocolError> {
         self.page.validate()?;
         validate_encoded_bound(
             self,
-            MAX_CORE_CONTROL_WIRE_BYTES,
+            maximum,
             "Core source delta request exceeds its control wire bound",
         )
     }
@@ -435,11 +440,15 @@ impl CoreSourceDeltaPageApplied {
                 "Core source delta acknowledgement does not match its page CAS",
             ));
         }
-        validate_encoded_bound(
-            self,
-            MAX_CORE_CONTROL_WIRE_BYTES,
-            "Core source delta acknowledgement exceeds its control wire bound",
-        )
+        if crate::core_source_delta_page_applied_frame_wire_bytes(u64::MAX, self)?
+            > MAX_CORE_CONTROL_WIRE_BYTES
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "Core source delta acknowledgement exceeds its complete frame wire bound",
+            ));
+        }
+        Ok(())
     }
 }
 

@@ -53,9 +53,10 @@ pub use lifecycle::{
 };
 mod message;
 pub use message::{
-    Capability, CoreProjectionCurrentness, HelloRequest, HelloResult, HelperEnvelope,
-    HelperMessage, HostEnvelope, HostMessage, MaterializedCoverage, ProAccessState,
-    ProAccessStatus, ProOperation, RepositoryCoverage, StatusRequest, StatusResult,
+    core_source_delta_page_applied_frame_wire_bytes, Capability, CoreProjectionCurrentness,
+    HelloRequest, HelloResult, HelperEnvelope, HelperMessage, HostEnvelope, HostMessage,
+    MaterializedCoverage, ProAccessState, ProAccessStatus, ProOperation, RepositoryCoverage,
+    StatusRequest, StatusResult,
 };
 mod query;
 pub use query::{

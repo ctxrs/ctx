@@ -133,7 +133,7 @@ pub(super) fn validate_encoded_bound<T: Serialize>(
     Ok(())
 }
 
-pub(super) fn encoded_len<T: Serialize + ?Sized>(value: &T) -> Result<usize, ProtocolError> {
+pub(crate) fn encoded_len<T: Serialize + ?Sized>(value: &T) -> Result<usize, ProtocolError> {
     #[derive(Default)]
     struct Counter(usize);
 

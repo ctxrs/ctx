@@ -120,7 +120,7 @@ pub(super) fn inventory() -> Value {
             "ProAccessStatus": fields(&["entitlement", "graph_key", "local_repository"], &[]),
             "CoreSourceState": fields(
                 &["source", "core_record_accumulator", "event_count"], &[]),
-            "CoreSourceRemoval": fields(&["source", "removal_revision_sha256"], &[]),
+            "CoreSourceRemoval": fields(&["source"], &[]),
             "CoreGenerationHead": fields(&[
                 "contract_version", "core_generation_id", "generation_manifest_version",
                 "identity_version", "core_record_version", "core_record_contract_fingerprint",
@@ -151,7 +151,7 @@ pub(super) fn inventory() -> Value {
                 "acknowledgement_page_index", "acknowledgement_terminal",
                 "changed_sources", "removed_sources", "reconcile_sources", "replayed"
             ], &[]),
-            "CoreSourceReconciliation": fields(&["delta"], &[]),
+            "CoreSourceReconciliation": fields(&["materialize_index", "delta"], &[]),
             "CoreEventState": fields(
                 &["event_id", "core_record_sha256", "requires_replacement"], &[]),
             "CoreEventStatePageRequest": fields(&[

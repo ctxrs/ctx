@@ -10,8 +10,60 @@ use crate::{
     CoreEventStatePageRequest, CoreMaterializationBegan, CoreMaterializationFinished,
     CoreMaterializationReceipt, CoreSourceDeltaPageApplied, ErrorClass,
     FinishCoreMaterializationRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
-    PrepareGraphKeyDeletionRequest, ProtocolError, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+    PrepareGraphKeyDeletionRequest, ProtocolError, FRAME_HEADER_BYTES, PROTOCOL_FINGERPRINT,
+    PROTOCOL_VERSION,
 };
+
+const ENVELOPE_SEQUENCE_PREFIX_BYTES: usize = "{\"sequence\":".len();
+const ENVELOPE_REQUEST_ID_PREFIX_BYTES: usize = ",\"request_id\":\"".len();
+const UUID_HYPHENATED_BYTES: usize = 36;
+const CORE_SOURCE_APPLIED_MESSAGE_PREFIX_BYTES: usize =
+    "\",\"message\":{\"kind\":\"core_source_delta_page_applied\",\"body\":".len();
+const CORE_SOURCE_APPLIED_FRAME_SUFFIX_BYTES: usize = "}}".len();
+
+const fn u64_decimal_bytes(mut value: u64) -> usize {
+    let mut bytes = 1;
+    while value >= 10 {
+        value /= 10;
+        bytes += 1;
+    }
+    bytes
+}
+
+pub(crate) fn core_source_delta_page_applied_frame_wire_bytes_from_response_bytes(
+    sequence: u64,
+    encoded_response_bytes: usize,
+) -> Result<usize, ProtocolError> {
+    FRAME_HEADER_BYTES
+        .checked_add(ENVELOPE_SEQUENCE_PREFIX_BYTES)
+        .and_then(|bytes| bytes.checked_add(u64_decimal_bytes(sequence)))
+        .and_then(|bytes| bytes.checked_add(ENVELOPE_REQUEST_ID_PREFIX_BYTES))
+        .and_then(|bytes| bytes.checked_add(UUID_HYPHENATED_BYTES))
+        .and_then(|bytes| bytes.checked_add(CORE_SOURCE_APPLIED_MESSAGE_PREFIX_BYTES))
+        .and_then(|bytes| bytes.checked_add(encoded_response_bytes))
+        .and_then(|bytes| bytes.checked_add(CORE_SOURCE_APPLIED_FRAME_SUFFIX_BYTES))
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorClass::Bounds,
+                "Core source delta acknowledgement frame byte count overflowed",
+            )
+        })
+}
+
+/// Returns the exact byte length of a complete framed source acknowledgement.
+///
+/// UUIDs have a fixed 36-byte JSON representation. Callers that must admit a
+/// response before its transport sequence is available use `u64::MAX`; every
+/// actual Protocol V1 sequence is then no larger than the admitted frame.
+pub fn core_source_delta_page_applied_frame_wire_bytes(
+    sequence: u64,
+    response: &CoreSourceDeltaPageApplied,
+) -> Result<usize, ProtocolError> {
+    core_source_delta_page_applied_frame_wire_bytes_from_response_bytes(
+        sequence,
+        crate::core_materialization::encoded_len(response)?,
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct HostEnvelope {

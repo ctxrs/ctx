@@ -1,6 +1,9 @@
 use std::{collections::BTreeMap, io::Cursor};
 
-use crate::{read_frame, write_frame, HostEnvelope, HostMessage};
+use crate::{
+    core_source_delta_page_applied_frame_wire_bytes, read_frame, write_frame, HelperEnvelope,
+    HelperMessage, HostEnvelope, HostMessage,
+};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CoreContent, CoreContentPolicyStatus, EventIdentityInput,
     NativeItemKey, NativeSessionKey, RepositoryAlias, RepositoryAliasKind, RepositoryBinding,
@@ -9,6 +12,7 @@ use ctx_history_core::{
     RepositoryVcsObservation, RepositoryVcsObservationKind, SessionIdentityInput, SourceAnchor,
     TypedKey, CORE_CONTENT_POLICY_REVISION, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
 };
+use uuid::Uuid;
 
 use super::*;
 
@@ -789,6 +793,86 @@ fn source_acknowledgement_pages_are_bounded_and_cursor_pinned() {
     assert_eq!(
         nonterminal_error.message,
         "nonterminal Core source delta pages must complete in one acknowledgement page"
+    );
+}
+
+#[test]
+fn source_acknowledgement_sizing_is_the_exact_complete_frame_at_decimal_boundaries() {
+    let response = CoreSourceDeltaPageApplied {
+        materialization_id: "d".repeat(64),
+        core_generation_id: "a".repeat(64),
+        page_index: 0,
+        acknowledgement_page_index: 9,
+        acknowledgement_terminal: false,
+        changed_sources: 0,
+        removed_sources: 1,
+        reconcile_sources: vec![CoreSourceReconciliation {
+            materialize_index: 9,
+            delta: CoreSourceDelta::Removed(CoreSourceRemoval { source: source(9) }),
+        }],
+        replayed: false,
+    };
+    for sequence in [0, 9, 10, 99, 100, u64::MAX] {
+        let mut frame = Vec::new();
+        write_frame(
+            &mut frame,
+            &HelperEnvelope {
+                sequence,
+                request_id: Uuid::from_u128(1),
+                message: HelperMessage::CoreSourceDeltaPageApplied(response.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            core_source_delta_page_applied_frame_wire_bytes(sequence, &response).unwrap(),
+            frame.len()
+        );
+    }
+    assert_eq!(
+        core_source_delta_page_applied_frame_wire_bytes(10, &response).unwrap(),
+        core_source_delta_page_applied_frame_wire_bytes(9, &response).unwrap() + 1
+    );
+    assert_eq!(
+        core_source_delta_page_applied_frame_wire_bytes(100, &response).unwrap(),
+        core_source_delta_page_applied_frame_wire_bytes(99, &response).unwrap() + 1
+    );
+
+    let mut cursor_ten = response.clone();
+    cursor_ten.acknowledgement_page_index = 10;
+    assert_eq!(
+        core_source_delta_page_applied_frame_wire_bytes(u64::MAX, &cursor_ten).unwrap(),
+        core_source_delta_page_applied_frame_wire_bytes(u64::MAX, &response).unwrap() + 1
+    );
+    let mut cursor_ninety_nine = response;
+    cursor_ninety_nine.acknowledgement_page_index = 99;
+    let ninety_nine =
+        core_source_delta_page_applied_frame_wire_bytes(u64::MAX, &cursor_ninety_nine).unwrap();
+    cursor_ninety_nine.acknowledgement_page_index = 100;
+    assert_eq!(
+        core_source_delta_page_applied_frame_wire_bytes(u64::MAX, &cursor_ninety_nine).unwrap(),
+        ninety_nine + 1
+    );
+}
+
+#[test]
+fn source_delta_request_validation_measures_the_whole_request() {
+    let request = ApplyCoreSourceDeltaPageRequest {
+        page: CoreSourceDeltaPage::new("d".repeat(64), "a".repeat(64), 0, true, Vec::new())
+            .unwrap(),
+        acknowledgement_page_index: 0,
+    };
+    let page_bytes = serde_json::to_vec(&request.page).unwrap().len();
+    let request_bytes = serde_json::to_vec(&request).unwrap().len();
+    assert!(request_bytes > page_bytes);
+    request
+        .validate_with_control_wire_bound(request_bytes)
+        .unwrap();
+    assert_eq!(
+        request
+            .validate_with_control_wire_bound(request_bytes - 1)
+            .unwrap_err()
+            .class,
+        ErrorClass::Bounds
     );
 }
 
