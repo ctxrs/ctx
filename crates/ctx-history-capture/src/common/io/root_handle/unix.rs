@@ -268,37 +268,12 @@ fn open_component(
     let descriptor = unsafe { libc::openat(parent, name.as_ptr(), flags) };
     if descriptor < 0 {
         let cause = io::Error::last_os_error();
-        return match cause.raw_os_error() {
-            Some(libc::ELOOP) => Err(AuthorityOpenError::Rejected(
-                "symlinked provider source path components are rejected",
-            )),
-            // `open(2)`'s ENXIO/ENODEV cover most non-regular special files
-            // (FIFOs, device nodes) portably, but a bound Unix-domain socket
-            // is rejected with EOPNOTSUPP on macOS/BSD kernels instead.
-            Some(libc::ENXIO | libc::ENODEV | libc::EOPNOTSUPP) => {
-                Err(AuthorityOpenError::Rejected(
-                    "provider source paths must be regular files or directories",
-                ))
-            }
-            // BSD-derived kernels (observed on macOS) report ENOTDIR rather
-            // than ELOOP for `openat(..., O_NOFOLLOW | O_DIRECTORY)` against a
-            // symlink component. Without this arm, a symlinked ancestor
-            // silently degraded to a bare `std::io::Error` on macOS instead
-            // of the intended rejection that every other platform already
-            // gets via ELOOP. A non-symlink component still legitimately
-            // returns ENOTDIR here too (e.g. a plain regular file standing
-            // in for a directory ancestor), so only reclassify when an
-            // `lstat` confirms the component is actually a symlink.
-            Some(libc::ENOTDIR)
-                if expected == Some(ExpectedType::Directory)
-                    && component_is_symlink(parent, &name) =>
-            {
-                Err(AuthorityOpenError::Rejected(
-                    "symlinked provider source path components are rejected",
-                ))
-            }
-            _ => Err(cause.into()),
-        };
+        return Err(classify_open_component_error(
+            parent,
+            name.as_c_str(),
+            expected,
+            cause,
+        ));
     }
     let file = unsafe { File::from_raw_fd(descriptor) };
     let metadata = file.metadata()?;
@@ -308,6 +283,32 @@ fn open_component(
         ));
     }
     Ok(file)
+}
+
+fn classify_open_component_error(
+    parent: libc::c_int,
+    name: &CStr,
+    expected: Option<ExpectedType>,
+    cause: io::Error,
+) -> AuthorityOpenError {
+    match cause.raw_os_error() {
+        Some(libc::ELOOP) => {
+            AuthorityOpenError::Rejected("symlinked provider source path components are rejected")
+        }
+        // BSD kernels also use ENOTDIR for O_NOFOLLOW | O_DIRECTORY against a
+        // symlink. Reclassify only when no-follow metadata confirms that case.
+        Some(libc::ENOTDIR)
+            if expected == Some(ExpectedType::Directory) && component_is_symlink(parent, name) =>
+        {
+            AuthorityOpenError::Rejected("symlinked provider source path components are rejected")
+        }
+        Some(libc::ENXIO) | Some(libc::ENODEV) | Some(libc::EOPNOTSUPP) => {
+            AuthorityOpenError::Rejected(
+                "provider source paths must be regular files or directories",
+            )
+        }
+        _ => AuthorityOpenError::Io(cause),
+    }
 }
 
 /// Best-effort, TOCTOU-tolerant check for whether `name` under `parent` is
@@ -476,8 +477,26 @@ fn current_errno() -> libc::c_int {
     unsafe { *errno_location() }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
+    #[test]
+    fn eopnotsupp_is_classified_as_a_special_file_rejection() {
+        let error = super::classify_open_component_error(
+            libc::AT_FDCWD,
+            c"unused",
+            None,
+            std::io::Error::from_raw_os_error(libc::EOPNOTSUPP),
+        );
+
+        assert!(matches!(
+            error,
+            super::AuthorityOpenError::Rejected(
+                "provider source paths must be regular files or directories"
+            )
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn filesystem_policy_rejects_network_fuse_and_virtual_roots() {
         const NFS_SUPER_MAGIC: i64 = 0x6969;
