@@ -16,8 +16,10 @@ use crate::{
 };
 
 mod digest;
+mod writer_options;
 
 use digest::{decode_sha256_hex, is_sha256_hex};
+pub use writer_options::WriterOptions;
 
 pub const GENERATION_MANIFEST_VERSION: u32 = 7;
 pub const LEXICAL_SCHEMA_VERSION: u32 = LEXICAL_SCHEMA_REVISION;
@@ -392,24 +394,6 @@ pub enum IndexError {
     },
     #[error("manifest Core-record aggregate is invalid for source {0}")]
     CoreRecordAggregateMismatch(String),
-}
-
-#[derive(Debug, Clone)]
-pub struct WriterOptions {
-    pub indexer_threads: usize,
-    pub memory_bytes: usize,
-}
-
-impl Default for WriterOptions {
-    fn default() -> Self {
-        let parallelism = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1);
-        Self {
-            indexer_threads: parallelism.clamp(1, 8),
-            memory_bytes: 512 * 1024 * 1024,
-        }
-    }
 }
 
 /// Non-zero number of consecutive certified route observations that found a
