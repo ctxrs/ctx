@@ -1,27 +1,31 @@
 use ctx_history_core::{
     derive_event_id, derive_session_id, EventIdentityInput, GitObjectFormat, GitObjectId,
-    NativeItemKey, NativeSessionKey, RepositoryBinding, RepositoryEvidence,
-    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
-    RepositoryFileObservationKind, RepositoryOutcomeKind, RepositoryOutcomeLinkage,
-    RepositoryOutcomeObservation, RepositoryVcsObservation, RepositoryVcsObservationKind,
-    SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
-    CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    NativeItemKey, NativeSessionKey, RepositoryAlias, RepositoryAliasKind, RepositoryBinding,
+    RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
+    RepositoryFileObservation, RepositoryFileObservationKind, RepositoryLocalRootAuthorization,
+    RepositoryOutcomeKind, RepositoryOutcomeLinkage, RepositoryOutcomeObservation,
+    RepositoryVcsObservation, RepositoryVcsObservationKind, SessionIdentityInput, SourceAnchor,
+    SourceKey, TypedKey, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
+    CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
 };
 use ctx_history_index::{CoreEventRecord, EventRecord};
 use ctx_pro_host_protocol::{
     BlameResult, EvidenceCitation, GitSnapshot, NumberedEvidence, ResolvedBlameTarget,
     ResourceKind, ResourceRef, WorktreeStatus,
 };
+use sha2::{Digest, Sha256};
 
 use super::{
     project_evidence_previews, EvidencePreviewKind, VerifiedEvidenceRecord,
-    MAX_EVIDENCE_PREVIEW_AGGREGATE_BYTES, MAX_EVIDENCE_PREVIEW_CITATIONS,
-    MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
+    MAX_EVIDENCE_PREVIEW_BODY_BYTES, MAX_EVIDENCE_PREVIEW_BODY_LINES,
+    MAX_EVIDENCE_PREVIEW_CITATIONS, MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
 };
 
 const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const DIGEST: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const OID: &str = "0123456789abcdef0123456789abcdef01234567";
+const REPOSITORY_ID: &str = "forge:github.com/ctxrs/ctx";
+const REPOSITORY_RESOURCE_ID: &str = "repository:opaque-derived-graph-id";
 
 fn resource(id: &str, kind: ResourceKind, display: &str) -> ResourceRef {
     ResourceRef {
@@ -33,17 +37,30 @@ fn resource(id: &str, kind: ResourceKind, display: &str) -> ResourceRef {
 
 fn repository() -> ResourceRef {
     resource(
-        "repository:ctxrs-ctx",
+        REPOSITORY_RESOURCE_ID,
         ResourceKind::Repository,
-        "ctxrs/ctx",
+        REPOSITORY_ID,
     )
 }
 
 fn source(provider: &str, seed: u8) -> SourceKey {
+    source_contract(
+        provider,
+        if provider == "codex" {
+            "codex_session_jsonl"
+        } else {
+            "unsupported_session_jsonl"
+        },
+        "codex-nativepath-jsonl-v0",
+        seed,
+    )
+}
+
+fn source_contract(provider: &str, format: &str, schema: &str, seed: u8) -> SourceKey {
     SourceKey::derive(
         provider,
-        format!("{provider}_session_jsonl"),
-        "fixture-v1",
+        format,
+        schema,
         1,
         SourceAnchor::CatalogLineage([seed; 32]),
     )
@@ -51,9 +68,17 @@ fn source(provider: &str, seed: u8) -> SourceKey {
 }
 
 fn binding(format: Option<GitObjectFormat>) -> RepositoryBinding {
+    binding_for("binding-1", REPOSITORY_ID, format)
+}
+
+fn binding_for(
+    binding_id: &str,
+    logical_repository_id: &str,
+    format: Option<GitObjectFormat>,
+) -> RepositoryBinding {
     RepositoryBinding {
-        binding_id: "binding-1".to_owned(),
-        logical_repository_id: "forge:github.com/ctxrs/ctx".to_owned(),
+        binding_id: binding_id.to_owned(),
+        logical_repository_id: logical_repository_id.to_owned(),
         checkout_id: None,
         worktree_id: None,
         aliases: Vec::new(),
@@ -67,8 +92,48 @@ fn binding(format: Option<GitObjectFormat>) -> RepositoryBinding {
     }
 }
 
-fn base_record(provider: &str, seed: u8, sequence: u64, body: &str) -> CoreEventRecord {
-    let source = source(provider, seed);
+fn authorize_local_root(record: &mut CoreEventRecord, local_root: &str) {
+    let binding = &mut record.core_record.repository_bindings[0];
+    binding.checkout_id = Some("checkout-1".to_owned());
+    binding.worktree_id = Some("worktree-1".to_owned());
+    binding.local_root_authorization = Some(RepositoryLocalRootAuthorization {
+        local_root: local_root.to_owned(),
+        local_root_authorization_fingerprint_revision:
+            CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
+        local_root_authorization_fingerprint: [7; 32],
+        observed_at_unix_ms: 1,
+    });
+}
+
+fn base_record(
+    provider: &str,
+    seed: u8,
+    sequence: u64,
+    body: &str,
+    event_type: &str,
+    role: &str,
+) -> CoreEventRecord {
+    base_record_for_source(
+        source(provider, seed),
+        seed,
+        sequence,
+        body,
+        event_type,
+        role,
+        "codex-nativepath-core-record-v7",
+    )
+}
+
+fn base_record_for_source(
+    source: SourceKey,
+    seed: u8,
+    sequence: u64,
+    body: &str,
+    event_type: &str,
+    role: &str,
+    parser_revision: &str,
+) -> CoreEventRecord {
+    let provider = source.provider().to_owned();
     let session_id = derive_session_id(SessionIdentityInput {
         source: &source,
         logical_session_kind: "thread",
@@ -79,7 +144,7 @@ fn base_record(provider: &str, seed: u8, sequence: u64, body: &str) -> CoreEvent
     let event_id = derive_event_id(EventIdentityInput {
         source: &source,
         session_id,
-        logical_item_kind: "tool_result",
+        logical_item_kind: event_type,
         native_item_key: &NativeItemKey::native_id("event", TypedKey::U64(sequence)).unwrap(),
         subrecord_selector: None,
     })
@@ -90,31 +155,31 @@ fn base_record(provider: &str, seed: u8, sequence: u64, body: &str) -> CoreEvent
         session_id,
         source.clone(),
         sequence,
-        "tool_result",
-        "codex",
+        event_type,
+        "primary",
         true,
-        "fixture-v1",
+        parser_revision,
         body,
     )
     .unwrap();
-    core.role = Some("assistant".to_owned());
+    core.role = Some(role.to_owned());
     let event = EventRecord {
         event_id,
         session_id,
         parent_session_id: None,
         root_session_id: session_id,
         source: source.clone(),
-        provider: provider.to_owned(),
+        provider,
         source_format: source.source_format().to_owned(),
         provider_session_id: None,
         native_event_id: None,
         branch: None,
-        agent_type: "codex".to_owned(),
+        agent_type: "primary".to_owned(),
         is_primary: true,
         event_sequence: sequence,
         occurred_at_unix_ms: None,
-        event_type: "tool_result".to_owned(),
-        role: Some("assistant".to_owned()),
+        event_type: event_type.to_owned(),
+        role: Some(role.to_owned()),
         workspace: None,
         cwd: None,
         touched_files: Vec::new(),
@@ -133,7 +198,16 @@ fn file_record(
     kind: RepositoryFileObservationKind,
     prior_path: Option<&str>,
 ) -> CoreEventRecord {
-    let mut record = base_record("codex", seed, sequence, body);
+    let record = base_record("codex", seed, sequence, body, "tool_call", "assistant");
+    file_record_from_base(record, path, kind, prior_path)
+}
+
+fn file_record_from_base(
+    mut record: CoreEventRecord,
+    path: &str,
+    kind: RepositoryFileObservationKind,
+    prior_path: Option<&str>,
+) -> CoreEventRecord {
     record.core_record.repository_bindings = vec![binding(None)];
     record.core_record.repository_file_observations = vec![RepositoryFileObservation {
         repository_binding_id: "binding-1".to_owned(),
@@ -145,7 +219,7 @@ fn file_record(
 }
 
 fn commit_record(seed: u8, sequence: u64, body: &str, outcomes: usize) -> CoreEventRecord {
-    let mut record = base_record("codex", seed, sequence, body);
+    let mut record = base_record("codex", seed, sequence, body, "command_output", "tool");
     record.core_record.repository_bindings = vec![binding(Some(GitObjectFormat::Sha1))];
     record.core_record.repository_vcs_observations = (0..outcomes)
         .map(|index| RepositoryVcsObservation {
@@ -179,6 +253,8 @@ fn commit_record(seed: u8, sequence: u64, body: &str, outcomes: usize) -> CoreEv
 }
 
 fn numbered(record: &CoreEventRecord, number: u32) -> NumberedEvidence {
+    let encoded = record.core_record.encode_stored().unwrap();
+    let digest = format!("{:x}", Sha256::digest(encoded));
     NumberedEvidence {
         number,
         citation: EvidenceCitation {
@@ -188,7 +264,7 @@ fn numbered(record: &CoreEventRecord, number: u32) -> NumberedEvidence {
             event_id: record.event_id,
             event_sequence: record.event_sequence,
             byte_range: None,
-            evidence_sha256: Some(DIGEST.to_owned()),
+            evidence_sha256: Some(digest),
         },
     }
 }
@@ -227,7 +303,7 @@ fn verified<'a>(
     evidence: &'a NumberedEvidence,
     record: &'a CoreEventRecord,
 ) -> VerifiedEvidenceRecord<'a> {
-    VerifiedEvidenceRecord::new(evidence, GENERATION, DIGEST, record).unwrap()
+    VerifiedEvidenceRecord::new(evidence, GENERATION, record).unwrap()
 }
 
 fn one_file_preview(target: &str, record: &CoreEventRecord) -> super::EvidencePreviewModel {
@@ -376,9 +452,74 @@ fn exact_path_matching_rejects_basename_case_and_token_boundary_lookalikes() {
         RepositoryFileObservationKind::Modified,
         None,
     );
+    assert!(one_file_preview("src/lib.rs", &absolute)
+        .previews
+        .is_empty());
+}
+
+#[test]
+fn certified_local_root_allows_only_the_exact_authorized_absolute_path() {
+    let root = "/worktrees/validated";
+    let mut authorized = file_record(
+        25,
+        1,
+        "*** Update File: /worktrees/validated/src/lib.rs",
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
+    );
+    authorize_local_root(&mut authorized, root);
     assert_eq!(
-        one_file_preview("src/lib.rs", &absolute).previews[0].excerpt,
-        "*** Update File: /tmp/worktree/src/lib.rs"
+        one_file_preview("src/lib.rs", &authorized).previews[0].excerpt,
+        "*** Update File: /worktrees/validated/src/lib.rs"
+    );
+
+    let mut other_root = file_record(
+        26,
+        1,
+        "*** Update File: /other/repository/src/lib.rs",
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
+    );
+    authorize_local_root(&mut other_root, root);
+    assert!(one_file_preview("src/lib.rs", &other_root)
+        .previews
+        .is_empty());
+
+    let mut traversal = file_record(
+        27,
+        1,
+        "*** Update File: /worktrees/validated/src/lib.rs",
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
+    );
+    authorize_local_root(&mut traversal, "/worktrees/validated/../validated");
+    assert!(one_file_preview("src/lib.rs", &traversal)
+        .previews
+        .is_empty());
+}
+
+#[test]
+fn certified_local_root_preserves_exact_absolute_rename_old_and_new_paths() {
+    let body = "*** Update File: /worktrees/validated/src/old.rs\n*** Move to: /worktrees/validated/src/new.rs";
+    let mut record = file_record(
+        28,
+        1,
+        body,
+        "src/new.rs",
+        RepositoryFileObservationKind::Renamed,
+        Some("src/old.rs"),
+    );
+    authorize_local_root(&mut record, "/worktrees/validated");
+    assert_eq!(
+        one_file_preview("src/old.rs", &record).previews[0].excerpt,
+        body
+    );
+    assert_eq!(
+        one_file_preview("src/new.rs", &record).previews[0].excerpt,
+        "*** Move to: /worktrees/validated/src/new.rs"
     );
 }
 
@@ -430,6 +571,187 @@ fn duplicate_conflicting_and_multiple_decisive_file_units_omit() {
         None,
     );
     assert!(one_file_preview("src/lib.rs", &repeated)
+        .previews
+        .is_empty());
+}
+
+#[test]
+fn codex_contract_allowlist_rejects_unknown_format_schema_revision_and_event_shape() {
+    let valid = file_record(
+        33,
+        1,
+        "*** Update File: src/lib.rs",
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
+    );
+    let evidence = numbered(&valid, 1);
+    assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, &valid).is_some());
+
+    for variant in 0..5 {
+        let mut record = if matches!(variant, 0 | 1) {
+            file_record_from_base(
+                base_record_for_source(
+                    source_contract(
+                        "codex",
+                        if variant == 0 {
+                            "unknown_codex_jsonl"
+                        } else {
+                            "codex_session_jsonl"
+                        },
+                        if variant == 1 {
+                            "unknown-schema"
+                        } else {
+                            "codex-nativepath-jsonl-v0"
+                        },
+                        34 + variant,
+                    ),
+                    34 + variant,
+                    1,
+                    "*** Update File: src/lib.rs",
+                    "tool_call",
+                    "assistant",
+                    "codex-nativepath-core-record-v7",
+                ),
+                "src/lib.rs",
+                RepositoryFileObservationKind::Modified,
+                None,
+            )
+        } else {
+            valid.clone()
+        };
+        match variant {
+            0 | 1 => {}
+            2 => record.core_record.parser_revision = "codex-nativepath-core-record-v8".to_owned(),
+            3 => record.core_record.normalization_revision += 1,
+            4 => {
+                record.event.event_type = "message".to_owned();
+                record.core_record.event_type = "message".to_owned();
+            }
+            _ => unreachable!(),
+        }
+        let evidence = numbered(&record, 1);
+        assert!(
+            VerifiedEvidenceRecord::new(&evidence, GENERATION, &record).is_none(),
+            "variant {variant}"
+        );
+    }
+}
+
+#[test]
+fn unsupported_and_mixed_file_grammars_omit() {
+    for (index, body) in [
+        "updated file src/lib.rs",
+        "*** Update File: src/lib.rs\ndiff --git a/src/lib.rs b/src/lib.rs",
+        "*** Update File: src/lib.rs\nmodified: src/lib.rs",
+        "diff --git a/src/lib.rs b/src/lib.rs\nmodified: src/lib.rs",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let record = file_record(
+            34 + u8::try_from(index).unwrap(),
+            1,
+            body,
+            "src/lib.rs",
+            RepositoryFileObservationKind::Modified,
+            None,
+        );
+        assert!(
+            one_file_preview("src/lib.rs", &record).previews.is_empty(),
+            "{body}"
+        );
+    }
+
+    let wrong_shape = base_record(
+        "codex",
+        38,
+        1,
+        "*** Update File: src/lib.rs",
+        "command_output",
+        "tool",
+    );
+    let mut wrong_shape = wrong_shape;
+    wrong_shape.core_record.repository_bindings = vec![binding(None)];
+    wrong_shape.core_record.repository_file_observations = vec![RepositoryFileObservation {
+        repository_binding_id: "binding-1".to_owned(),
+        relative_path: "src/lib.rs".to_owned(),
+        kind: RepositoryFileObservationKind::Modified,
+        prior_relative_path: None,
+    }];
+    assert!(one_file_preview("src/lib.rs", &wrong_shape)
+        .previews
+        .is_empty());
+}
+
+#[test]
+fn repository_binding_identity_scopes_file_observations_exactly() {
+    let exact = file_record(
+        39,
+        1,
+        "*** Update File: src/lib.rs",
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
+    );
+    assert_ne!(repository().id, repository().display);
+    assert_eq!(
+        one_file_preview("src/lib.rs", &exact).previews[0].excerpt,
+        "*** Update File: src/lib.rs"
+    );
+
+    let mut other_repository = file_record(
+        40,
+        1,
+        "*** Update File: src/lib.rs",
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
+    );
+    other_repository
+        .core_record
+        .repository_bindings
+        .push(binding_for("binding-2", "forge:github.com/fork/ctx", None));
+    other_repository.core_record.repository_file_observations[0].repository_binding_id =
+        "binding-2".to_owned();
+    assert!(one_file_preview("src/lib.rs", &other_repository)
+        .previews
+        .is_empty());
+
+    let mut ambiguous = file_record(
+        41,
+        1,
+        "*** Update File: src/lib.rs",
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
+    );
+    ambiguous
+        .core_record
+        .repository_bindings
+        .push(binding_for("binding-2", REPOSITORY_ID, None));
+    assert!(one_file_preview("src/lib.rs", &ambiguous)
+        .previews
+        .is_empty());
+
+    let mut exact_alias = file_record(
+        42,
+        1,
+        "*** Update File: src/lib.rs",
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
+    );
+    exact_alias.core_record.repository_bindings[0].logical_repository_id =
+        "local:certified".to_owned();
+    exact_alias.core_record.repository_bindings[0].aliases = vec![RepositoryAlias {
+        kind: RepositoryAliasKind::Forge,
+        host: "github.com".to_owned(),
+        namespace: vec!["ctxrs".to_owned()],
+        name: "ctx".to_owned(),
+        remote_name: Some("origin".to_owned()),
+    }];
+    assert!(one_file_preview("src/lib.rs", &exact_alias)
         .previews
         .is_empty());
 }
@@ -544,6 +866,55 @@ fn commit_case_token_duplicate_unit_and_duplicate_outcome_ambiguity_omit() {
 }
 
 #[test]
+fn commit_outcome_must_belong_to_the_exact_resolved_repository_binding() {
+    assert!(
+        super::commit_oid_matches_binding(OID, &binding(Some(GitObjectFormat::Sha1))).is_some()
+    );
+    assert!(
+        super::commit_oid_matches_binding(OID, &binding(Some(GitObjectFormat::Sha256))).is_none()
+    );
+    assert!(super::commit_oid_matches_binding(
+        &"a".repeat(64),
+        &binding(Some(GitObjectFormat::Sha256))
+    )
+    .is_some());
+
+    let body = format!("Process exited with code 0\nOutput:\n{OID}");
+    let mut other_repository = commit_record(48, 2, &body, 1);
+    other_repository
+        .core_record
+        .repository_bindings
+        .push(binding_for(
+            "binding-2",
+            "local:certified-other-repository",
+            Some(GitObjectFormat::Sha1),
+        ));
+    other_repository.core_record.repository_vcs_observations[0].repository_binding_id =
+        "binding-2".to_owned();
+    let evidence = numbered(&other_repository, 1);
+    assert!(project_evidence_previews(
+        &commit_result(OID, vec![evidence.clone()]),
+        &[verified(&evidence, &other_repository)],
+    )
+    .previews
+    .is_empty());
+
+    let mut ambiguous = commit_record(49, 2, &body, 1);
+    ambiguous.core_record.repository_bindings.push(binding_for(
+        "binding-2",
+        REPOSITORY_ID,
+        Some(GitObjectFormat::Sha1),
+    ));
+    let evidence = numbered(&ambiguous, 1);
+    assert!(project_evidence_previews(
+        &commit_result(OID, vec![evidence.clone()]),
+        &[verified(&evidence, &ambiguous)],
+    )
+    .previews
+    .is_empty());
+}
+
+#[test]
 fn utf8_exact_512_byte_unit_is_kept_and_oversized_unit_is_omitted() {
     let prefix = "*** Update File: ";
     let exact_path = format!("{}x", "é".repeat((512 - prefix.len() - 1) / 2));
@@ -576,6 +947,70 @@ fn utf8_exact_512_byte_unit_is_kept_and_oversized_unit_is_omitted() {
     assert!(one_file_preview(&oversized_path, &oversized)
         .previews
         .is_empty());
+}
+
+#[test]
+fn parser_body_and_line_ceilings_are_checked_before_projection() {
+    let marker = "*** Update File: src/lib.rs";
+    let bounded_body = format!(
+        "{marker}\n{}",
+        "x".repeat(MAX_EVIDENCE_PREVIEW_BODY_BYTES - marker.len() - 1)
+    );
+    assert_eq!(bounded_body.len(), MAX_EVIDENCE_PREVIEW_BODY_BYTES);
+    let bounded = file_record(
+        52,
+        1,
+        &bounded_body,
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
+    );
+    assert_eq!(
+        one_file_preview("src/lib.rs", &bounded).previews[0].excerpt,
+        marker
+    );
+
+    let oversized_body = format!("{bounded_body}x");
+    let oversized = file_record(
+        53,
+        1,
+        &oversized_body,
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
+    );
+    assert!(one_file_preview("src/lib.rs", &oversized)
+        .previews
+        .is_empty());
+
+    let bounded_lines = format!(
+        "{marker}\n{}",
+        "\n".repeat(MAX_EVIDENCE_PREVIEW_BODY_LINES - 1)
+    );
+    let bounded = file_record(
+        54,
+        1,
+        &bounded_lines,
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
+    );
+    assert_eq!(
+        one_file_preview("src/lib.rs", &bounded).previews[0].excerpt,
+        marker
+    );
+
+    let newline_dense = format!("{bounded_lines}\n");
+    assert!(newline_dense.len() < MAX_EVIDENCE_PREVIEW_BODY_BYTES);
+    let dense = file_record(
+        55,
+        1,
+        &newline_dense,
+        "src/lib.rs",
+        RepositoryFileObservationKind::Modified,
+        None,
+    );
+    assert!(one_file_preview("src/lib.rs", &dense).previews.is_empty());
 }
 
 #[test]
@@ -639,19 +1074,32 @@ fn digest_generation_and_all_coordinates_must_match() {
         None,
     );
     let evidence = numbered(&record, 1);
-    assert!(VerifiedEvidenceRecord::new(&evidence, "b", DIGEST, &record).is_none());
-    assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, "f", &record).is_none());
+    assert!(VerifiedEvidenceRecord::new(&evidence, "b", &record).is_none());
+
+    let mut wrong_digest = evidence.clone();
+    wrong_digest.citation.evidence_sha256 = Some("f".repeat(64));
+    assert!(VerifiedEvidenceRecord::new(&wrong_digest, GENERATION, &record).is_none());
 
     let mut missing = evidence.clone();
     missing.citation.evidence_sha256 = None;
-    assert!(VerifiedEvidenceRecord::new(&missing, GENERATION, DIGEST, &record).is_none());
+    assert!(VerifiedEvidenceRecord::new(&missing, GENERATION, &record).is_none());
 
     let mut ranged = evidence.clone();
     ranged.citation.byte_range = Some(ctx_pro_host_protocol::ByteRange {
         start: 0,
         end_exclusive: 1,
     });
-    assert!(VerifiedEvidenceRecord::new(&ranged, GENERATION, DIGEST, &record).is_none());
+    assert!(VerifiedEvidenceRecord::new(&ranged, GENERATION, &record).is_none());
+
+    let mut mutated_content = record.clone();
+    mutated_content
+        .core_record
+        .content
+        .normalized_body
+        .as_mut()
+        .unwrap()
+        .push_str("\nmutated");
+    assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, &mutated_content).is_none());
 
     let other = file_record(
         71,
@@ -661,7 +1109,7 @@ fn digest_generation_and_all_coordinates_must_match() {
         RepositoryFileObservationKind::Modified,
         None,
     );
-    assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, DIGEST, &other).is_none());
+    assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, &other).is_none());
 
     for mutate in [0, 1, 2] {
         let mut mismatch = record.clone();
@@ -671,7 +1119,7 @@ fn digest_generation_and_all_coordinates_must_match() {
             2 => mismatch.event.session_id = other.session_id,
             _ => unreachable!(),
         }
-        assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, DIGEST, &mismatch).is_none());
+        assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, &mismatch).is_none());
     }
 }
 
@@ -715,7 +1163,7 @@ fn pull_requests_non_codex_and_unverified_records_are_normal_omissions() {
     );
     non_codex.event.provider = "claude".to_owned();
     let evidence = numbered(&non_codex, 1);
-    assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, DIGEST, &non_codex).is_none());
+    assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, &non_codex).is_none());
 }
 
 #[test]
@@ -739,39 +1187,8 @@ fn excerpt_never_expands_to_adjacent_content_and_repeats_deterministically() {
 }
 
 #[test]
-fn public_byte_limits_are_exact_and_aggregate_output_obeys_them() {
+fn public_projector_limits_are_exact() {
     assert_eq!(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES, 512);
-    assert_eq!(MAX_EVIDENCE_PREVIEW_AGGREGATE_BYTES, 4_096);
-
-    let records = (0..3)
-        .map(|index| {
-            file_record(
-                100 + index,
-                u64::from(index),
-                &format!("modified: src/{index}.rs"),
-                &format!("src/{index}.rs"),
-                RepositoryFileObservationKind::Modified,
-                None,
-            )
-        })
-        .collect::<Vec<_>>();
-    let evidence = records
-        .iter()
-        .enumerate()
-        .map(|(index, record)| numbered(record, u32::try_from(index + 1).unwrap()))
-        .collect::<Vec<_>>();
-    let proofs = evidence
-        .iter()
-        .zip(&records)
-        .map(|(citation, record)| verified(citation, record))
-        .collect::<Vec<_>>();
-    let model = project_evidence_previews(&file_result("src/0.rs", evidence.clone()), &proofs);
-    assert!(
-        model
-            .previews
-            .iter()
-            .map(|preview| preview.excerpt.len())
-            .sum::<usize>()
-            <= MAX_EVIDENCE_PREVIEW_AGGREGATE_BYTES
-    );
+    assert_eq!(MAX_EVIDENCE_PREVIEW_BODY_BYTES, 64 * 1_024);
+    assert_eq!(MAX_EVIDENCE_PREVIEW_BODY_LINES, 4_096);
 }
