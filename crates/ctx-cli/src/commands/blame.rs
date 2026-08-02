@@ -74,12 +74,6 @@ pub(crate) struct BlameArgs {
         requires = "target"
     )]
     pub(crate) format: JsonOutputFormat,
-    #[arg(
-        long,
-        requires = "target",
-        help = "Request exact cited Codex file evidence in human output; valid only when TARGET resolves to a file"
-    )]
-    pub(crate) evidence_preview: bool,
 }
 
 impl BlameArgs {
@@ -92,18 +86,9 @@ impl BlameArgs {
         }
     }
 
-    pub(crate) const fn evidence_preview_requested(&self) -> bool {
-        match &self.explicit_target {
-            Some(BlameTargetArgs::File(args)) => args.evidence_preview,
-            Some(BlameTargetArgs::Commit(args)) => args.evidence_preview,
-            Some(BlameTargetArgs::PullRequest(args)) => args.evidence_preview,
-            None => self.evidence_preview,
-        }
-    }
-
-    fn into_query(self) -> Result<(BlameTarget, u32, Option<String>, bool, bool)> {
+    fn into_query(self) -> Result<(BlameTarget, u32, Option<String>, bool)> {
         if let Some(target) = self.explicit_target {
-            return validated_query(explicit_query(target));
+            return Ok(explicit_query(target));
         }
         let target = self
             .target
@@ -136,13 +121,7 @@ impl BlameArgs {
                 repository: self.repository,
             },
         };
-        validated_query((
-            target,
-            self.limit,
-            self.cursor,
-            self.format.is_json(),
-            self.evidence_preview,
-        ))
+        Ok((target, self.limit, self.cursor, self.format.is_json()))
     }
 }
 
@@ -194,8 +173,6 @@ pub(crate) struct FileBlameArgs {
     pub(crate) cursor: Option<String>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,
-    #[arg(long, help = "Request exact cited Codex file evidence in human output")]
-    pub(crate) evidence_preview: bool,
 }
 
 #[derive(Debug, Args)]
@@ -222,8 +199,6 @@ pub(crate) struct CommitBlameArgs {
     pub(crate) cursor: Option<String>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,
-    #[arg(long, hide = true)]
-    pub(crate) evidence_preview: bool,
 }
 
 #[derive(Debug, Args)]
@@ -250,11 +225,9 @@ pub(crate) struct PullRequestBlameArgs {
     pub(crate) cursor: Option<String>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,
-    #[arg(long, hide = true)]
-    pub(crate) evidence_preview: bool,
 }
 
-fn explicit_query(target: BlameTargetArgs) -> (BlameTarget, u32, Option<String>, bool, bool) {
+fn explicit_query(target: BlameTargetArgs) -> (BlameTarget, u32, Option<String>, bool) {
     match target {
         BlameTargetArgs::File(args) => (
             BlameTarget::File {
@@ -265,7 +238,6 @@ fn explicit_query(target: BlameTargetArgs) -> (BlameTarget, u32, Option<String>,
             args.limit,
             args.cursor,
             args.format.is_json(),
-            args.evidence_preview,
         ),
         BlameTargetArgs::Commit(args) => (
             BlameTarget::Commit {
@@ -275,7 +247,6 @@ fn explicit_query(target: BlameTargetArgs) -> (BlameTarget, u32, Option<String>,
             args.limit,
             args.cursor,
             args.format.is_json(),
-            args.evidence_preview,
         ),
         BlameTargetArgs::PullRequest(args) => (
             BlameTarget::PullRequest {
@@ -285,25 +256,8 @@ fn explicit_query(target: BlameTargetArgs) -> (BlameTarget, u32, Option<String>,
             args.limit,
             args.cursor,
             args.format.is_json(),
-            args.evidence_preview,
         ),
     }
-}
-
-fn validated_query(
-    query: (BlameTarget, u32, Option<String>, bool, bool),
-) -> Result<(BlameTarget, u32, Option<String>, bool, bool)> {
-    if query.4 && !matches!(&query.0, BlameTarget::File { .. }) {
-        return Err(anyhow!(
-            "invalid_request: --evidence-preview is valid only for file blame; remove it or select a file target"
-        ));
-    }
-    if query.3 && query.4 {
-        return Err(anyhow!(
-            "invalid_request: --evidence-preview is only available for human output; remove it or use --format text"
-        ));
-    }
-    Ok(query)
 }
 
 fn classify_target(target: &str) -> Option<BlameTargetType> {
@@ -348,8 +302,15 @@ pub(crate) fn run(
         local_usage,
         ui,
         crate::pro::blame,
-        evidence_hydration::hydrate_evidence_previews,
+        hydrate_evidence_context,
     )
+}
+
+pub(crate) fn hydrate_evidence_context(
+    data_root: &std::path::Path,
+    result: &ctx_pro_host_protocol::BlameResult,
+) -> crate::pro::evidence_preview::EvidencePreviewModel {
+    evidence_hydration::hydrate_evidence_previews(data_root, result)
 }
 
 fn run_with(
@@ -368,7 +329,7 @@ fn run_with(
         &ctx_pro_host_protocol::BlameResult,
     ) -> crate::pro::evidence_preview::EvidencePreviewModel,
 ) -> Result<()> {
-    let (target, limit, cursor, json, evidence_preview) = args.into_query()?;
+    let (target, limit, cursor, json) = args.into_query()?;
     target
         .validate()
         .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
@@ -381,10 +342,13 @@ fn run_with(
     let result = (|| {
         let result = present_blame_result(blame(&data_root, target, limit, cursor), json, ui)?;
         telemetry.complete(result.matches.len(), result.next.is_some());
-        let previews = evidence_preview.then(|| hydrate(&data_root, &result));
-        if let Some(previews) = previews.as_ref() {
+        if matches!(
+            &result.target,
+            ctx_pro_host_protocol::ResolvedBlameTarget::File { .. }
+        ) {
+            let previews = hydrate(&data_root, &result);
             emit_blame_result(&result, json, local_usage, ui, |result, json, ui| {
-                print_blame_result_with_evidence_preview(result, json, previews, ui)
+                print_blame_result_with_evidence_preview(result, json, &previews, ui)
             })?;
         } else {
             emit_blame_result(&result, json, local_usage, ui, print_blame_result)?;
@@ -422,8 +386,15 @@ fn emit_blame_result(
 }
 
 #[cfg(test)]
-fn blame_json_output_bytes(result: &ctx_pro_host_protocol::BlameResult) -> Result<usize> {
-    Ok(serde_json::to_vec_pretty(result)?.len().saturating_add(1))
+fn blame_json_output_bytes(
+    result: &ctx_pro_host_protocol::BlameResult,
+    previews: Option<&crate::pro::evidence_preview::EvidencePreviewModel>,
+) -> Result<usize> {
+    Ok(
+        serde_json::to_vec_pretty(&crate::pro::blame_result_json(result, previews))?
+            .len()
+            .saturating_add(1),
+    )
 }
 
 fn finish_blame_telemetry(

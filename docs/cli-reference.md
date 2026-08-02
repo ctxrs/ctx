@@ -468,10 +468,10 @@ ctx data root preserves that identity and its selected backend; copying
 The public Pro query surface is:
 
 ```bash
-ctx blame <target> [--type file|commit|pr] [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--evidence-preview] [--format json]
+ctx blame <target> [--type file|commit|pr] [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
 
 # Explicit compatibility forms
-ctx blame file <path> [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--evidence-preview] [--format json]
+ctx blame file <path> [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
 ctx blame commit <sha> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
 ctx blame pr <positive-number-or-canonical-url> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
 ```
@@ -491,16 +491,16 @@ with their existing arguments and output behavior. Those three words therefore
 retain subcommand precedence as the first token; for example, use
 `ctx blame file file` to query a file literally named `file`.
 
-`--evidence-preview` is off by default, human-only, and must be requested for
-each file-blame invocation. It adds up to three bounded exact Codex file
-excerpts from cited local history. Unsupported, stale, or ambiguous file
-evidence may be omitted from the preview without changing attribution or the
-underlying `BlameResult`. A commit or PR target combined with
-`--evidence-preview` is rejected with actionable `invalid_request` before Pro
-or index access. Combining a file preview with `--format json` is also rejected
-with `invalid_request`. JSON and MCP have no evidence-preview surface, and their
-schemas remain unchanged. A file continuation command retains the flag when
-the current page explicitly requested it.
+File blame automatically attempts one bounded read of up to the first three
+exact cited Core records. Human output adds an
+`Evidence context (local history content)` section only when at least one
+record verifies and projects safely; otherwise the entire section is omitted.
+JSON and MCP always include the same status-bearing
+`evidence_context` object described in the JSON contract. Missing, stale,
+unsupported, oversized, or ambiguous evidence does not change attribution,
+the underlying helper result, or command success. Commit and PR blame mark
+evidence context as not applicable and do not read Core evidence. Continuation
+commands use the ordinary blame syntax and require no evidence option.
 
 There are no Pro `show`, `timeline`, `facts`, or `related` compatibility
 aliases. OSS `ctx show session|event` remains unchanged. The CLI blame limit defaults to 20

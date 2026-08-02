@@ -573,7 +573,6 @@ fn command_uses_stable_pro_error_json(command: &CommandRoot, json_output: bool) 
     json_output
         && match command {
             CommandRoot::Pro(_) | CommandRoot::Referral(_) => true,
-            CommandRoot::Blame(args) => args.evidence_preview_requested(),
             _ => false,
         }
 }
@@ -732,36 +731,13 @@ mod tests {
     }
 
     #[test]
-    fn stable_pro_error_json_is_scoped_to_pro_referral_and_preview_conflicts() {
+    fn stable_pro_error_json_is_scoped_to_pro_and_referral_commands() {
         for args in [
             &["pro", "--format=json"][..],
             &["pro", "manage", "--format=json"][..],
             &["referral", "create", "agent-smith", "--format=json"][..],
             &["referral", "status", "--format=json"][..],
             &["referral", "payout", "--format=json"][..],
-            &[
-                "blame",
-                "file",
-                "src/main.rs",
-                "--evidence-preview",
-                "--format=json",
-            ][..],
-            &[
-                "blame",
-                "commit",
-                "abc1234",
-                "--evidence-preview",
-                "--format=json",
-            ][..],
-            &[
-                "blame",
-                "pr",
-                "42",
-                "--repository",
-                "forge:github.com/ctxrs/ctx",
-                "--evidence-preview",
-                "--format=json",
-            ][..],
         ] {
             let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));

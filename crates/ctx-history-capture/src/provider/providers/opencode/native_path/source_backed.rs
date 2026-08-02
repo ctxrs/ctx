@@ -12,7 +12,9 @@ use std::{
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CoreRecord,
     CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
+    RepositoryAbstention, RepositoryAbstentionReason, RepositoryEvidenceKind, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
+    CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
 };
 use rusqlite::{limits::Limit, Connection, Row, Statement};
 use sha2::{Digest, Sha256};
@@ -46,7 +48,8 @@ use crate::{
 
 const SOURCE_ANCHOR_KEY: &str = "active-database";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const PARSER_REVISION: &str = "opencode-family-source-backed-v5-indexed-message-part-streaming";
+const PARSER_REVISION: &str =
+    "opencode-family-source-backed-v7-indexed-streaming-file-invocation-lexical-prefix";
 const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
@@ -81,11 +84,13 @@ pub(crate) enum OpenCodeSourceBackedError {
 pub(crate) type OpenCodeSourceBackedResult<T> = Result<T, OpenCodeSourceBackedError>;
 
 mod adapter;
+mod invocation;
 mod ordering;
 mod projection;
 mod value;
 
 pub(crate) use adapter::register as register_source_backed_route;
+use invocation::*;
 use ordering::{
     initialize_ordering_scratch, stream_fallback_ordered_events, stream_ordered_session_identities,
     OPENCODE_FALLBACK_SCRATCH_MAX_BYTES,
@@ -819,8 +824,7 @@ fn open_root_authorized_snapshot_retained_with_hook_and_progress(
         })?;
     after_authorize();
     sqlite_snapshot.revalidate()?;
-    source_directory.revalidate()?;
-    source_root.revalidate()?;
+    source_root.revalidate_same_object()?;
     let connection = sqlite_snapshot.connection()?;
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;

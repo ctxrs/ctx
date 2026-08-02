@@ -1,12 +1,18 @@
-use std::{collections::HashSet, path::Path};
+use std::{collections::HashSet, ops::Range, path::Path};
 
-use ctx_history_core::{RepositoryFileObservationKind, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION};
+use ctx_history_core::{
+    RepositoryAbstentionReason, RepositoryFileInvocationKind, RepositoryFileInvocationTextRange,
+    RepositoryFileObservationKind, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::events::{codex_tool_name, CodexToolCallContext};
 use crate::{
-    repository_attribution::{UnscopedFileObservation, MAX_COMMAND_BYTES},
+    repository_attribution::{
+        UnscopedFileObservation, UnscopedRepositoryFileInvocationEvidence, MAX_COMMAND_BYTES,
+        MAX_REPOSITORY_CANDIDATES,
+    },
     OutputOutcomeMetadata,
 };
 
@@ -113,13 +119,30 @@ pub(crate) struct CodexRepositoryToolEvidence {
     pub(crate) declared_workdir: Option<String>,
     pub(crate) continuation_cell_id: Option<String>,
     pub(crate) file_observations: Vec<UnscopedFileObservation>,
+    pub(crate) file_invocations: Vec<UnscopedRepositoryFileInvocationEvidence>,
+    pub(crate) abstentions: Vec<(RepositoryAbstentionReason, &'static str)>,
     pub(crate) structured_content: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexPatchOperation {
+    path: String,
+    prior_path: Option<String>,
+    operation: RepositoryFileInvocationKind,
+    patch_text_range: Range<usize>,
 }
 
 /// Reads measured native argument objects and Codex's static nested-tool
 /// orchestration envelope. The nested path decodes JSON-compatible literals;
 /// it never evaluates JavaScript or executes captured commands.
 pub(crate) fn repository_tool_evidence(payload: &Value) -> Vec<CodexRepositoryToolEvidence> {
+    repository_tool_evidence_for_core(payload, None)
+}
+
+pub(crate) fn repository_tool_evidence_for_core(
+    payload: &Value,
+    normalized_body: Option<&str>,
+) -> Vec<CodexRepositoryToolEvidence> {
     let Some(item_type) = payload.get("type").and_then(Value::as_str) else {
         return Vec::new();
     };
@@ -128,9 +151,14 @@ pub(crate) fn repository_tool_evidence(payload: &Value) -> Vec<CodexRepositoryTo
         return nested_exec_tool_evidence(payload).unwrap_or_default();
     }
     if tool_name == "apply_patch" {
-        return native_patch_tool_evidence(payload, item_type)
+        return native_patch_tool_evidence(payload, item_type, normalized_body)
             .into_iter()
             .collect();
+    }
+    if let Some(evidence) =
+        native_file_tool_evidence(payload, item_type, &tool_name, normalized_body)
+    {
+        return vec![evidence];
     }
     if !matches!(tool_name.as_str(), "exec_command" | "wait") {
         return Vec::new();
@@ -140,9 +168,99 @@ pub(crate) fn repository_tool_evidence(payload: &Value) -> Vec<CodexRepositoryTo
         .collect()
 }
 
+fn native_file_tool_evidence(
+    payload: &Value,
+    item_type: &str,
+    tool_name: &str,
+    normalized_body: Option<&str>,
+) -> Option<CodexRepositoryToolEvidence> {
+    if item_type != "function_call"
+        || payload
+            .get("name")
+            .zip(payload.get("tool"))
+            .is_some_and(|(name, tool)| name != tool)
+    {
+        return None;
+    }
+    let kind = exact_file_operation(tool_name)?;
+    let call_id = bounded_literal(
+        payload.get("call_id")?.as_str()?,
+        MAX_CALL_ID_BYTES,
+        control_identifier,
+    )?;
+    let arguments = decode_top_level_argument_object(exact_one_of(payload, "arguments", "input")?)?;
+    if [
+        "operation",
+        "file_path",
+        "filePath",
+        "target_path",
+        "targetPath",
+        "old_path",
+        "oldPath",
+        "new_path",
+        "newPath",
+    ]
+    .iter()
+    .any(|field| arguments.contains_key(*field))
+    {
+        return None;
+    }
+    let path = bounded_patch_path(arguments.get("path")?.as_str()?)?;
+    let prior_path = match kind {
+        RepositoryFileInvocationKind::Rename => {
+            let prior = bounded_patch_path(arguments.get("prior_path")?.as_str()?)?;
+            Some((prior != path).then_some(prior)?)
+        }
+        _ if arguments.contains_key("prior_path") => return None,
+        _ => None,
+    };
+    let argument_unit = serde_json::to_string(&Value::Object(arguments)).ok()?;
+    let normalized_text_range = if let Some(body) = normalized_body {
+        let prefix = format!("{tool_name}: ");
+        if body.strip_prefix(&prefix) == Some(argument_unit.as_str()) {
+            Some(RepositoryFileInvocationTextRange {
+                start: u32::try_from(prefix.len()).ok()?,
+                end: u32::try_from(prefix.len().checked_add(argument_unit.len())?).ok()?,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let invocation = UnscopedRepositoryFileInvocationEvidence {
+        operation_ordinal: 0,
+        path,
+        prior_path,
+        kind,
+        tool_name: Some(tool_name.to_owned()),
+        normalized_text_range,
+    };
+    Some(CodexRepositoryToolEvidence {
+        tool_name: tool_name.to_owned(),
+        command: None,
+        command_too_large: false,
+        declared_workdir: None,
+        continuation_cell_id: None,
+        file_observations: Vec::new(),
+        file_invocations: vec![invocation],
+        abstentions: Vec::new(),
+        structured_content: json!({
+            "provider_native_tool": {
+                "provider": "codex",
+                "name": tool_name,
+                "call_id": call_id,
+                "argument_schema": "codex_exact_file_operation_args_v1",
+                "raw_arguments_retained": false,
+            }
+        }),
+    })
+}
+
 fn native_patch_tool_evidence(
     payload: &Value,
     item_type: &str,
+    normalized_body: Option<&str>,
 ) -> Option<CodexRepositoryToolEvidence> {
     if payload
         .get("name")
@@ -170,7 +288,15 @@ fn native_patch_tool_evidence(
         }
         _ => return None,
     };
-    patch_tool_evidence(call_id, None, schema, &patch)?
+    let mut operation_ordinal = 0;
+    patch_tool_evidence(
+        call_id,
+        None,
+        schema,
+        &patch,
+        normalized_body,
+        &mut operation_ordinal,
+    )?
 }
 
 fn native_tool_evidence(payload: &Value, tool_name: String) -> Option<CodexRepositoryToolEvidence> {
@@ -230,6 +356,8 @@ fn native_tool_evidence(payload: &Value, tool_name: String) -> Option<CodexRepos
         declared_workdir,
         continuation_cell_id,
         file_observations: Vec::new(),
+        file_invocations: Vec::new(),
+        abstentions: Vec::new(),
         structured_content: json!({
             "provider_native_tool": {
                 "provider": "codex",
@@ -256,6 +384,7 @@ fn nested_exec_tool_evidence(payload: &Value) -> Option<Vec<CodexRepositoryToolE
     }
     let calls = StaticJsParser::new(source).parse_program()?;
     let mut evidence = Vec::new();
+    let mut operation_ordinal = 0_u32;
     for (index, call) in calls.into_iter().enumerate() {
         match call {
             StaticNestedToolCall::ExecCommand(arguments) => {
@@ -277,6 +406,8 @@ fn nested_exec_tool_evidence(payload: &Value) -> Option<Vec<CodexRepositoryToolE
                     declared_workdir,
                     continuation_cell_id: None,
                     file_observations: Vec::new(),
+                    file_invocations: Vec::new(),
+                    abstentions: Vec::new(),
                     structured_content: json!({
                         "provider_native_tool": {
                             "provider": "codex",
@@ -291,6 +422,7 @@ fn nested_exec_tool_evidence(payload: &Value) -> Option<Vec<CodexRepositoryToolE
                         }
                     }),
                 });
+                operation_ordinal = operation_ordinal.checked_add(1)?;
             }
             StaticNestedToolCall::ApplyPatch(patch) => {
                 if let Some(patch_evidence) = patch_tool_evidence(
@@ -298,9 +430,37 @@ fn nested_exec_tool_evidence(payload: &Value) -> Option<Vec<CodexRepositoryToolE
                     Some(index),
                     "codex_nested_apply_patch_literal_v3",
                     &patch,
+                    None,
+                    &mut operation_ordinal,
                 )? {
                     evidence.push(patch_evidence);
                 }
+            }
+        }
+    }
+    let strict_capacity_exceeded = evidence.iter().any(|item| {
+        item.abstentions
+            .iter()
+            .any(|(reason, _)| *reason == RepositoryAbstentionReason::CandidateLimitExceeded)
+    }) || evidence
+        .iter()
+        .map(|item| item.file_invocations.len())
+        .sum::<usize>()
+        > MAX_REPOSITORY_CANDIDATES;
+    if strict_capacity_exceeded {
+        for item in &mut evidence {
+            item.file_invocations.clear();
+        }
+        if let Some(patch) = evidence
+            .iter_mut()
+            .find(|item| item.tool_name == "apply_patch")
+        {
+            let abstention = (
+                RepositoryAbstentionReason::CandidateLimitExceeded,
+                "codex_patch_operation_candidate_limit_exceeded",
+            );
+            if !patch.abstentions.contains(&abstention) {
+                patch.abstentions.push(abstention);
             }
         }
     }
@@ -312,13 +472,78 @@ fn patch_tool_evidence(
     nested_activity_index: Option<usize>,
     schema: &'static str,
     patch: &str,
+    normalized_body: Option<&str>,
+    operation_ordinal: &mut u32,
 ) -> Option<Option<CodexRepositoryToolEvidence>> {
     if patch.len() > MAX_STRUCTURED_ARGUMENT_BYTES {
         return None;
     }
-    let file_observations = static_patch_file_observations(patch)?;
-    if file_observations.is_empty() {
+    if patch_operation_capacity_exceeded(patch) {
+        return Some(Some(CodexRepositoryToolEvidence {
+            tool_name: "apply_patch".to_owned(),
+            command: None,
+            command_too_large: false,
+            declared_workdir: None,
+            continuation_cell_id: None,
+            file_observations: Vec::new(),
+            file_invocations: Vec::new(),
+            abstentions: vec![(
+                RepositoryAbstentionReason::CandidateLimitExceeded,
+                "codex_patch_operation_candidate_limit_exceeded",
+            )],
+            structured_content: json!({
+                "provider_native_tool": {
+                    "provider": "codex",
+                    "name": "apply_patch",
+                    "outer_name": nested_activity_index.map(|_| "exec"),
+                    "call_id": call_id,
+                    "nested_activity_index": nested_activity_index,
+                    "argument_schema": schema,
+                    "static_patch_paths": 0,
+                    "raw_arguments_retained": false,
+                }
+            }),
+        }));
+    }
+    let patch_operations = static_patch_operations(patch)?;
+    let operation_count = u32::try_from(patch_operations.len()).ok()?;
+    let first_operation_ordinal = *operation_ordinal;
+    *operation_ordinal = operation_ordinal.checked_add(operation_count.max(1))?;
+    if patch_operations.is_empty() {
         return Some(None);
+    }
+    let file_observations = patch_file_observations(&patch_operations)?;
+    let strict_capacity_exceeded = patch_operations.len() > MAX_REPOSITORY_CANDIDATES;
+    let normalized_patch_offset = normalized_body.and_then(|body| {
+        let normalized_patch = patch.trim();
+        body.strip_prefix("apply_patch: ")
+            .filter(|body_patch| *body_patch == normalized_patch)
+            .map(|_| "apply_patch: ".len())
+    });
+    let mut file_invocations = Vec::with_capacity(if strict_capacity_exceeded {
+        0
+    } else {
+        patch_operations.len()
+    });
+    for (index, operation) in patch_operations.into_iter().enumerate() {
+        if strict_capacity_exceeded {
+            continue;
+        }
+        let normalized_text_range = match normalized_patch_offset {
+            Some(offset) => Some(RepositoryFileInvocationTextRange {
+                start: u32::try_from(offset.checked_add(operation.patch_text_range.start)?).ok()?,
+                end: u32::try_from(offset.checked_add(operation.patch_text_range.end)?).ok()?,
+            }),
+            None => None,
+        };
+        file_invocations.push(UnscopedRepositoryFileInvocationEvidence {
+            operation_ordinal: first_operation_ordinal.checked_add(u32::try_from(index).ok()?)?,
+            path: operation.path,
+            prior_path: operation.prior_path,
+            kind: operation.operation,
+            tool_name: Some("apply_patch".to_owned()),
+            normalized_text_range,
+        });
     }
     let static_patch_paths = file_observations.len();
     Some(Some(CodexRepositoryToolEvidence {
@@ -328,6 +553,14 @@ fn patch_tool_evidence(
         declared_workdir: None,
         continuation_cell_id: None,
         file_observations,
+        file_invocations,
+        abstentions: strict_capacity_exceeded
+            .then_some((
+                RepositoryAbstentionReason::CandidateLimitExceeded,
+                "codex_patch_operation_candidate_limit_exceeded",
+            ))
+            .into_iter()
+            .collect(),
         structured_content: json!({
             "provider_native_tool": {
                 "provider": "codex",
@@ -343,71 +576,176 @@ fn patch_tool_evidence(
     }))
 }
 
-fn static_patch_file_observations(patch: &str) -> Option<Vec<UnscopedFileObservation>> {
-    let mut lines = patch.lines();
-    if lines.next()?.trim_end() != "*** Begin Patch" {
+fn patch_operation_capacity_exceeded(patch: &str) -> bool {
+    patch
+        .lines()
+        .filter(|line| {
+            line.starts_with("*** Add File: ")
+                || line.starts_with("*** Update File: ")
+                || line.starts_with("*** Delete File: ")
+        })
+        .take(MAX_STATIC_PATCH_PATHS.saturating_add(1))
+        .count()
+        > MAX_STATIC_PATCH_PATHS
+}
+
+fn static_patch_operations(patch: &str) -> Option<Vec<CodexPatchOperation>> {
+    let lines = patch_lines(patch);
+    if lines.first()?.text != "*** Begin Patch" {
         return None;
     }
-    let mut observations = Vec::new();
-    let mut pending_update = None;
+    let mut operations = Vec::new();
+    let mut pending_update: Option<(String, Range<usize>, usize)> = None;
     let mut ended = false;
-    for line in lines {
+    for line in lines.into_iter().skip(1) {
         if ended {
-            if !line.trim().is_empty() {
+            if !line.text.trim().is_empty() {
                 return None;
             }
             continue;
         }
-        if line.trim_end() == "*** End Patch" {
-            push_pending_patch_update(&mut observations, &mut pending_update)?;
+        if line.text == "*** End Patch" {
+            push_pending_patch_update(&mut operations, &mut pending_update)?;
             ended = true;
             continue;
         }
-        if let Some(path) = line.strip_prefix("*** Add File: ") {
-            push_pending_patch_update(&mut observations, &mut pending_update)?;
-            push_patch_observation(
-                &mut observations,
+        if let Some(path) = line.text.strip_prefix("*** Add File: ") {
+            push_pending_patch_update(&mut operations, &mut pending_update)?;
+            push_patch_operation(
+                &mut operations,
                 path,
                 None,
-                RepositoryFileObservationKind::Created,
+                exact_file_operation("create")?,
+                line.range,
             )?;
-        } else if let Some(path) = line.strip_prefix("*** Update File: ") {
-            push_pending_patch_update(&mut observations, &mut pending_update)?;
-            pending_update = Some(bounded_patch_path(path)?);
-        } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
-            push_pending_patch_update(&mut observations, &mut pending_update)?;
-            push_patch_observation(
-                &mut observations,
+        } else if let Some(path) = line.text.strip_prefix("*** Update File: ") {
+            push_pending_patch_update(&mut operations, &mut pending_update)?;
+            pending_update = Some((bounded_patch_path(path)?, line.range, line.index));
+        } else if let Some(path) = line.text.strip_prefix("*** Delete File: ") {
+            push_pending_patch_update(&mut operations, &mut pending_update)?;
+            push_patch_operation(
+                &mut operations,
                 path,
                 None,
-                RepositoryFileObservationKind::Deleted,
+                exact_file_operation("delete")?,
+                line.range,
             )?;
-        } else if let Some(path) = line.strip_prefix("*** Move to: ") {
-            let prior_path = pending_update.take()?;
-            push_patch_observation(
-                &mut observations,
+        } else if let Some(path) = line.text.strip_prefix("*** Move to: ") {
+            let (prior_path, update_range, update_line_index) = pending_update.take()?;
+            if line.index != update_line_index.checked_add(1)? {
+                return None;
+            }
+            push_patch_operation(
+                &mut operations,
                 path,
                 Some(prior_path),
-                RepositoryFileObservationKind::Renamed,
+                exact_file_operation("rename")?,
+                update_range.start..line.range.end,
             )?;
         }
     }
-    ended.then_some(observations)
+    ended.then_some(operations)
 }
 
 fn push_pending_patch_update(
-    observations: &mut Vec<UnscopedFileObservation>,
-    pending_update: &mut Option<String>,
+    operations: &mut Vec<CodexPatchOperation>,
+    pending_update: &mut Option<(String, Range<usize>, usize)>,
 ) -> Option<()> {
-    if let Some(path) = pending_update.take() {
-        push_patch_observation(
-            observations,
+    if let Some((path, range, _)) = pending_update.take() {
+        push_patch_operation(
+            operations,
             &path,
             None,
-            RepositoryFileObservationKind::Modified,
+            exact_file_operation("modify")?,
+            range,
         )?;
     }
     Some(())
+}
+
+fn exact_file_operation(verb: &str) -> Option<RepositoryFileInvocationKind> {
+    match verb {
+        "read" => Some(RepositoryFileInvocationKind::Read),
+        "create" => Some(RepositoryFileInvocationKind::Create),
+        "modify" => Some(RepositoryFileInvocationKind::Modify),
+        "delete" => Some(RepositoryFileInvocationKind::Delete),
+        "rename" => Some(RepositoryFileInvocationKind::Rename),
+        "write" => Some(RepositoryFileInvocationKind::Write),
+        _ => None,
+    }
+}
+
+fn push_patch_operation(
+    operations: &mut Vec<CodexPatchOperation>,
+    path: &str,
+    prior_path: Option<String>,
+    operation: RepositoryFileInvocationKind,
+    patch_text_range: Range<usize>,
+) -> Option<()> {
+    if operations.len() >= MAX_STATIC_PATCH_PATHS {
+        return None;
+    }
+    operations.push(CodexPatchOperation {
+        path: bounded_patch_path(path)?,
+        prior_path,
+        operation,
+        patch_text_range,
+    });
+    Some(())
+}
+
+fn patch_file_observations(
+    operations: &[CodexPatchOperation],
+) -> Option<Vec<UnscopedFileObservation>> {
+    let mut observations = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let kind = match operation.operation {
+            RepositoryFileInvocationKind::Read => RepositoryFileObservationKind::Read,
+            RepositoryFileInvocationKind::Create => RepositoryFileObservationKind::Created,
+            RepositoryFileInvocationKind::Modify | RepositoryFileInvocationKind::Write => {
+                RepositoryFileObservationKind::Modified
+            }
+            RepositoryFileInvocationKind::Delete => RepositoryFileObservationKind::Deleted,
+            RepositoryFileInvocationKind::Rename => RepositoryFileObservationKind::Renamed,
+        };
+        push_patch_observation(
+            &mut observations,
+            &operation.path,
+            operation.prior_path.clone(),
+            kind,
+        )?;
+    }
+    Some(observations)
+}
+
+struct PatchLine<'a> {
+    index: usize,
+    text: &'a str,
+    range: Range<usize>,
+}
+
+fn patch_lines(patch: &str) -> Vec<PatchLine<'_>> {
+    let mut lines = Vec::new();
+    let mut start = 0_usize;
+    for (index, segment) in patch.split_inclusive('\n').enumerate() {
+        let without_lf = segment.strip_suffix('\n').unwrap_or(segment);
+        let text = without_lf.strip_suffix('\r').unwrap_or(without_lf);
+        let end = start + text.len();
+        lines.push(PatchLine {
+            index,
+            text,
+            range: start..end,
+        });
+        start += segment.len();
+    }
+    if patch.is_empty() {
+        lines.push(PatchLine {
+            index: 0,
+            text: patch,
+            range: 0..0,
+        });
+    }
+    lines
 }
 
 fn push_patch_observation(

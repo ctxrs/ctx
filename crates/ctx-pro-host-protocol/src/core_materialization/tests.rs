@@ -158,6 +158,7 @@ fn record(source: &SourceKey, sequence: u64, body: String, two_repositories: boo
         repository_candidate_evidence: RepositoryCandidateEvidence::default(),
         repository_bindings,
         repository_abstentions: Vec::new(),
+        repository_file_invocation_evidence: Vec::new(),
         repository_file_observations,
         repository_vcs_observations,
     }

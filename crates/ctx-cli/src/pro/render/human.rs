@@ -2,13 +2,12 @@ use ctx_pro_host_protocol::{BlameResult, ResolvedBlameTarget};
 
 use crate::ui::{Document, RenderContext};
 
-use super::{commit, evidence, file, pull_request, target};
-use crate::pro::evidence_preview::EvidencePreviewModel;
+use super::{commit, evidence, file, pull_request, target, BlameEvidenceContext};
 
 pub(super) fn render(
     result: &BlameResult,
     context: &RenderContext,
-    previews: Option<&EvidencePreviewModel>,
+    evidence_context: &BlameEvidenceContext,
 ) -> Document {
     let mut document = Document::new();
     target::render(&mut document, context, result);
@@ -22,10 +21,10 @@ pub(super) fn render(
             pull_request::render(&mut document, context, &result.matches)
         }
     }
-    evidence::render_continuation(&mut document, context, result, previews.is_some());
+    evidence::render_continuation(&mut document, context, result);
     evidence::render_list(&mut document, context, result);
-    if let Some(previews) = previews {
-        evidence::render_previews(&mut document, context, previews);
+    if evidence_context.is_available() {
+        evidence::render_previews(&mut document, context, evidence_context.model());
     }
     document
 }

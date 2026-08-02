@@ -1,7 +1,9 @@
-use ctx_history_core::{RepositoryAbstentionReason, RepositoryFileObservationKind};
+use ctx_history_core::{
+    RepositoryAbstentionReason, RepositoryFileInvocationKind, RepositoryFileObservationKind,
+};
 use serde_json::json;
 
-use super::repository_tool_evidence;
+use super::{repository_tool_evidence, repository_tool_evidence_for_core};
 use crate::provider::codex::events::CodexToolCallContext;
 use crate::repository_attribution::{attribute, AttributionInput, CommandEvidenceDisposition};
 use crate::{OutputOutcome, OutputOutcomeMetadata};
@@ -280,6 +282,349 @@ fn direct_native_patch_input_uses_the_same_bounded_parser() {
     assert_eq!(
         evidence[0].file_observations[0].kind,
         RepositoryFileObservationKind::Modified
+    );
+}
+
+#[test]
+fn strict_patch_invocations_preserve_multiple_exact_operations_and_targets() {
+    let patch = "*** Begin Patch\n*** Add File: src/new.rs\n+new\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** Delete File: src/old.rs\n*** End Patch";
+    let normalized_body = format!("apply_patch: {patch}");
+    let payload = json!({
+        "type": "custom_tool_call",
+        "name": "apply_patch",
+        "call_id": "strict-multi",
+        "input": patch,
+    });
+
+    let evidence = repository_tool_evidence_for_core(&payload, Some(&normalized_body));
+    assert_eq!(evidence.len(), 1);
+    let invocations = &evidence[0].file_invocations;
+    assert_eq!(invocations.len(), 3);
+    assert_eq!(
+        invocations
+            .iter()
+            .map(|invocation| (
+                invocation.path.as_str(),
+                invocation.kind,
+                invocation.operation_ordinal,
+                invocation.tool_name.as_deref(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "src/new.rs",
+                RepositoryFileInvocationKind::Create,
+                0,
+                Some("apply_patch"),
+            ),
+            (
+                "src/lib.rs",
+                RepositoryFileInvocationKind::Modify,
+                1,
+                Some("apply_patch"),
+            ),
+            (
+                "src/old.rs",
+                RepositoryFileInvocationKind::Delete,
+                2,
+                Some("apply_patch"),
+            ),
+        ]
+    );
+    assert_eq!(
+        invocations
+            .iter()
+            .map(|invocation| {
+                normalized_body
+                    .get({
+                        let range = invocation.normalized_text_range.unwrap();
+                        range.start as usize..range.end as usize
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            "*** Add File: src/new.rs",
+            "*** Update File: src/lib.rs",
+            "*** Delete File: src/old.rs",
+        ]
+    );
+}
+
+#[test]
+fn strict_patch_rename_keeps_both_paths_in_one_complete_body_range() {
+    let patch = "*** Begin Patch\n*** Update File: src/old.rs\n*** Move to: src/new.rs\n@@\n-old\n+new\n*** End Patch";
+    let normalized_body = format!("apply_patch: {patch}");
+    let payload = json!({
+        "type": "custom_tool_call",
+        "name": "apply_patch",
+        "call_id": "strict-rename",
+        "input": patch,
+    });
+
+    let evidence = repository_tool_evidence_for_core(&payload, Some(&normalized_body));
+    let invocation = &evidence[0].file_invocations[0];
+    assert_eq!(invocation.path, "src/new.rs");
+    assert_eq!(invocation.prior_path.as_deref(), Some("src/old.rs"));
+    assert_eq!(invocation.kind, RepositoryFileInvocationKind::Rename);
+    let range = invocation.normalized_text_range.unwrap();
+    let range = range.start as usize..range.end as usize;
+    assert!(normalized_body.is_char_boundary(range.start));
+    assert!(normalized_body.is_char_boundary(range.end));
+    assert_eq!(
+        &normalized_body[range],
+        "*** Update File: src/old.rs\n*** Move to: src/new.rs"
+    );
+}
+
+#[test]
+fn strict_ranges_are_utf8_byte_exact_and_exclude_crlf_edges() {
+    let patch =
+        "*** Begin Patch\r\n*** Update File: src/é.rs\r\n@@\r\n-old\r\n+new\r\n*** End Patch\r\n";
+    let normalized_body = format!("apply_patch: {}", patch.trim());
+    let payload = json!({
+        "type": "custom_tool_call",
+        "name": "apply_patch",
+        "call_id": "strict-utf8-range",
+        "input": patch,
+    });
+
+    let evidence = repository_tool_evidence_for_core(&payload, Some(&normalized_body));
+    let range = evidence[0].file_invocations[0]
+        .normalized_text_range
+        .unwrap();
+    let range = range.start as usize..range.end as usize;
+    assert!(normalized_body.is_char_boundary(range.start));
+    assert!(normalized_body.is_char_boundary(range.end));
+    assert_eq!(&normalized_body[range], "*** Update File: src/é.rs");
+}
+
+#[test]
+fn nested_multi_operation_patches_have_distinct_deterministic_ordinals_without_ranges() {
+    let payload = json!({
+        "type": "custom_tool_call",
+        "name": "exec",
+        "call_id": "strict-nested",
+        "input": r#"
+            text(await tools.apply_patch("*** Begin Patch\n*** Add File: src/first.rs\n+first\n*** Update File: src/second.rs\n@@\n-old\n+new\n*** End Patch"));
+            const command = await tools.exec_command({cmd:"git status",workdir:"/repo"});
+            text(await tools.apply_patch("*** Begin Patch\n*** Delete File: src/third.rs\n*** Add File: src/fourth.rs\n+fourth\n*** End Patch"));
+            text(command.output);
+        "#,
+    });
+
+    let evidence = repository_tool_evidence(&payload);
+    assert_eq!(evidence.len(), 3);
+    assert_eq!(
+        evidence[0]
+            .file_invocations
+            .iter()
+            .map(|invocation| invocation.operation_ordinal)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert_eq!(
+        evidence[2]
+            .file_invocations
+            .iter()
+            .map(|invocation| invocation.operation_ordinal)
+            .collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+    assert!(evidence
+        .iter()
+        .flat_map(|item| &item.file_invocations)
+        .all(|invocation| invocation.normalized_text_range.is_none()));
+}
+
+#[test]
+fn nested_patch_calls_share_one_strict_bound_and_never_publish_a_partial_prefix() {
+    let patch = |prefix: &str, count: usize| {
+        let mut patch = String::from("*** Begin Patch\n");
+        for index in 0..count {
+            patch.push_str(&format!("*** Add File: src/{prefix}-{index}.rs\n+value\n"));
+        }
+        patch.push_str("*** End Patch");
+        serde_json::to_string(&patch).unwrap()
+    };
+    let payload = json!({
+        "type": "custom_tool_call",
+        "name": "exec",
+        "call_id": "strict-nested-overflow",
+        "input": format!(
+            "text(await tools.apply_patch({})); text(await tools.apply_patch({}));",
+            patch("first", 17),
+            patch("second", 16),
+        ),
+    });
+
+    let evidence = repository_tool_evidence(&payload);
+    assert_eq!(evidence.len(), 2);
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|item| item.file_observations.len())
+            .sum::<usize>(),
+        33
+    );
+    assert!(evidence.iter().all(|item| item.file_invocations.is_empty()));
+    assert!(evidence.iter().any(|item| {
+        item.abstentions
+            .iter()
+            .any(|(reason, _)| *reason == RepositoryAbstentionReason::CandidateLimitExceeded)
+    }));
+}
+
+#[test]
+fn strict_invocations_abstain_on_ambiguous_or_unknown_native_shapes() {
+    let conflicting_patch = "*** Begin Patch\n*** Add File: src/same.rs\n+new\n*** Delete File: src/same.rs\n*** End Patch";
+    let delayed_move = "*** Begin Patch\n*** Update File: src/old.rs\n@@\n-old\n+new\n*** Move to: src/new.rs\n*** End Patch";
+    for payload in [
+        json!({
+            "type": "custom_tool_call",
+            "name": "apply_patch",
+            "call_id": "ambiguous-patch",
+            "input": conflicting_patch,
+        }),
+        json!({
+            "type": "custom_tool_call",
+            "name": "apply_patch",
+            "call_id": "ambiguous-delayed-move",
+            "input": delayed_move,
+        }),
+        json!({
+            "type": "function_call",
+            "name": "provider_file_tool",
+            "call_id": "generic-recursive-touch",
+            "arguments": json!({
+                "operation": "modify",
+                "nested": {"file_path": "src/generic.rs"},
+            }).to_string(),
+        }),
+    ] {
+        assert!(repository_tool_evidence_for_core(&payload, None).is_empty());
+    }
+    for verb in ["unknown", "Unknown", "edit", "created", ""] {
+        assert!(super::exact_file_operation(verb).is_none(), "{verb}");
+    }
+}
+
+#[test]
+fn exact_file_verbs_map_without_alias_or_case_inference() {
+    for (verb, operation) in [
+        ("read", RepositoryFileInvocationKind::Read),
+        ("create", RepositoryFileInvocationKind::Create),
+        ("modify", RepositoryFileInvocationKind::Modify),
+        ("delete", RepositoryFileInvocationKind::Delete),
+        ("rename", RepositoryFileInvocationKind::Rename),
+        ("write", RepositoryFileInvocationKind::Write),
+    ] {
+        assert_eq!(super::exact_file_operation(verb), Some(operation));
+    }
+}
+
+#[test]
+fn exact_native_file_schema_maps_every_verb_and_complete_argument_range() {
+    for (tool_name, kind) in [
+        ("read", RepositoryFileInvocationKind::Read),
+        ("create", RepositoryFileInvocationKind::Create),
+        ("modify", RepositoryFileInvocationKind::Modify),
+        ("delete", RepositoryFileInvocationKind::Delete),
+        ("write", RepositoryFileInvocationKind::Write),
+    ] {
+        let arguments = json!({"path": format!("src/{tool_name}.rs")});
+        let argument_unit = serde_json::to_string(&arguments).unwrap();
+        let normalized_body = format!("{tool_name}: {argument_unit}");
+        let payload = json!({
+            "type": "function_call",
+            "name": tool_name,
+            "call_id": format!("exact-{tool_name}"),
+            "arguments": argument_unit,
+        });
+        let evidence = repository_tool_evidence_for_core(&payload, Some(&normalized_body));
+        let invocation = &evidence[0].file_invocations[0];
+        assert_eq!(invocation.kind, kind);
+        assert_eq!(invocation.tool_name.as_deref(), Some(tool_name));
+        assert_eq!(invocation.operation_ordinal, 0);
+        let range = invocation.normalized_text_range.unwrap();
+        assert_eq!(
+            &normalized_body[range.start as usize..range.end as usize],
+            serde_json::to_string(&arguments).unwrap()
+        );
+    }
+
+    let arguments = json!({"prior_path": "src/old.rs", "path": "src/new.rs"});
+    let argument_unit = serde_json::to_string(&arguments).unwrap();
+    let normalized_body = format!("rename: {argument_unit}");
+    let payload = json!({
+        "type": "function_call",
+        "name": "rename",
+        "call_id": "exact-rename",
+        "arguments": argument_unit,
+    });
+    let evidence = repository_tool_evidence_for_core(&payload, Some(&normalized_body));
+    let invocation = &evidence[0].file_invocations[0];
+    assert_eq!(invocation.kind, RepositoryFileInvocationKind::Rename);
+    assert_eq!(invocation.path, "src/new.rs");
+    assert_eq!(invocation.prior_path.as_deref(), Some("src/old.rs"));
+}
+
+#[test]
+fn exact_native_file_schema_rejects_alias_and_verb_ambiguity() {
+    for payload in [
+        json!({
+            "type": "function_call",
+            "name": "Read",
+            "call_id": "wrong-case",
+            "arguments": json!({"path": "src/lib.rs"}).to_string(),
+        }),
+        json!({
+            "type": "function_call",
+            "name": "read",
+            "call_id": "ambiguous-path",
+            "arguments": json!({
+                "path": "src/lib.rs",
+                "file_path": "src/decoy.rs",
+            }).to_string(),
+        }),
+        json!({
+            "type": "function_call",
+            "name": "modify",
+            "call_id": "conflicting-operation",
+            "arguments": json!({
+                "operation": "read",
+                "path": "src/lib.rs",
+            }).to_string(),
+        }),
+    ] {
+        assert!(repository_tool_evidence_for_core(&payload, None).is_empty());
+    }
+}
+
+#[test]
+fn strict_patch_overflow_abstains_instead_of_publishing_a_prefix() {
+    let mut patch = String::from("*** Begin Patch\n");
+    for index in 0..=crate::repository_attribution::MAX_REPOSITORY_CANDIDATES {
+        patch.push_str(&format!("*** Add File: src/generated/{index}.rs\n+value\n"));
+    }
+    patch.push_str("*** End Patch");
+    let payload = json!({
+        "type": "custom_tool_call",
+        "name": "apply_patch",
+        "call_id": "strict-overflow",
+        "input": patch,
+    });
+
+    let evidence = repository_tool_evidence_for_core(&payload, None);
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].file_observations.len(), 33);
+    assert!(evidence[0].file_invocations.is_empty());
+    assert_eq!(
+        evidence[0].abstentions,
+        vec![(
+            RepositoryAbstentionReason::CandidateLimitExceeded,
+            "codex_patch_operation_candidate_limit_exceeded",
+        )]
     );
 }
 

@@ -85,6 +85,7 @@ mod repository_tests {
         let occurrence =
             next_event_occurrence(&event, &source, session_id, &mut projector.event_identities)
                 .unwrap();
+        let normalized_body = cursor_normalized_body(&event).unwrap();
         core_record(
             &source,
             session_id,
@@ -92,6 +93,7 @@ mod repository_tests {
             event,
             occurrence,
             annotation,
+            normalized_body,
         )
         .unwrap()
         .unwrap()
@@ -144,6 +146,69 @@ mod repository_tests {
             &result_annotation,
             RepositoryAbstentionReason::ProviderOutputUnjoined
         ));
+    }
+
+    #[test]
+    fn cursor_provider_neutral_file_invocation_is_exact_and_call_local() {
+        let temp = TempDir::new().unwrap();
+        let repo = repository(&temp);
+        let call = serde_json::json!({
+            "role": "assistant",
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "id": "write-local",
+                "name": "write_file",
+                "input": {
+                    "workdir": repo,
+                    "path": "src/lib.rs",
+                    "contents": "pub fn exact() {}\n"
+                }
+            }]}
+        })
+        .to_string();
+        let result = r#"{"role":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"write-local","content":"done"}]}}"#;
+        let mut projector = projector();
+        let call_event = event(&call, 1);
+        let call_annotation = projector.attribution_for_event(&call_event);
+        assert_eq!(call_annotation.repository_file_invocation_evidence.len(), 1);
+        assert_eq!(call_annotation.repository_file_observations.len(), 1);
+        assert_eq!(
+            call_annotation.repository_file_observations[0].relative_path,
+            "src/lib.rs"
+        );
+        assert_eq!(
+            projector
+                .repository_attributor
+                .full_certification_probe_count(),
+            1
+        );
+        let invocation = &call_annotation.repository_file_invocation_evidence[0];
+        assert_eq!(invocation.operation_ordinal, 0);
+        assert_eq!(invocation.relative_path, "src/lib.rs");
+        assert_eq!(invocation.prior_relative_path, None);
+        assert_eq!(
+            invocation.kind,
+            ctx_history_core::RepositoryFileInvocationKind::Write
+        );
+        assert_eq!(invocation.tool_name.as_deref(), Some("write_file"));
+
+        let core = core_from_event(&mut projector, call_event, call_annotation);
+        let normalized_body = core.content.normalized_body.as_deref().unwrap();
+        let range = core.repository_file_invocation_evidence[0]
+            .normalized_text_range
+            .unwrap();
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end as usize, normalized_body.len());
+        assert_eq!(
+            &normalized_body[range.start as usize..range.end as usize],
+            normalized_body
+        );
+
+        let result_annotation = projector.attribution_for_event(&event(result, 2));
+        assert!(result_annotation
+            .repository_file_invocation_evidence
+            .is_empty());
+        assert_eq!(result_annotation.repository_file_observations.len(), 1);
     }
 
     #[test]
@@ -247,8 +312,18 @@ mod repository_tests {
         let exact_annotation = exact_projector.attribution_for_event(&event(&exact_call, 1));
         assert_eq!(exact_annotation.repository_bindings.len(), 1);
         assert_eq!(
+            exact_annotation.repository_file_invocation_evidence.len(),
+            MAX_CURSOR_INPUT_PATHS
+        );
+        assert_eq!(
             exact_annotation.repository_file_observations.len(),
             MAX_CURSOR_INPUT_PATHS
+        );
+        assert_eq!(
+            exact_projector
+                .repository_attributor
+                .full_certification_probe_count(),
+            1
         );
         assert!(!has_reason(
             &exact_annotation,
@@ -299,16 +374,20 @@ mod repository_tests {
             }
 
             let annotation = overflow_projector.attribution_for_event(&call_event);
-            assert!(annotation.repository_bindings.is_empty());
-            assert!(annotation.repository_file_observations.is_empty());
+            assert_eq!(annotation.repository_bindings.len(), 1);
+            assert_eq!(
+                annotation.repository_file_observations.len(),
+                MAX_CURSOR_INPUT_PATHS
+            );
+            assert!(annotation.repository_file_invocation_evidence.is_empty());
             assert!(has_reason(
                 &annotation,
                 RepositoryAbstentionReason::CandidateLimitExceeded
             ));
-            assert!(!has_reason(
-                &annotation,
-                RepositoryAbstentionReason::Ambiguous
-            ));
+            assert_eq!(
+                has_reason(&annotation, RepositoryAbstentionReason::Ambiguous),
+                call_id == "scalar-overflow"
+            );
 
             let core = core_from_event(&mut overflow_projector, call_event, annotation);
             let complete_body: serde_json::Value =
@@ -335,14 +414,20 @@ mod repository_tests {
                 overflow_projector.attribution_for_event(&event(&result, ordinal as u64 + 10));
             assert!(result_annotation.repository_bindings.is_empty());
             assert!(result_annotation.repository_file_observations.is_empty());
-            assert!(has_reason(
-                &result_annotation,
-                RepositoryAbstentionReason::CandidateLimitExceeded
-            ));
-            assert!(!has_reason(
-                &result_annotation,
-                RepositoryAbstentionReason::ProviderOutputUnjoined
-            ));
+            assert_eq!(
+                has_reason(
+                    &result_annotation,
+                    RepositoryAbstentionReason::CandidateLimitExceeded
+                ),
+                call_id == "array-overflow"
+            );
+            assert_eq!(
+                has_reason(
+                    &result_annotation,
+                    RepositoryAbstentionReason::ProviderOutputUnjoined
+                ),
+                call_id == "scalar-overflow"
+            );
         }
     }
 
@@ -375,7 +460,12 @@ mod repository_tests {
 
         let annotation = projector.attribution_for_event(&call_event);
         assert_eq!(annotation.repository_bindings.len(), 1);
-        assert!(annotation.repository_file_observations.is_empty());
+        assert_eq!(annotation.repository_file_observations.len(), 1);
+        assert_eq!(
+            annotation.repository_file_observations[0].relative_path,
+            "src/lib.rs"
+        );
+        assert!(annotation.repository_file_invocation_evidence.is_empty());
         assert!(has_reason(
             &annotation,
             RepositoryAbstentionReason::Ambiguous
@@ -393,7 +483,14 @@ mod repository_tests {
         let result = r#"{"role":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"invalid-path-shape","content":"complete result"}]}}"#;
         let result_annotation = projector.attribution_for_event(&event(result, 2));
         assert_eq!(result_annotation.repository_bindings.len(), 1);
-        assert!(result_annotation.repository_file_observations.is_empty());
+        assert_eq!(result_annotation.repository_file_observations.len(), 1);
+        assert_eq!(
+            result_annotation.repository_file_observations[0].relative_path,
+            "src/lib.rs"
+        );
+        assert!(result_annotation
+            .repository_file_invocation_evidence
+            .is_empty());
         assert!(has_reason(
             &result_annotation,
             RepositoryAbstentionReason::Ambiguous
@@ -402,6 +499,54 @@ mod repository_tests {
             &result_annotation,
             RepositoryAbstentionReason::ProviderOutputUnjoined
         ));
+    }
+
+    #[test]
+    fn cursor_path_alias_ambiguity_abstains_without_typed_file_evidence_and_preserves_body() {
+        let temp = TempDir::new().unwrap();
+        let repo = repository(&temp);
+        let path = repo.join("src/lib.rs").to_string_lossy().into_owned();
+        let call = serde_json::json!({
+            "role": "assistant",
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "id": "ambiguous-path-aliases",
+                "name": "write_file",
+                "input": {
+                    "path": path,
+                    "file_path": path
+                }
+            }]}
+        })
+        .to_string();
+        let mut projector = projector();
+        let call_event = event(&call, 1);
+        let native_content = match &call_event.body {
+            CursorEventBody::ToolCall { native_content, .. } => native_content.clone(),
+            body => panic!("expected tool call, got {body:?}"),
+        };
+        assert_eq!(
+            native_content.pointer("/input/path"),
+            native_content.pointer("/input/file_path")
+        );
+
+        let annotation = projector.attribution_for_event(&call_event);
+        assert_eq!(annotation.repository_bindings.len(), 1);
+        assert_eq!(annotation.repository_file_observations.len(), 1);
+        assert_eq!(
+            annotation.repository_file_observations[0].relative_path,
+            "src/lib.rs"
+        );
+        assert!(annotation.repository_file_invocation_evidence.is_empty());
+        assert!(has_reason(
+            &annotation,
+            RepositoryAbstentionReason::Ambiguous
+        ));
+
+        let core = core_from_event(&mut projector, call_event, annotation);
+        let complete_body: serde_json::Value =
+            serde_json::from_str(core.content.normalized_body.as_deref().unwrap()).unwrap();
+        assert_eq!(complete_body, native_content);
     }
 
     #[test]
@@ -565,6 +710,7 @@ mod fidelity_identity_tests {
             &mut projector.event_identities,
         )
         .unwrap();
+        let normalized_body = cursor_normalized_body(&event).unwrap();
         core_record(
             &projector.source,
             projector.session_id,
@@ -572,6 +718,7 @@ mod fidelity_identity_tests {
             event,
             duplicate_occurrence,
             annotation,
+            normalized_body,
         )
         .unwrap()
         .unwrap()

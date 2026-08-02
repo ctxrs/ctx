@@ -1,6 +1,35 @@
+use super::super::invocation_evidence::CLAUDE_MAX_EXACT_FILE_INVOCATIONS_PER_CALL;
 use super::*;
-use ctx_history_core::{CertifiedSource, ScannedSourceCounts, SourceObservation};
+use ctx_history_core::{
+    CertifiedSource, RepositoryFileInvocationKind, ScannedSourceCounts, SourceObservation,
+};
 use ctx_history_index::{GenerationWriter, WriterOptions};
+
+fn initialized_test_repository() -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    for arguments in [
+        &["init", "-q"][..],
+        &["config", "user.name", "ctx test"],
+        &["config", "user.email", "ctx@example.invalid"],
+    ] {
+        assert!(std::process::Command::new("/usr/bin/git")
+            .args(arguments)
+            .current_dir(temp.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    for arguments in [&["add", "tracked.txt"][..], &["commit", "-qm", "fixture"]] {
+        assert!(std::process::Command::new("/usr/bin/git")
+            .args(arguments)
+            .current_dir(temp.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    temp
+}
 
 #[test]
 fn claude_body_above_the_page_target_is_retained_whole() {
@@ -80,6 +109,267 @@ fn claude_oversized_command_abstains_without_session_cwd_fallback() {
         .any(|abstention| { abstention.reason == RepositoryAbstentionReason::CommandTooLarge }));
 }
 
+#[test]
+fn exact_file_invocations_emit_per_call_provider_neutral_evidence() {
+    let temp = initialized_test_repository();
+
+    let calls = serde_json::json!([
+        {
+            "type": "tool_use",
+            "id": "read-call",
+            "name": "Read",
+            "input": {"file_path": "src/read.rs"}
+        },
+        {
+            "type": "tool_use",
+            "id": "edit-call",
+            "name": "Edit",
+            "input": {
+                "file_path": "src/edit.rs",
+                "old_string": "before",
+                "new_string": "after"
+            }
+        },
+        {
+            "type": "tool_use",
+            "id": "write-call",
+            "name": "Write",
+            "input": {"file_path": "src/write.rs", "content": "complete"}
+        },
+        {
+            "type": "tool_use",
+            "id": "delete-call",
+            "name": "Delete",
+            "input": {"path": "src/delete.rs"}
+        },
+        {
+            "type": "tool_use",
+            "id": "create-call",
+            "name": "Create",
+            "input": {"path": "src/create.rs", "content": "new"}
+        },
+        {
+            "type": "tool_use",
+            "id": "rename-call",
+            "name": "Rename",
+            "input": {"old_path": "src/old.rs", "new_path": "src/new.rs"}
+        }
+    ]);
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "assistant",
+        "uuid": "exact-file-calls",
+        "sessionId": "test-session",
+        "timestamp": "2026-08-01T12:00:00Z",
+        "cwd": temp.path(),
+        "message": {"role": "assistant", "content": calls}
+    }))
+    .unwrap();
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    let expected = [
+        (
+            "Read",
+            RepositoryFileInvocationKind::Read,
+            "src/read.rs",
+            None,
+        ),
+        (
+            "Edit",
+            RepositoryFileInvocationKind::Modify,
+            "src/edit.rs",
+            None,
+        ),
+        (
+            "Write",
+            RepositoryFileInvocationKind::Write,
+            "src/write.rs",
+            None,
+        ),
+        (
+            "Delete",
+            RepositoryFileInvocationKind::Delete,
+            "src/delete.rs",
+            None,
+        ),
+        (
+            "Create",
+            RepositoryFileInvocationKind::Create,
+            "src/create.rs",
+            None,
+        ),
+        (
+            "Rename",
+            RepositoryFileInvocationKind::Rename,
+            "src/new.rs",
+            Some("src/old.rs"),
+        ),
+    ];
+    assert_eq!(emitted.len(), expected.len());
+    for (index, (record, (tool_name, kind, path, prior_path))) in
+        emitted.iter().zip(expected).enumerate()
+    {
+        let [evidence] = record.repository_file_invocation_evidence.as_slice() else {
+            panic!("expected one exact invocation for {tool_name}");
+        };
+        assert_eq!(evidence.operation_ordinal, u32::try_from(index).unwrap());
+        assert_eq!(evidence.tool_name.as_deref(), Some(tool_name));
+        assert_eq!(evidence.kind, kind);
+        assert_eq!(evidence.relative_path, path);
+        assert_eq!(evidence.prior_relative_path.as_deref(), prior_path);
+        let range = evidence.normalized_text_range.unwrap();
+        let body = record.content.normalized_body.as_deref().unwrap();
+        let selected = &body[range.start as usize..range.end as usize];
+        let input = record
+            .content
+            .structured_content
+            .as_ref()
+            .unwrap()
+            .get("input")
+            .unwrap();
+        assert_eq!(selected, serde_json::to_string(input).unwrap());
+        assert!(!record.repository_file_observations.is_empty());
+        record.validate_contract().unwrap();
+    }
+}
+
+#[test]
+fn exact_multi_path_call_emits_one_call_local_vector_with_one_complete_input_range() {
+    let temp = initialized_test_repository();
+    let input = serde_json::json!({
+        "paths": ["src/first.rs", "src/second.rs"],
+        "content": "same native call"
+    });
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "assistant",
+        "uuid": "exact-multi-path-call",
+        "sessionId": "test-session",
+        "timestamp": "2026-08-01T12:00:00Z",
+        "cwd": temp.path(),
+        "message": {"role": "assistant", "content": [{
+            "type": "tool_use",
+            "id": "write-multiple",
+            "name": "Write",
+            "input": &input,
+        }]}
+    }))
+    .unwrap();
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+
+    let [record] = emitted.as_slice() else {
+        panic!("expected one multi-path tool-call record");
+    };
+    assert!(record.repository_file_observations.is_empty());
+    assert_eq!(record.repository_file_invocation_evidence.len(), 2);
+    assert!(record
+        .repository_file_invocation_evidence
+        .iter()
+        .all(|evidence| {
+            evidence.operation_ordinal == 0
+                && evidence.kind == RepositoryFileInvocationKind::Write
+                && evidence.tool_name.as_deref() == Some("Write")
+        }));
+    assert_eq!(
+        record
+            .repository_file_invocation_evidence
+            .iter()
+            .map(|evidence| evidence.relative_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["src/first.rs", "src/second.rs"]
+    );
+    let body = record.content.normalized_body.as_deref().unwrap();
+    let expected_input = serde_json::to_string(&input).unwrap();
+    for evidence in &record.repository_file_invocation_evidence {
+        let range = evidence.normalized_text_range.unwrap();
+        assert_eq!(
+            &body[range.start as usize..range.end as usize],
+            expected_input
+        );
+    }
+    record.validate_contract().unwrap();
+}
+
+#[test]
+fn legacy_file_touches_remain_additive_for_non_strict_shapes() {
+    let content = serde_json::json!([
+        {
+            "type": "tool_use",
+            "id": "glob-call",
+            "name": "Glob",
+            "input": {"path": "src"}
+        },
+        {
+            "type": "tool_use",
+            "id": "grep-call",
+            "name": "Grep",
+            "input": {"file_path": "src/lib.rs"}
+        },
+        {
+            "type": "tool_use",
+            "id": "patch-call",
+            "name": "apply_patch",
+            "input": {
+                "patch": "*** Update File: src/a.rs\n*** Add File: src/b.rs\n*** Delete File: src/c.rs"
+            }
+        },
+        {
+            "type": "tool_use",
+            "id": "ambiguous-read",
+            "name": "Read",
+            "input": {"file_path": "src/one.rs", "path": "src/two.rs"}
+        }
+    ]);
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "assistant",
+        "uuid": "legacy-file-touches",
+        "sessionId": "test-session",
+        "message": {"role": "assistant", "content": content}
+    }))
+    .unwrap();
+    let locator = ClaudePhysicalLocator {
+        path: PathBuf::from("legacy-file-touches.jsonl"),
+        byte_start: 0,
+        byte_end_exclusive: bytes.len() as u64,
+        line_number: 1,
+        record_sha256: Sha256::digest(&bytes).into(),
+    };
+
+    let parsed = parse_native_record(&bytes, 0, &locator).unwrap();
+    assert_eq!(parsed.rows.len(), 4);
+    let calls = parsed
+        .rows
+        .iter()
+        .map(|row| row.tool_call.as_ref().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(calls[0].file_touches[0].path, "src");
+    assert_eq!(calls[1].file_touches[0].path, "src/lib.rs");
+    assert_eq!(
+        calls[2]
+            .file_touches
+            .iter()
+            .map(|touch| touch.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["src/a.rs", "src/b.rs", "src/c.rs"]
+    );
+    assert_eq!(calls[3].file_touches.len(), 2);
+    assert!(calls
+        .iter()
+        .all(|call| call.exact_file_invocations.is_empty()));
+}
+
 fn fallback_row(body: &str, ordinal: u64) -> ClaudeRetainedRow {
     let bytes = serde_json::json!({
         "type": "user",
@@ -102,6 +392,76 @@ fn fallback_row(body: &str, ordinal: u64) -> ClaudeRetainedRow {
         .into_iter()
         .next()
         .unwrap()
+}
+
+fn fallback_tool_call_row() -> ClaudeRetainedRow {
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "assistant",
+        "sessionId": "fallback-session",
+        "timestamp": "2026-07-31T12:00:00Z",
+        "message": {"role": "assistant", "content": [{
+            "type": "tool_use",
+            "name": "Write",
+            "input": {"file_path": "src/lib.rs", "content": "baseline"}
+        }]},
+    }))
+    .unwrap();
+    let locator = ClaudePhysicalLocator {
+        path: PathBuf::from("fallback-session.jsonl"),
+        byte_start: 0,
+        byte_end_exclusive: bytes.len() as u64,
+        line_number: 1,
+        record_sha256: Sha256::digest(&bytes).into(),
+    };
+    parse_native_record(&bytes, 0, &locator)
+        .unwrap()
+        .rows
+        .into_iter()
+        .next()
+        .unwrap()
+}
+
+#[test]
+fn idless_tool_call_fallback_identity_excludes_additive_invocation_cache() {
+    let row = fallback_tool_call_row();
+    let call = row.tool_call.as_ref().unwrap();
+    assert!(!call.exact_file_invocations.is_empty());
+    assert!(serde_json::to_value(call)
+        .unwrap()
+        .get("exact_file_invocations")
+        .is_none());
+
+    let mut baseline_row = row.clone();
+    baseline_row
+        .tool_call
+        .as_mut()
+        .unwrap()
+        .exact_file_invocations = Default::default();
+    assert_eq!(
+        fallback_event_digest(&row).unwrap(),
+        fallback_event_digest(&baseline_row).unwrap()
+    );
+
+    let key = ClaudeSessionKey {
+        root_session_id: "fallback-session".to_owned(),
+        workflow_run_id: None,
+        agent_id: None,
+    };
+    let source = source_key(&key).unwrap();
+    let session_id = session_identity(&source, &session_typed_key(&key).unwrap()).unwrap();
+    let (event_id, _) = fallback_event_id(
+        &row,
+        &source,
+        session_id,
+        &mut FallbackEventIdentityState::default(),
+    );
+    let (baseline_event_id, _) = fallback_event_id(
+        &baseline_row,
+        &source,
+        session_id,
+        &mut FallbackEventIdentityState::default(),
+    );
+    assert_eq!(event_id, baseline_event_id);
 }
 
 fn fallback_event_ids(bodies: &[&str]) -> Vec<StableEntityId> {
@@ -322,6 +682,140 @@ fn sixty_five_small_result_blocks_are_all_emitted() {
         emitted.last().unwrap().content.normalized_body.as_deref(),
         Some("result-64")
     );
+}
+
+#[test]
+fn exact_multi_path_overflow_abstains_without_truncating_or_rejecting_the_record() {
+    let temp = initialized_test_repository();
+    let paths = (0..=CLAUDE_MAX_EXACT_FILE_INVOCATIONS_PER_CALL)
+        .map(|index| format!("src/file-{index}.rs"))
+        .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "assistant",
+        "uuid": "exact-file-overflow",
+        "sessionId": "test-session",
+        "cwd": temp.path(),
+        "message": {"role": "assistant", "content": [{
+            "type": "tool_use",
+            "id": "read-overflow",
+            "name": "Read",
+            "input": {"paths": paths},
+        }]},
+    }))
+    .unwrap();
+
+    let mut projector = test_projector();
+    let mut emitted = Vec::new();
+    projector
+        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+            emitted.push(record);
+            Ok(())
+        })
+        .unwrap();
+    let [record] = emitted.as_slice() else {
+        panic!("expected the overflowing native call to remain available");
+    };
+    assert!(record.repository_file_invocation_evidence.is_empty());
+    assert!(record.repository_bindings.is_empty());
+    assert!(record.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::CandidateLimitExceeded
+            && abstention.detail.as_deref()
+                == Some("claude_exact_file_invocation_capacity_exceeded")
+    }));
+    assert_eq!(projector.rejected_records(), 0);
+}
+
+#[test]
+fn exact_file_invocation_boundaries_are_typed_and_fail_closed() {
+    let temp = initialized_test_repository();
+    for index in 0..CLAUDE_MAX_EXACT_FILE_INVOCATIONS_PER_CALL {
+        std::fs::write(temp.path().join(format!("file-{index}.rs")), "fixture\n").unwrap();
+    }
+
+    for count in [32, 33, 64, 65] {
+        let paths = (0..count)
+            .map(|index| format!("file-{index}.rs"))
+            .collect::<Vec<_>>();
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "type": "assistant",
+            "uuid": format!("exact-file-boundary-{count}"),
+            "sessionId": "test-session",
+            "cwd": temp.path(),
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "id": format!("read-{count}"),
+                "name": "Read",
+                "input": {"paths": paths},
+            }]},
+        }))
+        .unwrap();
+        let mut projector = test_projector();
+        let mut emitted = Vec::new();
+        projector
+            .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+                emitted.push(record);
+                Ok(())
+            })
+            .unwrap();
+        let [record] = emitted.as_slice() else {
+            panic!("expected one boundary record for {count}");
+        };
+        if count == 32 {
+            assert_eq!(record.repository_file_invocation_evidence.len(), 32);
+            assert_eq!(record.repository_bindings.len(), 1);
+            assert!(!record.repository_abstentions.iter().any(|abstention| {
+                abstention.reason == RepositoryAbstentionReason::CandidateLimitExceeded
+            }));
+        } else {
+            assert!(record.repository_file_invocation_evidence.is_empty());
+            assert!(record.repository_bindings.is_empty());
+            assert!(record.repository_abstentions.iter().any(|abstention| {
+                abstention.reason == RepositoryAbstentionReason::CandidateLimitExceeded
+            }));
+        }
+    }
+
+    for (input, reason) in [
+        (
+            serde_json::json!({"paths": ["x".repeat(16 * 1024 + 1)]}),
+            RepositoryAbstentionReason::CandidateLimitExceeded,
+        ),
+        (
+            serde_json::json!({"paths": ["file-0.rs", "file-0.rs"]}),
+            RepositoryAbstentionReason::Ambiguous,
+        ),
+    ] {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "type": "assistant",
+            "uuid": format!("exact-file-inexact-{reason:?}"),
+            "sessionId": "test-session",
+            "cwd": temp.path(),
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "id": "inexact",
+                "name": "Read",
+                "input": input,
+            }]},
+        }))
+        .unwrap();
+        let mut projector = test_projector();
+        let mut emitted = Vec::new();
+        projector
+            .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
+                emitted.push(record);
+                Ok(())
+            })
+            .unwrap();
+        let [record] = emitted.as_slice() else {
+            panic!("expected one inexact record");
+        };
+        assert!(record.repository_bindings.is_empty());
+        assert!(record.repository_file_invocation_evidence.is_empty());
+        assert!(record
+            .repository_abstentions
+            .iter()
+            .any(|abstention| abstention.reason == reason));
+    }
 }
 
 #[test]

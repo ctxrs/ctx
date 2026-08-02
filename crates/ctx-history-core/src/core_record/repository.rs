@@ -16,6 +16,8 @@ use super::{
     MAX_TEXT_METADATA_BYTES,
 };
 
+const MAX_REPOSITORY_TOOL_NAME_BYTES: usize = 512;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GitObjectFormat {
@@ -394,6 +396,93 @@ pub enum RepositoryAbstentionReason {
     OutcomeRepositoryUnbound,
     ConcurrentDrift,
     PlatformUnsupported,
+}
+
+/// Exact provider-native request intent for one repository file operation.
+///
+/// This is not an effect-success assertion. The optional text range selects
+/// bytes in the enclosing record's normalized body and never stores copied
+/// body or preview text.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryFileInvocationEvidence {
+    pub operation_ordinal: u32,
+    pub repository_binding_id: String,
+    pub relative_path: String,
+    pub prior_relative_path: Option<String>,
+    pub kind: RepositoryFileInvocationKind,
+    pub tool_name: Option<String>,
+    pub normalized_text_range: Option<RepositoryFileInvocationTextRange>,
+}
+
+impl RepositoryFileInvocationEvidence {
+    pub fn validate_contract(&self, normalized_body: Option<&str>) -> CoreRecordResult<()> {
+        validate_text(
+            "repository_binding_id",
+            &self.repository_binding_id,
+            MAX_TEXT_METADATA_BYTES,
+        )?;
+        validate_repository_relative_path(&self.relative_path)?;
+        if let Some(prior) = &self.prior_relative_path {
+            validate_repository_relative_path(prior)?;
+        }
+        if matches!(self.kind, RepositoryFileInvocationKind::Rename)
+            != self.prior_relative_path.is_some()
+        {
+            return Err(CoreRecordError::InvalidRepositoryFileInvocationEvidence);
+        }
+        validate_optional_text(
+            "repository_file_invocation_tool_name",
+            self.tool_name.as_deref(),
+            MAX_REPOSITORY_TOOL_NAME_BYTES,
+        )?;
+        if let Some(range) = &self.normalized_text_range {
+            range.validate_contract(normalized_body)?;
+        }
+        Ok(())
+    }
+}
+
+/// Closed request-intent actions; uncertain actions must be omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryFileInvocationKind {
+    Read,
+    Create,
+    Modify,
+    Delete,
+    Rename,
+    Write,
+}
+
+/// Half-open UTF-8 byte range into `CoreContent.normalized_body`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryFileInvocationTextRange {
+    /// Inclusive UTF-8 byte offset.
+    pub start: u32,
+    /// Exclusive UTF-8 byte offset.
+    pub end: u32,
+}
+
+impl RepositoryFileInvocationTextRange {
+    fn validate_contract(&self, normalized_body: Option<&str>) -> CoreRecordResult<()> {
+        let Some(body) = normalized_body else {
+            return Err(CoreRecordError::InvalidRepositoryFileInvocationEvidence);
+        };
+        let start = usize::try_from(self.start)
+            .map_err(|_| CoreRecordError::InvalidRepositoryFileInvocationEvidence)?;
+        let end = usize::try_from(self.end)
+            .map_err(|_| CoreRecordError::InvalidRepositoryFileInvocationEvidence)?;
+        if start >= end
+            || end > body.len()
+            || !body.is_char_boundary(start)
+            || !body.is_char_boundary(end)
+        {
+            return Err(CoreRecordError::InvalidRepositoryFileInvocationEvidence);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

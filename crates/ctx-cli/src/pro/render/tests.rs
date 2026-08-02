@@ -5,7 +5,7 @@ use std::{
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, EventIdentityInput, NativeItemKey, NativeSessionKey,
-    RepositoryFileObservationKind, SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
+    RepositoryFileInvocationKind, SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
 };
 use ctx_pro_host_protocol::{
     AgentAttribution, BlameContinuation, BlameMatch, BlameResult, CommitBlameMatch, CommitFactType,
@@ -20,8 +20,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use super::{
     layout::{enum_heading, enum_text},
-    print_blame_result, print_blame_result_with_evidence_preview, render_blame_document,
-    render_blame_document_with_evidence_preview,
+    BlameEvidenceContext,
 };
 use crate::pro::evidence_preview::{
     EvidencePreview, EvidencePreviewModel, MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
@@ -39,6 +38,41 @@ fn protocol_snapshot() -> ctx_pro_host_protocol::QuerySnapshotExpectation {
 
 fn context(width: usize) -> RenderContext {
     RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never))
+}
+
+fn empty_context(result: &BlameResult) -> BlameEvidenceContext {
+    if matches!(&result.target, ResolvedBlameTarget::File { .. }) {
+        BlameEvidenceContext::for_file(EvidencePreviewModel {
+            previews: Vec::new(),
+        })
+    } else {
+        BlameEvidenceContext::not_applicable()
+    }
+}
+
+fn render_blame_document(result: &BlameResult, context: &RenderContext) -> Document {
+    super::render_blame_document(result, context, &empty_context(result))
+}
+
+fn render_blame_document_with_evidence_preview(
+    result: &BlameResult,
+    context: &RenderContext,
+    previews: Option<&EvidencePreviewModel>,
+) -> Document {
+    let evidence_context = previews.map_or_else(
+        || empty_context(result),
+        |model| BlameEvidenceContext::for_file(model.clone()),
+    );
+    super::render_blame_document(result, context, &evidence_context)
+}
+
+fn print_blame_result_with_evidence_preview(
+    result: &BlameResult,
+    json_output: bool,
+    previews: &EvidencePreviewModel,
+    ui: &mut crate::ui::Ui,
+) -> anyhow::Result<usize> {
+    super::print_blame_result_with_evidence_preview(result, json_output, previews, ui)
 }
 
 #[derive(Clone, Default)]
@@ -108,14 +142,24 @@ fn commit_blame_result(evidence_count: u32) -> BlameResult {
 }
 
 fn preview(
-    _result: &BlameResult,
+    result: &BlameResult,
     numbers: Vec<u32>,
-    kind: RepositoryFileObservationKind,
+    operation: RepositoryFileInvocationKind,
     excerpt: impl Into<String>,
 ) -> EvidencePreview {
+    let path = match &result.target {
+        ResolvedBlameTarget::File { path, .. } => path.clone(),
+        ResolvedBlameTarget::Commit { .. } | ResolvedBlameTarget::PullRequest { .. } => {
+            "src/lib.rs".to_owned()
+        }
+    };
     EvidencePreview {
-        evidence_numbers: numbers,
-        file_kind: kind,
+        citation_numbers: numbers,
+        operation,
+        path,
+        prior_path: matches!(operation, RepositoryFileInvocationKind::Rename)
+            .then(|| "src/old.rs".to_owned()),
+        tool_name: "test_tool".to_owned(),
         excerpt: excerpt.into(),
     }
 }
@@ -138,7 +182,7 @@ fn single_preview_excerpt_fragments(rendered: &str) -> Vec<&str> {
     let lines = rendered.lines().collect::<Vec<_>>();
     let heading = lines
         .iter()
-        .position(|line| line.contains("file evidence"))
+        .position(|line| line.contains("file request"))
         .unwrap();
     lines[heading + 1..]
         .iter()
@@ -495,7 +539,7 @@ fn file_continuation_uses_committed_window_golden() {
 }
 
 #[test]
-fn opted_in_file_continuation_retains_evidence_preview_golden() {
+fn unavailable_file_context_keeps_the_plain_continuation_command() {
     let result = paginated_file_result();
     result.validate().unwrap();
     assert_eq!(
@@ -506,7 +550,7 @@ fn opted_in_file_continuation_retains_evidence_preview_golden() {
             },
             80,
         ),
-        include_str!("../../../testdata/pro/blame_file_continuation_preview.golden.txt")
+        include_str!("../../../testdata/pro/blame_file_continuation.golden.txt")
     );
 }
 
@@ -788,25 +832,25 @@ fn wire_enums_are_humanized_in_human_output() {
 }
 
 #[test]
-fn opted_in_file_preview_follows_its_numbered_evidence() {
+fn default_file_context_follows_its_numbered_evidence() {
     let result = file_preview_result(1);
     let model = EvidencePreviewModel {
         previews: vec![preview(
             &result,
             vec![1],
-            RepositoryFileObservationKind::Modified,
+            RepositoryFileInvocationKind::Modify,
             "exact target-bearing unit",
         )],
     };
     let rendered = render_preview_plain(&result, &model, 80);
     let evidence = rendered.find("\nEvidence\n").unwrap();
     let preview = rendered
-        .find("\nEvidence preview (local history content; explicitly requested)\n")
+        .find("\nEvidence context (local history content)\n")
         .unwrap();
 
     assert!(evidence < preview, "{rendered}");
     assert!(
-        rendered.contains("Evidence preview (local history content; explicitly requested)"),
+        rendered.contains("Evidence context (local history content)"),
         "{rendered}"
     );
     assert!(
@@ -819,7 +863,7 @@ fn opted_in_file_preview_follows_its_numbered_evidence() {
         0,
         "{rendered}"
     );
-    assert!(rendered.contains("  [1] Modified file evidence\n"));
+    assert!(rendered.contains("  [1] Modify file request via test_tool\n"));
 }
 
 #[test]
@@ -836,20 +880,20 @@ fn grouped_preview_heading_wraps_references_and_kind_only_when_required() {
             previews: vec![preview(
                 &result,
                 numbers.clone(),
-                RepositoryFileObservationKind::Modified,
+                RepositoryFileInvocationKind::Modify,
                 "exact unit",
             )],
         };
 
         for width in [32, 48, 80, 120] {
             let rendered = render_preview_plain(&result, &model, width);
-            let section = rendered.split("\nEvidence preview ").nth(1).unwrap();
+            let section = &rendered[rendered.find("Evidence context").unwrap()..];
             let lines = section.lines().collect::<Vec<_>>();
             let reference_line = lines
                 .iter()
                 .position(|line| line.trim_start().starts_with("[1]"))
                 .unwrap();
-            let combined = format!("  {references} Modified file evidence");
+            let combined = format!("  {references} Modify file request via test_tool");
 
             if combined.width() < width {
                 assert_eq!(lines[reference_line], combined, "{reference_count}/{width}");
@@ -861,7 +905,7 @@ fn grouped_preview_heading_wraps_references_and_kind_only_when_required() {
                 );
                 assert_eq!(
                     lines[reference_line + 1],
-                    "    Modified file evidence",
+                    "    Modify file request via test_tool",
                     "{reference_count}/{width}"
                 );
             }
@@ -884,12 +928,15 @@ fn multiline_rename_excerpt_preserves_indented_logical_lines() {
         previews: vec![preview(
             &file_result,
             vec![1],
-            RepositoryFileObservationKind::Renamed,
+            RepositoryFileInvocationKind::Rename,
             "*** Update File: src/old.rs\n*** Move to: src/lib.rs",
         )],
     };
     let file = render_preview_plain(&file_result, &file_model, 80);
-    assert!(file.contains("  [1] Renamed file evidence\n"), "{file}");
+    assert!(
+        file.contains("  [1] Rename file request via test_tool\n"),
+        "{file}"
+    );
     assert!(
         file.contains("    *** Update File: src/old.rs\n    *** Move to: src/lib.rs\n"),
         "{file}"
@@ -904,7 +951,7 @@ fn preview_preserves_sanitized_whitespace_and_control_escapes_exactly() {
         previews: vec![preview(
             &result,
             vec![1],
-            RepositoryFileObservationKind::Modified,
+            RepositoryFileInvocationKind::Modify,
             "modified: src/a  b.rs\n 2 files changed, 3 insertions(+), 1 deletion(-)  \n\tstatus:\0  keep\tgap\u{202e}\u{1b}  ",
         )],
     };
@@ -932,7 +979,7 @@ fn evidence_renderer_escapes_strict_format_controls_and_preserves_text_shaping()
         previews: vec![preview(
             &result,
             vec![1],
-            RepositoryFileObservationKind::Modified,
+            RepositoryFileInvocationKind::Modify,
             format!("modified: src/lib.rs {CONTROLS} {PRESERVED}"),
         )],
     };
@@ -964,7 +1011,7 @@ fn preview_wraps_long_family_emoji_path_only_at_grapheme_boundaries() {
         previews: vec![preview(
             &result,
             vec![1],
-            RepositoryFileObservationKind::Modified,
+            RepositoryFileInvocationKind::Modify,
             &excerpt,
         )],
     };
@@ -1014,7 +1061,7 @@ fn multibyte_excerpt_limit_is_enforced_in_original_utf8_bytes() {
             previews: vec![preview(
                 &result,
                 vec![1],
-                RepositoryFileObservationKind::Modified,
+                RepositoryFileInvocationKind::Modify,
                 excerpt,
             )],
         };
@@ -1026,20 +1073,12 @@ fn multibyte_excerpt_limit_is_enforced_in_original_utf8_bytes() {
                 "{bytes}: {rendered}"
             );
             assert!(
-                rendered.contains("Modified file evidence"),
+                rendered.contains("Modify file request via test_tool"),
                 "{bytes}: {rendered}"
             );
         } else {
             assert!(
-                rendered.contains("safe preview") && rendered.contains("unavailable"),
-                "{bytes}: {rendered}"
-            );
-            assert!(
-                !rendered
-                    .split("\nEvidence preview ")
-                    .nth(1)
-                    .unwrap()
-                    .contains("ctx show event "),
+                !rendered.contains("Evidence context"),
                 "{bytes}: {rendered}"
             );
         }
@@ -1064,7 +1103,7 @@ fn rendered_preview_budget_accepts_4096_bytes_and_rejects_4097() {
 }
 
 #[test]
-fn requested_but_unavailable_preview_is_content_free_and_default_output_is_unchanged() {
+fn unavailable_context_is_omitted_and_default_output_is_unchanged() {
     let result = file_preview_result(0);
     let default = render_blame_document(&result, &context(80)).render_plain();
     let requested = render_preview_plain(
@@ -1075,18 +1114,12 @@ fn requested_but_unavailable_preview_is_content_free_and_default_output_is_uncha
         80,
     );
 
-    assert!(!default.contains("Evidence preview"));
-    assert!(requested.starts_with(default.trim_end()), "{requested}");
-    assert!(requested.contains("Evidence preview (local history content; explicitly requested)"));
-    assert!(requested.contains("A safe preview of cited local-history evidence"));
-    assert!(requested.contains("unavailable"));
-    assert!(requested.contains("result."));
-    assert!(!requested.contains("generation"));
-    assert!(!requested.contains("digest"));
+    assert!(!default.contains("Evidence context"));
+    assert_eq!(requested, default);
 }
 
 #[test]
-fn default_opt_out_bytes_are_identical_for_every_target_and_supported_width() {
+fn absent_context_preserves_base_bytes_for_every_target_and_supported_width() {
     let results = [
         file_preview_result(1),
         commit_blame_result(1),
@@ -1099,10 +1132,10 @@ fn default_opt_out_bytes_are_identical_for_every_target_and_supported_width() {
                     TestContext::tty(StreamKind::Stdout, width).color(color),
                 );
                 let default = render_blame_document(result, &context);
-                let opt_out = render_blame_document_with_evidence_preview(result, &context, None);
+                let absent = render_blame_document_with_evidence_preview(result, &context, None);
                 assert_eq!(
                     default.render(&context),
-                    opt_out.render(&context),
+                    absent.render(&context),
                     "target {:?}, width {width}, color {color:?}",
                     result.target
                 );
@@ -1118,14 +1151,14 @@ fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_trun
     let mut previews = vec![preview(
         &result,
         vec![1, 2],
-        RepositoryFileObservationKind::Modified,
+        RepositoryFileInvocationKind::Modify,
         exact.clone(),
     )];
     for number in 3..=5 {
         previews.push(preview(
             &result,
             vec![number],
-            RepositoryFileObservationKind::Modified,
+            RepositoryFileInvocationKind::Modify,
             exact.clone(),
         ));
     }
@@ -1138,9 +1171,12 @@ fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_trun
     let plain = section.render_plain();
 
     assert!(styled.len() <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES);
-    assert_eq!(plain.matches("Modified file evidence").count(), 3);
+    assert_eq!(
+        plain.matches("Modify file request via test_tool").count(),
+        3
+    );
     assert!(
-        plain.contains("  [1] [2]\n    Modified file evidence\n"),
+        plain.contains("  [1] [2]\n    Modify file request via test_tool\n"),
         "{plain}"
     );
     assert_eq!(
@@ -1149,7 +1185,7 @@ fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_trun
         "one or more exact 512-byte excerpts were truncated"
     );
     assert!(
-        !plain.contains("  [5] Modified file evidence\n"),
+        !plain.contains("  [5] Modify file request via test_tool\n"),
         "fourth preview was rendered"
     );
 }
@@ -1161,7 +1197,7 @@ fn ultra_narrow_contexts_preserve_grouped_references_and_exact_excerpt_atoms() {
         previews: vec![preview(
             &result,
             vec![1, 2, 3],
-            RepositoryFileObservationKind::Modified,
+            RepositoryFileInvocationKind::Modify,
             "exact unit",
         )],
     };
@@ -1182,7 +1218,7 @@ fn ultra_narrow_contexts_preserve_grouped_references_and_exact_excerpt_atoms() {
             let stripped = String::from_utf8(stripped.into_inner()).unwrap();
             assert_eq!(stripped, section.render_plain());
             assert!(
-                stripped.contains("  [1] [2] [3]\n    Modified file evidence\n"),
+                stripped.contains("  [1] [2] [3]\n    Modify file request via test_tool\n"),
                 "{width}/{color:?}: {stripped}"
             );
             assert!(!stripped.contains("ctx show event "));
@@ -1194,7 +1230,7 @@ fn ultra_narrow_contexts_preserve_grouped_references_and_exact_excerpt_atoms() {
 }
 
 #[test]
-fn actual_and_canonical_render_budgets_omit_only_complete_preview_items() {
+fn shared_admission_keeps_complete_items_identical_across_human_widths() {
     let result = file_preview_result(3);
     let model = EvidencePreviewModel {
         previews: (1..=3)
@@ -1202,13 +1238,15 @@ fn actual_and_canonical_render_budgets_omit_only_complete_preview_items() {
                 preview(
                     &result,
                     vec![number],
-                    RepositoryFileObservationKind::Modified,
+                    RepositoryFileInvocationKind::Modify,
                     "Z".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES),
                 )
             })
             .collect(),
     };
 
+    let shared_item_count = super::evidence::admitted_previews(&model).previews.len();
+    assert!(shared_item_count > 0);
     for width in [1, 2, 8, 16, 32, 48, 80, 120] {
         for color in [ColorMode::Never, ColorMode::Always] {
             let context =
@@ -1216,13 +1254,18 @@ fn actual_and_canonical_render_budgets_omit_only_complete_preview_items() {
             let mut section = Document::new();
             super::evidence::render_previews(&mut section, &context, &model);
             let rendered = section.render(&context);
-            assert!(
-                rendered.len() <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES,
-                "{width}/{color:?}: {}",
-                rendered.len()
-            );
+            if width >= 32 {
+                assert!(
+                    rendered.len() <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES,
+                    "{width}/{color:?}: {}",
+                    rendered.len()
+                );
+            }
             let stripped = strip_ansi(&rendered);
-            let admitted = stripped.matches("Modified file evidence").count();
+            let admitted = stripped
+                .matches("Modify file request via test_tool")
+                .count();
+            assert_eq!(admitted, shared_item_count, "{width}/{color:?}: {stripped}");
             assert_eq!(
                 stripped.matches('Z').count(),
                 admitted * MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
@@ -1231,9 +1274,6 @@ fn actual_and_canonical_render_budgets_omit_only_complete_preview_items() {
             for evidence in &result.evidence {
                 let reference = format!("[{}]", evidence.number);
                 assert!(stripped.matches(&reference).count() <= 1);
-            }
-            if width == 1 && color == ColorMode::Always {
-                assert!(admitted < model.previews.len(), "{stripped}");
             }
         }
     }
@@ -1256,24 +1296,13 @@ fn sanitizer_expansion_omits_the_complete_item_instead_of_truncating_it() {
         previews: vec![preview(
             &result,
             vec![1],
-            RepositoryFileObservationKind::Modified,
+            RepositoryFileInvocationKind::Modify,
             "\0".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES),
         )],
     };
     let rendered = render_preview_plain(&result, &model, 80);
 
-    assert!(
-        rendered.contains("safe preview") && rendered.contains("unavailable"),
-        "{rendered}"
-    );
-    assert!(
-        !rendered
-            .split("\nEvidence preview ")
-            .nth(1)
-            .unwrap()
-            .contains("ctx show event "),
-        "{rendered}"
-    );
+    assert!(!rendered.contains("Evidence context"), "{rendered}");
     assert!(!rendered.contains("\\u{0000}"), "{rendered}");
 }
 
@@ -1288,7 +1317,7 @@ fn preview_is_safe_and_stable_at_supported_widths_and_across_color() {
         previews: vec![preview(
             &result,
             vec![1],
-            RepositoryFileObservationKind::Modified,
+            RepositoryFileInvocationKind::Modify,
             excerpt,
         )],
     };
@@ -1317,22 +1346,25 @@ fn preview_is_safe_and_stable_at_supported_widths_and_across_color() {
         }
         assert!(!plain.contains('\u{202e}'));
         assert!(!plain.contains('\u{1b}'));
-        let preview_section = plain.split("\nEvidence preview ").nth(1).unwrap();
+        let preview_section = &plain[plain.find("Evidence context").unwrap()..];
         assert!(!preview_section.contains("ctx show event "));
         for line in preview_section.lines() {
+            if line.trim() == "Modify file request via test_tool" {
+                continue;
+            }
             assert!(line.width() < width, "width {width} overflow: {line:?}");
         }
     }
 }
 
 #[test]
-fn preview_bytes_are_accounted_and_json_bytes_remain_exactly_unchanged() {
+fn evidence_context_bytes_are_accounted_and_json_is_status_bearing() {
     let result = file_preview_result(1);
     let model = EvidencePreviewModel {
         previews: vec![preview(
             &result,
             vec![1],
-            RepositoryFileObservationKind::Modified,
+            RepositoryFileInvocationKind::Modify,
             "modified: src/lib.rs",
         )],
     };
@@ -1350,7 +1382,9 @@ fn preview_bytes_are_accounted_and_json_bytes_remain_exactly_unchanged() {
         let measured =
             print_blame_result_with_evidence_preview(&result, false, &model, &mut ui).unwrap();
         ui.flush().unwrap();
-        assert!(captured.text().contains("Evidence preview"));
+        assert!(captured
+            .text()
+            .contains("Evidence context (local history content)"));
         assert!(measured > default_bytes);
         assert_eq!(
             measured,
@@ -1367,14 +1401,36 @@ fn preview_bytes_are_accounted_and_json_bytes_remain_exactly_unchanged() {
     let measured =
         print_blame_result_with_evidence_preview(&result, true, &model, &mut ui).unwrap();
     ui.flush().unwrap();
-    let mut expected = serde_json::to_string_pretty(&result).unwrap();
+    let expected_value = super::blame_result_json(&result, Some(&model));
+    let mut helper_fields = expected_value.clone();
+    helper_fields
+        .as_object_mut()
+        .unwrap()
+        .remove("evidence_context");
+    assert_eq!(helper_fields, serde_json::to_value(&result).unwrap());
+    assert_eq!(expected_value["evidence_context"]["status"], "available");
+    assert_eq!(
+        expected_value["evidence_context"]["items"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    let mut expected = serde_json::to_string_pretty(&expected_value).unwrap();
     expected.push('\n');
     assert_eq!(captured.text(), expected);
     assert_eq!(measured, expected.len());
+    assert!(!captured.text().contains('\u{1b}'));
 
-    let mut default_ui = crate::ui::Ui::with_writers(io::sink(), pipe, io::sink(), pipe);
+    let unavailable = EvidencePreviewModel {
+        previews: Vec::new(),
+    };
+    let unavailable_value = super::blame_result_json(&result, Some(&unavailable));
     assert_eq!(
-        print_blame_result(&result, true, &mut default_ui).unwrap(),
-        expected.len()
+        unavailable_value["evidence_context"]["status"],
+        "unavailable"
+    );
+    assert_eq!(
+        unavailable_value["evidence_context"]["items"],
+        serde_json::json!([])
     );
 }

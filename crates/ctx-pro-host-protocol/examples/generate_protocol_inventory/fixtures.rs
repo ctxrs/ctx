@@ -140,6 +140,7 @@ pub(super) fn record() -> CoreRecord {
         repository_candidate_evidence,
         repository_bindings: Vec::new(),
         repository_abstentions: Vec::new(),
+        repository_file_invocation_evidence: Vec::new(),
         repository_file_observations: Vec::new(),
         repository_vcs_observations: Vec::new(),
     }

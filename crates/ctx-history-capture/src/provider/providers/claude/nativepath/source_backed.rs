@@ -18,16 +18,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
+    invocation_evidence::ClaudeExactFileInvocationAbstention,
     record::parse_native_record,
     rows::{
-        ClaudeEventKind, ClaudeOutputOutcome, ClaudePhysicalLocator, ClaudeRetainedRow,
-        ClaudeSessionMetadata, CLAUDE_MAX_RECORD_ROWS,
+        ClaudeOutputOutcome, ClaudePhysicalLocator, ClaudeRetainedRow, ClaudeSessionMetadata,
+        CLAUDE_MAX_RECORD_ROWS,
     },
     source::{classify_claude_path, claude_projects_root, ClaudeSessionKey, SessionLayout},
 };
 use crate::repository_attribution::{
     apply_annotation, linked_outcome_evidence, AttributionInput, CommandEvidenceDisposition,
     LinkedOutcomeInput, RepositoryAttributor, UnscopedFileObservation,
+    UnscopedRepositoryFileInvocationEvidence,
 };
 use crate::OutputOutcome;
 use crate::{
@@ -56,8 +58,10 @@ const MAX_PENDING_CALLS: usize = 4096;
 const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;
 
 mod checkpoint;
+mod normalized_body;
 
 use checkpoint::*;
+use normalized_body::{event_kind, lexical_body};
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ClaudeJsonlAdapter;
@@ -339,6 +343,7 @@ impl JsonlFamilyProjector for ClaudeProjector {
         );
         for row in parsed.rows {
             let event_sequence = row_event_sequence(&row)?;
+            let normalized_body = lexical_body(&row);
             let structured_content = row_structured_content(&row);
             let mut input = AttributionInput {
                 activity_at_unix_ms: row
@@ -367,6 +372,34 @@ impl JsonlFamilyProjector for ClaudeProjector {
                         kind: touch.kind,
                     })
                     .collect();
+                input.repository_file_invocation_evidence = call
+                    .exact_file_invocations
+                    .iter()
+                    .map(|invocation| {
+                        let evidence = invocation.evidence_in(&call.input, &normalized_body);
+                        UnscopedRepositoryFileInvocationEvidence {
+                            operation_ordinal: evidence.invocation.invocation_ordinal,
+                            path: evidence.invocation.target.path.clone(),
+                            prior_path: evidence.invocation.target.prior_path.clone(),
+                            kind: evidence.invocation.invocation_kind(),
+                            tool_name: Some(evidence.invocation.tool_name.clone()),
+                            normalized_text_range: evidence.normalized_text_range,
+                        }
+                    })
+                    .collect();
+                if let Some(abstention) = call.exact_file_invocations.abstention() {
+                    input.provider_native_context_ambiguous = true;
+                    input.outcome_abstentions.push(match abstention {
+                        ClaudeExactFileInvocationAbstention::CapacityExceeded => (
+                            RepositoryAbstentionReason::CandidateLimitExceeded,
+                            "claude_exact_file_invocation_capacity_exceeded",
+                        ),
+                        ClaudeExactFileInvocationAbstention::Opaque => (
+                            RepositoryAbstentionReason::Ambiguous,
+                            "claude_exact_file_invocation_is_opaque",
+                        ),
+                    });
+                }
                 if let Some(call_id) = call.call_id.as_deref().filter(|id| !id.is_empty()) {
                     self.remember_pending_call(
                         call_id,
@@ -443,12 +476,12 @@ impl JsonlFamilyProjector for ClaudeProjector {
             )?;
             let mut core = core_record(
                 &self.source,
-                &self.source_path,
                 &self.binding,
                 &self.identities,
                 &self.session,
                 row,
                 fallback_identity,
+                normalized_body,
             )?;
             apply_annotation(&mut core, self.attributor.attribute(input));
             core.validate_contract().map_err(contract)?;
@@ -468,12 +501,12 @@ impl JsonlFamilyProjector for ClaudeProjector {
 
 fn core_record(
     source: &SourceKey,
-    _source_path: &str,
     binding: &Binding,
     identities: &Identities,
     session: &ClaudeSessionMetadata,
     row: ClaudeRetainedRow,
     fallback_identity: Option<FallbackEventIdentity>,
+    normalized_body: String,
 ) -> Result<CoreRecord> {
     let native_item_key = native_item_key(&row, fallback_identity)?;
     let event_id = derive_event_id(EventIdentityInput {
@@ -496,7 +529,7 @@ fn core_record(
         identities.agent_type,
         identities.is_primary,
         PARSER_REVISION,
-        lexical_body(&row),
+        normalized_body,
     )
     .map_err(contract)?;
     record.parent_session_id = identities.parent_session_id;
@@ -928,40 +961,6 @@ fn fallback_event_key_parts(identity: FallbackEventIdentity) -> Result<Vec<Typed
         TypedKey::bytes(identity.digest.to_vec()).map_err(contract)?,
         TypedKey::U64(identity.duplicate_occurrence),
     ])
-}
-
-fn lexical_body(row: &ClaudeRetainedRow) -> String {
-    let text = row
-        .body
-        .clone()
-        .or_else(|| {
-            row.tool_call.as_ref().and_then(|call| {
-                serde_json::to_string(&serde_json::json!({
-                    "type": "tool_use",
-                    "id": call.call_id,
-                    "name": call.tool_name,
-                    "input": call.input,
-                }))
-                .ok()
-            })
-        })
-        .or_else(|| row.tool_result.as_ref().map(claude_tool_result_body))
-        .unwrap_or_else(|| event_kind(row.kind).to_owned());
-    if text.trim().is_empty() {
-        event_kind(row.kind).to_owned()
-    } else {
-        text
-    }
-}
-
-fn event_kind(kind: ClaudeEventKind) -> &'static str {
-    match kind {
-        ClaudeEventKind::Message => "message",
-        ClaudeEventKind::Summary => "summary",
-        ClaudeEventKind::Notice => "notice",
-        ClaudeEventKind::ToolCall => "tool_call",
-        ClaudeEventKind::ToolOutput => "tool_output",
-    }
 }
 
 fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<Binding> {

@@ -4,6 +4,7 @@ use std::{
 };
 
 use clap::Parser as _;
+use ctx_history_core::RepositoryFileInvocationKind;
 use ctx_pro_host_protocol::{
     BlameResult, CommitBlameMatch, CommitFactType, CommitPredicate, FactConfidence, FactState,
     ResolvedBlameTarget, ResourceKind, ResourceRef,
@@ -356,38 +357,10 @@ fn explicit_blame_subcommands_keep_their_original_queries() {
 }
 
 #[test]
-fn evidence_preview_is_explicit_on_universal_and_nested_file_targets() {
+fn removed_evidence_preview_flag_is_unknown_on_every_blame_form() {
     for arguments in [
         &["ctx", "blame", "src/lib.rs", "--evidence-preview"][..],
-        &[
-            "ctx",
-            "blame",
-            "abc1234",
-            "--type",
-            "file",
-            "--evidence-preview",
-        ],
-        &["ctx", "blame", "file", "src/lib.rs", "--evidence-preview"],
-    ] {
-        let cli = crate::Cli::try_parse_from(arguments).unwrap();
-        let crate::cli::CommandRoot::Blame(args) = cli.command else {
-            panic!("expected blame command");
-        };
-        let query = args.into_query().unwrap();
-        assert!(query.4, "{arguments:?}");
-    }
-
-    let cli = crate::Cli::try_parse_from(["ctx", "blame", "file", "src/lib.rs"]).unwrap();
-    let crate::cli::CommandRoot::Blame(args) = cli.command else {
-        panic!("expected blame command");
-    };
-    assert!(!args.into_query().unwrap().4);
-}
-
-#[test]
-fn non_file_preview_stops_before_pro_helper_or_core_index_access() {
-    for arguments in [
-        &["ctx", "blame", "abc1234", "--evidence-preview"][..],
+        &["ctx", "blame", "abc1234", "--evidence-preview"],
         &[
             "ctx",
             "blame",
@@ -396,6 +369,7 @@ fn non_file_preview_stops_before_pro_helper_or_core_index_access() {
             "forge:github.com/ctxrs/ctx",
             "--evidence-preview",
         ],
+        &["ctx", "blame", "file", "src/lib.rs", "--evidence-preview"],
         &["ctx", "blame", "commit", "abc1234", "--evidence-preview"],
         &[
             "ctx",
@@ -407,56 +381,36 @@ fn non_file_preview_stops_before_pro_helper_or_core_index_access() {
             "--evidence-preview",
         ],
     ] {
-        let cli = crate::Cli::try_parse_from(arguments).unwrap();
-        let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
-        let crate::cli::CommandRoot::Blame(args) = cli.command else {
-            panic!("expected blame command");
-        };
-        let pro_calls = std::cell::Cell::new(0usize);
-        let core_index_reads = std::cell::Cell::new(0usize);
-        let mut ui = sink_ui();
-        let error = run_with(
-            args,
-            PathBuf::from("/unused"),
-            &mut usage,
-            &mut ui,
-            |_, _, _, _| {
-                pro_calls.set(pro_calls.get() + 1);
-                panic!("non-file preview reached Pro/helper access")
-            },
-            |_, _| {
-                core_index_reads.set(core_index_reads.get() + 1);
-                panic!("non-file preview reached Core/index access")
-            },
-        )
-        .unwrap_err();
-        assert_eq!(pro_calls.get(), 0, "{arguments:?}");
-        assert_eq!(core_index_reads.get(), 0, "{arguments:?}");
-        assert_eq!(
-            error.to_string(),
-            "invalid_request: --evidence-preview is valid only for file blame; remove it or select a file target"
+        let error = crate::Cli::try_parse_from(arguments)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("unexpected argument '--evidence-preview'"),
+            "{arguments:?}: {error}"
         );
-        assert!(!error.to_string().contains("/unused"));
     }
 }
 
 #[test]
-fn json_preview_conflict_stops_before_pro_or_evidence_access() {
+fn commit_and_pr_results_skip_hydration_for_text_and_json() {
     for arguments in [
+        &["ctx", "blame", "commit", "abc1234"][..],
+        &["ctx", "blame", "commit", "abc1234", "--format=json"],
         &[
             "ctx",
             "blame",
-            "src/lib.rs",
-            "--evidence-preview",
-            "--format",
-            "json",
-        ][..],
+            "pr",
+            "42",
+            "--repository",
+            "forge:github.com/ctxrs/ctx",
+        ],
         &[
             "ctx",
             "blame",
-            "file",
-            "src/lib.rs",
-            "--evidence-preview",
+            "pr",
+            "42",
+            "--repository",
+            "forge:github.com/ctxrs/ctx",
             "--format=json",
         ],
     ] {
@@ -465,31 +419,134 @@ fn json_preview_conflict_stops_before_pro_or_evidence_access() {
         let crate::cli::CommandRoot::Blame(args) = cli.command else {
             panic!("expected blame command");
         };
-        let pro_calls = std::cell::Cell::new(0usize);
-        let evidence_reads = std::cell::Cell::new(0usize);
-        let mut ui = sink_ui();
-        let error = run_with(
+        let temp = tempfile::tempdir().unwrap();
+        let writer = SharedWriter::default();
+        let captured = writer.clone();
+        let pipe = crate::ui::RenderContext::for_test(crate::ui::TestContext::pipe(
+            crate::ui::StreamKind::Stdout,
+        ));
+        let mut ui = crate::ui::Ui::with_writers(writer, pipe, io::sink(), pipe);
+        run_with(
             args,
-            PathBuf::from("/unused"),
+            temp.path().to_path_buf(),
+            &mut usage,
+            &mut ui,
+            |_, target, _, _| {
+                let repository = ResourceRef {
+                    id: "repository:ctxrs-ctx".to_owned(),
+                    kind: ResourceKind::Repository,
+                    display: "ctxrs/ctx".to_owned(),
+                };
+                let target = match target {
+                    BlameTarget::Commit { oid, .. } => ResolvedBlameTarget::Commit {
+                        commit: ResourceRef {
+                            id: format!("commit:{oid}"),
+                            kind: ResourceKind::Commit,
+                            display: oid,
+                        },
+                        repository,
+                    },
+                    BlameTarget::PullRequest { selector, .. } => ResolvedBlameTarget::PullRequest {
+                        selector,
+                        pull_request: ResourceRef {
+                            id: "pull_request:ctxrs-ctx:42".to_owned(),
+                            kind: ResourceKind::PullRequest,
+                            display: "ctxrs/ctx#42".to_owned(),
+                        },
+                        repository,
+                    },
+                    BlameTarget::File { .. } => panic!("unexpected file target"),
+                };
+                Ok(BlameResult {
+                    snapshot: protocol_snapshot(),
+                    target,
+                    git_snapshot: None,
+                    matches: Vec::new(),
+                    evidence: Vec::new(),
+                    next: None,
+                })
+            },
+            |_, _| panic!("non-file blame performed an evidence hydration read"),
+        )
+        .unwrap_or_else(|error| panic!("{arguments:?}: {error}"));
+        ui.flush().unwrap();
+        let rendered = captured.text();
+        assert!(!rendered.contains("Evidence context"), "{rendered}");
+        if arguments.contains(&"--format=json") {
+            let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+            assert_eq!(value["evidence_context"]["status"], "not_applicable");
+            assert_eq!(value["evidence_context"]["items"], serde_json::json!([]));
+            assert!(!rendered.contains('\u{1b}'));
+        }
+    }
+}
+
+#[test]
+fn file_hydration_is_automatic_for_text_and_json_and_empty_context_is_nonfatal() {
+    for (arguments, json) in [
+        (&["ctx", "blame", "file", "src/lib.rs"][..], false),
+        (
+            &["ctx", "blame", "file", "src/lib.rs", "--format=json"][..],
+            true,
+        ),
+    ] {
+        let cli = crate::Cli::try_parse_from(arguments).unwrap();
+        let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
+        let crate::cli::CommandRoot::Blame(args) = cli.command else {
+            panic!("expected blame command");
+        };
+        let writer = SharedWriter::default();
+        let captured = writer.clone();
+        let pipe = crate::ui::RenderContext::for_test(crate::ui::TestContext::pipe(
+            crate::ui::StreamKind::Stdout,
+        ));
+        let mut ui = crate::ui::Ui::with_writers(writer, pipe, io::sink(), pipe);
+        let reads = std::cell::Cell::new(0usize);
+        let temp = tempfile::tempdir().unwrap();
+        run_with(
+            args,
+            temp.path().to_path_buf(),
             &mut usage,
             &mut ui,
             |_, _, _, _| {
-                pro_calls.set(pro_calls.get() + 1);
-                panic!("JSON conflict reached Pro")
+                Ok(BlameResult {
+                    snapshot: protocol_snapshot(),
+                    target: ResolvedBlameTarget::File {
+                        path: "src/lib.rs".to_owned(),
+                        repository: ResourceRef {
+                            id: "repository:ctxrs-ctx".to_owned(),
+                            kind: ResourceKind::Repository,
+                            display: "ctxrs/ctx".to_owned(),
+                        },
+                        requested_lines: None,
+                    },
+                    git_snapshot: Some(ctx_pro_host_protocol::GitSnapshot {
+                        head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                        worktree_status: ctx_pro_host_protocol::WorktreeStatus::Clean,
+                    }),
+                    matches: Vec::new(),
+                    evidence: Vec::new(),
+                    next: None,
+                })
             },
             |_, _| {
-                evidence_reads.set(evidence_reads.get() + 1);
-                panic!("JSON conflict reached evidence hydration")
+                reads.set(reads.get() + 1);
+                crate::pro::evidence_preview::EvidencePreviewModel {
+                    previews: Vec::new(),
+                }
             },
         )
-        .unwrap_err();
-        assert_eq!(pro_calls.get(), 0, "{arguments:?}");
-        assert_eq!(evidence_reads.get(), 0, "{arguments:?}");
-        assert_eq!(
-                error.to_string(),
-                "invalid_request: --evidence-preview is only available for human output; remove it or use --format text"
-            );
-        assert!(!error.to_string().contains("/unused"));
+        .unwrap();
+        ui.flush().unwrap();
+        assert_eq!(reads.get(), 1, "{arguments:?}");
+        let rendered = captured.text();
+        assert!(!rendered.contains("Evidence context"), "{rendered}");
+        if json {
+            let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+            assert_eq!(value["evidence_context"]["status"], "unavailable");
+            assert_eq!(value["evidence_context"]["items"], serde_json::json!([]));
+            assert!(!rendered.contains('\u{1b}'));
+        }
     }
 }
 
@@ -579,9 +636,8 @@ fn successful_blame_observes_structured_results_and_empty_pages() {
     let cli = crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234"]).unwrap();
     let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
     let mut ui = sink_ui();
-
     emit_blame_result(&result, true, &mut usage, &mut ui, |result, _, _| {
-        blame_json_output_bytes(result)
+        blame_json_output_bytes(result, None)
     })
     .unwrap();
     let completed = usage.completed(true, std::time::Duration::ZERO).unwrap();
@@ -591,9 +647,12 @@ fn successful_blame_observes_structured_results_and_empty_pages() {
     );
     assert_eq!(
         completed.delivered_output_bytes_for_test(),
-        blame_json_output_bytes(&result).unwrap() as u64
+        blame_json_output_bytes(&result, None).unwrap() as u64
     );
-    assert!(blame_json_output_bytes(&result).unwrap() > serde_json::to_vec(&result).unwrap().len());
+    assert!(
+        blame_json_output_bytes(&result, None).unwrap()
+            > serde_json::to_vec(&result).unwrap().len()
+    );
 
     result.matches.clear();
     let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
@@ -632,7 +691,6 @@ fn human_byte_accounting_is_plain_and_invariant_across_color_modes() {
     };
     let cli = crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234"]).unwrap();
     let mut observations = Vec::new();
-
     for color in [crate::ui::ColorMode::Never, crate::ui::ColorMode::Always] {
         let writer = SharedWriter::default();
         let captured = writer.clone();
@@ -662,7 +720,7 @@ fn human_byte_accounting_is_plain_and_invariant_across_color_modes() {
 }
 
 #[test]
-fn opted_in_preview_bytes_are_included_in_local_usage_accounting() {
+fn automatic_evidence_context_bytes_are_included_in_local_usage_accounting() {
     let resource = |id: &str, kind| ResourceRef {
         id: id.to_owned(),
         kind,
@@ -684,17 +742,27 @@ fn opted_in_preview_bytes_are_included_in_local_usage_accounting() {
         next: None,
     };
     let previews = crate::pro::evidence_preview::EvidencePreviewModel {
+        previews: vec![crate::pro::evidence_preview::EvidencePreview {
+            citation_numbers: vec![1],
+            operation: RepositoryFileInvocationKind::Modify,
+            path: "src/lib.rs".to_owned(),
+            prior_path: None,
+            tool_name: "test_tool".to_owned(),
+            excerpt: "modified: src/lib.rs".to_owned(),
+        }],
+    };
+    let unavailable = crate::pro::evidence_preview::EvidencePreviewModel {
         previews: Vec::new(),
     };
-    let cli =
-        crate::Cli::try_parse_from(["ctx", "blame", "file", "src/lib.rs", "--evidence-preview"])
-            .unwrap();
+    let cli = crate::Cli::try_parse_from(["ctx", "blame", "file", "src/lib.rs"]).unwrap();
     let mut expected_ui = sink_ui();
     let expected =
         print_blame_result_with_evidence_preview(&result, false, &previews, &mut expected_ui)
             .unwrap();
     let mut default_ui = sink_ui();
-    let default = print_blame_result(&result, false, &mut default_ui).unwrap();
+    let default =
+        print_blame_result_with_evidence_preview(&result, false, &unavailable, &mut default_ui)
+            .unwrap();
     assert!(expected > default);
 
     let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);

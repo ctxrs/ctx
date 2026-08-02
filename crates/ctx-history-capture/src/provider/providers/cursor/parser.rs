@@ -52,6 +52,11 @@ pub(super) enum CursorInputPathEvidence {
     Inexact {
         candidate_limit_exceeded: bool,
         invalid_shape: bool,
+        // Kept only for the legacy ordinary-observation path. Strict request
+        // inference remains fail-closed, and checkpoint serialization retains
+        // its pre-existing v2 shape.
+        #[serde(skip)]
+        retained_paths: Vec<String>,
     },
 }
 
@@ -528,6 +533,7 @@ impl<'de> Visitor<'de> for CursorToolUseBlockVisitor {
         let mut tool_name = None;
         let mut call_id_seen = false;
         let mut tool_name_seen = false;
+        let mut input_seen = false;
         let mut ambiguous_native_fields = false;
         let mut input = CursorToolInput::default();
         while let Some(field) = map.next_key::<String>()? {
@@ -549,6 +555,8 @@ impl<'de> Visitor<'de> for CursorToolUseBlockVisitor {
                     tool_name = value;
                 }
                 "input" => {
+                    ambiguous_native_fields |= input_seen;
+                    input_seen = true;
                     let decoded = map.next_value_seed(CursorToolInputSeed)?;
                     ambiguous_native_fields |= input.merge(decoded);
                 }
@@ -675,6 +683,7 @@ impl CursorToolInputPaths {
             CursorInputPathEvidence::Inexact {
                 candidate_limit_exceeded: self.candidate_limit_exceeded,
                 invalid_shape: self.invalid_shape,
+                retained_paths: self.paths,
             }
         } else {
             CursorInputPathEvidence::Exact(self.paths)
@@ -709,6 +718,7 @@ impl<'de> Visitor<'de> for CursorToolInputVisitor {
         A: MapAccess<'de>,
     {
         let mut input = CursorToolInput::default();
+        let mut path_fields_seen = 0_u8;
         while let Some(field) = map.next_key::<String>()? {
             match field.as_str() {
                 "command" => {
@@ -728,12 +738,26 @@ impl<'de> Visitor<'de> for CursorToolInputVisitor {
                     input.declared_workdir = value;
                 }
                 "path" | "file_path" | "filePath" => {
+                    let field_bit = match field.as_str() {
+                        "path" => 1,
+                        "file_path" => 2,
+                        "filePath" => 4,
+                        _ => 0,
+                    };
+                    let conflicting_alias = path_fields_seen != 0;
+                    input.invalid_field |= conflicting_alias;
+                    input.paths.invalid_shape |= conflicting_alias;
+                    path_fields_seen |= field_bit;
                     let path = map.next_value_seed(CursorPathStringSeed {
                         max_chars: MAX_CURSOR_PATH_CHARS,
                     })?;
                     input.paths.observe(path);
                 }
                 "paths" => {
+                    let conflicting_alias = path_fields_seen != 0;
+                    input.invalid_field |= conflicting_alias;
+                    input.paths.invalid_shape |= conflicting_alias;
+                    path_fields_seen |= 8;
                     let decoded = map.next_value_seed(CursorPathsSeed)?;
                     input.paths.merge(decoded);
                 }

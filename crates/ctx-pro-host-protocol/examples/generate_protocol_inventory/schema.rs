@@ -102,6 +102,9 @@ pub(super) fn inventory() -> Value {
                 "command_specific_repository_path", "file_activity_path", "vcs_activity_path",
                 "outcome_operation_repository_path", "outcome_output_repository_path"
             ],
+            "repository_file_invocation_kind": [
+                "read", "create", "modify", "delete", "rename", "write"
+            ],
             "query_snapshot_expectation_kind": ["core"],
             "resource_kind": ResourceKind::ALL.map(ResourceKind::wire_name)
         },
@@ -192,14 +195,20 @@ pub(super) fn inventory() -> Value {
                 "event_sequence", "occurred_at_unix_ms", "event_type", "role", "agent_type",
                 "is_primary", "workspace", "branch", "cwd", "parser_revision",
                 "normalization_revision", "content", "metadata", "repository_candidate_evidence",
-                "repository_bindings", "repository_abstentions", "repository_file_observations",
+                "repository_bindings", "repository_abstentions",
+                "repository_file_invocation_evidence", "repository_file_observations",
                 "repository_vcs_observations"
             ], &[]),
             "RepositoryCandidateEvidence": fields(&[
                 "repository_observation_revision", "bounded_shell_subset_revision",
                 "association_policy_revision", "outcome_capture_revision", "candidates"
             ], &[]),
-            "RepositoryCandidate": fields(&["kind", "path"], &[])
+            "RepositoryCandidate": fields(&["kind", "path"], &[]),
+            "RepositoryFileInvocationEvidence": fields(&[
+                "operation_ordinal", "repository_binding_id", "relative_path",
+                "prior_relative_path", "kind", "tool_name", "normalized_text_range"
+            ], &[]),
+            "RepositoryFileInvocationTextRange": fields(&["start", "end"], &[])
         },
         "core_record_contract": {
             "fingerprint": core_record_contract_fingerprint(),
@@ -211,7 +220,9 @@ pub(super) fn inventory() -> Value {
             "repository_outcome_capture_revision": CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
             "repository_local_root_authorization_fingerprint_revision":
                 CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
-            "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs"
+            "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs",
+            "repository_file_invocation_evidence_set":
+                "strictly_sorted_unique_typed_request_intent_bound_to_repository_and_normalized_body"
         },
         "core_materialization": {
             "contract_version": CORE_MATERIALIZATION_CONTRACT_VERSION,
@@ -227,7 +238,7 @@ pub(super) fn inventory() -> Value {
             "removal": "source_removal_is_resumable_as_bounded_event_tombstone_pages_and_deletes_source_control_state only_on_its_terminal_page",
             "replacement": "prior_event_removal_and_replacement_record_insertion_are_atomic_in_one_bounded_event_delta_page",
             "records": "complete_core_records_are_read_only_from_the_pinned_core_source_event_page_api_and_only_added_or_replaced_events_cross_the_protocol",
-            "repository_data": "repository_bindings_abstentions_file_and_vcs_observations_exist_only_inside_core_records",
+            "repository_data": "repository_bindings_abstentions_file_invocation_evidence_and_file_and_vcs_observations_exist_only_inside_core_records",
             "publication": "explicit_terminal_counts_at_most_one_prior_receipt_cas_and_a_small_final_control_transaction",
             "replay": "source_delta_requests_and_acknowledgement_pages_are_independently_idempotent_and_an_exact_completed_generation_may_skip_all_delta_and_event_pages",
             "integrity": "strict_source_acknowledgement_and_event_page_sequence_content_generation_and_transactional_staging_without_hash_chains"
