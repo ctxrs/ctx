@@ -19,6 +19,8 @@ use crate::{
 };
 
 const SESSION_ID: &str = "01900000-0000-7000-8000-000000000001";
+const PARENT_SESSION_ID: &str = "01900000-0000-7000-8000-000000000010";
+const ROOT_SESSION_ID: &str = "01900000-0000-7000-8000-000000000020";
 const EVENT_ID: &str = "01900001-0000-7000-8000-000000000002";
 const SECOND_EVENT_ID: &str = "01900002-0000-7000-8000-000000000003";
 
@@ -222,6 +224,11 @@ fn show_value() -> Value {
         "provider_session_id": "demo-unicode-session",
         "mode": "lite",
         "format": "text",
+        "session": {
+            "ctx_session_id": SESSION_ID,
+            "parent_ctx_session_id": null,
+            "root_ctx_session_id": SESSION_ID,
+        },
         "events": [
             {
                 "ctx_event_id": EVENT_ID,
@@ -244,6 +251,41 @@ fn show_value() -> Value {
                 "text": "Done.",
             },
         ],
+    })
+}
+
+fn session_show_value(parent: Option<&str>, root: &str) -> Value {
+    let mut value = show_value();
+    value["session"]["parent_ctx_session_id"] = parent.map_or(Value::Null, |parent| json!(parent));
+    value["session"]["root_ctx_session_id"] = json!(root);
+    value
+}
+
+fn event_show_value(parent: Option<&str>, root: &str) -> Value {
+    let mut value = show_value();
+    value["target"] = json!("event");
+    value["ctx_event_id"] = json!(EVENT_ID);
+    let mut selected = value["events"][0].clone();
+    selected["parent_ctx_session_id"] = parent.map_or(Value::Null, |parent| json!(parent));
+    selected["root_ctx_session_id"] = json!(root);
+    value["event"] = selected;
+    value
+}
+
+fn lineage_show_values(parent: Option<&str>, root: &str) -> [Value; 2] {
+    [
+        session_show_value(parent, root),
+        event_show_value(parent, root),
+    ]
+}
+
+fn rendered_field_value(rendered: &str, label: &str) -> Option<String> {
+    let prefix = format!("{label:<16}");
+    rendered.lines().find_map(|line| {
+        line.strip_prefix(&prefix)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
     })
 }
 
@@ -300,6 +342,109 @@ fn primary_renderers_match_reference_goldens_at_80_columns() {
         render_show_document(&show_value(), &context).render_plain(),
         include_str!("goldens/show.txt")
     );
+}
+
+#[test]
+fn nested_lineage_is_visible_for_session_and_event_show() {
+    for value in lineage_show_values(Some(PARENT_SESSION_ID), ROOT_SESSION_ID) {
+        let rendered = render_show_document(&value, &context(80, ColorMode::Never)).render_plain();
+
+        assert_eq!(
+            rendered_field_value(&rendered, "Session").as_deref(),
+            Some(SESSION_ID)
+        );
+        assert_eq!(
+            rendered_field_value(&rendered, "Parent").as_deref(),
+            Some(PARENT_SESSION_ID)
+        );
+        assert_eq!(
+            rendered_field_value(&rendered, "Root").as_deref(),
+            Some(ROOT_SESSION_ID)
+        );
+        assert!(rendered_field_value(&rendered, "Parent / root").is_none());
+        for id in [SESSION_ID, PARENT_SESSION_ID, ROOT_SESSION_ID] {
+            assert_eq!(rendered.matches(id).count(), 1, "{rendered}");
+        }
+    }
+}
+
+#[test]
+fn one_level_lineage_collapses_repeated_parent_and_root_identity() {
+    for value in lineage_show_values(Some(ROOT_SESSION_ID), ROOT_SESSION_ID) {
+        let rendered = render_show_document(&value, &context(80, ColorMode::Never)).render_plain();
+
+        assert_eq!(
+            rendered_field_value(&rendered, "Parent / root").as_deref(),
+            Some(ROOT_SESSION_ID)
+        );
+        assert!(rendered_field_value(&rendered, "Parent").is_none());
+        assert!(rendered_field_value(&rendered, "Root").is_none());
+        assert_eq!(rendered.matches(ROOT_SESSION_ID).count(), 1, "{rendered}");
+    }
+}
+
+#[test]
+fn primary_lineage_omits_redundant_hierarchy_fields() {
+    for value in lineage_show_values(None, SESSION_ID) {
+        let rendered = render_show_document(&value, &context(80, ColorMode::Never)).render_plain();
+
+        assert_eq!(
+            rendered_field_value(&rendered, "Session").as_deref(),
+            Some(SESSION_ID)
+        );
+        assert!(rendered_field_value(&rendered, "Parent / root").is_none());
+        assert!(rendered_field_value(&rendered, "Parent").is_none());
+        assert!(rendered_field_value(&rendered, "Root").is_none());
+        assert_eq!(rendered.matches(SESSION_ID).count(), 1, "{rendered}");
+    }
+}
+
+#[test]
+fn narrow_lineage_keeps_every_session_id_copyable_and_complete() {
+    for value in lineage_show_values(Some(PARENT_SESSION_ID), ROOT_SESSION_ID) {
+        let context = context(24, ColorMode::Never);
+        let document = render_show_document(&value, &context);
+        let rendered = document.render_plain();
+        assert_fits(&document, &context);
+
+        let references = document
+            .lines()
+            .iter()
+            .flat_map(|line| line.spans())
+            .filter(|span| span.token() == Token::Reference)
+            .map(|span| span.content())
+            .collect::<Vec<_>>();
+        for id in [SESSION_ID, PARENT_SESSION_ID, ROOT_SESSION_ID] {
+            assert_value_survives_layout(&rendered, id);
+            assert!(references.contains(&id), "{id} was not one copyable span");
+        }
+    }
+}
+
+#[test]
+fn human_lineage_keeps_compatibility_renderer_bytes_unchanged() {
+    let fixtures = [
+        (
+            session_show_value(None, SESSION_ID),
+            session_show_value(Some(PARENT_SESSION_ID), ROOT_SESSION_ID),
+        ),
+        (
+            event_show_value(None, SESSION_ID),
+            event_show_value(Some(PARENT_SESSION_ID), ROOT_SESSION_ID),
+        ),
+    ];
+
+    for (ordinary, nested) in fixtures {
+        assert_eq!(render_show_text(&nested), render_show_text(&ordinary));
+        assert_eq!(
+            render_show_markdown(&nested),
+            render_show_markdown(&ordinary)
+        );
+        assert_eq!(
+            render_show_jsonl(&nested).unwrap(),
+            render_show_jsonl(&ordinary).unwrap()
+        );
+    }
 }
 
 #[test]
