@@ -11,7 +11,7 @@ use super::layout::{
     FIELD_GAP,
 };
 use crate::pro::evidence_preview::{
-    EvidencePreview, EvidencePreviewKind, EvidencePreviewModel, MAX_EVIDENCE_PREVIEW_CITATIONS,
+    EvidencePreview, EvidencePreviewModel, MAX_EVIDENCE_PREVIEW_CITATIONS,
     MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
 };
 
@@ -110,10 +110,7 @@ fn preview_item(
         return None;
     }
     let mut document = Document::new();
-    let kind = match preview.kind {
-        EvidencePreviewKind::File(kind) => format!("{} file evidence", enum_heading(kind)),
-        EvidencePreviewKind::Commit => "Commit evidence".to_owned(),
-    };
+    let kind = format!("{} file evidence", enum_heading(preview.file_kind));
     let references_width = preview
         .evidence_numbers
         .iter()
@@ -244,6 +241,7 @@ pub(super) fn render_continuation(
     document: &mut Document,
     context: &RenderContext,
     result: &BlameResult,
+    evidence_preview: bool,
 ) {
     let Some(next) = &result.next else {
         return;
@@ -272,7 +270,7 @@ pub(super) fn render_continuation(
     push_atomic(
         document,
         4,
-        &continuation_command(result, &next.cursor),
+        &continuation_command(result, &next.cursor, evidence_preview),
         Token::Command,
     );
 }
@@ -287,7 +285,7 @@ fn citation_text(citation: &EvidenceCitation) -> String {
     )
 }
 
-fn continuation_command(result: &BlameResult, cursor: &str) -> String {
+fn continuation_command(result: &BlameResult, cursor: &str, evidence_preview: bool) -> String {
     let (mut command, repository) = match &result.target {
         ResolvedBlameTarget::File {
             path,
@@ -318,6 +316,9 @@ fn continuation_command(result: &BlameResult, cursor: &str) -> String {
     command.push_str(&shell_display(&repository.display));
     command.push_str(" --cursor ");
     command.push_str(&shell_display(cursor));
+    if evidence_preview && matches!(&result.target, ResolvedBlameTarget::File { .. }) {
+        command.push_str(" --evidence-preview");
+    }
     command
 }
 

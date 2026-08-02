@@ -62,7 +62,7 @@ fn hydrate_evidence_previews_with(
     let unavailable = || EvidencePreviewModel {
         previews: Vec::new(),
     };
-    if matches!(result.target, ResolvedBlameTarget::PullRequest { .. }) {
+    if !matches!(&result.target, ResolvedBlameTarget::File { .. }) {
         return unavailable();
     }
 

@@ -82,15 +82,36 @@ fn push_visible_unicode_escape(safe: &mut String, character: char) {
 }
 
 fn is_untrusted_history_format_control(character: char) -> bool {
+    // Keep text-shaping content such as ZWNJ, ZWJ, combining marks, and
+    // variation selectors. This denylist covers separators, invisible fillers,
+    // format controls, and the non-mark default-ignorable ranges instead.
     matches!(
         character,
-        '\u{061c}'
+        '\u{00ad}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061c}'
+            | '\u{06dd}'
+            | '\u{070f}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08e2}'
+            | '\u{115f}'..='\u{1160}'
+            | '\u{180e}'
             | '\u{200b}'
             | '\u{200e}'..='\u{200f}'
+            | '\u{2028}'..='\u{2029}'
             | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'
-            | '\u{2066}'..='\u{206f}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{3164}'
             | '\u{feff}'
+            | '\u{ffa0}'
+            | '\u{fff0}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e00ff}'
+            | '\u{e01f0}'..='\u{e0fff}'
     )
 }
 

@@ -77,7 +77,7 @@ pub(crate) struct BlameArgs {
     #[arg(
         long,
         requires = "target",
-        help = "Request exact cited local-history evidence for eligible file or commit results in human output; pull request evidence is not eligible"
+        help = "Request exact cited Codex file evidence in human output; valid only when TARGET resolves to a file"
     )]
     pub(crate) evidence_preview: bool,
 }
@@ -185,10 +185,7 @@ pub(crate) struct FileBlameArgs {
     pub(crate) cursor: Option<String>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,
-    #[arg(
-        long,
-        help = "Request exact cited local-history evidence for eligible file or commit results in human output; pull request evidence is not eligible"
-    )]
+    #[arg(long, help = "Request exact cited Codex file evidence in human output")]
     pub(crate) evidence_preview: bool,
 }
 
@@ -216,10 +213,7 @@ pub(crate) struct CommitBlameArgs {
     pub(crate) cursor: Option<String>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,
-    #[arg(
-        long,
-        help = "Request exact cited local-history evidence for eligible file or commit results in human output; pull request evidence is not eligible"
-    )]
+    #[arg(long, hide = true)]
     pub(crate) evidence_preview: bool,
 }
 
@@ -247,10 +241,7 @@ pub(crate) struct PullRequestBlameArgs {
     pub(crate) cursor: Option<String>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,
-    #[arg(
-        long,
-        help = "Request exact cited local-history evidence for eligible file or commit results in human output; pull request evidence is not eligible"
-    )]
+    #[arg(long, hide = true)]
     pub(crate) evidence_preview: bool,
 }
 
@@ -293,6 +284,11 @@ fn explicit_query(target: BlameTargetArgs) -> (BlameTarget, u32, Option<String>,
 fn validated_query(
     query: (BlameTarget, u32, Option<String>, bool, bool),
 ) -> Result<(BlameTarget, u32, Option<String>, bool, bool)> {
+    if query.4 && !matches!(&query.0, BlameTarget::File { .. }) {
+        return Err(anyhow!(
+            "invalid_request: --evidence-preview is valid only for file blame; remove it or select a file target"
+        ));
+    }
     if query.3 && query.4 {
         return Err(anyhow!(
             "invalid_request: --evidence-preview is only available for human output; remove it or use --format text"

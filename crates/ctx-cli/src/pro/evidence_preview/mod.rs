@@ -1,6 +1,5 @@
 use ctx_history_core::{
-    GitObjectFormat, RepositoryBinding, RepositoryFileObservationKind, RepositoryOutcomeKind,
-    RepositoryVcsObservationKind, StableEntityId, CORE_CONTENT_POLICY_REVISION,
+    RepositoryBinding, RepositoryFileObservationKind, StableEntityId, CORE_CONTENT_POLICY_REVISION,
     CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
 };
 use ctx_history_index::CoreEventRecord;
@@ -67,28 +66,25 @@ pub(crate) struct EvidencePreview {
     pub(crate) evidence_numbers: Vec<u32>,
     pub(crate) event_id: StableEntityId,
     pub(crate) event_sequence: u64,
-    pub(crate) kind: EvidencePreviewKind,
+    pub(crate) file_kind: RepositoryFileObservationKind,
     /// An exact, complete UTF-8 unit copied from `CoreContent::normalized_body`.
     pub(crate) excerpt: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EvidencePreviewKind {
-    File(RepositoryFileObservationKind),
-    Commit,
-}
-
-/// Projects bounded human-only evidence previews without mutating the blame result or Core data.
+/// Projects bounded human-only Codex file evidence without mutating the blame result or Core data.
 #[must_use]
 pub(crate) fn project_evidence_previews(
     result: &BlameResult,
     verified: &[VerifiedEvidenceRecord<'_>],
 ) -> EvidencePreviewModel {
-    if matches!(result.target, ResolvedBlameTarget::PullRequest { .. }) {
+    let ResolvedBlameTarget::File {
+        path, repository, ..
+    } = &result.target
+    else {
         return EvidencePreviewModel {
             previews: Vec::new(),
         };
-    }
+    };
 
     let mut citations = result.evidence.iter().collect::<Vec<_>>();
     citations.sort_by_key(|evidence| evidence.number);
@@ -106,7 +102,7 @@ pub(crate) fn project_evidence_previews(
         if matching.next().is_some() {
             continue;
         }
-        let Some((kind, excerpt)) = project_one(&result.target, candidate.record) else {
+        let Some((file_kind, excerpt)) = project_one(path, repository, candidate.record) else {
             continue;
         };
 
@@ -120,7 +116,7 @@ pub(crate) fn project_evidence_previews(
             evidence_numbers: vec![numbered.number],
             event_id: candidate.record.event_id,
             event_sequence: candidate.record.event_sequence,
-            kind,
+            file_kind,
             excerpt: excerpt.to_owned(),
         });
     }
@@ -157,10 +153,8 @@ fn validated_codex_contract(record: &CoreEventRecord) -> bool {
         && event.source_format == VALIDATED_SOURCE_FORMAT
         && event.event_type == core.event_type
         && event.role == core.role
-        && matches!(
-            (core.event_type.as_str(), core.role.as_deref()),
-            ("tool_call", Some("assistant")) | ("command_output", Some("tool"))
-        )
+        && core.event_type == "tool_call"
+        && core.role.as_deref() == Some("assistant")
 }
 
 fn is_lower_sha256(value: &str) -> bool {
@@ -171,44 +165,22 @@ fn is_lower_sha256(value: &str) -> bool {
 }
 
 fn project_one<'a>(
-    target: &ResolvedBlameTarget,
+    path: &str,
+    repository: &ResourceRef,
     record: &'a CoreEventRecord,
-) -> Option<(EvidencePreviewKind, &'a str)> {
+) -> Option<(RepositoryFileObservationKind, &'a str)> {
     let body = record.core_record.content.normalized_body.as_deref()?;
     let lines = body_lines(body)?;
-    let (kind, excerpt) = match target {
-        ResolvedBlameTarget::File {
-            path, repository, ..
-        } => {
-            validated_file_event_shape(record)?;
-            let binding = exact_repository_binding(repository, record)?;
-            let (kind, range) = file_unit(path, binding, record, &lines)?;
-            (
-                EvidencePreviewKind::File(kind),
-                &body[range.start..range.end],
-            )
-        }
-        ResolvedBlameTarget::Commit { commit, repository } => {
-            validated_commit_event_shape(record)?;
-            let binding = exact_repository_binding(repository, record)?;
-            commit_oid_matches_binding(&commit.display, binding)?;
-            let range = commit_unit(&commit.display, &binding.binding_id, record, &lines)?;
-            (EvidencePreviewKind::Commit, &body[range.start..range.end])
-        }
-        ResolvedBlameTarget::PullRequest { .. } => return None,
-    };
-    (excerpt.len() <= MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES).then_some((kind, excerpt))
+    validated_file_event_shape(record)?;
+    let binding = exact_repository_binding(repository, record)?;
+    let (file_kind, range) = file_unit(path, binding, record, &lines)?;
+    let excerpt = &body[range.start..range.end];
+    (excerpt.len() <= MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES).then_some((file_kind, excerpt))
 }
 
 fn validated_file_event_shape(record: &CoreEventRecord) -> Option<()> {
     (record.core_record.event_type == "tool_call"
         && record.core_record.role.as_deref() == Some("assistant"))
-    .then_some(())
-}
-
-fn validated_commit_event_shape(record: &CoreEventRecord) -> Option<()> {
-    (record.core_record.event_type == "command_output"
-        && record.core_record.role.as_deref() == Some("tool"))
     .then_some(())
 }
 
@@ -226,15 +198,6 @@ fn exact_repository_binding<'a>(
         .filter(|binding| binding.logical_repository_id == repository.display);
     let binding = matches.next()?;
     matches.next().is_none().then_some(binding)
-}
-
-fn commit_oid_matches_binding(target: &str, binding: &RepositoryBinding) -> Option<()> {
-    let format = match target.len() {
-        40 => GitObjectFormat::Sha1,
-        64 => GitObjectFormat::Sha256,
-        _ => return None,
-    };
-    (binding.git_object_format == Some(format)).then_some(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -680,146 +643,6 @@ fn authorized_target_path(repository_binding: &RepositoryBinding, target: &str) 
         return None;
     }
     Some(local_root.join(target_path))
-}
-
-fn commit_unit(
-    target: &str,
-    repository_binding_id: &str,
-    record: &CoreEventRecord,
-    lines: &[BodyLine<'_>],
-) -> Option<ByteSpan> {
-    if !is_canonical_oid(target) {
-        return None;
-    }
-    if record
-        .core_record
-        .repository_vcs_observations
-        .iter()
-        .any(|observation| {
-            observation.repository_binding_id != repository_binding_id
-                && matches!(
-                    &observation.kind,
-                    RepositoryVcsObservationKind::Outcome(outcome)
-                        if outcome.kind == RepositoryOutcomeKind::Commit
-                            && outcome
-                                .produced_object_ids
-                                .iter()
-                                .any(|object_id| object_id.hex == target)
-                )
-        })
-    {
-        return None;
-    }
-    let mut outcomes = record
-        .core_record
-        .repository_vcs_observations
-        .iter()
-        .filter_map(|observation| match &observation.kind {
-            RepositoryVcsObservationKind::Outcome(outcome)
-                if observation.repository_binding_id == repository_binding_id
-                    && outcome.kind == RepositoryOutcomeKind::Commit
-                    && outcome
-                        .produced_object_ids
-                        .iter()
-                        .any(|object_id| object_id.hex == target) =>
-            {
-                Some(outcome)
-            }
-            _ => None,
-        });
-    outcomes.next()?;
-    if outcomes.next().is_some() {
-        return None;
-    }
-
-    let output_start = successful_output_start(lines)?;
-    let mut outcome_index = None;
-    let mut full_oid_index = None;
-    let mut raw_target_occurrences = 0usize;
-    for (index, line) in lines.iter().enumerate().skip(output_start) {
-        raw_target_occurrences =
-            raw_target_occurrences.checked_add(line.text.matches(target).count())?;
-        if line.text == target && full_oid_index.replace(index).is_some() {
-            return None;
-        }
-        match canonical_commit_outcome_prefix(line.text) {
-            Ok(Some(prefix)) if target.starts_with(prefix) => {
-                if outcome_index.replace(index).is_some() {
-                    return None;
-                }
-            }
-            Ok(Some(_)) | Err(()) => return None,
-            Ok(None) => {}
-        }
-    }
-    let outcome_index = outcome_index?;
-    let full_oid_index = full_oid_index?;
-    if raw_target_occurrences != 1 || outcome_index >= full_oid_index {
-        return None;
-    }
-    Some(ByteSpan {
-        start: lines[outcome_index].span.start,
-        end: lines[full_oid_index].span.end,
-    })
-}
-
-fn is_canonical_oid(value: &str) -> bool {
-    matches!(value.len(), 40 | 64)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn canonical_commit_outcome_prefix(line: &str) -> Result<Option<&str>, ()> {
-    if !line.starts_with('[') {
-        return Ok(None);
-    }
-    let close = line.find(']').ok_or(())?;
-    let suffix = &line[close + 1..];
-    if !suffix.is_empty() && !suffix.starts_with(' ') {
-        return Err(());
-    }
-    let inside = &line[1..close];
-    let (context, prefix) = inside.rsplit_once(' ').ok_or(())?;
-    if context.is_empty()
-        || context.chars().next().is_some_and(char::is_whitespace)
-        || context.chars().last().is_some_and(char::is_whitespace)
-        || context.chars().any(char::is_control)
-        || !(7..=40).contains(&prefix.len())
-        || !prefix
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(());
-    }
-    Ok(Some(prefix))
-}
-
-fn successful_output_start(lines: &[BodyLine<'_>]) -> Option<usize> {
-    let statuses = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            line.text
-                .strip_prefix("Process exited with code ")
-                .map(|code| (index, code))
-        })
-        .collect::<Vec<_>>();
-    let output_markers = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            matches!(line.text, "Final output:" | "Output:").then_some((index, line.text))
-        })
-        .collect::<Vec<_>>();
-    match (statuses.as_slice(), output_markers.as_slice()) {
-        ([(status_index, "0")], [(output_index, "Final output:" | "Output:")])
-            if status_index < output_index =>
-        {
-            output_index.checked_add(1)
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]

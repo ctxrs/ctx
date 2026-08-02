@@ -347,7 +347,7 @@ fn explicit_blame_subcommands_keep_their_original_queries() {
 }
 
 #[test]
-fn evidence_preview_is_explicit_and_available_on_universal_and_nested_targets() {
+fn evidence_preview_is_explicit_on_universal_and_nested_file_targets() {
     for arguments in [
         &["ctx", "blame", "src/lib.rs", "--evidence-preview"][..],
         &[
@@ -355,30 +355,10 @@ fn evidence_preview_is_explicit_and_available_on_universal_and_nested_targets() 
             "blame",
             "abc1234",
             "--type",
-            "commit",
-            "--evidence-preview",
-        ],
-        &[
-            "ctx",
-            "blame",
-            "42",
-            "--type",
-            "pr",
-            "--repository",
-            "forge:github.com/ctxrs/ctx",
+            "file",
             "--evidence-preview",
         ],
         &["ctx", "blame", "file", "src/lib.rs", "--evidence-preview"],
-        &["ctx", "blame", "commit", "abc1234", "--evidence-preview"],
-        &[
-            "ctx",
-            "blame",
-            "pr",
-            "42",
-            "--repository",
-            "forge:github.com/ctxrs/ctx",
-            "--evidence-preview",
-        ],
     ] {
         let cli = crate::Cli::try_parse_from(arguments).unwrap();
         let crate::cli::CommandRoot::Blame(args) = cli.command else {
@@ -393,6 +373,62 @@ fn evidence_preview_is_explicit_and_available_on_universal_and_nested_targets() 
         panic!("expected blame command");
     };
     assert!(!args.into_query().unwrap().4);
+}
+
+#[test]
+fn non_file_preview_stops_before_pro_helper_or_core_index_access() {
+    for arguments in [
+        &["ctx", "blame", "abc1234", "--evidence-preview"][..],
+        &[
+            "ctx",
+            "blame",
+            "42",
+            "--repository",
+            "forge:github.com/ctxrs/ctx",
+            "--evidence-preview",
+        ],
+        &["ctx", "blame", "commit", "abc1234", "--evidence-preview"],
+        &[
+            "ctx",
+            "blame",
+            "pr",
+            "42",
+            "--repository",
+            "forge:github.com/ctxrs/ctx",
+            "--evidence-preview",
+        ],
+    ] {
+        let cli = crate::Cli::try_parse_from(arguments).unwrap();
+        let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
+        let crate::cli::CommandRoot::Blame(args) = cli.command else {
+            panic!("expected blame command");
+        };
+        let pro_calls = std::cell::Cell::new(0usize);
+        let core_index_reads = std::cell::Cell::new(0usize);
+        let mut ui = sink_ui();
+        let error = run_with(
+            args,
+            PathBuf::from("/unused"),
+            &mut usage,
+            &mut ui,
+            |_, _, _, _| {
+                pro_calls.set(pro_calls.get() + 1);
+                panic!("non-file preview reached Pro/helper access")
+            },
+            |_, _| {
+                core_index_reads.set(core_index_reads.get() + 1);
+                panic!("non-file preview reached Core/index access")
+            },
+        )
+        .unwrap_err();
+        assert_eq!(pro_calls.get(), 0, "{arguments:?}");
+        assert_eq!(core_index_reads.get(), 0, "{arguments:?}");
+        assert_eq!(
+            error.to_string(),
+            "invalid_request: --evidence-preview is valid only for file blame; remove it or select a file target"
+        );
+        assert!(!error.to_string().contains("/unused"));
+    }
 }
 
 #[test]
@@ -411,24 +447,6 @@ fn json_preview_conflict_stops_before_pro_or_evidence_access() {
             "blame",
             "file",
             "src/lib.rs",
-            "--evidence-preview",
-            "--format=json",
-        ],
-        &[
-            "ctx",
-            "blame",
-            "commit",
-            "abc1234",
-            "--evidence-preview",
-            "--format=json",
-        ],
-        &[
-            "ctx",
-            "blame",
-            "pr",
-            "42",
-            "--repository",
-            "forge:github.com/ctxrs/ctx",
             "--evidence-preview",
             "--format=json",
         ],
@@ -639,11 +657,15 @@ fn opted_in_preview_bytes_are_included_in_local_usage_accounting() {
         display: id.to_owned(),
     };
     let result = BlameResult {
-        target: ResolvedBlameTarget::Commit {
-            commit: resource("commit:abc1234", ResourceKind::Commit),
+        target: ResolvedBlameTarget::File {
+            path: "src/lib.rs".to_owned(),
             repository: resource("repository:ctx", ResourceKind::Repository),
+            requested_lines: None,
         },
-        git_snapshot: None,
+        git_snapshot: Some(ctx_pro_host_protocol::GitSnapshot {
+            head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            worktree_status: ctx_pro_host_protocol::WorktreeStatus::Clean,
+        }),
         matches: Vec::new(),
         evidence: Vec::new(),
         next: None,
@@ -652,7 +674,7 @@ fn opted_in_preview_bytes_are_included_in_local_usage_accounting() {
         previews: Vec::new(),
     };
     let cli =
-        crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234", "--evidence-preview"])
+        crate::Cli::try_parse_from(["ctx", "blame", "file", "src/lib.rs", "--evidence-preview"])
             .unwrap();
     let mut expected_ui = sink_ui();
     let expected =

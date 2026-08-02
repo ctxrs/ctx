@@ -571,6 +571,68 @@ fn global_spans_preserve_ordinary_unicode_exactly() {
 }
 
 #[test]
+fn strict_history_sanitizer_escapes_disallowed_format_controls_exactly() {
+    const CASES: &[(char, &str)] = &[
+        ('\u{00ad}', "\\u{00ad}"),
+        ('\u{0600}', "\\u{0600}"),
+        ('\u{061c}', "\\u{061c}"),
+        ('\u{115f}', "\\u{115f}"),
+        ('\u{180e}', "\\u{180e}"),
+        ('\u{2028}', "\\u{2028}"),
+        ('\u{2029}', "\\u{2029}"),
+        ('\u{2061}', "\\u{2061}"),
+        ('\u{2062}', "\\u{2062}"),
+        ('\u{2063}', "\\u{2063}"),
+        ('\u{2064}', "\\u{2064}"),
+        ('\u{2065}', "\\u{2065}"),
+        ('\u{3164}', "\\u{3164}"),
+        ('\u{ffa0}', "\\u{ffa0}"),
+        ('\u{fff0}', "\\u{fff0}"),
+        ('\u{fff9}', "\\u{fff9}"),
+        ('\u{110bd}', "\\u{110bd}"),
+        ('\u{13430}', "\\u{13430}"),
+        ('\u{1bca0}', "\\u{1bca0}"),
+        ('\u{1d173}', "\\u{1d173}"),
+        ('\u{e0001}', "\\u{e0001}"),
+        ('\u{e0020}', "\\u{e0020}"),
+        ('\u{e007f}', "\\u{e007f}"),
+        ('\u{e0080}', "\\u{e0080}"),
+        ('\u{e01f0}', "\\u{e01f0}"),
+    ];
+
+    for (character, expected) in CASES {
+        assert_eq!(
+            sanitize_untrusted_history_body_for_terminal(&character.to_string()),
+            *expected,
+            "U+{:04X}",
+            u32::from(*character)
+        );
+    }
+}
+
+#[test]
+fn strict_history_sanitizer_preserves_text_shaping_and_generic_ui_behavior() {
+    const PRESERVED: &str = concat!(
+        "می\u{200c}روم ",
+        "👩\u{200d}💻 ",
+        "✈\u{fe0f} 字\u{e0100} ᠠ\u{180b} ",
+        "e\u{0301} x\u{034f} ក\u{17b4} ",
+        "مرحبا שלום"
+    );
+    const STRICT_ONLY: &str = "\u{2028}\u{2029}\u{2061}\u{2062}\u{2063}\u{2064}";
+
+    assert_eq!(
+        sanitize_untrusted_history_body_for_terminal(PRESERVED),
+        PRESERVED
+    );
+    assert_eq!(
+        Span::text(STRICT_ONLY).content(),
+        STRICT_ONLY,
+        "the generic UI sanitizer must remain unchanged"
+    );
+}
+
+#[test]
 fn untrusted_history_body_controls_are_visibly_escaped_before_layout() {
     const FORBIDDEN: &[char] = &[
         '\u{061c}', '\u{200b}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}',

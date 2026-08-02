@@ -159,10 +159,10 @@ pub(crate) fn run_cli() -> Result<()> {
     let mut ui = Ui::stdio(cli.color);
     let json_output = command_json_output(&cli.command);
     let machine_output = command_machine_readable_output(&cli.command, json_output);
-    let pro_referral_json_output = command_uses_stable_pro_error_json(&cli.command, json_output);
+    let stable_pro_error_json = command_uses_stable_pro_error_json(&cli.command, json_output);
     if let CommandRoot::Referral(args) = &cli.command {
         let validation = args.validate_invocation();
-        if pro_referral_json_output {
+        if stable_pro_error_json {
             if let Err(error) = &validation {
                 if render_stable_pro_error_json(error)? {
                     return Err(RenderedJsonError.into());
@@ -398,7 +398,7 @@ pub(crate) fn run_cli() -> Result<()> {
         if error.is::<RenderedJsonError>() || error.is::<RenderedCliError>() {
             Some(RenderedCliError.into())
         } else if json_output {
-            if pro_referral_json_output && render_stable_pro_error_json(error)? {
+            if stable_pro_error_json && render_stable_pro_error_json(error)? {
                 Some(RenderedJsonError.into())
             } else if let Some(error) =
                 error.downcast_ref::<presentation_limit::PresentationOutputLimitError>()
@@ -494,7 +494,7 @@ fn render_generic_command_error(
 }
 
 fn render_stable_pro_error_json(error: &anyhow::Error) -> Result<bool> {
-    pro::write_stable_error_json(&mut io::stderr().lock(), error)
+    pro::write_stable_error_json(&mut crate::output::stderr_writer(), error)
 }
 
 fn write_clap_output(error: &clap::Error, ui: &mut Ui) -> Result<()> {
@@ -570,7 +570,11 @@ fn command_json_output(command: &CommandRoot) -> bool {
 }
 
 fn command_uses_stable_pro_error_json(command: &CommandRoot, json_output: bool) -> bool {
-    json_output && matches!(command, CommandRoot::Pro(_) | CommandRoot::Referral(_))
+    json_output
+        && matches!(
+            command,
+            CommandRoot::Pro(_) | CommandRoot::Referral(_) | CommandRoot::Blame(_)
+        )
 }
 
 fn show_json_output(args: &ShowArgs) -> bool {
@@ -727,13 +731,23 @@ mod tests {
     }
 
     #[test]
-    fn stable_pro_error_json_is_scoped_to_pro_and_referral_json_modes() {
+    fn stable_pro_error_json_is_scoped_to_pro_referral_and_blame_json_modes() {
         for args in [
             &["pro", "--format=json"][..],
             &["pro", "manage", "--format=json"][..],
             &["referral", "create", "agent-smith", "--format=json"][..],
             &["referral", "status", "--format=json"][..],
             &["referral", "payout", "--format=json"][..],
+            &["blame", "file", "src/main.rs", "--format=json"][..],
+            &["blame", "commit", "abc1234", "--format=json"][..],
+            &[
+                "blame",
+                "pr",
+                "42",
+                "--repository",
+                "forge:github.com/ctxrs/ctx",
+                "--format=json",
+            ][..],
         ] {
             let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
@@ -747,7 +761,7 @@ mod tests {
         for args in [
             &["pro"][..],
             &["referral", "status"][..],
-            &["blame", "file", "src/main.rs", "--format=json"][..],
+            &["blame", "file", "src/main.rs"][..],
             &["status", "--format=json"][..],
         ] {
             let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))

@@ -22,7 +22,7 @@ pub(super) fn render(
             pull_request::render(&mut document, context, &result.matches)
         }
     }
-    evidence::render_continuation(&mut document, context, result);
+    evidence::render_continuation(&mut document, context, result, previews.is_some());
     evidence::render_list(&mut document, context, result);
     if let Some(previews) = previews {
         evidence::render_previews(&mut document, context, previews);

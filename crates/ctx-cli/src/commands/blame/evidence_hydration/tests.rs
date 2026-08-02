@@ -351,27 +351,39 @@ fn digest_and_every_event_coordinate_mismatch_are_omitted() {
 }
 
 #[test]
-fn pull_request_preview_is_accepted_without_any_core_read() {
+fn non_file_preview_is_rejected_without_any_core_read() {
     let mut result = result(Vec::new());
-    result.target = ResolvedBlameTarget::PullRequest {
-        selector: "42".to_owned(),
-        pull_request: ResourceRef {
-            id: "pull_request:ctxrs/ctx#42".to_owned(),
-            kind: ResourceKind::PullRequest,
-            display: "ctxrs/ctx#42".to_owned(),
-        },
-        repository: ResourceRef {
-            id: "repository:ctxrs-ctx".to_owned(),
-            kind: ResourceKind::Repository,
-            display: "ctxrs/ctx".to_owned(),
-        },
+    let repository = ResourceRef {
+        id: "repository:ctxrs-ctx".to_owned(),
+        kind: ResourceKind::Repository,
+        display: "ctxrs/ctx".to_owned(),
     };
-    result.git_snapshot = None;
-
-    let model = hydrate_evidence_previews_with(&result, |_, _, _, _| {
-        panic!("PR preview reached the Core index")
-    });
-    assert!(model.previews.is_empty());
+    for target in [
+        ResolvedBlameTarget::Commit {
+            commit: ResourceRef {
+                id: "commit:abc1234".to_owned(),
+                kind: ResourceKind::Commit,
+                display: "abc1234".to_owned(),
+            },
+            repository: repository.clone(),
+        },
+        ResolvedBlameTarget::PullRequest {
+            selector: "42".to_owned(),
+            pull_request: ResourceRef {
+                id: "pull_request:ctxrs/ctx#42".to_owned(),
+                kind: ResourceKind::PullRequest,
+                display: "ctxrs/ctx#42".to_owned(),
+            },
+            repository: repository.clone(),
+        },
+    ] {
+        result.target = target;
+        result.git_snapshot = None;
+        let model = hydrate_evidence_previews_with(&result, |_, _, _, _| {
+            panic!("non-file preview reached the Core index")
+        });
+        assert!(model.previews.is_empty());
+    }
 }
 
 #[test]

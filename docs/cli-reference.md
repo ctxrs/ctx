@@ -475,8 +475,8 @@ ctx blame <target> [--type file|commit|pr] [--lines <start[:end]>] [--repository
 
 # Explicit compatibility forms
 ctx blame file <path> [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--evidence-preview] [--format json]
-ctx blame commit <sha> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--evidence-preview] [--format json]
-ctx blame pr <positive-number-or-canonical-url> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--evidence-preview] [--format json]
+ctx blame commit <sha> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
+ctx blame pr <positive-number-or-canonical-url> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
 ```
 
 Without `--type`, shorthand classification is deterministic and conservative:
@@ -495,14 +495,16 @@ retain subcommand precedence as the first token; for example, use
 `ctx blame file file` to query a file literally named `file`.
 
 `--evidence-preview` is off by default, human-only, and must be requested for
-each invocation. It adds bounded exact excerpts from cited local history plus a
-`ctx show event <ctx-event-id>` follow-up for the complete cited record. Current
-eligible previews are conservative Codex file and commit evidence; other
-evidence may show the preview as unavailable. Unsupported, stale, or ambiguous
+each file-blame invocation. It adds up to three bounded exact Codex file
+excerpts from cited local history plus a `ctx show event <ctx-event-id>`
+follow-up for the complete cited record. Unsupported, stale, or ambiguous file
 evidence may be omitted from the preview without changing attribution or the
-underlying `BlameResult`. Combining `--evidence-preview` with `--format json` is
-rejected with `invalid_request`. JSON and MCP have no evidence-preview surface,
-and their schemas remain unchanged.
+underlying `BlameResult`. A commit or PR target combined with
+`--evidence-preview` is rejected with actionable `invalid_request` before Pro
+or index access. Combining a file preview with `--format json` is also rejected
+with `invalid_request`. JSON and MCP have no evidence-preview surface, and their
+schemas remain unchanged. A file continuation command retains the flag when
+the current page explicitly requested it.
 
 There are no Pro `show`, `timeline`, `facts`, or `related` compatibility
 aliases. OSS `ctx show session|event` remains unchanged. The CLI blame limit defaults to 20

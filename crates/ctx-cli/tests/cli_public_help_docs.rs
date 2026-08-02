@@ -250,10 +250,8 @@ fn blame_help_explains_launch_targets_and_bounds() {
     assert!(help.contains("ctx blame <COMMAND>"), "{help}");
     assert!(help.contains("--type <TYPE>"), "{help}");
     assert!(help.contains("--evidence-preview"), "{help}");
-    assert!(
-        help.contains("exact cited local-history evidence"),
-        "{help}"
-    );
+    assert!(help.contains("exact cited Codex file evidence"), "{help}");
+    assert!(help.contains("resolves to a file"), "{help}");
     assert!(help.contains("possible values: file, commit, pr"), "{help}");
     assert!(help.contains("overrides auto-detection"), "{help}");
 
@@ -285,19 +283,20 @@ fn blame_help_explains_launch_targets_and_bounds() {
             "{args:?} help omitted the limit contract:\n{help}"
         );
         assert!(help.contains("--cursor <CURSOR>"));
-        assert!(help.contains("--evidence-preview"), "{args:?}:\n{help}");
-        assert!(
-            normalized_help.contains(
-                "Request exact cited local-history evidence for eligible file or commit results"
-            ),
-            "{args:?}:\n{help}"
-        );
-        assert!(
-            normalized_help.contains("pull request evidence is not eligible"),
-            "{args:?}:\n{help}"
-        );
-        for secret in ["generation", "project", "heuristic", "Codex"] {
+        if args.as_slice() == ["blame", "file", "--help"] {
+            assert!(help.contains("--evidence-preview"), "{args:?}:\n{help}");
+            assert!(
+                normalized_help.contains("Request exact cited Codex file evidence in human output"),
+                "{args:?}:\n{help}"
+            );
+        } else {
+            assert!(!help.contains("--evidence-preview"), "{args:?}:\n{help}");
+        }
+        for secret in ["generation", "project", "heuristic"] {
             assert!(!help.contains(secret), "{args:?} leaked {secret}:\n{help}");
+        }
+        if args.as_slice() != ["blame", "file", "--help"] {
+            assert!(!help.contains("Codex"), "{args:?} leaked Codex:\n{help}");
         }
         if args.as_slice() == ["blame", "file", "--help"] {
             assert!(
@@ -338,9 +337,10 @@ fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
             repository,
             "--format=json",
         ]));
-        assert!(stderr.contains("invalid_request"), "{stderr}");
-        assert!(stderr.contains("repository selector"), "{stderr}");
-        assert!(!stderr.contains("pro_not_installed"), "{stderr}");
+        assert_eq!(
+            stderr,
+            "{\"error\":\"invalid_request\",\"error_code\":\"invalid_request\"}\n"
+        );
     }
 
     for args in [
@@ -349,10 +349,17 @@ fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
     ] {
         let stderr = failure_stderr(ctx(&temp).args(args));
         assert!(stderr.contains("invalid_request"), "{stderr}");
-        assert!(stderr.contains("target type is ambiguous"), "{stderr}");
-        assert!(stderr.contains("--type file"), "{stderr}");
-        assert!(stderr.contains("--type commit"), "{stderr}");
-        assert!(stderr.contains("--type pr"), "{stderr}");
+        if args.contains(&"--format=json") {
+            assert_eq!(
+                stderr,
+                "{\"error\":\"invalid_request\",\"error_code\":\"invalid_request\"}\n"
+            );
+        } else {
+            assert!(stderr.contains("target type is ambiguous"), "{stderr}");
+            assert!(stderr.contains("--type file"), "{stderr}");
+            assert!(stderr.contains("--type commit"), "{stderr}");
+            assert!(stderr.contains("--type pr"), "{stderr}");
+        }
         assert!(!stderr.contains("pro_not_installed"), "{stderr}");
     }
 
@@ -369,25 +376,59 @@ fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
 }
 
 #[test]
-fn evidence_preview_json_conflict_rejects_before_process_level_pro_or_index_access() {
+fn all_preview_json_conflicts_emit_exact_stable_json_before_pro_or_core_access() {
     let temp = tempdir();
     let root = data_root(&temp);
-    let stderr = failure_stderr(ctx(&temp).args([
-        "blame",
-        "src/lib.rs",
-        "--evidence-preview",
-        "--format=json",
-    ]));
-
-    assert!(stderr.contains("invalid_request"), "{stderr}");
-    assert!(stderr.contains("--evidence-preview"), "{stderr}");
-    assert!(stderr.contains("--format text"), "{stderr}");
-    assert!(!stderr.contains("pro_not_installed"), "{stderr}");
-    assert!(
-        !root.exists(),
-        "rejected command created {}",
-        root.display()
-    );
+    let expected = b"{\"error\":\"invalid_request\",\"error_code\":\"invalid_request\"}\n";
+    for args in [
+        &["blame", "src/lib.rs", "--evidence-preview", "--format=json"][..],
+        &["blame", "abc1234", "--evidence-preview", "--format=json"],
+        &[
+            "blame",
+            "42",
+            "--repository",
+            "forge:github.com/ctxrs/ctx",
+            "--evidence-preview",
+            "--format=json",
+        ],
+        &[
+            "blame",
+            "file",
+            "src/lib.rs",
+            "--evidence-preview",
+            "--format=json",
+        ],
+        &[
+            "blame",
+            "commit",
+            "abc1234",
+            "--evidence-preview",
+            "--format=json",
+        ],
+        &[
+            "blame",
+            "pr",
+            "42",
+            "--repository",
+            "forge:github.com/ctxrs/ctx",
+            "--evidence-preview",
+            "--format=json",
+        ],
+    ] {
+        let output = ctx(&temp).args(args).output().unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert_eq!(output.stderr, expected, "{args:?}");
+        assert!(!output.stderr.contains(&0x1b), "{args:?}");
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"], "invalid_request", "{args:?}");
+        assert_eq!(error["error_code"], "invalid_request", "{args:?}");
+        assert!(
+            !root.exists(),
+            "rejected {args:?} created {}",
+            root.display()
+        );
+    }
 }
 
 #[test]

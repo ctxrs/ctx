@@ -1,13 +1,10 @@
 use ctx_history_core::{
-    derive_event_id, derive_session_id, EventIdentityInput, GitObjectFormat, GitObjectId,
-    NativeItemKey, NativeSessionKey, RepositoryAlias, RepositoryAliasKind, RepositoryBinding,
-    RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
-    RepositoryFileObservation, RepositoryFileObservationKind, RepositoryLocalRootAuthorization,
-    RepositoryOutcomeKind, RepositoryOutcomeLinkage, RepositoryOutcomeObservation,
-    RepositoryVcsObservation, RepositoryVcsObservationKind, SessionIdentityInput, SourceAnchor,
-    SourceKey, TypedKey, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    derive_event_id, derive_session_id, EventIdentityInput, NativeItemKey, NativeSessionKey,
+    RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryEvidence,
+    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
+    RepositoryFileObservationKind, RepositoryLocalRootAuthorization, SessionIdentityInput,
+    SourceAnchor, SourceKey, TypedKey, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
-    CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
 };
 use ctx_history_index::{CoreEventRecord, EventRecord};
 use ctx_pro_host_protocol::{
@@ -17,9 +14,9 @@ use ctx_pro_host_protocol::{
 use sha2::{Digest, Sha256};
 
 use super::{
-    project_evidence_previews, EvidencePreviewKind, VerifiedEvidenceRecord,
-    MAX_EVIDENCE_PREVIEW_BODY_BYTES, MAX_EVIDENCE_PREVIEW_BODY_LINES,
-    MAX_EVIDENCE_PREVIEW_CITATIONS, MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
+    project_evidence_previews, VerifiedEvidenceRecord, MAX_EVIDENCE_PREVIEW_BODY_BYTES,
+    MAX_EVIDENCE_PREVIEW_BODY_LINES, MAX_EVIDENCE_PREVIEW_CITATIONS,
+    MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
 };
 
 const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -67,22 +64,18 @@ fn source_contract(provider: &str, format: &str, schema: &str, seed: u8) -> Sour
     .unwrap()
 }
 
-fn binding(format: Option<GitObjectFormat>) -> RepositoryBinding {
-    binding_for("binding-1", REPOSITORY_ID, format)
+fn binding() -> RepositoryBinding {
+    binding_for("binding-1", REPOSITORY_ID)
 }
 
-fn binding_for(
-    binding_id: &str,
-    logical_repository_id: &str,
-    format: Option<GitObjectFormat>,
-) -> RepositoryBinding {
+fn binding_for(binding_id: &str, logical_repository_id: &str) -> RepositoryBinding {
     RepositoryBinding {
         binding_id: binding_id.to_owned(),
         logical_repository_id: logical_repository_id.to_owned(),
         checkout_id: None,
         worktree_id: None,
         aliases: Vec::new(),
-        git_object_format: format,
+        git_object_format: None,
         local_root_authorization: None,
         evidence: vec![RepositoryEvidence {
             kind: RepositoryEvidenceKind::FileActivity,
@@ -215,57 +208,13 @@ fn file_record_from_base(
     kind: RepositoryFileObservationKind,
     prior_path: Option<&str>,
 ) -> CoreEventRecord {
-    record.core_record.repository_bindings = vec![binding(None)];
+    record.core_record.repository_bindings = vec![binding()];
     record.core_record.repository_file_observations = vec![RepositoryFileObservation {
         repository_binding_id: "binding-1".to_owned(),
         relative_path: path.to_owned(),
         kind,
         prior_relative_path: prior_path.map(str::to_owned),
     }];
-    record
-}
-
-fn commit_record(seed: u8, sequence: u64, body: &str, outcomes: usize) -> CoreEventRecord {
-    commit_record_for_oid(seed, sequence, body, outcomes, OID)
-}
-
-fn commit_record_for_oid(
-    seed: u8,
-    sequence: u64,
-    body: &str,
-    outcomes: usize,
-    oid: &str,
-) -> CoreEventRecord {
-    let mut record = base_record("codex", seed, sequence, body, "command_output", "tool");
-    record.core_record.repository_bindings = vec![binding(Some(GitObjectFormat::Sha1))];
-    record.core_record.repository_vcs_observations = (0..outcomes)
-        .map(|index| RepositoryVcsObservation {
-            repository_binding_id: "binding-1".to_owned(),
-            kind: RepositoryVcsObservationKind::Outcome(Box::new(RepositoryOutcomeObservation {
-                kind: RepositoryOutcomeKind::Commit,
-                produced_object_ids: vec![GitObjectId {
-                    format: GitObjectFormat::Sha1,
-                    hex: oid.to_owned(),
-                }],
-                replacement_lineage: Vec::new(),
-                pull_request: None,
-                observed_at_unix_ms: i64::try_from(index).unwrap(),
-                linkage: RepositoryOutcomeLinkage {
-                    provider: "codex".to_owned(),
-                    origin_call_id: format!("origin-{index}"),
-                    result_call_id: format!("result-{index}"),
-                    origin_event_sequence: sequence.saturating_sub(1),
-                    continuation_call_id_sha256: Vec::new(),
-                    result_record_sha256: [index as u8 + 1; 32],
-                },
-                outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
-            })),
-            object_id: None,
-            parent_object_ids: Vec::new(),
-            reference: None,
-            relative_path: None,
-        })
-        .collect();
     record
 }
 
@@ -297,19 +246,6 @@ fn file_result(path: &str, evidence: Vec<NumberedEvidence>) -> BlameResult {
             head_oid: OID.to_owned(),
             worktree_status: WorktreeStatus::Clean,
         }),
-        matches: Vec::new(),
-        evidence,
-        next: None,
-    }
-}
-
-fn commit_result(oid: &str, evidence: Vec<NumberedEvidence>) -> BlameResult {
-    BlameResult {
-        target: ResolvedBlameTarget::Commit {
-            commit: resource(&format!("commit:{oid}"), ResourceKind::Commit, oid),
-            repository: repository(),
-        },
-        git_snapshot: None,
         matches: Vec::new(),
         evidence,
         next: None,
@@ -361,7 +297,7 @@ fn file_operations_require_exact_typed_agreement() {
         let record = file_record(index as u8 + 1, 1, body, path, kind, None);
         let model = one_file_preview(path, &record);
         assert_eq!(model.previews.len(), 1, "{kind:?}");
-        assert_eq!(model.previews[0].kind, EvidencePreviewKind::File(kind));
+        assert_eq!(model.previews[0].file_kind, kind);
         assert_eq!(model.previews[0].excerpt, expected);
     }
 }
@@ -694,16 +630,15 @@ fn unsupported_and_mixed_file_grammars_omit() {
         "tool",
     );
     let mut wrong_shape = wrong_shape;
-    wrong_shape.core_record.repository_bindings = vec![binding(None)];
+    wrong_shape.core_record.repository_bindings = vec![binding()];
     wrong_shape.core_record.repository_file_observations = vec![RepositoryFileObservation {
         repository_binding_id: "binding-1".to_owned(),
         relative_path: "src/lib.rs".to_owned(),
         kind: RepositoryFileObservationKind::Modified,
         prior_relative_path: None,
     }];
-    assert!(one_file_preview("src/lib.rs", &wrong_shape)
-        .previews
-        .is_empty());
+    let evidence = numbered(&wrong_shape, 1);
+    assert!(VerifiedEvidenceRecord::new(&evidence, GENERATION, &wrong_shape).is_none());
 }
 
 #[test]
@@ -733,7 +668,7 @@ fn production_repository_display_mapping_scopes_file_observations_exactly() {
     other_repository
         .core_record
         .repository_bindings
-        .push(binding_for("binding-2", "forge:github.com/fork/ctx", None));
+        .push(binding_for("binding-2", "forge:github.com/fork/ctx"));
     other_repository.core_record.repository_file_observations[0].repository_binding_id =
         "binding-2".to_owned();
     assert!(one_file_preview("src/lib.rs", &other_repository)
@@ -751,7 +686,7 @@ fn production_repository_display_mapping_scopes_file_observations_exactly() {
     ambiguous
         .core_record
         .repository_bindings
-        .push(binding_for("binding-2", REPOSITORY_ID, None));
+        .push(binding_for("binding-2", REPOSITORY_ID));
     assert!(one_file_preview("src/lib.rs", &ambiguous)
         .previews
         .is_empty());
@@ -795,11 +730,10 @@ fn same_path_other_repositories_require_distinct_certified_absolute_roots() {
             RepositoryFileObservationKind::Modified,
             None,
         );
-        record.core_record.repository_bindings.push(binding_for(
-            "binding-2",
-            logical_repository_id,
-            None,
-        ));
+        record
+            .core_record
+            .repository_bindings
+            .push(binding_for("binding-2", logical_repository_id));
         record
             .core_record
             .repository_file_observations
@@ -823,11 +757,10 @@ fn same_path_other_repositories_require_distinct_certified_absolute_roots() {
         RepositoryFileObservationKind::Renamed,
         Some("src/old.rs"),
     );
-    prior_path.core_record.repository_bindings.push(binding_for(
-        "binding-2",
-        "local:prior-path-repository",
-        None,
-    ));
+    prior_path
+        .core_record
+        .repository_bindings
+        .push(binding_for("binding-2", "local:prior-path-repository"));
     prior_path
         .core_record
         .repository_file_observations
@@ -851,7 +784,7 @@ fn same_path_other_repositories_require_distinct_certified_absolute_roots() {
         None,
     );
     authorize_local_root(&mut distinct_roots, "/worktrees/target");
-    let mut competing = binding_for("binding-2", "forge:github.com/fork/ctx", None);
+    let mut competing = binding_for("binding-2", "forge:github.com/fork/ctx");
     authorize_binding(&mut competing, "/worktrees/fork", "2");
     distinct_roots
         .core_record
@@ -880,304 +813,6 @@ fn same_path_other_repositories_require_distinct_certified_absolute_roots() {
     assert!(one_file_preview("src/lib.rs", &same_roots)
         .previews
         .is_empty());
-}
-
-#[test]
-fn commit_requires_one_certified_success_outcome_and_one_exact_oid_unit() {
-    for (index, body) in [
-        format!(
-            "Script completed\nProcess exited with code 0\nWall time 0.1 seconds\nOutput:\n[main 0123456] exact\n{OID}\nadjacent"
-        ),
-        format!(
-            "Script completed\nProcess exited with code 0\nFinal output:\n[main 0123456] exact\n{OID}\nadjacent"
-        ),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let success = commit_record(40 + u8::try_from(index).unwrap(), 2, &body, 1);
-        let evidence = numbered(&success, 1);
-        let model = project_evidence_previews(
-            &commit_result(OID, vec![evidence.clone()]),
-            &[verified(&evidence, &success)],
-        );
-        assert_eq!(model.previews[0].kind, EvidencePreviewKind::Commit);
-        assert_eq!(
-            model.previews[0].excerpt,
-            format!("[main 0123456] exact\n{OID}")
-        );
-    }
-
-    let failed = commit_record(
-        41,
-        2,
-        &format!("Process exited with code 1\nOutput:\n{OID}"),
-        1,
-    );
-    let evidence = numbered(&failed, 1);
-    assert!(project_evidence_previews(
-        &commit_result(OID, vec![evidence.clone()]),
-        &[verified(&evidence, &failed)],
-    )
-    .previews
-    .is_empty());
-
-    let mention_only = commit_record(42, 2, &format!("git show {OID}"), 0);
-    let evidence = numbered(&mention_only, 1);
-    assert!(project_evidence_previews(
-        &commit_result(OID, vec![evidence.clone()]),
-        &[verified(&evidence, &mention_only)],
-    )
-    .previews
-    .is_empty());
-
-    let certified_but_textually_unproven = commit_record(47, 2, OID, 1);
-    let evidence = numbered(&certified_but_textually_unproven, 1);
-    assert!(project_evidence_previews(
-        &commit_result(OID, vec![evidence.clone()]),
-        &[verified(&evidence, &certified_but_textually_unproven)],
-    )
-    .previews
-    .is_empty());
-}
-
-#[test]
-fn commit_preserves_the_evaluated_h033_outcome_stats_and_full_oid_unit() {
-    const H033_OID: &str = "7a8e20ecfbe6b05fdc182fc71511e08794f6343f";
-    let expected = format!(
-        "[ctx/v026-pro-blame-consolidation-20260725 7a8e20ecf] fix(release): complete paired native qualification\n 2 files changed, 197 insertions(+), 10 deletions(-)\n{H033_OID}"
-    );
-    assert_eq!(expected.len(), 198);
-    let body = format!(
-        "Chunk ID: ea50da\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 99\nOutput:\n scripts/ctx-pro/native-platform-smoke.py           | 170 +++++++++++++++++++--\n .../ctx_pro_native_platform_smoke_contract.py      |  37 +++++\n 2 files changed, 197 insertions(+), 10 deletions(-)\n[ctx/v026-pro-blame-consolidation-20260725 7a8e20ecf] fix(release): complete paired native qualification\n 2 files changed, 197 insertions(+), 10 deletions(-)\n{H033_OID}"
-    );
-    let record = commit_record_for_oid(48, 2, &body, 1, H033_OID);
-    let evidence = numbered(&record, 1);
-    let model = project_evidence_previews(
-        &commit_result(H033_OID, vec![evidence.clone()]),
-        &[verified(&evidence, &record)],
-    );
-    assert_eq!(model.previews[0].excerpt, expected);
-}
-
-#[test]
-fn commit_case_token_duplicate_unit_and_duplicate_outcome_ambiguity_omit() {
-    let uppercase = OID.to_ascii_uppercase();
-    let case = commit_record(
-        43,
-        2,
-        &format!("Process exited with code 0\nOutput:\n[main 0123456] exact\n{uppercase}"),
-        1,
-    );
-    let evidence = numbered(&case, 1);
-    assert!(project_evidence_previews(
-        &commit_result(OID, vec![evidence.clone()]),
-        &[verified(&evidence, &case)],
-    )
-    .previews
-    .is_empty());
-
-    let boundary = commit_record(
-        44,
-        2,
-        &format!("Process exited with code 0\nOutput:\n[main 0123456] exact\na{OID}"),
-        1,
-    );
-    let evidence = numbered(&boundary, 1);
-    assert!(project_evidence_previews(
-        &commit_result(OID, vec![evidence.clone()]),
-        &[verified(&evidence, &boundary)],
-    )
-    .previews
-    .is_empty());
-
-    let repeated = commit_record(
-        45,
-        2,
-        &format!("Process exited with code 0\nOutput:\n[main 0123456] exact\n{OID}\n{OID}"),
-        1,
-    );
-    let evidence = numbered(&repeated, 1);
-    assert!(project_evidence_previews(
-        &commit_result(OID, vec![evidence.clone()]),
-        &[verified(&evidence, &repeated)],
-    )
-    .previews
-    .is_empty());
-
-    let outcomes = commit_record(
-        46,
-        2,
-        &format!("Process exited with code 0\nOutput:\n[main 0123456] exact\n{OID}"),
-        2,
-    );
-    let evidence = numbered(&outcomes, 1);
-    assert!(project_evidence_previews(
-        &commit_result(OID, vec![evidence.clone()]),
-        &[verified(&evidence, &outcomes)],
-    )
-    .previews
-    .is_empty());
-}
-
-#[test]
-fn commit_anchor_rejects_ambiguous_order_case_prefix_and_boundaries() {
-    for (index, body) in [
-        format!(
-            "Process exited with code 0\nOutput:\n[main 0123456] one\n[other 0123456] two\n{OID}"
-        ),
-        format!("Process exited with code 0\nOutput:\n{OID}\n[main 0123456] exact"),
-        format!("Process exited with code 0\nOutput:\n[main 012345A] exact\n{OID}"),
-        format!("Process exited with code 0\nOutput:\n[main 012345] exact\n{OID}"),
-        format!("Process exited with code 0\nOutput:\n[main 0123456]exact\n{OID}"),
-        format!("Process exited with code 0\nOutput:\n[main 0123456] exact {OID}\n{OID}"),
-        format!("Process exited with code 0\nOutput:\n[main 0123456] exact\n {OID}"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let record = commit_record(60 + u8::try_from(index).unwrap(), 2, &body, 1);
-        let evidence = numbered(&record, 1);
-        assert!(
-            project_evidence_previews(
-                &commit_result(OID, vec![evidence.clone()]),
-                &[verified(&evidence, &record)],
-            )
-            .previews
-            .is_empty(),
-            "{body}"
-        );
-    }
-
-    let oversized_body = format!(
-        "Process exited with code 0\nOutput:\n[main 0123456] exact\n{}\n{OID}",
-        "x".repeat(460)
-    );
-    let oversized = commit_record(67, 2, &oversized_body, 1);
-    let evidence = numbered(&oversized, 1);
-    assert!(project_evidence_previews(
-        &commit_result(OID, vec![evidence.clone()]),
-        &[verified(&evidence, &oversized)],
-    )
-    .previews
-    .is_empty());
-}
-
-#[test]
-fn commit_output_framing_rejects_malformed_duplicate_and_mixed_markers() {
-    for (index, body) in [
-        format!("Process exited with code 0\nFinal output: \n[main 0123456] exact\n{OID}"),
-        format!("Process exited with code 0\nfinal output:\n[main 0123456] exact\n{OID}"),
-        format!("Process exited with code 0\nOutput:\nFinal output:\n[main 0123456] exact\n{OID}"),
-        format!("Process exited with code 0\nOutput:\nOutput:\n[main 0123456] exact\n{OID}"),
-        format!(
-            "Process exited with code 0\nFinal output:\nFinal output:\n[main 0123456] exact\n{OID}"
-        ),
-        format!(" Process exited with code 0\nFinal output:\n[main 0123456] exact\n{OID}"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let record = commit_record(50 + u8::try_from(index).unwrap(), 2, &body, 1);
-        let evidence = numbered(&record, 1);
-        assert!(
-            project_evidence_previews(
-                &commit_result(OID, vec![evidence.clone()]),
-                &[verified(&evidence, &record)],
-            )
-            .previews
-            .is_empty(),
-            "{body}"
-        );
-    }
-}
-
-#[test]
-fn commit_outcome_must_belong_to_the_exact_resolved_repository_binding() {
-    assert!(
-        super::commit_oid_matches_binding(OID, &binding(Some(GitObjectFormat::Sha1))).is_some()
-    );
-    assert!(
-        super::commit_oid_matches_binding(OID, &binding(Some(GitObjectFormat::Sha256))).is_none()
-    );
-    assert!(super::commit_oid_matches_binding(
-        &"a".repeat(64),
-        &binding(Some(GitObjectFormat::Sha256))
-    )
-    .is_some());
-
-    let body = format!("Process exited with code 0\nOutput:\n[main 0123456] exact\n{OID}");
-    let mut other_repository = commit_record(48, 2, &body, 1);
-    other_repository
-        .core_record
-        .repository_bindings
-        .push(binding_for(
-            "binding-2",
-            "local:certified-other-repository",
-            Some(GitObjectFormat::Sha1),
-        ));
-    other_repository.core_record.repository_vcs_observations[0].repository_binding_id =
-        "binding-2".to_owned();
-    let evidence = numbered(&other_repository, 1);
-    assert!(project_evidence_previews(
-        &commit_result(OID, vec![evidence.clone()]),
-        &[verified(&evidence, &other_repository)],
-    )
-    .previews
-    .is_empty());
-
-    for (index, logical_repository_id) in [
-        "forge:github.com/fork/ctx",
-        "local:simultaneous-other-repository",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let mut simultaneous = commit_record(
-            56 + u8::try_from(index).unwrap(),
-            2,
-            &format!("Process exited with code 0\nFinal output:\n[main 0123456] exact\n{OID}"),
-            1,
-        );
-        simultaneous
-            .core_record
-            .repository_bindings
-            .push(binding_for(
-                "binding-2",
-                logical_repository_id,
-                Some(GitObjectFormat::Sha1),
-            ));
-        let mut competing = simultaneous.core_record.repository_vcs_observations[0].clone();
-        competing.repository_binding_id = "binding-2".to_owned();
-        simultaneous
-            .core_record
-            .repository_vcs_observations
-            .push(competing);
-        let evidence = numbered(&simultaneous, 1);
-        assert!(
-            project_evidence_previews(
-                &commit_result(OID, vec![evidence.clone()]),
-                &[verified(&evidence, &simultaneous)],
-            )
-            .previews
-            .is_empty(),
-            "{logical_repository_id}"
-        );
-    }
-
-    let mut ambiguous = commit_record(49, 2, &body, 1);
-    ambiguous.core_record.repository_bindings.push(binding_for(
-        "binding-2",
-        REPOSITORY_ID,
-        Some(GitObjectFormat::Sha1),
-    ));
-    let evidence = numbered(&ambiguous, 1);
-    assert!(project_evidence_previews(
-        &commit_result(OID, vec![evidence.clone()]),
-        &[verified(&evidence, &ambiguous)],
-    )
-    .previews
-    .is_empty());
 }
 
 #[test]
@@ -1396,7 +1031,7 @@ fn digest_generation_and_all_coordinates_must_match() {
 }
 
 #[test]
-fn pull_requests_non_codex_and_unverified_records_are_normal_omissions() {
+fn non_file_targets_non_codex_and_unverified_records_are_normal_omissions() {
     let record = file_record(
         80,
         1,
@@ -1407,18 +1042,28 @@ fn pull_requests_non_codex_and_unverified_records_are_normal_omissions() {
     );
     let evidence = numbered(&record, 1);
     let proof = verified(&evidence, &record);
-    let pr = BlameResult {
-        target: ResolvedBlameTarget::PullRequest {
+    for target in [
+        ResolvedBlameTarget::Commit {
+            commit: resource("commit:1", ResourceKind::Commit, OID),
+            repository: repository(),
+        },
+        ResolvedBlameTarget::PullRequest {
             selector: "1".to_owned(),
             pull_request: resource("pr:1", ResourceKind::PullRequest, "#1"),
             repository: repository(),
         },
-        git_snapshot: None,
-        matches: Vec::new(),
-        evidence: vec![evidence.clone()],
-        next: None,
-    };
-    assert!(project_evidence_previews(&pr, &[proof]).previews.is_empty());
+    ] {
+        let result = BlameResult {
+            target,
+            git_snapshot: None,
+            matches: Vec::new(),
+            evidence: vec![evidence.clone()],
+            next: None,
+        };
+        assert!(project_evidence_previews(&result, &[proof])
+            .previews
+            .is_empty());
+    }
     assert!(
         project_evidence_previews(&file_result("src/lib.rs", vec![evidence]), &[])
             .previews

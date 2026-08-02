@@ -24,7 +24,7 @@ use super::{
     render_blame_document_with_evidence_preview,
 };
 use crate::pro::evidence_preview::{
-    EvidencePreview, EvidencePreviewKind, EvidencePreviewModel, MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
+    EvidencePreview, EvidencePreviewModel, MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
 };
 use crate::ui::{ColorMode, Document, Line, RenderContext, StreamKind, TestContext, Token};
 
@@ -61,45 +61,45 @@ fn render_plain(result: &BlameResult, width: usize) -> String {
     render_blame_document(result, &context(width)).render_plain()
 }
 
-fn preview_result(file: bool, evidence_count: u32) -> BlameResult {
+fn file_preview_result(evidence_count: u32) -> BlameResult {
     let evidence = (1..=evidence_count).map(event_evidence).collect();
-    if file {
-        BlameResult {
-            target: ResolvedBlameTarget::File {
-                path: "src/lib.rs".to_owned(),
-                repository: repository(),
-                requested_lines: None,
-            },
-            git_snapshot: Some(GitSnapshot {
-                head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-                worktree_status: WorktreeStatus::Clean,
-            }),
-            matches: Vec::new(),
-            evidence,
-            next: None,
-        }
-    } else {
-        BlameResult {
-            target: ResolvedBlameTarget::Commit {
-                commit: resource(
-                    "commit:0123456789abcdef0123456789abcdef01234567",
-                    ResourceKind::Commit,
-                    "0123456789abcdef0123456789abcdef01234567",
-                ),
-                repository: repository(),
-            },
-            git_snapshot: None,
-            matches: Vec::new(),
-            evidence,
-            next: None,
-        }
+    BlameResult {
+        target: ResolvedBlameTarget::File {
+            path: "src/lib.rs".to_owned(),
+            repository: repository(),
+            requested_lines: None,
+        },
+        git_snapshot: Some(GitSnapshot {
+            head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            worktree_status: WorktreeStatus::Clean,
+        }),
+        matches: Vec::new(),
+        evidence,
+        next: None,
+    }
+}
+
+fn commit_blame_result(evidence_count: u32) -> BlameResult {
+    BlameResult {
+        target: ResolvedBlameTarget::Commit {
+            commit: resource(
+                "commit:0123456789abcdef0123456789abcdef01234567",
+                ResourceKind::Commit,
+                "0123456789abcdef0123456789abcdef01234567",
+            ),
+            repository: repository(),
+        },
+        git_snapshot: None,
+        matches: Vec::new(),
+        evidence: (1..=evidence_count).map(event_evidence).collect(),
+        next: None,
     }
 }
 
 fn preview(
     result: &BlameResult,
     numbers: Vec<u32>,
-    kind: EvidencePreviewKind,
+    kind: RepositoryFileObservationKind,
     excerpt: impl Into<String>,
 ) -> EvidencePreview {
     let citation = result
@@ -111,7 +111,7 @@ fn preview(
         evidence_numbers: numbers,
         event_id: citation.citation.event_id,
         event_sequence: citation.citation.event_sequence,
-        kind,
+        file_kind: kind,
         excerpt: excerpt.into(),
     }
 }
@@ -134,7 +134,7 @@ fn single_preview_excerpt_fragments(rendered: &str) -> Vec<&str> {
     let lines = rendered.lines().collect::<Vec<_>>();
     let heading = lines
         .iter()
-        .position(|line| line.contains("file evidence") || line.contains("Commit evidence"))
+        .position(|line| line.contains("file evidence"))
         .unwrap();
     let command = lines
         .iter()
@@ -456,9 +456,8 @@ fn pull_request_activity_only_page_scopes_missing_commits_golden() {
     );
 }
 
-#[test]
-fn file_continuation_uses_committed_window_golden() {
-    let result = BlameResult {
+fn paginated_file_result() -> BlameResult {
+    BlameResult {
         target: ResolvedBlameTarget::File {
             path: "src/lib.rs".to_owned(),
             repository: repository(),
@@ -480,11 +479,32 @@ fn file_continuation_uses_committed_window_golden() {
             cursor: "more-lines".to_owned(),
             reason: ContinuationReason::MoreCommittedLines,
         }),
-    };
+    }
+}
+
+#[test]
+fn file_continuation_uses_committed_window_golden() {
+    let result = paginated_file_result();
     result.validate().unwrap();
     assert_eq!(
         render_plain(&result, 80),
         include_str!("../../../testdata/pro/blame_file_continuation.golden.txt")
+    );
+}
+
+#[test]
+fn opted_in_file_continuation_retains_evidence_preview_golden() {
+    let result = paginated_file_result();
+    result.validate().unwrap();
+    assert_eq!(
+        render_preview_plain(
+            &result,
+            &EvidencePreviewModel {
+                previews: Vec::new(),
+            },
+            80,
+        ),
+        include_str!("../../../testdata/pro/blame_file_continuation_preview.golden.txt")
     );
 }
 
@@ -760,49 +780,43 @@ fn wire_enums_are_humanized_in_human_output() {
 }
 
 #[test]
-fn opted_in_file_and_commit_previews_follow_their_numbered_evidence() {
-    for file in [true, false] {
-        let result = preview_result(file, 1);
-        let kind = if file {
-            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified)
-        } else {
-            EvidencePreviewKind::Commit
-        };
-        let model = EvidencePreviewModel {
-            previews: vec![preview(&result, vec![1], kind, "exact target-bearing unit")],
-        };
-        let rendered = render_preview_plain(&result, &model, 80);
-        let evidence = rendered.find("\nEvidence\n").unwrap();
-        let preview = rendered
-            .find("\nEvidence preview (local history content; explicitly requested)\n")
-            .unwrap();
+fn opted_in_file_preview_follows_its_numbered_evidence() {
+    let result = file_preview_result(1);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            RepositoryFileObservationKind::Modified,
+            "exact target-bearing unit",
+        )],
+    };
+    let rendered = render_preview_plain(&result, &model, 80);
+    let evidence = rendered.find("\nEvidence\n").unwrap();
+    let preview = rendered
+        .find("\nEvidence preview (local history content; explicitly requested)\n")
+        .unwrap();
 
-        assert!(evidence < preview, "{rendered}");
-        assert!(
-            rendered.contains("Evidence preview (local history content; explicitly requested)"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("    exact target-bearing unit"),
-            "{rendered}"
-        );
-        let event_command = format!("ctx show event {}", result.evidence[0].citation.event_id);
-        assert_eq!(
-            rendered[preview..].matches(&event_command).count(),
-            1,
-            "{rendered}"
-        );
-        if file {
-            assert!(rendered.contains("  [1] Modified file evidence\n"));
-        } else {
-            assert!(rendered.contains("  [1] Commit evidence\n"));
-        }
-    }
+    assert!(evidence < preview, "{rendered}");
+    assert!(
+        rendered.contains("Evidence preview (local history content; explicitly requested)"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("    exact target-bearing unit"),
+        "{rendered}"
+    );
+    let event_command = format!("ctx show event {}", result.evidence[0].citation.event_id);
+    assert_eq!(
+        rendered[preview..].matches(&event_command).count(),
+        1,
+        "{rendered}"
+    );
+    assert!(rendered.contains("  [1] Modified file evidence\n"));
 }
 
 #[test]
 fn grouped_preview_heading_wraps_references_and_kind_only_when_required() {
-    let result = preview_result(true, 3);
+    let result = file_preview_result(3);
     for reference_count in 1..=3usize {
         let numbers = (1..=u32::try_from(reference_count).unwrap()).collect::<Vec<_>>();
         let references = numbers
@@ -814,7 +828,7 @@ fn grouped_preview_heading_wraps_references_and_kind_only_when_required() {
             previews: vec![preview(
                 &result,
                 numbers.clone(),
-                EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+                RepositoryFileObservationKind::Modified,
                 "exact unit",
             )],
         };
@@ -856,13 +870,13 @@ fn grouped_preview_heading_wraps_references_and_kind_only_when_required() {
 }
 
 #[test]
-fn multiline_rename_and_commit_excerpts_preserve_indented_logical_lines() {
-    let file_result = preview_result(true, 1);
+fn multiline_rename_excerpt_preserves_indented_logical_lines() {
+    let file_result = file_preview_result(1);
     let file_model = EvidencePreviewModel {
         previews: vec![preview(
             &file_result,
             vec![1],
-            EvidencePreviewKind::File(RepositoryFileObservationKind::Renamed),
+            RepositoryFileObservationKind::Renamed,
             "*** Update File: src/old.rs\n*** Move to: src/lib.rs",
         )],
     };
@@ -873,35 +887,16 @@ fn multiline_rename_and_commit_excerpts_preserve_indented_logical_lines() {
         "{file}"
     );
     assert!(!file.contains("old.rs\\n***"), "{file}");
-
-    let commit_result = preview_result(false, 1);
-    let commit_model = EvidencePreviewModel {
-        previews: vec![preview(
-            &commit_result,
-            vec![1],
-            EvidencePreviewKind::Commit,
-            "commit 0123456789abcdef\nAuthor: Example Agent\n\u{202e}subject",
-        )],
-    };
-    let commit = render_preview_plain(&commit_result, &commit_model, 80);
-    assert!(commit.contains("  [1] Commit evidence\n"), "{commit}");
-    assert!(
-        commit.contains(
-            "    commit 0123456789abcdef\n    Author: Example Agent\n    \\u{202e}subject\n"
-        ),
-        "{commit}"
-    );
-    assert!(!commit.contains('\u{202e}'));
 }
 
 #[test]
 fn preview_preserves_sanitized_whitespace_and_control_escapes_exactly() {
-    let result = preview_result(true, 1);
+    let result = file_preview_result(1);
     let model = EvidencePreviewModel {
         previews: vec![preview(
             &result,
             vec![1],
-            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+            RepositoryFileObservationKind::Modified,
             "modified: src/a  b.rs\n 2 files changed, 3 insertions(+), 1 deletion(-)  \n\tstatus:\0  keep\tgap\u{202e}\u{1b}  ",
         )],
     };
@@ -921,8 +916,38 @@ fn preview_preserves_sanitized_whitespace_and_control_escapes_exactly() {
 }
 
 #[test]
+fn evidence_renderer_escapes_strict_format_controls_and_preserves_text_shaping() {
+    const CONTROLS: &str = "\u{2028}\u{2029}\u{2061}\u{2062}\u{2063}\u{2064}";
+    const PRESERVED: &str = "می\u{200c}روم 👩\u{200d}💻 ✈\u{fe0f} e\u{0301} مرحبا";
+    let result = file_preview_result(1);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            RepositoryFileObservationKind::Modified,
+            format!("modified: src/lib.rs {CONTROLS} {PRESERVED}"),
+        )],
+    };
+    let context = RenderContext::for_test(TestContext::pipe(StreamKind::Stdout));
+    let rendered =
+        render_blame_document_with_evidence_preview(&result, &context, Some(&model)).render_plain();
+
+    assert!(
+        rendered.contains(
+            "modified: src/lib.rs \\u{2028}\\u{2029}\\u{2061}\\u{2062}\\u{2063}\\u{2064}"
+        ),
+        "{rendered}"
+    );
+    assert!(rendered.contains(PRESERVED), "{rendered}");
+    assert!(!CONTROLS.chars().any(|control| rendered.contains(control)));
+    for preserved_escape in ["\\u{200c}", "\\u{200d}", "\\u{fe0f}", "\\u{0301}"] {
+        assert!(!rendered.contains(preserved_escape), "{rendered}");
+    }
+}
+
+#[test]
 fn preview_wraps_long_family_emoji_path_only_at_grapheme_boundaries() {
-    let result = preview_result(true, 1);
+    let result = file_preview_result(1);
     let family = "👨‍👩‍👧‍👦";
     let combining = "e\u{0301}";
     let excerpt = format!("src/{}  /{}.rs", family.repeat(16), combining.repeat(12));
@@ -931,7 +956,7 @@ fn preview_wraps_long_family_emoji_path_only_at_grapheme_boundaries() {
         previews: vec![preview(
             &result,
             vec![1],
-            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+            RepositoryFileObservationKind::Modified,
             &excerpt,
         )],
     };
@@ -970,7 +995,7 @@ fn preview_wraps_long_family_emoji_path_only_at_grapheme_boundaries() {
 
 #[test]
 fn multibyte_excerpt_limit_is_enforced_in_original_utf8_bytes() {
-    let result = preview_result(true, 1);
+    let result = file_preview_result(1);
     for bytes in [511usize, 512, 513] {
         let mut excerpt = "é".repeat(bytes / 2);
         if bytes % 2 == 1 {
@@ -981,7 +1006,7 @@ fn multibyte_excerpt_limit_is_enforced_in_original_utf8_bytes() {
             previews: vec![preview(
                 &result,
                 vec![1],
-                EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+                RepositoryFileObservationKind::Modified,
                 excerpt,
             )],
         };
@@ -1036,7 +1061,7 @@ fn rendered_preview_budget_accepts_4096_bytes_and_rejects_4097() {
 
 #[test]
 fn requested_but_unavailable_preview_is_content_free_and_default_output_is_unchanged() {
-    let result = preview_result(false, 0);
+    let result = file_preview_result(0);
     let default = render_blame_document(&result, &context(80)).render_plain();
     let requested = render_preview_plain(
         &result,
@@ -1059,8 +1084,8 @@ fn requested_but_unavailable_preview_is_content_free_and_default_output_is_uncha
 #[test]
 fn default_opt_out_bytes_are_identical_for_every_target_and_supported_width() {
     let results = [
-        preview_result(true, 1),
-        preview_result(false, 1),
+        file_preview_result(1),
+        commit_blame_result(1),
         paginated_pr_result(true),
     ];
     for result in &results {
@@ -1084,19 +1109,19 @@ fn default_opt_out_bytes_are_identical_for_every_target_and_supported_width() {
 
 #[test]
 fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_truncation() {
-    let result = preview_result(true, 5);
+    let result = file_preview_result(5);
     let exact = "Z".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES);
     let mut previews = vec![preview(
         &result,
         vec![1, 2],
-        EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+        RepositoryFileObservationKind::Modified,
         exact.clone(),
     )];
     for number in 3..=5 {
         previews.push(preview(
             &result,
             vec![number],
-            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+            RepositoryFileObservationKind::Modified,
             exact.clone(),
         ));
     }
@@ -1127,12 +1152,12 @@ fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_trun
 
 #[test]
 fn ultra_narrow_contexts_preserve_grouped_references_and_full_event_command_atoms() {
-    let result = preview_result(true, 3);
+    let result = file_preview_result(3);
     let model = EvidencePreviewModel {
         previews: vec![preview(
             &result,
             vec![1, 2, 3],
-            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+            RepositoryFileObservationKind::Modified,
             "exact unit",
         )],
     };
@@ -1171,14 +1196,14 @@ fn ultra_narrow_contexts_preserve_grouped_references_and_full_event_command_atom
 
 #[test]
 fn actual_and_canonical_render_budgets_omit_only_complete_preview_items() {
-    let result = preview_result(true, 3);
+    let result = file_preview_result(3);
     let model = EvidencePreviewModel {
         previews: (1..=3)
             .map(|number| {
                 preview(
                     &result,
                     vec![number],
-                    EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+                    RepositoryFileObservationKind::Modified,
                     "Z".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES),
                 )
             })
@@ -1229,12 +1254,12 @@ fn actual_and_canonical_render_budgets_omit_only_complete_preview_items() {
 
 #[test]
 fn sanitizer_expansion_omits_the_complete_item_instead_of_truncating_it() {
-    let result = preview_result(true, 1);
+    let result = file_preview_result(1);
     let model = EvidencePreviewModel {
         previews: vec![preview(
             &result,
             vec![1],
-            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+            RepositoryFileObservationKind::Modified,
             "\0".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES),
         )],
     };
@@ -1257,7 +1282,7 @@ fn sanitizer_expansion_omits_the_complete_item_instead_of_truncating_it() {
 
 #[test]
 fn preview_is_safe_and_stable_at_supported_widths_and_across_color() {
-    let result = preview_result(true, 1);
+    let result = file_preview_result(1);
     let family = "👨‍👩‍👧‍👦";
     let persian = "می‌روم";
     let combining = "e\u{0301}";
@@ -1266,7 +1291,7 @@ fn preview_is_safe_and_stable_at_supported_widths_and_across_color() {
         previews: vec![preview(
             &result,
             vec![1],
-            EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+            RepositoryFileObservationKind::Modified,
             excerpt,
         )],
     };
@@ -1314,13 +1339,13 @@ fn preview_is_safe_and_stable_at_supported_widths_and_across_color() {
 
 #[test]
 fn preview_bytes_are_accounted_and_json_bytes_remain_exactly_unchanged() {
-    let result = preview_result(false, 1);
+    let result = file_preview_result(1);
     let model = EvidencePreviewModel {
         previews: vec![preview(
             &result,
             vec![1],
-            EvidencePreviewKind::Commit,
-            "exact commit evidence",
+            RepositoryFileObservationKind::Modified,
+            "modified: src/lib.rs",
         )],
     };
     let default_bytes =
