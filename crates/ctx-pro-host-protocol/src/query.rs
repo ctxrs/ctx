@@ -485,6 +485,19 @@ impl BlameResult {
     pub fn validate_for_request(&self, request: &BlameRequest) -> Result<(), ProtocolError> {
         request.validate()?;
         self.validate()?;
+        let expected_core_generation_id = match &request.expected_snapshot {
+            QuerySnapshotExpectation::Core { receipt } => &receipt.core_generation_id,
+        };
+        if self
+            .evidence
+            .iter()
+            .any(|evidence| evidence.citation.core_generation_id != *expected_core_generation_id)
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "blame evidence generation does not match the requested Core snapshot",
+            ));
+        }
         if self.matches.len() > request.limit as usize {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,
@@ -937,6 +950,10 @@ fn normalized_repository_selector(value: &str) -> String {
     }
     format!("forge:{}/{path}", host.to_ascii_lowercase())
 }
+
+#[cfg(test)]
+#[path = "query_request_generation_tests.rs"]
+mod request_generation_tests;
 
 #[cfg(test)]
 mod tests {

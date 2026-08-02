@@ -468,10 +468,10 @@ ctx data root preserves that identity and its selected backend; copying
 The public Pro query surface is:
 
 ```bash
-ctx blame <target> [--type file|commit|pr] [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
+ctx blame <target> [--type file|commit|pr] [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--evidence-preview] [--format json]
 
 # Explicit compatibility forms
-ctx blame file <path> [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
+ctx blame file <path> [--lines <start[:end]>] [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--evidence-preview] [--format json]
 ctx blame commit <sha> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
 ctx blame pr <positive-number-or-canonical-url> [--repository <logical-repository>] [--limit N] [--cursor <cursor>] [--format json]
 ```
@@ -490,6 +490,17 @@ The `file`, `commit`, and `pr` subcommands remain supported compatibility forms
 with their existing arguments and output behavior. Those three words therefore
 retain subcommand precedence as the first token; for example, use
 `ctx blame file file` to query a file literally named `file`.
+
+`--evidence-preview` is off by default, human-only, and must be requested for
+each file-blame invocation. It adds up to three bounded exact Codex file
+excerpts from cited local history. Unsupported, stale, or ambiguous file
+evidence may be omitted from the preview without changing attribution or the
+underlying `BlameResult`. A commit or PR target combined with
+`--evidence-preview` is rejected with actionable `invalid_request` before Pro
+or index access. Combining a file preview with `--format json` is also rejected
+with `invalid_request`. JSON and MCP have no evidence-preview surface, and their
+schemas remain unchanged. A file continuation command retains the flag when
+the current page explicitly requested it.
 
 There are no Pro `show`, `timeline`, `facts`, or `related` compatibility
 aliases. OSS `ctx show session|event` remains unchanged. The CLI blame limit defaults to 20

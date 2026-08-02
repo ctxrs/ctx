@@ -1,5 +1,31 @@
 use super::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CoreEventBatchBudgetMode {
+    LegacyBounded,
+    Paged,
+    Strict {
+        per_record_budget: Option<CoreEventPageBudget>,
+    },
+}
+
+impl CoreEventBatchBudgetMode {
+    fn admits_oversized_singleton(self) -> bool {
+        matches!(self, Self::Paged)
+    }
+
+    fn preflights_before_decode(self) -> bool {
+        matches!(self, Self::Strict { .. })
+    }
+
+    fn per_record_budget(self) -> Option<CoreEventPageBudget> {
+        match self {
+            Self::Strict { per_record_budget } => per_record_budget,
+            Self::LegacyBounded | Self::Paged => None,
+        }
+    }
+}
+
 impl VerifiedIndex {
     pub fn event_by_id(&self, event_id: Uuid) -> Result<Option<EventRecord>> {
         Ok(self
@@ -206,7 +232,7 @@ impl VerifiedIndex {
                 maximum_events,
                 maximum_stored_core_bytes,
                 usize::MAX,
-                false,
+                CoreEventBatchBudgetMode::LegacyBounded,
             )?
             .map(|batch| batch.items))
     }
@@ -228,13 +254,15 @@ impl VerifiedIndex {
             maximum_events,
             budget.maximum_encoded_core_bytes,
             budget.maximum_content_bytes,
-            true,
+            CoreEventBatchBudgetMode::Paged,
         )
     }
 
     /// Returns a complete requested-order Core batch only when every record
     /// fits the aggregate byte ceilings. Unlike paged presentation reads, an
     /// oversized singleton is declined instead of being admitted for progress.
+    /// Strict reads validate both size dimensions and order the complete
+    /// FAST-only candidate set before loading any stored document.
     pub fn core_events_by_ids_with_strict_budget(
         &self,
         event_ids: &[Uuid],
@@ -247,7 +275,36 @@ impl VerifiedIndex {
             maximum_events,
             budget.maximum_encoded_core_bytes,
             budget.maximum_content_bytes,
-            false,
+            CoreEventBatchBudgetMode::Strict {
+                per_record_budget: None,
+            },
+        )
+    }
+
+    /// Returns a complete requested-order Core batch only when it fits the
+    /// aggregate ceilings and every individual record fits the independent
+    /// per-record ceilings.
+    ///
+    /// Both size dimensions are checked from FAST metadata for the complete
+    /// candidate set before any stored read, so a record cannot borrow unused
+    /// aggregate capacity from another requested ID.
+    pub fn core_events_by_ids_with_strict_per_record_budget(
+        &self,
+        event_ids: &[Uuid],
+        maximum_events: usize,
+        aggregate_budget: CoreEventPageBudget,
+        per_record_budget: CoreEventPageBudget,
+    ) -> Result<Option<CoreEventBatch>> {
+        validate_core_event_page_budget(aggregate_budget)?;
+        validate_core_event_page_budget(per_record_budget)?;
+        self.core_event_batch_by_ids(
+            event_ids,
+            maximum_events,
+            aggregate_budget.maximum_encoded_core_bytes,
+            aggregate_budget.maximum_content_bytes,
+            CoreEventBatchBudgetMode::Strict {
+                per_record_budget: Some(per_record_budget),
+            },
         )
     }
 
@@ -257,7 +314,7 @@ impl VerifiedIndex {
         maximum_events: usize,
         maximum_stored_core_bytes: usize,
         maximum_content_bytes: usize,
-        admit_oversized_singleton: bool,
+        budget_mode: CoreEventBatchBudgetMode,
     ) -> Result<Option<CoreEventBatch>> {
         if event_ids.len() > maximum_events {
             return Ok(None);
@@ -284,13 +341,98 @@ impl VerifiedIndex {
                 .collect::<Vec<_>>(),
         );
         let addresses = self.searcher.search(&query, &DocSetCollector)?;
+        let per_record_budget = budget_mode.per_record_budget();
+        let candidates = if budget_mode.preflights_before_decode() {
+            let mut by_event_id = BTreeMap::new();
+            for address in addresses {
+                let (event_id, record_encoded_core_bytes, record_content_bytes) =
+                    core_event_fast_preflight(&self.searcher, address)?;
+                if !requested.contains(&event_id) {
+                    return Err(IndexError::InvalidStoredDocumentField("event_id"));
+                }
+                if by_event_id
+                    .insert(
+                        event_id,
+                        (address, record_encoded_core_bytes, record_content_bytes),
+                    )
+                    .is_some()
+                {
+                    return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
+                }
+            }
+            if by_event_id.len() != requested.len() {
+                return Ok(None);
+            }
+            if per_record_budget.is_some_and(|budget| {
+                by_event_id
+                    .values()
+                    .any(|(_, encoded_core_bytes, content_bytes)| {
+                        *encoded_core_bytes > budget.maximum_encoded_core_bytes
+                            || *content_bytes > budget.maximum_content_bytes
+                    })
+            }) {
+                return Ok(None);
+            }
+            let mut aggregate_encoded_core_bytes = 0_usize;
+            let mut aggregate_content_bytes = 0_usize;
+            for (_, encoded_core_bytes, record_content_bytes) in by_event_id.values() {
+                aggregate_encoded_core_bytes =
+                    match aggregate_encoded_core_bytes.checked_add(*encoded_core_bytes) {
+                        Some(total) if total <= maximum_stored_core_bytes => total,
+                        _ => return Ok(None),
+                    };
+                aggregate_content_bytes =
+                    match aggregate_content_bytes.checked_add(*record_content_bytes) {
+                        Some(total) if total <= maximum_content_bytes => total,
+                        _ => return Ok(None),
+                    };
+            }
+            let mut ordered = Vec::with_capacity(event_ids.len());
+            for event_id in event_ids {
+                let Some((address, encoded_core_bytes, content_bytes)) =
+                    by_event_id.remove(event_id)
+                else {
+                    return Ok(None);
+                };
+                ordered.push((
+                    address,
+                    Some((*event_id, encoded_core_bytes, content_bytes)),
+                ));
+            }
+            ordered
+        } else {
+            addresses
+                .into_iter()
+                .map(|address| (address, None))
+                .collect()
+        };
         let mut records = BTreeMap::new();
         let mut stored_core_bytes = 0_usize;
         let mut content_bytes = 0_usize;
-        for address in addresses {
+        for (address, fast_preflight) in candidates {
             let (record, record_stored_core_bytes) =
                 stored_core_event_record_with_size(&self.searcher, address, fields)?;
             let record_content_bytes = core_content_bytes(&record.core_record.content)?;
+            if let Some((
+                preflight_event_id,
+                preflight_encoded_core_bytes,
+                preflight_content_bytes,
+            )) = fast_preflight
+            {
+                if record.event_id.as_uuid() != preflight_event_id {
+                    return Err(IndexError::InvalidStoredDocumentField("event_id"));
+                }
+                if record_stored_core_bytes != preflight_encoded_core_bytes {
+                    return Err(IndexError::InvalidStoredDocumentField(
+                        CORE_RECORD_ENCODED_BYTES_FIELD,
+                    ));
+                }
+                if record_content_bytes != preflight_content_bytes {
+                    return Err(IndexError::InvalidStoredDocumentField(
+                        CORE_CONTENT_BYTES_FIELD,
+                    ));
+                }
+            }
             let Some(next_stored_core_bytes) =
                 stored_core_bytes.checked_add(record_stored_core_bytes)
             else {
@@ -301,7 +443,7 @@ impl VerifiedIndex {
             };
             if (next_stored_core_bytes > maximum_stored_core_bytes
                 || next_content_bytes > maximum_content_bytes)
-                && !(admit_oversized_singleton && event_ids.len() == 1)
+                && !(budget_mode.admits_oversized_singleton() && event_ids.len() == 1)
             {
                 return Ok(None);
             }

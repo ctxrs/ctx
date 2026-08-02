@@ -118,7 +118,7 @@ fn open_retained_verified_index(
             count.set(Some(current.saturating_add(1)));
         }
     });
-    VerifiedIndex::open_retained(index_root, generation_id)
+    VerifiedIndex::open_pinned_generation(index_root, generation_id)
 }
 
 #[cfg(test)]

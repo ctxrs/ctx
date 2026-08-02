@@ -100,7 +100,10 @@ pub const DEFAULT_CORE_EVENT_PAGE_BUDGET: CoreEventPageBudget = CoreEventPageBud
     maximum_content_bytes: MAX_CORE_CONTENT_BYTES,
 };
 
-/// Retained complete-Core byte ceilings for one source or semantic page.
+/// Paired encoded and decoded-content ceilings for complete Core records.
+///
+/// Each query API defines whether these ceilings apply to an aggregate page,
+/// a strict batch, or every individual record in a strict batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreEventPageBudget {
     pub maximum_encoded_core_bytes: usize,

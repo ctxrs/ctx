@@ -930,6 +930,12 @@ prose summary, or suggested claims:
 - `next`, null or an opaque cursor plus `more_matches` or
   `more_committed_lines` reason.
 
+`--evidence-preview` has no JSON or MCP representation. Combining it with
+`--format json` is rejected as stable `invalid_request` JSON for universal and
+explicit file, commit, and PR CLI forms. The flag is otherwise valid
+only for human file blame. CLI JSON and MCP continue to return the unchanged
+`BlameResult` schema above, with no preview fields.
+
 Ordinary CLI and MCP blame send a bounded maintenance wake, read the latest
 committed Pro generation, and report its frontier or typed stale state while
 catch-up proceeds. Only an explicit wait policy waits for a requested frontier;

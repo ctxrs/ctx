@@ -7,9 +7,10 @@ mod verification;
 pub use contract::*;
 use filtering::*;
 pub(crate) use records::stored_event_record;
+pub(crate) use records::validate_core_record_encoded_bytes;
 use records::{
-    stored_core_event_record, stored_core_event_record_with_size, EventAddressCandidate,
-    SessionEventAddressCandidate,
+    core_event_fast_preflight, stored_core_event_record, stored_core_event_record_with_size,
+    EventAddressCandidate, SessionEventAddressCandidate,
 };
 
 pub(super) use verification::{
@@ -63,6 +64,7 @@ const OCCURRED_AT_UNIX_MS_FIELD: &str = "occurred_at_unix_ms";
 const EVENT_IDENTITY_DIGEST_FIELD: &str = "event_identity_digest";
 const SOURCE_KEY_FIELD: &str = "source_key";
 const CORE_CONTENT_BYTES_FIELD: &str = "core_content_bytes";
+const CORE_RECORD_ENCODED_BYTES_FIELD: &str = "core_record_encoded_bytes";
 const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
 const SESSION_EVENT_ORDER_FIELD: &str = "session_event_order";
 const SEMANTIC_EVENT_ORDER_FIELD: &str = "semantic_event_order";
@@ -71,6 +73,7 @@ const SEMANTIC_EVENT_ORDER_FIELD: &str = "semantic_event_order";
 thread_local! {
     static STORED_EVENT_RECORD_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static STORED_CORE_EVENT_RECORD_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static CORE_RECORD_DECODES: Cell<usize> = const { Cell::new(0) };
     static SOURCE_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
     static SESSION_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
     static SEMANTIC_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
@@ -97,6 +100,16 @@ pub(crate) fn reset_stored_core_event_record_materializations() {
 #[cfg(test)]
 pub(crate) fn stored_core_event_record_materializations() -> usize {
     STORED_CORE_EVENT_RECORD_MATERIALIZATIONS.get()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_core_record_decodes() {
+    CORE_RECORD_DECODES.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn core_record_decodes() -> usize {
+    CORE_RECORD_DECODES.get()
 }
 
 #[cfg(test)]

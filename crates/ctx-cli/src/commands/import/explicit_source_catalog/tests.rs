@@ -115,15 +115,32 @@ mod tests {
         assert!(!data_root.join("work.sqlite").exists());
         let bytes = fs::read(catalog_root(&data_root).join(catalog_revision_filename(1))).unwrap();
         let text = String::from_utf8(bytes).unwrap();
-        for forbidden in [
+        let catalog: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let forbidden = [
             "preview",
             "payload",
             "credential",
             "event_id",
             "session_id",
             "raw_source_path",
-        ] {
-            assert!(!text.contains(forbidden), "{forbidden} leaked into catalog");
+        ];
+        assert_no_forbidden_catalog_keys(&catalog, &forbidden);
+    }
+
+    fn assert_no_forbidden_catalog_keys(value: &serde_json::Value, forbidden: &[&str]) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                for (key, value) in fields {
+                    assert!(!forbidden.contains(&key.as_str()), "{key} leaked into catalog");
+                    assert_no_forbidden_catalog_keys(value, forbidden);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    assert_no_forbidden_catalog_keys(value, forbidden);
+                }
+            }
+            _ => {}
         }
     }
 

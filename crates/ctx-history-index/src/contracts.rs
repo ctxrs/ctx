@@ -1,6 +1,6 @@
 use ctx_history_core::{
-    core_record_contract_fingerprint, CertifiedSource, CertifiedSourceDeletion, CoreRecordError,
-    ProjectionContractError, SourceKey, CORE_RECORD_VERSION, IDENTITY_VERSION,
+    core_record_contract_fingerprint, CertifiedSource, CoreRecordError, ProjectionContractError,
+    SourceKey, CORE_RECORD_VERSION, IDENTITY_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -108,10 +108,24 @@ pub enum IndexError {
     UnboundIndexState,
     #[error("the lexical generation changed while a verified reader was opening")]
     ConcurrentGenerationChange,
+    #[error(
+        "requested lexical generation {expected_generation_id} is not retained: \
+         active generation is {active_generation_id}, previous generation is {previous_generation_id:?}"
+    )]
+    PinnedGenerationNotRetained {
+        expected_generation_id: String,
+        active_generation_id: String,
+        previous_generation_id: Option<String>,
+    },
+    #[error(
+        "requested lexical generation {expected_generation_id} resolved to publication payload/manifest generation {actual_generation_id}"
+    )]
+    PinnedGenerationMismatch {
+        expected_generation_id: String,
+        actual_generation_id: String,
+    },
     #[error("generation manifest {0} is missing")]
     MissingManifest(String),
-    #[error("generation {0} is not retained by the active generation pointer")]
-    GenerationNotRetained(String),
     #[error("generation manifest digest mismatch: expected {expected}, actual {actual}")]
     ManifestDigestMismatch { expected: String, actual: String },
     #[error("generation ID is not exactly 64 lowercase hexadecimal characters")]
@@ -951,40 +965,4 @@ pub(crate) fn implicit_source_routes(
 pub(crate) struct CommitPayload {
     pub(crate) version: u32,
     pub(crate) generation_id: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct CommitReceipt {
-    pub generation_id: String,
-    pub opstamp: u64,
-    pub indexed_documents: u64,
-    pub semantic_eligible_documents: u64,
-    pub certified_sources: usize,
-    pub certified_source_bytes: u64,
-    manifest: GenerationManifest,
-}
-
-impl CommitReceipt {
-    pub(crate) fn from_manifest(opstamp: u64, manifest: GenerationManifest) -> Result<Self> {
-        Ok(Self {
-            generation_id: manifest.generation_id()?,
-            opstamp,
-            indexed_documents: manifest.indexed_documents,
-            semantic_eligible_documents: manifest.semantic_eligible_documents,
-            certified_sources: manifest.sources.len(),
-            certified_source_bytes: manifest.certified_source_bytes,
-            manifest,
-        })
-    }
-
-    /// Returns the exact immutable manifest snapshot published by this commit.
-    pub fn manifest(&self) -> &GenerationManifest {
-        &self.manifest
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum RevalidationTarget<'a> {
-    Source(&'a CertifiedSource),
-    Deletion(&'a CertifiedSourceDeletion),
 }

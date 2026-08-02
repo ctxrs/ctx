@@ -344,6 +344,10 @@ fn repository_schema() -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use ctx_pro_host_protocol::{BlameResult, ResolvedBlameTarget, ResourceKind, ResourceRef};
+
     use super::*;
 
     fn private_tempdir() -> tempfile::TempDir {
@@ -397,6 +401,75 @@ mod tests {
                 .map(Vec::len),
             Some(3)
         );
+    }
+
+    #[test]
+    fn evidence_preview_is_not_an_mcp_argument_and_cannot_trigger_preview_reads() {
+        let schema = pro_blame_tool();
+        let properties = schema["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(properties, BTreeSet::from(["cursor", "limit", "target"]));
+        assert_eq!(schema["inputSchema"]["additionalProperties"], false);
+
+        let temp = private_tempdir();
+        let unopened_data_root = temp.path().join("unopened-data-root");
+        let target = BlameTarget::Commit {
+            oid: "abc1234".to_owned(),
+            repository: None,
+        };
+        let rejected = tool_pro_blame(
+            &json!({
+                "target": {"kind": "commit", "oid": "abc1234"},
+                "evidence_preview": true
+            }),
+            &unopened_data_root,
+            Ok(target),
+        );
+        assert_eq!(
+            rejected.value.unwrap_err().to_string(),
+            "unknown blame argument evidence_preview"
+        );
+        assert!(
+            !unopened_data_root.exists(),
+            "a rejected preview argument reached Pro or evidence storage"
+        );
+
+        let commit = ResourceRef {
+            id: "commit:abc1234".to_owned(),
+            kind: ResourceKind::Commit,
+            display: "abc1234".to_owned(),
+        };
+        let result = BlameResult {
+            target: ResolvedBlameTarget::Commit {
+                commit,
+                repository: ResourceRef {
+                    id: "repository:fixture".to_owned(),
+                    kind: ResourceKind::Repository,
+                    display: "fixture/repository".to_owned(),
+                },
+            },
+            git_snapshot: None,
+            matches: Vec::new(),
+            evidence: Vec::new(),
+            next: None,
+        };
+        let encoded = crate::pro::blame_result_json(&result);
+        let result_fields = encoded
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            result_fields,
+            BTreeSet::from(["evidence", "git_snapshot", "matches", "next", "target"])
+        );
+        assert!(encoded.get("evidence_preview").is_none());
+        assert!(encoded.get("previews").is_none());
     }
 
     #[test]

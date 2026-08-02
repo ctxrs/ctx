@@ -4,6 +4,7 @@
 //! readers observe either the previous complete generation or the next one.
 
 mod analyzer;
+mod commit_contract;
 mod contracts;
 mod durable_directory;
 mod identity;
@@ -21,16 +22,17 @@ mod writer_support;
 
 pub use durable_directory::durable_atomic_replace_file;
 
+pub use commit_contract::{CommitReceipt, RevalidationTarget};
+
 pub(crate) use contracts::{
     CommitPayload, COMMIT_PAYLOAD_VERSION, INDEX_MEMORY_MIN_PER_THREAD, MANIFEST_DIRECTORY,
     MAX_DOCUMENT_METADATA_BYTES,
 };
 pub use contracts::{
-    CommitReceipt, ConsecutiveSourceMissingCount, GenerationManifest, IndexError, Result,
-    RevalidationTarget, SourceCoreRecordAggregate, SourceMissingObservationPoint,
-    SourceRouteIdentity, SourceRouteMissingState, SourceRouteSnapshot, WriterOptions,
-    GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
-    LEXICAL_SEGMENT_MERGE_FAN_IN,
+    ConsecutiveSourceMissingCount, GenerationManifest, IndexError, Result,
+    SourceCoreRecordAggregate, SourceMissingObservationPoint, SourceRouteIdentity,
+    SourceRouteMissingState, SourceRouteSnapshot, WriterOptions, GENERATION_MANIFEST_VERSION,
+    LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
 };
 pub use ctx_history_core::CoreRecord;
 pub(crate) use identity::{

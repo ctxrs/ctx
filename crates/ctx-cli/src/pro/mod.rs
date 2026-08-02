@@ -8,6 +8,7 @@ mod commercial_deletion;
 mod commercial_lifecycle;
 mod commercial_production_record;
 mod credential_vault;
+pub(crate) mod evidence_preview;
 mod graph_key_deletion;
 mod helper_command;
 mod lifecycle;
@@ -40,7 +41,9 @@ pub(crate) use pricing::PRO_MONTHLY_PRICE_DISPLAY;
 #[cfg(test)]
 pub(crate) use referral::parse_referral_codename;
 pub(crate) use referral::{run as run_referral, show_cta_once, ReferralArgs};
-pub(crate) use render::{blame_result_json, print_blame_result};
+pub(crate) use render::{
+    blame_result_json, print_blame_result, print_blame_result_with_evidence_preview,
+};
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;

@@ -1,12 +1,199 @@
 use ctx_pro_host_protocol::{
     BlameMatch, BlameResult, ContinuationReason, EvidenceCitation, LineRange, ResolvedBlameTarget,
 };
+use unicode_segmentation::UnicodeSegmentation as _;
 
+use crate::ui::{sanitize_untrusted_history_body_for_terminal, ColorMode, StreamKind, TestContext};
 use crate::ui::{Document, Line, RenderContext, Span, Token};
 
 use super::layout::{
-    display_width, line_range_text, push_atomic, push_authored, push_heading, FIELD_GAP,
+    display_width, enum_heading, line_range_text, push_atomic, push_authored, push_heading,
+    FIELD_GAP,
 };
+use crate::pro::evidence_preview::{
+    EvidencePreview, EvidencePreviewModel, MAX_EVIDENCE_PREVIEW_CITATIONS,
+    MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
+};
+
+const EVIDENCE_PREVIEW_BUDGET_WIDTH: usize = 32;
+pub(super) const MAX_EVIDENCE_PREVIEW_RENDERED_BYTES: usize = 4_096;
+const EVIDENCE_PREVIEW_DISCLOSURE: &str =
+    "Evidence preview (local history content; explicitly requested)";
+const EVIDENCE_PREVIEW_UNAVAILABLE: &str =
+    "A safe preview of cited local-history evidence is unavailable for this result.";
+
+pub(super) fn render_previews(
+    document: &mut Document,
+    context: &RenderContext,
+    model: &EvidencePreviewModel,
+) {
+    let budget_context = RenderContext::for_test(
+        TestContext::tty(StreamKind::Stdout, EVIDENCE_PREVIEW_BUDGET_WIDTH)
+            .color(ColorMode::Always),
+    );
+    let mut rendered = Document::new();
+    rendered.push_blank();
+    rendered.append(preview_header(&budget_context));
+    let mut actual = Document::new();
+    actual.push_blank();
+    actual.append(preview_header(context));
+    let mut admitted = 0usize;
+
+    for preview in model.previews.iter().take(MAX_EVIDENCE_PREVIEW_CITATIONS) {
+        if preview.excerpt.len() > MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES {
+            continue;
+        }
+        let excerpt_lines = preview
+            .excerpt
+            .split('\n')
+            .map(sanitize_untrusted_history_body_for_terminal)
+            .collect::<Vec<_>>();
+        let Some(budget_item) = preview_item(&budget_context, preview, &excerpt_lines) else {
+            continue;
+        };
+        let mut candidate = rendered.clone();
+        candidate.append(budget_item);
+        if !within_rendered_preview_budget(&candidate, &budget_context) {
+            continue;
+        }
+        let Some(actual_item) = preview_item(context, preview, &excerpt_lines) else {
+            continue;
+        };
+        let mut actual_candidate = actual.clone();
+        actual_candidate.append(actual_item);
+        if !within_rendered_preview_budget(&actual_candidate, context) {
+            continue;
+        }
+        rendered = candidate;
+        actual = actual_candidate;
+        admitted += 1;
+    }
+
+    if admitted == 0 {
+        let mut unavailable = Document::new();
+        unavailable.push_blank();
+        unavailable.append(preview_header(context));
+        push_authored(
+            &mut unavailable,
+            context,
+            2,
+            EVIDENCE_PREVIEW_UNAVAILABLE,
+            Token::Text,
+        );
+        document.append(unavailable);
+    } else {
+        document.append(actual);
+    }
+}
+
+fn preview_header(context: &RenderContext) -> Document {
+    let mut document = Document::new();
+    push_authored(
+        &mut document,
+        context,
+        0,
+        EVIDENCE_PREVIEW_DISCLOSURE,
+        Token::Heading,
+    );
+    document
+}
+
+fn preview_item(
+    context: &RenderContext,
+    preview: &EvidencePreview,
+    excerpt_lines: &[String],
+) -> Option<Document> {
+    if preview.evidence_numbers.is_empty()
+        || preview.evidence_numbers.len() > MAX_EVIDENCE_PREVIEW_CITATIONS
+        || preview.evidence_numbers.contains(&0)
+    {
+        return None;
+    }
+    let mut document = Document::new();
+    let kind = format!("{} file evidence", enum_heading(preview.file_kind));
+    let references_width = preview
+        .evidence_numbers
+        .iter()
+        .map(|number| display_width(&format!("[{number}]")))
+        .sum::<usize>()
+        .saturating_add(preview.evidence_numbers.len().saturating_sub(1));
+    let combined_width = 2usize
+        .saturating_add(references_width)
+        .saturating_add(1)
+        .saturating_add(display_width(&kind));
+    let mut references = preview_reference_line(&preview.evidence_numbers);
+    if context
+        .content_width()
+        .is_none_or(|width| combined_width <= width)
+    {
+        references.push(Span::text(" "));
+        references.push(Span::new(kind, Token::Label));
+        document.push_line(references);
+    } else {
+        document.push_line(references);
+        push_atomic(&mut document, 4, &kind, Token::Label);
+    }
+    for line in excerpt_lines {
+        push_literal_excerpt_line(&mut document, context, 4, line, Token::Text);
+    }
+    Some(document)
+}
+
+fn push_literal_excerpt_line(
+    document: &mut Document,
+    context: &RenderContext,
+    indent: usize,
+    text: &str,
+    token: Token,
+) {
+    let Some(width) = context
+        .content_width()
+        .map(|width| width.saturating_sub(indent).max(1))
+    else {
+        push_atomic(document, indent, text, token);
+        return;
+    };
+    let mut fragment = String::new();
+    let mut fragment_width = 0usize;
+    let mut whitespace_break = None;
+    for grapheme in text.graphemes(true) {
+        let grapheme_width = display_width(grapheme);
+        if !fragment.is_empty() && fragment_width.saturating_add(grapheme_width) > width {
+            if let Some(index) = whitespace_break.take() {
+                let remainder = fragment.split_off(index);
+                push_atomic(document, indent, &fragment, token);
+                fragment = remainder;
+                fragment_width = display_width(&fragment);
+            }
+            if !fragment.is_empty() && fragment_width.saturating_add(grapheme_width) > width {
+                push_atomic(document, indent, &fragment, token);
+                fragment.clear();
+                fragment_width = 0;
+            }
+        }
+        fragment.push_str(grapheme);
+        fragment_width = fragment_width.saturating_add(grapheme_width);
+        if grapheme.chars().next().is_some_and(char::is_whitespace) {
+            whitespace_break = Some(fragment.len());
+        }
+    }
+    push_atomic(document, indent, &fragment, token);
+}
+
+fn preview_reference_line(numbers: &[u32]) -> Line {
+    let mut line = Line::new().with(Span::text("  "));
+    for (index, number) in numbers.iter().enumerate() {
+        if index > 0 {
+            line.push(Span::text(" "));
+        }
+        line.push(Span::new(format!("[{number}]"), Token::Reference));
+    }
+    line
+}
+
+pub(super) fn within_rendered_preview_budget(document: &Document, context: &RenderContext) -> bool {
+    document.render(context).len() <= MAX_EVIDENCE_PREVIEW_RENDERED_BYTES
+}
 
 pub(super) fn render_list(document: &mut Document, context: &RenderContext, result: &BlameResult) {
     if result.evidence.is_empty() {
@@ -48,6 +235,7 @@ pub(super) fn render_continuation(
     document: &mut Document,
     context: &RenderContext,
     result: &BlameResult,
+    evidence_preview: bool,
 ) {
     let Some(next) = &result.next else {
         return;
@@ -76,7 +264,7 @@ pub(super) fn render_continuation(
     push_atomic(
         document,
         4,
-        &continuation_command(result, &next.cursor),
+        &continuation_command(result, &next.cursor, evidence_preview),
         Token::Command,
     );
 }
@@ -91,7 +279,7 @@ fn citation_text(citation: &EvidenceCitation) -> String {
     )
 }
 
-fn continuation_command(result: &BlameResult, cursor: &str) -> String {
+fn continuation_command(result: &BlameResult, cursor: &str, evidence_preview: bool) -> String {
     let (mut command, repository) = match &result.target {
         ResolvedBlameTarget::File {
             path,
@@ -122,6 +310,9 @@ fn continuation_command(result: &BlameResult, cursor: &str) -> String {
     command.push_str(&shell_display(&repository.display));
     command.push_str(" --cursor ");
     command.push_str(&shell_display(cursor));
+    if evidence_preview && matches!(&result.target, ResolvedBlameTarget::File { .. }) {
+        command.push_str(" --evidence-preview");
+    }
     command
 }
 

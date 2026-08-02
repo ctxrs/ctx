@@ -1,8 +1,11 @@
-use std::io::Write as _;
+use std::{
+    io::{self, Write as _},
+    sync::{Arc, Mutex},
+};
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, EventIdentityInput, NativeItemKey, NativeSessionKey,
-    SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
+    RepositoryFileObservationKind, SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
 };
 use ctx_pro_host_protocol::{
     AgentAttribution, BlameContinuation, BlameMatch, BlameResult, CommitBlameMatch, CommitFactType,
@@ -12,20 +15,124 @@ use ctx_pro_host_protocol::{
     PullRequestCommit, PullRequestCommitRelationship, ResolvedBlameTarget, ResourceKind,
     ResourceRef, WorktreeStatus,
 };
+use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
 use super::{
     layout::{enum_heading, enum_text},
-    render_blame_document,
+    print_blame_result, print_blame_result_with_evidence_preview, render_blame_document,
+    render_blame_document_with_evidence_preview,
 };
-use crate::ui::{ColorMode, Document, RenderContext, StreamKind, TestContext, Token};
+use crate::pro::evidence_preview::{
+    EvidencePreview, EvidencePreviewModel, MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
+};
+use crate::ui::{ColorMode, Document, Line, RenderContext, StreamKind, TestContext, Token};
 
 fn context(width: usize) -> RenderContext {
     RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never))
 }
 
+#[derive(Clone, Default)]
+struct SharedWriter {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SharedWriter {
+    fn text(&self) -> String {
+        String::from_utf8(self.bytes.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl io::Write for SharedWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.bytes
+            .lock()
+            .map_err(|_| io::Error::other("shared preview writer was poisoned"))?
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 fn render_plain(result: &BlameResult, width: usize) -> String {
     render_blame_document(result, &context(width)).render_plain()
+}
+
+fn file_preview_result(evidence_count: u32) -> BlameResult {
+    let evidence = (1..=evidence_count).map(event_evidence).collect();
+    BlameResult {
+        target: ResolvedBlameTarget::File {
+            path: "src/lib.rs".to_owned(),
+            repository: repository(),
+            requested_lines: None,
+        },
+        git_snapshot: Some(GitSnapshot {
+            head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            worktree_status: WorktreeStatus::Clean,
+        }),
+        matches: Vec::new(),
+        evidence,
+        next: None,
+    }
+}
+
+fn commit_blame_result(evidence_count: u32) -> BlameResult {
+    BlameResult {
+        target: ResolvedBlameTarget::Commit {
+            commit: resource(
+                "commit:0123456789abcdef0123456789abcdef01234567",
+                ResourceKind::Commit,
+                "0123456789abcdef0123456789abcdef01234567",
+            ),
+            repository: repository(),
+        },
+        git_snapshot: None,
+        matches: Vec::new(),
+        evidence: (1..=evidence_count).map(event_evidence).collect(),
+        next: None,
+    }
+}
+
+fn preview(
+    _result: &BlameResult,
+    numbers: Vec<u32>,
+    kind: RepositoryFileObservationKind,
+    excerpt: impl Into<String>,
+) -> EvidencePreview {
+    EvidencePreview {
+        evidence_numbers: numbers,
+        file_kind: kind,
+        excerpt: excerpt.into(),
+    }
+}
+
+fn render_preview_plain(
+    result: &BlameResult,
+    model: &EvidencePreviewModel,
+    width: usize,
+) -> String {
+    render_blame_document_with_evidence_preview(result, &context(width), Some(model)).render_plain()
+}
+
+fn strip_ansi(rendered: &str) -> String {
+    let mut stripped = anstream::StripStream::new(Vec::new());
+    stripped.write_all(rendered.as_bytes()).unwrap();
+    String::from_utf8(stripped.into_inner()).unwrap()
+}
+
+fn single_preview_excerpt_fragments(rendered: &str) -> Vec<&str> {
+    let lines = rendered.lines().collect::<Vec<_>>();
+    let heading = lines
+        .iter()
+        .position(|line| line.contains("file evidence"))
+        .unwrap();
+    lines[heading + 1..]
+        .iter()
+        .map(|line| line.strip_prefix("    ").unwrap())
+        .collect()
 }
 
 fn resource(id: &str, kind: ResourceKind, display: &str) -> ResourceRef {
@@ -336,9 +443,8 @@ fn pull_request_activity_only_page_scopes_missing_commits_golden() {
     );
 }
 
-#[test]
-fn file_continuation_uses_committed_window_golden() {
-    let result = BlameResult {
+fn paginated_file_result() -> BlameResult {
+    BlameResult {
         target: ResolvedBlameTarget::File {
             path: "src/lib.rs".to_owned(),
             repository: repository(),
@@ -360,11 +466,32 @@ fn file_continuation_uses_committed_window_golden() {
             cursor: "more-lines".to_owned(),
             reason: ContinuationReason::MoreCommittedLines,
         }),
-    };
+    }
+}
+
+#[test]
+fn file_continuation_uses_committed_window_golden() {
+    let result = paginated_file_result();
     result.validate().unwrap();
     assert_eq!(
         render_plain(&result, 80),
         include_str!("../../../testdata/pro/blame_file_continuation.golden.txt")
+    );
+}
+
+#[test]
+fn opted_in_file_continuation_retains_evidence_preview_golden() {
+    let result = paginated_file_result();
+    result.validate().unwrap();
+    assert_eq!(
+        render_preview_plain(
+            &result,
+            &EvidencePreviewModel {
+                previews: Vec::new(),
+            },
+            80,
+        ),
+        include_str!("../../../testdata/pro/blame_file_continuation_preview.golden.txt")
     );
 }
 
@@ -636,5 +763,597 @@ fn wire_enums_are_humanized_in_human_output() {
     assert_eq!(
         enum_heading(PullRequestCommitRelationship::ContainsCommit),
         "Contains commit"
+    );
+}
+
+#[test]
+fn opted_in_file_preview_follows_its_numbered_evidence() {
+    let result = file_preview_result(1);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            RepositoryFileObservationKind::Modified,
+            "exact target-bearing unit",
+        )],
+    };
+    let rendered = render_preview_plain(&result, &model, 80);
+    let evidence = rendered.find("\nEvidence\n").unwrap();
+    let preview = rendered
+        .find("\nEvidence preview (local history content; explicitly requested)\n")
+        .unwrap();
+
+    assert!(evidence < preview, "{rendered}");
+    assert!(
+        rendered.contains("Evidence preview (local history content; explicitly requested)"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("    exact target-bearing unit"),
+        "{rendered}"
+    );
+    let event_command = format!("ctx show event {}", result.evidence[0].citation.event_id);
+    assert_eq!(
+        rendered[preview..].matches(&event_command).count(),
+        0,
+        "{rendered}"
+    );
+    assert!(rendered.contains("  [1] Modified file evidence\n"));
+}
+
+#[test]
+fn grouped_preview_heading_wraps_references_and_kind_only_when_required() {
+    let result = file_preview_result(3);
+    for reference_count in 1..=3usize {
+        let numbers = (1..=u32::try_from(reference_count).unwrap()).collect::<Vec<_>>();
+        let references = numbers
+            .iter()
+            .map(|number| format!("[{number}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let model = EvidencePreviewModel {
+            previews: vec![preview(
+                &result,
+                numbers.clone(),
+                RepositoryFileObservationKind::Modified,
+                "exact unit",
+            )],
+        };
+
+        for width in [32, 48, 80, 120] {
+            let rendered = render_preview_plain(&result, &model, width);
+            let section = rendered.split("\nEvidence preview ").nth(1).unwrap();
+            let lines = section.lines().collect::<Vec<_>>();
+            let reference_line = lines
+                .iter()
+                .position(|line| line.trim_start().starts_with("[1]"))
+                .unwrap();
+            let combined = format!("  {references} Modified file evidence");
+
+            if combined.width() < width {
+                assert_eq!(lines[reference_line], combined, "{reference_count}/{width}");
+            } else {
+                assert_eq!(
+                    lines[reference_line],
+                    format!("  {references}"),
+                    "{reference_count}/{width}"
+                );
+                assert_eq!(
+                    lines[reference_line + 1],
+                    "    Modified file evidence",
+                    "{reference_count}/{width}"
+                );
+            }
+            assert!(lines[reference_line].width() <= width);
+            for number in numbers.iter().map(|number| format!("[{number}]")) {
+                assert_eq!(
+                    section.matches(&number).count(),
+                    1,
+                    "reference {number} at {reference_count}/{width}: {section}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn multiline_rename_excerpt_preserves_indented_logical_lines() {
+    let file_result = file_preview_result(1);
+    let file_model = EvidencePreviewModel {
+        previews: vec![preview(
+            &file_result,
+            vec![1],
+            RepositoryFileObservationKind::Renamed,
+            "*** Update File: src/old.rs\n*** Move to: src/lib.rs",
+        )],
+    };
+    let file = render_preview_plain(&file_result, &file_model, 80);
+    assert!(file.contains("  [1] Renamed file evidence\n"), "{file}");
+    assert!(
+        file.contains("    *** Update File: src/old.rs\n    *** Move to: src/lib.rs\n"),
+        "{file}"
+    );
+    assert!(!file.contains("old.rs\\n***"), "{file}");
+}
+
+#[test]
+fn preview_preserves_sanitized_whitespace_and_control_escapes_exactly() {
+    let result = file_preview_result(1);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            RepositoryFileObservationKind::Modified,
+            "modified: src/a  b.rs\n 2 files changed, 3 insertions(+), 1 deletion(-)  \n\tstatus:\0  keep\tgap\u{202e}\u{1b}  ",
+        )],
+    };
+    let rendered = render_preview_plain(&result, &model, 120);
+
+    assert_eq!(
+        single_preview_excerpt_fragments(&rendered),
+        [
+            "modified: src/a  b.rs",
+            " 2 files changed, 3 insertions(+), 1 deletion(-)  ",
+            "\\tstatus:\\u{0000}  keep\\tgap\\u{202e}\\x1b  ",
+        ]
+    );
+    assert!(!rendered.contains('\0'));
+    assert!(!rendered.contains('\u{202e}'));
+    assert!(!rendered.contains('\u{1b}'));
+}
+
+#[test]
+fn evidence_renderer_escapes_strict_format_controls_and_preserves_text_shaping() {
+    const CONTROLS: &str = "\u{2028}\u{2029}\u{2061}\u{2062}\u{2063}\u{2064}";
+    const PRESERVED: &str = "می\u{200c}روم 👩\u{200d}💻 ✈\u{fe0f} e\u{0301} مرحبا";
+    let result = file_preview_result(1);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            RepositoryFileObservationKind::Modified,
+            format!("modified: src/lib.rs {CONTROLS} {PRESERVED}"),
+        )],
+    };
+    let context = RenderContext::for_test(TestContext::pipe(StreamKind::Stdout));
+    let rendered =
+        render_blame_document_with_evidence_preview(&result, &context, Some(&model)).render_plain();
+
+    assert!(
+        rendered.contains(
+            "modified: src/lib.rs \\u{2028}\\u{2029}\\u{2061}\\u{2062}\\u{2063}\\u{2064}"
+        ),
+        "{rendered}"
+    );
+    assert!(rendered.contains(PRESERVED), "{rendered}");
+    assert!(!CONTROLS.chars().any(|control| rendered.contains(control)));
+    for preserved_escape in ["\\u{200c}", "\\u{200d}", "\\u{fe0f}", "\\u{0301}"] {
+        assert!(!rendered.contains(preserved_escape), "{rendered}");
+    }
+}
+
+#[test]
+fn preview_wraps_long_family_emoji_path_only_at_grapheme_boundaries() {
+    let result = file_preview_result(1);
+    let family = "👨‍👩‍👧‍👦";
+    let combining = "e\u{0301}";
+    let excerpt = format!("src/{}  /{}.rs", family.repeat(16), combining.repeat(12));
+    assert!(excerpt.len() <= MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            RepositoryFileObservationKind::Modified,
+            &excerpt,
+        )],
+    };
+    let mut grapheme_boundaries = excerpt
+        .grapheme_indices(true)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    grapheme_boundaries.push(excerpt.len());
+
+    for width in [1, 2, 8, 16, 32, 48, 80, 120] {
+        for color in [ColorMode::Never, ColorMode::Always] {
+            let context =
+                RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color));
+            let mut section = Document::new();
+            super::evidence::render_previews(&mut section, &context, &model);
+            let rendered = section.render(&context);
+            assert!(
+                rendered.len() <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES,
+                "{width}/{color:?}: {}",
+                rendered.len()
+            );
+            let stripped = strip_ansi(&rendered);
+            let fragments = single_preview_excerpt_fragments(&stripped);
+            assert_eq!(fragments.concat(), excerpt, "{width}/{color:?}");
+            let mut consumed = 0usize;
+            for fragment in fragments {
+                consumed = consumed.saturating_add(fragment.len());
+                assert!(
+                    grapheme_boundaries.contains(&consumed),
+                    "split grapheme at byte {consumed} for {width}/{color:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn multibyte_excerpt_limit_is_enforced_in_original_utf8_bytes() {
+    let result = file_preview_result(1);
+    for bytes in [511usize, 512, 513] {
+        let mut excerpt = "é".repeat(bytes / 2);
+        if bytes % 2 == 1 {
+            excerpt.push('x');
+        }
+        assert_eq!(excerpt.len(), bytes);
+        let model = EvidencePreviewModel {
+            previews: vec![preview(
+                &result,
+                vec![1],
+                RepositoryFileObservationKind::Modified,
+                excerpt,
+            )],
+        };
+        let rendered = render_preview_plain(&result, &model, 80);
+        if bytes <= MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES {
+            assert_eq!(
+                rendered.matches('é').count(),
+                bytes / 2,
+                "{bytes}: {rendered}"
+            );
+            assert!(
+                rendered.contains("Modified file evidence"),
+                "{bytes}: {rendered}"
+            );
+        } else {
+            assert!(
+                rendered.contains("safe preview") && rendered.contains("unavailable"),
+                "{bytes}: {rendered}"
+            );
+            assert!(
+                !rendered
+                    .split("\nEvidence preview ")
+                    .nth(1)
+                    .unwrap()
+                    .contains("ctx show event "),
+                "{bytes}: {rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rendered_preview_budget_accepts_4096_bytes_and_rejects_4097() {
+    let context = context(80);
+    let at_limit = Document::from_line(Line::text("x".repeat(4_095)));
+    let over_limit = Document::from_line(Line::text("x".repeat(4_096)));
+    assert_eq!(super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES, 4_096);
+    assert_eq!(at_limit.render(&context).len(), 4_096);
+    assert_eq!(over_limit.render(&context).len(), 4_097);
+    assert!(super::evidence::within_rendered_preview_budget(
+        &at_limit, &context
+    ));
+    assert!(!super::evidence::within_rendered_preview_budget(
+        &over_limit,
+        &context
+    ));
+}
+
+#[test]
+fn requested_but_unavailable_preview_is_content_free_and_default_output_is_unchanged() {
+    let result = file_preview_result(0);
+    let default = render_blame_document(&result, &context(80)).render_plain();
+    let requested = render_preview_plain(
+        &result,
+        &EvidencePreviewModel {
+            previews: Vec::new(),
+        },
+        80,
+    );
+
+    assert!(!default.contains("Evidence preview"));
+    assert!(requested.starts_with(default.trim_end()), "{requested}");
+    assert!(requested.contains("Evidence preview (local history content; explicitly requested)"));
+    assert!(requested.contains("A safe preview of cited local-history evidence"));
+    assert!(requested.contains("unavailable"));
+    assert!(requested.contains("result."));
+    assert!(!requested.contains("generation"));
+    assert!(!requested.contains("digest"));
+}
+
+#[test]
+fn default_opt_out_bytes_are_identical_for_every_target_and_supported_width() {
+    let results = [
+        file_preview_result(1),
+        commit_blame_result(1),
+        paginated_pr_result(true),
+    ];
+    for result in &results {
+        for width in [32, 48, 80, 120] {
+            for color in [ColorMode::Never, ColorMode::Always] {
+                let context = RenderContext::for_test(
+                    TestContext::tty(StreamKind::Stdout, width).color(color),
+                );
+                let default = render_blame_document(result, &context);
+                let opt_out = render_blame_document_with_evidence_preview(result, &context, None);
+                assert_eq!(
+                    default.render(&context),
+                    opt_out.render(&context),
+                    "target {:?}, width {width}, color {color:?}",
+                    result.target
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_truncation() {
+    let result = file_preview_result(5);
+    let exact = "Z".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES);
+    let mut previews = vec![preview(
+        &result,
+        vec![1, 2],
+        RepositoryFileObservationKind::Modified,
+        exact.clone(),
+    )];
+    for number in 3..=5 {
+        previews.push(preview(
+            &result,
+            vec![number],
+            RepositoryFileObservationKind::Modified,
+            exact.clone(),
+        ));
+    }
+    let model = EvidencePreviewModel { previews };
+    let styled_context =
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 32).color(ColorMode::Always));
+    let mut section = Document::new();
+    super::evidence::render_previews(&mut section, &styled_context, &model);
+    let styled = section.render(&styled_context);
+    let plain = section.render_plain();
+
+    assert!(styled.len() <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES);
+    assert_eq!(plain.matches("Modified file evidence").count(), 3);
+    assert!(
+        plain.contains("  [1] [2]\n    Modified file evidence\n"),
+        "{plain}"
+    );
+    assert_eq!(
+        plain.chars().filter(|character| *character == 'Z').count(),
+        3 * MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
+        "one or more exact 512-byte excerpts were truncated"
+    );
+    assert!(
+        !plain.contains("  [5] Modified file evidence\n"),
+        "fourth preview was rendered"
+    );
+}
+
+#[test]
+fn ultra_narrow_contexts_preserve_grouped_references_and_exact_excerpt_atoms() {
+    let result = file_preview_result(3);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1, 2, 3],
+            RepositoryFileObservationKind::Modified,
+            "exact unit",
+        )],
+    };
+    for width in [1, 2, 8, 16] {
+        for color in [ColorMode::Never, ColorMode::Always] {
+            let context =
+                RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color));
+            let mut section = Document::new();
+            super::evidence::render_previews(&mut section, &context, &model);
+            let rendered = section.render(&context);
+            assert!(
+                rendered.len() <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES,
+                "{width}/{color:?}: {}",
+                rendered.len()
+            );
+            let mut stripped = anstream::StripStream::new(Vec::new());
+            stripped.write_all(rendered.as_bytes()).unwrap();
+            let stripped = String::from_utf8(stripped.into_inner()).unwrap();
+            assert_eq!(stripped, section.render_plain());
+            assert!(
+                stripped.contains("  [1] [2] [3]\n    Modified file evidence\n"),
+                "{width}/{color:?}: {stripped}"
+            );
+            assert!(!stripped.contains("ctx show event "));
+            for reference in ["[1]", "[2]", "[3]"] {
+                assert_eq!(stripped.matches(reference).count(), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn actual_and_canonical_render_budgets_omit_only_complete_preview_items() {
+    let result = file_preview_result(3);
+    let model = EvidencePreviewModel {
+        previews: (1..=3)
+            .map(|number| {
+                preview(
+                    &result,
+                    vec![number],
+                    RepositoryFileObservationKind::Modified,
+                    "Z".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES),
+                )
+            })
+            .collect(),
+    };
+
+    for width in [1, 2, 8, 16, 32, 48, 80, 120] {
+        for color in [ColorMode::Never, ColorMode::Always] {
+            let context =
+                RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color));
+            let mut section = Document::new();
+            super::evidence::render_previews(&mut section, &context, &model);
+            let rendered = section.render(&context);
+            assert!(
+                rendered.len() <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES,
+                "{width}/{color:?}: {}",
+                rendered.len()
+            );
+            let stripped = strip_ansi(&rendered);
+            let admitted = stripped.matches("Modified file evidence").count();
+            assert_eq!(
+                stripped.matches('Z').count(),
+                admitted * MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
+                "partial excerpt at {width}/{color:?}: {stripped}"
+            );
+            for evidence in &result.evidence {
+                let reference = format!("[{}]", evidence.number);
+                assert!(stripped.matches(&reference).count() <= 1);
+            }
+            if width == 1 && color == ColorMode::Always {
+                assert!(admitted < model.previews.len(), "{stripped}");
+            }
+        }
+    }
+
+    let canonical_bytes = crate::ui::canonical_human_output_bytes(|context| {
+        let mut section = Document::new();
+        super::evidence::render_previews(&mut section, context, &model);
+        section
+    });
+    assert!(
+        canonical_bytes <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES,
+        "canonical: {canonical_bytes}"
+    );
+}
+
+#[test]
+fn sanitizer_expansion_omits_the_complete_item_instead_of_truncating_it() {
+    let result = file_preview_result(1);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            RepositoryFileObservationKind::Modified,
+            "\0".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES),
+        )],
+    };
+    let rendered = render_preview_plain(&result, &model, 80);
+
+    assert!(
+        rendered.contains("safe preview") && rendered.contains("unavailable"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered
+            .split("\nEvidence preview ")
+            .nth(1)
+            .unwrap()
+            .contains("ctx show event "),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("\\u{0000}"), "{rendered}");
+}
+
+#[test]
+fn preview_is_safe_and_stable_at_supported_widths_and_across_color() {
+    let result = file_preview_result(1);
+    let family = "👨‍👩‍👧‍👦";
+    let persian = "می‌روم";
+    let combining = "e\u{0301}";
+    let excerpt = format!("{family} {persian} {combining} bad\u{202e}name\u{1b}\tend");
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            RepositoryFileObservationKind::Modified,
+            excerpt,
+        )],
+    };
+
+    for width in [32, 48, 80, 120] {
+        let plain_context = context(width);
+        let styled_context = RenderContext::for_test(
+            TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Always),
+        );
+        let plain_document =
+            render_blame_document_with_evidence_preview(&result, &plain_context, Some(&model));
+        let styled_document =
+            render_blame_document_with_evidence_preview(&result, &styled_context, Some(&model));
+        let plain = plain_document.render_plain();
+        let styled = styled_document.render(&styled_context);
+        let mut stripped = anstream::StripStream::new(Vec::new());
+        stripped.write_all(styled.as_bytes()).unwrap();
+        let stripped = String::from_utf8(stripped.into_inner()).unwrap();
+
+        assert_eq!(stripped, plain, "width {width}");
+        for legitimate in [family, persian, combining] {
+            assert!(plain.contains(legitimate), "width {width}: {plain}");
+        }
+        for visible in ["\\u{202e}", "\\x1b", "\\t"] {
+            assert!(plain.contains(visible), "width {width}: {plain}");
+        }
+        assert!(!plain.contains('\u{202e}'));
+        assert!(!plain.contains('\u{1b}'));
+        let preview_section = plain.split("\nEvidence preview ").nth(1).unwrap();
+        assert!(!preview_section.contains("ctx show event "));
+        for line in preview_section.lines() {
+            assert!(line.width() < width, "width {width} overflow: {line:?}");
+        }
+    }
+}
+
+#[test]
+fn preview_bytes_are_accounted_and_json_bytes_remain_exactly_unchanged() {
+    let result = file_preview_result(1);
+    let model = EvidencePreviewModel {
+        previews: vec![preview(
+            &result,
+            vec![1],
+            RepositoryFileObservationKind::Modified,
+            "modified: src/lib.rs",
+        )],
+    };
+    let default_bytes =
+        crate::ui::canonical_human_output_bytes(|context| render_blame_document(&result, context));
+
+    for color in [ColorMode::Never, ColorMode::Always] {
+        let writer = SharedWriter::default();
+        let captured = writer.clone();
+        let stdout_context =
+            RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 80).color(color));
+        let stderr_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stderr));
+        let mut ui =
+            crate::ui::Ui::with_writers(writer, stdout_context, io::sink(), stderr_context);
+        let measured =
+            print_blame_result_with_evidence_preview(&result, false, &model, &mut ui).unwrap();
+        ui.flush().unwrap();
+        assert!(captured.text().contains("Evidence preview"));
+        assert!(measured > default_bytes);
+        assert_eq!(
+            measured,
+            crate::ui::canonical_human_output_bytes(|context| {
+                render_blame_document_with_evidence_preview(&result, context, Some(&model))
+            })
+        );
+    }
+
+    let writer = SharedWriter::default();
+    let captured = writer.clone();
+    let pipe = RenderContext::for_test(TestContext::pipe(StreamKind::Stdout));
+    let mut ui = crate::ui::Ui::with_writers(writer, pipe, io::sink(), pipe);
+    let measured =
+        print_blame_result_with_evidence_preview(&result, true, &model, &mut ui).unwrap();
+    ui.flush().unwrap();
+    let mut expected = serde_json::to_string_pretty(&result).unwrap();
+    expected.push('\n');
+    assert_eq!(captured.text(), expected);
+    assert_eq!(measured, expected.len());
+
+    let mut default_ui = crate::ui::Ui::with_writers(io::sink(), pipe, io::sink(), pipe);
+    assert_eq!(
+        print_blame_result(&result, true, &mut default_ui).unwrap(),
+        expected.len()
     );
 }

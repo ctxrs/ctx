@@ -436,8 +436,10 @@ fn semantic_generation_mirrors_exact_per_source_core_aggregates() -> Result<()> 
     )?;
     let generation = SourceBackedSemanticGeneration::from_verified_index(&index)?;
     assert_eq!(SOURCE_CONTRACT_VERSION, 10);
-    assert_eq!(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION, 15);
+    assert_eq!(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION, 16);
+    assert_eq!(index.manifest().semantic_eligible_documents, 5);
     assert_eq!(generation.semantic_documents, 5);
+    assert_eq!(generation.core_generation_id, index.generation_id());
     assert_eq!(generation.sources.len(), 2);
     assert_eq!(
         generation

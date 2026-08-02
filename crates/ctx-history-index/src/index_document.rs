@@ -12,7 +12,7 @@ use ctx_history_core::{
 
 use crate::{Fields, IndexError, Result};
 
-const BASE_FIELD_VALUES: usize = 28;
+const BASE_FIELD_VALUES: usize = 29;
 pub(crate) const SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN: usize = 64;
 pub(crate) const SOURCE_EVENT_ORDER_KEY_LEN: usize = 104;
 const SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET: usize = SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN;
@@ -484,6 +484,7 @@ impl IndexDocument {
         core_content_bytes: usize,
         source: IndexSourceFields,
     ) -> Result<Self> {
+        let core_record_encoded_bytes = core_record_bytes.len();
         let semantic_event_order =
             crate::policy::is_semantic_candidate(&record.event_type, record.role.as_deref())
                 .then(|| SemanticEventOrderKey::for_event(record.event_id))
@@ -491,7 +492,7 @@ impl IndexDocument {
         let source_event_order = SourceEventOrderKey::for_document(
             &source,
             record.event_id.digest(),
-            core_record_bytes.len(),
+            core_record_encoded_bytes,
             core_content_bytes,
         )?;
         let session_event_order = SessionEventOrderKey::for_core_record(&record)?;
@@ -589,6 +590,12 @@ impl IndexDocument {
             fields.core_content_bytes,
             u64::try_from(core_content_bytes)
                 .map_err(|_| IndexError::WriterInvariant("Core content size does not fit u64"))?,
+        );
+        target.add_u64(
+            fields.core_record_encoded_bytes,
+            u64::try_from(core_record_encoded_bytes).map_err(|_| {
+                IndexError::WriterInvariant("encoded Core record size does not fit u64")
+            })?,
         );
         target.add_bytes(fields.core_record, core_record_bytes);
         target.add_bytes(fields.source_event_order, source_event_order.into_bytes());
