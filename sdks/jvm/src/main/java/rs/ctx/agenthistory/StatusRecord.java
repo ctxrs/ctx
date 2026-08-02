@@ -1,5 +1,7 @@
 package rs.ctx.agenthistory;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -23,12 +25,7 @@ public final class StatusRecord {
         if (value == null) {
             return;
         }
-        boolean numeric = value instanceof Number;
-        double exact = numeric ? ((Number) value).doubleValue() : Double.NaN;
-        boolean valid = Double.isFinite(exact)
-                && exact == Math.rint(exact)
-                && exact >= 0.0d
-                && exact <= (double) MAX_SAFE_COUNTER;
+        boolean valid = exactCounter(value);
         if (!valid) {
             Map<String, Object> details = new LinkedHashMap<>();
             details.put("field", key);
@@ -38,6 +35,24 @@ public final class StatusRecord {
                     details,
                     null);
         }
+    }
+
+    private static boolean exactCounter(Object value) {
+        if (value instanceof BigDecimal) {
+            try {
+                BigInteger integer = ((BigDecimal) value).toBigIntegerExact();
+                return integer.signum() >= 0
+                        && integer.compareTo(BigInteger.valueOf(MAX_SAFE_COUNTER)) <= 0;
+            } catch (ArithmeticException ignored) {
+                return false;
+            }
+        }
+        if (value instanceof Byte || value instanceof Short
+                || value instanceof Integer || value instanceof Long) {
+            long integer = ((Number) value).longValue();
+            return integer >= 0 && integer <= MAX_SAFE_COUNTER;
+        }
+        return false;
     }
 
     static StatusRecord from(Object value) {

@@ -70,6 +70,18 @@ final class CtxAgentHistoryTests: XCTestCase {
             )
         }
 
+        for rejected in ["1.00000000000000001", "1.5"] {
+            let runner = CapturingRunner { _ in
+                CommandResult(
+                    stdout: "{\"initialized\":true,\"local_only\":true,\"indexed_items\":\(rejected)}"
+                )
+            }
+            let client = AgentHistoryClient(
+                adapter: LocalCLIAdapter(dataRoot: "/tmp/ctx-sdk-test", runner: runner)
+            )
+            XCTAssertThrowsError(try client.status())
+        }
+
         let invalid = AgentHistoryStatus(
             initialized: true,
             localOnly: true,

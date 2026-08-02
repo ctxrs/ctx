@@ -1,5 +1,6 @@
 package rs.ctx.agenthistory;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -193,7 +194,7 @@ final class Json {
             }
             String number = input.substring(start, index);
             try {
-                return decimal ? Double.valueOf(number) : Long.valueOf(number);
+                return decimal ? new BigDecimal(number) : Long.valueOf(number);
             } catch (NumberFormatException cause) {
                 throw error("invalid number");
             }

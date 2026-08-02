@@ -240,7 +240,7 @@ public struct LocalCLIAdapter: Sendable {
             message: firstStderrLine.map { "ctx command failed: \($0)" } ?? "ctx command failed",
             details: .object([
                 "command": .array(([ctxPath] + arguments).map { .string($0) }),
-                "exitCode": .number(Double(result.exitCode)),
+                "exitCode": .number(Decimal(result.exitCode)),
                 "stdout": .string(stdout),
                 "stderr": .string(stderr)
             ]),

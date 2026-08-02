@@ -63,7 +63,9 @@ public final class AgentHistoryClientTest {
     }
 
     private static void rejectsStatusCountersOutsideExactCrossSDKDomain() {
-        for (String rejected : new String[] {"9007199254740993", "9223372036854775807"}) {
+        for (String rejected : new String[] {
+                "9007199254740993", "9223372036854775807", "1.00000000000000001", "1.5"
+        }) {
             AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport(
                     "local-cli",
                     "{\"initialized\":true,\"indexed_items\":" + rejected + "}"));

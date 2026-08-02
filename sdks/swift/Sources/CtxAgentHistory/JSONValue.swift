@@ -3,7 +3,7 @@ import Foundation
 public enum JSONValue: Codable, Equatable, Sendable, CustomStringConvertible {
     case null
     case bool(Bool)
-    case number(Double)
+    case number(Decimal)
     case string(String)
     case array([JSONValue])
     case object([String: JSONValue])
@@ -14,9 +14,7 @@ public enum JSONValue: Codable, Equatable, Sendable, CustomStringConvertible {
             self = .null
         } else if let value = try? container.decode(Bool.self) {
             self = .bool(value)
-        } else if let value = try? container.decode(Int.self) {
-            self = .number(Double(value))
-        } else if let value = try? container.decode(Double.self) {
+        } else if let value = try? container.decode(Decimal.self) {
             self = .number(value)
         } else if let value = try? container.decode(String.self) {
             self = .string(value)
@@ -68,7 +66,15 @@ public enum JSONValue: Codable, Equatable, Sendable, CustomStringConvertible {
 
     public var intValue: Int? {
         if case let .number(value) = self {
-            return Int(value)
+            let number = NSDecimalNumber(decimal: value)
+            guard number != .notANumber else {
+                return nil
+            }
+            let integer = number.int64Value
+            guard Decimal(integer) == value else {
+                return nil
+            }
+            return Int(exactly: integer)
         }
         return nil
     }

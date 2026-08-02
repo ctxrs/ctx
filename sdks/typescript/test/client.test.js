@@ -109,6 +109,35 @@ test("status counters use the exact cross-SDK integer domain", async () => {
         error.details.maximum === maximum,
     );
   }
+
+  for (const wireValue of ["1.00000000000000001", "1e0"]) {
+    const { client } = mockClient(() => ({
+      stdout: `{"initialized":true,"indexed_items":${wireValue}}`,
+    }));
+    await assert.rejects(
+      () => client.status(),
+      (error) =>
+        error instanceof CtxParseError &&
+        error.details.field === "indexedItems" &&
+        error.details.maximum === maximum,
+    );
+  }
+});
+
+test("status counter lexeme checks do not reinterpret other operation payloads", async () => {
+  const { client } = mockClient(() => ({
+    stdout: '{"results":[],"indexed_items":1.5}',
+  }));
+  const response = await client.search("needle");
+  assert.equal(response.search.indexedItems, 1.5);
+});
+
+test("status counter lexeme checks ignore extension fields below the status root", async () => {
+  const { client } = mockClient(() => ({
+    stdout: '{"initialized":true,"daemon":{"indexed_items":1.5}}',
+  }));
+  const response = await client.status();
+  assert.equal(response.status.daemon.indexedItems, 1.5);
 });
 
 test("forces analytics off after ambient and user environment merging", async () => {
