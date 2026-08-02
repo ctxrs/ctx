@@ -14,8 +14,8 @@ mod root_handle;
     reason = "provider adapters migrate to these capability types in follow-up slices"
 )]
 pub(crate) use root_handle::{
-    open_provider_source_file, open_provider_source_path, OpenedProviderSourceFile,
-    OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot,
+    is_non_regular_source_rejection, open_provider_source_file, open_provider_source_path,
+    OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot,
 };
 
 /// Maximum directories admitted by one provider JSONL inventory.

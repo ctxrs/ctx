@@ -109,6 +109,7 @@ pub(crate) enum CursorDiscoveryIssueKind {
     InvalidLayout,
     NotFound,
     Symlink,
+    SpecialFile,
     LimitExceeded,
 }
 
@@ -394,12 +395,28 @@ fn visit_directories(
                         false,
                     );
                 }
-                Err(error) => inventory.reject(
-                    path,
-                    CursorDiscoveryIssueKind::Symlink,
-                    error.to_string(),
-                    true,
-                ),
+                Err(error) => {
+                    // A non-regular entry (Unix-domain socket, FIFO, device
+                    // node) is safely refused by the authority walk. Skip it
+                    // without invalidating completion: its mere presence beside
+                    // valid transcripts must not mark the whole Cursor source
+                    // unreadable, which would otherwise fail the full refresh.
+                    if crate::common::io::is_non_regular_source_rejection(&error) {
+                        inventory.reject(
+                            path,
+                            CursorDiscoveryIssueKind::SpecialFile,
+                            error.to_string(),
+                            false,
+                        );
+                    } else {
+                        inventory.reject(
+                            path,
+                            CursorDiscoveryIssueKind::Symlink,
+                            error.to_string(),
+                            true,
+                        );
+                    }
+                }
             }
         }
         if let Err(error) = directory.revalidate() {
@@ -578,4 +595,63 @@ fn cursor_catalog_token(
         reopened.revalidate_leaf()?;
     }
     Ok(token)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    // Creates a non-regular special file (FIFO) at `path`. A FIFO shares the
+    // exact authority-walk rejection path as the reported Cursor `worker.sock`
+    // Unix-domain socket (both classify as NON_REGULAR_PROVIDER_SOURCE_REASON),
+    // and unlike a bound socket it is not constrained by the platform sun_path
+    // length limit under a deep temp directory. The socket-specific errno
+    // mapping is covered separately in the root_handle unix tests.
+    fn make_special_file(path: &Path) {
+        let raw = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let result = unsafe { libc::mkfifo(raw.as_ptr(), 0o600) };
+        assert_eq!(result, 0, "mkfifo {}", path.display());
+    }
+
+    #[test]
+    fn cursor_special_file_beside_transcript_is_skipped_without_failing_discovery() {
+        // Regression: a live special file (for example Cursor's `worker.sock`)
+        // sitting beside valid transcripts must be safely skipped, not treated
+        // as an unreadable source. Previously it invalidated completion, marked
+        // the whole Cursor provider `unknown`, and failed the full refresh so
+        // no lexical index was published for any provider.
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let root = temp.path();
+        let session_directory = root
+            .join("projects")
+            .join("acme")
+            .join(AGENT_TRANSCRIPTS)
+            .join("session-a");
+        std::fs::create_dir_all(&session_directory).unwrap();
+        std::fs::write(session_directory.join("session-a.jsonl"), b"{}\n").unwrap();
+        make_special_file(&session_directory.join("worker.sock"));
+
+        let inventory = discover_cursor_transcripts(root);
+
+        assert!(
+            inventory.completed,
+            "special-file entry must not invalidate completion: {:?}",
+            inventory.issues
+        );
+        assert_eq!(
+            inventory.transcripts.len(),
+            1,
+            "the valid transcript is still discovered alongside the special file"
+        );
+        assert!(
+            inventory
+                .issues
+                .iter()
+                .any(|issue| issue.kind == CursorDiscoveryIssueKind::SpecialFile),
+            "the skipped special file is recorded as a non-fatal issue: {:?}",
+            inventory.issues
+        );
+    }
 }
