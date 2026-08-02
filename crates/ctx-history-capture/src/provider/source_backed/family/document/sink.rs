@@ -7,16 +7,15 @@ use super::*;
 const LOGICAL_SNAPSHOT_SPOOL_MAX_CORE_RECORDS: usize =
     crate::PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES;
 /// This matches the existing bounded source-document catalog byte ceiling.
-///
-/// Independent logical SQLite scans are capped at four workers, so live
-/// disposable spool storage is bounded to one GiB across the worker set.
+/// Independent file scans remain bounded per leaf and by the shared worker
+/// cap; large database leaves use serial direct streaming instead.
 const LOGICAL_SNAPSHOT_SPOOL_MAX_ENCODED_BYTES: usize = 256 * 1024 * 1024;
 
 /// The only write surface available while one changed document is projected.
 ///
-/// Ordinary documents stream directly to the active generation. Logical
-/// snapshots spool to an anonymous private file until their completed
-/// certificate proves whether the live Tantivy generation needs a mutation.
+/// Serial durable leaves stream directly to the active generation. Logical or
+/// independently scanned leaves spool to an anonymous private file until they
+/// can be retained or replayed in deterministic discovery order.
 pub(crate) struct ChangedDocumentSink<'sink, 'writer> {
     target: ChangedDocumentTarget<'sink, 'writer>,
     deferred: Option<DeferredCoreRecords>,
@@ -309,22 +308,6 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
             source: None,
             emitted_core_records: 0,
         })
-    }
-
-    pub(super) fn parallel(
-        emitter: &'sink mut ParallelLeafScanEmitter<
-            'writer,
-            CertifiedSource,
-            SourceBackedRouteError,
-        >,
-    ) -> Self {
-        Self {
-            target: ChangedDocumentTarget::Parallel(emitter),
-            deferred: None,
-            logical_base: None,
-            source: None,
-            emitted_core_records: 0,
-        }
     }
 
     pub(super) fn parallel_logical(

@@ -251,6 +251,7 @@ pub(crate) enum DocumentLeafExecutionPolicy {
     #[default]
     Serial,
     Independent,
+    #[cfg(test)]
     IndependentCapped(usize),
 }
 pub(crate) trait ReplacementDocumentTree: Send + Sync + 'static {
@@ -261,11 +262,6 @@ pub(crate) trait ReplacementDocumentTree: Send + Sync + 'static {
     fn owns_source(&self, source: &SourceKey) -> bool;
     fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
         DocumentLeafExecutionPolicy::Serial
-    }
-    /// Defers records from a physically changed leaf until its completed
-    /// logical certificate can be compared with the retained source.
-    fn defer_changed_leaf_staging(&self) -> bool {
-        false
     }
     fn independent_leaf_source(
         &self,
@@ -291,8 +287,11 @@ pub(crate) trait ReplacementDocumentTree: Send + Sync + 'static {
     ) -> SourceBackedRouteResult<Option<SourceKey>> {
         match self.leaf_execution_policy() {
             DocumentLeafExecutionPolicy::Serial => Ok(None),
-            DocumentLeafExecutionPolicy::Independent
-            | DocumentLeafExecutionPolicy::IndependentCapped(_) => {
+            DocumentLeafExecutionPolicy::Independent => {
+                self.independent_leaf_source(authority, leaf).map(Some)
+            }
+            #[cfg(test)]
+            DocumentLeafExecutionPolicy::IndependentCapped(_) => {
                 self.independent_leaf_source(authority, leaf).map(Some)
             }
         }
@@ -475,6 +474,7 @@ where
             sink.recommended_leaf_workers(tree.leaves.len()),
             sink,
         )?,
+        #[cfg(test)]
         DocumentLeafExecutionPolicy::IndependentCapped(worker_count) => {
             scan_document_leaves_independently(
                 adapter,
@@ -582,12 +582,11 @@ where
             stage_exact_document_replay(sink, &base)?;
             base
         } else {
-            let mut changed =
-                if adapter.defer_changed_leaf_staging() || !observed.replay_from_frontier {
-                    ChangedDocumentSink::logical(sink)?
-                } else {
-                    ChangedDocumentSink::new(sink)
-                };
+            let mut changed = if observed.replay_from_frontier {
+                ChangedDocumentSink::new(sink)
+            } else {
+                ChangedDocumentSink::logical(sink)?
+            };
             let terminal =
                 adapter.scan_changed(&tree.authority, &observed.provider_leaf, &mut changed)?;
             if terminal.parser_revision != adapter.parser_revision() {
@@ -674,8 +673,7 @@ where
                     adapter.independent_leaf_source(&tree.authority, &observed.provider_leaf)?
                 }
             };
-            let logical_base = (adapter.defer_changed_leaf_staging()
-                || !observed.replay_from_frontier)
+            let logical_base = (!observed.replay_from_frontier)
                 .then(|| base_by_source.get(&source.identity().digest()).cloned())
                 .flatten()
                 .filter(|base| base.observation().source().exact_descriptor_eq(&source))
@@ -740,13 +738,11 @@ where
     A: ReplacementDocumentTree,
 {
     let scan_result = {
-        let mut changed = if adapter.defer_changed_leaf_staging() || !observed.replay_from_frontier
-        {
-            ChangedDocumentSink::parallel_logical(emitter, logical_base.cloned())
-                .map_err(ParallelLeafScanWorkerError::provider)?
-        } else {
-            ChangedDocumentSink::parallel(emitter)
-        };
+        // Independent workers must complete their scans without waiting for
+        // the deterministic writer lane assigned to an earlier leaf. Stage
+        // each bounded leaf privately, then replay it in discovery order.
+        let mut changed = ChangedDocumentSink::parallel_logical(emitter, logical_base.cloned())
+            .map_err(ParallelLeafScanWorkerError::provider)?;
         (|| {
             let terminal =
                 adapter.scan_changed(authority, &observed.provider_leaf, &mut changed)?;

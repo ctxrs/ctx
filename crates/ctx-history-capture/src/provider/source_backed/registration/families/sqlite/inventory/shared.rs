@@ -27,26 +27,15 @@ use crate::{
 
 use super::*;
 
-pub(super) const SQLITE_INVENTORY_MAX_LEAF_WORKERS: usize = 4;
-
-/// Central admission policy for independently certifiable SQLite inventories.
-///
-/// These providers discover a bounded set of distinct databases, derive each
-/// exact source from catalog evidence, and scan one retained snapshot per
-/// leaf. Single-database and compound-database routes retain the serial
-/// default.
+/// SQLite leaves can be individually large and already stream through one
+/// bounded logical snapshot. Keep them serial so a changed database writes
+/// directly to Tantivy instead of duplicating its complete Core projection in
+/// per-leaf scratch. Provider routes themselves remain independently
+/// schedulable by the refresh coordinator.
 pub(super) fn sqlite_inventory_leaf_execution_policy(
-    provider: CaptureProvider,
+    _provider: CaptureProvider,
 ) -> DocumentLeafExecutionPolicy {
-    match provider {
-        CaptureProvider::AstrBot | CaptureProvider::Lingma | CaptureProvider::Crush => {
-            // Each active-WAL snapshot carries source-family, ctx-owned copy,
-            // spool, and Tantivy descriptors. Four scanners plus the eight
-            // index workers remain below the process-wide release FD budget.
-            DocumentLeafExecutionPolicy::IndependentCapped(SQLITE_INVENTORY_MAX_LEAF_WORKERS)
-        }
-        _ => DocumentLeafExecutionPolicy::Serial,
-    }
+    DocumentLeafExecutionPolicy::Serial
 }
 
 #[cfg(test)]
@@ -330,10 +319,6 @@ where
             return policy;
         }
         sqlite_inventory_leaf_execution_policy(self.provider)
-    }
-
-    fn defer_changed_leaf_staging(&self) -> bool {
-        true
     }
 
     fn independent_leaf_source(
