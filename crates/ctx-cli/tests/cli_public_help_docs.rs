@@ -289,6 +289,19 @@ fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
     assert!(stderr.contains("END >= START"));
     let stderr = failure_stderr(ctx(&temp).args(["blame", "pr", "0", "--repository", "ctxrs/ctx"]));
     assert!(stderr.contains("positive decimal number"));
+    for repository in ["", "   "] {
+        let stderr = failure_stderr(ctx(&temp).args([
+            "blame",
+            "commit",
+            "abc123",
+            "--repository",
+            repository,
+            "--format=json",
+        ]));
+        assert!(stderr.contains("invalid_request"), "{stderr}");
+        assert!(stderr.contains("repository selector"), "{stderr}");
+        assert!(!stderr.contains("pro_not_installed"), "{stderr}");
+    }
 }
 
 #[test]

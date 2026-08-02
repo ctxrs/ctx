@@ -165,6 +165,18 @@ fn mcp_tool_input_validation_returns_stable_invalid_request_and_server_recovers(
             "pull request selector must be a positive decimal number",
         ),
         (
+            "empty-pro-repository",
+            "blame",
+            json!({"target": {"kind": "commit", "oid": "abc123", "repository": ""}}),
+            "target.repository cannot be empty",
+        ),
+        (
+            "whitespace-pro-repository",
+            "blame",
+            json!({"target": {"kind": "commit", "oid": "abc123", "repository": "   "}}),
+            "target.repository cannot be empty",
+        ),
+        (
             "bad-pro-lines",
             "blame",
             json!({"target": {"kind": "file", "path": "src/lib.rs", "lines": {"start": 4, "end": 2}}}),

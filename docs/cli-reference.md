@@ -482,9 +482,11 @@ and is bounded from 1 through 100.
 
 Query `--repository` is an optional logical repository identity, such as
 `forge:github.com/ctxrs/ctx`, recorded in the graph. It is never a local
-checkout path or a raw credential-bearing remote URL. It is required for a
-numeric PR selector and optional with a canonical GitHub, GitLab (including
-canonical self-hosted `/-/merge_requests/<positive>`), or Codeberg URL.
+checkout path or a raw credential-bearing remote URL. Omitting it leaves the
+query unscoped; an explicitly empty or whitespace-only identity is an invalid
+request. It is required for a numeric PR selector and optional with a canonical
+GitHub, GitLab (including canonical self-hosted
+`/-/merge_requests/<positive>`), or Codeberg URL.
 
 `--lines` is a positive 1-based committed line or inclusive `start:end` range
 and exists only for file blame. File blame binds the result to a Git HEAD
