@@ -263,7 +263,7 @@ fn strict_native_tool_call_ambiguity_and_overflow_abstain_without_cross_call_inf
     let temp = crate::test_support_paths::tempdir().unwrap();
     let database = temp.path().join("overflow-opencode.db");
     drop(write_current_schema(&database, temp.path(), &overflow));
-    let (_, _, records) = scan_current_schema(&database);
+    let (_, _, records, _) = scan_current_schema(&database);
     let [record] = records.as_slice() else {
         panic!("expected the overflowing call to remain a Core record");
     };
@@ -635,6 +635,31 @@ fn admitted_opencode_backup_stays_stable_across_later_wal_commit_and_next_open_a
             .collect::<Vec<_>>(),
         vec!["admitted OpenCode message", "later OpenCode message"]
     );
+}
+
+#[test]
+fn unrelated_sibling_creation_does_not_invalidate_the_sqlite_source_family() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let source_directory = temp.path().join("source");
+    let database = source_directory.join("opencode.sqlite");
+    fs::create_dir_all(&source_directory).unwrap();
+    drop(write_current_schema(
+        &database,
+        temp.path(),
+        &json!({
+            "role": "user",
+            "text": "source-family authority"
+        }),
+    ));
+
+    let data_root = temp.path().join("data-root");
+    let authorized =
+        open_root_authorized_snapshot_retained_with_hook(&data_root, &database, || {
+            fs::write(source_directory.join("unrelated.txt"), "unrelated churn").unwrap();
+        })
+        .unwrap();
+    authorized.sqlite_snapshot.finish().unwrap();
+    authorized.source_root.revalidate_same_object().unwrap();
 }
 
 #[test]
@@ -1201,7 +1226,7 @@ fn failed_tool_result_record_never_invents_file_invocation_evidence() {
         }),
     ));
 
-    let (_, scan, records) = scan_current_schema(&database);
+    let (_, scan, records, _) = scan_current_schema(&database);
     assert_eq!(scan.certificate.counts().indexed_documents, 1);
     let [record] = records.as_slice() else {
         panic!("expected one retained failed-result record");

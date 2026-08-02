@@ -225,7 +225,7 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
                     false
                 };
                 leaf.source_root
-                    .revalidate()
+                    .revalidate_same_object()
                     .map_err(|error| route_error(error.into()))?;
                 (leaf.terminal_revalidate)().map_err(|error| route_error(error.into()))?;
                 finalize_work_counters(leaf, exact_replay)?;

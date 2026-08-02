@@ -384,10 +384,10 @@ mod repository_tests {
                 &annotation,
                 RepositoryAbstentionReason::CandidateLimitExceeded
             ));
-            assert!(!has_reason(
-                &annotation,
-                RepositoryAbstentionReason::Ambiguous
-            ));
+            assert_eq!(
+                has_reason(&annotation, RepositoryAbstentionReason::Ambiguous),
+                call_id == "scalar-overflow"
+            );
 
             let core = core_from_event(&mut overflow_projector, call_event, annotation);
             let complete_body: serde_json::Value =
@@ -414,14 +414,20 @@ mod repository_tests {
                 overflow_projector.attribution_for_event(&event(&result, ordinal as u64 + 10));
             assert!(result_annotation.repository_bindings.is_empty());
             assert!(result_annotation.repository_file_observations.is_empty());
-            assert!(has_reason(
-                &result_annotation,
-                RepositoryAbstentionReason::CandidateLimitExceeded
-            ));
-            assert!(!has_reason(
-                &result_annotation,
-                RepositoryAbstentionReason::ProviderOutputUnjoined
-            ));
+            assert_eq!(
+                has_reason(
+                    &result_annotation,
+                    RepositoryAbstentionReason::CandidateLimitExceeded
+                ),
+                call_id == "array-overflow"
+            );
+            assert_eq!(
+                has_reason(
+                    &result_annotation,
+                    RepositoryAbstentionReason::ProviderOutputUnjoined
+                ),
+                call_id == "scalar-overflow"
+            );
         }
     }
 

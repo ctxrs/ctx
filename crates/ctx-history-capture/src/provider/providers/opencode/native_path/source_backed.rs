@@ -597,8 +597,7 @@ fn open_root_authorized_snapshot_retained_with_progress_and_hook(
         })?;
     after_authorize();
     sqlite_snapshot.revalidate()?;
-    source_directory.revalidate()?;
-    source_root.revalidate()?;
+    source_root.revalidate_same_object()?;
     let connection = sqlite_snapshot.connection()?;
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
