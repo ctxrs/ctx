@@ -20,6 +20,7 @@ use super::{
     certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
     open_root_handle_sqlite_source_online_backup_after_database_copy_for_test,
     open_root_handle_sqlite_source_online_backup_before_identity_check_for_test,
+    open_root_handle_sqlite_source_online_backup_with_scratch_limit_for_test,
     open_root_handle_sqlite_source_snapshot,
     open_root_handle_sqlite_source_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
@@ -58,9 +59,12 @@ fn create_persistent_wal(path: &Path) -> Connection {
 }
 
 fn retain_parent(path: &Path) -> SqliteSourceDirectoryAuthority {
+    retain_parent_in_data_root(crate::test_provider_sqlite_data_root(), path)
+}
+
+fn retain_parent_in_data_root(data_root: &Path, path: &Path) -> SqliteSourceDirectoryAuthority {
     let parent = File::open(path).unwrap();
-    retain_sqlite_source_directory_authority(crate::test_provider_sqlite_data_root(), &parent, path)
-        .unwrap()
+    retain_sqlite_source_directory_authority(data_root, &parent, path).unwrap()
 }
 
 fn read_values(snapshot: &SqliteSourceReadSnapshot) -> Vec<String> {
@@ -941,6 +945,108 @@ fn logical_online_backup_is_one_private_snapshot_without_provider_content_or_nam
     assert_eq!(parent.snapshot_counters().active_snapshots(), 0);
     assert_eq!(directory_names(temp.path()), before_names);
     assert_eq!(provider_content_bytes(temp.path()), before_content);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sidecar_free_logical_snapshot_has_one_near_limit_scratch_allocation() {
+    const PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+
+    let provider = tempfile::tempdir().unwrap();
+    let data_root = tempfile::tempdir().unwrap();
+    let database = provider.path().join("provider.sqlite");
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute("CREATE TABLE payloads (body BLOB NOT NULL)", [])
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO payloads (body) VALUES (zeroblob(?1))",
+            [PAYLOAD_BYTES],
+        )
+        .unwrap();
+    drop(connection);
+    let scratch_limit = fs::metadata(&database).unwrap().len();
+    let parent = retain_parent_in_data_root(data_root.path(), provider.path());
+
+    let snapshot = open_root_handle_sqlite_source_online_backup_with_scratch_limit_for_test(
+        &parent,
+        OsStr::new("provider.sqlite"),
+        scratch_limit,
+    )
+    .unwrap();
+
+    assert_eq!(
+        snapshot
+            .connection()
+            .unwrap()
+            .query_row("SELECT length(body) FROM payloads", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        PAYLOAD_BYTES as i64
+    );
+    assert_eq!(snapshot.copied_bytes(), scratch_limit);
+    let snapshot_directory = snapshot.snapshot_directory().unwrap();
+    let retained_scratch_bytes = fs::read_dir(snapshot_directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().metadata().unwrap().len())
+        .sum::<u64>();
+    assert_eq!(retained_scratch_bytes, scratch_limit);
+    assert_eq!(
+        directory_names(snapshot_directory),
+        [OsString::from("source.sqlite")].into()
+    );
+
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.source_bytes_copied(), 0);
+    assert_eq!(counters.logical_online_backup_bytes(), scratch_limit);
+    assert_eq!(counters.active_snapshot_bytes(), scratch_limit);
+    assert_eq!(counters.max_active_snapshot_bytes(), scratch_limit);
+    let observed_peak_scratch = counters
+        .source_bytes_copied()
+        .checked_add(counters.max_active_snapshot_bytes())
+        .unwrap();
+    assert_eq!(observed_peak_scratch, scratch_limit);
+    assert!(observed_peak_scratch <= scratch_limit);
+
+    let staging_root = data_root.path().join("tmp").join("provider-sqlite");
+    assert_eq!(fs::read_dir(&staging_root).unwrap().count(), 1);
+    let fence = snapshot.seal().unwrap();
+    drop(fence);
+    assert_eq!(fs::read_dir(staging_root).unwrap().count(), 0);
+}
+
+#[test]
+fn copied_wal_family_is_promoted_without_a_second_scratch_database() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let writer = create_persistent_wal(&database);
+    drop(writer);
+    let wal = database.with_file_name("provider.sqlite-wal");
+    let shared_memory = database.with_file_name("provider.sqlite-shm");
+    fs::remove_file(shared_memory).unwrap();
+    let expected_copy_bytes =
+        fs::metadata(&database).unwrap().len() + fs::metadata(&wal).unwrap().len();
+    let parent = retain_parent_in_data_root(data_root.path(), temp.path());
+
+    let snapshot = parent
+        .open_logical_online_backup_snapshot(OsStr::new("provider.sqlite"))
+        .unwrap();
+
+    assert_eq!(read_values(&snapshot), ["from-wal"]);
+    assert_eq!(snapshot.copied_bytes(), expected_copy_bytes);
+    let counters = parent.snapshot_counters();
+    assert_eq!(counters.source_bytes_copied(), expected_copy_bytes);
+    assert_eq!(counters.logical_online_backup_bytes(), 0);
+    assert_eq!(counters.active_snapshot_bytes(), expected_copy_bytes);
+    assert_eq!(counters.max_active_snapshot_bytes(), expected_copy_bytes);
+    assert!(counters.max_active_snapshot_bytes() <= SQLITE_SNAPSHOT_MAX_TOTAL_BYTES);
+    let staging_root = data_root.path().join("tmp").join("provider-sqlite");
+    assert_eq!(fs::read_dir(&staging_root).unwrap().count(), 1);
+    snapshot.finish().unwrap();
+    assert_eq!(fs::read_dir(staging_root).unwrap().count(), 0);
 }
 
 #[test]

@@ -66,6 +66,7 @@ fn open_root_handle_sqlite_source_snapshot_inner(
             family,
             after_database_copy,
             before_source_revalidation,
+            SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
         );
     }
     let native_evidence = family.capture_evidence()?;
@@ -112,15 +113,17 @@ fn open_logical_online_backup_snapshot(
     family: SqliteSourceFamily,
     after_database_copy: impl FnOnce(),
     before_source_revalidation: impl FnOnce(),
+    scratch_limit: u64,
 ) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
     let opening_evidence = family.capture_revision_evidence()?;
-    enforce_snapshot_copy_bounds(&family, &opening_evidence)?;
+    enforce_snapshot_copy_bounds_with_limit(&family, &opening_evidence, scratch_limit)?;
     let source = acquire_online_backup_source(
         authority.data_root(),
         &authority.snapshot_context,
         &family,
         &opening_evidence,
         after_database_copy,
+        scratch_limit,
     )?;
     verify_connection_read_only(&source.connection)?;
     source
@@ -151,9 +154,53 @@ fn open_logical_online_backup_snapshot(
         (opening_evidence.clone(), true)
     };
     let source_sqlite_evidence = capture_sqlite_evidence(&source.connection)?;
-    enforce_online_backup_bounds(&source.connection, &family.database.path)?;
+    enforce_online_backup_bounds(&source.connection, &family.database.path, scratch_limit)?;
+
+    // A ctx-owned exact family is already the one certified private logical
+    // snapshot. Retain that pinned view instead of allocating a second full
+    // database through the backup API. Source copies and online backups are
+    // therefore mutually exclusive scratch strategies.
+    if source.copied_source_directory.is_some() {
+        family.revalidate_logical_database_identity(&native_evidence)?;
+        let OnlineBackupSource {
+            connection,
+            copied_source_directory,
+            copied_source_bytes,
+            ..
+        } = source;
+        let snapshot_directory = copied_source_directory.ok_or_else(|| {
+            SqliteSourceAccessError::SnapshotUnavailable {
+                reason: "the certified private SQLite source copy was not retained".to_owned(),
+            }
+        })?;
+        let sqlite_evidence = source_sqlite_evidence;
+        family.revalidate_logical_database_identity(&native_evidence)?;
+        let evidence = SqliteSourceEvidence::from_snapshot(&native_evidence, &sqlite_evidence);
+        let snapshot_activity = authority.snapshot_context.record_open(
+            SqliteSourceSnapshotStrategy::LogicalOnlineBackup,
+            copied_source_bytes,
+        )?;
+        return Ok(SqliteSourceReadSnapshot {
+            connection: Some(connection),
+            family: Some(family),
+            native_evidence,
+            sqlite_evidence,
+            evidence,
+            policy: SqliteSourceSnapshotPolicy::LogicalOnlineBackup,
+            admitted_revision_is_replay_safe,
+            #[cfg(test)]
+            strategy: SqliteSourceSnapshotStrategy::LogicalOnlineBackup,
+            #[cfg(test)]
+            copied_bytes: copied_source_bytes,
+            _snapshot_directory: Some(snapshot_directory),
+            snapshot_activity: Some(snapshot_activity),
+            snapshot_context: Arc::clone(&authority.snapshot_context),
+            terminal_fence_slot: Arc::default(),
+        });
+    }
+
     let (snapshot_directory, snapshot_path, snapshot_bytes) =
-        online_backup_to_ctx(authority.data_root(), &source.connection)?;
+        online_backup_to_ctx(authority.data_root(), &source.connection, scratch_limit)?;
     family.revalidate_logical_database_identity(&native_evidence)?;
     end_pinned_read_snapshot(&source.connection)?;
     drop(source);
@@ -205,7 +252,8 @@ fn open_logical_online_backup_snapshot(
 struct OnlineBackupSource {
     connection: Connection,
     requires_live_family_fence: bool,
-    _copied_source_directory: Option<TempDir>,
+    copied_source_directory: Option<TempDir>,
+    copied_source_bytes: u64,
 }
 
 fn acquire_online_backup_source(
@@ -214,10 +262,22 @@ fn acquire_online_backup_source(
     family: &SqliteSourceFamily,
     evidence: &SqliteFamilyEvidence,
     after_database_copy: impl FnOnce(),
+    scratch_limit: u64,
 ) -> SqliteSourceAccessResult<OnlineBackupSource> {
     let committed_wal = evidence.wal.as_ref().is_some_and(|state| state.length != 0);
     if !committed_wal {
-        let copied_bytes = enforce_snapshot_copy_bounds(family, evidence)?;
+        #[cfg(target_os = "linux")]
+        if immutable_procfd_available(family.database.file()) {
+            return Ok(OnlineBackupSource {
+                connection: open_immutable_main(&family.database)?,
+                requires_live_family_fence: false,
+                copied_source_directory: None,
+                copied_source_bytes: 0,
+            });
+        }
+
+        let copied_bytes =
+            enforce_snapshot_copy_bounds_with_limit(family, evidence, scratch_limit)?;
         let (snapshot_directory, snapshot_path) =
             copy_sqlite_family_to_ctx(data_root, family, evidence, after_database_copy)?;
         snapshot_context.record_source_bytes_copied(copied_bytes)?;
@@ -233,7 +293,8 @@ fn acquire_online_backup_source(
                 sqlite_error("opening the exact copied logical-backup source", source)
             })?,
             requires_live_family_fence: false,
-            _copied_source_directory: Some(snapshot_directory),
+            copied_source_directory: Some(snapshot_directory),
+            copied_source_bytes: copied_bytes,
         });
     }
 
@@ -242,11 +303,12 @@ fn acquire_online_backup_source(
         return Ok(OnlineBackupSource {
             connection,
             requires_live_family_fence: true,
-            _copied_source_directory: None,
+            copied_source_directory: None,
+            copied_source_bytes: 0,
         });
     }
 
-    let copied_bytes = enforce_snapshot_copy_bounds(family, evidence)?;
+    let copied_bytes = enforce_snapshot_copy_bounds_with_limit(family, evidence, scratch_limit)?;
     let (snapshot_directory, snapshot_path) =
         copy_sqlite_family_to_ctx(data_root, family, evidence, after_database_copy)?;
     snapshot_context.record_source_bytes_copied(copied_bytes)?;
@@ -261,7 +323,8 @@ fn acquire_online_backup_source(
     Ok(OnlineBackupSource {
         connection,
         requires_live_family_fence: false,
-        _copied_source_directory: Some(snapshot_directory),
+        copied_source_directory: Some(snapshot_directory),
+        copied_source_bytes: copied_bytes,
     })
 }
 
@@ -285,6 +348,7 @@ fn open_live_authorized_source(
 fn enforce_online_backup_bounds(
     connection: &Connection,
     path: &Path,
+    scratch_limit: u64,
 ) -> SqliteSourceAccessResult<u64> {
     let page_count: i64 = connection
         .pragma_query_value(None, "page_count", |row| row.get(0))
@@ -304,14 +368,14 @@ fn enforce_online_backup_bounds(
         SqliteSourceAccessError::SnapshotTooLarge {
             path: path.to_path_buf(),
             length: u64::MAX,
-            maximum: SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+            maximum: scratch_limit,
         }
     })?;
-    if bytes > SQLITE_SNAPSHOT_MAX_TOTAL_BYTES {
+    if bytes > scratch_limit {
         return Err(SqliteSourceAccessError::SnapshotTooLarge {
             path: path.to_path_buf(),
             length: bytes,
-            maximum: SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+            maximum: scratch_limit,
         });
     }
     Ok(bytes)
@@ -320,6 +384,7 @@ fn enforce_online_backup_bounds(
 fn online_backup_to_ctx(
     data_root: &Path,
     source: &Connection,
+    scratch_limit: u64,
 ) -> SqliteSourceAccessResult<(TempDir, PathBuf, u64)> {
     let directory = create_snapshot_directory(data_root, "provider-sqlite-online-backup-")?;
     let snapshot_path = directory.path().join("source.sqlite");
@@ -346,11 +411,11 @@ fn online_backup_to_ctx(
             source,
         })?
         .len();
-    if snapshot_bytes > SQLITE_SNAPSHOT_MAX_TOTAL_BYTES {
+    if snapshot_bytes > scratch_limit {
         return Err(SqliteSourceAccessError::SnapshotTooLarge {
             path: snapshot_path,
             length: snapshot_bytes,
-            maximum: SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+            maximum: scratch_limit,
         });
     }
     Ok((directory, snapshot_path, snapshot_bytes))
@@ -544,6 +609,14 @@ fn enforce_snapshot_copy_bounds(
     family: &SqliteSourceFamily,
     evidence: &SqliteFamilyEvidence,
 ) -> SqliteSourceAccessResult<u64> {
+    enforce_snapshot_copy_bounds_with_limit(family, evidence, SQLITE_SNAPSHOT_MAX_TOTAL_BYTES)
+}
+
+fn enforce_snapshot_copy_bounds_with_limit(
+    family: &SqliteSourceFamily,
+    evidence: &SqliteFamilyEvidence,
+    scratch_limit: u64,
+) -> SqliteSourceAccessResult<u64> {
     // The family total is authoritative: main and WAL may consume any share,
     // but every observed byte from both members must fit and be copied.
     let mut total = evidence.database.length;
@@ -553,18 +626,18 @@ fn enforce_snapshot_copy_bounds(
                 SqliteSourceAccessError::SnapshotTooLarge {
                     path: family.database.path.clone(),
                     length: u64::MAX,
-                    maximum: SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+                    maximum: scratch_limit,
                 }
             })?;
         }
         (None, None) => {}
         _ => return Err(SqliteSourceAccessError::SourceChanged),
     }
-    if total > SQLITE_SNAPSHOT_MAX_TOTAL_BYTES {
+    if total > scratch_limit {
         return Err(SqliteSourceAccessError::SnapshotTooLarge {
             path: family.database.path.clone(),
             length: total,
-            maximum: SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+            maximum: scratch_limit,
         });
     }
     Ok(total)
@@ -778,6 +851,16 @@ pub(super) fn run_online_backup_with_deadline_for_test(
     deadline: Instant,
 ) -> SqliteSourceAccessResult<()> {
     run_online_backup_until(source, destination, deadline)
+}
+
+#[cfg(test)]
+pub(super) fn open_root_handle_sqlite_source_online_backup_with_scratch_limit_for_test(
+    authority: &SqliteSourceDirectoryAuthority,
+    database_name: &OsStr,
+    scratch_limit: u64,
+) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
+    let family = SqliteSourceFamily::open(authority, database_name, || {})?;
+    open_logical_online_backup_snapshot(authority, family, || {}, || {}, scratch_limit)
 }
 
 #[cfg(test)]

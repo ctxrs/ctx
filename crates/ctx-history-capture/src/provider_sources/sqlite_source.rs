@@ -820,6 +820,7 @@ use snapshot::{
     certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
     open_root_handle_sqlite_source_online_backup_after_database_copy_for_test,
     open_root_handle_sqlite_source_online_backup_before_identity_check_for_test,
+    open_root_handle_sqlite_source_online_backup_with_scratch_limit_for_test,
     open_root_handle_sqlite_source_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
     open_root_handle_sqlite_source_snapshot_for_test, run_online_backup_with_deadline_for_test,
