@@ -78,6 +78,30 @@ pub(super) fn tool_pro_blame(
     data_root: &Path,
     parsed_target: Result<BlameTarget>,
 ) -> McpHandled<Result<Value>> {
+    tool_pro_blame_with(
+        arguments,
+        data_root,
+        parsed_target,
+        crate::pro::blame,
+        crate::commands::blame::hydrate_evidence_context,
+    )
+}
+
+fn tool_pro_blame_with(
+    arguments: &Value,
+    data_root: &Path,
+    parsed_target: Result<BlameTarget>,
+    blame: impl FnOnce(
+        &Path,
+        BlameTarget,
+        u32,
+        Option<String>,
+    ) -> Result<ctx_pro_host_protocol::BlameResult>,
+    hydrate: impl FnOnce(
+        &Path,
+        &ctx_pro_host_protocol::BlameResult,
+    ) -> crate::pro::evidence_preview::EvidencePreviewModel,
+) -> McpHandled<Result<Value>> {
     let started = Instant::now();
     let target_kind = parsed_target
         .as_ref()
@@ -104,14 +128,19 @@ pub(super) fn tool_pro_blame(
             )));
         }
         let cursor = optional_cursor(arguments)?;
-        let result = crate::pro::blame(
+        let result = blame(
             data_root,
             target,
             u32::try_from(limit).map_err(|_| invalid_tool_request("limit is too large"))?,
             cursor,
         )?;
         telemetry.complete(result.matches.len(), result.next.is_some());
-        Ok(crate::pro::blame_result_json(&result))
+        let previews = matches!(
+            &result.target,
+            ctx_pro_host_protocol::ResolvedBlameTarget::File { .. }
+        )
+        .then(|| hydrate(data_root, &result));
+        Ok(crate::pro::blame_result_json(&result, previews.as_ref()))
     })();
     finish_mcp_blame_telemetry(&mut telemetry, started, result)
 }
@@ -344,8 +373,9 @@ fn repository_schema() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{cell::Cell, collections::BTreeSet};
 
+    use ctx_history_core::RepositoryFileInvocationKind;
     use ctx_pro_host_protocol::{BlameResult, ResolvedBlameTarget, ResourceKind, ResourceRef};
 
     use super::*;
@@ -404,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_preview_is_not_an_mcp_argument_and_cannot_trigger_preview_reads() {
+    fn blame_mcp_schema_has_no_evidence_switch() {
         let schema = pro_blame_tool();
         let properties = schema["inputSchema"]["properties"]
             .as_object()
@@ -414,62 +444,161 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(properties, BTreeSet::from(["cursor", "limit", "target"]));
         assert_eq!(schema["inputSchema"]["additionalProperties"], false);
+    }
 
+    #[test]
+    fn mcp_and_cli_json_share_available_and_unavailable_file_context() {
         let temp = private_tempdir();
         let unopened_data_root = temp.path().join("unopened-data-root");
-        let target = BlameTarget::Commit {
-            oid: "abc1234".to_owned(),
-            repository: None,
-        };
-        let rejected = tool_pro_blame(
-            &json!({
-                "target": {"kind": "commit", "oid": "abc1234"},
-                "evidence_preview": true
-            }),
-            &unopened_data_root,
-            Ok(target),
-        );
-        assert_eq!(
-            rejected.value.unwrap_err().to_string(),
-            "unknown blame argument evidence_preview"
-        );
-        assert!(
-            !unopened_data_root.exists(),
-            "a rejected preview argument reached Pro or evidence storage"
-        );
-
-        let commit = ResourceRef {
-            id: "commit:abc1234".to_owned(),
-            kind: ResourceKind::Commit,
-            display: "abc1234".to_owned(),
+        let repository = ResourceRef {
+            id: "repository:fixture".to_owned(),
+            kind: ResourceKind::Repository,
+            display: "fixture/repository".to_owned(),
         };
         let result = BlameResult {
-            target: ResolvedBlameTarget::Commit {
-                commit,
-                repository: ResourceRef {
-                    id: "repository:fixture".to_owned(),
-                    kind: ResourceKind::Repository,
-                    display: "fixture/repository".to_owned(),
-                },
+            target: ResolvedBlameTarget::File {
+                path: "src/lib.rs".to_owned(),
+                repository,
+                requested_lines: None,
             },
-            git_snapshot: None,
+            git_snapshot: Some(ctx_pro_host_protocol::GitSnapshot {
+                head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                worktree_status: ctx_pro_host_protocol::WorktreeStatus::Clean,
+            }),
             matches: Vec::new(),
             evidence: Vec::new(),
             next: None,
         };
-        let encoded = crate::pro::blame_result_json(&result);
-        let result_fields = encoded
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
+        let model = crate::pro::evidence_preview::EvidencePreviewModel {
+            previews: vec![crate::pro::evidence_preview::EvidencePreview {
+                citation_numbers: vec![1],
+                operation: RepositoryFileInvocationKind::Modify,
+                path: "src/lib.rs".to_owned(),
+                prior_path: None,
+                tool_name: "test_tool".to_owned(),
+                excerpt: "modified: src/lib.rs".to_owned(),
+            }],
+        };
+        let expected = crate::pro::blame_result_json(&result, Some(&model));
+        let reads = Cell::new(0usize);
+        let mcp = tool_pro_blame_with(
+            &json!({"target": {"kind": "file", "path": "src/lib.rs"}}),
+            &unopened_data_root,
+            Ok(BlameTarget::File {
+                path: "src/lib.rs".to_owned(),
+                repository: None,
+                lines: None,
+            }),
+            |_, _, _, _| Ok(result.clone()),
+            |_, _| {
+                reads.set(reads.get() + 1);
+                model.clone()
+            },
+        )
+        .value
+        .unwrap();
+        assert_eq!(reads.get(), 1);
+        assert_eq!(mcp, expected);
+        assert_eq!(mcp["evidence_context"]["status"], "available");
         assert_eq!(
-            result_fields,
-            BTreeSet::from(["evidence", "git_snapshot", "matches", "next", "target"])
+            mcp["evidence_context"]["items"].as_array().map(Vec::len),
+            Some(1)
         );
-        assert!(encoded.get("evidence_preview").is_none());
-        assert!(encoded.get("previews").is_none());
+        assert!(!serde_json::to_string(&mcp).unwrap().contains('\u{1b}'));
+
+        let unavailable = tool_pro_blame_with(
+            &json!({"target": {"kind": "file", "path": "src/lib.rs"}}),
+            &unopened_data_root,
+            Ok(BlameTarget::File {
+                path: "src/lib.rs".to_owned(),
+                repository: None,
+                lines: None,
+            }),
+            |_, _, _, _| Ok(result.clone()),
+            |_, _| crate::pro::evidence_preview::EvidencePreviewModel {
+                previews: Vec::new(),
+            },
+        )
+        .value
+        .unwrap();
+        let empty_model = crate::pro::evidence_preview::EvidencePreviewModel {
+            previews: Vec::new(),
+        };
+        let expected_unavailable = crate::pro::blame_result_json(&result, Some(&empty_model));
+        assert_eq!(unavailable, expected_unavailable);
+        assert_eq!(unavailable["evidence_context"]["status"], "unavailable");
+        assert_eq!(
+            unavailable["evidence_context"]["items"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn mcp_commit_and_pr_context_is_not_applicable_without_hydration_reads() {
+        let repository = ResourceRef {
+            id: "repository:fixture".to_owned(),
+            kind: ResourceKind::Repository,
+            display: "fixture/repository".to_owned(),
+        };
+        for (arguments, target, result) in [
+            (
+                json!({"target": {"kind": "commit", "oid": "abc1234"}}),
+                BlameTarget::Commit {
+                    oid: "abc1234".to_owned(),
+                    repository: None,
+                },
+                BlameResult {
+                    target: ResolvedBlameTarget::Commit {
+                        commit: ResourceRef {
+                            id: "commit:abc1234".to_owned(),
+                            kind: ResourceKind::Commit,
+                            display: "abc1234".to_owned(),
+                        },
+                        repository: repository.clone(),
+                    },
+                    git_snapshot: None,
+                    matches: Vec::new(),
+                    evidence: Vec::new(),
+                    next: None,
+                },
+            ),
+            (
+                json!({"target": {"kind": "pull_request", "selector": "42", "repository": "fixture/repository"}}),
+                BlameTarget::PullRequest {
+                    selector: "42".to_owned(),
+                    repository: Some("fixture/repository".to_owned()),
+                },
+                BlameResult {
+                    target: ResolvedBlameTarget::PullRequest {
+                        selector: "42".to_owned(),
+                        pull_request: ResourceRef {
+                            id: "pull_request:fixture:42".to_owned(),
+                            kind: ResourceKind::PullRequest,
+                            display: "fixture/repository#42".to_owned(),
+                        },
+                        repository: repository.clone(),
+                    },
+                    git_snapshot: None,
+                    matches: Vec::new(),
+                    evidence: Vec::new(),
+                    next: None,
+                },
+            ),
+        ] {
+            let expected = crate::pro::blame_result_json(&result, None);
+            let output = tool_pro_blame_with(
+                &arguments,
+                std::path::Path::new("/unopened"),
+                Ok(target),
+                |_, _, _, _| Ok(result.clone()),
+                |_, _| panic!("non-file MCP blame performed an evidence hydration read"),
+            )
+            .value
+            .unwrap();
+            assert_eq!(output, expected);
+            assert_eq!(output["evidence_context"]["status"], "not_applicable");
+            assert_eq!(output["evidence_context"]["items"], serde_json::json!([]));
+        }
     }
 
     #[test]

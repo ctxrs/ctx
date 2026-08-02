@@ -1,5 +1,6 @@
 mod discovery;
 mod dto;
+mod file_invocation;
 mod parser;
 mod source_backed;
 

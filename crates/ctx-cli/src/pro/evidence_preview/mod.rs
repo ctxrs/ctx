@@ -1,30 +1,23 @@
 use ctx_history_core::{
-    RepositoryBinding, RepositoryFileObservationKind, CORE_CONTENT_POLICY_REVISION,
-    CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
+    RepositoryBinding, RepositoryFileInvocationEvidence, RepositoryFileInvocationKind,
+    CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
 };
 use ctx_history_index::CoreEventRecord;
 use ctx_pro_host_protocol::{
     BlameResult, EvidenceCitation, NumberedEvidence, ResolvedBlameTarget, ResourceKind, ResourceRef,
 };
+use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::path::{Component, Path, PathBuf};
+use std::collections::BTreeSet;
 
 pub(crate) const MAX_EVIDENCE_PREVIEW_CITATIONS: usize = 3;
 pub(crate) const MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES: usize = 512;
-pub(crate) const MAX_EVIDENCE_PREVIEW_BODY_BYTES: usize = 64 * 1_024;
-pub(crate) const MAX_EVIDENCE_PREVIEW_BODY_LINES: usize = 4_096;
-
-const VALIDATED_PROVIDER: &str = "codex";
-const VALIDATED_SOURCE_FORMAT: &str = "codex_session_jsonl";
-const VALIDATED_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
-const VALIDATED_PROVIDER_IDENTITY_VERSION: u32 = 1;
-const VALIDATED_PARSER_REVISION: &str = "codex-nativepath-core-record-v7";
 
 /// Exact Core evidence whose generation and coordinates were verified by hydration and whose
 /// stored Core bytes are digest-verified during construction.
 ///
 /// Construction is deliberately fail-closed. A caller cannot pass a bare Core record to the
-/// projector and accidentally bypass the citation identity checks.
+/// projector and accidentally bypass citation identity or current Core-contract checks.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VerifiedEvidenceRecord<'a> {
     numbered: &'a NumberedEvidence,
@@ -48,7 +41,7 @@ impl<'a> VerifiedEvidenceRecord<'a> {
             || actual_digest != cited_digest
             || !is_lower_sha256(cited_digest)
             || !citation_matches_record(citation, record)
-            || !validated_codex_contract(record)
+            || !validated_current_core_contract(record)
         {
             return None;
         }
@@ -56,20 +49,29 @@ impl<'a> VerifiedEvidenceRecord<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct EvidencePreviewModel {
     pub(crate) previews: Vec<EvidencePreview>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Provider-neutral evidence for one exact provider-native file-operation request.
+///
+/// `operation` describes requested intent, not a successful filesystem effect. `excerpt` is an
+/// exact UTF-8 byte range copied from `CoreContent::normalized_body`; presentation sanitization is
+/// deliberately separate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct EvidencePreview {
-    pub(crate) evidence_numbers: Vec<u32>,
-    pub(crate) file_kind: RepositoryFileObservationKind,
-    /// An exact, complete UTF-8 unit copied from `CoreContent::normalized_body`.
+    pub(crate) citation_numbers: Vec<u32>,
+    pub(crate) operation: RepositoryFileInvocationKind,
+    pub(crate) path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) prior_path: Option<String>,
+    pub(crate) tool_name: String,
     pub(crate) excerpt: String,
 }
 
-/// Projects bounded human-only Codex file evidence without mutating the blame result or Core data.
+/// Projects bounded provider-neutral file invocation evidence without mutating the blame result
+/// or Core data.
 #[must_use]
 pub(crate) fn project_evidence_previews(
     result: &BlameResult,
@@ -79,9 +81,7 @@ pub(crate) fn project_evidence_previews(
         path, repository, ..
     } = &result.target
     else {
-        return EvidencePreviewModel {
-            previews: Vec::new(),
-        };
+        return unavailable();
     };
 
     let mut citations = result.evidence.iter().collect::<Vec<_>>();
@@ -100,35 +100,50 @@ pub(crate) fn project_evidence_previews(
         if matching.next().is_some() {
             continue;
         }
-        let Some((file_kind, excerpt)) = project_one(path, repository, candidate.record) else {
+        let Some(mut preview) = project_one(path, repository, candidate.record) else {
             continue;
         };
 
         // Replayed provider events can have distinct stable IDs while carrying the same exact
-        // target-bearing unit. Keep one visible unit and preserve every citation number.
+        // invocation. Keep one visible item and preserve every citation number deterministically.
         if let Some(existing) = previews
             .iter_mut()
-            .find(|preview| preview.file_kind == file_kind && preview.excerpt == excerpt)
+            .find(|existing| same_item(existing, &preview))
         {
-            existing.evidence_numbers.push(numbered.number);
+            existing.citation_numbers.push(numbered.number);
             continue;
         }
-        previews.push(EvidencePreview {
-            evidence_numbers: vec![numbered.number],
-            file_kind,
-            excerpt: excerpt.to_owned(),
-        });
+        preview.citation_numbers.push(numbered.number);
+        previews.push(preview);
     }
 
     EvidencePreviewModel { previews }
 }
 
+fn unavailable() -> EvidencePreviewModel {
+    EvidencePreviewModel {
+        previews: Vec::new(),
+    }
+}
+
+fn same_item(left: &EvidencePreview, right: &EvidencePreview) -> bool {
+    left.operation == right.operation
+        && left.path == right.path
+        && left.prior_path == right.prior_path
+        && left.tool_name == right.tool_name
+        && left.excerpt == right.excerpt
+}
+
 fn citation_matches_record(citation: &EvidenceCitation, record: &CoreEventRecord) -> bool {
     let event = &record.event;
     let core = &record.core_record;
-    event.provider == VALIDATED_PROVIDER
-        && event.source.provider() == VALIDATED_PROVIDER
-        && core.source.provider() == VALIDATED_PROVIDER
+    citation.source.validate_contract().is_ok()
+        && event.source.validate_contract().is_ok()
+        && event.provider == event.source.provider()
+        && event.provider == core.source.provider()
+        && event.source_format == event.source.source_format()
+        && event.source_format == core.source.source_format()
+        && event.source.exact_descriptor_eq(&core.source)
         && citation.source.exact_descriptor_eq(&event.source)
         && citation.source.exact_descriptor_eq(&core.source)
         && citation.session_id == event.session_id
@@ -139,21 +154,48 @@ fn citation_matches_record(citation: &EvidenceCitation, record: &CoreEventRecord
         && citation.event_sequence == core.event_sequence
 }
 
-fn validated_codex_contract(record: &CoreEventRecord) -> bool {
-    let event = &record.event;
+fn validated_current_core_contract(record: &CoreEventRecord) -> bool {
     let core = &record.core_record;
-    core.record_version == CORE_RECORD_VERSION
+    core.validate_contract().is_ok()
+        && core.record_version == CORE_RECORD_VERSION
         && core.normalization_revision == CORE_NORMALIZATION_REVISION
         && core.content.policy_revision == CORE_CONTENT_POLICY_REVISION
-        && core.parser_revision == VALIDATED_PARSER_REVISION
-        && core.source.source_format() == VALIDATED_SOURCE_FORMAT
-        && core.source.schema_variant() == VALIDATED_SCHEMA_VARIANT
-        && core.source.provider_identity_version() == VALIDATED_PROVIDER_IDENTITY_VERSION
-        && event.source_format == VALIDATED_SOURCE_FORMAT
-        && event.event_type == core.event_type
-        && event.role == core.role
         && core.event_type == "tool_call"
         && core.role.as_deref() == Some("assistant")
+        && event_projection_matches_core(record)
+}
+
+fn event_projection_matches_core(record: &CoreEventRecord) -> bool {
+    let event = &record.event;
+    let core = &record.core_record;
+    event.event_id == core.event_id
+        && event.session_id == core.session_id
+        && event.parent_session_id == core.parent_session_id
+        && event.root_session_id == core.root_session_id
+        && event.source.exact_descriptor_eq(&core.source)
+        && event.provider_session_id == core.provider_session_id
+        && event.native_event_id == core.native_event_id
+        && event.branch == core.branch
+        && event.agent_type == core.agent_type
+        && event.is_primary == core.is_primary
+        && event.event_sequence == core.event_sequence
+        && event.occurred_at_unix_ms == core.occurred_at_unix_ms
+        && event.event_type == core.event_type
+        && event.role == core.role
+        && event.workspace == core.workspace
+        && event.cwd == core.cwd
+        && event.touched_files == projected_touched_files(record)
+}
+
+fn projected_touched_files(record: &CoreEventRecord) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    for observation in &record.core_record.repository_file_observations {
+        paths.insert(observation.relative_path.clone());
+        if let Some(prior_path) = &observation.prior_relative_path {
+            paths.insert(prior_path.clone());
+        }
+    }
+    paths.into_iter().collect()
 }
 
 fn is_lower_sha256(value: &str) -> bool {
@@ -163,24 +205,40 @@ fn is_lower_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn project_one<'a>(
-    path: &str,
+fn project_one(
+    target: &str,
     repository: &ResourceRef,
-    record: &'a CoreEventRecord,
-) -> Option<(RepositoryFileObservationKind, &'a str)> {
-    let body = record.core_record.content.normalized_body.as_deref()?;
-    let lines = body_lines(body)?;
-    validated_file_event_shape(record)?;
+    record: &CoreEventRecord,
+) -> Option<EvidencePreview> {
     let binding = exact_repository_binding(repository, record)?;
-    let (file_kind, range) = file_unit(path, binding, record, &lines)?;
-    let excerpt = &body[range.start..range.end];
-    (excerpt.len() <= MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES).then_some((file_kind, excerpt))
-}
+    let target_invocation = exact_target_invocation(target, binding, record)?;
+    let invocation = target_invocation.invocation;
+    if invocation.repository_binding_id != binding.binding_id
+        || invocation_ranges_overlap(target_invocation.index, invocation, record)
+    {
+        return None;
+    }
+    let tool_name = invocation
+        .tool_name
+        .as_deref()
+        .filter(|tool_name| !tool_name.trim().is_empty())?;
+    let range = invocation.normalized_text_range?;
+    let body = record.core_record.content.normalized_body.as_deref()?;
+    let start = usize::try_from(range.start).ok()?;
+    let end = usize::try_from(range.end).ok()?;
+    let excerpt = body.get(start..end)?;
+    if excerpt.len() > MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES {
+        return None;
+    }
 
-fn validated_file_event_shape(record: &CoreEventRecord) -> Option<()> {
-    (record.core_record.event_type == "tool_call"
-        && record.core_record.role.as_deref() == Some("assistant"))
-    .then_some(())
+    Some(EvidencePreview {
+        citation_numbers: Vec::new(),
+        operation: invocation.kind,
+        path: invocation.relative_path.clone(),
+        prior_path: invocation.prior_relative_path.clone(),
+        tool_name: tool_name.to_owned(),
+        excerpt: excerpt.to_owned(),
+    })
 }
 
 fn exact_repository_binding<'a>(
@@ -199,449 +257,253 @@ fn exact_repository_binding<'a>(
     matches.next().is_none().then_some(binding)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ByteSpan {
-    start: usize,
-    end: usize,
-}
-
 #[derive(Debug, Clone, Copy)]
-struct BodyLine<'a> {
-    span: ByteSpan,
-    text: &'a str,
+struct TargetInvocation<'a> {
+    index: usize,
+    invocation: &'a RepositoryFileInvocationEvidence,
+    matched_relative_path: &'a str,
 }
 
-fn body_lines(body: &str) -> Option<Vec<BodyLine<'_>>> {
-    if body.len() > MAX_EVIDENCE_PREVIEW_BODY_BYTES {
-        return None;
-    }
-    let line_count = body
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count()
-        .checked_add(usize::from(!body.is_empty() && !body.ends_with('\n')))?;
-    if line_count > MAX_EVIDENCE_PREVIEW_BODY_LINES {
-        return None;
-    }
-    let mut lines = Vec::with_capacity(line_count);
-    let mut start = 0usize;
-    for segment in body.split_inclusive('\n') {
-        let end = start + segment.len() - usize::from(segment.ends_with('\n'));
-        let raw = &body[start..end];
-        lines.push(BodyLine {
-            span: ByteSpan { start, end },
-            text: raw.strip_suffix('\r').unwrap_or(raw),
-        });
-        start += segment.len();
-    }
-    if start < body.len() {
-        lines.push(BodyLine {
-            span: ByteSpan {
-                start,
-                end: body.len(),
-            },
-            text: &body[start..],
-        });
-    }
-    Some(lines)
-}
-
-#[derive(Debug, Clone, Copy)]
-struct FileUnit {
-    kind: RepositoryFileObservationKind,
-    span: ByteSpan,
-    authorized_absolute: bool,
-}
-
-fn file_unit(
+fn exact_target_invocation<'a>(
     target: &str,
-    repository_binding: &RepositoryBinding,
-    record: &CoreEventRecord,
-    lines: &[BodyLine<'_>],
-) -> Option<(RepositoryFileObservationKind, ByteSpan)> {
-    let mut observations = record
-        .core_record
-        .repository_file_observations
-        .iter()
-        .filter(|observation| {
-            observation.repository_binding_id == repository_binding.binding_id
-                && (observation.relative_path == target
-                    || observation.prior_relative_path.as_deref() == Some(target))
-        });
-    let observation = observations.next()?;
-    if observations.next().is_some() || observation.kind == RepositoryFileObservationKind::Unknown {
-        return None;
-    }
-
-    let units = match file_grammar(lines)? {
-        FileGrammar::ApplyPatch => apply_patch_units(target, repository_binding, lines),
-        FileGrammar::Diff => diff_units(target, lines),
-        FileGrammar::NarrowResult => narrow_result_units(target, repository_binding, lines),
-    };
-    if units.len() != 1 || units[0].kind != observation.kind {
-        return None;
-    }
-    if same_path_other_binding_is_ambiguous(
-        target,
-        repository_binding,
-        record,
-        units[0].authorized_absolute,
-    ) {
-        return None;
-    }
-    Some((observation.kind, units[0].span))
-}
-
-fn same_path_other_binding_is_ambiguous(
-    target: &str,
-    repository_binding: &RepositoryBinding,
-    record: &CoreEventRecord,
-    authorized_absolute: bool,
-) -> bool {
-    let competitors = record
-        .core_record
-        .repository_file_observations
-        .iter()
-        .filter(|observation| {
-            observation.repository_binding_id != repository_binding.binding_id
-                && (observation.relative_path == target
-                    || observation.prior_relative_path.as_deref() == Some(target))
-        });
-    if !authorized_absolute {
-        return competitors.count() > 0;
-    }
-    let Some(selected_path) = authorized_target_path(repository_binding, target) else {
-        return true;
-    };
-    competitors.into_iter().any(|observation| {
-        record
+    selected_binding: &RepositoryBinding,
+    record: &'a CoreEventRecord,
+) -> Option<TargetInvocation<'a>> {
+    let absolute_style = absolute_path_style(target);
+    if absolute_style.is_none() && !looks_like_absolute_path(target) {
+        let mut matches = record
             .core_record
-            .repository_bindings
+            .repository_file_invocation_evidence
             .iter()
-            .find(|binding| binding.binding_id == observation.repository_binding_id)
-            .and_then(|binding| authorized_target_path(binding, target))
-            .is_none_or(|path| path == selected_path)
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FileGrammar {
-    ApplyPatch,
-    Diff,
-    NarrowResult,
-}
-
-fn file_grammar(lines: &[BodyLine<'_>]) -> Option<FileGrammar> {
-    let apply = has_apply_patch_syntax(lines);
-    let diff = lines
-        .iter()
-        .any(|line| line.text.starts_with("diff --git "));
-    let narrow = lines.iter().any(|line| {
-        let text = line.text.trim();
-        [
-            "created: ",
-            "modified: ",
-            "deleted: ",
-            "read: ",
-            "renamed: ",
-        ]
-        .iter()
-        .any(|prefix| text.starts_with(prefix))
-    });
-    match (apply, diff, narrow) {
-        (true, false, false) => Some(FileGrammar::ApplyPatch),
-        (false, true, false) => Some(FileGrammar::Diff),
-        (false, false, true) => Some(FileGrammar::NarrowResult),
-        _ => None,
-    }
-}
-
-fn has_apply_patch_syntax(lines: &[BodyLine<'_>]) -> bool {
-    lines.iter().any(|line| {
-        let text = line.text.trim();
-        text == "*** Begin Patch"
-            || text == "*** End Patch"
-            || text == "apply_patch: *** Begin Patch"
-            || [
-                "*** Add File: ",
-                "*** Update File: ",
-                "*** Delete File: ",
-                "*** Move to: ",
-            ]
-            .iter()
-            .any(|prefix| text.starts_with(prefix))
-    })
-}
-
-fn apply_patch_units(
-    target: &str,
-    repository_binding: &RepositoryBinding,
-    lines: &[BodyLine<'_>],
-) -> Vec<FileUnit> {
-    let mut units = Vec::new();
-    let mut index = 0usize;
-    while index < lines.len() {
-        let text = lines[index].text.trim();
-        if let Some(path) = text.strip_prefix("*** Add File: ") {
-            push_path_unit(
-                &mut units,
-                target,
-                repository_binding,
-                path,
-                RepositoryFileObservationKind::Created,
-                lines[index].span,
-            );
-        } else if let Some(path) = text.strip_prefix("*** Delete File: ") {
-            push_path_unit(
-                &mut units,
-                target,
-                repository_binding,
-                path,
-                RepositoryFileObservationKind::Deleted,
-                lines[index].span,
-            );
-        } else if let Some(old_path) = text.strip_prefix("*** Update File: ") {
-            let move_to = lines.get(index + 1).and_then(|line| {
-                line.text
-                    .trim()
-                    .strip_prefix("*** Move to: ")
-                    .map(|path| (line, path))
+            .enumerate()
+            .flat_map(|(index, invocation)| {
+                invocation_paths(invocation)
+                    .filter(move |relative_path| *relative_path == target)
+                    .map(move |matched_relative_path| TargetInvocation {
+                        index,
+                        invocation,
+                        matched_relative_path,
+                    })
             });
-            if let Some((move_line, new_path)) = move_to {
-                if let Some(authorized_absolute) =
-                    authorized_path_matches(old_path, target, repository_binding)
-                {
-                    units.push(FileUnit {
-                        kind: RepositoryFileObservationKind::Renamed,
-                        span: ByteSpan {
-                            start: lines[index].span.start,
-                            end: move_line.span.end,
-                        },
-                        authorized_absolute,
-                    });
-                } else if let Some(authorized_absolute) =
-                    authorized_path_matches(new_path, target, repository_binding)
-                {
-                    units.push(FileUnit {
-                        kind: RepositoryFileObservationKind::Renamed,
-                        span: ByteSpan {
-                            start: lines[index].span.start,
-                            end: move_line.span.end,
-                        },
-                        authorized_absolute,
-                    });
-                }
-                index += 1;
-            } else {
-                push_path_unit(
-                    &mut units,
-                    target,
-                    repository_binding,
-                    old_path,
-                    RepositoryFileObservationKind::Modified,
-                    lines[index].span,
-                );
-            }
-        }
-        index += 1;
+        let matched = matches.next()?;
+        return matches.next().is_none().then_some(matched);
     }
-    units
-}
 
-fn diff_units(target: &str, lines: &[BodyLine<'_>]) -> Vec<FileUnit> {
-    let starts = lines
+    absolute_style?;
+    let mut selected_matches = record
+        .core_record
+        .repository_file_invocation_evidence
         .iter()
         .enumerate()
-        .filter_map(|(index, line)| line.text.starts_with("diff --git ").then_some(index))
-        .collect::<Vec<_>>();
-    let mut units = Vec::new();
-    for (position, start) in starts.iter().copied().enumerate() {
-        let end = starts.get(position + 1).copied().unwrap_or(lines.len());
-        let section = &lines[start..end];
-        let Some((old_header, new_header)) = diff_header_paths(section[0].text) else {
-            continue;
-        };
-        let new_modes = prefixed_lines(section, "new file mode ");
-        let deleted_modes = prefixed_lines(section, "deleted file mode ");
-        let rename_from = prefixed_lines(section, "rename from ");
-        let rename_to = prefixed_lines(section, "rename to ");
-
-        if rename_from.len() == 1
-            && rename_to.len() == 1
-            && new_modes.is_empty()
-            && deleted_modes.is_empty()
-            && diff_path_matches(old_header, "a/", rename_from[0].1)
-            && diff_path_matches(new_header, "b/", rename_to[0].1)
-        {
-            if rename_from[0].1 == target {
-                units.push(FileUnit {
-                    kind: RepositoryFileObservationKind::Renamed,
-                    span: rename_from[0].0.span,
-                    authorized_absolute: false,
-                });
-            } else if rename_to[0].1 == target {
-                units.push(FileUnit {
-                    kind: RepositoryFileObservationKind::Renamed,
-                    span: rename_to[0].0.span,
-                    authorized_absolute: false,
-                });
-            }
-            continue;
-        }
-
-        if !rename_from.is_empty() || !rename_to.is_empty() {
-            continue;
-        }
-        let header_matches = diff_path_matches(old_header, "a/", target)
-            && diff_path_matches(new_header, "b/", target);
-        if !header_matches {
-            continue;
-        }
-        match (new_modes.as_slice(), deleted_modes.as_slice()) {
-            ([(mode_line, _)], []) if mode_line.span.start == section[0].span.end + 1 => {
-                units.push(FileUnit {
-                    kind: RepositoryFileObservationKind::Created,
-                    span: ByteSpan {
-                        start: section[0].span.start,
-                        end: mode_line.span.end,
-                    },
-                    authorized_absolute: false,
-                });
-            }
-            ([], [(mode_line, _)]) if mode_line.span.start == section[0].span.end + 1 => {
-                units.push(FileUnit {
-                    kind: RepositoryFileObservationKind::Deleted,
-                    span: ByteSpan {
-                        start: section[0].span.start,
-                        end: mode_line.span.end,
-                    },
-                    authorized_absolute: false,
-                });
-            }
-            ([], []) => units.push(FileUnit {
-                kind: RepositoryFileObservationKind::Modified,
-                span: section[0].span,
-                authorized_absolute: false,
-            }),
-            _ => {}
-        }
-    }
-    units
-}
-
-fn diff_header_paths(line: &str) -> Option<(&str, &str)> {
-    let mut fields = line.split_ascii_whitespace();
-    (fields.next() == Some("diff") && fields.next() == Some("--git")).then_some(())?;
-    let old = fields.next()?;
-    let new = fields.next()?;
-    fields.next().is_none().then_some((old, new))
-}
-
-fn diff_path_matches(candidate: &str, side_prefix: &str, relative_path: &str) -> bool {
-    candidate.strip_prefix(side_prefix) == Some(relative_path)
-}
-
-fn prefixed_lines<'a>(lines: &'a [BodyLine<'a>], prefix: &str) -> Vec<(BodyLine<'a>, &'a str)> {
-    lines
-        .iter()
-        .filter_map(|line| line.text.strip_prefix(prefix).map(|value| (*line, value)))
-        .collect()
-}
-
-fn narrow_result_units(
-    target: &str,
-    repository_binding: &RepositoryBinding,
-    lines: &[BodyLine<'_>],
-) -> Vec<FileUnit> {
-    let mut units = Vec::new();
-    for line in lines {
-        let text = line.text.trim();
-        for (prefix, kind) in [
-            ("created: ", RepositoryFileObservationKind::Created),
-            ("modified: ", RepositoryFileObservationKind::Modified),
-            ("deleted: ", RepositoryFileObservationKind::Deleted),
-            ("read: ", RepositoryFileObservationKind::Read),
-        ] {
-            if let Some(path) = text.strip_prefix(prefix) {
-                push_path_unit(
-                    &mut units,
-                    target,
-                    repository_binding,
-                    path,
-                    kind,
-                    line.span,
-                );
-            }
-        }
-        if let Some(paths) = text.strip_prefix("renamed: ") {
-            if let Some((old, new)) = paths.split_once(" -> ") {
-                let old_match = authorized_path_matches(old, target, repository_binding);
-                let new_match = authorized_path_matches(new, target, repository_binding);
-                if let (Some(authorized_absolute), None) | (None, Some(authorized_absolute)) =
-                    (old_match, new_match)
-                {
-                    units.push(FileUnit {
-                        kind: RepositoryFileObservationKind::Renamed,
-                        span: line.span,
-                        authorized_absolute,
-                    });
-                }
-            }
-        }
-    }
-    units
-}
-
-fn push_path_unit(
-    units: &mut Vec<FileUnit>,
-    target: &str,
-    repository_binding: &RepositoryBinding,
-    candidate: &str,
-    kind: RepositoryFileObservationKind,
-    span: ByteSpan,
-) {
-    if let Some(authorized_absolute) =
-        authorized_path_matches(candidate, target, repository_binding)
-    {
-        units.push(FileUnit {
-            kind,
-            span,
-            authorized_absolute,
+        .filter(|(_, invocation)| invocation.repository_binding_id == selected_binding.binding_id)
+        .flat_map(|(index, invocation)| {
+            invocation_paths(invocation).filter_map(move |relative_path| {
+                (certified_absolute_path(selected_binding, relative_path).as_deref()
+                    == Some(target))
+                .then_some(TargetInvocation {
+                    index,
+                    invocation,
+                    matched_relative_path: relative_path,
+                })
+            })
         });
+    let matched = selected_matches.next()?;
+    if selected_matches.next().is_some()
+        || absolute_invocation_is_ambiguous(target, matched, selected_binding, record)
+    {
+        return None;
     }
+    Some(matched)
 }
 
-fn authorized_path_matches(
-    candidate: &str,
+fn invocation_paths(invocation: &RepositoryFileInvocationEvidence) -> impl Iterator<Item = &str> {
+    std::iter::once(invocation.relative_path.as_str())
+        .chain(invocation.prior_relative_path.as_deref())
+}
+
+fn absolute_invocation_is_ambiguous(
     target: &str,
-    repository_binding: &RepositoryBinding,
-) -> Option<bool> {
-    if candidate == target {
-        return Some(false);
-    }
-    (authorized_target_path(repository_binding, target)?.to_str() == Some(candidate))
-        .then_some(true)
+    selected: TargetInvocation<'_>,
+    selected_binding: &RepositoryBinding,
+    record: &CoreEventRecord,
+) -> bool {
+    record
+        .core_record
+        .repository_file_invocation_evidence
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != selected.index)
+        .any(|(_, invocation)| {
+            let Some(binding) = unique_binding(&invocation.repository_binding_id, record) else {
+                return true;
+            };
+            invocation_paths(invocation).any(|relative_path| {
+                absolute_competitor_is_ambiguous(
+                    target,
+                    selected.matched_relative_path,
+                    relative_path,
+                    binding,
+                    selected_binding,
+                )
+            })
+        })
 }
 
-fn authorized_target_path(repository_binding: &RepositoryBinding, target: &str) -> Option<PathBuf> {
-    let target_path = Path::new(target);
-    if target_path.is_absolute()
-        || target_path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
+fn absolute_competitor_is_ambiguous(
+    target: &str,
+    matched_relative_path: &str,
+    competitor_relative_path: &str,
+    competitor_binding: &RepositoryBinding,
+    selected_binding: &RepositoryBinding,
+) -> bool {
+    if competitor_binding.binding_id == selected_binding.binding_id {
+        return certified_absolute_path(competitor_binding, competitor_relative_path).as_deref()
+            == Some(target);
+    }
+    match certified_absolute_path(competitor_binding, competitor_relative_path) {
+        Some(path) => path == target,
+        None => competitor_relative_path == matched_relative_path,
+    }
+}
+
+fn unique_binding<'a>(
+    binding_id: &str,
+    record: &'a CoreEventRecord,
+) -> Option<&'a RepositoryBinding> {
+    let mut matches = record
+        .core_record
+        .repository_bindings
+        .iter()
+        .filter(|binding| binding.binding_id == binding_id);
+    let binding = matches.next()?;
+    matches.next().is_none().then_some(binding)
+}
+
+fn certified_absolute_path(binding: &RepositoryBinding, relative_path: &str) -> Option<String> {
+    if relative_path.is_empty()
+        || relative_path.starts_with('/')
+        || relative_path.contains('\\')
+        || relative_path
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control())
+        || relative_path
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
     {
         return None;
     }
-    let authorization = repository_binding.local_root_authorization.as_ref()?;
-    let local_root = Path::new(&authorization.local_root);
-    if !local_root.is_absolute()
-        || local_root
-            .components()
-            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    let root = &binding.local_root_authorization.as_ref()?.local_root;
+    let style = absolute_path_style(root)?;
+    let separator = style.separator();
+    let relative_path = if separator == '/' {
+        relative_path.to_owned()
+    } else {
+        relative_path.replace('/', "\\")
+    };
+    Some(if root.ends_with(separator) {
+        format!("{root}{relative_path}")
+    } else {
+        format!("{root}{separator}{relative_path}")
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbsolutePathStyle {
+    Posix,
+    WindowsDrive { separator: char },
+    WindowsUnc,
+}
+
+impl AbsolutePathStyle {
+    const fn separator(self) -> char {
+        match self {
+            Self::Posix | Self::WindowsDrive { separator: '/' } => '/',
+            Self::WindowsDrive { .. } | Self::WindowsUnc => '\\',
+        }
+    }
+}
+
+fn looks_like_absolute_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with("\\\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
+}
+
+fn absolute_path_style(path: &str) -> Option<AbsolutePathStyle> {
+    if path
+        .bytes()
+        .any(|byte| byte == 0 || byte.is_ascii_control())
     {
         return None;
     }
-    Some(local_root.join(target_path))
+
+    if let Some(remainder) = path.strip_prefix("\\\\") {
+        if path.contains('/') || !valid_absolute_components(remainder, '\\', 2) {
+            return None;
+        }
+        return Some(AbsolutePathStyle::WindowsUnc);
+    }
+
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+    {
+        let separator = char::from(bytes[2]);
+        let other_separator = if separator == '/' { '\\' } else { '/' };
+        let remainder = &path[3..];
+        if remainder.contains(other_separator)
+            || (!remainder.is_empty() && !valid_absolute_components(remainder, separator, 0))
+        {
+            return None;
+        }
+        return Some(AbsolutePathStyle::WindowsDrive { separator });
+    }
+
+    let remainder = path.strip_prefix('/')?;
+    if path.contains('\\')
+        || (!remainder.is_empty() && !valid_absolute_components(remainder, '/', 0))
+    {
+        return None;
+    }
+    Some(AbsolutePathStyle::Posix)
+}
+
+fn valid_absolute_components(remainder: &str, separator: char, minimum: usize) -> bool {
+    let mut count = 0usize;
+    for component in remainder.split(separator) {
+        if component.is_empty() || matches!(component, "." | "..") {
+            return false;
+        }
+        count += 1;
+    }
+    count >= minimum
+}
+
+fn invocation_ranges_overlap(
+    selected_index: usize,
+    selected: &RepositoryFileInvocationEvidence,
+    record: &CoreEventRecord,
+) -> bool {
+    let Some(selected_range) = selected.normalized_text_range else {
+        return false;
+    };
+    record
+        .core_record
+        .repository_file_invocation_evidence
+        .iter()
+        .enumerate()
+        .any(|(index, invocation)| {
+            index != selected_index
+                && invocation.normalized_text_range.is_some_and(|range| {
+                    selected_range.start < range.end && range.start < selected_range.end
+                })
+        })
 }
 
 #[cfg(test)]

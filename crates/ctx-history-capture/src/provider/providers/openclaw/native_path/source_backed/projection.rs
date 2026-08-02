@@ -65,10 +65,18 @@ impl OpenClawProjector {
         } else {
             event.event_type
         };
-        let (body, structured_content) = if let Some(call) = tool_call {
+        let tool_call_projection = tool_call
+            .map(|call| {
+                strict_tool_call_projection(
+                    call.block,
+                    subrecord.as_ref().map_or(0, |(_, _, ordinal)| *ordinal),
+                )
+            })
+            .transpose()?;
+        let (body, structured_content) = if let Some(projected) = &tool_call_projection {
             (
-                serde_json::to_string(call.block).unwrap_or_else(|_| event.lexical_text.clone()),
-                Some(call.block.clone()),
+                projected.normalized_body.clone(),
+                tool_call.map(|call| call.block.clone()),
             )
         } else if let Some(result) = tool_result {
             let projected = project_tool_result(result, output);
@@ -136,15 +144,21 @@ impl OpenClawProjector {
             structured_content,
             ..AttributionInput::default()
         };
-        if let Some(call) = tool_call {
-            self.observe_tool_call(call, event_sequence, &mut input);
+        if let (Some(call), Some(projected)) = (tool_call, tool_call_projection.as_ref()) {
+            self.observe_tool_call(call, projected, event_sequence, &mut input);
         }
         let running = if let (Some(result), Some(output)) = (tool_result, output) {
             self.observe_tool_result(source_bytes, event, result, output, &mut input)
         } else {
             None
         };
-        let annotation = self.attributor.attribute(input);
+        let mut annotation = self.attributor.attribute(input);
+        if let Some(abstention) = tool_call_projection
+            .as_ref()
+            .and_then(|projection| projection.abstention)
+        {
+            append_invocation_abstention(&mut annotation, abstention);
+        }
         apply_annotation(&mut record, annotation);
         record.validate_contract().map_err(contract)?;
         emit(record)?;
@@ -161,11 +175,13 @@ impl OpenClawProjector {
     fn observe_tool_call(
         &mut self,
         call: &NativeToolCall<'_>,
+        projected: &StrictToolCallProjection,
         event_sequence: u64,
         input: &mut AttributionInput,
     ) {
         input.command = call.command.clone();
         input.declared_tool_workdir = call.declared_workdir.clone();
+        input.repository_file_invocation_evidence = projected.file_invocations.clone();
         input.file_observations = call.file_observations.clone();
         let Some(call_id) = call.call_id.filter(|id| !id.is_empty()) else {
             return;
@@ -249,6 +265,31 @@ impl OpenClawProjector {
             }
         }
         None
+    }
+}
+
+fn append_invocation_abstention(
+    annotation: &mut ctx_history_core::CoreRecordAnnotation,
+    abstention: StrictInvocationAbstention,
+) {
+    let (reason, detail) = match abstention {
+        StrictInvocationAbstention::Capacity => (
+            RepositoryAbstentionReason::CandidateLimitExceeded,
+            "openclaw_file_invocation_evidence_overflow",
+        ),
+        StrictInvocationAbstention::Opaque => (
+            RepositoryAbstentionReason::Unsupported,
+            "openclaw_file_invocation_schema_not_proven",
+        ),
+    };
+    let abstention = RepositoryAbstention {
+        evidence_kind: RepositoryEvidenceKind::FileActivity,
+        reason,
+        detail: Some(detail.to_owned()),
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    };
+    if !annotation.repository_abstentions.contains(&abstention) {
+        annotation.repository_abstentions.push(abstention);
     }
 }
 

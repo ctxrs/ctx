@@ -2,7 +2,9 @@
 use std::process::Command;
 use std::{fs, path::Path};
 
-use ctx_history_core::{CaptureProvider, EventRole, EventType, TypedKey};
+use ctx_history_core::{
+    CaptureProvider, EventRole, EventType, RepositoryFileInvocationKind, TypedKey,
+};
 #[cfg(unix)]
 use ctx_history_core::{
     RepositoryCandidateKind, RepositoryEvidenceKind, RepositoryFileObservationKind,
@@ -172,6 +174,7 @@ fn scan_current_schema(
 fn direct_core_projection_is_complete_and_self_contained() {
     let sources = [
         include_str!("../source_backed.rs"),
+        include_str!("invocation.rs"),
         include_str!("projection.rs"),
     ];
     let production = sources.join("\n");
@@ -179,7 +182,8 @@ fn direct_core_projection_is_complete_and_self_contained() {
     assert!(production.contains("native_event_id = Some"));
     assert!(production.contains("PARSER_REVISION"));
     assert!(production.contains("validate_contract"));
-    assert!(production.contains("let body = if searchable.is_empty()"));
+    assert!(production.contains("strict_tool_call_projection"));
+    assert!(production.contains("map_or(lexical_body"));
     assert!(production.contains("RepositoryAttributor"));
     assert!(production.contains("apply_annotation"));
     for removed_api in [
@@ -192,6 +196,132 @@ fn direct_core_projection_is_complete_and_self_contained() {
     }
     assert!(!production.contains("body.truncate"));
     assert!(!production.contains("body.chars().take"));
+}
+
+#[test]
+fn strict_native_tool_call_preserves_exact_target_range_and_lexical_prefix() {
+    let body = json!({
+        "type": "tool",
+        "tool": "write_file",
+        "state": {"input": {"path": "src/write.rs", "content": "exact"}}
+    });
+    let prefix = "tool call: write_file";
+    let projected = strict_tool_call_projection(&body, prefix).unwrap();
+    assert!(projected.normalized_body.starts_with(prefix));
+    assert_eq!(&projected.normalized_body[..prefix.len()], prefix);
+    let [invocation] = projected.file_invocations.as_slice() else {
+        panic!("expected one exact native invocation");
+    };
+    assert_eq!(invocation.operation_ordinal, 0);
+    assert_eq!(invocation.tool_name.as_deref(), Some("write_file"));
+    assert_eq!(invocation.path, "src/write.rs");
+    assert_eq!(invocation.kind, RepositoryFileInvocationKind::Write);
+    let range = invocation.normalized_text_range.unwrap();
+    assert_eq!(
+        &projected.normalized_body[range.start as usize..range.end as usize],
+        serde_json::to_string(&body).unwrap()
+    );
+}
+
+#[test]
+fn strict_native_tool_call_ambiguity_and_overflow_abstain_without_cross_call_inference() {
+    let ambiguous = json!({"type": "tool", "tool": "edit_file", "state": {"input": {
+        "path": "src/a.rs", "file_path": "src/a.rs"
+    }}});
+    let projected = strict_tool_call_projection(&ambiguous, "tool call: edit_file").unwrap();
+    assert!(projected.file_invocations.is_empty());
+    assert_eq!(
+        projected.abstention,
+        Some(StrictInvocationAbstention::Opaque)
+    );
+
+    let recursive_decoy = json!({
+        "type": "tool",
+        "tool": "edit_file",
+        "state": {
+            "input": {"replacement": "no exact target"},
+            "metadata": {"path": "src/decoy.rs"}
+        }
+    });
+    let projected = strict_tool_call_projection(&recursive_decoy, "tool call: edit_file").unwrap();
+    assert!(projected.file_invocations.is_empty());
+
+    let paths = (0..=MAX_STRICT_FILE_INVOCATIONS)
+        .map(|index| format!("src/{index}.rs"))
+        .collect::<Vec<_>>();
+    let overflow = json!({
+        "type": "tool",
+        "tool": "read_file",
+        "state": {"input": {"files": paths}}
+    });
+    let projected = strict_tool_call_projection(&overflow, "tool call: read_file").unwrap();
+    assert!(projected.file_invocations.is_empty());
+    assert_eq!(
+        projected.abstention,
+        Some(StrictInvocationAbstention::Capacity)
+    );
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("overflow-opencode.db");
+    drop(write_current_schema(&database, temp.path(), &overflow));
+    let (_, _, records) = scan_current_schema(&database);
+    let [record] = records.as_slice() else {
+        panic!("expected the overflowing call to remain a Core record");
+    };
+    assert!(record.repository_file_invocation_evidence.is_empty());
+    assert!(record.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == ctx_history_core::RepositoryAbstentionReason::CandidateLimitExceeded
+            && abstention.detail.as_deref() == Some("opencode_file_invocation_evidence_overflow")
+    }));
+
+    for name in [
+        "READ_FILE",
+        "Read_File",
+        "grep",
+        "glob",
+        "search",
+        "apply_patch",
+        "patch",
+    ] {
+        let body = json!({"type": "tool", "tool": name, "state": {"input": {"path": "src/no.rs"}}});
+        let projected = strict_tool_call_projection(&body, "old lexical body").unwrap();
+        assert!(projected.file_invocations.is_empty(), "promoted {name}");
+        assert_eq!(projected.normalized_body, "old lexical body");
+        assert_eq!(
+            projected.abstention,
+            Some(StrictInvocationAbstention::Opaque)
+        );
+    }
+
+    let generic_wrapper =
+        json!({"tool_calls": [{"name": "read_file", "arguments": {"path": "src/no.rs"}}]});
+    let projected = strict_tool_call_projection(&generic_wrapper, "old lexical body").unwrap();
+    assert!(projected.file_invocations.is_empty());
+    assert_eq!(projected.normalized_body, "old lexical body");
+
+    let byte_overflow = json!({"type": "tool", "tool": "read_file", "state": {"input": {
+        "files": (0..5).map(|index| format!("{}-{index}", "x".repeat(16 * 1024 - 2))).collect::<Vec<_>>()
+    }}});
+    let projected = strict_tool_call_projection(&byte_overflow, "tool call: read_file").unwrap();
+    assert!(projected.file_invocations.is_empty());
+    assert_eq!(
+        projected.abstention,
+        Some(StrictInvocationAbstention::Capacity)
+    );
+    assert!(strict_text_range(0, u32::MAX as usize + 1).is_none());
+}
+
+#[test]
+fn result_shapes_are_classified_before_strict_invocation_projection() {
+    let body = json!({
+        "type": "tool",
+        "tool": "edit_file",
+        "result_outcome": "failure",
+        "path": "src/result-only.rs"
+    });
+    assert_eq!(
+        projection::source_backed_retained_event_kind("tool", "tool", &body),
+        OpenCodeNativeEventKind::ToolOutput
+    );
 }
 
 #[test]
@@ -905,21 +1035,18 @@ fn current_schema_projects_shared_repository_attribution_and_preserves_native_me
     run_git(&repository, &["commit", "-qm", "fixture"]);
 
     let database = temp.path().join("opencode.db");
-    let connection = write_current_schema(
-        &database,
-        &repository,
-        &json!({
-            "type": "tool",
-            "tool": "edit",
-            "state": {
-                "input": {
-                    "command": "git status --short",
-                    "workdir": repository,
-                    "path": "src/lib.rs"
-                }
+    let part_data = json!({
+        "type": "tool",
+        "tool": "edit",
+        "state": {
+            "input": {
+                "command": "git status --short",
+                "workdir": repository,
+                "path": "src/lib.rs"
             }
-        }),
-    );
+        }
+    });
+    let connection = write_current_schema(&database, &repository, &part_data);
     drop(connection);
     let mut permissions = fs::metadata(&database).unwrap().permissions();
     permissions.set_readonly(true);
@@ -935,11 +1062,15 @@ fn current_schema_projects_shared_repository_attribution_and_preserves_native_me
     let [record] = records.as_slice() else {
         panic!("expected one current-schema Core record");
     };
-    assert!(record
-        .content
-        .normalized_body
-        .as_deref()
-        .is_some_and(|body| body.contains("git status --short")));
+    let old_lexical_body = "edit\ngit status --short";
+    let exact_unit = serde_json::to_string(&part_data).unwrap();
+    let expected_body = format!("{old_lexical_body}\n{exact_unit}");
+    assert_eq!(
+        record.content.normalized_body.as_deref(),
+        Some(expected_body.as_str())
+    );
+    assert_eq!(&expected_body[..old_lexical_body.len()], old_lexical_body);
+    assert!(record.content.structured_content.is_none());
     assert_eq!(
         record.provider_session_id.as_deref(),
         Some("current-session")
@@ -972,6 +1103,16 @@ fn current_schema_projects_shared_repository_attribution_and_preserves_native_me
         record.repository_file_observations[0].kind,
         RepositoryFileObservationKind::Modified
     );
+    let [invocation] = record.repository_file_invocation_evidence.as_slice() else {
+        panic!("expected one strict OpenCode invocation");
+    };
+    assert_eq!(invocation.operation_ordinal, 0);
+    assert_eq!(invocation.relative_path, "src/lib.rs");
+    assert_eq!(invocation.kind, RepositoryFileInvocationKind::Modify);
+    assert_eq!(invocation.tool_name.as_deref(), Some("edit"));
+    let body = record.content.normalized_body.as_deref().unwrap();
+    let range = invocation.normalized_text_range.unwrap();
+    assert_eq!(&body[range.start as usize..range.end as usize], exact_unit);
     assert_eq!(
         record
             .repository_candidate_evidence
@@ -987,4 +1128,84 @@ fn current_schema_projects_shared_repository_attribution_and_preserves_native_me
         vec![repository.join("src/lib.rs").to_string_lossy().as_ref()]
     );
     record.validate_contract().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn indexed_exact_hydration_keeps_the_native_tool_call_body_authoritative() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let repository = temp.path().join("hydration-repository");
+    fs::create_dir(&repository).unwrap();
+    run_git(&repository, &["init", "-q"]);
+    fs::create_dir(repository.join("src")).unwrap();
+    fs::write(repository.join("src/hydrated.rs"), "pub fn hydrated() {}\n").unwrap();
+
+    let part_data = json!({
+        "type": "tool",
+        "tool": "write_file",
+        "state": {
+            "status": "running",
+            "input": {
+                "workdir": repository,
+                "path": "src/hydrated.rs",
+                "content": "pub fn hydrated() { exact(); }"
+            }
+        }
+    });
+    let database = temp.path().join("hydration-opencode.db");
+    drop(write_current_schema(&database, &repository, &part_data));
+
+    let page = project_fixture(&database, temp.path());
+    let [item] = page.items.as_slice() else {
+        panic!("expected one hydrated OpenCode tool-call record");
+    };
+    let record = &item.core_record;
+    let exact_unit = serde_json::to_string(&part_data).unwrap();
+    let old_lexical_body = "tool call: write_file";
+    let expected = format!("{old_lexical_body}\n{exact_unit}");
+    assert_eq!(
+        record.content.normalized_body.as_deref(),
+        Some(expected.as_str())
+    );
+    assert!(record.content.structured_content.is_none());
+    let [invocation] = record.repository_file_invocation_evidence.as_slice() else {
+        panic!("expected one hydrated strict invocation");
+    };
+    assert_eq!(invocation.kind, RepositoryFileInvocationKind::Write);
+    assert_eq!(invocation.relative_path, "src/hydrated.rs");
+    let range = invocation.normalized_text_range.unwrap();
+    assert_eq!(
+        &expected[range.start as usize..range.end as usize],
+        exact_unit
+    );
+    assert_eq!(&expected[..old_lexical_body.len()], old_lexical_body);
+    assert!(exact_unit.contains("pub fn hydrated() { exact(); }"));
+    record.validate_contract().unwrap();
+}
+
+#[test]
+fn failed_tool_result_record_never_invents_file_invocation_evidence() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("failed-result-opencode.db");
+    drop(write_current_schema(
+        &database,
+        temp.path(),
+        &json!({
+            "type": "tool",
+            "tool": "edit_file",
+            "state": {
+                "status": "failed",
+                "input": {"path": "src/result-only.rs"},
+                "output": "provider-native failure"
+            }
+        }),
+    ));
+
+    let (_, scan, records) = scan_current_schema(&database);
+    assert_eq!(scan.certificate.counts().indexed_documents, 1);
+    let [record] = records.as_slice() else {
+        panic!("expected one retained failed-result record");
+    };
+    assert_eq!(record.event_type, "tool_output");
+    assert!(record.repository_file_invocation_evidence.is_empty());
 }

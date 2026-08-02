@@ -135,14 +135,15 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     assert_eq!(
         canonical["core_record_contract"],
         serde_json::json!({
-            "fingerprint": "68991e8e9894e3ea16a752af306adb66fceda6667eb802637a9e14ed776c5cae",
-            "repository_contract_revision": 6,
+            "fingerprint": "931172482d0ee38770bc21b173bfd0c304c2d1d8e0dfa0c51b2654ec2134a7e7",
+            "repository_contract_revision": 7,
             "repository_observation_revision": 2,
             "bounded_shell_subset_revision": 1,
             "repository_association_policy_revision": 3,
             "repository_outcome_capture_revision": 2,
             "repository_local_root_authorization_fingerprint_revision": 1,
-            "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs"
+            "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs",
+            "repository_file_invocation_evidence_set": "strictly_sorted_unique_typed_request_intent_bound_to_repository_and_normalized_body"
         })
     );
 

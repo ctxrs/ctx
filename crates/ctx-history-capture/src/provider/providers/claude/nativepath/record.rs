@@ -9,6 +9,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{
+    invocation_evidence::extract_exact_file_invocations,
     privacy::{preflight_record, RawRecordPreflight, RawResultClassification},
     rows::{
         ClaudeEventIdentity, ClaudeEventKind, ClaudeFileTouch, ClaudeNativeOrder,
@@ -210,6 +211,13 @@ impl SafeContent {
                     return Err("Claude content exceeds the representable row limit");
                 }
                 let (command, command_too_large) = bounded_command(&block.input);
+                let invocation_ordinal = u32::try_from(self.calls.len())
+                    .map_err(|_| "Claude tool-call ordinal overflowed")?;
+                let exact_file_invocations = extract_exact_file_invocations(
+                    invocation_ordinal,
+                    block.name.as_deref(),
+                    &block.input,
+                );
                 self.calls.push(ToolCallRequest {
                     call_id: block.id,
                     tool_name: block.name.clone(),
@@ -221,6 +229,7 @@ impl SafeContent {
                         16 * 1024,
                     ),
                     file_touches: safe_file_touches(&block.input, block.name.as_deref()),
+                    exact_file_invocations,
                     input: block.input,
                 });
             }

@@ -2,12 +2,63 @@ use std::path::Path;
 
 use ctx_history_core::{
     CoreRecordAnnotation, RepositoryAbstentionReason, RepositoryEvidence,
-    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
-    RepositoryFileObservationKind, RepositoryOutcomeObservation, RepositoryVcsObservation,
-    RepositoryVcsObservationKind,
+    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileInvocationEvidence,
+    RepositoryFileInvocationKind, RepositoryFileObservation, RepositoryFileObservationKind,
+    RepositoryOutcomeObservation, RepositoryVcsObservation, RepositoryVcsObservationKind,
 };
 
-use super::{push_abstention, CertifiedCandidate, ScopedFileInput, ScopedVcsInput};
+use super::{
+    push_abstention, CertifiedCandidate, ScopedFileInput, ScopedRepositoryFileInvocationEvidence,
+    ScopedVcsInput,
+};
+
+pub(super) fn scope_file_invocations(
+    annotation: &mut CoreRecordAnnotation,
+    certified: &[CertifiedCandidate],
+    inputs: Vec<ScopedRepositoryFileInvocationEvidence>,
+) {
+    for input in inputs {
+        let Some(certificate) = most_specific_certificate(certified, &input.path) else {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::FileActivity,
+                RepositoryAbstentionReason::UnscopedFileActivity,
+                "file_invocation_path_has_no_certified_repository",
+            );
+            continue;
+        };
+        let Some(relative_path) = repository_relative(&certificate.repository_root, &input.path)
+        else {
+            continue;
+        };
+        let prior_relative_path = input
+            .prior_path
+            .as_ref()
+            .and_then(|path| repository_relative(&certificate.repository_root, path));
+        if input.kind == RepositoryFileInvocationKind::Rename && prior_relative_path.is_none() {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::FileActivity,
+                RepositoryAbstentionReason::UnscopedFileActivity,
+                "file_invocation_rename_paths_do_not_share_one_certified_repository",
+            );
+            continue;
+        }
+        annotation
+            .repository_file_invocation_evidence
+            .push(RepositoryFileInvocationEvidence {
+                operation_ordinal: input.operation_ordinal,
+                repository_binding_id: certificate.binding.binding_id.clone(),
+                relative_path,
+                prior_relative_path,
+                kind: input.kind,
+                tool_name: input.tool_name,
+                normalized_text_range: input.normalized_text_range,
+            });
+    }
+    annotation.repository_file_invocation_evidence.sort();
+    annotation.repository_file_invocation_evidence.dedup();
+}
 
 pub(super) fn scope_files(
     annotation: &mut CoreRecordAnnotation,

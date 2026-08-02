@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::parser::MAX_CURSOR_INPUT_PATHS;
 use super::{
     discover_cursor_transcripts,
+    invocation_evidence::cursor_repository_file_invocation_evidence,
     layout::CursorTranscriptPath,
     parser::{project_cursor_jsonl_record, CursorInputPathEvidence},
     projection::{CursorEventBody, CursorNativeEvent},
@@ -46,13 +47,15 @@ const NATIVE_EVENT_LOGICAL_KIND: &str = "cursor.logical-event-v3";
 const LOGICAL_SESSION_KIND: &str = "cursor-session";
 const LOGICAL_EVENT_KIND: &str = "cursor-event";
 const SOURCE_SCHEMA_VARIANT: &str = "cursor-agent-transcript-jsonl-v1";
-const PARSER_REVISION: &str = "cursor-shared-jsonl-v7-exact-repository-path-evidence";
+const PARSER_REVISION: &str = "cursor-shared-jsonl-v8-provider-neutral-file-invocations";
 const EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
 const MAX_CURSOR_TOOL_CONTEXTS: usize = 256;
 
 mod checkpoint;
+mod file_observations;
 
 use checkpoint::*;
+use file_observations::preserve_cursor_ordinary_file_observations;
 
 #[cfg(test)]
 static CURSOR_PROJECTED_RECORDS: AtomicU64 = AtomicU64::new(0);
@@ -331,7 +334,9 @@ impl JsonlFamilyProjector for CursorProjector {
                 self.session_id,
                 &mut self.event_identities,
             )?;
-            let attribution = self.attribution_for_event(&event);
+            let normalized_body = cursor_normalized_body(&event)?;
+            let attribution =
+                self.attribution_for_event_with_normalized_body(&event, normalized_body.as_deref());
             if let Some(document) = core_record(
                 &self.source,
                 self.session_id,
@@ -339,6 +344,7 @@ impl JsonlFamilyProjector for CursorProjector {
                 event,
                 duplicate_occurrence,
                 attribution,
+                normalized_body,
             )? {
                 emit(document)?;
             }
@@ -368,9 +374,19 @@ impl CursorProjector {
         }
     }
 
+    #[cfg(test)]
     fn attribution_for_event(
         &mut self,
         event: &CursorNativeEvent,
+    ) -> ctx_history_core::CoreRecordAnnotation {
+        let normalized_body = cursor_normalized_body(event).unwrap();
+        self.attribution_for_event_with_normalized_body(event, normalized_body.as_deref())
+    }
+
+    fn attribution_for_event_with_normalized_body(
+        &mut self,
+        event: &CursorNativeEvent,
+        normalized_body: Option<&str>,
     ) -> ctx_history_core::CoreRecordAnnotation {
         let activity_at_unix_ms = event
             .occurred_at
@@ -383,6 +399,10 @@ impl CursorProjector {
         let mut input = crate::repository_attribution::AttributionInput {
             activity_at_unix_ms,
             structured_content,
+            repository_file_invocation_evidence: cursor_repository_file_invocation_evidence(
+                event,
+                normalized_body,
+            ),
             ..crate::repository_attribution::AttributionInput::default()
         };
         let mut adapter_abstentions = Vec::new();
@@ -474,6 +494,7 @@ impl CursorProjector {
             CursorEventBody::None | CursorEventBody::Text { .. } => {}
         }
         let mut annotation = self.repository_attributor.attribute(input);
+        preserve_cursor_ordinary_file_observations(&mut annotation);
         append_adapter_abstentions(&mut annotation, adapter_abstentions);
         annotation
     }
@@ -507,18 +528,32 @@ fn apply_cursor_context(
 ) {
     input.command = context.command.clone();
     input.declared_tool_workdir = context.declared_workdir.clone();
-    let CursorInputPathEvidence::Exact(paths) = &context.input_paths else {
+    if !input.repository_file_invocation_evidence.is_empty() {
         return;
+    }
+    let paths = match &context.input_paths {
+        CursorInputPathEvidence::Exact(paths) => paths,
+        CursorInputPathEvidence::Inexact { retained_paths, .. } => {
+            input.provider_native_context_ambiguous = true;
+            retained_paths
+        }
     };
-    input
-        .file_observations
-        .extend(paths.iter().cloned().map(|path| {
-            crate::repository_attribution::UnscopedFileObservation {
-                path,
+    for path in paths {
+        if input
+            .file_observations
+            .iter()
+            .any(|observation| observation.path == *path && observation.prior_path.is_none())
+        {
+            continue;
+        }
+        input
+            .file_observations
+            .push(crate::repository_attribution::UnscopedFileObservation {
+                path: path.clone(),
                 prior_path: None,
                 kind: RepositoryFileObservationKind::Unknown,
-            }
-        }));
+            });
+    }
 }
 
 fn append_cursor_input_path_abstentions(
@@ -532,6 +567,7 @@ fn append_cursor_input_path_abstentions(
     let CursorInputPathEvidence::Inexact {
         candidate_limit_exceeded,
         invalid_shape,
+        ..
     } = evidence
     else {
         return;
@@ -721,14 +757,10 @@ fn core_record(
     event: CursorNativeEvent,
     duplicate_occurrence: u64,
     annotation: ctx_history_core::CoreRecordAnnotation,
+    normalized_body: Option<String>,
 ) -> Result<Option<CoreRecord>> {
-    let text = match &event.body {
-        CursorEventBody::Text { text } if event.event_type == EventType::Message => text.clone(),
-        CursorEventBody::ToolCall { native_content, .. }
-        | CursorEventBody::ToolOutput { native_content, .. } => {
-            serde_json::to_string(native_content)?
-        }
-        CursorEventBody::None | CursorEventBody::Text { .. } => return Ok(None),
+    let Some(text) = normalized_body else {
+        return Ok(None);
     };
     if text.is_empty() {
         return Ok(None);
@@ -773,10 +805,24 @@ fn core_record(
     record.repository_candidate_evidence = annotation.repository_candidate_evidence;
     record.repository_bindings = annotation.repository_bindings;
     record.repository_abstentions = annotation.repository_abstentions;
+    record.repository_file_invocation_evidence = annotation.repository_file_invocation_evidence;
     record.repository_file_observations = annotation.repository_file_observations;
     record.repository_vcs_observations = annotation.repository_vcs_observations;
     record.validate_contract().map_err(contract)?;
     Ok(Some(record))
+}
+
+fn cursor_normalized_body(event: &CursorNativeEvent) -> Result<Option<String>> {
+    match &event.body {
+        CursorEventBody::Text { text } if event.event_type == EventType::Message => {
+            Ok(Some(text.clone()))
+        }
+        CursorEventBody::ToolCall { native_content, .. }
+        | CursorEventBody::ToolOutput { native_content, .. } => {
+            Ok(Some(serde_json::to_string(native_content)?))
+        }
+        CursorEventBody::None | CursorEventBody::Text { .. } => Ok(None),
+    }
 }
 
 fn source_key(native_session_id: &str) -> Result<SourceKey> {

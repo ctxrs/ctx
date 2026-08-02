@@ -2,9 +2,10 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use ctx_history_core::{
     CoreRecordAnnotation, RepositoryAbstention, RepositoryAbstentionReason,
-    RepositoryCandidateKind, RepositoryEvidenceKind, RepositoryFileObservation,
-    RepositoryFileObservationKind, RepositoryOutcomeKind, RepositoryOutcomeObservation,
-    RepositoryVcsObservation, RepositoryVcsObservationKind, CORE_BOUNDED_SHELL_SUBSET_REVISION,
+    RepositoryCandidateKind, RepositoryEvidenceKind, RepositoryFileInvocationKind,
+    RepositoryFileInvocationTextRange, RepositoryFileObservation, RepositoryFileObservationKind,
+    RepositoryOutcomeKind, RepositoryOutcomeObservation, RepositoryVcsObservation,
+    RepositoryVcsObservationKind, CORE_BOUNDED_SHELL_SUBSET_REVISION,
     CORE_MISSING_ACTIVITY_TIME_UNIX_MS, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
@@ -22,12 +23,12 @@ use super::{
         ProviderIdentityResolution,
     },
     outcome::UnscopedOutcomeObservation,
-    scoping::{path_string, scope_files, scope_outcomes, scope_vcs},
+    scoping::{path_string, scope_file_invocations, scope_files, scope_outcomes, scope_vcs},
     shell::{analyze, command_too_large, lexical_absolute},
     AttributionInput, BoundedCommitProducer, CommandEvidenceDisposition, UnscopedVcsObservation,
 };
 
-const MAX_REPOSITORY_CANDIDATES: usize = 32;
+pub(crate) const MAX_REPOSITORY_CANDIDATES: usize = 32;
 
 #[derive(Debug, Clone)]
 pub(super) struct Candidate {
@@ -42,6 +43,16 @@ pub(super) struct ScopedFileInput {
     pub(super) path: PathBuf,
     pub(super) prior_path: Option<PathBuf>,
     pub(super) kind: RepositoryFileObservationKind,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ScopedRepositoryFileInvocationEvidence {
+    pub(super) operation_ordinal: u32,
+    pub(super) path: PathBuf,
+    pub(super) prior_path: Option<PathBuf>,
+    pub(super) kind: RepositoryFileInvocationKind,
+    pub(super) tool_name: Option<String>,
+    pub(super) normalized_text_range: Option<RepositoryFileInvocationTextRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,17 +205,7 @@ pub(super) fn attribute_with_attributor(
         .abstentions
         .iter()
         .any(|abstention| abstention.reason == RepositoryAbstentionReason::CandidateLimitExceeded);
-    let admitted_command_candidate_count = if command_candidate_limit_exceeded {
-        0
-    } else {
-        command_analysis.repository_paths.len()
-    };
-
-    let requested_candidate_count = admitted_command_candidate_count
-        .saturating_add(input.file_observations.len())
-        .saturating_add(input.vcs_observations.len())
-        .saturating_add(usize::from(input.declared_tool_workdir.is_some()))
-        .saturating_add(usize::from(outcome_operation_path.is_some()));
+    let file_invocation_was_attempted = !input.repository_file_invocation_evidence.is_empty();
 
     let mut candidates = Vec::new();
     let more_specific_command =
@@ -242,51 +243,45 @@ pub(super) fn attribute_with_attributor(
     }
 
     let file_base = declared_workdir.as_deref().or(session_cwd.as_deref());
-    let mut file_inputs = Vec::new();
-    for observation in input.file_observations {
-        let Some(path) = lexical_absolute(&observation.path, file_base) else {
-            push_abstention(
-                &mut annotation,
-                RepositoryEvidenceKind::FileActivity,
-                RepositoryAbstentionReason::UnscopedFileActivity,
-                "unscoped_or_dynamic_file_path",
-            );
+    let mut file_invocation_inputs = Vec::new();
+    let mut file_invocation_candidates = Vec::new();
+    for evidence in input.repository_file_invocation_evidence {
+        let Some((path, prior_path)) = prepare_file_paths(
+            &mut annotation,
+            &evidence.path,
+            evidence.prior_path.as_deref(),
+            evidence.kind == RepositoryFileInvocationKind::Rename,
+            file_base,
+        ) else {
             continue;
         };
-        let prior_path = match (observation.kind, observation.prior_path.as_deref()) {
-            (RepositoryFileObservationKind::Renamed, Some(path)) => {
-                let Some(path) = lexical_absolute(path, file_base) else {
-                    push_abstention(
-                        &mut annotation,
-                        RepositoryEvidenceKind::FileActivity,
-                        RepositoryAbstentionReason::UnscopedFileActivity,
-                        "rename_prior_path_is_not_bounded_literal",
-                    );
-                    continue;
-                };
-                Some(path)
-            }
-            (RepositoryFileObservationKind::Renamed, None) | (_, Some(_)) => {
-                push_abstention(
-                    &mut annotation,
-                    RepositoryEvidenceKind::FileActivity,
-                    RepositoryAbstentionReason::UnscopedFileActivity,
-                    "file_change_and_prior_path_shape_conflict",
-                );
-                continue;
-            }
-            (_, None) => None,
+        file_invocation_candidates.push(Candidate {
+            path: path.clone(),
+            kind: CandidateKind::File,
+            evidence_kind: RepositoryEvidenceKind::FileActivity,
+            observed_at_unix_ms: activity_at_unix_ms,
+        });
+        file_invocation_inputs.push(ScopedRepositoryFileInvocationEvidence {
+            operation_ordinal: evidence.operation_ordinal,
+            path,
+            prior_path,
+            kind: evidence.kind,
+            tool_name: evidence.tool_name,
+            normalized_text_range: evidence.normalized_text_range,
+        });
+    }
+    let mut file_inputs = Vec::new();
+    for observation in input.file_observations {
+        let Some((path, prior_path)) = prepare_file_paths(
+            &mut annotation,
+            &observation.path,
+            observation.prior_path.as_deref(),
+            observation.kind == RepositoryFileObservationKind::Renamed,
+            file_base,
+        ) else {
+            continue;
         };
-        annotation.repository_candidate_evidence.insert(
-            RepositoryCandidateKind::FileActivityPath,
-            path_string(&path),
-        );
-        if let Some(prior_path) = &prior_path {
-            annotation.repository_candidate_evidence.insert(
-                RepositoryCandidateKind::FileActivityPath,
-                path_string(prior_path),
-            );
-        }
+        retain_file_path_candidates(&mut annotation, &path, prior_path.as_deref());
         candidates.push(Candidate {
             path: path.clone(),
             kind: CandidateKind::File,
@@ -342,22 +337,41 @@ pub(super) fn attribute_with_attributor(
         vcs_inputs.push(ScopedVcsInput { path, observation });
     }
 
-    if requested_candidate_count > MAX_REPOSITORY_CANDIDATES {
+    dedupe_candidates(&mut candidates);
+    let ordinary_candidate_count = candidates.len();
+    let mut candidates_with_invocations = candidates.clone();
+    candidates_with_invocations.extend(file_invocation_candidates);
+    dedupe_candidates(&mut candidates_with_invocations);
+    if candidates_with_invocations.len() > MAX_REPOSITORY_CANDIDATES {
         push_abstention(
             &mut annotation,
-            RepositoryEvidenceKind::ProviderNativeResult,
+            if file_invocation_was_attempted
+                && ordinary_candidate_count <= MAX_REPOSITORY_CANDIDATES
+            {
+                RepositoryEvidenceKind::FileActivity
+            } else {
+                RepositoryEvidenceKind::ProviderNativeResult
+            },
             RepositoryAbstentionReason::CandidateLimitExceeded,
             "repository_candidate_product_limit_exceeded",
         );
-        if !outcome_observations.is_empty() {
-            push_abstention(
-                &mut annotation,
-                RepositoryEvidenceKind::ProviderNativeResult,
-                RepositoryAbstentionReason::OutcomeRepositoryUnbound,
-                "repository_outcome_blocked_by_candidate_limit",
-            );
+        if ordinary_candidate_count > MAX_REPOSITORY_CANDIDATES {
+            if !outcome_observations.is_empty() {
+                push_abstention(
+                    &mut annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+                    "repository_outcome_blocked_by_candidate_limit",
+                );
+            }
+            return annotation;
         }
-        return annotation;
+        file_invocation_inputs.clear();
+    } else {
+        for input in &file_invocation_inputs {
+            retain_file_path_candidates(&mut annotation, &input.path, input.prior_path.as_deref());
+        }
+        candidates = candidates_with_invocations;
     }
 
     let attempted_specific = input.declared_tool_workdir.is_some()
@@ -365,6 +379,7 @@ pub(super) fn attribute_with_attributor(
         || command_analysis.blocks_session_fallback
         || provider_identity.was_attempted()
         || provider_native_context_ambiguous
+        || file_invocation_was_attempted
         || !file_inputs.is_empty()
         || !vcs_inputs.is_empty()
         || outcome_operation_path.is_some();
@@ -378,8 +393,6 @@ pub(super) fn attribute_with_attributor(
             });
         }
     }
-    dedupe_candidates(&mut candidates);
-
     let mut certified = Vec::new();
     let mut probe_budget = EventProbeBudget::new();
     for candidate in candidates {
@@ -407,6 +420,7 @@ pub(super) fn attribute_with_attributor(
         &attributor.certifier,
         &mut probe_budget,
     );
+    scope_file_invocations(&mut annotation, &certified, file_invocation_inputs);
     scope_files(&mut annotation, &certified, file_inputs);
     scope_vcs(&mut annotation, &certified, vcs_inputs);
     scope_outcomes(
@@ -425,6 +439,65 @@ pub(super) fn attribute_with_attributor(
         );
     }
     annotation
+}
+
+fn prepare_file_paths(
+    annotation: &mut CoreRecordAnnotation,
+    path: &str,
+    prior_path: Option<&str>,
+    is_rename: bool,
+    base: Option<&std::path::Path>,
+) -> Option<(PathBuf, Option<PathBuf>)> {
+    let Some(path) = lexical_absolute(path, base) else {
+        push_abstention(
+            annotation,
+            RepositoryEvidenceKind::FileActivity,
+            RepositoryAbstentionReason::UnscopedFileActivity,
+            "unscoped_or_dynamic_file_path",
+        );
+        return None;
+    };
+    let prior_path = match (is_rename, prior_path) {
+        (true, Some(prior_path)) => {
+            let Some(prior_path) = lexical_absolute(prior_path, base) else {
+                push_abstention(
+                    annotation,
+                    RepositoryEvidenceKind::FileActivity,
+                    RepositoryAbstentionReason::UnscopedFileActivity,
+                    "rename_prior_path_is_not_bounded_literal",
+                );
+                return None;
+            };
+            Some(prior_path)
+        }
+        (true, None) | (false, Some(_)) => {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::FileActivity,
+                RepositoryAbstentionReason::UnscopedFileActivity,
+                "file_change_and_prior_path_shape_conflict",
+            );
+            return None;
+        }
+        (false, None) => None,
+    };
+    Some((path, prior_path))
+}
+
+fn retain_file_path_candidates(
+    annotation: &mut CoreRecordAnnotation,
+    path: &std::path::Path,
+    prior_path: Option<&std::path::Path>,
+) {
+    annotation
+        .repository_candidate_evidence
+        .insert(RepositoryCandidateKind::FileActivityPath, path_string(path));
+    if let Some(prior_path) = prior_path {
+        annotation.repository_candidate_evidence.insert(
+            RepositoryCandidateKind::FileActivityPath,
+            path_string(prior_path),
+        );
+    }
 }
 
 fn resolve_deferred_commit_observations(

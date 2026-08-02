@@ -925,8 +925,9 @@ root-local retry metadata; setup and `--keep-data` fail until a later
 
 Successful `ctx blame <target> [--type file|commit|pr] --format json`, the
 explicit `ctx blame file|commit|pr --format json` compatibility forms, and MCP
-`blame` return the protocol `BlameResult` directly, with no payload wrapper,
-prose summary, or suggested claims:
+`blame` return one host-extended result object with the protocol `BlameResult`
+fields at top level plus `evidence_context`. There is no enclosing payload
+wrapper, prose summary, or suggested claims:
 
 - `target`, a resolved tagged `file`, `commit`, or `pull_request` target;
 - `git_snapshot`, required for file results and null for commit/PR results;
@@ -934,13 +935,44 @@ prose summary, or suggested claims:
   the resolved target;
 - `evidence`, a complete deduplicated table numbered contiguously from one;
 - `next`, null or an opaque cursor plus `more_matches` or
-  `more_committed_lines` reason.
+  `more_committed_lines` reason;
+- `evidence_context`, a host-owned object added after the helper response is
+  validated, with `status` and `items` fields.
 
-`--evidence-preview` has no JSON or MCP representation. Combining it with
-`--format json` is rejected as stable `invalid_request` JSON for universal and
-explicit file, commit, and PR CLI forms. The flag is otherwise valid
-only for human file blame. CLI JSON and MCP continue to return the unchanged
-`BlameResult` schema above, with no preview fields.
+CLI JSON and MCP serialize the identical `evidence_context` object without
+changing the private helper `BlameResult` or protocol version:
+
+```json
+{
+  "evidence_context": {
+    "status": "available",
+    "items": [
+      {
+        "citation_numbers": [1],
+        "operation": "modify",
+        "path": "src/lib.rs",
+        "tool_name": "apply_patch",
+        "excerpt": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old_value\n+new_value\n*** End Patch"
+      }
+    ]
+  }
+}
+```
+
+`status` is `available` when file blame has at least one verified, admitted
+item; `unavailable` when file hydration or projection yields none; and
+`not_applicable` for commit and PR blame. `items` is always an array and is
+empty for `unavailable` and `not_applicable`. File blame reads at most the first
+three exact cited Core records under the fixed evidence and 4 KiB admission
+budgets. Each item describes provider-neutral requested file-operation intent,
+its target (and prior path for a rename), the provider-native tool name, and an
+exact excerpt; it does not independently assert a successful filesystem effect.
+Hydration failure never changes attribution, the helper result, exit
+status, or the evidence table. Commit and PR blame perform no Core evidence
+read. Human output renders the same admitted item list under
+`Evidence context (local history content)` only when status is `available`; it
+emits no unavailable or not-applicable banner. Machine output remains
+ANSI-free.
 
 Ordinary CLI and MCP blame send a bounded maintenance wake, read the latest
 committed Pro generation, and report its frontier or typed stale state while

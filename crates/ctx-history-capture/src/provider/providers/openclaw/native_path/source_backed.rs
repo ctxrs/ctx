@@ -2,9 +2,9 @@
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, EventIdentityInput,
-    EventType, NativeItemKey, NativeSessionKey, RepositoryAbstentionReason,
-    RepositoryFileObservationKind, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId,
-    TypedKey,
+    EventType, NativeItemKey, NativeSessionKey, RepositoryAbstention, RepositoryAbstentionReason,
+    RepositoryEvidenceKind, RepositoryFileObservationKind, SessionIdentityInput, SourceAnchor,
+    SourceKey, StableEntityId, TypedKey, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
 };
 use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
@@ -39,10 +39,12 @@ use crate::{
 };
 
 mod checkpoint;
+mod invocation;
 mod native;
 mod projection;
 
 use checkpoint::*;
+use invocation::*;
 use native::*;
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "openclaw.legacy-session";
@@ -53,7 +55,7 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-openclaw-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "openclaw-legacy-session";
 const LOGICAL_EVENT_KIND: &str = "openclaw-legacy-event";
 const SOURCE_SCHEMA_VARIANT: &str = "openclaw-legacy-jsonl-v2";
-const PARSER_REVISION: &str = "openclaw-source-backed-v4-result-content";
+const PARSER_REVISION: &str = "openclaw-source-backed-v5-file-invocation-evidence";
 const MAX_PENDING_CALLS: usize = 4096;
 const MAX_RUNNING_PROCESSES: usize = 256;
 const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;

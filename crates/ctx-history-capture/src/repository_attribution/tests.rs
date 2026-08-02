@@ -8,10 +8,10 @@ use std::{
 
 use ctx_history_core::{
     GitObjectFormat, GitObjectId, RepositoryAbstentionReason, RepositoryAlias, RepositoryAliasKind,
-    RepositoryCandidateKind, RepositoryEvidenceKind, RepositoryFileObservationKind,
-    RepositoryOutcomeKind, RepositoryOutcomeLinkage, RepositoryOutcomeObservation,
-    RepositoryPullRequestIdentity, RepositoryVcsObservationKind,
-    CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    RepositoryCandidateKind, RepositoryEvidenceKind, RepositoryFileInvocationKind,
+    RepositoryFileInvocationTextRange, RepositoryFileObservationKind, RepositoryOutcomeKind,
+    RepositoryOutcomeLinkage, RepositoryOutcomeObservation, RepositoryPullRequestIdentity,
+    RepositoryVcsObservationKind, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
 };
 use tempfile::TempDir;
 
@@ -21,7 +21,7 @@ use super::{
     attribute,
     git::{CandidateKind, GitCertifier},
     linked_outcome_evidence, AttributionInput, LinkedOutcomeInput, RepositoryAttributor,
-    UnscopedFileObservation, UnscopedVcsObservation,
+    UnscopedFileObservation, UnscopedRepositoryFileInvocationEvidence, UnscopedVcsObservation,
 };
 use crate::OutputOutcome;
 
@@ -177,6 +177,307 @@ fn multi_repository_candidate_evidence_is_complete_and_input_order_independent()
     );
     assert_eq!(forward.repository_bindings.len(), 2);
     assert_eq!(forward.repository_file_observations.len(), 2);
+}
+
+#[test]
+fn exact_file_invocations_scope_and_canonicalize_without_observation_promotion() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(
+        temp.path(),
+        "provider-intent",
+        Some("https://github.com/acme/provider-intent.git"),
+    );
+    let read = UnscopedRepositoryFileInvocationEvidence {
+        operation_ordinal: 2,
+        path: repo.join("tracked.txt").to_string_lossy().into_owned(),
+        prior_path: None,
+        kind: RepositoryFileInvocationKind::Read,
+        tool_name: Some("read_file".to_owned()),
+        normalized_text_range: Some(RepositoryFileInvocationTextRange { start: 5, end: 12 }),
+    };
+    let write = UnscopedRepositoryFileInvocationEvidence {
+        operation_ordinal: 1,
+        path: "src/lib.rs".to_owned(),
+        prior_path: None,
+        kind: RepositoryFileInvocationKind::Write,
+        tool_name: Some("write_file".to_owned()),
+        normalized_text_range: None,
+    };
+    let rename = UnscopedRepositoryFileInvocationEvidence {
+        operation_ordinal: 0,
+        path: "src/new.rs".to_owned(),
+        prior_path: Some("src/old.rs".to_owned()),
+        kind: RepositoryFileInvocationKind::Rename,
+        tool_name: Some("rename_file".to_owned()),
+        normalized_text_range: None,
+    };
+    let annotation = attribute(AttributionInput {
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        structured_content: Some(serde_json::json!({
+            "recursive": {"path": "invented.rs", "action": "delete"}
+        })),
+        repository_file_invocation_evidence: vec![read.clone(), write, rename, read],
+        file_observations: vec![UnscopedFileObservation {
+            path: "observed-only.rs".to_owned(),
+            prior_path: None,
+            kind: RepositoryFileObservationKind::Unknown,
+        }],
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_file_invocation_evidence.len(), 3);
+    assert_eq!(
+        annotation
+            .repository_file_invocation_evidence
+            .iter()
+            .map(|evidence| evidence.operation_ordinal)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        annotation.repository_file_invocation_evidence[0]
+            .prior_relative_path
+            .as_deref(),
+        Some("src/old.rs")
+    );
+    let read = &annotation.repository_file_invocation_evidence[2];
+    assert_eq!(read.relative_path, "tracked.txt");
+    assert_eq!(read.kind, RepositoryFileInvocationKind::Read);
+    assert_eq!(read.tool_name.as_deref(), Some("read_file"));
+    assert_eq!(
+        read.normalized_text_range,
+        Some(RepositoryFileInvocationTextRange { start: 5, end: 12 })
+    );
+    assert_eq!(annotation.repository_file_observations.len(), 1);
+    assert!(annotation
+        .repository_file_invocation_evidence
+        .iter()
+        .all(|evidence| evidence.relative_path != "observed-only.rs"
+            && evidence.relative_path != "invented.rs"));
+}
+
+#[test]
+fn generic_observations_and_structured_json_never_create_invocation_evidence() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "generic-only", None);
+    let annotation = attribute(AttributionInput {
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        structured_content: Some(serde_json::json!({
+            "tool": {"name": "read_file", "path": "tracked.txt", "operation_ordinal": 0}
+        })),
+        file_observations: vec![UnscopedFileObservation {
+            path: "tracked.txt".to_owned(),
+            prior_path: None,
+            kind: RepositoryFileObservationKind::Read,
+        }],
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_file_observations.len(), 1);
+    assert!(annotation.repository_file_invocation_evidence.is_empty());
+}
+
+#[test]
+fn invocation_intent_never_asserts_a_file_effect_observation() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "intent-not-effect", None);
+    let annotation = attribute(AttributionInput {
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        repository_file_invocation_evidence: vec![UnscopedRepositoryFileInvocationEvidence {
+            operation_ordinal: 0,
+            path: "src/new.rs".to_owned(),
+            prior_path: None,
+            kind: RepositoryFileInvocationKind::Create,
+            tool_name: Some("create_file".to_owned()),
+            normalized_text_range: None,
+        }],
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_file_invocation_evidence.len(), 1);
+    assert!(annotation.repository_file_observations.is_empty());
+}
+
+#[test]
+fn invocation_rename_requires_both_paths_in_one_certified_repository() {
+    let temp = TempDir::new().unwrap();
+    let first = repository(temp.path(), "rename-first", None);
+    let second = repository(temp.path(), "rename-second", None);
+    let annotation = attribute(AttributionInput {
+        repository_file_invocation_evidence: vec![UnscopedRepositoryFileInvocationEvidence {
+            operation_ordinal: 7,
+            path: first.join("tracked.txt").to_string_lossy().into_owned(),
+            prior_path: Some(second.join("tracked.txt").to_string_lossy().into_owned()),
+            kind: RepositoryFileInvocationKind::Rename,
+            tool_name: Some("rename_file".to_owned()),
+            normalized_text_range: None,
+        }],
+        ..AttributionInput::default()
+    });
+
+    assert!(annotation.repository_file_invocation_evidence.is_empty());
+    assert!(has_reason(
+        &annotation,
+        RepositoryAbstentionReason::UnscopedFileActivity
+    ));
+}
+
+#[test]
+fn invalid_invocation_path_fails_closed_without_session_repository_fallback() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "invocation-fallback", None);
+    let annotation = attribute(AttributionInput {
+        session_cwd: Some(repo.to_string_lossy().into_owned()),
+        repository_file_invocation_evidence: vec![UnscopedRepositoryFileInvocationEvidence {
+            operation_ordinal: 0,
+            path: "$DYNAMIC/file.rs".to_owned(),
+            prior_path: None,
+            kind: RepositoryFileInvocationKind::Read,
+            tool_name: Some("read_file".to_owned()),
+            normalized_text_range: None,
+        }],
+        ..AttributionInput::default()
+    });
+
+    assert!(annotation.repository_bindings.is_empty());
+    assert!(annotation.repository_file_invocation_evidence.is_empty());
+    assert!(has_reason(
+        &annotation,
+        RepositoryAbstentionReason::UnscopedFileActivity
+    ));
+}
+
+#[test]
+fn duplicate_invocation_and_observation_paths_share_one_candidate_slot() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "mixed-duplicate-ceiling", None);
+    let mut file_observations = Vec::new();
+    for index in 0..32 {
+        let path = repo.join(format!("candidate-{index}.txt"));
+        fs::write(&path, "candidate\n").unwrap();
+        file_observations.push(UnscopedFileObservation {
+            path: path.to_string_lossy().into_owned(),
+            prior_path: None,
+            kind: RepositoryFileObservationKind::Modified,
+        });
+    }
+    let annotation = attribute(AttributionInput {
+        repository_file_invocation_evidence: vec![UnscopedRepositoryFileInvocationEvidence {
+            operation_ordinal: 0,
+            path: file_observations[0].path.clone(),
+            prior_path: None,
+            kind: RepositoryFileInvocationKind::Modify,
+            tool_name: Some("apply_patch".to_owned()),
+            normalized_text_range: None,
+        }],
+        file_observations,
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_bindings.len(), 1);
+    assert_eq!(annotation.repository_file_observations.len(), 32);
+    assert_eq!(annotation.repository_file_invocation_evidence.len(), 1);
+    assert!(!has_reason(
+        &annotation,
+        RepositoryAbstentionReason::CandidateLimitExceeded
+    ));
+}
+
+#[test]
+fn strict_candidate_overflow_preserves_admissible_ordinary_attribution() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "strict-overflow-ordinary", None);
+    let repository_file_invocation_evidence = (0..33)
+        .map(|operation_ordinal| {
+            let path = repo.join(format!("strict-{operation_ordinal}.txt"));
+            fs::write(&path, "strict\n").unwrap();
+            UnscopedRepositoryFileInvocationEvidence {
+                operation_ordinal,
+                path: path.to_string_lossy().into_owned(),
+                prior_path: None,
+                kind: RepositoryFileInvocationKind::Modify,
+                tool_name: Some("apply_patch".to_owned()),
+                normalized_text_range: None,
+            }
+        })
+        .collect();
+    let annotation = attribute(AttributionInput {
+        repository_file_invocation_evidence,
+        file_observations: vec![UnscopedFileObservation {
+            path: repo.join("tracked.txt").to_string_lossy().into_owned(),
+            prior_path: None,
+            kind: RepositoryFileObservationKind::Modified,
+        }],
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_bindings.len(), 1);
+    assert_eq!(annotation.repository_file_observations.len(), 1);
+    assert!(annotation.repository_file_invocation_evidence.is_empty());
+    assert!(has_reason(
+        &annotation,
+        RepositoryAbstentionReason::CandidateLimitExceeded
+    ));
+}
+
+#[test]
+fn mixed_candidate_channels_are_admitted_at_the_shared_ceiling() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "mixed-channel-ceiling", None);
+    let command_dir = repo.join("command-route");
+    fs::create_dir(&command_dir).unwrap();
+    let mut vcs_observations = Vec::new();
+    for index in 0..10 {
+        let path = repo.join(format!("vcs-route-{index}"));
+        fs::create_dir(&path).unwrap();
+        vcs_observations.push(UnscopedVcsObservation {
+            path: Some(path.to_string_lossy().into_owned()),
+            kind: RepositoryVcsObservationKind::Commit,
+            object_id: None,
+            parent_object_ids: Vec::new(),
+            reference: None,
+        });
+    }
+    let mut file_observations = Vec::new();
+    for index in 0..10 {
+        let path = repo.join(format!("ordinary-{index}.txt"));
+        fs::write(&path, "ordinary\n").unwrap();
+        file_observations.push(UnscopedFileObservation {
+            path: path.to_string_lossy().into_owned(),
+            prior_path: None,
+            kind: RepositoryFileObservationKind::Modified,
+        });
+    }
+    let repository_file_invocation_evidence = (0..11)
+        .map(|operation_ordinal| {
+            let path = repo.join(format!("strict-{operation_ordinal}.txt"));
+            fs::write(&path, "strict\n").unwrap();
+            UnscopedRepositoryFileInvocationEvidence {
+                operation_ordinal,
+                path: path.to_string_lossy().into_owned(),
+                prior_path: None,
+                kind: RepositoryFileInvocationKind::Modify,
+                tool_name: Some("apply_patch".to_owned()),
+                normalized_text_range: None,
+            }
+        })
+        .collect();
+    let annotation = attribute(AttributionInput {
+        command: Some(format!("git -C {} status", command_dir.display())),
+        repository_file_invocation_evidence,
+        file_observations,
+        vcs_observations,
+        ..AttributionInput::default()
+    });
+
+    assert_eq!(annotation.repository_bindings.len(), 1);
+    assert_eq!(annotation.repository_file_observations.len(), 10);
+    assert_eq!(annotation.repository_vcs_observations.len(), 10);
+    assert_eq!(annotation.repository_file_invocation_evidence.len(), 11);
+    assert!(!has_reason(
+        &annotation,
+        RepositoryAbstentionReason::CandidateLimitExceeded
+    ));
 }
 
 #[test]

@@ -72,6 +72,7 @@ pub(super) fn project_event(
     record.repository_candidate_evidence = annotation.repository_candidate_evidence;
     record.repository_bindings = annotation.repository_bindings;
     record.repository_abstentions = annotation.repository_abstentions;
+    record.repository_file_invocation_evidence = annotation.repository_file_invocation_evidence;
     record.repository_file_observations = annotation.repository_file_observations;
     record.repository_vcs_observations = annotation.repository_vcs_observations;
     record.validate_contract()?;
