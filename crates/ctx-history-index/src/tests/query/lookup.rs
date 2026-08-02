@@ -798,6 +798,78 @@ fn bounded_core_event_batch_is_complete_and_requested_ordered() {
 }
 
 #[test]
+fn strict_core_event_stream_selects_once_and_materializes_in_requested_order() {
+    let temp = tempdir().unwrap();
+    let source = source("strict-streaming-events.jsonl");
+    let first = document(&source, 1, "first complete body");
+    let second = document(&source, 2, "second complete body");
+    let third = document(&source, 3, "third complete body");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(first.clone()).unwrap();
+    writer.add_core_record(second.clone()).unwrap();
+    writer.add_core_record(third.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 3)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let requested = [
+        third.event_id.as_uuid(),
+        first.event_id.as_uuid(),
+        second.event_id.as_uuid(),
+    ];
+    crate::query::reset_core_event_id_selection_queries();
+    crate::query::reset_stored_core_event_record_materializations();
+    let mut stream = index
+        .stream_core_events_by_ids_with_strict_per_record_budget(
+            &requested,
+            requested.len(),
+            DEFAULT_CORE_EVENT_PAGE_BUDGET,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(crate::query::core_event_id_selection_queries(), 1);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+
+    for (offset, expected) in [third, first, second].into_iter().enumerate() {
+        let actual = stream.next().unwrap().unwrap();
+        assert_eq!(actual.core_record, expected);
+        assert_eq!(
+            crate::query::stored_core_event_record_materializations(),
+            offset + 1
+        );
+    }
+    assert!(stream.next().is_none());
+    assert_eq!(crate::query::core_event_id_selection_queries(), 1);
+    drop(stream);
+
+    crate::query::reset_core_event_id_selection_queries();
+    let duplicate = index.stream_core_events_by_ids_with_strict_per_record_budget(
+        &[requested[0], requested[0]],
+        2,
+        DEFAULT_CORE_EVENT_PAGE_BUDGET,
+    );
+    assert!(matches!(
+        duplicate,
+        Err(IndexError::DuplicateEventIdentity(_))
+    ));
+    assert_eq!(crate::query::core_event_id_selection_queries(), 0);
+
+    crate::query::reset_core_event_id_selection_queries();
+    crate::query::reset_stored_core_event_record_materializations();
+    assert!(index
+        .stream_core_events_by_ids_with_strict_per_record_budget(
+            &[requested[0], Uuid::nil()],
+            2,
+            DEFAULT_CORE_EVENT_PAGE_BUDGET,
+        )
+        .unwrap()
+        .is_none());
+    assert_eq!(crate::query::core_event_id_selection_queries(), 1);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+}
+
+#[test]
 fn strict_core_event_batch_rejects_fast_content_overflow_before_stored_materialization() {
     let temp = tempdir().unwrap();
     let source = source("strict-content-preflight.jsonl");
@@ -821,6 +893,19 @@ fn strict_core_event_batch_rejects_fast_content_overflow_before_stored_materiali
     crate::query::reset_core_record_decodes();
     assert!(index
         .core_events_by_ids_with_strict_budget(
+            &requested,
+            requested.len(),
+            CoreEventPageBudget::new(ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES, 1),
+        )
+        .unwrap()
+        .is_none());
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+    assert_eq!(crate::query::core_record_decodes(), 0);
+
+    crate::query::reset_stored_core_event_record_materializations();
+    crate::query::reset_core_record_decodes();
+    assert!(index
+        .stream_core_events_by_ids_with_strict_per_record_budget(
             &requested,
             requested.len(),
             CoreEventPageBudget::new(ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES, 1),
@@ -1049,6 +1134,24 @@ fn strict_core_event_batch_rejects_forged_fast_content_size_after_decode() {
     );
     assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
     assert_eq!(crate::query::core_record_decodes(), 1);
+
+    crate::query::reset_stored_core_event_record_materializations();
+    crate::query::reset_core_record_decodes();
+    let mut stream = pinned
+        .stream_core_events_by_ids_with_strict_per_record_budget(
+            &[record.event_id.as_uuid()],
+            1,
+            DEFAULT_CORE_EVENT_PAGE_BUDGET,
+        )
+        .unwrap()
+        .unwrap();
+    let streamed = stream.next().unwrap();
+    assert!(matches!(
+        streamed,
+        Err(IndexError::InvalidStoredDocumentField("core_content_bytes"))
+    ));
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
+    assert_eq!(crate::query::core_record_decodes(), 1);
 }
 
 #[test]
@@ -1103,6 +1206,26 @@ fn strict_core_event_batch_rejects_forged_fast_encoded_size_before_decode() {
         ),
         "unexpected strict corruption result: {result:?}"
     );
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
+    assert_eq!(crate::query::core_record_decodes(), 0);
+
+    crate::query::reset_stored_core_event_record_materializations();
+    crate::query::reset_core_record_decodes();
+    let mut stream = pinned
+        .stream_core_events_by_ids_with_strict_per_record_budget(
+            &[record.event_id.as_uuid()],
+            1,
+            DEFAULT_CORE_EVENT_PAGE_BUDGET,
+        )
+        .unwrap()
+        .unwrap();
+    let streamed = stream.next().unwrap();
+    assert!(matches!(
+        streamed,
+        Err(IndexError::InvalidStoredDocumentField(
+            "core_record_encoded_bytes"
+        ))
+    ));
     assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
     assert_eq!(crate::query::core_record_decodes(), 0);
 }

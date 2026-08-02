@@ -41,13 +41,13 @@ use super::{
     shared::{index_root, render_active_generation_race, ActiveGenerationRaceCommand},
 };
 
-use hydration::core_records_for_search_hits;
+use hydration::presentations_for_search_hits;
+pub(in crate::commands::source_index) use hydration::SearchPresentation;
 #[cfg(test)]
 pub(super) use hydration::{
-    core_records_for_search_hits_with_budget, SearchCoreHydrationBudget,
-    SearchCoreHydrationBudgetExceeded, SearchCoreHydrationBudgetStage,
-    SEARCH_CORE_BODY_PREFIX_CHARS, SEARCH_CORE_HYDRATION_BUDGET,
-    SEARCH_CORE_MAX_RETAINED_BODY_BYTES,
+    presentations_for_search_hits_with_budget, SearchPresentationHydrationBudget,
+    SearchPresentationRetentionBudgetExceeded, SEARCH_PRESENTATION_HYDRATION_BUDGET,
+    SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
 };
 pub(crate) use query::SourceSearchRequest;
 pub(super) use query::{index_search_filters, NormalizedSearchQuery};
@@ -91,9 +91,55 @@ pub(super) struct SemanticFallbackDiagnostics {
 
 #[derive(Debug, Clone)]
 pub(super) struct SearchHit {
-    pub(super) event: EventRecord,
+    pub(super) event: SearchEventMetadata,
     pub(super) score: f32,
     pub(super) more_matches_in_session: usize,
+}
+
+/// The exact immutable event fields retained after candidate shaping and used
+/// by search presentation, rendering, and context accounting. Large source,
+/// native-identity, and touched-file metadata stays outside the result window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands::source_index) struct SearchEventMetadata {
+    pub(in crate::commands::source_index) event_id: Uuid,
+    pub(in crate::commands::source_index) session_id: Uuid,
+    pub(in crate::commands::source_index) parent_session_id: Option<Uuid>,
+    pub(in crate::commands::source_index) root_session_id: Uuid,
+    pub(in crate::commands::source_index) provider: String,
+    pub(in crate::commands::source_index) source_format: String,
+    pub(in crate::commands::source_index) provider_session_id: Option<String>,
+    pub(in crate::commands::source_index) branch: Option<String>,
+    pub(in crate::commands::source_index) agent_type: String,
+    pub(in crate::commands::source_index) is_primary: bool,
+    pub(in crate::commands::source_index) event_sequence: u64,
+    pub(in crate::commands::source_index) occurred_at_unix_ms: Option<i64>,
+    pub(in crate::commands::source_index) event_type: String,
+    pub(in crate::commands::source_index) role: Option<String>,
+    pub(in crate::commands::source_index) workspace: Option<String>,
+    pub(in crate::commands::source_index) cwd: Option<String>,
+}
+
+impl From<&EventRecord> for SearchEventMetadata {
+    fn from(event: &EventRecord) -> Self {
+        Self {
+            event_id: event.event_id.as_uuid(),
+            session_id: event.session_id.as_uuid(),
+            parent_session_id: event.parent_session_id.map(|id| id.as_uuid()),
+            root_session_id: event.root_session_id.as_uuid(),
+            provider: event.provider.clone(),
+            source_format: event.source_format.clone(),
+            provider_session_id: event.provider_session_id.clone(),
+            branch: event.branch.clone(),
+            agent_type: event.agent_type.clone(),
+            is_primary: event.is_primary,
+            event_sequence: event.event_sequence,
+            occurred_at_unix_ms: event.occurred_at_unix_ms,
+            event_type: event.event_type.clone(),
+            role: event.role.clone(),
+            workspace: event.workspace.clone(),
+            cwd: event.cwd.clone(),
+        }
+    }
 }
 
 pub(super) struct RefreshOutcome {
@@ -316,7 +362,7 @@ pub(super) fn search_context_observation(
         .result_window
         .hits
         .iter()
-        .map(|hit| hit.event.session_id.as_uuid())
+        .map(|hit| hit.event.session_id)
         .collect::<BTreeSet<_>>();
     let mut matched_normalized_session_bytes = 0_usize;
     for session_id in session_ids {
@@ -417,7 +463,7 @@ pub(super) fn search_existing_generation(
     let collection =
         collect_search_hits_with_backend(request, &index, data_root, semantic_weight, &filters)?;
     let query_duration = query_started.elapsed();
-    let core_records = core_records_for_search_hits(
+    let presentations = presentations_for_search_hits(
         &index,
         &collection.result_window.hits,
         &NormalizedSearchQuery::from_request(request),
@@ -428,7 +474,7 @@ pub(super) fn search_existing_generation(
         &index,
         &collection,
         &filters,
-        &core_records,
+        &presentations,
         refresh_status,
         refresh_source_count,
         query_duration,
@@ -788,7 +834,7 @@ pub(super) fn shape_search_result_window<'a>(
             .into_iter()
             .take(shape_limit)
             .map(|candidate| SearchHit {
-                event: candidate.event.clone(),
+                event: SearchEventMetadata::from(&candidate.event),
                 score: candidate.score,
                 more_matches_in_session: 0,
             })
@@ -809,7 +855,7 @@ pub(super) fn shape_search_result_window<'a>(
             }
             positions.insert(session_id, hits.len());
             hits.push(SearchHit {
-                event: candidate.event.clone(),
+                event: SearchEventMetadata::from(&candidate.event),
                 score: candidate.score,
                 more_matches_in_session: 0,
             });

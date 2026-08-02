@@ -74,6 +74,7 @@ thread_local! {
     static STORED_EVENT_RECORD_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static STORED_CORE_EVENT_RECORD_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static CORE_RECORD_DECODES: Cell<usize> = const { Cell::new(0) };
+    static CORE_EVENT_ID_SELECTION_QUERIES: Cell<usize> = const { Cell::new(0) };
     static SOURCE_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
     static SESSION_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
     static SEMANTIC_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
@@ -110,6 +111,16 @@ pub(crate) fn reset_core_record_decodes() {
 #[cfg(test)]
 pub(crate) fn core_record_decodes() -> usize {
     CORE_RECORD_DECODES.get()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_core_event_id_selection_queries() {
+    CORE_EVENT_ID_SELECTION_QUERIES.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn core_event_id_selection_queries() -> usize {
+    CORE_EVENT_ID_SELECTION_QUERIES.get()
 }
 
 #[cfg(test)]

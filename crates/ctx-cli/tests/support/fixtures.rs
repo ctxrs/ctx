@@ -1,5 +1,6 @@
 use ctx_history_index::{CoreRecord, GenerationWriter, VerifiedIndex, WriterOptions};
 use rusqlite::Connection;
+use serde_json::json;
 use std::{
     collections::BTreeSet,
     fs,
@@ -83,6 +84,44 @@ pub(crate) fn initialize_generation_only_core(data_root: &Path) -> String {
     let verified = VerifiedIndex::open(index_root).unwrap();
     assert_eq!(verified.generation_id(), core_receipt.generation_id);
     core_receipt.generation_id
+}
+
+pub(crate) fn write_codex_message_fixture(root: &Path, session_id: &str, message: &str) -> PathBuf {
+    fs::create_dir_all(root).unwrap();
+    let path = root.join(format!("rollout-{session_id}.jsonl"));
+    let records = [
+        json!({
+            "timestamp": "2026-08-02T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": session_id,
+                "timestamp": "2026-08-02T12:00:00Z",
+                "cwd": "/workspace/huge-grapheme",
+                "originator": "codex_cli_rs",
+                "cli_version": "0.1.0",
+                "source": "cli",
+                "model_provider": "openai"
+            }
+        }),
+        json!({
+            "timestamp": "2026-08-02T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": message
+                }]
+            }
+        }),
+    ];
+    let encoded = records
+        .iter()
+        .map(|record| format!("{}\n", serde_json::to_string(record).unwrap()))
+        .collect::<String>();
+    fs::write(&path, encoded).unwrap();
+    path
 }
 
 pub(crate) fn provider_core_records(data_root: &Path, provider: &str) -> Vec<CoreRecord> {

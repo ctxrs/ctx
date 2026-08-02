@@ -8,7 +8,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use super::{
     render_search_document, render_show_document, render_show_jsonl, render_show_markdown,
-    render_show_text, search_snippet_fragment, SEARCH_SNIPPET_MAX_CHARS,
+    render_show_text, search_snippet_fragment, SEARCH_SNIPPET_MAX_BYTES, SEARCH_SNIPPET_MAX_CHARS,
 };
 use crate::{
     cli::Cli,
@@ -63,6 +63,36 @@ fn search_snippet_keeps_combining_and_emoji_graphemes_intact() {
     assert_eq!(graphemes.first().copied(), Some(combining));
     assert_eq!(graphemes.last().copied(), Some(family));
     assert!(snippet.contains("目标"));
+}
+
+#[test]
+fn search_snippet_byte_bounds_pathological_large_grapheme_clusters_around_the_query() {
+    let oversized_cluster = format!("x{}", "\u{301}".repeat(SEARCH_SNIPPET_MAX_BYTES));
+    let body = format!("{oversized_cluster}needle{oversized_cluster}");
+
+    let (snippet, truncated) = search_snippet_fragment(&body, &["needle"]);
+
+    assert!(truncated);
+    assert!(snippet.len() <= SEARCH_SNIPPET_MAX_BYTES);
+    assert!(snippet.contains("needle"));
+    let start = body.find(&snippet).expect("snippet remains a body window");
+    let end = start + snippet.len();
+    assert!(body
+        .grapheme_indices(true)
+        .any(|(offset, _)| offset == start));
+    assert!(end == body.len() || body.grapheme_indices(true).any(|(offset, _)| offset == end));
+    assert_eq!(snippet.graphemes(true).next(), Some("n"));
+    assert_eq!(snippet.graphemes(true).next_back(), Some("e"));
+    assert!(!snippet.starts_with('\u{301}'));
+    assert!(!snippet.ends_with('\u{301}'));
+
+    let first = search_snippet_fragment(&oversized_cluster, &["x"]);
+    let second = search_snippet_fragment(&oversized_cluster, &["x"]);
+    assert_eq!(first, second);
+    assert_eq!(first, (String::new(), true));
+
+    let metadata_only = search_snippet_fragment(&oversized_cluster, &[]);
+    assert_eq!(metadata_only, (String::new(), true));
 }
 
 #[test]

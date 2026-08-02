@@ -1,171 +1,168 @@
-use std::{collections::HashMap, fmt};
+use std::{collections::BTreeSet, fmt};
 
 use anyhow::{anyhow, Result};
-use ctx_history_core::{CoreRecord, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES};
+use ctx_history_core::{MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES};
 use ctx_history_index::{CoreEventPageBudget, CoreEventRecord, VerifiedIndex};
 use uuid::Uuid;
 
 use crate::MAX_SEARCH_LIMIT;
 
-use super::{NormalizedSearchQuery, SearchHit};
-use crate::commands::source_index::render::{
-    search_snippet_fragment, SearchCorePresentation, SEARCH_SNIPPET_MAX_CHARS,
-};
+use super::{NormalizedSearchQuery, SearchEventMetadata, SearchHit};
+use crate::commands::source_index::render::{search_snippet_fragment, SEARCH_SNIPPET_MAX_BYTES};
 
-#[cfg(test)]
-pub(in crate::commands::source_index) const SEARCH_CORE_BODY_PREFIX_CHARS: usize =
-    SEARCH_SNIPPET_MAX_CHARS;
-const MAX_UTF8_CHAR_BYTES: usize = 4;
-pub(in crate::commands::source_index) const SEARCH_CORE_MAX_RETAINED_BODY_BYTES: usize =
-    MAX_SEARCH_LIMIT * SEARCH_SNIPPET_MAX_CHARS * MAX_UTF8_CHAR_BYTES;
-const SEARCH_CORE_MAX_AGGREGATE_ENCODED_BYTES: usize = MAX_ENCODED_CORE_RECORD_BYTES;
-const SEARCH_CORE_MAX_AGGREGATE_CONTENT_BYTES: usize = MAX_CORE_CONTENT_BYTES;
+const SEARCH_CORE_RECORD_BUDGET: CoreEventPageBudget =
+    CoreEventPageBudget::new(MAX_ENCODED_CORE_RECORD_BYTES, MAX_CORE_CONTENT_BYTES);
+pub(in crate::commands::source_index) const SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES: usize =
+    MAX_SEARCH_LIMIT * SEARCH_SNIPPET_MAX_BYTES;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::commands::source_index) struct SearchCoreHydrationBudget {
-    pub(in crate::commands::source_index) maximum_encoded_core_bytes: usize,
-    pub(in crate::commands::source_index) maximum_content_bytes: usize,
-    pub(in crate::commands::source_index) maximum_retained_body_bytes: usize,
+/// Compact, non-authoritative search state derived from one complete stored
+/// Core record. Event metadata is borrowed from the already compact result
+/// window; only the snippet is newly retained.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::commands::source_index) struct SearchPresentation<'event> {
+    pub(in crate::commands::source_index) event: &'event SearchEventMetadata,
+    pub(in crate::commands::source_index) snippet: String,
+    pub(in crate::commands::source_index) snippet_truncated: bool,
 }
 
-pub(in crate::commands::source_index) const SEARCH_CORE_HYDRATION_BUDGET:
-    SearchCoreHydrationBudget = SearchCoreHydrationBudget {
-    maximum_encoded_core_bytes: SEARCH_CORE_MAX_AGGREGATE_ENCODED_BYTES,
-    maximum_content_bytes: SEARCH_CORE_MAX_AGGREGATE_CONTENT_BYTES,
-    maximum_retained_body_bytes: SEARCH_CORE_MAX_RETAINED_BODY_BYTES,
-};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::commands::source_index) enum SearchCoreHydrationBudgetStage {
-    Decode,
-    Retention,
+pub(in crate::commands::source_index) struct SearchPresentationHydrationBudget {
+    pub(in crate::commands::source_index) maximum_retained_snippet_bytes: usize,
 }
+
+pub(in crate::commands::source_index) const SEARCH_PRESENTATION_HYDRATION_BUDGET:
+    SearchPresentationHydrationBudget = SearchPresentationHydrationBudget {
+    maximum_retained_snippet_bytes: SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::commands::source_index) struct SearchCoreHydrationBudgetExceeded {
+pub(in crate::commands::source_index) struct SearchPresentationRetentionBudgetExceeded {
     pub(in crate::commands::source_index) event_id: Uuid,
-    pub(in crate::commands::source_index) stage: SearchCoreHydrationBudgetStage,
-    pub(in crate::commands::source_index) admitted_encoded_core_bytes: usize,
-    pub(in crate::commands::source_index) maximum_encoded_core_bytes: usize,
-    pub(in crate::commands::source_index) admitted_content_bytes: usize,
-    pub(in crate::commands::source_index) maximum_content_bytes: usize,
-    pub(in crate::commands::source_index) retained_body_bytes: usize,
-    pub(in crate::commands::source_index) maximum_retained_body_bytes: usize,
+    pub(in crate::commands::source_index) retained_snippet_bytes: usize,
+    pub(in crate::commands::source_index) maximum_retained_snippet_bytes: usize,
 }
 
-impl fmt::Display for SearchCoreHydrationBudgetExceeded {
+impl fmt::Display for SearchPresentationRetentionBudgetExceeded {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "Core search event {} cannot fit the aggregate search {:?} budget (encoded Core: {}/{}, decoded content: {}/{}, retained snippet bodies: {}/{})",
+            "Core search event {} cannot fit the bounded search presentation retention budget (retained snippets: {}/{})",
             self.event_id,
-            self.stage,
-            self.admitted_encoded_core_bytes,
-            self.maximum_encoded_core_bytes,
-            self.admitted_content_bytes,
-            self.maximum_content_bytes,
-            self.retained_body_bytes,
-            self.maximum_retained_body_bytes,
+            self.retained_snippet_bytes,
+            self.maximum_retained_snippet_bytes,
         )
     }
 }
 
-impl std::error::Error for SearchCoreHydrationBudgetExceeded {}
+impl std::error::Error for SearchPresentationRetentionBudgetExceeded {}
 
-pub(super) fn core_records_for_search_hits(
+pub(super) fn presentations_for_search_hits<'event>(
     index: &VerifiedIndex,
-    hits: &[SearchHit],
+    hits: &'event [SearchHit],
     query: &NormalizedSearchQuery,
-) -> Result<HashMap<Uuid, SearchCorePresentation>> {
-    core_records_for_search_hits_with_budget(index, hits, query, SEARCH_CORE_HYDRATION_BUDGET)
+) -> Result<Vec<SearchPresentation<'event>>> {
+    presentations_for_search_hits_with_budget(
+        index,
+        hits,
+        query,
+        SEARCH_PRESENTATION_HYDRATION_BUDGET,
+    )
 }
 
-pub(in crate::commands::source_index) fn core_records_for_search_hits_with_budget(
+pub(in crate::commands::source_index) fn presentations_for_search_hits_with_budget<'event>(
     index: &VerifiedIndex,
-    hits: &[SearchHit],
+    hits: &'event [SearchHit],
     query: &NormalizedSearchQuery,
-    budget: SearchCoreHydrationBudget,
-) -> Result<HashMap<Uuid, SearchCorePresentation>> {
-    if budget.maximum_encoded_core_bytes == 0
-        || budget.maximum_content_bytes == 0
-        || budget.maximum_retained_body_bytes == 0
-    {
-        return Err(anyhow!("Core search hydration budgets must be positive"));
+    budget: SearchPresentationHydrationBudget,
+) -> Result<Vec<SearchPresentation<'event>>> {
+    if budget.maximum_retained_snippet_bytes == 0 {
+        return Err(anyhow!(
+            "search presentation hydration budget must be positive"
+        ));
+    }
+
+    let mut requested = BTreeSet::new();
+    for hit in hits {
+        if !requested.insert(hit.event.event_id) {
+            return Err(anyhow!(
+                "search result duplicated Core event {}",
+                hit.event.event_id
+            ));
+        }
     }
 
     let event_ids = hits
         .iter()
-        .map(|hit| hit.event.event_id.as_uuid())
+        .map(|hit| hit.event.event_id)
         .collect::<Vec<_>>();
-    let page_budget = CoreEventPageBudget::new(
-        budget.maximum_encoded_core_bytes,
-        budget.maximum_content_bytes,
-    );
-    // Resolve all selected addresses with one bounded Tantivy query. The
-    // aggregate encoded/content ceilings bound complete decoded records for
-    // this batch. Each record is reduced to its compact query-centered
-    // presentation before it enters the returned map.
-    let batch = index
-        .core_events_by_ids_with_strict_budget(&event_ids, event_ids.len(), page_budget)?
+    // Execute one generation-pinned Tantivy selection. The returned iterator
+    // decodes exactly one complete Core record at a time, allowing each body
+    // to be projected and discarded before the next record is materialized.
+    let mut records = index
+        .stream_core_events_by_ids_with_strict_per_record_budget(
+            &event_ids,
+            hits.len(),
+            SEARCH_CORE_RECORD_BUDGET,
+        )?
         .ok_or_else(|| {
-            search_core_hydration_budget_error(
-                event_ids.first().copied().unwrap_or_else(Uuid::nil),
-                SearchCoreHydrationBudgetStage::Decode,
-                0,
-                0,
-                0,
-                budget,
+            anyhow!(
+                "pinned Core lookup omitted search event {}",
+                event_ids.first().copied().unwrap_or_else(Uuid::nil)
             )
         })?;
-    let admitted_encoded_core_bytes = batch.encoded_core_bytes;
-    let admitted_content_bytes = batch.content_bytes;
-    let mut records = HashMap::with_capacity(hits.len());
-    let mut retained_body_bytes = 0_usize;
     let query_texts = query.texts();
-    for (event_id, record) in event_ids.into_iter().zip(batch.items) {
-        if record.event_id.as_uuid() != event_id {
-            return Err(anyhow!(
-                "pinned Core lookup returned an invalid record for search event {event_id}"
-            ));
-        }
-        let (record, body_bytes) = search_core_presentation_projection(record, &query_texts)?;
-        let next_retained_body_bytes =
-            retained_body_bytes.checked_add(body_bytes).ok_or_else(|| {
-                search_core_hydration_budget_error(
-                    event_id,
-                    SearchCoreHydrationBudgetStage::Retention,
-                    admitted_encoded_core_bytes,
-                    admitted_content_bytes,
-                    retained_body_bytes,
-                    budget,
-                )
+    let mut presentations = Vec::with_capacity(hits.len());
+    let mut retained_snippet_bytes = 0_usize;
+    for hit in hits {
+        let event_id = hit.event.event_id;
+        let record = records
+            .next()
+            .transpose()?
+            .ok_or_else(|| anyhow!("pinned Core lookup omitted search event {event_id}"))?;
+
+        let (presentation, snippet_bytes) =
+            search_presentation_projection(record, &hit.event, &query_texts)?;
+        let next_retained_snippet_bytes = retained_snippet_bytes
+            .checked_add(snippet_bytes)
+            .ok_or_else(|| {
+                search_presentation_retention_budget_error(event_id, retained_snippet_bytes, budget)
             })?;
-        if next_retained_body_bytes > budget.maximum_retained_body_bytes {
-            return Err(search_core_hydration_budget_error(
+        if next_retained_snippet_bytes > budget.maximum_retained_snippet_bytes {
+            return Err(search_presentation_retention_budget_error(
                 event_id,
-                SearchCoreHydrationBudgetStage::Retention,
-                admitted_encoded_core_bytes,
-                admitted_content_bytes,
-                next_retained_body_bytes,
+                next_retained_snippet_bytes,
                 budget,
             ));
         }
-        retained_body_bytes = next_retained_body_bytes;
-        if records.insert(event_id, record).is_some() {
-            return Err(anyhow!("search result duplicated Core event {event_id}"));
-        }
+        retained_snippet_bytes = next_retained_snippet_bytes;
+        presentations.push(presentation);
     }
-    Ok(records)
+    if records.next().transpose()?.is_some() {
+        return Err(anyhow!(
+            "pinned Core lookup returned more search records than requested"
+        ));
+    }
+    Ok(presentations)
 }
 
-fn search_core_presentation_projection(
+fn search_presentation_projection<'event>(
     record: CoreEventRecord,
+    expected_event: &'event SearchEventMetadata,
     query_texts: &[&str],
-) -> Result<(SearchCorePresentation, usize)> {
+) -> Result<(SearchPresentation<'event>, usize)> {
     let CoreEventRecord {
         event,
         mut core_record,
     } = record;
+    if event.event_id != core_record.event_id
+        || event.session_id != core_record.session_id
+        || SearchEventMetadata::from(&event) != *expected_event
+    {
+        return Err(anyhow!(
+            "pinned Core lookup returned misaligned metadata for search event {}",
+            expected_event.event_id
+        ));
+    }
     let body = core_record
         .content
         .normalized_body
@@ -177,46 +174,32 @@ fn search_core_presentation_projection(
                 event.event_id
             )
         })?;
-    let (fragment, snippet_truncated) = search_snippet_fragment(&body, query_texts);
-    let retained_body_bytes = fragment.len();
+    let (snippet, snippet_truncated) = search_snippet_fragment(&body, query_texts);
+    let retained_snippet_bytes = snippet.len();
 
-    let core_record = CoreRecord::new_selected(
-        core_record.event_id,
-        core_record.session_id,
-        core_record.root_session_id,
-        core_record.source,
-        core_record.event_sequence,
-        core_record.event_type,
-        core_record.agent_type,
-        core_record.is_primary,
-        "search-presentation-v2",
-        fragment,
-    )?;
+    // Neither the complete body nor the remainder of Core crosses the search
+    // presentation boundary.
+    drop(body);
+    drop(event);
+    drop(core_record);
     Ok((
-        SearchCorePresentation {
-            record: CoreEventRecord { event, core_record },
+        SearchPresentation {
+            event: expected_event,
+            snippet,
             snippet_truncated,
         },
-        retained_body_bytes,
+        retained_snippet_bytes,
     ))
 }
 
-fn search_core_hydration_budget_error(
+fn search_presentation_retention_budget_error(
     event_id: Uuid,
-    stage: SearchCoreHydrationBudgetStage,
-    admitted_encoded_core_bytes: usize,
-    admitted_content_bytes: usize,
-    retained_body_bytes: usize,
-    budget: SearchCoreHydrationBudget,
+    retained_snippet_bytes: usize,
+    budget: SearchPresentationHydrationBudget,
 ) -> anyhow::Error {
-    anyhow::Error::new(SearchCoreHydrationBudgetExceeded {
+    anyhow::Error::new(SearchPresentationRetentionBudgetExceeded {
         event_id,
-        stage,
-        admitted_encoded_core_bytes,
-        maximum_encoded_core_bytes: budget.maximum_encoded_core_bytes,
-        admitted_content_bytes,
-        maximum_content_bytes: budget.maximum_content_bytes,
-        retained_body_bytes,
-        maximum_retained_body_bytes: budget.maximum_retained_body_bytes,
+        retained_snippet_bytes,
+        maximum_retained_snippet_bytes: budget.maximum_retained_snippet_bytes,
     })
 }

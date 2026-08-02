@@ -658,6 +658,99 @@ fn mcp_search_returns_structured_json_without_refresh() {
 }
 
 #[test]
+fn mcp_search_keeps_a_hit_whose_matching_grapheme_exceeds_the_snippet_cap() {
+    const SNIPPET_MAX_BYTES: usize = 16 * 1024;
+    const SESSION_ID: &str = "019c0000-0000-7000-8000-000000000002";
+
+    let temp = daemon_test_root();
+    let oversized_cluster = format!("x{}", "\u{301}".repeat(SNIPPET_MAX_BYTES));
+    let fixture = write_codex_message_fixture(
+        &temp.path().join("huge-grapheme-mcp-fixture"),
+        SESSION_ID,
+        &oversized_cluster,
+    );
+    let _daemon = start_mcp_source_refresh_daemon(&temp);
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        fixture.to_str().unwrap(),
+        "--format=json",
+        "--progress=none",
+        "--no-daemon",
+    ]));
+
+    let requests = [
+        json!({
+            "jsonrpc": "2.0",
+            "id": "init",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "ctx-test", "version": "0" }
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "search-1",
+            "method": "tools/call",
+            "params": {
+                "name": "search",
+                "arguments": {
+                    "query": "x",
+                    "provider": "codex",
+                    "events": true,
+                    "include_current_session": true,
+                    "limit": 1,
+                    "backend": "lexical"
+                }
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "search-2",
+            "method": "tools/call",
+            "params": {
+                "name": "search",
+                "arguments": {
+                    "query": "x",
+                    "provider": "codex",
+                    "events": true,
+                    "include_current_session": true,
+                    "limit": 1,
+                    "backend": "lexical"
+                }
+            }
+        }),
+    ];
+    let responses = mcp_roundtrip(&temp, &requests);
+    let first = &responses[1]["result"]["structuredContent"];
+    let second = &responses[2]["result"]["structuredContent"];
+    let first_result = &first["results"][0];
+    let second_result = &second["results"][0];
+
+    assert_eq!(
+        first["results"].as_array().map(Vec::len),
+        Some(1),
+        "{first:#}"
+    );
+    assert_eq!(first_result["snippet"], "", "{first:#}");
+    assert_eq!(first_result["snippet_truncated"], true, "{first:#}");
+    assert!(
+        first_result["snippet"].as_str().unwrap().len() <= SNIPPET_MAX_BYTES,
+        "{first:#}"
+    );
+    assert_eq!(first_result["snippet"], second_result["snippet"]);
+    assert_eq!(
+        first_result["snippet_truncated"],
+        second_result["snippet_truncated"]
+    );
+    assert_eq!(first_result["ctx_event_id"], second_result["ctx_event_id"]);
+}
+
+#[test]
 fn mcp_search_applies_source_backed_identity_filters() {
     let temp = tempdir();
     let (_daemon, _) = import_custom_history_fixture_source_backed(&temp, "basic.jsonl");

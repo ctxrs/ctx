@@ -308,6 +308,101 @@ impl VerifiedIndex {
         )
     }
 
+    /// Selects a complete requested-order Core set with one Tantivy query,
+    /// then decodes records lazily under independent per-record ceilings.
+    ///
+    /// The complete FAST-only candidate set is validated before this returns.
+    /// The iterator retains only addresses and size metadata; each call to
+    /// `next` materializes one complete Core record and validates it against
+    /// the preflight metadata before yielding it.
+    pub fn stream_core_events_by_ids_with_strict_per_record_budget<'index>(
+        &'index self,
+        event_ids: &[Uuid],
+        maximum_events: usize,
+        per_record_budget: CoreEventPageBudget,
+    ) -> Result<Option<impl Iterator<Item = Result<CoreEventRecord>> + 'index>> {
+        validate_core_event_page_budget(per_record_budget)?;
+        if event_ids.len() > maximum_events {
+            return Ok(None);
+        }
+
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let mut requested = BTreeSet::new();
+        for event_id in event_ids {
+            if !requested.insert(*event_id) {
+                return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
+            }
+        }
+        let query = TermSetQuery::new(
+            requested
+                .iter()
+                .map(|event_id| Term::from_field_text(fields.event_id, &event_id.to_string()))
+                .collect::<Vec<_>>(),
+        );
+        #[cfg(test)]
+        CORE_EVENT_ID_SELECTION_QUERIES
+            .set(CORE_EVENT_ID_SELECTION_QUERIES.get().saturating_add(1));
+        let addresses = self.searcher.search(&query, &DocSetCollector)?;
+        let mut by_event_id = BTreeMap::new();
+        for address in addresses {
+            let (event_id, encoded_core_bytes, content_bytes) =
+                core_event_fast_preflight(&self.searcher, address)?;
+            if !requested.contains(&event_id) {
+                return Err(IndexError::InvalidStoredDocumentField("event_id"));
+            }
+            if encoded_core_bytes > per_record_budget.maximum_encoded_core_bytes
+                || content_bytes > per_record_budget.maximum_content_bytes
+            {
+                return Ok(None);
+            }
+            if by_event_id
+                .insert(event_id, (address, encoded_core_bytes, content_bytes))
+                .is_some()
+            {
+                return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
+            }
+        }
+        if by_event_id.len() != requested.len() {
+            return Ok(None);
+        }
+
+        let mut ordered = Vec::with_capacity(event_ids.len());
+        for event_id in event_ids {
+            let Some((address, encoded_core_bytes, content_bytes)) = by_event_id.remove(event_id)
+            else {
+                return Ok(None);
+            };
+            ordered.push((address, *event_id, encoded_core_bytes, content_bytes));
+        }
+        let searcher = &self.searcher;
+        Ok(Some(ordered.into_iter().map(
+            move |(
+                address,
+                expected_event_id,
+                expected_encoded_core_bytes,
+                expected_content_bytes,
+            )| {
+                let (record, encoded_core_bytes) =
+                    stored_core_event_record_with_size(searcher, address, fields)?;
+                let content_bytes = core_content_bytes(&record.core_record.content)?;
+                if record.event_id.as_uuid() != expected_event_id {
+                    return Err(IndexError::InvalidStoredDocumentField("event_id"));
+                }
+                if encoded_core_bytes != expected_encoded_core_bytes {
+                    return Err(IndexError::InvalidStoredDocumentField(
+                        CORE_RECORD_ENCODED_BYTES_FIELD,
+                    ));
+                }
+                if content_bytes != expected_content_bytes {
+                    return Err(IndexError::InvalidStoredDocumentField(
+                        CORE_CONTENT_BYTES_FIELD,
+                    ));
+                }
+                Ok(record)
+            },
+        )))
+    }
+
     fn core_event_batch_by_ids(
         &self,
         event_ids: &[Uuid],
@@ -340,6 +435,9 @@ impl VerifiedIndex {
                 .map(|event_id| Term::from_field_text(fields.event_id, &event_id.to_string()))
                 .collect::<Vec<_>>(),
         );
+        #[cfg(test)]
+        CORE_EVENT_ID_SELECTION_QUERIES
+            .set(CORE_EVENT_ID_SELECTION_QUERIES.get().saturating_add(1));
         let addresses = self.searcher.search(&query, &DocSetCollector)?;
         let per_record_budget = budget_mode.per_record_budget();
         let candidates = if budget_mode.preflights_before_decode() {
