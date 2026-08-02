@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc, Arc, Barrier,
     },
 };
@@ -10,6 +10,11 @@ use crate::semantic::dirty_source_routes::EventWatermark;
 use ctx_history_capture::{
     provider_source_for_path, DiscoveryPlatform, DiscoveryPlatformDirs, ProviderCatalogSupport,
     ProviderImportSupport, ProviderSource, ProviderSourceKind, SourceBackedFailedRoute,
+};
+use ctx_history_core::{
+    derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
+    NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceKey, SourceObservation, TypedKey,
 };
 use ctx_history_index::SourceRouteIdentity;
 use rusqlite::Connection;
@@ -198,6 +203,129 @@ fn publish_selected_routes(
         }];
     }
     Ok(publication)
+}
+
+fn publication_pin_source() -> SourceKey {
+    SourceKey::derive(
+        "codex",
+        "codex_session_jsonl",
+        "session",
+        1,
+        SourceAnchor::CatalogLineage([0x91; 32]),
+    )
+    .unwrap()
+}
+
+fn publication_pin_record(source: &SourceKey) -> CoreRecord {
+    let native_session = TypedKey::utf8("publication-pin-session").unwrap();
+    let session_key = NativeSessionKey::native_id("session", native_session).unwrap();
+    let session_id = derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: "thread",
+        native_session_key: &session_key,
+    })
+    .unwrap();
+    let native_item =
+        NativeItemKey::native_id("message", TypedKey::utf8("publication-pin-event").unwrap())
+            .unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: "message",
+        native_item_key: &native_item,
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let mut record = CoreRecord::new_selected(
+        event_id,
+        session_id,
+        session_id,
+        source.clone(),
+        0,
+        "message",
+        "primary",
+        true,
+        "publication-pin-test-v1",
+        "exact publication pin fixture",
+    )
+    .unwrap();
+    record.provider_session_id = Some("publication-pin-session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(0));
+    record.role = Some("user".to_owned());
+    record.validate_contract().unwrap();
+    record
+}
+
+fn publication_pin_certificate(source: &SourceKey) -> CertifiedSource {
+    let observation = SourceObservation::new(source.clone(), "regular-file-v1", vec![1]).unwrap();
+    CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        "publication-pin-test-v1",
+        [0x92; 32],
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 1,
+            indexed_documents: 1,
+            certified_bytes: 128,
+            ..ScannedSourceCounts::default()
+        },
+    )
+    .unwrap()
+}
+
+fn publish_pin_fixture(
+    execution: &SourceBackedRefreshExecution<'_>,
+    nonempty: bool,
+) -> Result<SourceBackedRefreshPublication> {
+    let mut writer =
+        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?;
+    if nonempty {
+        let source = publication_pin_source();
+        writer.begin_source(source.clone())?;
+        writer.add_core_record(publication_pin_record(&source))?;
+        writer.certify_source(publication_pin_certificate(&source))?;
+    }
+    let commit = writer.commit(|_| true)?;
+    let mut publication = if nonempty {
+        test_publication(commit.generation_id)
+    } else {
+        empty_test_publication(commit.generation_id)
+    };
+    if nonempty {
+        publication.certified_source_count = 1;
+        publication.certified_source_bytes = 128;
+        publication.current = SourceBackedRefreshCurrent {
+            source_count: 1,
+            indexed_documents: 1,
+            complete_records: 1,
+            retained_records: 1,
+            certified_source_bytes: 128,
+            ..SourceBackedRefreshCurrent::default()
+        };
+    }
+    publication.published_explicit_source_catalog = execution
+        .explicit_source_catalog
+        .cloned()
+        .expect("publication pin catalog authority");
+    publication.selected_route_ids = match &execution.scope {
+        SourceBackedRefreshScope::All => Vec::new(),
+        SourceBackedRefreshScope::Exact(routes) => routes
+            .iter()
+            .map(|route| route.as_str().to_owned())
+            .collect(),
+    };
+    publication.successful_route_ids = publication.selected_route_ids.clone();
+    publication.scanned_routes = publication.selected_route_ids.len();
+    Ok(publication)
+}
+
+fn publication_pin_executor(
+    publish_nonempty: Arc<AtomicBool>,
+) -> Arc<dyn SourceBackedRefreshExecutor> {
+    Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+        publish_pin_fixture(&execution, publish_nonempty.load(Ordering::SeqCst))
+    })
 }
 
 fn manual_all_request(
@@ -1943,6 +2071,179 @@ fn verified_publication_atomically_installs_pinned_core_receipt() {
             .generation_id()
     );
     assert!(!coordinator.has_pending_request());
+}
+
+#[test]
+fn publication_remains_running_until_exact_pin_authority_exists() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let publish_nonempty = Arc::new(AtomicBool::new(false));
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(publication_pin_executor(
+        Arc::clone(&publish_nonempty),
+    )));
+    coordinator.enqueue_periodic(&data_root).unwrap();
+    assert!(!coordinator.run_next(&data_root).unwrap().failed);
+    let prior = coordinator
+        .pinned_core_publication()
+        .expect("prior retained authority");
+
+    publish_nonempty.store(true, Ordering::SeqCst);
+    let queued = coordinator.enqueue_periodic(&data_root).unwrap();
+    let request_id = request_id(&queued);
+    let (gate, opener_started, opener_release) = RunningRefreshGate::new();
+    std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_root = data_root.clone();
+        let handle = scope.spawn(move || {
+            runner
+                .run_next_with_verified_index_opener(&runner_root, |index_root| {
+                    opener_started.send(()).expect("signal pin opener");
+                    let _ = opener_release.recv();
+                    Ok(Arc::new(open_verified_index(index_root)?))
+                })
+                .expect("queued publication")
+        });
+        gate.wait_until_started();
+
+        let running = coordinator.status(&request_id).expect("running request");
+        assert_eq!(running["request_state"], "running");
+        assert_eq!(running["published_generation"], prior.generation_id());
+        let durable = pin_published_generation(&data_root)
+            .unwrap()
+            .expect("new durable generation");
+        assert_ne!(durable.generation_id(), prior.generation_id());
+        let visible = coordinator
+            .pinned_core_publication()
+            .expect("prior authority remains visible");
+        assert!(Arc::ptr_eq(&prior, &visible));
+
+        gate.release();
+        let run = handle.join().expect("publication runner");
+        assert!(!run.failed);
+    });
+
+    let published = coordinator.status(&request_id).expect("published request");
+    assert_eq!(published["request_state"], "published");
+    let current = coordinator
+        .pinned_core_publication()
+        .expect("current retained authority");
+    assert_ne!(current.generation_id(), prior.generation_id());
+    assert_eq!(current.generation_id(), published["published_generation"]);
+}
+
+#[test]
+fn mismatched_pin_fails_without_rebinding_stale_prior_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let publish_nonempty = Arc::new(AtomicBool::new(false));
+    let coordinator =
+        CoreRefreshEngine::with_executor(publication_pin_executor(Arc::clone(&publish_nonempty)));
+    coordinator.enqueue_periodic(&data_root).unwrap();
+    assert!(!coordinator.run_next(&data_root).unwrap().failed);
+    let prior = coordinator
+        .pinned_core_publication()
+        .expect("prior retained authority");
+    let stale_index = prior.verified_index().expect("prior verified index");
+
+    publish_nonempty.store(true, Ordering::SeqCst);
+    let queued = coordinator.enqueue_periodic(&data_root).unwrap();
+    let request_id = request_id(&queued);
+    let run = coordinator
+        .run_next_with_verified_index_opener(&data_root, |_| Ok(stale_index))
+        .expect("mismatched publication attempt");
+
+    assert!(run.failed);
+    assert_eq!(run.job["request_state"], "failed");
+    assert!(run.job.get("post_publication_error").is_none());
+    assert!(run.job["last_error"]
+        .as_str()
+        .is_some_and(|error| error.contains("verified pin carries")));
+    let retained = coordinator
+        .pinned_core_publication()
+        .expect("prior authority remains retained");
+    assert!(Arc::ptr_eq(&prior, &retained));
+    let durable = pin_published_generation(&data_root)
+        .unwrap()
+        .expect("new durable generation exists");
+    assert_ne!(durable.generation_id(), retained.generation_id());
+    assert_eq!(
+        coordinator.status(&request_id).unwrap()["request_state"],
+        "failed"
+    );
+}
+
+#[test]
+fn missing_pin_retries_exact_route_and_reopens_without_stale_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let publish_nonempty = Arc::new(AtomicBool::new(false));
+    let coordinator =
+        CoreRefreshEngine::with_executor(publication_pin_executor(Arc::clone(&publish_nonempty)));
+    coordinator.enqueue_periodic(&data_root).unwrap();
+    assert!(!coordinator.run_next(&data_root).unwrap().failed);
+    let prior = coordinator
+        .pinned_core_publication()
+        .expect("prior retained authority");
+
+    let route = route_identity(0xa1);
+    coordinator.reconcile_watch_routes(
+        [route.clone()],
+        EventWatermark::new(7, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    publish_nonempty.store(true, Ordering::SeqCst);
+    let injected_opens = AtomicUsize::new(0);
+    let failed = coordinator
+        .run_next_with_verified_index_opener(&data_root, |_| {
+            injected_opens.fetch_add(1, Ordering::SeqCst);
+            coordinator.record_watch_routes(
+                [(route.clone(), EventWatermark::new(7, 1))],
+                ledger_now_ms().saturating_sub(1_000),
+            );
+            Err(anyhow!("injected missing exact generation pin"))
+        })
+        .expect("missing-pin publication attempt");
+
+    assert_eq!(injected_opens.load(Ordering::SeqCst), 1);
+    assert!(failed.failed);
+    assert_eq!(failed.job["request_state"], "failed");
+    assert!(failed.job.get("post_publication_error").is_none());
+    assert!(failed.job["last_error"]
+        .as_str()
+        .is_some_and(|error| error.contains("injected missing exact generation pin")));
+    let retained = coordinator
+        .pinned_core_publication()
+        .expect("prior authority remains retained");
+    assert!(Arc::ptr_eq(&prior, &retained));
+    let durable = pin_published_generation(&data_root)
+        .unwrap()
+        .expect("committed generation survives missing pin");
+    assert_ne!(durable.generation_id(), retained.generation_id());
+    assert!(coordinator.has_scheduled_route_work());
+
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let (retried, verified_opens) = count_verified_index_opens(|| {
+        coordinator
+            .run_next(&data_root)
+            .expect("retry reopens durable generation")
+    });
+    assert_eq!(verified_opens, 1);
+    assert!(!retried.failed, "{:#}", retried.job);
+    let reopened = coordinator
+        .pinned_core_publication()
+        .expect("retried authority");
+    assert_ne!(reopened.generation_id(), prior.generation_id());
+    assert_eq!(
+        reopened.generation_id(),
+        retried.job["published_generation"]
+    );
+    assert!(!coordinator.has_scheduled_route_work());
 }
 
 #[test]

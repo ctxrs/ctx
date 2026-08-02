@@ -7,6 +7,7 @@ mod generation_authority;
 mod generation_observation;
 mod read_model;
 mod runtime_metadata;
+use generation_authority::CoreRefreshTerminalSuccess;
 pub(crate) use generation_authority::PinnedCorePublication;
 use read_model::{
     SourceBackedRefreshAttempt, SourceBackedRefreshProgress, SourceBackedRefreshState,
@@ -405,11 +406,24 @@ impl CoreRefreshEngine {
     }
 
     pub(in crate::semantic) fn run_next(&self, data_root: &Path) -> Option<SourceBackedRefreshRun> {
+        self.run_next_with_verified_index_opener(data_root, |index_root| {
+            Ok(Arc::new(open_verified_index(index_root)?))
+        })
+    }
+
+    pub(super) fn run_next_with_verified_index_opener<Open>(
+        &self,
+        data_root: &Path,
+        open_verified: Open,
+    ) -> Option<SourceBackedRefreshRun>
+    where
+        Open: FnOnce(&Path) -> Result<Arc<VerifiedIndex>>,
+    {
         let executor = Arc::clone(&self.executor);
         let verified_index = RefCell::new(None::<Arc<VerifiedIndex>>);
         let publication_probe_attempted = Cell::new(false);
         let request_id_cell = RefCell::new(None::<String>);
-        let mut run = self.run_next_with(
+        let run = self.run_next_with_terminal_success(
             |request_id, coordinator| {
                 request_id_cell.replace(Some(request_id.to_owned()));
                 let requested_catalog =
@@ -431,17 +445,15 @@ impl CoreRefreshEngine {
                 )?;
                 let probe_started = StdInstant::now();
                 publication_probe_attempted.set(true);
-                let pin = Arc::new(
-                    open_verified_index(&source_backed_index_root(data_root))
-                        .context("verify Core generation after publication")?,
-                );
+                let pin = open_verified(&source_backed_index_root(data_root))
+                    .context("verify Core generation after publication")?;
                 let verification = verify_source_backed_publication(&publication, &pin);
                 coordinator.set_publication_probe_timing(
                     request_id,
                     nonzero_duration_micros(probe_started.elapsed()),
                 );
-                verified_index.replace(Some(pin));
                 verification?;
+                verified_index.replace(Some(pin));
                 Ok(publication)
             },
             || {
@@ -460,6 +472,13 @@ impl CoreRefreshEngine {
                 verified_index.replace(verified);
                 Ok(generation_id)
             },
+            |receipt| {
+                let pin = verified_index.borrow_mut().take().ok_or_else(|| {
+                    anyhow!("verified Core publication has no exact retained generation pin")
+                })?;
+                CoreRefreshTerminalSuccess::bind(receipt, pin)
+                    .context("bind exact Core publication receipt and generation authority")
+            },
             |_| {
                 request_id_cell
                     .borrow()
@@ -469,23 +488,7 @@ impl CoreRefreshEngine {
             },
             |_| Ok(()),
         )?;
-        let mut publication_ready = !run.failed;
-        if publication_ready {
-            let pin = verified_index.into_inner();
-            let request_id = run.job.get("request_id").and_then(Value::as_str);
-            let receipt = request_id.and_then(|request_id| self.receipt_for_request(request_id));
-            let binding = match (pin, receipt) {
-                (Some(pin), Some(receipt)) => self.bind_core_publication(receipt, pin),
-                _ => Err(anyhow!(
-                    "completed Core publication has no exact verified generation pin and receipt"
-                )),
-            };
-            if let Err(error) = binding {
-                publication_ready = false;
-                run.job["post_publication_error"] =
-                    Value::String(format!("bind exact Core publication receipt: {error:#}"));
-            }
-        }
+        let publication_ready = !run.failed;
         if let Some(request_id) = run.job.get("request_id").and_then(Value::as_str) {
             self.finish_route_admissions(request_id, publication_ready);
         }
@@ -783,11 +786,6 @@ impl CoreRefreshEngine {
         write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), &job)
     }
 
-    fn receipt_for_request(&self, request_id: &str) -> Option<SourceBackedRefreshReceipt> {
-        let state = self.lock_state();
-        find_attempt(&state, request_id).and_then(|attempt| attempt.receipt.clone())
-    }
-
     pub(super) fn set_progress(
         &self,
         request_id: &str,
@@ -812,16 +810,18 @@ impl CoreRefreshEngine {
         Some(attempt.job_json())
     }
 
-    pub(super) fn run_next_with<Execute, Probe, Published, Failed>(
+    fn run_next_with_terminal_success<Execute, Probe, Terminal, Published, Failed>(
         &self,
         execute: Execute,
         probe: Probe,
+        terminal: Terminal,
         published: Published,
         failed: Failed,
     ) -> Option<SourceBackedRefreshRun>
     where
         Execute: FnOnce(&str, &Self) -> Result<SourceBackedRefreshPublication>,
         Probe: FnOnce() -> Result<Option<String>>,
+        Terminal: FnOnce(SourceBackedRefreshReceipt) -> Result<CoreRefreshTerminalSuccess>,
         Published: FnOnce(&str) -> Result<()>,
         Failed: FnOnce(&str) -> Result<()>,
     {
@@ -886,6 +886,27 @@ impl CoreRefreshEngine {
                 "{error:#}; verifying the retained generation also failed: {probe_error:#}"
             )), None),
         };
+        let continuation = self
+            .lock_state()
+            .manual_all_continuations
+            .get(&request_id)
+            .cloned();
+        let verified = match verified {
+            Ok((observed, mut publication)) => {
+                if let Some(continuation) = continuation.as_ref() {
+                    aggregate_manual_all_continuation(&mut publication, continuation);
+                }
+                let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+                    previous_generation.clone(),
+                    observed.clone(),
+                    &publication,
+                );
+                terminal(receipt)
+                    .map(|terminal| (observed, publication, terminal))
+                    .map_err(|error| format!("finalize verified Core publication: {error:#}"))
+            }
+            Err(error) => Err(error),
+        };
         let verified = match verified {
             Ok(verified) => Ok(verified),
             Err(error) => match failed(&error) {
@@ -896,60 +917,45 @@ impl CoreRefreshEngine {
             },
         };
         let mut state = self.lock_state();
-        let continuation = state.manual_all_continuations.remove(&request_id);
+        state.manual_all_continuations.remove(&request_id);
         let mut newly_published_generation = None;
-        let (failed_run, did_work) = {
-            let attempt = find_attempt_mut(&mut state, &request_id)?;
-            attempt.finished_at_ms = Some(utc_now().timestamp_millis());
-            attempt.progress.current_source = None;
-            attempt.progress.completed_records = None;
-            if observed_for_status.is_some() {
-                attempt.published_generation = observed_for_status.clone();
+        let (failed_run, did_work) = match verified {
+            Ok((observed, publication, terminal)) => {
+                let receipt = terminal.install(&mut state);
+                let attempt = find_attempt_mut(&mut state, &request_id)?;
+                attempt.finished_at_ms = Some(utc_now().timestamp_millis());
+                attempt.progress.current_source = None;
+                attempt.progress.completed_records = None;
+                attempt.state = SourceBackedRefreshState::Published;
+                attempt.published_generation = Some(observed.clone());
+                attempt.progress.phase = "published".to_owned();
+                attempt.progress.completed_sources = attempt.progress.total_sources;
+                attempt.scanned_routes = Some(publication.scanned_routes);
+                attempt.unsupported_routes = Some(publication.unsupported_routes);
+                attempt.certified_source_count = Some(publication.certified_source_count);
+                attempt.certified_source_bytes = Some(publication.certified_source_bytes);
+                attempt.receipt = Some(receipt);
+                attempt.timings = Some(publication.timings);
+                attempt.published_explicit_source_catalog =
+                    Some(publication.published_explicit_source_catalog);
+                newly_published_generation = Some(observed);
+                let did_work = attempt.published_generation != previous_generation;
+                (false, did_work)
             }
-
-            match verified {
-                Ok((observed, mut publication)) => {
-                    if let Some(continuation) = continuation.as_ref() {
-                        aggregate_manual_all_continuation(&mut publication, continuation);
-                    }
-                    let generation_changed =
-                        previous_generation.as_deref() != Some(observed.as_str());
-                    attempt.state = SourceBackedRefreshState::Published;
-                    attempt.published_generation = Some(observed.clone());
-                    attempt.progress.phase = "published".to_owned();
-                    attempt.progress.completed_sources = attempt.progress.total_sources;
-                    attempt.scanned_routes = Some(publication.scanned_routes);
-                    attempt.unsupported_routes = Some(publication.unsupported_routes);
-                    attempt.certified_source_count = Some(publication.certified_source_count);
-                    attempt.certified_source_bytes = Some(publication.certified_source_bytes);
-                    attempt.receipt = Some(SourceBackedRefreshReceipt {
-                        previous_generation: previous_generation.clone(),
-                        published_generation: observed.clone(),
-                        generation_changed,
-                        published_explicit_source_catalog: publication
-                            .published_explicit_source_catalog
-                            .clone(),
-                        current: publication.current,
-                        selected_route_ids: publication.selected_route_ids,
-                        successful_route_ids: publication.successful_route_ids,
-                        source_failures: publication.source_failures,
-                    });
-                    attempt.timings = Some(publication.timings);
-                    attempt.published_explicit_source_catalog =
-                        Some(publication.published_explicit_source_catalog);
-                    newly_published_generation = Some(observed);
+            Err(error) => {
+                let attempt = find_attempt_mut(&mut state, &request_id)?;
+                attempt.finished_at_ms = Some(utc_now().timestamp_millis());
+                attempt.progress.current_source = None;
+                attempt.progress.completed_records = None;
+                if observed_for_status.is_some() {
+                    attempt.published_generation = observed_for_status.clone();
                 }
-                Err(error) => {
-                    attempt.state = SourceBackedRefreshState::Failed;
-                    attempt.progress.phase = "failed".to_owned();
-                    attempt.failure_type = execution_failure_type;
-                    attempt.last_error = Some(error);
-                }
+                attempt.state = SourceBackedRefreshState::Failed;
+                attempt.progress.phase = "failed".to_owned();
+                attempt.failure_type = execution_failure_type;
+                attempt.last_error = Some(error);
+                (true, false)
             }
-
-            let failed = attempt.state == SourceBackedRefreshState::Failed;
-            let did_work = !failed && attempt.published_generation != previous_generation;
-            (failed, did_work)
         };
         if newly_published_generation.is_some() {
             state.current_published_generation = newly_published_generation;
@@ -992,6 +998,29 @@ impl CoreRefreshEngine {
             failed: failed_run,
             scope: refresh_scope,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn run_next_with<Execute, Probe, Published, Failed>(
+        &self,
+        execute: Execute,
+        probe: Probe,
+        published: Published,
+        failed: Failed,
+    ) -> Option<SourceBackedRefreshRun>
+    where
+        Execute: FnOnce(&str, &Self) -> Result<SourceBackedRefreshPublication>,
+        Probe: FnOnce() -> Result<Option<String>>,
+        Published: FnOnce(&str) -> Result<()>,
+        Failed: FnOnce(&str) -> Result<()>,
+    {
+        self.run_next_with_terminal_success(
+            execute,
+            probe,
+            |receipt| Ok(CoreRefreshTerminalSuccess::state_only(receipt)),
+            published,
+            failed,
+        )
     }
 
     fn finish_route_admissions(&self, request_id: &str, publication_ready: bool) {

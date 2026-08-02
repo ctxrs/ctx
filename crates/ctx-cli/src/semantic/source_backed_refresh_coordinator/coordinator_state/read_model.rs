@@ -14,6 +14,26 @@ pub(crate) struct SourceBackedRefreshReceipt {
 }
 
 impl SourceBackedRefreshReceipt {
+    pub(super) fn from_verified_publication(
+        previous_generation: Option<String>,
+        published_generation: String,
+        publication: &SourceBackedRefreshPublication,
+    ) -> Self {
+        Self {
+            generation_changed: previous_generation.as_deref()
+                != Some(published_generation.as_str()),
+            previous_generation,
+            published_generation,
+            published_explicit_source_catalog: publication
+                .published_explicit_source_catalog
+                .clone(),
+            current: publication.current,
+            selected_route_ids: publication.selected_route_ids.clone(),
+            successful_route_ids: publication.successful_route_ids.clone(),
+            source_failures: publication.source_failures.clone(),
+        }
+    }
+
     fn terminal_outcome(&self) -> &'static str {
         if self.source_failures.is_empty() {
             "completed"

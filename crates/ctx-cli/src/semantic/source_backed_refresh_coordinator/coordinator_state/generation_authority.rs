@@ -18,6 +18,23 @@ impl fmt::Debug for PinnedCorePublication {
 }
 
 impl PinnedCorePublication {
+    fn new(
+        receipt: SourceBackedRefreshReceipt,
+        verified_index: Arc<VerifiedIndex>,
+    ) -> Result<Arc<Self>> {
+        if verified_index.generation_id() != receipt.published_generation {
+            bail!(
+                "cannot bind verified generation {} to Core publication receipt {}",
+                verified_index.generation_id(),
+                receipt.published_generation
+            );
+        }
+        Ok(Arc::new(Self {
+            receipt,
+            verified_index,
+        }))
+    }
+
     pub(crate) fn generation_id(&self) -> &str {
         &self.receipt.published_generation
     }
@@ -37,6 +54,49 @@ impl PinnedCorePublication {
     }
 }
 
+/// The terminal success admitted by the coordinator state machine.
+///
+/// In production this has exactly one representation: a truthful receipt and
+/// its generation-matching retained `VerifiedIndex` authority. The state-only
+/// representation exists solely for unit tests of queue/status transitions
+/// that use synthetic generation labels instead of on-disk indexes.
+pub(super) enum CoreRefreshTerminalSuccess {
+    Verified(Arc<PinnedCorePublication>),
+    #[cfg(test)]
+    StateOnly(SourceBackedRefreshReceipt),
+}
+
+impl CoreRefreshTerminalSuccess {
+    pub(super) fn bind(
+        receipt: SourceBackedRefreshReceipt,
+        verified_index: Arc<VerifiedIndex>,
+    ) -> Result<Self> {
+        Ok(Self::Verified(PinnedCorePublication::new(
+            receipt,
+            verified_index,
+        )?))
+    }
+
+    #[cfg(test)]
+    pub(super) fn state_only(receipt: SourceBackedRefreshReceipt) -> Self {
+        Self::StateOnly(receipt)
+    }
+
+    /// Installs retained authority before returning the receipt that may be
+    /// exposed as Published/current under the same state lock.
+    pub(super) fn install(self, state: &mut CoreRefreshEngineState) -> SourceBackedRefreshReceipt {
+        match self {
+            Self::Verified(authority) => {
+                let receipt = authority.receipt.clone();
+                state.pinned_core_publication = Some(authority);
+                receipt
+            }
+            #[cfg(test)]
+            Self::StateOnly(receipt) => receipt,
+        }
+    }
+}
+
 impl CoreRefreshEngine {
     pub(in crate::semantic) fn pinned_core_publication(
         &self,
@@ -45,24 +105,5 @@ impl CoreRefreshEngine {
             .pinned_core_publication
             .as_ref()
             .map(Arc::clone)
-    }
-
-    pub(super) fn bind_core_publication(
-        &self,
-        receipt: SourceBackedRefreshReceipt,
-        verified_index: Arc<VerifiedIndex>,
-    ) -> Result<()> {
-        if verified_index.generation_id() != receipt.published_generation {
-            bail!(
-                "cannot bind verified generation {} to Core publication receipt {}",
-                verified_index.generation_id(),
-                receipt.published_generation
-            );
-        }
-        self.lock_state().pinned_core_publication = Some(Arc::new(PinnedCorePublication {
-            receipt,
-            verified_index,
-        }));
-        Ok(())
     }
 }
