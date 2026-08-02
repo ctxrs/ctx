@@ -15,7 +15,7 @@ use crate::{
 
 pub(crate) const ACTIVE_GENERATION_POINTER_FILE: &str = "active-generation.json";
 pub(crate) const INDEX_GENERATIONS_DIRECTORY: &str = "index-generations";
-const ACTIVE_GENERATION_POINTER_VERSION: u32 = 1;
+const ACTIVE_GENERATION_POINTER_VERSION: u32 = 2;
 const GENERATION_DIRECTORY_PREFIX: &str = "generation-";
 
 pub(crate) fn lexical_index_settings() -> IndexSettings {
@@ -40,13 +40,19 @@ fn validate_lexical_index_settings(index: &Index) -> Result<()> {
 pub(crate) struct GenerationSlot {
     generation_id: String,
     directory: String,
+    physical_integrity_digest: String,
 }
 
 impl GenerationSlot {
-    pub(crate) fn new(generation_id: String, directory: String) -> Result<Self> {
+    pub(crate) fn new(
+        generation_id: String,
+        directory: String,
+        physical_integrity_digest: String,
+    ) -> Result<Self> {
         let slot = Self {
             generation_id,
             directory,
+            physical_integrity_digest,
         };
         slot.validate()?;
         Ok(slot)
@@ -60,8 +66,17 @@ impl GenerationSlot {
         &self.directory
     }
 
+    pub(crate) fn physical_integrity_digest(&self) -> &str {
+        &self.physical_integrity_digest
+    }
+
+    pub(crate) fn names_are_valid(generation_id: &str, directory: &str) -> bool {
+        is_generation_id(generation_id) && is_generation_directory_name(directory)
+    }
+
     fn validate(&self) -> Result<()> {
-        if !is_generation_id(&self.generation_id) || !is_generation_directory_name(&self.directory)
+        if !Self::names_are_valid(&self.generation_id, &self.directory)
+            || !is_generation_id(&self.physical_integrity_digest)
         {
             return Err(IndexError::InvalidActiveGenerationPointer);
         }
@@ -125,6 +140,16 @@ pub(crate) fn load_active_generation_pointer(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
+    #[derive(Deserialize)]
+    struct PointerVersion {
+        version: u32,
+    }
+    let version: PointerVersion = serde_json::from_slice(&bytes)?;
+    if version.version != ACTIVE_GENERATION_POINTER_VERSION {
+        return Err(IndexError::UnsupportedActiveGenerationPointer(
+            version.version,
+        ));
+    }
     let pointer: ActiveGenerationPointer = serde_json::from_slice(&bytes)?;
     if serde_json::to_vec(&pointer)? != bytes {
         return Err(IndexError::InvalidActiveGenerationPointer);
@@ -284,7 +309,7 @@ mod tests {
             .settings(mismatched_settings)
             .create_in_dir(&path)
             .unwrap();
-        GenerationSlot::new("0".repeat(64), directory_name.to_owned()).unwrap()
+        GenerationSlot::new("0".repeat(64), directory_name.to_owned(), "0".repeat(64)).unwrap()
     }
 
     #[test]
@@ -301,7 +326,12 @@ mod tests {
     fn candidate_settings_roundtrip_exactly() {
         let root = tempfile::tempdir().unwrap();
         let candidate = create_candidate_generation(root.path(), None).unwrap();
-        let slot = GenerationSlot::new("0".repeat(64), candidate.directory_name.clone()).unwrap();
+        let slot = GenerationSlot::new(
+            "0".repeat(64),
+            candidate.directory_name.clone(),
+            "0".repeat(64),
+        )
+        .unwrap();
         assert_eq!(candidate.index.settings(), &lexical_index_settings());
         drop(candidate.index);
 
@@ -332,6 +362,21 @@ mod tests {
             Err(IndexError::IndexSettingsMismatch(
                 crate::LEXICAL_SCHEMA_VERSION
             ))
+        ));
+    }
+
+    #[test]
+    fn version_one_pointer_requires_rebuild_instead_of_compatibility() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = format!(
+            "{{\"version\":1,\"active\":{{\"generation_id\":\"{}\",\"directory\":\"generation-00000000000000000000000000000001\"}},\"previous\":null}}",
+            "0".repeat(64)
+        );
+        fs::write(root.path().join(ACTIVE_GENERATION_POINTER_FILE), bytes).unwrap();
+
+        assert!(matches!(
+            load_active_generation_pointer(root.path()),
+            Err(IndexError::UnsupportedActiveGenerationPointer(1))
         ));
     }
 }

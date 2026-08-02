@@ -526,10 +526,9 @@ fn source_event_page_rejects_a_forged_order_size_suffix_before_returning_record(
         std::slice::from_ref(&source),
         vec![forged],
     );
-    let verified = VerifiedIndex::open(temp.path()).unwrap();
     assert!(matches!(
-        verified.core_source_event_page(&source, None, 1),
-        Err(IndexError::InvalidStoredDocumentField("source_event_order"))
+        VerifiedIndex::open(temp.path()),
+        Err(IndexError::InvalidStoredDocumentField("query_projection"))
     ));
 }
 

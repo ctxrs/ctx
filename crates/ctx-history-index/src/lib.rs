@@ -11,6 +11,7 @@ mod identity;
 mod index_document;
 mod merge_policy;
 pub mod policy;
+mod preparation;
 mod publication;
 mod query;
 mod reader;
@@ -40,6 +41,7 @@ pub(crate) use identity::{
     source_sort_key, source_token,
 };
 pub use policy::{
+    current_semantic_generation_policy, current_semantic_generation_policy_hash,
     current_source_generation_policy, current_source_generation_policy_hash,
     EmbeddingGenerationPolicy, LexicalBodySelection, LexicalGenerationPolicy,
     LexicalIndexedBodyLimit, SemanticCoreContentFilter, SemanticGenerationPolicy, SourceEventClass,
@@ -49,13 +51,15 @@ pub use policy::{
     SEMANTIC_EMBEDDING_DIMENSIONS, SEMANTIC_EMBEDDING_MODEL, SEMANTIC_EMBEDDING_MODEL_REVISION,
     SEMANTIC_EMBEDDING_NORMALIZATION, SEMANTIC_SOURCE_MAX_CHARS,
 };
+pub use preparation::{CoreRecordPreparer, PreparedCoreRecord};
 #[cfg(test)]
 pub(crate) use publication::manifest_path;
 pub(crate) use publication::{
     create_candidate_generation, load_active_generation_pointer, load_manifest_for_metas,
-    meta_generation, open_slot_index, payload_generation_id, publish_active_generation_pointer,
-    reclaim_inactive_generation_directories, reclaim_unreferenced_manifests,
-    reconcile_commit_error, searcher_generation, sync_directory, sync_generation, verify_searcher,
+    meta_generation, open_slot_index, payload_generation_id, physical_integrity_digest,
+    publish_active_generation_pointer, reclaim_inactive_generation_directories,
+    reclaim_unreferenced_manifests, reconcile_commit_error, searcher_generation, sync_directory,
+    sync_generation, verify_complete_searcher, verify_physical_integrity, verify_searcher,
     verify_searcher_structure, write_manifest, ActiveGenerationPointer, GenerationSlot,
     INDEX_GENERATIONS_DIRECTORY,
 };
@@ -86,7 +90,7 @@ use std::{
 use ctx_history_core::IDENTITY_VERSION;
 use ctx_history_core::{
     CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory,
-    SourceKey, CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION,
+    SourceKey,
 };
 #[cfg(test)]
 use tantivy::directory::INDEX_WRITER_LOCK;
@@ -102,13 +106,15 @@ use tantivy::{
 use uuid::Uuid;
 
 use durable_directory::{reclaim_abandoned_atomic_writes, DurableMmapDirectory};
-use index_document::{core_content_bytes, IndexDocument, IndexSourceFields, SourceToken};
+use index_document::IndexDocument;
+#[cfg(test)]
+use index_document::{core_content_bytes, IndexSourceFields};
 use merge_policy::LexicalMergePolicy;
 use staging::{finish_identical_staging, PendingSource as StagedPendingSource, PendingSourceMode};
 use writer_support::{
     acquire_generation_writer_lock_with_retry, clear_active_generation_rebuild_marker,
     construct_index_writer_with_retry, load_active_generation_rebuild_marker,
-    reclaim_generation_integrity_receipts, ExactReplayInventoryWitness, PendingSource,
+    ExactReplayInventoryWitness, PendingSource,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,13 +177,14 @@ impl PendingDeletion {
 /// Returns whether an active disposable generation is structurally incompatible
 /// with this build and therefore must be replaced from source authority.
 ///
-/// These errors describe versioned schema, policy, or physical index settings,
-/// not damaged control metadata. Callers must not read, clone, migrate, or
-/// otherwise interpret the incompatible generation.
+/// These errors describe versioned pointer, schema, policy, or physical index
+/// settings, not damaged control metadata. Callers must not read, clone,
+/// migrate, or otherwise interpret the incompatible generation.
 pub fn generation_incompatibility_requires_rebuild(error: &IndexError) -> bool {
     matches!(
         error,
-        IndexError::UnsupportedCommitPayload(_)
+        IndexError::UnsupportedActiveGenerationPointer(_)
+            | IndexError::UnsupportedCommitPayload(_)
             | IndexError::UnsupportedManifest(_)
             | IndexError::GenerationContractMismatch { .. }
             | IndexError::CoreRecordContractMismatch { .. }
@@ -185,6 +192,7 @@ pub fn generation_incompatibility_requires_rebuild(error: &IndexError) -> bool {
             | IndexError::GenerationPolicyMismatch { .. }
             | IndexError::SchemaMismatch(_)
             | IndexError::IndexSettingsMismatch(_)
+            | IndexError::ChecksumMismatch
     )
 }
 
@@ -203,6 +211,7 @@ pub struct GenerationWriter {
     base_manifest: Option<GenerationManifest>,
     base_opstamp: u64,
     base_searcher: Option<Searcher>,
+    core_record_preparer: CoreRecordPreparer,
     complete_inventories: Vec<CertifiedSourceInventory>,
     pending: HashMap<String, PendingSource>,
     deletions: HashMap<SourceKey, PendingDeletion>,
@@ -219,6 +228,8 @@ pub struct GenerationWriter {
     before_writer_handoff: Option<Box<dyn FnOnce() + Send>>,
     #[cfg(test)]
     after_candidate_commit: Option<GenerationPathHook>,
+    #[cfg(test)]
+    return_commit_error_after_visibility: bool,
     #[cfg(test)]
     before_pointer_switch: Option<GenerationPathHook>,
     #[cfg(test)]
@@ -258,22 +269,29 @@ impl GenerationWriter {
         reclaim_abandoned_atomic_writes(&root)?;
         reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
 
-        let active_pointer = load_active_generation_pointer(&root)?;
-        reclaim_inactive_generation_directories(&root, active_pointer.as_ref())?;
-        let retained_generation_ids = active_pointer
-            .iter()
-            .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
-            .map(|slot| slot.generation_id().to_owned())
-            .collect::<Vec<_>>();
-        let retained_generation_directories = active_pointer
-            .iter()
-            .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
-            .map(|slot| slot.directory().to_owned())
-            .collect::<Vec<_>>();
-        reclaim_unreferenced_manifests(&root, &retained_generation_ids)?;
-        reclaim_generation_integrity_receipts(&root, &retained_generation_directories)?;
+        let (active_pointer, pointer_requires_rebuild) = match load_active_generation_pointer(&root)
+        {
+            Ok(pointer) => (pointer, false),
+            Err(error) if generation_incompatibility_requires_rebuild(&error) => (None, true),
+            Err(error) => return Err(error),
+        };
+        if !pointer_requires_rebuild {
+            reclaim_inactive_generation_directories(&root, active_pointer.as_ref())?;
+            let retained_generation_ids = active_pointer
+                .iter()
+                .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
+                .map(|slot| slot.generation_id().to_owned())
+                .collect::<Vec<_>>();
+            reclaim_unreferenced_manifests(&root, &retained_generation_ids)?;
+        }
 
-        let rebuild_marked = if let Some(marker) = load_active_generation_rebuild_marker(&root)? {
+        let rebuild_marked = if pointer_requires_rebuild {
+            // The unsupported pointer remains the sole durable publication
+            // authority until a complete current candidate atomically replaces
+            // it. Its slots and manifests are intentionally not decoded or
+            // reclaimed during staging.
+            true
+        } else if let Some(marker) = load_active_generation_rebuild_marker(&root)? {
             if active_pointer.as_ref().is_some_and(|pointer| {
                 pointer.active().generation_id() == marker.generation_id
                     && pointer.active().directory() == marker.directory
@@ -355,6 +373,19 @@ impl GenerationWriter {
                     None,
                 )
             };
+        let preparation_base = active_pointer.as_ref().and_then(|pointer| {
+            base_searcher
+                .as_ref()
+                .filter(|_| base_manifest.is_some())
+                .map(|searcher| (root.clone(), pointer.active().clone(), searcher.clone()))
+        });
+        let core_record_preparer = CoreRecordPreparer::new(
+            fields,
+            active_pointer
+                .as_ref()
+                .map(|pointer| pointer.active().generation_id().to_owned()),
+            preparation_base,
+        );
         let mut source_identities = HashMap::new();
         if let Some(manifest) = &base_manifest {
             for source in &manifest.sources {
@@ -381,6 +412,7 @@ impl GenerationWriter {
             base_manifest,
             base_opstamp,
             base_searcher,
+            core_record_preparer,
             complete_inventories: Vec::new(),
             pending: HashMap::new(),
             deletions: HashMap::new(),
@@ -397,6 +429,8 @@ impl GenerationWriter {
             before_writer_handoff: None,
             #[cfg(test)]
             after_candidate_commit: None,
+            #[cfg(test)]
+            return_commit_error_after_visibility: false,
             #[cfg(test)]
             before_pointer_switch: None,
             #[cfg(test)]
@@ -558,16 +592,13 @@ impl GenerationWriter {
             .delete_term(Term::from_field_text(source_key_field, &token));
         self.deletions.remove(&source);
         self.route_deletions.remove(&source);
-        let index_fields = IndexSourceFields::new(&source, &token);
         self.pending.insert(
             token,
             PendingSource {
-                index_fields,
                 staged: StagedPendingSource {
                     source,
                     mode: PendingSourceMode::Replace,
                     staged_documents: 0,
-                    staged_semantic_eligible_documents: 0,
                     certificate: None,
                     core_record_accumulator: [0; 32],
                 },
@@ -612,12 +643,10 @@ impl GenerationWriter {
         self.pending.insert(
             token.clone(),
             PendingSource {
-                index_fields: IndexSourceFields::new(&source, &token),
                 staged: StagedPendingSource {
                     source,
                     mode: PendingSourceMode::Append { base },
                     staged_documents: 0,
-                    staged_semantic_eligible_documents: 0,
                     certificate: None,
                     core_record_accumulator: [0; 32],
                 },
@@ -639,71 +668,54 @@ impl GenerationWriter {
     ///
     /// This is the canonical write API. No provider read locator is accepted,
     /// synthesized, or persisted by this path.
-    pub fn add_core_record(&mut self, mut record: CoreRecord) -> Result<()> {
-        if record.normalization_revision != CORE_NORMALIZATION_REVISION
-            || record.content.policy_revision != CORE_CONTENT_POLICY_REVISION
-        {
-            return Err(IndexError::CoreRecordPolicyRevisionMismatch {
-                normalization: record.normalization_revision,
-                expected_normalization: CORE_NORMALIZATION_REVISION,
-                content: record.content.policy_revision,
-                expected_content: CORE_CONTENT_POLICY_REVISION,
-            });
+    pub fn add_core_record(&mut self, record: CoreRecord) -> Result<()> {
+        let prepared = self.core_record_preparer().prepare(record)?;
+        self.add_prepared_core_record(prepared)
+    }
+
+    /// Returns a cloneable immutable preparation context pinned to this
+    /// writer's base-generation lookup authority.
+    pub fn core_record_preparer(&self) -> CoreRecordPreparer {
+        self.core_record_preparer.clone()
+    }
+
+    /// Enqueues one canonical record prepared by this writer's exact base
+    /// context. Preparation has already completed certificate reuse, encoding,
+    /// and lexical projection; this method never mutates or re-encodes it.
+    pub fn add_prepared_core_record(&mut self, prepared: PreparedCoreRecord) -> Result<()> {
+        let expected_base_generation_id = self
+            .active_pointer
+            .as_ref()
+            .map(|pointer| pointer.active().generation_id());
+        if prepared.base_generation_id() != expected_base_generation_id {
+            return Err(IndexError::PreparedCoreRecordContextMismatch);
         }
-        let semantic_eligible =
-            policy::is_semantic_candidate(&record.event_type, record.role.as_deref());
-        let source_digest = record.source.identity().digest();
-        let token = SourceToken::new(&source_digest);
-        let token = token.as_str()?;
-        let pending_source = match self.pending.get(token) {
-            Some(pending) if pending.source.exact_descriptor_eq(&record.source) => pending,
+        let token = prepared.source_token().to_owned();
+        let pending_source = match self.pending.get(&token) {
+            Some(pending) if pending.source.exact_descriptor_eq(prepared.source()) => pending,
             _ => return Err(IndexError::DocumentSourceNotActive),
         };
         let is_append = matches!(&pending_source.mode, PendingSourceMode::Append { .. });
         if matches!(&pending_source.mode, PendingSourceMode::Retain { .. }) {
             return Err(IndexError::DocumentSourceNotActive);
         }
-        let mut core_record_bytes = record.encode_stored()?;
-        if record.needs_prior_repository_certificate() {
-            if let Some(base_searcher) = &self.base_searcher {
-                if let Some(prior) =
-                    prior_core_record(base_searcher, self.fields, record.event_id, &record.source)?
-                {
-                    if record.reuse_prior_repository_certificate(&prior) {
-                        core_record_bytes = record.encode_stored()?;
-                    }
-                }
-            }
-        }
-        let record_leaf = staging::core_record_leaf(record.event_id, &core_record_bytes)?;
-        let core_content_bytes = core_content_bytes(&record.content)?;
-        let index_fields = pending_source.index_fields.clone();
         if is_append && self.base_searcher.is_none() {
             return Err(IndexError::AppendBaseMismatch);
         }
-        let target = IndexDocument::from_core(
-            self.fields,
-            record,
-            core_record_bytes,
-            core_content_bytes,
-            index_fields,
-        )?;
-        self.writer_mut()?.add_document(target)?;
+        let preparation::PreparedCoreRecordParts {
+            record_leaf,
+            document,
+        } = prepared.into_parts();
+        self.writer_mut()?.add_document(document)?;
         let pending = self
             .pending
-            .get_mut(token)
+            .get_mut(&token)
             .ok_or(IndexError::DocumentSourceNotActive)?;
         staging::accumulate_core_record(&mut pending.core_record_accumulator, &record_leaf);
         pending.staged_documents = pending
             .staged_documents
             .checked_add(1)
             .ok_or(IndexError::CountOverflow)?;
-        if semantic_eligible {
-            pending.staged_semantic_eligible_documents = pending
-                .staged_semantic_eligible_documents
-                .checked_add(1)
-                .ok_or(IndexError::CountOverflow)?;
-        }
         Ok(())
     }
 

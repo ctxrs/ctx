@@ -65,7 +65,7 @@ fn final_changed_source_commit_restart_replays_durable_stage_cleanup() -> Result
     builder.calls.clear();
     let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
     let restarted_outcome = reconcile_all(&mut restarted, &target, &mut builder, &mut embedder)?;
-    assert_eq!(restarted_outcome.records_read, 0);
+    assert_eq!(restarted_outcome.records_decoded, 0);
     assert!(
         builder.calls.is_empty(),
         "final changed source replay unexpectedly staged a later source"

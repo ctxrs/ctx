@@ -154,10 +154,13 @@ fn is_dense_script(character: char) -> bool {
 }
 
 pub(crate) fn register_body_analyzer(index: &Index) {
-    let analyzer = TextAnalyzer::builder(ScriptAwareTokenizer)
+    index.tokenizers().register(BODY_ANALYZER, body_analyzer());
+}
+
+pub(crate) fn body_analyzer() -> TextAnalyzer {
+    TextAnalyzer::builder(ScriptAwareTokenizer)
         .filter(LowerCaser)
-        .build();
-    index.tokenizers().register(BODY_ANALYZER, analyzer);
+        .build()
 }
 
 #[cfg(test)]

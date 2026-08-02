@@ -7,9 +7,9 @@ use std::{
 use crate::{
     analyzer::register_body_analyzer, durable_directory::DurableMmapDirectory, is_generation_id,
     load_active_generation_pointer, load_manifest_for_metas, meta_generation, open_slot_index,
-    payload_generation_id, searcher_generation, validate_schema, verify_searcher,
-    verify_searcher_structure, ActiveGenerationPointer, GenerationManifest, GenerationSlot,
-    IndexError, Result,
+    payload_generation_id, searcher_generation, validate_schema, verify_complete_searcher,
+    verify_physical_integrity, verify_searcher_structure, ActiveGenerationPointer,
+    GenerationManifest, GenerationSlot, IndexError, Result,
 };
 use tantivy::{ReloadPolicy, Searcher};
 
@@ -18,7 +18,7 @@ pub struct VerifiedIndex {
     pub(crate) searcher: Searcher,
     pub(crate) manifest: GenerationManifest,
     pub(crate) generation_id: String,
-    pub(crate) semantic_eligible_event_count: OnceLock<u64>,
+    pub(crate) semantic_eligibility_postings: OnceLock<crate::query::SemanticEligibilityPostings>,
 }
 
 impl VerifiedIndex {
@@ -206,18 +206,25 @@ impl VerifiedIndex {
             return Err(IndexError::ConcurrentGenerationChange);
         }
         if audit_stored_core {
-            if !searcher.index().validate_checksum()?.is_empty() {
-                return Err(IndexError::ChecksumMismatch);
-            }
-            verify_searcher(&searcher, &manifest)?;
+            verify_complete_searcher(
+                &searcher,
+                &manifest,
+                &crate::publication::slot_path(root, slot),
+                slot.physical_integrity_digest(),
+            )?;
         } else {
+            verify_physical_integrity(
+                &index,
+                &crate::publication::slot_path(root, slot),
+                slot.physical_integrity_digest(),
+            )?;
             verify_searcher_structure(&searcher, &manifest)?;
         }
         Ok(Self {
             searcher,
             manifest,
             generation_id,
-            semantic_eligible_event_count: OnceLock::new(),
+            semantic_eligibility_postings: OnceLock::new(),
         })
     }
 

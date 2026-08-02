@@ -5,7 +5,7 @@ use std::{
 };
 
 use ctx_history_core::{core_record_contract_fingerprint, CORE_RECORD_VERSION, IDENTITY_VERSION};
-use tantivy::{directory::Directory, Index, IndexMeta, ReloadPolicy, Searcher};
+use tantivy::{directory::Directory, IndexMeta, Searcher};
 use uuid::Uuid;
 
 use crate::{
@@ -16,8 +16,6 @@ use crate::{
     GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
     MANIFEST_DIRECTORY,
 };
-
-use super::verification::verify_searcher;
 
 pub(crate) fn load_manifest_for_metas(
     root: &Path,
@@ -84,8 +82,7 @@ pub(crate) fn load_manifest_for_metas(
 }
 
 pub(crate) fn reconcile_commit_error(
-    index: &Index,
-    root: &Path,
+    index: &tantivy::Index,
     expected_generation_id: &str,
     previous_generation_id: Option<&str>,
     commit_error: tantivy::TantivyError,
@@ -105,29 +102,7 @@ pub(crate) fn reconcile_commit_error(
         }
     })?;
     if visible_generation.as_deref() == Some(expected_generation_id) {
-        let verification = (|| -> Result<u64> {
-            let manifest = load_manifest_for_metas(root, &metas)?;
-            let reader = index
-                .reader_builder()
-                .reload_policy(ReloadPolicy::Manual)
-                .try_into()?;
-            let searcher = reader.searcher();
-            if searcher_generation(&searcher) != meta_generation(&metas) {
-                return Err(IndexError::ConcurrentGenerationChange);
-            }
-            verify_searcher(&searcher, &manifest)?;
-            Ok(metas.opstamp)
-        })();
-        return verification.map_err(|verification_error| {
-            IndexError::CommittedGenerationNeedsRecovery {
-                generation_id: expected_generation_id.to_owned(),
-                stage: "candidate commit reconciliation",
-                detail: format!(
-                    "{commit_error}; candidate commit completed but verification failed: \
-                     {verification_error}"
-                ),
-            }
-        });
+        return Ok(metas.opstamp);
     }
     if visible_generation.as_deref() == previous_generation_id
         || (previous_generation_id.is_none()
@@ -223,11 +198,13 @@ pub(crate) fn reclaim_unreferenced_manifests(
             .is_some_and(|(generation_id, suffix)| {
                 is_generation_id(generation_id) && !suffix.is_empty()
             });
+        let obsolete_integrity_sidecar = is_legacy_generation_integrity_sidecar(file_name);
         let should_remove = immutable_generation.is_some_and(|generation_id| {
             !retained_generation_ids
                 .iter()
                 .any(|retained| retained == generation_id)
-        }) || corrupt_quarantine;
+        }) || corrupt_quarantine
+            || obsolete_integrity_sidecar;
         if should_remove {
             fs::remove_file(entry.path())?;
             removed = true;
@@ -237,6 +214,19 @@ pub(crate) fn reclaim_unreferenced_manifests(
         sync_directory(&directory)?;
     }
     Ok(())
+}
+
+fn is_legacy_generation_integrity_sidecar(file_name: &str) -> bool {
+    let Some(generation_uuid) = file_name
+        .strip_prefix("generation-")
+        .and_then(|name| name.strip_suffix(".integrity.json"))
+    else {
+        return false;
+    };
+    generation_uuid.len() == 32
+        && generation_uuid
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub(crate) fn meta_generation(metas: &IndexMeta) -> BTreeMap<String, Option<u64>> {

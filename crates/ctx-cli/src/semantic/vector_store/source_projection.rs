@@ -6,8 +6,9 @@ use std::{
 use anyhow::{anyhow, Result};
 use ctx_history_core::{SourceKey, StableEntityId};
 use ctx_history_index::{
-    CoreEventRecord, SemanticEligibility, SourceCoreRecordAggregate, SourceEventCursor,
-    VerifiedIndex, LEXICAL_SCHEMA_VERSION, MAX_SOURCE_EVENT_PAGE_ITEMS,
+    current_semantic_generation_policy, CoreEventRecord, SemanticGenerationPolicy,
+    SourceCoreRecordAggregate, SourceEventCursor, VerifiedIndex, LEXICAL_SCHEMA_VERSION,
+    MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -32,7 +33,7 @@ mod state;
 #[cfg(test)]
 use manifest::SOURCE_CONTRACT_VERSION;
 use manifest::{
-    semantic_policy_fingerprint, source_contract_fingerprint, validate_generation, validate_page,
+    source_contract_fingerprint_with_authority, validate_generation, validate_page,
     validate_resolved_document, SourceProjectionFrontier, SourceTraversalPhase,
     SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
 };
@@ -58,8 +59,9 @@ struct SourceBackedSemanticSource {
 pub(super) struct SourceBackedSemanticGeneration {
     pub(super) core_generation_id: String,
     pub(super) semantic_policy_fingerprint: String,
-    /// Count of semantic-eligible records in this pinned Core generation.
-    pub(super) semantic_documents: u64,
+    contract_fingerprint: String,
+    model_descriptor: String,
+    semantic_policy: SemanticGenerationPolicy,
     sources: Vec<SourceBackedSemanticSource>,
 }
 
@@ -67,6 +69,25 @@ impl SourceBackedSemanticGeneration {
     /// Binds semantic catch-up to one verified schema-v15 Core manifest and
     /// mirrors its exact per-source Core commitments.
     pub(super) fn from_verified_index(index: &VerifiedIndex) -> Result<Self> {
+        Self::from_verified_index_with_policy(index, current_semantic_generation_policy())
+    }
+
+    fn from_verified_index_with_policy(
+        index: &VerifiedIndex,
+        semantic_policy: SemanticGenerationPolicy,
+    ) -> Result<Self> {
+        Self::from_verified_index_with_authority(
+            index,
+            semantic_policy,
+            crate::semantic::model_contract::semantic_model_contract_descriptor(),
+        )
+    }
+
+    fn from_verified_index_with_authority(
+        index: &VerifiedIndex,
+        semantic_policy: SemanticGenerationPolicy,
+        model_descriptor: String,
+    ) -> Result<Self> {
         let manifest = index.manifest();
         if LEXICAL_SCHEMA_VERSION != SOURCE_INPUT_LEXICAL_SCHEMA_VERSION
             || manifest.lexical_schema_version != SOURCE_INPUT_LEXICAL_SCHEMA_VERSION
@@ -79,11 +100,6 @@ impl SourceBackedSemanticGeneration {
         if manifest.indexed_documents != index.document_count() {
             return Err(anyhow!(
                 "source-backed semantic manifest count does not match its verified index"
-            ));
-        }
-        if manifest.semantic_eligible_documents > manifest.indexed_documents {
-            return Err(anyhow!(
-                "source-backed semantic document count exceeds its Core manifest"
             ));
         }
         if manifest.sources.len() != manifest.core_record_aggregates.len() {
@@ -106,14 +122,26 @@ impl SourceBackedSemanticGeneration {
                 aggregate: aggregate.clone(),
             })
             .collect();
+        let semantic_policy_fingerprint = semantic_policy.canonical_sha256()?;
+        let contract_fingerprint = source_contract_fingerprint_with_authority(
+            &semantic_policy_fingerprint,
+            &model_descriptor,
+        )?;
         let generation = Self {
             core_generation_id: manifest_generation_id,
-            semantic_policy_fingerprint: semantic_policy_fingerprint()?,
-            semantic_documents: manifest.semantic_eligible_documents,
+            semantic_policy_fingerprint,
+            contract_fingerprint,
+            model_descriptor,
+            semantic_policy,
             sources,
         };
         validate_generation(&generation)?;
         Ok(generation)
+    }
+
+    fn includes(&self, record: &CoreEventRecord) -> bool {
+        self.semantic_policy
+            .includes_event(&record.event.event_type, record.event.role.as_deref())
     }
 
     fn source(&self, source_identity_digest: &str) -> Option<&SourceBackedSemanticSource> {
@@ -161,9 +189,7 @@ pub(in crate::semantic) trait SourceBackedSemanticEmbedder {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(in crate::semantic) struct SourceBackedSemanticOutcome {
     /// Exact number of complete Core records decoded from changed-source pages.
-    pub(in crate::semantic) records_read: usize,
-    /// Compatibility name retained for daemon progress output.
-    pub(in crate::semantic) records_scanned: usize,
+    pub(in crate::semantic) records_decoded: usize,
     pub(in crate::semantic) records_embedded: usize,
     pub(in crate::semantic) records_reused: usize,
     pub(in crate::semantic) records_filtered: usize,
@@ -177,8 +203,7 @@ pub(in crate::semantic) struct SourceBackedSemanticOutcome {
 }
 
 fn merge_outcome(total: &mut SourceBackedSemanticOutcome, next: SourceBackedSemanticOutcome) {
-    total.records_read = total.records_read.saturating_add(next.records_read);
-    total.records_scanned = total.records_scanned.saturating_add(next.records_scanned);
+    total.records_decoded = total.records_decoded.saturating_add(next.records_decoded);
     total.records_embedded = total.records_embedded.saturating_add(next.records_embedded);
     total.records_reused = total.records_reused.saturating_add(next.records_reused);
     total.records_filtered = total.records_filtered.saturating_add(next.records_filtered);
@@ -263,7 +288,8 @@ impl SemanticVectorStore {
             if self
                 .acknowledged_source_projection(
                     &generation.core_generation_id,
-                    Some(generation.semantic_documents),
+                    None,
+                    Some(&generation.contract_fingerprint),
                     Some(&generation.semantic_policy_fingerprint),
                     false,
                 )?
@@ -302,6 +328,7 @@ impl SemanticVectorStore {
                                 index,
                                 &mut frontier,
                                 source,
+                                generation,
                                 builder,
                                 embedder,
                             )?
@@ -392,22 +419,31 @@ impl SemanticVectorStore {
         B: SourceBackedSemanticDocumentBuilder,
         E: SourceBackedSemanticEmbedder,
     {
-        let contract_fingerprint = source_contract_fingerprint()?;
         for source in
             generation.sources_after(frontier.source_traversal_after_identity_digest.as_deref())
         {
             let source_identity_digest = source.aggregate.source_identity_digest();
             let receipt = states.get(source_identity_digest).and_then(Option::as_ref);
+            let vector_reuse_allowed = receipt.is_some_and(|receipt| {
+                receipt.contract_fingerprint == generation.contract_fingerprint
+                    && receipt.semantic_policy_fingerprint == generation.semantic_policy_fingerprint
+            });
             if receipt.is_none_or(|receipt| {
                 !source_receipt_matches(
                     receipt,
                     source,
-                    &contract_fingerprint,
+                    &generation.contract_fingerprint,
                     &generation.semantic_policy_fingerprint,
                 )
             }) {
-                self.start_source_reconciliation(frontier, source, generation)?;
-                return self.reconcile_source_page(index, frontier, source, builder, embedder);
+                self.start_source_reconciliation(
+                    frontier,
+                    source,
+                    generation,
+                    vector_reuse_allowed,
+                )?;
+                return self
+                    .reconcile_source_page(index, frontier, source, generation, builder, embedder);
             }
             frontier.source_traversal_after_identity_digest =
                 Some(source_identity_digest.to_owned());
@@ -461,6 +497,7 @@ impl SemanticVectorStore {
         index: &VerifiedIndex,
         frontier: &mut SourceProjectionFrontier,
         source: &SourceBackedSemanticSource,
+        generation: &SourceBackedSemanticGeneration,
         builder: &mut B,
         embedder: &mut E,
     ) -> Result<SourceBackedSemanticOutcome>
@@ -543,7 +580,7 @@ impl SemanticVectorStore {
         let eligible_event_ids = page
             .records
             .iter()
-            .filter(|record| SemanticEligibility::CURRENT.includes(&record.event))
+            .filter(|record| generation.includes(record))
             .map(|record| record.event_id.as_uuid())
             .collect::<Vec<_>>();
         let existing_events = self
@@ -557,8 +594,7 @@ impl SemanticVectorStore {
         let existing_lookup =
             FlatActiveEventLookup::from_events(existing_events.values().cloned().collect());
         let mut outcome = SourceBackedSemanticOutcome {
-            records_read: page.records.len(),
-            records_scanned: page.records.len(),
+            records_decoded: page.records.len(),
             ..SourceBackedSemanticOutcome::default()
         };
         let mut semantic_records = 0_u64;
@@ -567,7 +603,7 @@ impl SemanticVectorStore {
         let mut retire = Vec::new();
 
         for record in &page.records {
-            if !SemanticEligibility::CURRENT.includes(&record.event) {
+            if !generation.includes(record) {
                 continue;
             }
             semantic_records = semantic_records.checked_add(1).ok_or_else(|| {
@@ -607,9 +643,10 @@ impl SemanticVectorStore {
                 &source_text,
                 &frontier.semantic_policy_fingerprint,
             );
-            let reusable = existing_events
-                .get(&document.event_id)
-                .is_some_and(|event| event.source_text_hash.to_hex() == source_text_sha256);
+            let reusable = frontier.vector_reuse_allowed
+                && existing_events
+                    .get(&document.event_id)
+                    .is_some_and(|event| event.source_text_hash.to_hex() == source_text_sha256);
             if reusable {
                 outcome.records_reused = outcome.records_reused.saturating_add(1);
             } else {
@@ -651,16 +688,6 @@ impl SemanticVectorStore {
                     "source-backed semantic source candidate count overflowed",
                 )
             })?;
-        if processed_semantic_documents > source.aggregate.semantic_eligible_documents()
-            || (page.terminal
-                && processed_semantic_documents != source.aggregate.semantic_eligible_documents())
-        {
-            return Err(SemanticVectorStoreError::reset_required(
-                "source-backed semantic candidate count disagrees with its Core aggregate",
-            )
-            .into());
-        }
-
         let metadata_updates = resolved
             .iter()
             .map(|document| {
@@ -756,7 +783,7 @@ impl SemanticVectorStore {
                 source_identity_digest: source.aggregate.source_identity_digest().to_owned(),
                 source_reconciliation_id: reconciliation_id.to_owned(),
                 indexed_documents: source.aggregate.indexed_documents(),
-                semantic_eligible_documents: source.aggregate.semantic_eligible_documents(),
+                semantic_eligible_documents: frontier.processed_source_semantic_documents,
                 core_record_accumulator: source.aggregate.core_record_accumulator().to_owned(),
                 contract_fingerprint: frontier.contract_fingerprint.clone(),
                 semantic_policy_fingerprint: frontier.semantic_policy_fingerprint.clone(),

@@ -98,24 +98,31 @@ fn structural_verification_fault_never_switches_the_active_pointer() {
     candidate.before_pointer_switch = Some(Box::new(move |candidate_path| {
         let directory = DurableMmapDirectory::open(candidate_path).unwrap();
         let index = Index::open(directory).unwrap();
-        let payload = index.load_metas().unwrap().payload.unwrap();
+        let payload = index.load_metas().unwrap().payload;
         let source_key = required_field(&index.schema(), "source_key").unwrap();
         let mut writer = index
             .writer_with_num_threads::<TantivyDocument>(1, INDEX_MEMORY_MIN_PER_THREAD)
             .unwrap();
         writer.delete_term(Term::from_field_text(source_key, &source_token));
         let mut prepared = writer.prepare_commit().unwrap();
-        prepared.set_payload(&payload);
+        if let Some(payload) = payload {
+            prepared.set_payload(&payload);
+        }
         prepared.commit().unwrap();
         writer.wait_merging_threads().unwrap();
     }));
-    assert!(matches!(
-        candidate.commit(|_| true),
-        Err(IndexError::DocumentCountMismatch {
-            manifest: 1,
-            index: 0
-        })
-    ));
+    let error = candidate.commit(|_| true).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            IndexError::DocumentCountMismatch {
+                manifest: 1,
+                index: 0
+            } | IndexError::CandidateDeletionDensityExceeded { .. }
+                | IndexError::ChecksumMismatch
+        ),
+        "{error:?}"
+    );
     assert_eq!(
         fs::read(temp.path().join("active-generation.json")).unwrap(),
         pointer_before
@@ -125,6 +132,390 @@ fn structural_verification_fault_never_switches_the_active_pointer() {
         baseline.generation_id
     );
     drop(GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap());
+}
+
+#[test]
+fn omitted_managed_body_projection_fault_before_pointer_switch_keeps_previous_generation() {
+    let temp = tempdir().unwrap();
+    let source = source("candidate-checksum-fault.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "checksum baseline"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    let baseline = initial.commit(|_| true).unwrap();
+    let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
+
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    candidate.begin_source(source.clone()).unwrap();
+    candidate
+        .add_core_record(document(&source, 1, "checksum candidate"))
+        .unwrap();
+    candidate
+        .certify_source(certificate(&source, 2, 1))
+        .unwrap();
+    candidate.before_pointer_switch = Some(Box::new(|candidate_path| {
+        omit_managed_and_corrupt_body_projection(candidate_path);
+    }));
+
+    assert!(matches!(
+        candidate.commit(|_| true),
+        Err(IndexError::ChecksumMismatch)
+    ));
+    assert_eq!(
+        fs::read(temp.path().join("active-generation.json")).unwrap(),
+        pointer_before
+    );
+    let still_active = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(still_active.generation_id(), baseline.generation_id);
+    assert_eq!(still_active.count_term("baseline").unwrap(), 1);
+    assert_eq!(still_active.count_term("candidate").unwrap(), 0);
+}
+
+#[test]
+fn stored_core_aggregate_fault_before_pointer_switch_keeps_the_previous_generation() {
+    const DOCUMENTS: u64 = 5;
+
+    let temp = tempdir().unwrap();
+    let source = source("candidate-core-aggregate-fault.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    for sequence in 1..=DOCUMENTS {
+        initial
+            .add_core_record(document(&source, sequence, "aggregate baseline"))
+            .unwrap();
+    }
+    initial
+        .certify_source(certificate(&source, 1, DOCUMENTS))
+        .unwrap();
+    let baseline = initial.commit(|_| true).unwrap();
+    let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
+
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    candidate.begin_source(source.clone()).unwrap();
+    for sequence in 1..=DOCUMENTS {
+        candidate
+            .add_core_record(document(&source, sequence, "aggregate candidate"))
+            .unwrap();
+    }
+    candidate
+        .certify_source(certificate(&source, 2, DOCUMENTS))
+        .unwrap();
+    candidate.before_pointer_switch = Some(Box::new(|candidate_path| {
+        let directory = DurableMmapDirectory::open(candidate_path).unwrap();
+        let index = Index::open(directory).unwrap();
+        let payload = index.load_metas().unwrap().payload;
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .unwrap();
+        let searcher = reader.searcher();
+        let address = searcher
+            .search(&AllQuery, &DocSetCollector)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let mut forged = decoded_stored_core(&searcher, address);
+        forged.content.normalized_body = Some("forged stored Core bytes".to_owned());
+        let forged_event_id = forged.event_id;
+        drop(searcher);
+        drop(reader);
+
+        let event_id = required_field(&index.schema(), "event_id").unwrap();
+        let mut writer = index
+            .writer_with_num_threads::<TantivyDocument>(1, INDEX_MEMORY_MIN_PER_THREAD)
+            .unwrap();
+        writer.set_merge_policy(Box::<NoMergePolicy>::default());
+        writer.delete_term(Term::from_field_text(
+            event_id,
+            &forged_event_id.to_string(),
+        ));
+        writer.add_document(indexed_document(forged)).unwrap();
+        let mut prepared = writer.prepare_commit().unwrap();
+        if let Some(payload) = payload {
+            prepared.set_payload(&payload);
+        }
+        prepared.commit().unwrap();
+        writer.wait_merging_threads().unwrap();
+    }));
+
+    assert!(matches!(
+        candidate.commit(|_| true),
+        Err(IndexError::CoreRecordAggregateMismatch(_))
+    ));
+    assert_eq!(
+        fs::read(temp.path().join("active-generation.json")).unwrap(),
+        pointer_before
+    );
+    let still_active = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(still_active.generation_id(), baseline.generation_id);
+    assert_eq!(
+        still_active.count_term("baseline").unwrap(),
+        DOCUMENTS as usize
+    );
+    assert_eq!(still_active.count_term("forged").unwrap(), 0);
+}
+
+fn assert_valid_recommit_without_projection_is_rejected(field_name: &'static str) {
+    let temp = tempdir().unwrap();
+    let source = source(&format!("missing-{field_name}.jsonl"));
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer
+        .add_core_record(document(&source, 1, "projection authority body"))
+        .unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    let address = searcher
+        .search(&AllQuery, &DocSetCollector)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let complete = indexed_document(decoded_stored_core(&searcher, address));
+    let omitted = required_field(&searcher.schema(), field_name).unwrap();
+    let mut forged = TantivyDocument::default();
+    for (field, value) in complete.field_values() {
+        if field != omitted {
+            forged.add_field_value(field, value);
+        }
+    }
+    let index = searcher.index().clone();
+    drop(searcher);
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        manifest,
+        std::slice::from_ref(&source),
+        vec![forged],
+    );
+
+    assert!(matches!(
+        VerifiedIndex::open(temp.path()),
+        Err(IndexError::InvalidStoredDocumentField(actual))
+            if actual == field_name || actual == "query_projection"
+    ));
+}
+
+#[test]
+fn checksum_valid_recommit_without_body_search_is_rejected() {
+    assert_valid_recommit_without_projection_is_rejected("body_search");
+}
+
+#[test]
+fn checksum_valid_recommit_without_session_order_is_rejected() {
+    assert_valid_recommit_without_projection_is_rejected("session_event_order");
+}
+
+#[test]
+fn checksum_valid_recommit_without_neutral_core_order_is_rejected() {
+    assert_valid_recommit_without_projection_is_rejected("semantic_event_order");
+}
+
+#[derive(Clone, Copy)]
+enum QueryProjectionMutation {
+    Omit(&'static str),
+    Text(&'static str, &'static str),
+    U64(&'static str, u64),
+    I64(&'static str, i64),
+}
+
+impl QueryProjectionMutation {
+    fn field_name(self) -> &'static str {
+        match self {
+            Self::Omit(field)
+            | Self::Text(field, _)
+            | Self::U64(field, _)
+            | Self::I64(field, _) => field,
+        }
+    }
+}
+
+fn query_projection_fixture_record(source: &SourceKey, body: &str) -> CoreRecord {
+    let mut record = document(source, 1, body);
+    record.repository_bindings.push(RepositoryBinding {
+        binding_id: "binding-1".to_owned(),
+        logical_repository_id: "repo-1".to_owned(),
+        checkout_id: None,
+        worktree_id: None,
+        aliases: Vec::new(),
+        git_object_format: Some(GitObjectFormat::Sha1),
+        local_root_authorization: None,
+        evidence: vec![RepositoryEvidence {
+            kind: RepositoryEvidenceKind::FileActivity,
+            confidence: RepositoryEvidenceConfidence::Explicit,
+        }],
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    });
+    record.repository_file_observations = vec![RepositoryFileObservation {
+        repository_binding_id: "binding-1".to_owned(),
+        relative_path: "src/current.rs".to_owned(),
+        kind: RepositoryFileObservationKind::Renamed,
+        prior_relative_path: Some("src/prior.rs".to_owned()),
+    }];
+    record
+        .repository_vcs_observations
+        .push(RepositoryVcsObservation {
+            repository_binding_id: "binding-1".to_owned(),
+            kind: RepositoryVcsObservationKind::Outcome(Box::new(RepositoryOutcomeObservation {
+                kind: RepositoryOutcomeKind::Commit,
+                produced_object_ids: vec![GitObjectId {
+                    format: GitObjectFormat::Sha1,
+                    hex: "a".repeat(40),
+                }],
+                replacement_lineage: Vec::new(),
+                pull_request: None,
+                observed_at_unix_ms: 1_700_000_000_000,
+                linkage: RepositoryOutcomeLinkage {
+                    provider: "codex".to_owned(),
+                    origin_call_id: "origin-call".to_owned(),
+                    result_call_id: "result-call".to_owned(),
+                    origin_event_sequence: record.event_sequence,
+                    continuation_call_id_sha256: Vec::new(),
+                    result_record_sha256: [7; 32],
+                },
+                outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+            })),
+            object_id: None,
+            parent_object_ids: Vec::new(),
+            reference: None,
+            relative_path: None,
+        });
+    record.validate_contract().unwrap();
+    record
+}
+
+fn recommit_candidate_with_query_projection_mutation(
+    candidate_path: &Path,
+    mutation: QueryProjectionMutation,
+) {
+    let directory = DurableMmapDirectory::open(candidate_path).unwrap();
+    let index = Index::open(directory).unwrap();
+    let payload = index.load_metas().unwrap().payload;
+    let reader = index
+        .reader_builder()
+        .reload_policy(ReloadPolicy::Manual)
+        .try_into()
+        .unwrap();
+    let searcher = reader.searcher();
+    let address = searcher
+        .search(&AllQuery, &DocSetCollector)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let core = decoded_stored_core(&searcher, address);
+    let event_id = core.event_id;
+    let complete = indexed_document(core);
+    let target = required_field(&index.schema(), mutation.field_name()).unwrap();
+    let mut forged = TantivyDocument::default();
+    for (field, value) in complete.field_values() {
+        if field != target {
+            forged.add_field_value(field, value);
+        }
+    }
+    match mutation {
+        QueryProjectionMutation::Omit(_) => {}
+        QueryProjectionMutation::Text(_, value) => forged.add_text(target, value),
+        QueryProjectionMutation::U64(_, value) => forged.add_u64(target, value),
+        QueryProjectionMutation::I64(_, value) => forged.add_i64(target, value),
+    }
+    drop(searcher);
+    drop(reader);
+
+    let event_id_field = required_field(&index.schema(), "event_id").unwrap();
+    let mut writer = index
+        .writer_with_num_threads::<TantivyDocument>(1, INDEX_MEMORY_MIN_PER_THREAD)
+        .unwrap();
+    writer.set_merge_policy(Box::<NoMergePolicy>::default());
+    writer.delete_term(Term::from_field_text(event_id_field, &event_id.to_string()));
+    writer.add_document(forged).unwrap();
+    let mut prepared = writer.prepare_commit().unwrap();
+    if let Some(payload) = payload {
+        prepared.set_payload(&payload);
+    }
+    prepared.commit().unwrap();
+    writer.wait_merging_threads().unwrap();
+}
+
+#[test]
+fn candidate_publication_rejects_every_query_authoritative_projection_mutation() {
+    let cases = [
+        ("event_type", QueryProjectionMutation::Omit("event_type")),
+        ("role", QueryProjectionMutation::Text("role", "assistant")),
+        (
+            "provider",
+            QueryProjectionMutation::Text("provider", "forged-provider"),
+        ),
+        (
+            "timestamp",
+            QueryProjectionMutation::I64("occurred_at_unix_ms", 42),
+        ),
+        ("is_primary", QueryProjectionMutation::U64("is_primary", 0)),
+        (
+            "workspace",
+            QueryProjectionMutation::Text("workspace_filter", "/forged/workspace"),
+        ),
+        (
+            "touched_file",
+            QueryProjectionMutation::Text("touched_file_filter", "src/forged.rs"),
+        ),
+        (
+            "produced_object",
+            QueryProjectionMutation::Text(
+                "repository_produced_object_id",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+        ),
+        (
+            "size",
+            QueryProjectionMutation::U64("core_content_bytes", 1),
+        ),
+    ];
+
+    for (name, mutation) in cases {
+        let temp = tempdir().unwrap();
+        let source = source(&format!("projection-{name}.jsonl"));
+        let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        initial.begin_source(source.clone()).unwrap();
+        initial
+            .add_core_record(query_projection_fixture_record(&source, "prior body"))
+            .unwrap();
+        initial.certify_source(certificate(&source, 1, 1)).unwrap();
+        let baseline = initial.commit(|_| true).unwrap();
+        let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
+
+        let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        candidate.begin_source(source.clone()).unwrap();
+        candidate
+            .add_core_record(query_projection_fixture_record(&source, "candidate body"))
+            .unwrap();
+        candidate
+            .certify_source(certificate(&source, 2, 1))
+            .unwrap();
+        candidate.before_pointer_switch = Some(Box::new(move |candidate_path| {
+            recommit_candidate_with_query_projection_mutation(candidate_path, mutation);
+        }));
+
+        assert!(matches!(
+            candidate.commit(|_| true),
+            Err(IndexError::InvalidStoredDocumentField(_))
+        ));
+        assert_eq!(
+            fs::read(temp.path().join("active-generation.json")).unwrap(),
+            pointer_before,
+            "{name} mutation switched the active pointer"
+        );
+        let retained = VerifiedIndex::open(temp.path()).unwrap();
+        assert_eq!(retained.generation_id(), baseline.generation_id, "{name}");
+        assert_eq!(retained.count_term("prior").unwrap(), 1, "{name}");
+        assert_eq!(retained.count_term("candidate").unwrap(), 0, "{name}");
+    }
 }
 
 #[test]
@@ -185,20 +576,8 @@ fn post_pointer_cleanup_failure_preserves_success_and_runs_later_cleanup() {
         .unwrap();
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     let first_receipt = first.commit(|_| true).unwrap();
-    let first_slot = load_active_generation_pointer(temp.path())
-        .unwrap()
-        .unwrap()
-        .active()
-        .clone();
-    let first_generation_path = temp
-        .path()
-        .join(INDEX_GENERATIONS_DIRECTORY)
-        .join(first_slot.directory());
+    let first_generation_path = active_generation_path(temp.path());
     let first_manifest_path = manifest_path(temp.path(), &first_receipt.generation_id);
-    let first_integrity_receipt_path = temp
-        .path()
-        .join(MANIFEST_DIRECTORY)
-        .join(format!("{}.integrity.json", first_slot.directory()));
 
     let mut second = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     second.begin_source(source.clone()).unwrap();
@@ -209,7 +588,6 @@ fn post_pointer_cleanup_failure_preserves_success_and_runs_later_cleanup() {
     second.commit(|_| true).unwrap();
     assert!(first_generation_path.exists());
     assert!(first_manifest_path.exists());
-    assert!(first_integrity_receipt_path.exists());
 
     let mut third = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     third.begin_source(source.clone()).unwrap();
@@ -240,10 +618,6 @@ fn post_pointer_cleanup_failure_preserves_success_and_runs_later_cleanup() {
     assert!(rebuild_marker.is_dir());
     assert!(!first_generation_path.exists());
     assert!(!first_manifest_path.exists());
-    assert!(
-        !first_integrity_receipt_path.exists(),
-        "an earlier cleanup failure skipped integrity receipt reclamation"
-    );
 
     fs::remove_file(rebuild_marker.join("obstruction")).unwrap();
     fs::remove_dir(&rebuild_marker).unwrap();
@@ -933,13 +1307,10 @@ fn verified_generation_rejects_a_forged_duplicate_event_identity() {
     );
 
     let (searcher, manifest) = open_unverified_generation(temp.path());
-    let reference_error =
-        crate::publication::verify_searcher_reference(&searcher, &manifest).unwrap_err();
-    let one_pass_error = verify_searcher(&searcher, &manifest).unwrap_err();
-    assert_eq!(
-        std::mem::discriminant(&reference_error),
-        std::mem::discriminant(&one_pass_error)
-    );
+    assert!(matches!(
+        verify_searcher(&searcher, &manifest),
+        Err(IndexError::DuplicateEventIdentity(_))
+    ));
     let error = match VerifiedIndex::open(temp.path()) {
         Ok(_) => panic!("duplicate event generation unexpectedly opened"),
         Err(error) => error,
@@ -985,13 +1356,10 @@ fn verified_generation_rejects_forged_source_ownership() {
     );
 
     let (searcher, manifest) = open_unverified_generation(temp.path());
-    let reference_error =
-        crate::publication::verify_searcher_reference(&searcher, &manifest).unwrap_err();
-    let one_pass_error = verify_searcher(&searcher, &manifest).unwrap_err();
-    assert_eq!(
-        std::mem::discriminant(&reference_error),
-        std::mem::discriminant(&one_pass_error)
-    );
+    assert!(matches!(
+        verify_searcher(&searcher, &manifest),
+        Err(IndexError::InvalidStoredDocumentField("core_record"))
+    ));
     let error = match VerifiedIndex::open(temp.path()) {
         Ok(_) => panic!("source ownership mismatch unexpectedly opened"),
         Err(error) => error,
@@ -1102,7 +1470,7 @@ fn invalid_memory_budget_has_no_filesystem_side_effect() {
 }
 
 #[test]
-fn one_pass_verifier_matches_reference_with_bounded_parallel_segment_state() {
+fn complete_verifier_decodes_once_with_bounded_parallel_segment_state() {
     const SOURCE_COUNT: usize = 6;
     const DOCUMENTS_PER_SOURCE: u64 = 24;
 
@@ -1111,32 +1479,29 @@ fn one_pass_verifier_matches_reference_with_bounded_parallel_segment_state() {
     assert_eq!(sources.len(), SOURCE_COUNT);
     assert_eq!(searcher.segment_readers().len(), SOURCE_COUNT);
 
-    let reference =
-        crate::publication::verify_searcher_reference_with_metrics(&searcher, &manifest).unwrap();
-    let one_pass =
+    let metrics =
         crate::publication::verify_searcher_with_metrics(&searcher, &manifest, 2, true).unwrap();
     let expected_documents = SOURCE_COUNT * DOCUMENTS_PER_SOURCE as usize;
 
-    assert_eq!(reference.query_passes, SOURCE_COUNT + 1);
+    assert_eq!(metrics.worker_budget, 2);
+    assert_eq!(metrics.segment_tasks, SOURCE_COUNT);
+    assert_eq!(metrics.document_decodes, expected_documents);
+    assert_eq!(metrics.source_terms, SOURCE_COUNT);
+    assert_eq!(metrics.max_active_workers, 2);
+    assert_eq!(metrics.max_buffered_segments, metrics.worker_budget);
+    assert_eq!(metrics.max_buffered_event_identities, 0);
+    assert_eq!(metrics.max_buffered_session_identities, 0);
+    assert!(metrics.stored_core_bytes > 0);
+    assert!(metrics.body_tokens >= expected_documents as u64);
     assert_eq!(
-        reference.segment_query_visits,
-        (SOURCE_COUNT + 1) * SOURCE_COUNT
+        metrics.verification_spill_bytes,
+        expected_documents as u64 * 133
     );
-    assert_eq!(reference.document_decodes, expected_documents);
-    assert_eq!(one_pass.worker_budget, 2);
-    assert_eq!(one_pass.segment_tasks, SOURCE_COUNT);
-    assert_eq!(one_pass.document_decodes, expected_documents);
-    assert_eq!(one_pass.source_terms, SOURCE_COUNT);
-    assert_eq!(one_pass.max_active_workers, 2);
-    assert!(one_pass.segment_tasks < reference.segment_query_visits);
-
-    assert_eq!(one_pass.max_buffered_segments, one_pass.worker_budget);
-    assert_eq!(one_pass.max_buffered_event_identities, 1);
-    assert_eq!(one_pass.max_buffered_session_identities, 1);
+    assert!(metrics.verification_heap_payload_bound_bytes < 32 * 1024);
 }
 
 #[test]
-fn one_pass_verifier_matches_reference_for_identity_digest_corruption() {
+fn complete_verifier_rejects_identity_digest_corruption() {
     let temp = tempdir().unwrap();
     let source = source("digest-corruption.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -1174,21 +1539,15 @@ fn one_pass_verifier_matches_reference_for_identity_digest_corruption() {
     );
 
     let (searcher, manifest) = open_unverified_generation(temp.path());
-    let reference =
-        crate::publication::verify_searcher_reference(&searcher, &manifest).unwrap_err();
-    let one_pass = verify_searcher(&searcher, &manifest).unwrap_err();
-    assert_eq!(
-        std::mem::discriminant(&reference),
-        std::mem::discriminant(&one_pass)
-    );
+    let error = verify_searcher(&searcher, &manifest).unwrap_err();
     assert!(matches!(
-        one_pass,
+        error,
         IndexError::InvalidStoredDocumentField("core_record")
     ));
 }
 
 #[test]
-fn one_pass_verifier_matches_reference_for_source_count_corruption() {
+fn complete_verifier_rejects_source_count_corruption() {
     let temp = tempdir().unwrap();
     let first = source("count-first.jsonl");
     let second = source("count-second.jsonl");
@@ -1223,21 +1582,15 @@ fn one_pass_verifier_matches_reference_for_source_count_corruption() {
     );
 
     let (searcher, manifest) = open_unverified_generation(temp.path());
-    let reference =
-        crate::publication::verify_searcher_reference(&searcher, &manifest).unwrap_err();
-    let one_pass = verify_searcher(&searcher, &manifest).unwrap_err();
-    assert_eq!(
-        std::mem::discriminant(&reference),
-        std::mem::discriminant(&one_pass)
-    );
+    let error = verify_searcher(&searcher, &manifest).unwrap_err();
     assert!(matches!(
-        one_pass,
+        error,
         IndexError::CoreRecordAggregateCountMismatch { .. }
     ));
 }
 
 #[test]
-fn one_pass_verifier_matches_reference_for_total_count_corruption() {
+fn complete_verifier_rejects_total_count_corruption() {
     let temp = tempdir().unwrap();
     let source = source("total-count.jsonl");
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -1259,15 +1612,9 @@ fn one_pass_verifier_matches_reference_for_total_count_corruption() {
     );
 
     let (searcher, manifest) = open_unverified_generation(temp.path());
-    let reference =
-        crate::publication::verify_searcher_reference(&searcher, &manifest).unwrap_err();
-    let one_pass = verify_searcher(&searcher, &manifest).unwrap_err();
-    assert_eq!(
-        std::mem::discriminant(&reference),
-        std::mem::discriminant(&one_pass)
-    );
+    let error = verify_searcher(&searcher, &manifest).unwrap_err();
     assert!(matches!(
-        one_pass,
+        error,
         IndexError::DocumentCountMismatch {
             manifest: 2,
             index: 1

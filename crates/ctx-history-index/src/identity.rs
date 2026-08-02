@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use ctx_history_core::{CoreRecord, SourceKey, StableEntityId};
 use sha2::{Digest, Sha256};
-use tantivy::{schema::IndexRecordOption, Searcher, TantivyDocument, Term};
+use tantivy::{schema::IndexRecordOption, Searcher, Term};
 use uuid::Uuid;
 
 use crate::{Fields, IndexError, Result};
@@ -13,7 +13,7 @@ pub(crate) fn prior_core_record(
     identity: StableEntityId,
     current_source: &SourceKey,
 ) -> Result<Option<CoreRecord>> {
-    use tantivy::{collector::TopDocs, query::TermQuery, schema::Value as TantivyValue};
+    use tantivy::{collector::TopDocs, query::TermQuery};
 
     let term = Term::from_field_text(fields.event_id, &identity.as_uuid().to_string());
     if searcher.doc_freq(&term)? == 0 {
@@ -21,31 +21,26 @@ pub(crate) fn prior_core_record(
     }
     let query = TermQuery::new(term, IndexRecordOption::Basic);
     let hits = searcher.search(&query, &TopDocs::with_limit(2).order_by_score())?;
-    let mut prior = None;
-    for (_, address) in hits {
-        let document: TantivyDocument = searcher.doc(address)?;
-        let bytes = document
-            .get_first(fields.core_record)
-            .and_then(|value| value.as_bytes())
-            .ok_or(IndexError::EmptyDocumentField {
-                field: "core_record",
-            })?;
-        crate::query::validate_core_record_encoded_bytes(searcher, address, bytes.len())?;
-        let decoded = CoreRecord::decode_stored(bytes)?;
-        if decoded.event_id != identity {
-            return Err(IndexError::InvalidStoredDocumentField("core_record"));
-        }
-        if !decoded.source.exact_descriptor_eq(current_source) {
-            continue;
-        }
-        if prior.is_some() {
-            return Err(IndexError::DuplicateEventIdentity(
-                identity.as_uuid().to_string(),
-            ));
-        }
-        prior = Some(decoded);
+    if hits.len() > 1 {
+        return Err(IndexError::DuplicateEventIdentity(
+            identity.as_uuid().to_string(),
+        ));
     }
-    Ok(prior)
+    let Some((_, address)) = hits.into_iter().next() else {
+        return Ok(None);
+    };
+    let record = crate::query::stored_verification_record(searcher, address, fields)?;
+    if record.core_record.event_id != identity {
+        return Err(IndexError::InvalidStoredDocumentField("core_record"));
+    }
+    if !record
+        .core_record
+        .source
+        .exact_descriptor_eq(current_source)
+    {
+        return Ok(None);
+    }
+    Ok(Some(record.core_record))
 }
 
 pub(crate) fn source_token(source: &SourceKey) -> String {

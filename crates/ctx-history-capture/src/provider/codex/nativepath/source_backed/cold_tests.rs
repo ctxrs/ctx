@@ -151,10 +151,6 @@ fn ready_arrival_preserves_exact_receipt_and_record_order() {
         parallel.commit.indexed_documents
     );
     assert_eq!(
-        single.commit.semantic_eligible_documents,
-        parallel.commit.semantic_eligible_documents
-    );
-    assert_eq!(
         single.commit.certified_sources,
         parallel.commit.certified_sources
     );

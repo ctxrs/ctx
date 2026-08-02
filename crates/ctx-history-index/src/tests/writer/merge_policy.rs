@@ -81,8 +81,8 @@ fn production_merge_policy_bounds_repeated_tiny_appends_amortized() {
         fs::read_dir(temp.path().join(MANIFEST_DIRECTORY))
             .unwrap()
             .count(),
-        4,
-        "publication should retain one manifest and integrity receipt for the visible and grace generations"
+        2,
+        "publication should retain one manifest for each visible and grace generation"
     );
 }
 
@@ -129,7 +129,7 @@ fn unreclaimed_delete_density_cannot_replace_the_active_generation() {
     replacement.before_pointer_switch = Some(Box::new(move |candidate_path| {
         let directory = DurableMmapDirectory::open(candidate_path).unwrap();
         let index = Index::open(directory).unwrap();
-        let payload = index.load_metas().unwrap().payload.unwrap();
+        let payload = index.load_metas().unwrap().payload;
         let event_id = required_field(&index.schema(), "event_id").unwrap();
         let mut writer = index
             .writer_with_num_threads::<TantivyDocument>(1, INDEX_MEMORY_MIN_PER_THREAD)
@@ -140,7 +140,9 @@ fn unreclaimed_delete_density_cannot_replace_the_active_generation() {
             &deleted_candidate_event.to_string(),
         ));
         let mut prepared = writer.prepare_commit().unwrap();
-        prepared.set_payload(&payload);
+        if let Some(payload) = payload {
+            prepared.set_payload(&payload);
+        }
         prepared.commit().unwrap();
         writer.wait_merging_threads().unwrap();
     }));
@@ -182,8 +184,8 @@ fn unreclaimed_delete_density_cannot_replace_the_active_generation() {
         fs::read_dir(temp.path().join(MANIFEST_DIRECTORY))
             .unwrap()
             .count(),
-        2,
-        "only the active manifest and integrity receipt may remain"
+        1,
+        "only the active manifest may remain"
     );
 }
 
@@ -290,8 +292,8 @@ fn production_merge_policy_bounds_repeated_substantial_replacements() {
             fs::read_dir(temp.path().join(MANIFEST_DIRECTORY))
                 .unwrap()
                 .count(),
-            4,
-            "only current/grace manifests and integrity receipts may remain"
+            2,
+            "only current and grace manifests may remain"
         );
         assert!(
             fs::read_dir(temp.path().join(INDEX_GENERATIONS_DIRECTORY))

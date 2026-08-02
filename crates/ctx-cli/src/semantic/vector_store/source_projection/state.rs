@@ -44,7 +44,7 @@ pub(super) fn source_receipt_matches(
 ) -> bool {
     receipt.source_identity_digest == source.aggregate.source_identity_digest()
         && receipt.indexed_documents == source.aggregate.indexed_documents()
-        && receipt.semantic_eligible_documents == source.aggregate.semantic_eligible_documents()
+        && receipt.semantic_eligible_documents <= receipt.indexed_documents
         && receipt.core_record_accumulator == source.aggregate.core_record_accumulator()
         && receipt.contract_fingerprint == contract_fingerprint
         && receipt.semantic_policy_fingerprint == policy_fingerprint
@@ -175,10 +175,11 @@ impl SemanticVectorStore {
     pub(super) fn source_receipts_summary(
         &self,
         states: &SourceProjectionStates,
-    ) -> Result<(u64, String, u64)> {
+    ) -> Result<(u64, String, u64, u64)> {
         let mut digest = Sha256::new();
         digest.update(RECEIPT_SET_DOMAIN);
         let mut projected_documents = 0_u64;
+        let mut semantic_documents = 0_u64;
         let mut receipt_count = 0_u64;
         for receipt in states.values() {
             let receipt = receipt.as_ref().ok_or_else(|| {
@@ -198,8 +199,20 @@ impl SemanticVectorStore {
                         "semantic source receipt count overflowed",
                     )
                 })?;
+            semantic_documents = semantic_documents
+                .checked_add(receipt.semantic_eligible_documents)
+                .ok_or_else(|| {
+                    SemanticVectorStoreError::reset_required(
+                        "semantic source candidate count overflowed",
+                    )
+                })?;
         }
-        Ok((receipt_count, hex(&digest.finalize()), projected_documents))
+        Ok((
+            receipt_count,
+            hex(&digest.finalize()),
+            semantic_documents,
+            projected_documents,
+        ))
     }
 
     fn flat_authority_matches_acknowledgement(
@@ -211,11 +224,12 @@ impl SemanticVectorStore {
         if states.values().any(Option::is_none) {
             return Ok(false);
         }
-        let (receipt_count, receipt_hash, projected_documents) =
+        let (receipt_count, receipt_hash, semantic_documents, projected_documents) =
             self.source_receipts_summary(&states)?;
         let stats = self.flat.active_stats().map_err(anyhow::Error::new)?;
         Ok(acknowledgement.source_receipt_count == receipt_count
             && acknowledgement.source_receipts_hash == receipt_hash
+            && acknowledgement.semantic_documents == semantic_documents
             && acknowledgement.projected_documents == projected_documents
             && acknowledgement.flat_active_events == stats.active_events as u64
             && acknowledgement.flat_active_chunks == stats.active_chunks as u64
@@ -231,7 +245,7 @@ impl SemanticVectorStore {
         generation: &SourceBackedSemanticGeneration,
         states: &SourceProjectionStates,
     ) -> Result<SourceBackedSemanticOutcome> {
-        let contract_fingerprint = source_contract_fingerprint()?;
+        let contract_fingerprint = &generation.contract_fingerprint;
         if states.len() != generation.sources.len()
             || generation.sources.iter().any(|source| {
                 states
@@ -241,7 +255,7 @@ impl SemanticVectorStore {
                         !source_receipt_matches(
                             receipt,
                             source,
-                            &contract_fingerprint,
+                            contract_fingerprint,
                             &generation.semantic_policy_fingerprint,
                         )
                     })
@@ -253,9 +267,9 @@ impl SemanticVectorStore {
             .into());
         }
 
-        let (source_receipt_count, source_receipts_hash, receipt_documents) =
+        let (source_receipt_count, source_receipts_hash, semantic_documents, receipt_documents) =
             self.source_receipts_summary(states)?;
-        if receipt_documents > frontier.semantic_documents {
+        if receipt_documents > semantic_documents {
             return Err(SemanticVectorStoreError::reset_required(
                 "semantic source receipts exceed metadata-eligible Core records",
             )
@@ -277,7 +291,7 @@ impl SemanticVectorStore {
             core_generation_id: frontier.core_generation_id.clone(),
             semantic_policy_fingerprint: frontier.semantic_policy_fingerprint.clone(),
             consumer_build_id: frontier.consumer_build_id.clone(),
-            semantic_documents: frontier.semantic_documents,
+            semantic_documents,
             projected_documents: receipt_documents,
             source_receipt_count,
             source_receipts_hash,
@@ -322,6 +336,7 @@ impl SemanticVectorStore {
                 core_generation_id,
                 Some(semantic_documents),
                 None,
+                None,
                 true,
             )?
             else {
@@ -346,6 +361,7 @@ impl SemanticVectorStore {
         &self,
         core_generation_id: &str,
         expected_semantic_documents: Option<u64>,
+        expected_contract_fingerprint: Option<&str>,
         expected_semantic_policy_fingerprint: Option<&str>,
         require_pin: bool,
     ) -> Result<Option<AcknowledgedSourceProjection>> {
@@ -366,7 +382,10 @@ impl SemanticVectorStore {
         if self.source_frontier()?.is_some() {
             return Ok(None);
         }
-        let fingerprint = source_contract_fingerprint()?;
+        let fingerprint = expected_contract_fingerprint
+            .map(str::to_owned)
+            .map(Ok)
+            .unwrap_or_else(source_contract_fingerprint)?;
         if acknowledgement.contract_version != SOURCE_CONTRACT_VERSION
             || acknowledgement.contract_fingerprint != fingerprint
             || acknowledgement.core_generation_id != core_generation_id
@@ -386,10 +405,11 @@ impl SemanticVectorStore {
         if states.values().any(Option::is_none) {
             return Ok(None);
         }
-        let (receipt_count, receipt_hash, projected_documents) =
+        let (receipt_count, receipt_hash, semantic_documents, projected_documents) =
             self.source_receipts_summary(&states)?;
         if acknowledgement.source_receipt_count != receipt_count
             || acknowledgement.source_receipts_hash != receipt_hash
+            || acknowledgement.semantic_documents != semantic_documents
             || acknowledgement.projected_documents != projected_documents
             || acknowledgement.projected_documents > acknowledgement.semantic_documents
         {
@@ -442,14 +462,13 @@ impl SemanticVectorStore {
         &self,
         generation: &SourceBackedSemanticGeneration,
     ) -> Result<SourceProjectionFrontier> {
-        let fingerprint = source_contract_fingerprint()?;
+        let fingerprint = generation.contract_fingerprint.clone();
         let previous_frontier = self.source_frontier()?;
         if let Some(frontier) = previous_frontier.as_ref() {
             if frontier.contract_version == SOURCE_CONTRACT_VERSION
                 && frontier.contract_fingerprint == fingerprint
                 && frontier.core_generation_id == generation.core_generation_id
                 && frontier.semantic_policy_fingerprint == generation.semantic_policy_fingerprint
-                && frontier.semantic_documents == generation.semantic_documents
             {
                 return Ok(frontier.clone());
             }
@@ -463,18 +482,17 @@ impl SemanticVectorStore {
                 &fingerprint,
                 &generation.core_generation_id,
             ),
-            semantic_documents: generation.semantic_documents,
             source_traversal_phase: SourceTraversalPhase::RemovingStaleSources,
             source_traversal_after_identity_digest: None,
             active_source_identity_digest: None,
             active_source_reconciliation_id: None,
             active_source_indexed_documents: 0,
-            active_source_semantic_documents: 0,
             processed_source_documents: 0,
             processed_source_semantic_documents: 0,
             after_identity: None,
             source_scan_complete: false,
             removing_source: false,
+            vector_reuse_allowed: false,
             last_failure: None,
             flat_publication: self
                 .flat
@@ -497,6 +515,7 @@ impl SemanticVectorStore {
         frontier: &mut SourceProjectionFrontier,
         source: &SourceBackedSemanticSource,
         generation: &SourceBackedSemanticGeneration,
+        vector_reuse_allowed: bool,
     ) -> Result<()> {
         let source_identity_digest = source.aggregate.source_identity_digest();
         frontier.active_source_identity_digest = Some(source_identity_digest.to_owned());
@@ -506,12 +525,12 @@ impl SemanticVectorStore {
             &source.aggregate,
         ));
         frontier.active_source_indexed_documents = source.aggregate.indexed_documents();
-        frontier.active_source_semantic_documents = source.aggregate.semantic_eligible_documents();
         frontier.processed_source_documents = 0;
         frontier.processed_source_semantic_documents = 0;
         frontier.after_identity = None;
         frontier.source_scan_complete = false;
         frontier.removing_source = false;
+        frontier.vector_reuse_allowed = vector_reuse_allowed;
         frontier.flat_staging = None;
         frontier.last_failure = None;
         self.store_source_frontier(frontier)
@@ -525,12 +544,12 @@ impl SemanticVectorStore {
         frontier.active_source_identity_digest = Some(source_identity_digest.to_owned());
         frontier.active_source_reconciliation_id = None;
         frontier.active_source_indexed_documents = 0;
-        frontier.active_source_semantic_documents = 0;
         frontier.processed_source_documents = 0;
         frontier.processed_source_semantic_documents = 0;
         frontier.after_identity = None;
         frontier.source_scan_complete = true;
         frontier.removing_source = true;
+        frontier.vector_reuse_allowed = false;
         frontier.flat_staging = None;
         frontier.last_failure = None;
         self.store_source_frontier(frontier)
@@ -584,18 +603,17 @@ fn frontier_from_acknowledgement(
         core_generation_id: acknowledgement.core_generation_id.clone(),
         semantic_policy_fingerprint: acknowledgement.semantic_policy_fingerprint.clone(),
         consumer_build_id: acknowledgement.consumer_build_id.clone(),
-        semantic_documents: acknowledgement.semantic_documents,
         source_traversal_phase: SourceTraversalPhase::RemovingStaleSources,
         source_traversal_after_identity_digest: None,
         active_source_identity_digest: None,
         active_source_reconciliation_id: None,
         active_source_indexed_documents: 0,
-        active_source_semantic_documents: 0,
         processed_source_documents: 0,
         processed_source_semantic_documents: 0,
         after_identity: None,
         source_scan_complete: false,
         removing_source: false,
+        vector_reuse_allowed: false,
         last_failure: None,
         flat_publication: current,
         flat_staging: None,
@@ -618,12 +636,12 @@ pub(super) fn clear_active_source(frontier: &mut SourceProjectionFrontier) {
     frontier.active_source_identity_digest = None;
     frontier.active_source_reconciliation_id = None;
     frontier.active_source_indexed_documents = 0;
-    frontier.active_source_semantic_documents = 0;
     frontier.processed_source_documents = 0;
     frontier.processed_source_semantic_documents = 0;
     frontier.after_identity = None;
     frontier.source_scan_complete = false;
     frontier.removing_source = false;
+    frontier.vector_reuse_allowed = false;
     frontier.flat_staging = None;
     frontier.last_failure = None;
 }
@@ -639,7 +657,6 @@ pub(super) fn source_reconciliation_id(
     digest.update(semantic_policy_fingerprint.as_bytes());
     digest.update(aggregate.source_identity_digest().as_bytes());
     digest.update(aggregate.indexed_documents().to_be_bytes());
-    digest.update(aggregate.semantic_eligible_documents().to_be_bytes());
     digest.update(aggregate.core_record_accumulator().as_bytes());
     hex(&digest.finalize())
 }

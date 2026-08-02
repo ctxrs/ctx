@@ -10,13 +10,12 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+crc32fast = "1.5"
 ctx-history-core = { path = "../ctx-history-core" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tantivy.workspace = true
 thiserror.workspace = true
-uuid.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true
+uuid.workspace = true

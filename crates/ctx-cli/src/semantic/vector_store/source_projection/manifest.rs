@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Result};
 use ctx_history_core::{core_record_contract_fingerprint, StableEntityKind, IDENTITY_VERSION};
-use ctx_history_index::{current_source_generation_policy, CoreEventRecord};
+use ctx_history_index::{current_semantic_generation_policy_hash, CoreEventRecord};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{SourceBackedSemanticGeneration, SourceBackedSemanticPage};
 use crate::semantic::{
-    model_contract::semantic_model_key,
+    model_contract::semantic_model_contract_descriptor,
     vector_store::flat_segments::{
         FlatPublicationToken, FlatSourceStagingToken, PinnedFlatGeneration,
     },
@@ -15,7 +15,7 @@ use crate::semantic::{
 
 pub(super) const SOURCE_FRONTIER_STATE: &str = "core_semantic_frontier_v1";
 pub(super) const SOURCE_ACKNOWLEDGEMENT_STATE: &str = "core_semantic_acknowledgement_v1";
-pub(super) const SOURCE_CONTRACT_VERSION: u16 = 10;
+pub(super) const SOURCE_CONTRACT_VERSION: u16 = 11;
 const SOURCE_CONTRACT_DOMAIN: &[u8] = b"ctx-source-backed-semantic-contract-v1\0";
 const SOURCE_BUILD_DOMAIN: &[u8] = b"ctx-source-backed-semantic-build-v1\0";
 pub(super) const SOURCE_INPUT_LEXICAL_SCHEMA_VERSION: u32 = 16;
@@ -28,18 +28,18 @@ pub(super) struct SourceProjectionFrontier {
     pub(super) core_generation_id: String,
     pub(super) semantic_policy_fingerprint: String,
     pub(super) consumer_build_id: String,
-    pub(super) semantic_documents: u64,
     pub(super) source_traversal_phase: SourceTraversalPhase,
     pub(super) source_traversal_after_identity_digest: Option<String>,
     pub(super) active_source_identity_digest: Option<String>,
     pub(super) active_source_reconciliation_id: Option<String>,
     pub(super) active_source_indexed_documents: u64,
-    pub(super) active_source_semantic_documents: u64,
     pub(super) processed_source_documents: u64,
     pub(super) processed_source_semantic_documents: u64,
     pub(super) after_identity: Option<Vec<u8>>,
     pub(super) source_scan_complete: bool,
     pub(super) removing_source: bool,
+    #[serde(default)]
+    pub(super) vector_reuse_allowed: bool,
     pub(super) last_failure: Option<String>,
     #[serde(default)]
     pub(super) flat_publication: FlatPublicationToken,
@@ -86,7 +86,26 @@ pub(super) fn validate_generation(generation: &SourceBackedSemanticGeneration) -
     validate_sha256(
         &generation.semantic_policy_fingerprint,
         "semantic policy fingerprint",
-    )
+    )?;
+    if generation.semantic_policy.canonical_sha256()? != generation.semantic_policy_fingerprint {
+        return Err(anyhow!(
+            "semantic generation policy does not match its fingerprint"
+        ));
+    }
+    validate_sha256(
+        &generation.contract_fingerprint,
+        "semantic contract fingerprint",
+    )?;
+    if source_contract_fingerprint_with_authority(
+        &generation.semantic_policy_fingerprint,
+        &generation.model_descriptor,
+    )? != generation.contract_fingerprint
+    {
+        return Err(anyhow!(
+            "semantic generation model descriptor does not match its contract fingerprint"
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn validate_generation_id(generation_id: &str) -> Result<()> {
@@ -174,20 +193,28 @@ pub(super) fn validate_resolved_document(
 }
 
 pub(super) fn semantic_policy_fingerprint() -> Result<String> {
-    let policy = current_source_generation_policy().semantic;
-    let encoded = serde_json::to_vec(&policy)?;
-    Ok(hex(&Sha256::digest(encoded)))
+    Ok(current_semantic_generation_policy_hash()?)
 }
 
 pub(super) fn source_contract_fingerprint() -> Result<String> {
+    source_contract_fingerprint_with_authority(
+        &semantic_policy_fingerprint()?,
+        &semantic_model_contract_descriptor(),
+    )
+}
+
+pub(super) fn source_contract_fingerprint_with_authority(
+    semantic_policy_fingerprint: &str,
+    model_descriptor: &str,
+) -> Result<String> {
     let mut digest = Sha256::new();
     digest.update(SOURCE_CONTRACT_DOMAIN);
     digest.update(SOURCE_CONTRACT_VERSION.to_be_bytes());
     digest.update(IDENTITY_VERSION.to_be_bytes());
     digest.update(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION.to_be_bytes());
     digest.update(core_record_contract_fingerprint().as_bytes());
-    digest.update(semantic_policy_fingerprint()?.as_bytes());
-    digest.update(semantic_model_key().as_bytes());
+    digest.update(semantic_policy_fingerprint.as_bytes());
+    digest.update(model_descriptor.as_bytes());
     Ok(hex(&digest.finalize()))
 }
 
@@ -221,5 +248,19 @@ mod tests {
             SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
             ctx_history_index::LEXICAL_SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn complete_model_descriptor_participates_in_semantic_contract_identity() {
+        let descriptor = semantic_model_contract_descriptor();
+        let policy = semantic_policy_fingerprint().unwrap();
+        let baseline = source_contract_fingerprint_with_authority(&policy, &descriptor).unwrap();
+        let revised = source_contract_fingerprint_with_authority(
+            &policy,
+            &format!("{descriptor}|test-only-sequence-length-change"),
+        )
+        .unwrap();
+        assert_ne!(baseline, revised);
+        assert_eq!(baseline, source_contract_fingerprint().unwrap());
     }
 }

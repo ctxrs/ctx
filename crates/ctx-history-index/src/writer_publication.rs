@@ -10,11 +10,6 @@ impl GenerationWriter {
             }
 
             if self.candidate_directory_name.is_none() {
-                if self.base_manifest.is_some() {
-                    // Validate before cloning: hard-linking immutable segment
-                    // files legitimately changes their inode ctime on Unix.
-                    self.validate_base_integrity_for_reuse()?;
-                }
                 let candidate = create_candidate_generation(
                     &self.root,
                     self.active_pointer
@@ -88,7 +83,6 @@ impl GenerationWriter {
         }
         self.validate_source_route_plan_complete()?;
         if let Some(witness) = self.exact_replay_inventory_witness()? {
-            self.validate_base_integrity_for_reuse()?;
             for certificate in witness.base.sources.iter().filter(|certificate| {
                 !self.source_is_carried_from_base(certificate.observation().source())
             }) {
@@ -114,6 +108,7 @@ impl GenerationWriter {
                     return Err(IndexError::SourceInvalidated(route.as_str().to_owned()));
                 }
             }
+            self.validate_base_integrity_for_reuse()?;
             return CommitReceipt::from_manifest(self.base_opstamp, witness.base.clone());
         }
 
@@ -133,6 +128,7 @@ impl GenerationWriter {
             &mut revalidate_inventory,
         )? {
             self.discard_candidate()?;
+            self.validate_base_integrity_for_reuse()?;
             return Ok(receipt);
         }
 
@@ -196,19 +192,32 @@ impl GenerationWriter {
         })?;
         prepared.set_payload(&payload);
         let commit_result = prepared.commit();
+        #[cfg(test)]
+        let commit_result = if self.return_commit_error_after_visibility {
+            commit_result.and_then(|_| {
+                Err(tantivy::TantivyError::InvalidArgument(
+                    "injected error after the candidate commit became visible".to_owned(),
+                ))
+            })
+        } else {
+            commit_result
+        };
         let writer = self.writer.take().ok_or(IndexError::WriterInvariant(
             "candidate commit is missing its lazy writer",
         ))?;
         writer.wait_merging_threads()?;
-        let opstamp = match commit_result {
-            Ok(opstamp) => opstamp,
-            Err(error) => reconcile_commit_error(
-                &self.index,
-                &root,
-                &generation_id,
-                previous_generation_id.as_deref(),
-                error,
-            )?,
+        let (opstamp, reconciled_commit_error) = match commit_result {
+            Ok(opstamp) => (opstamp, None),
+            Err(error) => {
+                let commit_error = error.to_string();
+                let opstamp = reconcile_commit_error(
+                    &self.index,
+                    &generation_id,
+                    previous_generation_id.as_deref(),
+                    error,
+                )?;
+                (opstamp, Some(commit_error))
+            }
         };
 
         let candidate_path = self.candidate_path()?;
@@ -216,13 +225,11 @@ impl GenerationWriter {
         if let Some(hook) = self.after_candidate_commit.take() {
             hook(&candidate_path);
         }
-        sync_generation(&candidate_path)?;
         #[cfg(test)]
         if let Some(hook) = self.before_pointer_switch.take() {
             hook(&candidate_path);
         }
-        self.verify_candidate(&candidate_path, &manifest, &generation_id)?;
-        writer_support::write_generation_integrity_receipt(&root, &generation_id, &candidate_path)?;
+        sync_generation(&candidate_path)?;
 
         let directory_name =
             self.candidate_directory_name
@@ -230,9 +237,23 @@ impl GenerationWriter {
                 .ok_or(IndexError::WriterInvariant(
                     "verified candidate has no generation directory",
                 ))?;
-        let active = GenerationSlot::new(generation_id.clone(), directory_name)?;
+        let verified = self
+            .verify_candidate(&candidate_path, &manifest, &generation_id, &directory_name)
+            .map_err(
+                |verification_error| match reconciled_commit_error.as_ref() {
+                    None => verification_error,
+                    Some(commit_error) => IndexError::CommittedGenerationNeedsRecovery {
+                        generation_id: generation_id.clone(),
+                        stage: "candidate commit reconciliation",
+                        detail: format!(
+                            "{commit_error}; candidate commit completed but verification failed: \
+                             {verification_error}"
+                        ),
+                    },
+                },
+            )?;
         let next_pointer = ActiveGenerationPointer::new(
-            active,
+            verified,
             self.base_manifest.as_ref().and_then(|_| {
                 self.active_pointer
                     .as_ref()
@@ -250,10 +271,6 @@ impl GenerationWriter {
             .chain(next_pointer.previous())
             .map(|slot| slot.generation_id().to_owned())
             .collect::<Vec<_>>();
-        let retained_generation_directories = std::iter::once(next_pointer.active())
-            .chain(next_pointer.previous())
-            .map(|slot| slot.directory().to_owned())
-            .collect::<Vec<_>>();
         // The durable pointer is authoritative now. Writer open retries every
         // cleanup below, so treat each attempt independently and never turn a
         // published generation into a failed refresh because reclamation was
@@ -261,10 +278,6 @@ impl GenerationWriter {
         let _ = clear_active_generation_rebuild_marker(&root);
         let _ = reclaim_inactive_generation_directories(&root, Some(&next_pointer));
         let _ = reclaim_unreferenced_manifests(&root, &retained_generation_ids);
-        let _ = writer_support::reclaim_generation_integrity_receipts(
-            &root,
-            &retained_generation_directories,
-        );
 
         CommitReceipt::from_manifest(opstamp, manifest)
     }
@@ -274,7 +287,8 @@ impl GenerationWriter {
         candidate_path: &Path,
         manifest: &GenerationManifest,
         generation_id: &str,
-    ) -> Result<()> {
+        directory_name: &str,
+    ) -> Result<GenerationSlot> {
         let directory =
             DurableMmapDirectory::open(candidate_path).map_err(tantivy::TantivyError::from)?;
         let index = Index::open(directory)?;
@@ -306,8 +320,13 @@ impl GenerationWriter {
         if searcher_generation(&searcher) != meta_generation(&metas) {
             return Err(IndexError::ConcurrentGenerationChange);
         }
-        verify_searcher_structure(&searcher, manifest)?;
-        publication::verify_event_id_terms(&searcher, manifest)
+        let physical_integrity_digest = physical_integrity_digest(&index, candidate_path)?;
+        verify_searcher(&searcher, manifest)?;
+        GenerationSlot::new(
+            generation_id.to_owned(),
+            directory_name.to_owned(),
+            physical_integrity_digest,
+        )
     }
 
     fn validate_base_integrity_for_reuse(&self) -> Result<()> {
@@ -328,14 +347,11 @@ impl GenerationWriter {
         if active.generation_id() != generation_id {
             return Err(IndexError::ConcurrentGenerationChange);
         }
-        let generation_path = self
-            .root
-            .join(INDEX_GENERATIONS_DIRECTORY)
-            .join(active.directory());
-        if let Err(error) = writer_support::validate_generation_integrity_receipt(
-            &self.root,
-            &generation_id,
-            &generation_path,
+        let active_index = open_slot_index(&self.root, active)?;
+        if let Err(error) = verify_physical_integrity(
+            &active_index,
+            &publication::slot_path(&self.root, active),
+            active.physical_integrity_digest(),
         ) {
             let detail =
                 match writer_support::mark_active_generation_for_rebuild(&self.root, active) {

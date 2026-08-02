@@ -134,14 +134,18 @@ pub(super) fn stored_core_verification_record(
     searcher: &tantivy::Searcher,
     address: DocAddress,
     fields: Fields,
-) -> Result<(CoreEventRecord, [u8; 32])> {
+) -> Result<(CoreEventRecord, [u8; 32], usize)> {
     note_stored_core_event_record_materialization();
     let document: TantivyDocument = searcher.doc(address)?;
     let encoded_core_record = unique_required_bytes(&document, fields.core_record, "core_record")?;
     let core_record = decode_core_bytes(searcher, address, encoded_core_record)?;
     let leaf = crate::staging::core_record_leaf(core_record.event_id, encoded_core_record)?;
     let event = event_record_from_core(&core_record);
-    Ok((CoreEventRecord { event, core_record }, leaf))
+    Ok((
+        CoreEventRecord { event, core_record },
+        leaf,
+        encoded_core_record.len(),
+    ))
 }
 
 fn unique_required_bytes<'a>(

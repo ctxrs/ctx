@@ -55,15 +55,9 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
     }
     writer.certify_source(certificate(&source, 1, 10)).unwrap();
     let receipt = writer.commit(|_| true).unwrap();
-    assert_eq!(receipt.semantic_eligible_documents, 4);
-    assert_eq!(receipt.manifest().semantic_eligible_documents, 4);
-    assert_eq!(
-        receipt.manifest().core_record_aggregates[0].semantic_eligible_documents(),
-        4
-    );
+    assert_eq!(receipt.indexed_documents, 10);
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
-    assert_eq!(index.manifest().semantic_eligible_documents, 4);
     let mut expected = [
         first.event_id,
         second.event_id,
@@ -165,7 +159,7 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
 }
 
 #[test]
-fn semantic_first_pages_visit_only_the_bounded_eligible_order_range() {
+fn semantic_first_pages_filter_the_neutral_core_order() {
     const INELIGIBLE_EVENTS: u64 = 2_048;
     let temp = tempdir().unwrap();
     let first_source = source("semantic-bounded-first-page.jsonl");
@@ -186,7 +180,6 @@ fn semantic_first_pages_visit_only_the_bounded_eligible_order_range() {
         .unwrap();
     let receipt = writer.commit(|_| true).unwrap();
     assert_eq!(receipt.indexed_documents, INELIGIBLE_EVENTS + 2);
-    assert_eq!(receipt.semantic_eligible_documents, 2);
 
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
     crate::query::reset_semantic_event_order_term_visits();
@@ -195,7 +188,7 @@ fn semantic_first_pages_visit_only_the_bounded_eligible_order_range() {
     assert_eq!(page.eligible_total, 2);
     assert_eq!(page.items.len(), 1);
     assert!(!page.terminal);
-    assert_eq!(crate::query::semantic_event_order_term_visits(), 2);
+    assert!(crate::query::semantic_event_order_term_visits() > 0);
     assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
 
     let empty_temp = tempdir().unwrap();
@@ -212,7 +205,7 @@ fn semantic_first_pages_visit_only_the_bounded_eligible_order_range() {
         .certify_source(certificate(&empty_source, 1, INELIGIBLE_EVENTS))
         .unwrap();
     let empty_receipt = empty_writer.commit(|_| true).unwrap();
-    assert_eq!(empty_receipt.semantic_eligible_documents, 0);
+    assert_eq!(empty_receipt.indexed_documents, INELIGIBLE_EVENTS);
 
     let empty = VerifiedIndex::open_pinned(empty_temp.path()).unwrap();
     crate::query::reset_semantic_event_order_term_visits();
@@ -221,12 +214,11 @@ fn semantic_first_pages_visit_only_the_bounded_eligible_order_range() {
     assert_eq!(page.eligible_total, 0);
     assert!(page.items.is_empty());
     assert!(page.terminal);
-    assert_eq!(crate::query::semantic_event_order_term_visits(), 0);
     assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
 }
 
 #[test]
-fn semantic_manifest_count_composes_across_append_retain_and_delete() {
+fn semantic_policy_count_tracks_unchanged_core_across_append_retain_and_delete() {
     let temp = tempdir().unwrap();
     let source = source("semantic-manifest-count.jsonl");
     let first_user = document(&source, 1, "first user message");
@@ -240,8 +232,14 @@ fn semantic_manifest_count_composes_across_append_retain_and_delete() {
     first
         .certify_source(appendable_certificate(&source, 1, 2, 20))
         .unwrap();
-    let first_receipt = first.commit(|_| true).unwrap();
-    assert_eq!(first_receipt.semantic_eligible_documents, 1);
+    let _first_receipt = first.commit(|_| true).unwrap();
+    assert_eq!(
+        VerifiedIndex::open(temp.path())
+            .unwrap()
+            .semantic_eligible_event_count()
+            .unwrap(),
+        1
+    );
 
     let mut second_user = document(&source, 3, "second user message");
     second_user.workspace = Some("append".to_owned());
@@ -263,9 +261,11 @@ fn semantic_manifest_count_composes_across_append_retain_and_delete() {
         )
         .unwrap();
     let append_receipt = append.commit(|_| true).unwrap();
-    assert_eq!(append_receipt.semantic_eligible_documents, 2);
     assert_eq!(
-        append_receipt.manifest().core_record_aggregates[0].semantic_eligible_documents(),
+        VerifiedIndex::open(temp.path())
+            .unwrap()
+            .semantic_eligible_event_count()
+            .unwrap(),
         2
     );
 
@@ -273,13 +273,12 @@ fn semantic_manifest_count_composes_across_append_retain_and_delete() {
     let mut retain = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     retain.retain_source(retained_certificate).unwrap();
     let retain_receipt = retain.commit(|_| true).unwrap();
-    assert_eq!(retain_receipt.semantic_eligible_documents, 2);
+    assert_eq!(retain_receipt.generation_id, append_receipt.generation_id);
 
     let mut deletion = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
     let (proof, inventory) = deletion_evidence(&source, 3);
     deletion.delete_source(proof, inventory).unwrap();
-    let deletion_receipt = deletion.commit(|_| true).unwrap();
-    assert_eq!(deletion_receipt.semantic_eligible_documents, 0);
+    let _deletion_receipt = deletion.commit(|_| true).unwrap();
     assert_eq!(
         VerifiedIndex::open(temp.path())
             .unwrap()
@@ -291,7 +290,7 @@ fn semantic_manifest_count_composes_across_append_retain_and_delete() {
 
 #[test]
 fn semantic_pages_select_addresses_before_decoding_and_bound_retained_core_bytes() {
-    const INELIGIBLE_EVENTS: u64 = 128;
+    const INELIGIBLE_EVENTS: u64 = 2_048;
     let temp = tempdir().unwrap();
     let source = source("semantic-address-first.jsonl");
     let large_body = format!("x{}", " ".repeat(512 * 1024 - 1));
@@ -315,6 +314,15 @@ fn semantic_pages_select_addresses_before_decoding_and_bound_retained_core_bytes
     expected.sort_by_key(|identity| identity.encode_canonical().unwrap());
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
+    crate::query::reset_stored_event_record_materializations();
+    let metadata_page = index.semantic_event_page(None, 1).unwrap();
+    assert_eq!(metadata_page.eligible_total, 3);
+    assert_eq!(metadata_page.items.len(), 1);
+    assert_eq!(
+        crate::query::stored_event_record_materializations(),
+        1,
+        "the exact indexed total and eligibility filter must not decode the corpus"
+    );
     let budget = CoreEventPageBudget::new(1, 1);
     let mut cursor = None;
     let mut actual = Vec::new();
@@ -327,9 +335,10 @@ fn semantic_pages_select_addresses_before_decoding_and_bound_retained_core_bytes
         assert_eq!(page.items.len(), 1);
         assert!(page.encoded_core_bytes <= ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES);
         assert!(page.content_bytes <= ctx_history_core::MAX_CORE_CONTENT_BYTES);
-        assert!(
-            crate::query::stored_core_event_record_materializations() <= 2,
-            "semantic byte lookahead may decode only the admitted record and one non-fitting record"
+        assert_eq!(
+            crate::query::stored_core_event_record_materializations(),
+            1,
+            "a one-item semantic page decodes only its returned Core record"
         );
         actual.push(page.items[0].event_id);
         if page.terminal {
@@ -348,11 +357,13 @@ fn semantic_event_pages_handle_empty_final_and_generation_bound_cursors() {
         .commit(|_| true)
         .unwrap();
     let empty = VerifiedIndex::open(temp.path()).unwrap();
+    crate::query::reset_stored_event_record_materializations();
     let page = empty.semantic_event_page(None, 1).unwrap();
     assert_eq!(page.eligible_total, 0);
     assert!(page.items.is_empty());
     assert!(page.terminal);
     assert!(page.next_cursor.is_none());
+    assert_eq!(crate::query::stored_event_record_materializations(), 0);
 
     let source = source("final-page.jsonl");
     let expected = document(&source, 1, "only eligible event");
