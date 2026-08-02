@@ -107,16 +107,28 @@ fn preview_item(
         EvidencePreviewKind::File(kind) => format!("{} file evidence", enum_heading(kind)),
         EvidencePreviewKind::Commit => "Commit evidence".to_owned(),
     };
-    let mut heading = Line::new().with(Span::text("  "));
-    for (index, number) in preview.evidence_numbers.iter().enumerate() {
-        if index > 0 {
-            heading.push(Span::text(" "));
-        }
-        heading.push(Span::new(format!("[{number}]"), Token::Reference));
+    let references_width = preview
+        .evidence_numbers
+        .iter()
+        .map(|number| display_width(&format!("[{number}]")))
+        .sum::<usize>()
+        .saturating_add(preview.evidence_numbers.len().saturating_sub(1));
+    let combined_width = 2usize
+        .saturating_add(references_width)
+        .saturating_add(1)
+        .saturating_add(display_width(&kind));
+    let mut references = preview_reference_line(&preview.evidence_numbers);
+    if context
+        .content_width()
+        .is_none_or(|width| combined_width <= width)
+    {
+        references.push(Span::text(" "));
+        references.push(Span::new(kind, Token::Label));
+        document.push_line(references);
+    } else {
+        document.push_line(references);
+        push_atomic(&mut document, 4, &kind, Token::Label);
     }
-    heading.push(Span::text(" "));
-    heading.push(Span::new(kind, Token::Label));
-    document.push_line(heading);
     for line in excerpt_lines {
         push_authored(&mut document, context, 4, line, Token::Text);
     }
@@ -127,6 +139,17 @@ fn preview_item(
         Token::Command,
     );
     Some(document)
+}
+
+fn preview_reference_line(numbers: &[u32]) -> Line {
+    let mut line = Line::new().with(Span::text("  "));
+    for (index, number) in numbers.iter().enumerate() {
+        if index > 0 {
+            line.push(Span::text(" "));
+        }
+        line.push(Span::new(format!("[{number}]"), Token::Reference));
+    }
+    line
 }
 
 pub(super) fn within_rendered_preview_budget(document: &Document, context: &RenderContext) -> bool {

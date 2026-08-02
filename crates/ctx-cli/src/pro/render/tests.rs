@@ -776,6 +776,61 @@ fn opted_in_file_and_commit_previews_follow_their_numbered_evidence() {
 }
 
 #[test]
+fn grouped_preview_heading_wraps_references_and_kind_only_when_required() {
+    let result = preview_result(true, 3);
+    for reference_count in 1..=3usize {
+        let numbers = (1..=u32::try_from(reference_count).unwrap()).collect::<Vec<_>>();
+        let references = numbers
+            .iter()
+            .map(|number| format!("[{number}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let model = EvidencePreviewModel {
+            previews: vec![preview(
+                &result,
+                numbers.clone(),
+                EvidencePreviewKind::File(RepositoryFileObservationKind::Modified),
+                "exact unit",
+            )],
+        };
+
+        for width in [32, 48, 80, 120] {
+            let rendered = render_preview_plain(&result, &model, width);
+            let section = rendered.split("\nEvidence preview ").nth(1).unwrap();
+            let lines = section.lines().collect::<Vec<_>>();
+            let reference_line = lines
+                .iter()
+                .position(|line| line.trim_start().starts_with("[1]"))
+                .unwrap();
+            let combined = format!("  {references} Modified file evidence");
+
+            if combined.width() < width {
+                assert_eq!(lines[reference_line], combined, "{reference_count}/{width}");
+            } else {
+                assert_eq!(
+                    lines[reference_line],
+                    format!("  {references}"),
+                    "{reference_count}/{width}"
+                );
+                assert_eq!(
+                    lines[reference_line + 1],
+                    "    Modified file evidence",
+                    "{reference_count}/{width}"
+                );
+            }
+            assert!(lines[reference_line].width() <= width);
+            for number in numbers.iter().map(|number| format!("[{number}]")) {
+                assert_eq!(
+                    section.matches(&number).count(),
+                    1,
+                    "reference {number} at {reference_count}/{width}: {section}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn multiline_rename_and_commit_excerpts_preserve_indented_logical_lines() {
     let file_result = preview_result(true, 1);
     let file_model = EvidencePreviewModel {
@@ -868,6 +923,7 @@ fn rendered_preview_budget_accepts_4096_bytes_and_rejects_4097() {
     let context = context(80);
     let at_limit = Document::from_line(Line::text("x".repeat(4_095)));
     let over_limit = Document::from_line(Line::text("x".repeat(4_096)));
+    assert_eq!(super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES, 4_096);
     assert_eq!(at_limit.render(&context).len(), 4_096);
     assert_eq!(over_limit.render(&context).len(), 4_097);
     assert!(super::evidence::within_rendered_preview_budget(
@@ -956,7 +1012,7 @@ fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_trun
     assert!(styled.len() <= super::evidence::MAX_EVIDENCE_PREVIEW_RENDERED_BYTES);
     assert_eq!(plain.matches("ctx show event ").count(), 3);
     assert!(
-        plain.contains("  [1] [2] Modified file evidence\n"),
+        plain.contains("  [1] [2]\n    Modified file evidence\n"),
         "{plain}"
     );
     assert_eq!(
