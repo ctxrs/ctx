@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use ctx_pro_host_protocol::{BlameTarget, LineRange, MAX_BLAME_RESULTS};
 
 use crate::{
@@ -18,19 +18,116 @@ use crate::{
 };
 
 #[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 pub(crate) struct BlameArgs {
     #[command(subcommand)]
-    pub(crate) target: BlameTargetArgs,
+    pub(crate) explicit_target: Option<BlameTargetArgs>,
+    #[arg(
+        value_name = "TARGET",
+        required = true,
+        help = "File path, Git commit ID, or positive PR number/canonical PR URL"
+    )]
+    pub(crate) target: Option<String>,
+    #[arg(
+        long = "type",
+        value_enum,
+        value_name = "TYPE",
+        requires = "target",
+        help = "Interpret TARGET as file, commit, or pr; overrides auto-detection"
+    )]
+    pub(crate) target_type: Option<BlameTargetType>,
+    #[arg(
+        long,
+        value_name = "START[:END]",
+        value_parser = parse_line_range,
+        requires = "target",
+        help = "Positive 1-based committed line or inclusive line range; file targets only"
+    )]
+    pub(crate) lines: Option<LineRange>,
+    #[arg(
+        long,
+        value_name = "REPOSITORY",
+        requires = "target",
+        help = "Optional logical repository identity, such as forge:github.com/ctxrs/ctx; required with a PR number and never a checkout path"
+    )]
+    pub(crate) repository: Option<String>,
+    #[arg(
+        long,
+        default_value_t = DEFAULT_BLAME_LIMIT,
+        value_parser = parse_blame_limit,
+        requires = "target",
+        help = "Maximum complete matches to return, from 1 to 100"
+    )]
+    pub(crate) limit: u32,
+    #[arg(
+        long,
+        requires = "target",
+        help = "Opaque continuation cursor from a previous blame page"
+    )]
+    pub(crate) cursor: Option<String>,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = JsonOutputFormat::Text,
+        requires = "target"
+    )]
+    pub(crate) format: JsonOutputFormat,
 }
 
 impl BlameArgs {
     pub(crate) const fn json_output(&self) -> bool {
-        match &self.target {
-            BlameTargetArgs::File(args) => args.format.is_json(),
-            BlameTargetArgs::Commit(args) => args.format.is_json(),
-            BlameTargetArgs::PullRequest(args) => args.format.is_json(),
+        match &self.explicit_target {
+            Some(BlameTargetArgs::File(args)) => args.format.is_json(),
+            Some(BlameTargetArgs::Commit(args)) => args.format.is_json(),
+            Some(BlameTargetArgs::PullRequest(args)) => args.format.is_json(),
+            None => self.format.is_json(),
         }
     }
+
+    fn into_query(self) -> Result<(BlameTarget, u32, Option<String>, bool)> {
+        if let Some(target) = self.explicit_target {
+            return Ok(explicit_query(target));
+        }
+        let target = self
+            .target
+            .ok_or_else(|| anyhow!("invalid_request: a blame target is required"))?;
+        let target_type = self
+            .target_type
+            .or_else(|| classify_target(&target))
+            .ok_or_else(|| {
+                anyhow!(
+                    "invalid_request: blame target type is ambiguous; use --type file, --type commit, or --type pr"
+                )
+            })?;
+        if self.lines.is_some() && target_type != BlameTargetType::File {
+            return Err(anyhow!(
+                "invalid_request: --lines is only valid for file blame; use --type file if the target is a path"
+            ));
+        }
+        let target = match target_type {
+            BlameTargetType::File => BlameTarget::File {
+                path: target,
+                repository: self.repository,
+                lines: self.lines,
+            },
+            BlameTargetType::Commit => BlameTarget::Commit {
+                oid: target,
+                repository: self.repository,
+            },
+            BlameTargetType::Pr => BlameTarget::PullRequest {
+                selector: target,
+                repository: self.repository,
+            },
+        };
+        Ok((target, self.limit, self.cursor, self.format.is_json()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum BlameTargetType {
+    File,
+    Commit,
+    Pr,
 }
 
 #[derive(Debug, Subcommand)]
@@ -128,13 +225,8 @@ pub(crate) struct PullRequestBlameArgs {
     pub(crate) format: JsonOutputFormat,
 }
 
-pub(crate) fn run(
-    args: BlameArgs,
-    data_root: PathBuf,
-    local_usage: &mut crate::local_usage::CliUsage,
-    ui: &mut crate::ui::Ui,
-) -> Result<()> {
-    let (target, limit, cursor, json) = match args.target {
+fn explicit_query(target: BlameTargetArgs) -> (BlameTarget, u32, Option<String>, bool) {
+    match target {
         BlameTargetArgs::File(args) => (
             BlameTarget::File {
                 path: args.path,
@@ -163,7 +255,46 @@ pub(crate) fn run(
             args.cursor,
             args.format.is_json(),
         ),
+    }
+}
+
+fn classify_target(target: &str) -> Option<BlameTargetType> {
+    let pr_candidate = BlameTarget::PullRequest {
+        selector: target.to_owned(),
+        repository: Some("auto-detection".to_owned()),
     };
+    if pr_candidate.validate().is_ok() {
+        return Some(BlameTargetType::Pr);
+    }
+    if (4..=64).contains(&target.len()) && target.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Some(BlameTargetType::Commit);
+    }
+    if looks_like_file_path(target) {
+        return Some(BlameTargetType::File);
+    }
+    None
+}
+
+fn looks_like_file_path(target: &str) -> bool {
+    if target.contains("://") {
+        return false;
+    }
+    if target.contains(['/', '\\']) {
+        return true;
+    }
+    let Some((stem, extension)) = target.rsplit_once('.') else {
+        return false;
+    };
+    (!stem.is_empty() || target.starts_with('.')) && !extension.is_empty()
+}
+
+pub(crate) fn run(
+    args: BlameArgs,
+    data_root: PathBuf,
+    local_usage: &mut crate::local_usage::CliUsage,
+    ui: &mut crate::ui::Ui,
+) -> Result<()> {
+    let (target, limit, cursor, json) = args.into_query()?;
     target
         .validate()
         .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
@@ -468,6 +599,165 @@ mod tests {
         );
         for invalid in ["0", "0:1", "4:3", "1:2:3", "-1", "x"] {
             assert!(parse_line_range(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn shorthand_classifier_is_deterministic_and_conservative() {
+        for target in [
+            "42",
+            "https://github.com/ctxrs/ctx/pull/42",
+            "https://gitlab.example.com/group/project/-/merge_requests/42",
+            "https://codeberg.org/ctxrs/ctx/pulls/42",
+        ] {
+            assert_eq!(
+                classify_target(target),
+                Some(BlameTargetType::Pr),
+                "{target}"
+            );
+        }
+        for target in ["abc1234", "0123456789abcdef0123456789abcdef01234567"] {
+            assert_eq!(
+                classify_target(target),
+                Some(BlameTargetType::Commit),
+                "{target}"
+            );
+        }
+        for target in ["src/lib.rs", r"src\lib.rs", "README.md", ".gitignore"] {
+            assert_eq!(
+                classify_target(target),
+                Some(BlameTargetType::File),
+                "{target}"
+            );
+        }
+        for target in [
+            "main",
+            "README",
+            "abc",
+            "feature",
+            "https://example.com/not-a-pr",
+        ] {
+            assert_eq!(classify_target(target), None, "{target}");
+        }
+    }
+
+    #[test]
+    fn shorthand_parser_builds_the_existing_typed_queries() {
+        let parse = |arguments: &[&str]| {
+            let cli =
+                crate::Cli::try_parse_from(std::iter::once("ctx").chain(arguments.iter().copied()))
+                    .unwrap();
+            let crate::cli::CommandRoot::Blame(args) = cli.command else {
+                panic!("expected blame command");
+            };
+            args.into_query().unwrap().0
+        };
+
+        assert_eq!(
+            parse(&[
+                "blame",
+                "src/lib.rs",
+                "--lines",
+                "4:8",
+                "--repository",
+                "forge:github.com/ctxrs/ctx",
+            ]),
+            BlameTarget::File {
+                path: "src/lib.rs".to_owned(),
+                repository: Some("forge:github.com/ctxrs/ctx".to_owned()),
+                lines: Some(LineRange { start: 4, end: 8 }),
+            }
+        );
+        assert_eq!(
+            parse(&["blame", "0123456789abcdef"]),
+            BlameTarget::Commit {
+                oid: "0123456789abcdef".to_owned(),
+                repository: None,
+            }
+        );
+        assert_eq!(
+            parse(&["blame", "42", "--repository", "forge:github.com/ctxrs/ctx",]),
+            BlameTarget::PullRequest {
+                selector: "42".to_owned(),
+                repository: Some("forge:github.com/ctxrs/ctx".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_type_is_authoritative_and_invalid_type_fails_in_clap() {
+        let cli =
+            crate::Cli::try_parse_from(["ctx", "blame", "0123456789abcdef", "--type", "file"])
+                .unwrap();
+        let crate::cli::CommandRoot::Blame(args) = cli.command else {
+            panic!("expected blame command");
+        };
+        assert!(matches!(
+            args.into_query().unwrap().0,
+            BlameTarget::File { path, .. } if path == "0123456789abcdef"
+        ));
+
+        let error = crate::Cli::try_parse_from(["ctx", "blame", "src/lib.rs", "--type", "unknown"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid value 'unknown'"), "{error}");
+        assert!(error.contains("file, commit, pr"), "{error}");
+    }
+
+    #[test]
+    fn ambiguous_shorthand_and_non_file_lines_are_typed_actionable_errors() {
+        for arguments in [
+            &["ctx", "blame", "main"][..],
+            &["ctx", "blame", "abc1234", "--lines", "4:8"][..],
+        ] {
+            let cli = crate::Cli::try_parse_from(arguments).unwrap();
+            let crate::cli::CommandRoot::Blame(args) = cli.command else {
+                panic!("expected blame command");
+            };
+            let error = args.into_query().unwrap_err().to_string();
+            assert!(error.starts_with("invalid_request:"), "{error}");
+            assert!(error.contains("--type"), "{error}");
+        }
+    }
+
+    #[test]
+    fn explicit_blame_subcommands_keep_their_original_queries() {
+        for (arguments, expected) in [
+            (
+                &["ctx", "blame", "file", "src/lib.rs"][..],
+                BlameTarget::File {
+                    path: "src/lib.rs".to_owned(),
+                    repository: None,
+                    lines: None,
+                },
+            ),
+            (
+                &["ctx", "blame", "commit", "abc1234"][..],
+                BlameTarget::Commit {
+                    oid: "abc1234".to_owned(),
+                    repository: None,
+                },
+            ),
+            (
+                &[
+                    "ctx",
+                    "blame",
+                    "pr",
+                    "42",
+                    "--repository",
+                    "forge:github.com/ctxrs/ctx",
+                ][..],
+                BlameTarget::PullRequest {
+                    selector: "42".to_owned(),
+                    repository: Some("forge:github.com/ctxrs/ctx".to_owned()),
+                },
+            ),
+        ] {
+            let cli = crate::Cli::try_parse_from(arguments).unwrap();
+            let crate::cli::CommandRoot::Blame(args) = cli.command else {
+                panic!("expected blame command");
+            };
+            assert_eq!(args.into_query().unwrap().0, expected, "{arguments:?}");
         }
     }
 

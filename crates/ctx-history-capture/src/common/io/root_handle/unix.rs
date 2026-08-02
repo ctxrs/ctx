@@ -271,6 +271,7 @@ fn open_component(
         return Err(classify_open_component_error(
             parent,
             name.as_c_str(),
+            expected,
             cause,
         ));
     }
@@ -287,6 +288,7 @@ fn open_component(
 fn classify_open_component_error(
     parent: libc::c_int,
     name: &CStr,
+    expected: Option<ExpectedType>,
     cause: io::Error,
 ) -> AuthorityOpenError {
     match cause.raw_os_error() {
@@ -295,7 +297,9 @@ fn classify_open_component_error(
         }
         // BSD kernels also use ENOTDIR for O_NOFOLLOW | O_DIRECTORY against a
         // symlink. Reclassify only when no-follow metadata confirms that case.
-        Some(libc::ENOTDIR) if component_is_symlink(parent, name) => {
+        Some(libc::ENOTDIR)
+            if expected == Some(ExpectedType::Directory) && component_is_symlink(parent, name) =>
+        {
             AuthorityOpenError::Rejected("symlinked provider source path components are rejected")
         }
         Some(libc::ENXIO) | Some(libc::ENODEV) | Some(libc::EOPNOTSUPP) => {
@@ -307,21 +311,25 @@ fn classify_open_component_error(
     }
 }
 
+/// Best-effort, TOCTOU-tolerant check for whether `name` under `parent` is
+/// currently a symlink. Used only to select the diagnostic reason on an
+/// `ENOTDIR` failure that already aborted the open; it never grants access
+/// and a failed/ambiguous `lstat` here simply keeps the raw IO error.
 fn component_is_symlink(parent: libc::c_int, name: &CStr) -> bool {
-    let mut metadata = MaybeUninit::<libc::stat>::uninit();
+    let mut stat_buffer: MaybeUninit<libc::stat> = MaybeUninit::uninit();
     let result = unsafe {
         libc::fstatat(
             parent,
             name.as_ptr(),
-            metadata.as_mut_ptr(),
+            stat_buffer.as_mut_ptr(),
             libc::AT_SYMLINK_NOFOLLOW,
         )
     };
     if result != 0 {
         return false;
     }
-    let metadata = unsafe { metadata.assume_init() };
-    metadata.st_mode & libc::S_IFMT == libc::S_IFLNK
+    let stat = unsafe { stat_buffer.assume_init() };
+    stat.st_mode & libc::S_IFMT == libc::S_IFLNK
 }
 
 fn classify_opened(file: File) -> Result<OpenedPath, AuthorityOpenError> {
@@ -476,6 +484,7 @@ mod tests {
         let error = super::classify_open_component_error(
             libc::AT_FDCWD,
             c"unused",
+            None,
             std::io::Error::from_raw_os_error(libc::EOPNOTSUPP),
         );
 

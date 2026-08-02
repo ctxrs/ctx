@@ -917,9 +917,10 @@ deletion and emits no success payload. An interrupted deletion retains
 root-local retry metadata; setup and `--keep-data` fail until a later
 `--delete-data` verifies and completes the same installation-scoped cleanup.
 
-Successful `ctx blame file|commit|pr --format json` and MCP `blame` return the protocol
-`BlameResult` directly, with no payload wrapper, prose summary, or suggested
-claims:
+Successful `ctx blame <target> [--type file|commit|pr] --format json`, the
+explicit `ctx blame file|commit|pr --format json` compatibility forms, and MCP
+`blame` return the protocol `BlameResult` directly, with no payload wrapper,
+prose summary, or suggested claims:
 
 - `target`, a resolved tagged `file`, `commit`, or `pull_request` target;
 - `git_snapshot`, required for file results and null for commit/PR results;

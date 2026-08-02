@@ -209,15 +209,17 @@ remain local.
 
 ```bash
 ctx pro
-ctx blame file src/lib.rs --lines 42
-ctx blame commit <sha> --format json
-ctx blame pr 42 --repository forge:github.com/ctxrs/ctx
+ctx blame src/lib.rs --lines 42
+ctx blame <sha> --type commit --format json
+ctx blame 42 --repository forge:github.com/ctxrs/ctx
 ```
 
 Repositories and worktrees are detected from indexed activity; setup does not
 need a repository path. Query `--repository` accepts a logical repository
 identity such as `forge:github.com/ctxrs/ctx`, rather than a filesystem path.
 Numeric PR selectors require it; canonical supported PR/MR URLs do not.
+Use `--type file|commit|pr` when a target is ambiguous. The explicit
+`ctx blame file`, `ctx blame commit`, and `ctx blame pr` forms remain supported.
 
 Setup, daemon freshness, and blame can catch the derived graph up. Canonical
 history is never changed by that work. Blame returns typed file, commit, or PR

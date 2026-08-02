@@ -266,6 +266,64 @@ fn commit_blame_human_output_preserves_production_grouping() {
 }
 
 #[test]
+fn shorthand_blame_preserves_explicit_human_and_json_output() {
+    let root = tempdir().unwrap();
+    initialize_current_query_store(root.path());
+    let helper = root.path().join("ctx-pro-blame");
+    write_blame_helper(&helper);
+
+    for (explicit, shorthand) in [
+        (
+            vec!["blame", "commit", "0123456789abcdef"],
+            vec!["blame", "0123456789abcdef"],
+        ),
+        (
+            vec!["blame", "pr", "https://github.com/ctxrs/ctx/pull/42"],
+            vec!["blame", "https://github.com/ctxrs/ctx/pull/42"],
+        ),
+    ] {
+        for format in [None, Some("--format=json")] {
+            let run = |args: &[&str]| {
+                let mut command = Command::cargo_bin("ctx").unwrap();
+                command
+                    .env("CTX_PRO_HELPER", &helper)
+                    .arg("--data-root")
+                    .arg(root.path())
+                    .args(args);
+                if let Some(format) = format {
+                    command.arg(format);
+                }
+                command.output().unwrap()
+            };
+            let explicit_output = run(&explicit);
+            let shorthand_output = run(&shorthand);
+            assert!(
+                explicit_output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&explicit_output.stderr)
+            );
+            assert!(
+                shorthand_output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&shorthand_output.stderr)
+            );
+            assert_eq!(shorthand_output.stdout, explicit_output.stdout);
+            assert_eq!(shorthand_output.stderr, explicit_output.stderr);
+            if format.is_some() {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&shorthand_output.stdout).unwrap();
+                assert!(matches!(
+                    value["target"]["kind"].as_str(),
+                    Some("commit" | "pull_request")
+                ));
+            } else {
+                assert!(!shorthand_output.stdout.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
 fn commit_and_pr_blame_do_not_require_git_but_file_blame_does() {
     let root = tempdir().unwrap();
     initialize_current_query_store(root.path());
