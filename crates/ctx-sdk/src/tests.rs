@@ -284,11 +284,15 @@ fn init_normalizes_real_setup_json_into_status_contract() {
         AgentHistoryOperation::Init,
         BackendInfo::local(Some("/tmp/ctx".to_owned())),
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
+            "initialized": true,
             "data_root": "/tmp/ctx",
             "config_path": "/tmp/ctx/config.toml",
             "mode": "ready",
-            "indexed_items": 12,
+            "indexed_items": 2_147_483_648_u64,
+            "indexed_sessions": 2_147_483_649_u64,
+            "indexed_events": 2_147_483_650_u64,
+            "indexed_sources": 2_147_483_651_u64,
             "network_required": false,
             "lexical": {
                 "status": "ready",
@@ -305,7 +309,10 @@ fn init_normalizes_real_setup_json_into_status_contract() {
     assert!(status.initialized);
     assert!(status.local_only);
     assert_eq!(status.data_root.as_deref(), Some("/tmp/ctx"));
-    assert_eq!(status.indexed_items, Some(12));
+    assert_eq!(status.indexed_items, Some(2_147_483_648));
+    assert_eq!(status.indexed_sessions, Some(2_147_483_649));
+    assert_eq!(status.indexed_events, Some(2_147_483_650));
+    assert_eq!(status.indexed_sources, Some(2_147_483_651));
     assert_eq!(status.lexical.as_ref().unwrap()["status"], "ready");
     assert_eq!(status.refresh.as_ref().unwrap()["status"], "ready");
     assert!(status.extra.is_empty());

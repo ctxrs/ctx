@@ -46,35 +46,35 @@ public final class StatusRecord {
         return getDataRoot();
     }
 
-    public Integer getIndexedItems() {
-        return AgentHistoryValue.integer(fields.get("indexedItems"));
+    public Long getIndexedItems() {
+        return AgentHistoryValue.longValue(fields.get("indexedItems"));
     }
 
-    public Integer indexedItems() {
+    public Long indexedItems() {
         return getIndexedItems();
     }
 
-    public Integer getIndexedSessions() {
-        return AgentHistoryValue.integer(fields.get("indexedSessions"));
+    public Long getIndexedSessions() {
+        return AgentHistoryValue.longValue(fields.get("indexedSessions"));
     }
 
-    public Integer indexedSessions() {
+    public Long indexedSessions() {
         return getIndexedSessions();
     }
 
-    public Integer getIndexedEvents() {
-        return AgentHistoryValue.integer(fields.get("indexedEvents"));
+    public Long getIndexedEvents() {
+        return AgentHistoryValue.longValue(fields.get("indexedEvents"));
     }
 
-    public Integer indexedEvents() {
+    public Long indexedEvents() {
         return getIndexedEvents();
     }
 
-    public Integer getIndexedSources() {
-        return AgentHistoryValue.integer(fields.get("indexedSources"));
+    public Long getIndexedSources() {
+        return AgentHistoryValue.longValue(fields.get("indexedSources"));
     }
 
-    public Integer indexedSources() {
+    public Long indexedSources() {
         return getIndexedSources();
     }
 

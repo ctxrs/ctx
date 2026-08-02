@@ -28,10 +28,10 @@ the local retrieval product.
   APIs, and search must not download the local embedding model when the required
   cache is missing. Explicit semantic/hybrid search may initialize an
   already-cached local model to embed the query.
-- `ctx setup --no-daemon`, `ctx setup --catalog-only`, and
-  `ctx import --no-daemon` must not autostart daemon maintenance.
-  Machine-readable foreground commands must not start or nudge the daemon,
-  regardless of refresh mode.
+- `ctx setup --no-daemon` and `ctx import --no-daemon` must not autostart daemon
+  maintenance. Machine-readable output is not a daemon-autostart security
+  control. The deprecated `ctx setup --catalog-only` flag is ignored and is not
+  a daemon-autostart security control either.
 - `ctx docs` reads embedded documentation and writes only an explicit topic
   output path for `ctx docs show --out` or an explicit man-page output
   directory when `ctx docs man --out` is used.

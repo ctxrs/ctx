@@ -86,7 +86,7 @@ internal static class Program
 
     private static async Task NormalizesSetupInitStatus()
     {
-        var transport = new RecordingTransport("""{"schema_version":1,"data_root":"/tmp/ctx","indexed_items":9,"lexical":{"status":"ready","generation_id":"gen-9"},"refresh":{"status":"ready","generation_id":"gen-9"},"network_required":false}""");
+        var transport = new RecordingTransport("""{"schema_version":2,"initialized":true,"data_root":"/tmp/ctx","mode":"ready","indexed_items":2147483648,"indexed_sessions":2147483649,"indexed_events":2147483650,"indexed_sources":2147483651,"lexical":{"status":"ready","generation_id":"gen-64"},"refresh":{"status":"ready","generation_id":"gen-64"},"network_required":false}""");
         var client = new AgentHistoryClient(transport);
 
         var response = await client.InitAsync(new InitOptions());
@@ -94,7 +94,10 @@ internal static class Program
         Equal("init", response.Operation);
         Equal(true, response.Status.Initialized);
         Equal(true, response.Status.LocalOnly);
-        Equal(9, response.Status.IndexedItems ?? -1);
+        Equal(2147483648UL, response.Status.IndexedItems ?? 0UL);
+        Equal(2147483649UL, response.Status.IndexedSessions ?? 0UL);
+        Equal(2147483650UL, response.Status.IndexedEvents ?? 0UL);
+        Equal(2147483651UL, response.Status.IndexedSources ?? 0UL);
     }
 
     private static async Task WrapsStatus()
@@ -108,11 +111,11 @@ internal static class Program
         Equal("status", status.Operation);
         Equal("local", status.Backend.Kind);
         Equal(true, status.Status.Initialized);
-        Equal(4, status.Status.IndexedItems ?? -1);
+        Equal(4UL, status.Status.IndexedItems ?? 0UL);
 
         var envelope = status.ToJsonObject();
         Equal("agent-history-v1", envelope["contractVersion"]!.GetValue<string>());
-        Equal(4, envelope["status"]!["indexedItems"]!.GetValue<int>());
+        Equal(4UL, envelope["status"]!["indexedItems"]!.GetValue<ulong>());
     }
 
     private static async Task FiltersStatusFields()

@@ -88,9 +88,10 @@ The exact words can change, but the output must communicate:
 - how to watch/wait in the foreground
 - search can run before indexing completes
 
-`ctx setup --format json` should report the same counts/status as structured fields
-without starting or nudging the daemon. `ctx setup --no-daemon` initializes
-local state without starting background work.
+`ctx setup --format json` reports the same counts/status as structured fields;
+output format does not change daemon-autostart behavior. `ctx setup --no-daemon`
+is the one-run daemon-autostart opt-out. The deprecated `--catalog-only` flag is
+ignored and does not change setup behavior.
 
 The long-lived daemon reloads effective daemon and semantic configuration
 between maintenance cycles. A later supported semantic opt-in plus repeat setup
@@ -158,7 +159,8 @@ The setup command owns:
 
 - creating the data root/config/store
 - source discovery and scanning
-- daemon autostart unless explicitly disabled or the setup mode is catalog-only
+- daemon autostart unless explicitly disabled with `--no-daemon`; the deprecated
+  `--catalog-only` flag is ignored
 - printing initial background indexing estimates and status commands
 - queueing model acquisition for the daemon without downloading in the setup
   process

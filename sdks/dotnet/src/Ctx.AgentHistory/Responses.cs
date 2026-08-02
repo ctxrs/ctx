@@ -133,10 +133,10 @@ public sealed record AgentHistoryStatus
         LocalOnly = JsonHelpers.GetBool(json, "localOnly") ?? true;
         ReadOnly = JsonHelpers.GetBool(json, "readOnly");
         DataRoot = JsonHelpers.GetString(json, "dataRoot");
-        IndexedItems = JsonHelpers.GetInt(json, "indexedItems");
-        IndexedSessions = JsonHelpers.GetInt(json, "indexedSessions");
-        IndexedEvents = JsonHelpers.GetInt(json, "indexedEvents");
-        IndexedSources = JsonHelpers.GetInt(json, "indexedSources");
+        IndexedItems = JsonHelpers.GetUInt64(json, "indexedItems");
+        IndexedSessions = JsonHelpers.GetUInt64(json, "indexedSessions");
+        IndexedEvents = JsonHelpers.GetUInt64(json, "indexedEvents");
+        IndexedSources = JsonHelpers.GetUInt64(json, "indexedSources");
         HistoryEpoch = JsonHelpers.CloneObject(json["historyEpoch"] as JsonObject);
         Lexical = JsonHelpers.CloneObject(json["lexical"] as JsonObject);
         Refresh = JsonHelpers.CloneObject(json["refresh"] as JsonObject);
@@ -148,10 +148,10 @@ public sealed record AgentHistoryStatus
     public bool LocalOnly { get; }
     public bool? ReadOnly { get; }
     public string? DataRoot { get; }
-    public int? IndexedItems { get; }
-    public int? IndexedSessions { get; }
-    public int? IndexedEvents { get; }
-    public int? IndexedSources { get; }
+    public ulong? IndexedItems { get; }
+    public ulong? IndexedSessions { get; }
+    public ulong? IndexedEvents { get; }
+    public ulong? IndexedSources { get; }
     public JsonObject HistoryEpoch { get; }
     public JsonObject Lexical { get; }
     public JsonObject Refresh { get; }

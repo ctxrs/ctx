@@ -128,10 +128,10 @@ type StatusRecord struct {
 	LocalOnly       bool   `json:"localOnly"`
 	ReadOnly        bool   `json:"readOnly,omitempty"`
 	DataRoot        string `json:"dataRoot,omitempty"`
-	IndexedItems    int    `json:"indexedItems,omitempty"`
-	IndexedSessions int    `json:"indexedSessions,omitempty"`
-	IndexedEvents   int    `json:"indexedEvents,omitempty"`
-	IndexedSources  int    `json:"indexedSources,omitempty"`
+	IndexedItems    uint64 `json:"indexedItems,omitempty"`
+	IndexedSessions uint64 `json:"indexedSessions,omitempty"`
+	IndexedEvents   uint64 `json:"indexedEvents,omitempty"`
+	IndexedSources  uint64 `json:"indexedSources,omitempty"`
 	HistoryEpoch    Object `json:"historyEpoch,omitempty"`
 	Lexical         Object `json:"lexical,omitempty"`
 	Refresh         Object `json:"refresh,omitempty"`

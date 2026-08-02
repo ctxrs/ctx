@@ -4,7 +4,6 @@ use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
 use crate::analytics::{self, SetupMode, SetupTelemetry};
-use crate::config::CONFIG_FILE;
 use crate::output::print_json;
 use crate::semantic::{
     autostart_daemon_and_wait, coordinate_source_backed_refresh,
@@ -91,29 +90,28 @@ pub(crate) fn run_setup(
         "stale" => "stale",
         _ => "unavailable",
     };
-    let output = json!({
-        "schema_version": 2,
-        "data_root": data_root,
-        "config_path": data_root.join(CONFIG_FILE),
-        "mode": mode,
-        "history_epoch": source.report["history_epoch"].clone(),
-        "lexical": source.report["lexical"].clone(),
-        "catalog": source.report["catalog"].clone(),
-        "refresh": source.report["refresh"].clone(),
-        "refresh_request": refresh_request,
-        "semantic": source.report["semantic"].clone(),
-        "pro_projection": source.report["pro_projection"].clone(),
-        "daemon": source.report["daemon"].clone(),
-        "daemon_autostart": daemon_autostart_json(
+    let mut output = source.report.clone();
+    let Some(output_fields) = output.as_object_mut() else {
+        bail!("source status report was not an object");
+    };
+    output_fields.remove("read_only");
+    output_fields.insert("mode".to_owned(), json!(mode));
+    output_fields.insert("refresh_request".to_owned(), refresh_request.clone());
+    output_fields.insert(
+        "daemon_autostart".to_owned(),
+        daemon_autostart_json(
             daemon_autostart_requested,
             daemon_autostart_reason,
             daemon_handoff.as_ref(),
             &supervisor,
         ),
-        "deprecated_catalog_only_ignored": args.catalog_only,
-        "network_required": false,
-        "repo_writes": false,
-    });
+    );
+    output_fields.insert(
+        "deprecated_catalog_only_ignored".to_owned(),
+        json!(args.catalog_only),
+    );
+    output_fields.insert("network_required".to_owned(), json!(false));
+    output_fields.insert("repo_writes".to_owned(), json!(false));
 
     if json_output {
         print_json(output)?;

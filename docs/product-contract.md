@@ -19,9 +19,9 @@ or requires a hosted research agent.
   transcript formats, and can opportunistically start the default-on ctx-owned
   background daemon maintenance profile. An explicit `[daemon] enabled = false`
   remains a durable opt-out.
-  `ctx setup --no-daemon`,
-  `ctx setup --catalog-only`, and machine-readable setup do not autostart or
-  nudge maintenance.
+  `ctx setup --no-daemon` is the one-run daemon-autostart opt-out. Output format
+  does not change setup autostart behavior. The deprecated `--catalog-only` flag
+  is ignored and does not change setup behavior.
 - `ctx sources` reports known local provider history paths, including whether a
   native source is currently importable.
 - `ctx import` publishes supported local transcript formats and selected local

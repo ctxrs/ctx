@@ -42,6 +42,34 @@ func TestStatusDecodesAgentHistoryV1(t *testing.T) {
 	}
 }
 
+func TestInitDecodesProductionSetupCountersAsUint64(t *testing.T) {
+	client := NewClient(WithTransport(fakeTransport{
+		response: `{
+			"schema_version": 2,
+			"initialized": true,
+			"data_root": "/tmp/ctx",
+			"mode": "ready",
+			"indexed_items": 9007199254740993,
+			"indexed_sessions": 9007199254740994,
+			"indexed_events": 9007199254740995,
+			"indexed_sources": 9007199254740996,
+			"lexical": {"status": "ready", "generation_id": "gen-64"},
+			"refresh": {"status": "ready"}
+		}`,
+	}))
+
+	initialized, err := client.Init(context.Background(), InitOptions{})
+	if err != nil {
+		t.Fatalf("Init returned error: %v", err)
+	}
+	if initialized.Status.IndexedItems != uint64(1<<53)+1 ||
+		initialized.Status.IndexedSessions != uint64(1<<53)+2 ||
+		initialized.Status.IndexedEvents != uint64(1<<53)+3 ||
+		initialized.Status.IndexedSources != uint64(1<<53)+4 {
+		t.Fatalf("status counters were not decoded as uint64: %+v", initialized.Status)
+	}
+}
+
 func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
 	transport := &recordingTransport{response: `{
 		"schema_version": 1,

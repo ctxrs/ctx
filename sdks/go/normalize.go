@@ -1,13 +1,16 @@
 package ctxagenthistory
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
 
 func normalizePayload(op Operation, payload []byte) ([]byte, error) {
 	var raw any
-	if err := json.Unmarshal(payload, &raw); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	if err := decoder.Decode(&raw); err != nil {
 		return nil, err
 	}
 	if object, ok := raw.(map[string]any); ok {

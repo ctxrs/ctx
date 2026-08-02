@@ -365,13 +365,14 @@ APIs, API keys, or remote accounts. Without semantic opt-in they do not download
 models or runtime assets; with semantic enabled, installer/runtime acquisition
 and daemon maintenance may acquire the local ONNX Runtime asset and embedding
 model when the installed build supports that path. Setup and native provider
-imports may opportunistically start the default-on ctx-owned background daemon
-maintenance profile when `[daemon].enabled` is true and output is
-human-readable. Explicit custom JSONL and history-source imports may start the
-required source-refresh endpoint even for machine-readable output. Use
+setup may opportunistically start the default-on ctx-owned background daemon
+maintenance profile when `[daemon].enabled` is true, regardless of output
+format. Explicit custom JSONL and history-source imports may start the required
+source-refresh endpoint even for machine-readable output. Use
 `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out; an
 explicit provider-source import with that opt-out requires an existing endpoint.
-`ctx setup --catalog-only` does not autostart daemon maintenance.
+The deprecated `ctx setup --catalog-only` flag is ignored and does not change
+daemon-autostart behavior.
 `ctx search --refresh off` does not refresh providers, run plugins, autostart
 daemon maintenance, start semantic workers, schedule semantic indexing, or
 write any derived generation. It serves results from the active Core
@@ -448,10 +449,9 @@ Daemon maintenance is enabled by default. Disable it durably with:
 enabled = false
 ```
 
-`daemon.enabled = true` allows eligible human-readable setup and native
-provider imports to opportunistically start the ctx-owned background daemon
-maintenance profile. Machine-readable foreground commands do not start or
-nudge it.
+`daemon.enabled = true` allows setup and eligible native provider imports to
+opportunistically start the ctx-owned background daemon maintenance profile.
+Setup output format does not change this behavior.
 Use `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out.
 `ctx daemon enable` and `ctx daemon disable` write only the `[daemon] enabled`
 override. An explicit disabled override continues to win after CLI upgrades and

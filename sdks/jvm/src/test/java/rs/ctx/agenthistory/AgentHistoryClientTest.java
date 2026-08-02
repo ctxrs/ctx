@@ -43,7 +43,9 @@ public final class AgentHistoryClientTest {
     private static void normalizesSetupJsonAsInitStatus() {
         AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport(
                 "local-cli",
-                "{\"schema_version\":1,\"data_root\":\"/tmp/ctx\",\"indexed_items\":9,"
+                "{\"schema_version\":2,\"initialized\":true,\"data_root\":\"/tmp/ctx\","
+                        + "\"indexed_items\":2147483648,\"indexed_sessions\":2147483649,"
+                        + "\"indexed_events\":2147483650,\"indexed_sources\":2147483651,"
                         + "\"lexical\":{\"status\":\"ready\",\"generation_id\":\"gen-9\"},"
                         + "\"refresh\":{\"status\":\"ready\",\"generation_id\":\"gen-9\"},"
                         + "\"network_required\":false}"));
@@ -53,7 +55,10 @@ public final class AgentHistoryClientTest {
         assertEquals("init", response.operation());
         assertEquals(Boolean.TRUE, response.getStatus().getInitialized());
         assertEquals(Boolean.TRUE, response.getStatus().getLocalOnly());
-        assertEquals(Integer.valueOf(9), response.getStatus().getIndexedItems());
+        assertEquals(Long.valueOf(2147483648L), response.getStatus().getIndexedItems());
+        assertEquals(Long.valueOf(2147483649L), response.getStatus().getIndexedSessions());
+        assertEquals(Long.valueOf(2147483650L), response.getStatus().getIndexedEvents());
+        assertEquals(Long.valueOf(2147483651L), response.getStatus().getIndexedSources());
     }
 
     private static void wrapsRawStatusAsTypedEnvelope() {
@@ -71,8 +76,8 @@ public final class AgentHistoryClientTest {
         assertEquals("local", response.getBackend().getKind());
         assertEquals(Boolean.TRUE, response.getStatus().getInitialized());
         assertEquals(Boolean.TRUE, response.getStatus().getLocalOnly());
-        assertEquals(Integer.valueOf(2), response.getStatus().getIndexedItems());
-        assertEquals(Integer.valueOf(2), AgentHistoryValue.integer(response.asMap().get("status") instanceof Map
+        assertEquals(Long.valueOf(2), response.getStatus().getIndexedItems());
+        assertEquals(Long.valueOf(2), AgentHistoryValue.longValue(response.asMap().get("status") instanceof Map
                 ? ((Map<?, ?>) response.asMap().get("status")).get("indexedItems")
                 : null));
         assertEquals(null, response.getStatus().asMap().get("futureCounter"));

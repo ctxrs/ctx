@@ -360,7 +360,7 @@ fn status_does_not_repair_missing_tantivy_publication_pointer() {
 }
 
 #[test]
-fn deprecated_catalog_only_is_ignored_and_wait_publishes_codex() {
+fn deprecated_catalog_only_is_ignored_and_wait_publishes_setup_status_contract() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
 
@@ -374,12 +374,33 @@ fn deprecated_catalog_only_is_ignored_and_wait_publishes_codex() {
     ]));
     assert_eq!(setup["schema_version"], 2, "{setup:#}");
     assert_eq!(setup["deprecated_catalog_only_ignored"], true, "{setup:#}");
+    assert!(setup.get("read_only").is_none(), "{setup:#}");
     assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["lexical"]["certified_sources"], 1, "{setup:#}");
     assert!(
         setup["lexical"]["indexed_documents"]
             .as_u64()
             .is_some_and(|count| count >= 1),
+        "{setup:#}"
+    );
+    for counter in [
+        "indexed_items",
+        "indexed_sessions",
+        "indexed_events",
+        "indexed_sources",
+    ] {
+        assert!(
+            setup[counter].as_u64().is_some(),
+            "setup omitted the {counter} status counter: {setup:#}"
+        );
+    }
+    assert_eq!(
+        setup["indexed_items"], setup["lexical"]["indexed_documents"],
+        "{setup:#}"
+    );
+    assert_eq!(setup["indexed_events"], setup["indexed_items"], "{setup:#}");
+    assert_eq!(
+        setup["indexed_sources"], setup["lexical"]["certified_sources"],
         "{setup:#}"
     );
 }
