@@ -35,6 +35,34 @@ pub(super) fn set_source_snapshot(
             SourceSnapshot {
                 source_identity_digest: source_identity_digest.to_owned(),
                 generation,
+                receipt: None,
+            },
+        ),
+    }
+}
+
+pub(super) fn set_source_snapshot_receipt(
+    manifest: &mut Manifest,
+    source_identity_digest: &str,
+    generation: u64,
+    receipt: FlatSourceReceipt,
+) {
+    match manifest.source_snapshots.binary_search_by(|snapshot| {
+        snapshot
+            .source_identity_digest
+            .as_str()
+            .cmp(source_identity_digest)
+    }) {
+        Ok(index) => {
+            manifest.source_snapshots[index].generation = generation;
+            manifest.source_snapshots[index].receipt = Some(receipt);
+        }
+        Err(index) => manifest.source_snapshots.insert(
+            index,
+            SourceSnapshot {
+                source_identity_digest: source_identity_digest.to_owned(),
+                generation,
+                receipt: Some(receipt),
             },
         ),
     }
@@ -49,6 +77,41 @@ pub(super) fn remove_source_snapshot(manifest: &mut Manifest, source_identity_di
     }) {
         manifest.source_snapshots.remove(index);
     }
+}
+
+pub(super) fn manifest_source_states(manifest: &Manifest) -> Vec<FlatSourceState> {
+    let mut states = manifest
+        .source_snapshots
+        .iter()
+        .map(|snapshot| {
+            (
+                snapshot.source_identity_digest.clone(),
+                (snapshot.generation, snapshot.receipt.clone()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for segment in &manifest.segments {
+        if segment.source_identity_digest == UNSCOPED_SOURCE_IDENTITY {
+            continue;
+        }
+        match states.entry(segment.source_identity_digest.clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((0, None));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if segment.generation > entry.get().0 {
+                    entry.get_mut().1 = None;
+                }
+            }
+        }
+    }
+    states
+        .into_iter()
+        .map(|(source_identity_digest, (_, receipt))| FlatSourceState {
+            source_identity_digest,
+            receipt,
+        })
+        .collect()
 }
 
 pub(super) fn load_active_events(

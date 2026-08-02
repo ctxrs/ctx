@@ -329,6 +329,20 @@ pub(super) fn validate_manifest(
                 "manifest source snapshots are invalid".to_owned(),
             ));
         }
+        if let Some(receipt) = &snapshot.receipt {
+            if receipt.source_identity_digest != snapshot.source_identity_digest
+                || receipt.source_reconciliation_id.is_empty()
+                || receipt.owned_event_count > receipt.semantic_eligible_documents
+                || decode_sha256(&receipt.core_record_accumulator).is_none()
+                || decode_sha256(&receipt.contract_fingerprint).is_none()
+                || decode_sha256(&receipt.semantic_policy_fingerprint).is_none()
+                || decode_sha256(&receipt.owned_event_ids_hash).is_none()
+            {
+                return Err(FlatStoreError::Corrupt(
+                    "manifest source receipt is invalid".to_owned(),
+                ));
+            }
+        }
         previous_snapshot = Some(&snapshot.source_identity_digest);
     }
     let mut prior_generation = 0_u64;

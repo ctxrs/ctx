@@ -7,8 +7,8 @@ use super::{
     model_contract::SEMANTIC_DIMENSIONS,
     vector_store::{
         flat_segments::{
-            FlatActiveEventLookup, FlatChunk, FlatEventReplacement, FlatSourceHash,
-            PinnedFlatGeneration,
+            FlatActiveEventLookup, FlatChunk, FlatEventMetadataUpdate, FlatEventReplacement,
+            FlatPublishOutcome, FlatSourceHash, PinnedFlatGeneration,
         },
         SemanticChunkDocument, SemanticVectorStore,
     },
@@ -70,6 +70,31 @@ impl SemanticVectorStore {
                 .map_err(anyhow::Error::new)?;
             self.flat_compact_if_needed()?;
             Ok(deleted)
+        })())
+    }
+
+    pub(super) fn publish_source_page(
+        &mut self,
+        items: &[(SemanticChunkDocument, Vec<f32>)],
+        authority_updates: &[FlatEventMetadataUpdate],
+        event_ids: &[Uuid],
+    ) -> Result<FlatPublishOutcome> {
+        semantic_owned_sidecar_result((|| {
+            if items.iter().any(|(_, embedding)| {
+                embedding.len() != SEMANTIC_DIMENSIONS
+                    || embedding.iter().any(|value| !value.is_finite())
+            }) {
+                return Err(SemanticVectorStoreError::unavailable(format!(
+                    "semantic embeddings must be finite f32[{SEMANTIC_DIMENSIONS}]"
+                ))
+                .into());
+            }
+            let replacements = grouped_replacements(items)?;
+            let publication = self
+                .flat
+                .publish_source_event_page(&replacements, authority_updates, event_ids)
+                .map_err(anyhow::Error::new)?;
+            Ok(publication)
         })())
     }
 

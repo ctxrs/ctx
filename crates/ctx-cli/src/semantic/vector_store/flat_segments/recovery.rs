@@ -117,86 +117,7 @@ impl FlatSegmentStore {
         })
     }
 
-    pub(super) fn compact_source_if_needed(&self, source: &FlatSourceScope) -> FlatResult<()> {
-        let _ = self.compact_source(source, false)?;
-        Ok(())
-    }
-
-    fn compact_source(
-        &self,
-        source: &FlatSourceScope,
-        force: bool,
-    ) -> FlatResult<FlatPublishOutcome> {
-        self.require_writable()?;
-        let _guard = self.lock_exclusive()?;
-        let Some(current) = self.load_current_locked()? else {
-            return Ok(noop_outcome(None));
-        };
-        let source_segments = current
-            .envelope
-            .manifest
-            .segments
-            .iter()
-            .filter(|segment| segment.source_identity_digest == source.source_identity_digest)
-            .collect::<Vec<_>>();
-        if source_segments.is_empty() {
-            return Ok(noop_outcome(Some(&current)));
-        }
-        let (events, catalog_touches) = self.load_source_events(Some(&current), source)?;
-        self.touch_metadata(catalog_touches);
-        let active_chunks = events.events().iter().try_fold(0_u64, |total, event| {
-            total
-                .checked_add(u64::from(event.chunk_count))
-                .ok_or_else(|| FlatStoreError::Corrupt("source chunk count overflow".to_owned()))
-        })?;
-        let stored_chunks = source_segments.iter().try_fold(0_u64, |total, segment| {
-            total
-                .checked_add(segment.vector_count)
-                .ok_or_else(|| FlatStoreError::Corrupt("stored source chunk overflow".to_owned()))
-        })?;
-        let already_compact = source_segments.len() == 1
-            && source_segments[0].kind == SegmentKind::Base
-            && source_segments[0].vector_count == active_chunks;
-        let over_threshold = source_segments.len() >= COMPACT_SEGMENT_THRESHOLD
-            || (active_chunks > 0 && stored_chunks > active_chunks.saturating_mul(2));
-        if already_compact || (!force && !over_threshold) {
-            return Ok(noop_outcome(Some(&current)));
-        }
-
-        let generation = next_generation(Some(&current))?;
-        let staged = write_source_compacted_segment(
-            &self.root,
-            &self.contract,
-            generation,
-            source,
-            events.events(),
-            &current.envelope.manifest,
-        )?;
-        sync_directory(&segments_directory(&self.root))?;
-        validate_staged_segment(&self.root, &self.contract, &staged.descriptor)?;
-        let mut manifest = current.envelope.manifest.clone();
-        manifest.generation = generation;
-        manifest.created_unix_millis = unix_millis();
-        manifest
-            .segments
-            .retain(|segment| segment.source_identity_digest != source.source_identity_digest);
-        manifest.segments.push(staged.descriptor);
-        manifest.segments.sort_by_key(|segment| segment.generation);
-        set_source_snapshot(&mut manifest, &source.source_identity_digest, generation);
-        let selected = publish_manifest(&self.root, manifest)?;
-        self.clear_pinned()?;
-        self.record_compaction_work(active_chunks, events.events().len())?;
-        let _ = cleanup_obsolete_locked(&self.root, &selected);
-        Ok(FlatPublishOutcome {
-            published: true,
-            generation,
-            generation_hash: Some(selected.generation_hash),
-            replaced_events: events.events().len(),
-            deleted_events: 0,
-        })
-    }
-
-    fn record_compaction_work(&self, vectors: u64, events: usize) -> FlatResult<()> {
+    pub(super) fn record_compaction_work(&self, vectors: u64, events: usize) -> FlatResult<()> {
         let vector_bytes = vectors
             .checked_mul(u64::from(self.contract.dimensions))
             .and_then(|value| value.checked_mul(4))
@@ -471,6 +392,7 @@ pub(super) fn write_source_compacted_segment(
             metadata,
             mutations,
         },
+        mutations: events.iter().map(event_mutation).collect(),
     })
 }
 
@@ -500,6 +422,7 @@ pub(super) fn write_empty_base_segment(
             metadata,
             mutations,
         },
+        mutations: Vec::new(),
     })
 }
 
@@ -532,7 +455,7 @@ pub(super) fn cleanup_obsolete_locked(
     selected: &SelectedManifest,
 ) -> FlatResult<FlatRecoveryReport> {
     let mut report = FlatRecoveryReport::default();
-    let active_segments = selected
+    let mut active_segments = selected
         .envelope
         .manifest
         .segments
@@ -544,27 +467,62 @@ pub(super) fn cleanup_obsolete_locked(
                 segment.mutations.file.as_str(),
             ]
         })
+        .map(str::to_owned)
         .collect::<HashSet<_>>();
 
     let manifest_directory = manifests_directory(root);
-    for entry in fs::read_dir(&manifest_directory).map_err(|source| {
-        io_error(
-            "read flat manifest cleanup directory",
-            &manifest_directory,
-            source,
-        )
-    })? {
-        let entry = entry.map_err(|source| {
+    let entries = fs::read_dir(&manifest_directory)
+        .map_err(|source| {
             io_error(
-                "read flat manifest cleanup entry",
+                "read flat manifest cleanup directory",
                 &manifest_directory,
                 source,
             )
-        })?;
+        })?
+        .map(|entry| {
+            entry.map_err(|source| {
+                io_error(
+                    "read flat manifest cleanup entry",
+                    &manifest_directory,
+                    source,
+                )
+            })
+        })
+        .collect::<FlatResult<Vec<_>>>()?;
+    let previous = entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let (generation, digest) = parse_manifest_name(name)?;
+            (entry.path() != selected.path && generation < selected.envelope.manifest.generation)
+                .then_some((generation, digest, entry.path()))
+        })
+        .max_by_key(|(generation, _, _)| *generation);
+    let previous_path = if let Some((generation, digest, path)) = previous {
+        let envelope = read_manifest(&path)?;
+        validate_manifest(&envelope, generation, &digest)?;
+        active_segments.extend(envelope.manifest.segments.iter().flat_map(|segment| {
+            [
+                segment.vectors.file.clone(),
+                segment.metadata.file.clone(),
+                segment.mutations.file.clone(),
+            ]
+        }));
+        Some(path)
+    } else {
+        None
+    };
+    for entry in entries {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if !name.starts_with(MANIFEST_PREFIX) || entry.path() == selected.path {
+        if !name.starts_with(MANIFEST_PREFIX)
+            || entry.path() == selected.path
+            || previous_path
+                .as_ref()
+                .is_some_and(|path| *path == entry.path())
+        {
             continue;
         }
         if parse_manifest_name(&name).is_none() {

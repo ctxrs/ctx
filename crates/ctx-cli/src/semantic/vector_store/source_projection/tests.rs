@@ -17,6 +17,7 @@ const TAIL_TOKEN: &str = "semantic-tail-token-7f0d";
 struct CoreBuilder {
     calls: Vec<Uuid>,
     fail_on: HashSet<Uuid>,
+    fail_after: Option<usize>,
 }
 
 impl SourceBackedSemanticDocumentBuilder for CoreBuilder {
@@ -25,7 +26,11 @@ impl SourceBackedSemanticDocumentBuilder for CoreBuilder {
         record: &CoreEventRecord,
     ) -> Result<Option<SemanticEventDocument>> {
         self.calls.push(record.event_id.as_uuid());
-        if self.fail_on.contains(&record.event_id.as_uuid()) {
+        if self.fail_on.contains(&record.event_id.as_uuid())
+            || self
+                .fail_after
+                .is_some_and(|limit| self.calls.len() > limit)
+        {
             return Err(anyhow!("forced Core projection interruption"));
         }
         let text = record.core_record.content.meaningful_text().to_owned();
@@ -360,7 +365,7 @@ fn semantic_generation_mirrors_exact_per_source_core_aggregates() -> Result<()> 
         &[(0, bodies("stable", 3)), (1, bodies("changed", 2))],
     )?;
     let generation = SourceBackedSemanticGeneration::from_verified_index(&index)?;
-    assert_eq!(SOURCE_CONTRACT_VERSION, 8);
+    assert_eq!(SOURCE_CONTRACT_VERSION, 9);
     assert_eq!(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION, 15);
     assert_eq!(generation.semantic_documents, 5);
     assert_eq!(generation.sources.len(), 2);
@@ -480,8 +485,8 @@ fn four_event_source_work_is_independent_of_740k_equivalent_corpus() -> Result<(
     assert_eq!(active_events(&store)?, 104);
     assert_eq!(
         store.flat_pin_generation()?.unwrap().generation(),
-        flat_generation + 3,
-        "one changed page publishes vectors, event authority, and a source snapshot"
+        flat_generation + 2,
+        "one changed page publishes combined vector/authority state, then its source receipt"
     );
     assert!(matches!(
         store.source_backed_generation_pin_exact(target.generation_id(), 104)?,
@@ -583,20 +588,24 @@ fn multi_page_restart_reconstructs_one_view_for_remaining_pages() -> Result<()> 
     let fixture = Fixture::new(1)?;
     let record_count = MAX_SOURCE_EVENT_PAGE_ITEMS + 4;
     let index = fixture.publish("view-restart", &[(0, bodies("restart", record_count))])?;
-    let mut builder = CoreBuilder::default();
+    let mut builder = CoreBuilder {
+        fail_after: Some(MAX_SOURCE_EVENT_PAGE_ITEMS),
+        ..CoreBuilder::default()
+    };
     let mut embedder = MarkerEmbedder::default();
     {
         let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
-        let transition =
-            store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
-        assert_eq!(transition.records_read, 0);
-        let first_page =
-            store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
-        assert_eq!(first_page.records_read, MAX_SOURCE_EVENT_PAGE_ITEMS);
-        assert_eq!(first_page.records_embedded, MAX_SOURCE_EVENT_PAGE_ITEMS);
-        assert!(first_page.work_remaining);
+        let error = store
+            .reconcile_source_backed_index(&index, &mut builder, &mut embedder)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("forced Core projection interruption"));
+        assert_eq!(active_events(&store)?, MAX_SOURCE_EVENT_PAGE_ITEMS);
     }
 
+    builder.fail_after = None;
+    builder.calls.clear();
     let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
     let segments_before_resume = restarted
         .flat_pin_generation()?
@@ -629,8 +638,8 @@ fn multi_page_restart_reconstructs_one_view_for_remaining_pages() -> Result<()> 
             .ok_or_else(|| anyhow!("resumed reconciliation lost its flat generation"))?
             .stats()
             .segment_count
-            <= segments_before_resume + 1,
-        "the resumed bounded page may add at most one durable delta"
+            <= segments_before_resume + 2,
+        "the resumed page and source receipt add at most two scoped segments"
     );
     Ok(())
 }
@@ -736,71 +745,190 @@ fn append_rewrite_and_removal_touch_only_owned_source() -> Result<()> {
 }
 
 #[test]
-fn crash_restart_replays_flat_publication_gap_idempotently() -> Result<()> {
-    let fixture = Fixture::new(1)?;
-    let index = fixture.publish("crash", &[(0, bodies("crash", 6))])?;
+fn large_multipage_lifecycle_replays_each_source_catalog_once() -> Result<()> {
+    let fixture = Fixture::new(2)?;
+    let mutable_count = MAX_SOURCE_EVENT_PAGE_ITEMS * 2 + 17;
+    let retained = bodies("large-retained", 3);
+    let initial = fixture.publish(
+        "large-linear-a",
+        &[
+            (0, retained.clone()),
+            (1, bodies("large-mutable", mutable_count)),
+        ],
+    )?;
+    let appended = fixture.publish(
+        "large-linear-b",
+        &[
+            (0, retained.clone()),
+            (1, bodies("large-mutable", mutable_count + 1)),
+        ],
+    )?;
+    let rewritten = fixture.publish(
+        "large-linear-c",
+        &[
+            (0, retained.clone()),
+            (1, bodies("large-rewritten", mutable_count + 1)),
+        ],
+    )?;
+    let removed = fixture.publish("large-linear-d", &[(0, retained)])?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
     let mut builder = CoreBuilder::default();
-    builder.fail_on.insert(fixture.event_id(0, 4)?);
     let mut embedder = MarkerEmbedder::default();
-    let published_generation = {
-        let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
-        let transition =
-            store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
-        assert_eq!(transition.records_read, 0);
-        assert!(transition.work_remaining);
-        let error = store
-            .reconcile_source_backed_index(&index, &mut builder, &mut embedder)
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("forced Core projection interruption"));
-        assert_eq!(active_events(&store)?, 0);
+    reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
+    let retained_digest = fixture.source_digest(&initial, 0)?;
+    let retained_rows = source_rows(&store, &retained_digest)?;
 
-        // Simulate a crash after the page's flat generation is durable but
-        // before ownership rows and the source frontier commit together.
-        let generation = SourceBackedSemanticGeneration::from_verified_index(&index)?;
-        let source = &generation.sources[0];
-        let page =
-            index.core_source_event_page(&source.source, None, MAX_SOURCE_EVENT_PAGE_ITEMS)?;
-        let mut page_builder = CoreBuilder::default();
-        let mut page_embedder = MarkerEmbedder::default();
-        let mut replacements = Vec::new();
-        for record in &page.items {
-            let document = page_builder
-                .build_document(record)?
-                .ok_or_else(|| anyhow!("fixture record was unexpectedly filtered"))?;
-            let source_text = semantic_source_text(&document.text);
-            let source_text_sha256 = semantic_document_hash(
-                &document,
-                &source_text,
-                &generation.semantic_policy_fingerprint,
-            );
-            let chunks = semantic_chunks_for_document(&document, &source_text, &source_text_sha256);
-            let embeddings = page_embedder.embed_chunks(&chunks)?;
-            replacements.extend(chunks.into_iter().zip(embeddings));
-        }
-        store.publish_chunk_replacements(&replacements, &[])?;
-        assert_eq!(active_events(&store)?, 6);
-        store.flat_pin_generation()?.unwrap().generation()
-    };
-
-    builder.fail_on.clear();
-    builder.calls.clear();
-    let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
-    let outcome = reconcile_all(&mut restarted, &index, &mut builder, &mut embedder)?;
-    assert_eq!(outcome.records_read, 6);
-    assert_eq!(outcome.records_reused, 6);
-    assert_eq!(outcome.records_embedded, 0);
-    assert_eq!(outcome.vectors_touched, 0);
-    assert_eq!(builder.calls.len(), 6);
-    assert_eq!(active_events(&restarted)?, 6);
+    store.reset_flat_active_event_snapshot_count();
+    let append = reconcile_all(&mut store, &appended, &mut builder, &mut embedder)?;
+    assert_eq!(append.records_read, mutable_count + 1);
+    assert_eq!(append.records_reused, mutable_count);
+    assert_eq!(append.records_embedded, 1);
+    assert_eq!(store.flat.source_catalog_load_count(), 1);
     assert_eq!(
-        restarted.flat_pin_generation()?.unwrap().generation(),
-        published_generation + 2
+        store.flat.source_catalog_records_replayed(),
+        u64::try_from(mutable_count)?
     );
-    let no_op = restarted.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
-    assert!(no_op.ready);
-    assert_eq!(no_op.records_read, 0);
+    assert_eq!(
+        store.flat.source_publication_count(),
+        u64::try_from((mutable_count + 1).div_ceil(MAX_SOURCE_EVENT_PAGE_ITEMS) + 1)?
+    );
+    assert_eq!(source_rows(&store, &retained_digest)?, retained_rows);
+
+    store.reset_flat_active_event_snapshot_count();
+    let rewrite = reconcile_all(&mut store, &rewritten, &mut builder, &mut embedder)?;
+    assert_eq!(rewrite.records_read, mutable_count + 1);
+    assert_eq!(rewrite.records_reused, 0);
+    assert_eq!(rewrite.records_embedded, mutable_count + 1);
+    assert_eq!(store.flat.source_catalog_load_count(), 1);
+    assert_eq!(
+        store.flat.source_catalog_records_replayed(),
+        u64::try_from(mutable_count + 1)?
+    );
+    assert_eq!(
+        store.flat.source_publication_count(),
+        u64::try_from((mutable_count + 1).div_ceil(MAX_SOURCE_EVENT_PAGE_ITEMS) + 1)?
+    );
+    assert_eq!(source_rows(&store, &retained_digest)?, retained_rows);
+
+    store.reset_flat_active_event_snapshot_count();
+    let removal = reconcile_all(&mut store, &removed, &mut builder, &mut embedder)?;
+    assert_eq!(removal.records_read, 0);
+    assert_eq!(removal.deleted_chunks, mutable_count + 1);
+    assert_eq!(store.flat.source_catalog_load_count(), 1);
+    assert_eq!(
+        store.flat.source_catalog_records_replayed(),
+        u64::try_from(mutable_count + 1)?
+    );
+    assert_eq!(
+        store.flat.source_publication_count(),
+        u64::try_from((mutable_count + 1).div_ceil(MAX_SOURCE_EVENT_PAGE_ITEMS) + 1)?
+    );
+    assert_eq!(source_rows(&store, &retained_digest)?, retained_rows);
+    assert_eq!(active_events(&store)?, 3);
+    Ok(())
+}
+
+#[test]
+fn frontier_commit_manifest_rollback_replays_sequence_and_same_id_rewrite() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let initial = fixture.publish_with_event_sequences(
+        "rollback-initial",
+        &[(0, vec![(1, "same semantic body".to_owned())])],
+    )?;
+    let sequence_only = fixture.publish_with_event_sequences(
+        "rollback-sequence",
+        &[(0, vec![(91, "same semantic body".to_owned())])],
+    )?;
+    let rewrite = fixture.publish_with_event_sequences(
+        "rollback-rewrite",
+        &[(0, vec![(92, "rewritten semantic body".to_owned())])],
+    )?;
+    let source_digest = fixture.source_digest(&initial, 0)?;
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
+
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
+    let embedded_initial = embedder.chunks;
+    store.flat.fail_after_source_frontier_commit_once();
+    let error = store
+        .reconcile_source_backed_index(&sequence_only, &mut builder, &mut embedder)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("injected failure after semantic source frontier commit"));
+    assert_eq!(embedder.chunks, embedded_initial);
+    let committed = store
+        .source_frontier()?
+        .ok_or_else(|| anyhow!("sequence-only fault lost its committed frontier"))?
+        .flat_publication;
+    assert_eq!(store.flat.rollback_active_manifest()?, committed);
+    drop(store);
+
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let replayed = reconcile_all(&mut store, &sequence_only, &mut builder, &mut embedder)?;
+    assert_eq!(replayed.records_read, 1);
+    assert_eq!(replayed.records_reused, 1);
+    assert_eq!(replayed.records_embedded, 0);
+    assert_eq!(embedder.chunks, embedded_initial);
+    let sequence_pin =
+        match store.source_backed_generation_pin_exact(sequence_only.generation_id(), 1)? {
+            SourceBackedGenerationPin::Ready(pin) => pin,
+            SourceBackedGenerationPin::NotReady | SourceBackedGenerationPin::ReadyEmpty => {
+                return Err(anyhow!(
+                    "sequence-only rollback replay did not become ready"
+                ));
+            }
+        };
+    assert_eq!(
+        sequence_pin
+            .scan_segments()
+            .iter()
+            .flat_map(|segment| segment.chunks())
+            .next()
+            .ok_or_else(|| anyhow!("sequence-only rollback replay lost its vector"))?
+            .seq,
+        91
+    );
+    let sequence_rows = source_rows(&store, &source_digest)?;
+
+    store.flat.fail_after_source_frontier_commit_once();
+    let error = store
+        .reconcile_source_backed_index(&rewrite, &mut builder, &mut embedder)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("injected failure after semantic source frontier commit"));
+    assert_eq!(embedder.chunks, embedded_initial + 1);
+    let committed = store
+        .source_frontier()?
+        .ok_or_else(|| anyhow!("same-ID rewrite fault lost its committed frontier"))?
+        .flat_publication;
+    assert_eq!(store.flat.rollback_active_manifest()?, committed);
+    drop(store);
+
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let replayed = reconcile_all(&mut store, &rewrite, &mut builder, &mut embedder)?;
+    assert_eq!(replayed.records_read, 1);
+    assert_eq!(replayed.records_embedded, 1);
+    assert_eq!(embedder.chunks, embedded_initial + 2);
+    assert_ne!(source_rows(&store, &source_digest)?, sequence_rows);
+    let rewrite_pin = match store.source_backed_generation_pin_exact(rewrite.generation_id(), 1)? {
+        SourceBackedGenerationPin::Ready(pin) => pin,
+        SourceBackedGenerationPin::NotReady | SourceBackedGenerationPin::ReadyEmpty => {
+            return Err(anyhow!("same-ID rollback replay did not become ready"));
+        }
+    };
+    assert_eq!(
+        rewrite_pin
+            .scan_segments()
+            .iter()
+            .flat_map(|segment| segment.chunks())
+            .next()
+            .ok_or_else(|| anyhow!("same-ID rollback replay lost its vector"))?
+            .seq,
+        92
+    );
     Ok(())
 }
 
@@ -827,10 +955,14 @@ fn core_advance_mid_catch_up_never_pins_mixed_generation() -> Result<()> {
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
 
-    let transition = store.reconcile_source_backed_index(&middle, &mut builder, &mut embedder)?;
-    assert_eq!(transition.records_read, 0);
-    let partial = store.reconcile_source_backed_index(&middle, &mut builder, &mut embedder)?;
-    assert_eq!(partial.records_read, 1);
+    builder.calls.clear();
+    builder.fail_after = Some(0);
+    let error = store
+        .reconcile_source_backed_index(&middle, &mut builder, &mut embedder)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("forced Core projection interruption"));
     assert!(matches!(
         store.source_backed_generation_pin_exact(initial.generation_id(), 3)?,
         SourceBackedGenerationPin::NotReady
@@ -840,18 +972,11 @@ fn core_advance_mid_catch_up_never_pins_mixed_generation() -> Result<()> {
         SourceBackedGenerationPin::NotReady
     ));
 
-    let newer_transition =
-        store.reconcile_source_backed_index(&newest, &mut builder, &mut embedder)?;
-    assert_eq!(newer_transition.records_read, 0);
-    let newer_partial =
-        store.reconcile_source_backed_index(&newest, &mut builder, &mut embedder)?;
-    assert_eq!(newer_partial.records_read, 2);
-    assert!(matches!(
-        store.source_backed_generation_pin_exact(newest.generation_id(), 3)?,
-        SourceBackedGenerationPin::NotReady
-    ));
+    builder.fail_after = None;
+    builder.calls.clear();
     let completed = reconcile_all(&mut store, &newest, &mut builder, &mut embedder)?;
-    assert_eq!(completed.records_read, 1);
+    assert_eq!(completed.records_read, 2);
+    assert_eq!(builder.calls.len(), 2);
     assert!(matches!(
         store.source_backed_generation_pin_exact(newest.generation_id(), 3)?,
         SourceBackedGenerationPin::Ready(_)
@@ -907,50 +1032,36 @@ fn policy_rebuild_persists_linear_source_traversal_across_restart() -> Result<()
 
     let mut revised = SourceBackedSemanticGeneration::from_verified_index(&index)?;
     revised.semantic_policy_fingerprint = "e".repeat(64);
-    let first_digest = revised.sources[0]
-        .aggregate
-        .source_identity_digest()
-        .to_owned();
-    let mut builder = CoreBuilder::default();
+    let mut builder = CoreBuilder {
+        fail_after: Some(3),
+        ..CoreBuilder::default()
+    };
     let mut embedder = MarkerEmbedder::default();
 
-    let transition =
-        store.reconcile_source_backed_generation(&index, &revised, &mut builder, &mut embedder)?;
-    assert_eq!(transition.records_read, 0);
-    let first_page =
-        store.reconcile_source_backed_generation(&index, &revised, &mut builder, &mut embedder)?;
-    assert_eq!(first_page.records_read, 1);
-    let first_finish =
-        store.reconcile_source_backed_generation(&index, &revised, &mut builder, &mut embedder)?;
-    assert_eq!(first_finish.records_read, 0);
-    let frontier = store
-        .source_frontier()?
-        .ok_or_else(|| anyhow!("policy rebuild lost its traversal frontier"))?;
-    assert_eq!(
-        frontier.source_traversal_phase,
-        SourceTraversalPhase::ReconcilingSources
-    );
-    assert_eq!(
-        frontier.source_traversal_after_identity_digest.as_deref(),
-        Some(first_digest.as_str())
-    );
+    let error = store
+        .reconcile_source_backed_generation(&index, &revised, &mut builder, &mut embedder)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("forced Core projection interruption"));
+    assert_eq!(builder.calls.len(), 4);
+    let completed_before_fault = builder.calls[..3].iter().copied().collect::<HashSet<_>>();
 
     drop(store);
     let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
-    let resumed =
-        store.reconcile_source_backed_generation(&index, &revised, &mut builder, &mut embedder)?;
-    assert_eq!(resumed.records_read, 1);
-    assert_eq!(builder.calls.len(), 2);
-    assert_ne!(builder.calls[0], builder.calls[1]);
-
-    let remainder =
-        reconcile_generation(&mut store, &index, &revised, &mut builder, &mut embedder)?;
-    assert_eq!(remainder.records_read, 6);
-    assert_eq!(builder.calls.len(), 8);
-    assert_eq!(
-        builder.calls.iter().copied().collect::<HashSet<_>>().len(),
-        8
-    );
+    store.reset_flat_active_event_snapshot_count();
+    builder.fail_after = None;
+    builder.calls.clear();
+    let resumed = reconcile_generation(&mut store, &index, &revised, &mut builder, &mut embedder)?;
+    assert_eq!(resumed.records_read, 5);
+    assert_eq!(builder.calls.len(), 5);
+    assert!(builder
+        .calls
+        .iter()
+        .all(|event_id| !completed_before_fault.contains(event_id)));
+    assert_eq!(store.flat.source_catalog_load_count(), 5);
+    assert_eq!(store.flat.source_catalog_records_replayed(), 5);
+    assert_eq!(store.flat.source_publication_count(), 10);
     Ok(())
 }
 

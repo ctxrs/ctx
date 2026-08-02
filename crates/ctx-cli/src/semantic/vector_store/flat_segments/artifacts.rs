@@ -172,6 +172,43 @@ pub(super) fn write_replacement_segment(
     replacements: &[FlatEventReplacement],
     tombstones: &[Uuid],
 ) -> FlatResult<StagedSegment> {
+    let existing = FlatActiveEventLookup {
+        events: Arc::new(Vec::new()),
+    };
+    write_event_segment(
+        root,
+        contract,
+        generation,
+        source,
+        EventSegmentInput {
+            replacements,
+            authority_updates: &[],
+            tombstones,
+            existing: &existing,
+        },
+    )
+}
+
+pub(super) struct EventSegmentInput<'a> {
+    pub(super) replacements: &'a [FlatEventReplacement],
+    pub(super) authority_updates: &'a [FlatEventMetadataUpdate],
+    pub(super) tombstones: &'a [Uuid],
+    pub(super) existing: &'a FlatActiveEventLookup,
+}
+
+pub(super) fn write_event_segment(
+    root: &Path,
+    contract: &FlatModelContract,
+    generation: u64,
+    source: &FlatSourceScope,
+    input: EventSegmentInput<'_>,
+) -> FlatResult<StagedSegment> {
+    let EventSegmentInput {
+        replacements,
+        authority_updates,
+        tombstones,
+        existing,
+    } = input;
     let mut ordered_replacements = replacements.iter().collect::<Vec<_>>();
     ordered_replacements.sort_by_key(|replacement| replacement.event_id);
     let mut ordered_tombstones = tombstones.to_vec();
@@ -187,12 +224,6 @@ pub(super) fn write_replacement_segment(
                 FlatStoreError::InvalidInput("publication vector count overflow".to_owned())
             })
         })?;
-    let mutation_count = u64::try_from(ordered_replacements.len())
-        .ok()
-        .zip(u64::try_from(ordered_tombstones.len()).ok())
-        .and_then(|(replacements, tombstones)| replacements.checked_add(tombstones))
-        .ok_or_else(|| FlatStoreError::InvalidInput("mutation count overflow".to_owned()))?;
-
     let directory = segments_directory(root);
     let stride = usize_from_u32(vector_stride(contract.dimensions)?, "vector stride")?;
     let mut vectors = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Vectors)?;
@@ -221,38 +252,118 @@ pub(super) fn write_replacement_segment(
         }
     }
 
+    let updates = authority_updates
+        .iter()
+        .map(|update| (update.event_id, update))
+        .collect::<HashMap<_, _>>();
+    if updates.len() != authority_updates.len() {
+        return Err(FlatStoreError::InvalidInput(
+            "authority update repeats an event".to_owned(),
+        ));
+    }
+    let replacement_ids = replacements
+        .iter()
+        .map(|replacement| replacement.event_id)
+        .collect::<HashSet<_>>();
+    let tombstone_ids = tombstones.iter().copied().collect::<HashSet<_>>();
+    if replacement_ids.len() != replacements.len()
+        || tombstone_ids.len() != tombstones.len()
+        || replacement_ids
+            .iter()
+            .any(|event_id| tombstone_ids.contains(event_id))
+        || updates
+            .keys()
+            .any(|event_id| tombstone_ids.contains(event_id))
+    {
+        return Err(FlatStoreError::InvalidInput(
+            "event publication has duplicate or ambiguous mutations".to_owned(),
+        ));
+    }
+
     let mut mutations = StagedArtifactWriter::new(&directory, generation, ArtifactRole::Mutations)?;
     let mut ordered_mutations = replacements
         .iter()
-        .map(|replacement| EventMutation {
-            event_id: replacement.event_id,
-            kind: MutationKind::Replace,
-            seq: replacement.seq,
-            source_text_hash: replacement.source_text_hash,
-            stable_identity_hash: [0; 32],
-            vector_generation: generation,
-            first_vector_ordinal: first_ordinals[&replacement.event_id],
-            chunk_count: u32::try_from(replacement.chunks.len()).unwrap_or(u32::MAX),
+        .map(|replacement| {
+            let update = updates.get(&replacement.event_id).copied();
+            if update.is_some_and(|update| {
+                update.seq != replacement.seq
+                    || update.source_text_hash != replacement.source_text_hash
+            }) {
+                return Err(FlatStoreError::InvalidInput(format!(
+                    "replacement authority disagrees for {}",
+                    replacement.event_id
+                )));
+            }
+            Ok(EventMutation {
+                event_id: replacement.event_id,
+                kind: MutationKind::Replace,
+                seq: replacement.seq,
+                source_text_hash: replacement.source_text_hash,
+                stable_identity_hash: update.map_or([0; 32], |update| update.stable_identity_hash),
+                vector_generation: generation,
+                first_vector_ordinal: first_ordinals[&replacement.event_id],
+                chunk_count: u32::try_from(replacement.chunks.len()).map_err(|_| {
+                    FlatStoreError::InvalidInput("replacement chunk count is too large".to_owned())
+                })?,
+            })
         })
-        .chain(
-            ordered_tombstones
-                .into_iter()
-                .map(|event_id| EventMutation {
-                    event_id,
-                    kind: MutationKind::Delete,
-                    seq: 0,
-                    source_text_hash: FlatSourceHash::from_bytes([0; 32]),
-                    stable_identity_hash: [0; 32],
-                    vector_generation: 0,
-                    first_vector_ordinal: 0,
-                    chunk_count: 0,
-                }),
-        )
-        .collect::<Vec<_>>();
-    ordered_mutations.sort_by_key(|mutation| mutation.event_id);
-    for mutation in ordered_mutations {
-        mutations.write_payload(&encode_mutation_record(mutation))?;
+        .collect::<FlatResult<Vec<_>>>()?;
+    for update in authority_updates {
+        if replacement_ids.contains(&update.event_id) {
+            continue;
+        }
+        let prior = existing.event(update.event_id).ok_or_else(|| {
+            FlatStoreError::InvalidInput(format!(
+                "authority update references absent event {}",
+                update.event_id
+            ))
+        })?;
+        if prior.source_text_hash != update.source_text_hash {
+            return Err(FlatStoreError::InvalidInput(format!(
+                "authority update changes source hash for {}",
+                update.event_id
+            )));
+        }
+        ordered_mutations.push(EventMutation {
+            event_id: update.event_id,
+            kind: MutationKind::Replace,
+            seq: update.seq,
+            source_text_hash: update.source_text_hash,
+            stable_identity_hash: update.stable_identity_hash,
+            vector_generation: prior.vector_generation,
+            first_vector_ordinal: prior.first_vector_ordinal,
+            chunk_count: prior.chunk_count,
+        });
     }
+    ordered_mutations.extend(
+        ordered_tombstones
+            .into_iter()
+            .map(|event_id| EventMutation {
+                event_id,
+                kind: MutationKind::Delete,
+                seq: 0,
+                source_text_hash: FlatSourceHash::from_bytes([0; 32]),
+                stable_identity_hash: [0; 32],
+                vector_generation: 0,
+                first_vector_ordinal: 0,
+                chunk_count: 0,
+            }),
+    );
+    ordered_mutations.sort_by_key(|mutation| mutation.event_id);
+    if ordered_mutations
+        .windows(2)
+        .any(|pair| pair[0].event_id == pair[1].event_id)
+    {
+        return Err(FlatStoreError::InvalidInput(
+            "event publication repeats an event".to_owned(),
+        ));
+    }
+    for mutation in &ordered_mutations {
+        mutations.write_payload(&encode_mutation_record(*mutation))?;
+    }
+
+    let mutation_count = u64::try_from(ordered_mutations.len())
+        .map_err(|_| FlatStoreError::InvalidInput("mutation count overflow".to_owned()))?;
 
     let vectors = vectors.finalize(vector_count, stride as u32, contract.dimensions)?;
     let metadata = metadata.finalize(vector_count, METADATA_RECORD_BYTES as u32, 0)?;
@@ -270,6 +381,7 @@ pub(super) fn write_replacement_segment(
             metadata,
             mutations,
         },
+        mutations: ordered_mutations,
     })
 }
 
@@ -318,6 +430,7 @@ pub(super) fn write_catalog_segment(
             metadata,
             mutations,
         },
+        mutations: ordered,
     })
 }
 

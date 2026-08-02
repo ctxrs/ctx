@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) const STORE_FORMAT: &str = "ctx-flat-f32";
 pub(super) const MANIFEST_ENVELOPE_VERSION: u32 = 1;
-pub(super) const MANIFEST_SCHEMA_VERSION: u32 = 2;
+pub(super) const MANIFEST_SCHEMA_VERSION: u32 = 3;
 pub(super) const SEGMENT_FORMAT_VERSION: u32 = 2;
 pub(super) const HEADER_BYTES: usize = 4_096;
 pub(super) const HEADER_BYTES_U64: u64 = HEADER_BYTES as u64;
@@ -94,6 +94,7 @@ pub(super) struct SegmentDescriptor {
 pub(super) struct SourceSnapshot {
     pub(super) source_identity_digest: String,
     pub(super) generation: u64,
+    pub(super) receipt: Option<FlatSourceReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +113,7 @@ pub(super) struct SelectedManifest {
 
 pub(super) struct StagedSegment {
     pub(super) descriptor: SegmentDescriptor,
+    pub(super) mutations: Vec<EventMutation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
