@@ -46,7 +46,11 @@ pub(super) mod lifecycle_manifest;
 #[path = "lifecycle_commands.rs"]
 mod commands;
 mod persistence;
-pub(crate) use commands::{lifecycle_status_json, run_lifecycle, ProArgs};
+#[cfg(test)]
+pub(crate) use commands::count_lifecycle_status_queries;
+pub(crate) use commands::{
+    lifecycle_status_json, lifecycle_status_json_for_core, run_lifecycle, ProArgs,
+};
 pub(super) use commands::{ProDeletionService, ProLifecycleService, ProManagePlan, ProSetupPlan};
 use persistence::{
     cleanup_transaction_files, durable_write, prepare_install_directory,

@@ -26,18 +26,55 @@ const SEARCH_DIRECTORY: &str = "search";
 const LEXICAL_DIRECTORY: &str = "lexical";
 const PRO_CATCH_UP_STATUS_FILE: &str = "pro-catch-up.json";
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StatusSnapshotReadCounts {
+    pub(crate) core_pins: usize,
+    pub(crate) pro_queries: usize,
+}
+
+#[cfg(test)]
+pub(crate) fn count_public_status_snapshot_reads<T>(
+    operation: impl FnOnce() -> T,
+) -> (T, StatusSnapshotReadCounts) {
+    let ((output, pro_queries), core_pins) =
+        super::source_backed_refresh_coordinator::count_verified_index_opens(|| {
+            crate::pro::count_lifecycle_status_queries(operation)
+        });
+    (
+        output,
+        StatusSnapshotReadCounts {
+            core_pins,
+            pro_queries,
+        },
+    )
+}
+
 pub(crate) struct SourceEpochStatus {
     pub(crate) initialized: bool,
     pub(crate) indexed_items: Option<u64>,
     pub(crate) indexed_sessions: Option<u64>,
     pub(crate) indexed_events: Option<u64>,
     pub(crate) indexed_sources: Option<u64>,
+    pub(crate) pro: Value,
     pub(crate) report: Value,
 }
 
 pub(crate) fn source_epoch_status_report(
     data_root: &Path,
     config: &AppConfig,
+) -> Result<SourceEpochStatus> {
+    source_epoch_status_report_with_pro_query(
+        data_root,
+        config,
+        crate::pro::lifecycle_status_json_for_core,
+    )
+}
+
+fn source_epoch_status_report_with_pro_query(
+    data_root: &Path,
+    config: &AppConfig,
+    query_pro: impl FnOnce(&Path, Option<&VerifiedIndex>) -> Value,
 ) -> Result<SourceEpochStatus> {
     let current_policy = current_source_generation_policy();
     let current_policy_hash = current_source_generation_policy_hash()?;
@@ -63,7 +100,8 @@ pub(crate) fn source_epoch_status_report(
         &mut semantic,
         read_daemon_job_status(&daemon_semantic_job_path(data_root)),
     );
-    let pro_projection = pro_projection_report(data_root, generation_id.as_deref());
+    let pro = query_pro(data_root, index.as_ref());
+    let pro_projection = pro_projection_report(data_root, generation_id.as_deref(), &pro);
     let refresh = refresh_report(refresh_job.as_ref(), generation_id.as_deref(), &daemon);
 
     let indexed_items = index.as_ref().map(VerifiedIndex::document_count);
@@ -82,6 +120,7 @@ pub(crate) fn source_epoch_status_report(
         indexed_sessions,
         indexed_events,
         indexed_sources,
+        pro,
         report: compact_json(json!({
             "schema_version": 2,
             "initialized": initialized,
@@ -185,7 +224,7 @@ fn lexical_report(
     let published_generation = refresh_job
         .and_then(|job| job.get("published_generation"))
         .and_then(Value::as_str);
-    match VerifiedIndex::open_pinned(&path) {
+    match super::source_backed_refresh_coordinator::open_verified_index(&path) {
         Ok(index) => {
             let manifest = index.manifest();
             let policy_matches = manifest.policy_schema_hash == current_policy_hash;
@@ -462,23 +501,23 @@ fn semantic_report(data_root: &Path, config: &AppConfig, index: Option<&Verified
     }))
 }
 
-fn pro_projection_report(data_root: &Path, generation_id: Option<&str>) -> Value {
-    let lifecycle = crate::pro::lifecycle_status_json(data_root);
+fn pro_projection_report(
+    data_root: &Path,
+    generation_id: Option<&str>,
+    lifecycle: &Value,
+) -> Value {
     let helper_generation_matches = lifecycle
         .get("projection_currentness")
         .and_then(Value::as_str)
         == Some("current")
         && lifecycle.get("materialized").and_then(Value::as_bool) == Some(true)
-        && generation_id.is_some_and(|expected| {
-            super::pin_active_verified_generation(data_root)
-                .is_ok_and(|active| active.generation_id() == expected)
-        });
+        && generation_id.is_some();
     let path = daemon_jobs_path(data_root).join(PRO_CATCH_UP_STATUS_FILE);
     let catch_up = read_daemon_job_status(&path);
     pro_projection_report_from_status(
         generation_id,
         helper_generation_matches,
-        &lifecycle,
+        lifecycle,
         catch_up.as_ref(),
         path,
     )

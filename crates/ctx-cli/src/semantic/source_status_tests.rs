@@ -1,8 +1,16 @@
 use super::*;
 use std::{
+    cell::{Cell, RefCell},
     fs, io,
     sync::{Arc, Mutex},
 };
+
+use ctx_history_core::{
+    derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
+    NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceObservation, TypedKey,
+};
+use ctx_history_index::{GenerationWriter, WriterOptions};
 
 use crate::{
     analytics::StatusTelemetry,
@@ -88,6 +96,90 @@ fn core_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, String)
     )
     .unwrap();
     (temp, data_root, generation_id)
+}
+
+fn publish_changed_core_generation(data_root: &Path) -> String {
+    let source = ctx_history_core::SourceKey::derive(
+        "codex",
+        "codex_session_jsonl",
+        "session",
+        1,
+        SourceAnchor::provider_native(
+            "session-file",
+            TypedKey::utf8("status-snapshot-race.jsonl").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let native_session = TypedKey::utf8("status-snapshot-race-session").unwrap();
+    let session_key = NativeSessionKey::native_id("session", native_session).unwrap();
+    let session_id = derive_session_id(SessionIdentityInput {
+        source: &source,
+        logical_session_kind: "thread",
+        native_session_key: &session_key,
+    })
+    .unwrap();
+    let native_item = NativeItemKey::native_id(
+        "message",
+        TypedKey::utf8("status-snapshot-race-event").unwrap(),
+    )
+    .unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source: &source,
+        session_id,
+        logical_item_kind: "message",
+        native_item_key: &native_item,
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let mut record = CoreRecord::new_selected(
+        event_id,
+        session_id,
+        session_id,
+        source.clone(),
+        1,
+        "message",
+        "primary",
+        true,
+        "status-snapshot-race-v1",
+        "new generation published during status assembly",
+    )
+    .unwrap();
+    record.provider_session_id = Some("status-snapshot-race-session".to_owned());
+    record.native_event_id = Some(TypedKey::U64(1));
+    record.role = Some("assistant".to_owned());
+    record.validate_contract().unwrap();
+
+    let mut writer = GenerationWriter::open(
+        data_root.join("search/lexical"),
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 32 * 1024 * 1024,
+        },
+    )
+    .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(record).unwrap();
+    let observation = SourceObservation::new(source, "status-snapshot-race-v1", vec![2]).unwrap();
+    writer
+        .certify_source(
+            CertifiedSource::certify(
+                observation.clone(),
+                observation,
+                "status-snapshot-race-v1",
+                [2; 32],
+                ScannedSourceCounts {
+                    complete_records: 1,
+                    retained_records: 1,
+                    indexed_documents: 1,
+                    certified_bytes: 128,
+                    ..ScannedSourceCounts::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    writer.commit(|_| true).unwrap().generation_id
 }
 
 #[test]
@@ -361,6 +453,105 @@ fn core_publication_is_ready_in_json_and_human_status() {
     assert!(!rendered.contains("Session view"), "{rendered}");
     assert!(!rendered.contains("Catalog pending"), "{rendered}");
     assert!(!rendered.contains("source refresh pending"), "{rendered}");
+}
+
+#[test]
+fn public_status_model_pins_core_once_and_queries_pro_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("missing");
+    let (status, counts) = count_public_status_snapshot_reads(|| {
+        crate::commands::status::status_read_model(&data_root, &AppConfig::default())
+    });
+
+    status.unwrap();
+    assert_eq!(
+        counts,
+        StatusSnapshotReadCounts {
+            core_pins: 1,
+            pro_queries: 1,
+        }
+    );
+}
+
+#[test]
+fn corrupt_core_and_unavailable_pro_remain_typed_in_one_snapshot() {
+    let (_temp, data_root, _generation_id) = core_publication_fixture();
+    fs::write(
+        data_root.join("search/lexical/active-generation.json"),
+        b"{corrupt",
+    )
+    .unwrap();
+
+    let (status, counts) = count_public_status_snapshot_reads(|| {
+        crate::commands::status::status_read_model(&data_root, &AppConfig::default())
+    });
+    let status = status.unwrap().report;
+
+    assert_eq!(counts.core_pins, 1);
+    assert_eq!(counts.pro_queries, 1);
+    assert_eq!(status["lexical"]["status"], "unavailable");
+    assert_eq!(
+        status["lexical"]["reason"],
+        "generation_verification_failed"
+    );
+    assert_eq!(status["pro"]["installed"], false);
+    assert_eq!(status["pro"]["state"], "not_setup");
+    assert_eq!(status["pro_projection"]["status"], "unavailable");
+    assert_eq!(status["pro_projection"]["reason"], "pro_not_installed");
+}
+
+#[test]
+fn generation_publish_during_pro_query_cannot_mix_status_snapshot() {
+    let (_temp, data_root, pinned_generation) = core_publication_fixture();
+    let pro_queries = Cell::new(0);
+    let requested_generation = RefCell::new(None);
+    let published_generation = RefCell::new(None);
+
+    let (status, core_pins) =
+        super::super::source_backed_refresh_coordinator::count_verified_index_opens(|| {
+            source_epoch_status_report_with_pro_query(
+                &data_root,
+                &AppConfig::default(),
+                |_, core| {
+                    pro_queries.set(pro_queries.get() + 1);
+                    let requested = core.unwrap().generation_id().to_owned();
+                    requested_generation.replace(Some(requested));
+                    published_generation.replace(Some(publish_changed_core_generation(&data_root)));
+                    json!({
+                        "installed": true,
+                        "ready": true,
+                        "materialized": true,
+                        "projection_currentness": "current",
+                        "materialized_coverage": "complete",
+                        "repository_coverage": {},
+                        "access_state": "active",
+                        "supported_operations": ["file_blame"],
+                        "available_operations": ["file_blame"],
+                        "error_code": null,
+                    })
+                },
+            )
+            .unwrap()
+        });
+
+    let published_generation = published_generation.into_inner().unwrap();
+    assert_ne!(published_generation, pinned_generation);
+    assert_eq!(pro_queries.get(), 1);
+    assert_eq!(core_pins, 1);
+    assert_eq!(
+        requested_generation.into_inner(),
+        Some(pinned_generation.clone())
+    );
+    assert_eq!(status.report["lexical"]["generation_id"], pinned_generation);
+    assert_eq!(
+        status.report["pro_projection"]["core_generation_id"],
+        pinned_generation
+    );
+    assert_eq!(status.report["pro_projection"]["status"], "ready");
+    assert_eq!(status.indexed_items, Some(0));
+    let active = VerifiedIndex::open_pinned(data_root.join("search/lexical")).unwrap();
+    assert_eq!(active.generation_id(), published_generation);
+    assert_eq!(active.document_count(), 1);
 }
 
 #[test]

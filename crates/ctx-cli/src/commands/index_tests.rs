@@ -6,8 +6,8 @@ use std::{
 use serde_json::json;
 
 use super::{
-    index_ready, index_terminal_error, index_wait_json, index_watch_output, IndexSelection,
-    IndexWaitArgs, IndexWaitHumanOutput, IndexWatchOutput,
+    index_readiness_snapshot, index_ready, index_terminal_error, index_wait_json,
+    index_watch_output, IndexSelection, IndexWaitArgs, IndexWaitHumanOutput, IndexWatchOutput,
 };
 use crate::output::JsonOutputFormat;
 use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext, Ui};
@@ -109,6 +109,18 @@ fn first_publication_pending_is_not_collapsed_to_missing() {
         index_terminal_error(&status, selection).is_none(),
         "{status:#}"
     );
+}
+
+#[test]
+fn public_index_snapshot_pins_core_once_and_queries_pro_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let (status, counts) = crate::semantic::count_public_status_snapshot_reads(|| {
+        index_readiness_snapshot(temp.path())
+    });
+
+    status.unwrap();
+    assert_eq!(counts.core_pins, 1);
+    assert_eq!(counts.pro_queries, 1);
 }
 
 #[test]

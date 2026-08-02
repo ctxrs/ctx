@@ -40,7 +40,7 @@ pub(crate) fn status_read_model(
     config: &config::AppConfig,
 ) -> Result<StatusReadModel> {
     let source = source_epoch_status_report(data_root, config)?;
-    let mut pro = crate::pro::lifecycle_status_json(data_root);
+    let mut pro = source.pro;
     if let Some(object) = pro.as_object_mut() {
         object.insert(
             "conversion_action".to_owned(),

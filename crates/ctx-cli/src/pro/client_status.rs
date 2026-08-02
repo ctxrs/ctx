@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
+use ctx_history_index::VerifiedIndex;
 use ctx_pro_host_protocol::{
     Capability, CoreProjectionCurrentness, EntitlementAccessState, HelperMessage, HostMessage,
     MaterializedCoverage, ProOperation, RepositoryCoverage, StatusRequest, StatusResult,
@@ -45,6 +46,20 @@ pub(crate) struct ProStatus {
     pub(crate) grace_deadline_unix: Option<i64>,
     #[serde(skip)]
     pub(crate) setup_repairability: ProSetupRepairability,
+}
+
+enum StatusCore<'a> {
+    Borrowed(&'a VerifiedIndex),
+    Owned(crate::semantic::PinnedSourceBackedGeneration),
+}
+
+impl StatusCore<'_> {
+    fn generation_id(&self) -> &str {
+        match self {
+            Self::Borrowed(index) => index.generation_id(),
+            Self::Owned(index) => index.generation_id(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,9 +136,27 @@ pub(crate) fn status(data_root: &Path) -> ProStatus {
     status_with_helper_resolver(data_root, support::helper_path)
 }
 
+pub(crate) fn status_for_core(data_root: &Path, active_core: Option<&VerifiedIndex>) -> ProStatus {
+    status_with_helper_resolver_and_core(data_root, support::helper_path, || {
+        active_core.map(StatusCore::Borrowed).ok_or_else(|| {
+            anyhow::anyhow!("source_unavailable: active verified Core generation is missing")
+        })
+    })
+}
+
 pub(crate) fn status_with_helper_resolver(
     data_root: &Path,
     resolve_helper: impl FnOnce(&Path) -> Result<PathBuf>,
+) -> ProStatus {
+    status_with_helper_resolver_and_core(data_root, resolve_helper, || {
+        crate::semantic::pin_active_verified_generation(data_root).map(StatusCore::Owned)
+    })
+}
+
+fn status_with_helper_resolver_and_core<'a>(
+    data_root: &Path,
+    resolve_helper: impl FnOnce(&Path) -> Result<PathBuf>,
+    resolve_core: impl FnOnce() -> Result<StatusCore<'a>>,
 ) -> ProStatus {
     let helper_path = match resolve_helper(data_root) {
         Ok(path) => path,
@@ -160,7 +193,7 @@ pub(crate) fn status_with_helper_resolver(
             };
         }
     };
-    let active_core = match crate::semantic::pin_active_verified_generation(data_root) {
+    let active_core = match resolve_core() {
         Ok(active_core) => active_core,
         Err(error) => {
             return ProStatus {
