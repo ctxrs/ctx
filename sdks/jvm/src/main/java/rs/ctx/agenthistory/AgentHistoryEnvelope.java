@@ -94,14 +94,7 @@ public class AgentHistoryEnvelope {
         switch (operation) {
             case "status":
             case "init":
-                if (!camel.containsKey("initialized")) {
-                    Object mode = camel.get("mode");
-                    camel.put("initialized", Boolean.valueOf("ready".equals(mode) || "catalog_only".equals(mode) || mode == null));
-                }
-                if (!camel.containsKey("localOnly")) {
-                    camel.put("localOnly", Boolean.TRUE);
-                }
-                fields.put("status", camel);
+                fields.put("status", normalizeStatus(camel));
                 break;
             case "sources":
                 fields.put("sources", camel.containsKey("sources")
@@ -132,6 +125,21 @@ public class AgentHistoryEnvelope {
                 break;
         }
         return buildCanonical(operation, backend, fields);
+    }
+
+    private static Map<String, Object> normalizeStatus(Map<String, Object> current) {
+        Map<String, Object> status = pick(
+                current,
+                "initialized", "dataRoot", "readOnly", "indexedItems", "indexedSessions",
+                "indexedEvents", "indexedSources", "historyEpoch", "lexical", "refresh",
+                "semantic", "daemon");
+        if (!status.containsKey("initialized")) {
+            Map<String, Object> lexical = AgentHistoryValue.objectOrNull(current.get("lexical"));
+            status.put("initialized", Boolean.valueOf(
+                    lexical != null && AgentHistoryValue.string(lexical.get("generationId")) != null));
+        }
+        status.put("localOnly", Boolean.TRUE);
+        return status;
     }
 
     private static void bridgeSearchPagination(Map<String, Object> search) {

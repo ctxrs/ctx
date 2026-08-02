@@ -587,7 +587,6 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
         &["setup", "--help"][..],
         &["status", "--help"],
         &["stats", "--help"],
-        &["index", "status", "--help"],
         &["index", "watch", "--help"],
         &["index", "wait", "--help"],
         &["sources", "--help"],

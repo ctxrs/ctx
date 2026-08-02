@@ -110,7 +110,6 @@ macro_rules! text_enum {
     };
 }
 
-pub mod archive;
 mod core_record;
 pub mod dtos;
 pub mod history_jsonl;
@@ -122,7 +121,6 @@ mod result_compaction;
 pub mod source;
 pub mod sync;
 
-pub use archive::SessionHistoryArchive;
 pub use core_record::{
     core_record_contract_fingerprint, CoreContent, CoreContentPolicyStatus, CoreRecord,
     CoreRecordAnnotation, CoreRecordError, CoreRecordResult, GitObjectFormat, GitObjectId,

@@ -475,7 +475,7 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
     assert_eq!(explicit_lexical["retrieval"]["requested_mode"], "lexical");
     assert_eq!(explicit_lexical["retrieval"]["effective_mode"], "lexical");
 
-    let status = json_output(ctx(&temp).args(["index", "status", "--format=json"]));
+    let status = json_output(ctx(&temp).args(["status", "--format=json"]));
     assert_eq!(status["semantic"]["status"], "pending");
     assert!(
         matches!(

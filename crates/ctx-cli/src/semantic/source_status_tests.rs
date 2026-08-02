@@ -301,7 +301,7 @@ fn core_publication_is_ready_in_json_and_human_status() {
 
     assert_eq!(json_status["lexical"]["status"], "ready");
     assert_eq!(json_status["lexical"]["generation_id"], generation_id);
-    assert_eq!(json_status["catalog"]["status"], "ready");
+    assert!(json_status.get("catalog").is_none());
     assert_eq!(json_status["refresh"]["status"], "ready");
     assert_eq!(
         json_status["refresh"]["published_generation"],

@@ -52,7 +52,7 @@ final class CtxAgentHistoryTests: XCTestCase {
         )
 
         _ = try client.status()
-        _ = try client.initialize(InitOptions(catalogOnly: true))
+        _ = try client.initialize(InitOptions())
         _ = try client.sources()
         _ = try client.importHistory(ImportOptions(provider: "codex", resume: true))
         _ = try client.sync(ImportOptions(all: true))
@@ -61,7 +61,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             runner.requests.map(\.arguments),
             [
                 ["--data-root", "/tmp/ctx-sdk-test", "status", "--format=json"],
-                ["--data-root", "/tmp/ctx-sdk-test", "setup", "--format=json", "--progress", "none", "--catalog-only"],
+                ["--data-root", "/tmp/ctx-sdk-test", "setup", "--format=json", "--progress", "none"],
                 ["--data-root", "/tmp/ctx-sdk-test", "sources", "--format=json"],
                 ["--data-root", "/tmp/ctx-sdk-test", "import", "--format=json", "--progress", "none", "--provider", "codex", "--resume"],
                 ["--data-root", "/tmp/ctx-sdk-test", "import", "--format=json", "--progress", "none", "--all"]
@@ -387,7 +387,7 @@ final class CtxAgentHistoryTests: XCTestCase {
         }
     }
 
-    private static let statusJSON = #"{"initialized":true,"local_only":true,"data_root":"/tmp/ctx-sdk-test","indexed_items":3,"indexed_sources":1,"cataloged_sessions":1}"#
+    private static let statusJSON = #"{"initialized":true,"local_only":true,"data_root":"/tmp/ctx-sdk-test","indexed_items":3,"indexed_sessions":1,"indexed_events":2,"indexed_sources":1,"lexical":{"status":"ready","generation_id":"gen-3"},"refresh":{"status":"ready","generation_id":"gen-3"}}"#
     private static let searchJSON = #"{"query":"local agent history","filters":{"provider":"codex"},"freshness":{"mode":"off","status":"skipped","source_count":0,"totals":{"imported_events":0}},"generated_at":"2026-07-01T12:00:00Z","retrieval":{"requested_mode":"hybrid","effective_mode":"lexical","semantic_weight":0.0,"semantic_fallback_code":"semantic_retrieval_failed","semantic_fallback":"semantic_retrieval_failed","coverage":{"embedded_items":4,"indexed_now":1},"diagnostics":{"query_embed_ms":2}},"results":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","event_seq":1,"title":"Fixture session","snippet":"local agent history search result","rank":1,"retrieval_score":0.98,"result_type":"event","result_scope":"event","provider":"codex","timestamp":"2026-07-01T12:00:00Z","cwd":"/workspace/ctx","why_matched":["text"],"citations":[{"target_type":"event","ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","label":"codex event","provider":"codex"}],"suggested_next_commands":["ctx show event 11111111-1111-4111-8111-111111111111 --window 10","ctx search 'local agent history' --session 22222222-2222-4222-8222-222222222222","ctx show session 22222222-2222-4222-8222-222222222222"],"visibility":"local_only"}],"result_window":{"limit":1,"returned":1,"more_available":true},"truncation":{"truncated":false}}"#
     private static let eventJSON = #"{"event":{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result","structured_content":{"kind":"toolResult","payload":{"items":["alpha",null,{"nested":[1,false]}]}},"content":{"complete":true,"policy_status":"selected"}},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result","structured_content":null,"content":{"complete":true,"policy_status":"selected"}}]}"#
     private static let sessionJSON = #"{"session":{"ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","title":"Fixture session"},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","text":"local agent history search result","content":{"complete":true,"policy_status":"selected"}}],"mode":"lite","format":"json"}"#

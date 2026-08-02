@@ -10,7 +10,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{json, Value};
 
 use crate::analytics::{count_bucket, IndexOperation, IndexState, IndexTelemetry, WaitOutcome};
-use crate::config::{self, CONFIG_FILE};
+use crate::config;
 use crate::output::{compact_json, print_json, JsonOutputFormat};
 use crate::semantic::source_epoch_status_report;
 use crate::ui::{Document, RenderContext, Ui};
@@ -29,7 +29,6 @@ pub(crate) struct IndexArgs {
 impl IndexArgs {
     pub(crate) fn json_output(&self) -> bool {
         match &self.command {
-            IndexCommand::Status(args) => args.format.is_json(),
             IndexCommand::Watch(args) => args.format == IndexWatchFormat::Jsonl,
             IndexCommand::Wait(args) => args.format.is_json(),
         }
@@ -38,18 +37,10 @@ impl IndexArgs {
 
 #[derive(Debug, Subcommand)]
 enum IndexCommand {
-    #[command(about = "Show local indexing progress once")]
-    Status(IndexStatusArgs),
     #[command(about = "Watch local indexing progress until ready")]
     Watch(IndexWatchArgs),
     #[command(about = "Wait until local indexing reaches a ready state")]
     Wait(IndexWaitArgs),
-}
-
-#[derive(Debug, Args)]
-struct IndexStatusArgs {
-    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
-    format: JsonOutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -90,10 +81,6 @@ pub(crate) fn run_index(
     ui: &mut Ui,
 ) -> Result<()> {
     match args.command {
-        IndexCommand::Status(args) => {
-            telemetry.operation = Some(IndexOperation::Status);
-            run_index_status(args, &data_root, quiet, telemetry, ui)
-        }
         IndexCommand::Watch(args) => {
             telemetry.operation = Some(IndexOperation::Watch);
             run_index_watch(args, &data_root, quiet, telemetry, ui)
@@ -103,24 +90,6 @@ pub(crate) fn run_index(
             run_index_wait(args, &data_root, quiet, telemetry, ui)
         }
     }
-}
-
-fn run_index_status(
-    args: IndexStatusArgs,
-    data_root: &Path,
-    quiet: bool,
-    telemetry: &mut IndexTelemetry,
-    ui: &mut Ui,
-) -> Result<()> {
-    let status = index_status_snapshot(data_root)?;
-    record_index_telemetry(telemetry, &status);
-    if args.format.is_json() {
-        print_json(status)?;
-    } else if !quiet {
-        let mut dashboard = IndexDashboard::default();
-        write_index_status_human(ui, &mut dashboard, &status)?;
-    }
-    Ok(())
 }
 
 fn run_index_watch(
@@ -134,7 +103,7 @@ fn run_index_watch(
     let jsonl_output = args.format == IndexWatchFormat::Jsonl;
     let mut output = index_watch_output(ui);
     loop {
-        let status = index_status_snapshot(data_root)?;
+        let status = index_readiness_snapshot(data_root)?;
         let selection = IndexSelection::default_for(&status);
         record_index_telemetry(telemetry, &status);
         if jsonl_output {
@@ -276,7 +245,7 @@ fn run_index_wait(
     let started = Instant::now();
     let mut human_output = IndexWaitHumanOutput::default();
     loop {
-        let status = index_status_snapshot(data_root)?;
+        let status = index_readiness_snapshot(data_root)?;
         let selection = explicit_selection.unwrap_or_else(|| IndexSelection::default_for(&status));
         telemetry.wait_lexical = Some(selection.lexical);
         telemetry.wait_semantic = Some(selection.semantic);
@@ -340,147 +309,61 @@ fn record_index_telemetry(telemetry: &mut IndexTelemetry, status: &Value) {
         "unknown",
     )));
     telemetry.semantic_state = Some(IndexState::from_safe_summary(&semantic_job_status(status)));
-    telemetry.indexed_items = Some(count_bucket(
-        usize_at(status, &["lexical", "indexed_items"]) as u64,
-    ));
-    telemetry.inventory_units = Some(count_bucket(
-        usize_at(status, &["lexical", "inventory_units"]) as u64,
-    ));
-    telemetry.pending_inventory_units = Some(count_bucket(usize_at(
-        status,
-        &["lexical", "pending_inventory_units"],
-    ) as u64));
-    telemetry.failed_inventory_units = Some(count_bucket(usize_at(
-        status,
-        &["lexical", "failed_inventory_units"],
-    ) as u64));
-    telemetry.stale_inventory_units = Some(count_bucket(usize_at(
-        status,
-        &["lexical", "stale_inventory_units"],
-    ) as u64));
+    telemetry.indexed_items = u64_at(status, &["lexical", "indexed_items"]).map(count_bucket);
 }
 
-fn index_status_snapshot(data_root: &Path) -> Result<Value> {
-    let config_path = data_root.join(CONFIG_FILE);
+fn index_readiness_snapshot(data_root: &Path) -> Result<Value> {
     let config = config::AppConfig::load(data_root)?;
     let source = source_epoch_status_report(data_root, &config)?;
-    let initialized = source.initialized;
-    let indexed_items = source.indexed_items.unwrap_or(0) as usize;
-    let indexed_sessions = source.indexed_sessions.unwrap_or(0) as usize;
-    let indexed_events = source.indexed_events.unwrap_or(0) as usize;
-    let inventory_units = source.indexed_sources.unwrap_or(0) as usize;
     let source_lexical = &source.report["lexical"];
-    let source_lexical_status = source_lexical
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("unavailable");
-    let total_source_bytes = source_lexical
-        .get("certified_source_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let completed_source_bytes = if source_lexical_status == "ready" {
-        total_source_bytes
-    } else {
-        0
-    };
-    let pending_inventory_units = if source_lexical_status == "pending" {
-        inventory_units.max(1)
-    } else {
-        0
-    };
-    let failed_inventory_units = usize::from(initialized && source_lexical_status == "unavailable");
-    let stale_inventory_units = 0;
-    let lexical_status = lexical_index_status(
-        initialized,
-        indexed_items,
-        inventory_units,
-        pending_inventory_units,
-        failed_inventory_units,
-    );
-    let mut semantic = source.report["semantic"].clone();
-    if let Some(object) = semantic.as_object_mut() {
-        let flat = object.get("flat_f32");
-        let embedded_items = flat
-            .and_then(|value| value.get("active_events"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let embedded_chunks = flat
-            .and_then(|value| value.get("active_chunks"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        object.insert(
-            "coverage".to_owned(),
-            json!({
-                "embedded_items": embedded_items,
-                "searchable_items": indexed_events,
-                "embedded_chunks": embedded_chunks,
-                "queued_items_estimate": (indexed_events as u64).saturating_sub(embedded_items),
-            }),
-        );
-    }
-    let daemon = source.report["daemon"].clone();
+    let source_semantic = &source.report["semantic"];
+    let semantic_flat = &source_semantic["flat_f32"];
+    let source_daemon = &source.report["daemon"];
     Ok(compact_json(json!({
-        "schema_version": 2,
-        "initialized": initialized,
-        "data_root": data_root,
-        "index_path": source_lexical.get("path"),
-        "config_path": config_path,
+        "schema_version": 1,
+        "initialized": source.initialized,
         "lexical": {
-            "status": lexical_status,
-            "source_status": source_lexical_status,
+            "status": source_lexical.get("status"),
+            "reason": source_lexical.get("reason"),
             "generation_id": source_lexical.get("generation_id"),
-            "indexed_items": indexed_items,
-            "indexed_sessions": indexed_sessions,
-            "indexed_events": indexed_events,
-            "completed_source_bytes": completed_source_bytes,
-            "total_source_bytes": total_source_bytes,
-            "inventory_units": inventory_units,
-            "pending_inventory_units": pending_inventory_units,
-            "failed_inventory_units": failed_inventory_units,
-            "stale_inventory_units": stale_inventory_units,
+            "indexed_items": source.indexed_items,
+            "indexed_sessions": source.indexed_sessions,
+            "indexed_events": source.indexed_events,
+            "indexed_sources": source.indexed_sources,
+            "certified_source_bytes": source_lexical.get("certified_source_bytes"),
         },
-        "history_epoch": source.report["history_epoch"].clone(),
-        "refresh": source.report["refresh"].clone(),
-        "semantic": semantic,
-        "daemon": daemon,
+        "refresh": {
+            "status": source.report["refresh"].get("status"),
+            "reason": source.report["refresh"].get("reason"),
+            "request_state": source.report["refresh"].get("request_state"),
+            "request_id": source.report["refresh"].get("request_id"),
+            "published_generation": source.report["refresh"].get("published_generation"),
+            "generation_id": source.report["refresh"].get("generation_id"),
+            "generation_matches": source.report["refresh"].get("generation_matches"),
+            "certified_source_count": source.report["refresh"].get("certified_source_count"),
+            "certified_source_bytes": source.report["refresh"].get("certified_source_bytes"),
+            "progress": source.report["refresh"].get("progress"),
+        },
+        "semantic": {
+            "status": source_semantic.get("status"),
+            "reason": source_semantic.get("reason"),
+            "enabled": source_semantic.get("enabled"),
+            "coverage": {
+                "searchable_items": semantic_flat.get("semantic_documents"),
+                "embedded_items": semantic_flat.get("active_events"),
+                "embedded_chunks": semantic_flat.get("active_chunks"),
+            },
+        },
+        "daemon": {
+            "status": source_daemon.get("status"),
+            "running": source_daemon.get("running"),
+            "jobs": {
+                "semantic_index": source_daemon.get("jobs").and_then(|jobs| jobs.get("semantic_index")),
+            },
+        },
         "local_only": true,
         "read_only": true,
     })))
-}
-
-fn lexical_index_status(
-    initialized: bool,
-    indexed_items: usize,
-    inventory_units: usize,
-    pending_inventory_units: usize,
-    failed_inventory_units: usize,
-) -> &'static str {
-    if failed_inventory_units > 0 {
-        "failed"
-    } else if pending_inventory_units > 0 && indexed_items > 0 {
-        "partial"
-    } else if pending_inventory_units > 0 {
-        "pending"
-    } else if !initialized {
-        "missing"
-    } else if indexed_items > 0 {
-        "ready"
-    } else if inventory_units == 0 {
-        "empty"
-    } else {
-        "ready"
-    }
-}
-
-fn write_index_status_human(
-    ui: &mut Ui,
-    dashboard: &mut IndexDashboard,
-    status: &Value,
-) -> Result<()> {
-    let context = *ui.stdout_context();
-    let document = dashboard.render(status, &context);
-    ui.write_stdout(&document)?;
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -523,10 +406,17 @@ fn index_ready(status: &Value, selection: IndexSelection) -> bool {
 }
 
 fn lexical_ready(status: &Value) -> bool {
-    matches!(
-        string_at(status, &["lexical", "status"], "unknown").as_str(),
-        "ready" | "empty"
-    )
+    if string_at(status, &["lexical", "status"], "unknown") != "ready" {
+        return false;
+    }
+    let refresh_status = string_at(status, &["refresh", "status"], "unknown");
+    let refresh_reason = string_at(status, &["refresh", "reason"], "");
+    refresh_status == "ready"
+        || (refresh_status == "unavailable"
+            && matches!(
+                refresh_reason.as_str(),
+                "daemon_unavailable" | "refresh_not_observed"
+            ))
 }
 
 fn semantic_ready(status: &Value) -> bool {
@@ -534,17 +424,33 @@ fn semantic_ready(status: &Value) -> bool {
 }
 
 fn index_terminal_error(status: &Value, selection: IndexSelection) -> Option<String> {
-    if selection.lexical && string_at(status, &["lexical", "status"], "unknown") == "missing" {
+    let lexical_status = string_at(status, &["lexical", "status"], "unknown");
+    let lexical_reason = string_at(status, &["lexical", "reason"], "");
+    let refresh_status = string_at(status, &["refresh", "status"], "unknown");
+    if selection.lexical
+        && lexical_reason == "generation_not_published"
+        && refresh_status != "pending"
+    {
         return Some("ctx index does not exist yet; run `ctx setup` first".to_owned());
     }
     if selection.lexical
-        && string_at(status, &["lexical", "status"], "unknown") == "failed"
+        && matches!(lexical_status.as_str(), "stale" | "unavailable")
+        && refresh_status != "pending"
         && !bool_at(status, &["daemon", "running"])
     {
-        return Some(
-            "one or more history files could not be indexed; run `ctx doctor` for details"
-                .to_owned(),
-        );
+        return Some("history refresh is unavailable; run `ctx doctor` for details".to_owned());
+    }
+    let refresh_reason = string_at(status, &["refresh", "reason"], "");
+    if selection.lexical
+        && lexical_status == "ready"
+        && matches!(refresh_status.as_str(), "stale" | "unavailable")
+        && !matches!(
+            refresh_reason.as_str(),
+            "daemon_unavailable" | "refresh_not_observed"
+        )
+        && (refresh_reason == "core_refresh_failed" || !bool_at(status, &["daemon", "running"]))
+    {
+        return Some("history refresh is unavailable; run `ctx doctor` for details".to_owned());
     }
     if selection.semantic {
         let semantic_status = semantic_job_status(status);
@@ -596,7 +502,7 @@ fn index_wait_json(status: Value, selection: IndexSelection, wait_status: &str) 
             "lexical": selection.lexical,
             "semantic": selection.semantic,
         },
-        "index": status,
+        "readiness": status,
         "local_only": local_only,
         "read_only": true,
     }))
@@ -634,11 +540,8 @@ fn bool_at(value: &Value, path: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-fn usize_at(value: &Value, path: &[&str]) -> usize {
-    value_at(value, path)
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(0)
+fn u64_at(value: &Value, path: &[&str]) -> Option<u64> {
+    value_at(value, path).and_then(Value::as_u64)
 }
 
 fn parse_positive_seconds(value: &str) -> std::result::Result<u64, String> {

@@ -884,10 +884,9 @@ fn foreground_import_rejections_complete_and_preserve_diagnostics() {
     assert!(status.get("relational").is_none(), "{status:#}");
     assert!(!data_root(&temp).join("relational.sqlite").exists());
 
-    let index =
-        json_output(ctx_from_binary(&temp, &binary).args(["index", "status", "--format=json"]));
-    assert_eq!(index["lexical"]["status"], "ready", "{index:#}");
-    assert_eq!(index["lexical"]["pending_inventory_units"], 0, "{index:#}");
+    let status = json_output(ctx_from_binary(&temp, &binary).args(["status", "--format=json"]));
+    assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
+    assert_eq!(status["refresh"]["status"], "ready", "{status:#}");
     ctx_from_binary(&temp, &binary)
         .args([
             "index",

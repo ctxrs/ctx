@@ -49,7 +49,7 @@ ctx daemon enable
 ```
 
 - `setup` creates the data root, discovers known provider history locations,
-  inventories current sources, builds and atomically publishes the
+  scans current sources, builds and atomically publishes the
   Core/Tantivy generation, schedules optional semantic and independent Pro work,
   and prints next steps. It never opens, migrates, or deletes pre-v0.26 history. Old Store
   files are ignored and may be removed explicitly by their owner.
@@ -57,14 +57,11 @@ ctx daemon enable
   history-source plugin commands. When `[daemon].enabled` is true, setup may
   opportunistically start the ctx-owned background daemon after foreground
   work completes. Use `setup --no-daemon` for a one-run opt-out.
-- `setup --catalog-only` stops after source discovery and inventory. The flag
-  name is kept for compatibility; it is useful for fast troubleshooting, but it
-  does not make history searchable and does not autostart daemon maintenance.
 - `setup --quiet` performs setup without printing success status lines, import
   summaries, data-root details, or get-started tips. It still exits nonzero and
   prints errors on failure.
-- `status` reports the ctx root, source epoch, lexical generation and policy,
-  source catalog state, semantic generation and coverage, daemon state,
+- `status` reports the ctx root, source epoch, lexical and refresh readiness,
+  semantic generation and coverage, daemon state,
   initialization state, compact
   local usage health, local-only marker, and read-only marker. It does not
   include usage counts or estimates, initialize or repair Core generations or
@@ -811,10 +808,10 @@ the indexed Core hit associated with the match; show/locate presentation reads
 the complete policy-selected record and source identity stored in Core.
 
 Default daemon maintenance owns provider/plugin refresh, immutable candidate
-construction, atomic lexical publication, source catalog lifetime, and semantic
+construction, atomic lexical publication, source discovery state, and semantic
 catch-up. Use
 `ctx daemon run` for explicit foreground maintenance. JSON status exposes
-`lexical`, `catalog`, `semantic`, and `daemon`
+`history_epoch`, `lexical`, `refresh`, `semantic`, and `daemon`
 objects. `ctx doctor` is the diagnostic surface for those components.
 
 ## Docs
@@ -943,7 +940,6 @@ Structured output is available for:
 ```text
 ctx setup --format json
 ctx status --format json
-ctx index status --format json
 ctx index watch --format jsonl
 ctx index wait --format json
 ctx sources --format json

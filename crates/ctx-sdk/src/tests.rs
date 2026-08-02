@@ -286,16 +286,15 @@ fn init_normalizes_real_setup_json_into_status_contract() {
         json!({
             "schema_version": 1,
             "data_root": "/tmp/ctx",
-            "database_path": "/tmp/ctx/history.sqlite3",
             "config_path": "/tmp/ctx/config.toml",
             "mode": "ready",
             "indexed_items": 12,
             "network_required": false,
-            "acquisition_status": {
-                "source": "catalog_scan",
-                "cursor": "status-checkpoint"
+            "lexical": {
+                "status": "ready",
+                "generation_id": "generation-1"
             },
-            "catalog": {"cataloged_sessions": 4},
+            "refresh": {"status": "ready"},
             "import": {"resume": false, "totals": {}}
         }),
     )
@@ -307,13 +306,9 @@ fn init_normalizes_real_setup_json_into_status_contract() {
     assert!(status.local_only);
     assert_eq!(status.data_root.as_deref(), Some("/tmp/ctx"));
     assert_eq!(status.indexed_items, Some(12));
-    assert!(status.extra.contains_key("mode"));
-    assert!(status.extra.contains_key("networkRequired"));
-    assert_eq!(status.extra["acquisitionStatus"]["source"], "catalog_scan");
-    assert_eq!(
-        status.extra["acquisitionStatus"]["cursor"],
-        "status-checkpoint"
-    );
+    assert_eq!(status.lexical.as_ref().unwrap()["status"], "ready");
+    assert_eq!(status.refresh.as_ref().unwrap()["status"], "ready");
+    assert!(status.extra.is_empty());
 }
 
 #[test]

@@ -231,15 +231,10 @@ pub(crate) struct StatusTelemetry {
     pub(crate) indexed_sessions: Option<CountBucket>,
     pub(crate) indexed_events: Option<CountBucket>,
     pub(crate) indexed_sources: Option<CountBucket>,
-    pub(crate) inventory_units: Option<CountBucket>,
-    pub(crate) pending_inventory_units: Option<CountBucket>,
-    pub(crate) failed_inventory_units: Option<CountBucket>,
-    pub(crate) stale_inventory_units: Option<CountBucket>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IndexOperation {
-    Status,
     Watch,
     Wait,
 }
@@ -247,7 +242,6 @@ pub(crate) enum IndexOperation {
 impl IndexOperation {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::Status => "status",
             Self::Watch => "watch",
             Self::Wait => "wait",
         }
@@ -321,10 +315,6 @@ pub(crate) struct IndexTelemetry {
     pub(crate) lexical_state: Option<IndexState>,
     pub(crate) semantic_state: Option<IndexState>,
     pub(crate) indexed_items: Option<CountBucket>,
-    pub(crate) inventory_units: Option<CountBucket>,
-    pub(crate) pending_inventory_units: Option<CountBucket>,
-    pub(crate) failed_inventory_units: Option<CountBucket>,
-    pub(crate) stale_inventory_units: Option<CountBucket>,
 }
 
 #[derive(Debug)]

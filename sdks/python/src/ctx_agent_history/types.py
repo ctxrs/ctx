@@ -60,14 +60,14 @@ class _StatusRequired(TypedDict):
 
 class Status(_StatusRequired, total=False):
     dataRoot: Optional[str]
+    readOnly: bool
     indexedItems: int
+    indexedSessions: int
+    indexedEvents: int
     indexedSources: int
-    catalogedSessions: int
-    indexedCatalogSessions: int
-    pendingCatalogSessions: int
-    failedCatalogSessions: int
-    staleCatalogSessions: int
-    freshness: Freshness
+    historyEpoch: JsonObject
+    lexical: JsonObject
+    refresh: JsonObject
     semantic: JsonObject
     daemon: JsonObject
 

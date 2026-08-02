@@ -83,7 +83,7 @@ and private relevance evals justify flipping the default.
 - Default search backend resolution is config-aware: lexical by default while
   semantic is off, hybrid by default while semantic is on, and explicit semantic
   fails fast when disabled.
-- Status, doctor, MCP status, and index status report `semantic.status =
+- Status, doctor, MCP status, and index readiness report `semantic.status =
   disabled` with `reason = semantic_disabled` when semantic is not enabled.
 - Setup refuses the invalid semantic-without-daemon configuration, runs
   foreground lexical indexing when daemon maintenance is not enabled, reports
@@ -198,7 +198,7 @@ and private relevance evals justify flipping the default.
 
 ### 1. Setup, Daemon, And Status
 
-- Done on this branch: setup, status, doctor, index status, and MCP status are
+- Done on this branch: setup, status, doctor, index readiness, and MCP status are
   config-aware, and setup refuses semantic-without-daemon.
 - Done on earlier commits in this branch: daemon autostart/status, stale lock
   recovery, semantic-first bootstrap scheduling, bounded incremental refresh,
@@ -207,13 +207,13 @@ and private relevance evals justify flipping the default.
   the daemon query service, foreground search no longer loads the model, and
   strict `--refresh off` fails clearly when no daemon is available.
 - Original implementation checklist:
-  - `ctx setup` foreground output distinguishes inventory complete, daemon
+  - `ctx setup` foreground output distinguishes source scanning complete, daemon
     autostart requested, daemon definitely running, and daemon skipped or
     failed to spawn.
   - Daemon autostart bookkeeping is close enough to setup/import/search that
     the parent can write a status file when spawning fails or is skipped.
   - Status/watch/wait treat stale locks as recoverable state.
-  - Background indexing is not claimed solely from pending inventory.
+  - Background indexing is reported only from an observed refresh or semantic job.
 - Tests:
   - setup JSON/human output does not promise running daemon when autostart is
     disabled or skipped;
@@ -354,7 +354,7 @@ and private relevance evals justify flipping the default.
   - if remote rollout is added, it should only populate/override an internal
     default for users who have not explicitly set `[search] semantic`.
   - before flipping the default, ship at least one prerelease build with
-    opt-in dogfood feedback, relevance review, and clear `ctx index status`
+    opt-in dogfood feedback, relevance review, and clear `ctx index watch`
     guidance.
 
 ### 7. Daemon Query Service

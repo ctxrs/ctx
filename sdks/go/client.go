@@ -49,9 +49,7 @@ func NewLocalClient(options ...LocalCLIOption) *Client {
 }
 
 // InitOptions configures Client.Init.
-type InitOptions struct {
-	CatalogOnly bool
-}
+type InitOptions struct{}
 
 // ImportOptions configures Client.Import and Client.Sync.
 type ImportOptions struct {
@@ -107,9 +105,6 @@ func (c *Client) Status(ctx context.Context) (*StatusResponse, error) {
 
 func (c *Client) Init(ctx context.Context, opts InitOptions) (*InitResponse, error) {
 	args := []string{"setup", "--format=json", "--progress", "none"}
-	if opts.CatalogOnly {
-		args = append(args, "--catalog-only")
-	}
 	var out InitResponse
 	if err := c.do(ctx, Operation{Name: "init", Args: args}, &out); err != nil {
 		return nil, err

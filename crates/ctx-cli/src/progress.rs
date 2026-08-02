@@ -206,17 +206,6 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
     }
 }
 
-pub(crate) fn format_byte_progress(completed: u64, total: u64) -> String {
-    let total = total.max(completed);
-    let (_, total_unit) = scaled_bytes(total);
-    if total_unit == "B" {
-        return format!("{completed} / {total} B");
-    }
-    let completed_value = bytes_in_unit(completed, total_unit);
-    let total_value = bytes_in_unit(total, total_unit);
-    format!("{completed_value:.1} / {total_value:.1} {total_unit}")
-}
-
 fn scaled_bytes(bytes: u64) -> (f64, &'static str) {
     let mut value = bytes as f64;
     let mut unit = 0usize;
@@ -225,18 +214,6 @@ fn scaled_bytes(bytes: u64) -> (f64, &'static str) {
         unit += 1;
     }
     (value, BYTE_UNITS[unit])
-}
-
-fn bytes_in_unit(bytes: u64, target_unit: &str) -> f64 {
-    let mut value = bytes as f64;
-    let target_index = BYTE_UNITS
-        .iter()
-        .position(|unit| *unit == target_unit)
-        .unwrap_or(0);
-    for _ in 0..target_index {
-        value /= 1024.0;
-    }
-    value
 }
 
 const BYTE_UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];

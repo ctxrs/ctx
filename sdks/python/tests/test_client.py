@@ -89,8 +89,8 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertEqual(result["backend"], {"kind": "local", "dataRoot": "/tmp/ctx-data"})
         self.assertTrue(result["status"]["initialized"])
         self.assertTrue(result["status"]["localOnly"])
-        self.assertEqual(result["status"]["freshness"], {"mode": "off", "status": "skipped"})
-        self.assertEqual(result["status"]["futureField"], "preserved")
+        self.assertEqual(result["status"]["lexical"]["generationId"], "gen-1")
+        self.assertNotIn("futureField", result["status"])
 
     def test_local_cli_forces_analytics_off_after_ambient_and_user_env(self) -> None:
         completed = subprocess.CompletedProcess(
@@ -117,7 +117,7 @@ class LocalCliAdapterTests(unittest.TestCase):
         with fake_ctx() as cli:
             client = AgentHistoryClient.local(ctx_binary=str(cli))
 
-            self.assertEqual(client.init(catalog_only=True)["operation"], "init")
+            self.assertEqual(client.init()["operation"], "init")
             self.assertEqual(client.sources()["operation"], "sources")
             self.assertEqual(client.import_(provider="codex", resume=True)["operation"], "import")
             self.assertEqual(
@@ -530,13 +530,13 @@ def _fake_ctx_script(
         elif command == "status":
             payload.update(
                 {
-                    "initialized": True,
-                    "freshness": {"mode": "off", "status": "skipped"},
+                    "lexical": {"status": "ready", "generation_id": "gen-1"},
+                    "refresh": {"status": "ready", "generation_id": "gen-1"},
                     "future_field": "preserved",
                 }
             )
         elif command == "setup":
-            payload.update({"mode": "ready"})
+            payload.update({"lexical": {"status": "ready", "generation_id": "gen-1"}})
         elif command == "import":
             payload.update({"totals": {}, "sources": []})
         print(json.dumps(payload))

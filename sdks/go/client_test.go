@@ -16,17 +16,14 @@ func TestStatusDecodesAgentHistoryV1(t *testing.T) {
 	client := NewClient(WithTransport(fakeTransport{
 		response: `{
 			"schema_version": 1,
-			"initialized": true,
 			"data_root": "/tmp/ctx",
-			"database_path": "/tmp/ctx/history.sqlite3",
 			"config_path": "/tmp/ctx/config.toml",
 			"indexed_items": 7,
+			"indexed_sessions": 3,
+			"indexed_events": 4,
 			"indexed_sources": 2,
-			"cataloged_sessions": 3,
-			"indexed_catalog_sessions": 2,
-			"pending_catalog_sessions": 1,
-			"failed_catalog_sessions": 0,
-			"stale_catalog_sessions": 0,
+			"lexical": {"status": "ready", "generation_id": "gen-7"},
+			"refresh": {"status": "ready", "generation_id": "gen-7"},
 			"local_only": true
 		}`,
 	}))
@@ -38,7 +35,9 @@ func TestStatusDecodesAgentHistoryV1(t *testing.T) {
 	if status.ContractVersion != APIVersion || status.Operation != "status" {
 		t.Fatalf("unexpected envelope: %+v", status)
 	}
-	if !status.Status.Initialized || status.Status.IndexedItems != 7 || !status.Status.LocalOnly {
+	if !status.Status.Initialized || status.Status.IndexedItems != 7 ||
+		status.Status.IndexedSessions != 3 || status.Status.IndexedEvents != 4 ||
+		status.Status.Lexical["generationId"] != "gen-7" || !status.Status.LocalOnly {
 		t.Fatalf("unexpected status: %+v", status)
 	}
 }

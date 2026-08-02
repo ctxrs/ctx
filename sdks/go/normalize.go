@@ -27,9 +27,9 @@ func normalizePayload(op Operation, payload []byte) ([]byte, error) {
 
 	switch operation {
 	case "status":
-		envelope["status"] = camel
+		envelope["status"] = normalizeStatus(camel)
 	case "init":
-		envelope["status"] = camel
+		envelope["status"] = normalizeStatus(camel)
 	case "sources":
 		envelope["sources"] = get(camel, "sources")
 	case "import", "sync":
@@ -52,6 +52,27 @@ func normalizePayload(op Operation, payload []byte) ([]byte, error) {
 	}
 
 	return json.Marshal(envelope)
+}
+
+func normalizeStatus(value any) map[string]any {
+	status, _ := value.(map[string]any)
+	out := map[string]any{"localOnly": true}
+	for _, key := range []string{
+		"dataRoot", "indexedItems", "indexedSessions", "indexedEvents", "indexedSources",
+		"historyEpoch", "lexical", "refresh", "semantic", "daemon", "readOnly",
+	} {
+		if nested, exists := status[key]; exists {
+			out[key] = nested
+		}
+	}
+	lexical, _ := status["lexical"].(map[string]any)
+	generationID, _ := lexical["generationId"].(string)
+	initialized, exact := status["initialized"].(bool)
+	if !exact {
+		initialized = generationID != ""
+	}
+	out["initialized"] = initialized
+	return out
 }
 
 func bridgeSearchPagination(value any) {
@@ -95,7 +116,7 @@ func camelize(value any) any {
 		out := make(map[string]any, len(typed))
 		for key, nested := range typed {
 			camelKey := snakeToCamel(key)
-			if camelKey == "databasePath" || camelKey == "configPath" || camelKey == "itemType" || camelKey == "payloadType" || camelKey == "recordType" {
+			if camelKey == "configPath" || camelKey == "itemType" || camelKey == "payloadType" || camelKey == "recordType" {
 				continue
 			}
 			out[camelKey] = camelize(nested)

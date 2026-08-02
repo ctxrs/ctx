@@ -12,21 +12,34 @@
     "readOnly": true,
     "dataRoot": "/tmp/ctx-sdk-fixture",
     "indexedItems": 3,
+    "indexedSessions": 1,
+    "indexedEvents": 3,
     "indexedSources": 1,
-    "catalogedSessions": 1,
-    "pendingCatalogSessions": 0,
-    "failedCatalogSessions": 0,
-    "staleCatalogSessions": 0,
+    "historyEpoch": {
+      "name": "self_contained_core",
+      "status": "ready",
+      "activationAuthority": "verified_lexical_generation"
+    },
+    "lexical": {
+      "status": "ready",
+      "generationId": "fixture-generation",
+      "indexedDocuments": 3,
+      "certifiedSources": 1
+    },
+    "refresh": {
+      "status": "ready",
+      "requestState": "published",
+      "publishedGeneration": "fixture-generation",
+      "generationMatches": true
+    },
     "semantic": {
       "status": "ready",
-      "running": false,
-      "modelCacheAvailable": true,
-      "coverage": {
-        "searchableItems": 3,
-        "embeddedItems": 3,
-        "embeddedChunks": 4,
-        "dirtyItems": 0,
-        "queuedItemsEstimate": 0
+      "enabled": true,
+      "flatF32": {
+        "status": "ready",
+        "semanticDocuments": 3,
+        "activeEvents": 3,
+        "activeChunks": 4
       }
     },
     "daemon": {
@@ -34,9 +47,9 @@
       "status": "completed",
       "running": false,
       "jobs": {
-        "historyRefresh": {
-          "enabled": true,
-          "status": "completed"
+        "coreRefresh": {
+          "status": "completed",
+          "requestState": "published"
         },
         "semanticIndex": {
           "enabled": true,

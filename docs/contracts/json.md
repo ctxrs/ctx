@@ -66,30 +66,17 @@ Reads local storage state and returns:
 - `schema_version`;
 - `initialized`;
 - `data_root`;
-- `database_path`;
 - `config_path`;
+- `history_epoch`;
+- `lexical`;
+- `refresh`;
+- `semantic`;
+- `pro_projection`;
+- `daemon`;
 - `indexed_items`;
-- `indexed_sources`;
 - `indexed_sessions`;
 - `indexed_events`;
-- `inventory_units`;
-- `inventory_source_bytes`, null when the data root is uninitialized;
-- `lexical_index_estimate_seconds`, null when the data root is uninitialized;
-- `pending_inventory_units`;
-- `failed_inventory_units`;
-- `stale_inventory_units`;
-- `cataloged_sessions`;
-- `indexed_catalog_sessions`;
-- `pending_catalog_sessions`;
-- `failed_catalog_sessions`;
-- `stale_catalog_sessions`;
-- `source_import_files`;
-- `indexed_source_import_files`;
-- `pending_source_import_files`;
-- `failed_source_import_files`;
-- `stale_source_import_files`;
-- `semantic`;
-- `daemon`;
+- `indexed_sources`;
 - `upgrade`;
 - `pro`, using the path-safe Local Pro status shape;
 - compact `local_usage` health (`enabled`, state, and a content-free error when
@@ -104,25 +91,32 @@ the operating-system key store; that metadata is outside both data stores and
 does not change this stable field. Usage control modes return a separate
 action-focused JSON shape with `read_only: false` and do not read Core status.
 
-`semantic` reports semantic sidecar and background-worker state. Fields listed
-as nullable may be omitted when unavailable:
-
-- `status`;
-- `running`;
-- `pid`, nullable/omitted;
-- `started_at_ms`, `heartbeat_at_ms`, and `finished_at_ms`, nullable/omitted;
-- `indexed_chunks`, nullable/omitted;
-- `model_init_ms`, nullable/omitted;
-- `last_error`, nullable/omitted;
-- `coverage`;
-- `model_cache_available`, true when the local embedding model cache needed by
-  the default background semantic worker is already present.
-
-Raw local CLI output may also include diagnostic paths such as `vector_path`,
-`lock_path`, and `status_path`. These are absolute paths on the current machine
-for troubleshooting the local sidecar/worker. They are not portable identifiers,
-may be omitted by adapters, and should not be persisted or forwarded outside
+`history_epoch` and `lexical` identify the verified searchable Core generation.
+`refresh` reports the latest observed daemon-owned refresh request and its exact
+generation binding. `semantic` reports the current source-backed semantic
+projection, including exact `flat_f32` document/event/chunk coverage when it is
+available. `daemon` reports process and relevant job state. These diagnostic
+objects can contain local paths and should not be persisted or forwarded outside
 local diagnostics.
+
+## Index Readiness
+
+```bash
+ctx index watch --format jsonl
+ctx index wait --format json
+```
+
+Each watch line is a read-only readiness snapshot containing `schema_version`,
+`initialized`, `lexical`, `refresh`, `semantic`, `daemon`, `local_only`, and
+`read_only`. Lexical counts and certified source bytes describe the currently
+verified generation. Refresh progress contains only values reported by the
+active refresh job; no synthetic work units, failure counts, rates, or remaining
+time are added.
+
+Wait returns one object with `schema_version`, `status` (`ready`, `blocked`, or
+`timeout`), `selection`, the final `readiness` snapshot, `local_only`, and
+`read_only`. Use `ctx status --format json` for the complete status contract;
+the index command intentionally has no separate one-shot status surface.
 
 `semantic.status` is one of:
 

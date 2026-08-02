@@ -63,7 +63,6 @@ export interface HostedAgentHistoryClientOptions {
 }
 
 export interface InitOptions {
-  catalogOnly?: boolean;
   progress?: ProgressMode;
 }
 
@@ -164,15 +163,15 @@ export interface Freshness {
 export interface AgentHistoryStatus {
   initialized: boolean;
   localOnly: boolean;
+  readOnly?: boolean;
   dataRoot?: string | null;
   indexedItems?: number;
+  indexedSessions?: number;
+  indexedEvents?: number;
   indexedSources?: number;
-  catalogedSessions?: number;
-  indexedCatalogSessions?: number;
-  pendingCatalogSessions?: number;
-  failedCatalogSessions?: number;
-  staleCatalogSessions?: number;
-  freshness?: Freshness;
+  historyEpoch?: Record<string, unknown>;
+  lexical?: Record<string, unknown>;
+  refresh?: Record<string, unknown>;
   semantic?: Record<string, unknown>;
   daemon?: Record<string, unknown>;
 }

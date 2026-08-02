@@ -47,7 +47,7 @@ class AgentHistoryTransport(Protocol):
     def status(self) -> StatusResponse:
         ...
 
-    def init(self, *, catalog_only: bool = False, progress: Optional[str] = None) -> InitResponse:
+    def init(self, *, progress: Optional[str] = None) -> InitResponse:
         ...
 
     def sources(self) -> SourcesResponse:
@@ -133,10 +133,8 @@ class LocalCliAdapter:
             ),
         )
 
-    def init(self, *, catalog_only: bool = False, progress: Optional[str] = None) -> InitResponse:
+    def init(self, *, progress: Optional[str] = None) -> InitResponse:
         args = ["setup", "--format=json"]
-        if catalog_only:
-            args.append("--catalog-only")
         if progress is not None:
             args.extend(["--progress", progress])
         raw = self._json(args)
@@ -421,7 +419,7 @@ class HostedAdapter:
     def status(self) -> StatusResponse:
         raise HostedTransportNotImplementedError("status")
 
-    def init(self, *, catalog_only: bool = False, progress: Optional[str] = None) -> InitResponse:
+    def init(self, *, progress: Optional[str] = None) -> InitResponse:
         raise HostedTransportNotImplementedError("init")
 
     def sources(self) -> SourcesResponse:

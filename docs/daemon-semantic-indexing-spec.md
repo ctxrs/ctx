@@ -107,8 +107,6 @@ Add an `index` command group that observes daemon state. It should not become
 the indexing worker.
 
 ```text
-ctx index status
-ctx index status --format json
 ctx index watch
 ctx index watch --format jsonl
 ctx index wait --lexical
@@ -117,29 +115,24 @@ ctx index wait --all
 ctx index wait --all --format json
 ```
 
-`ctx index status` prints the latest known state once. `ctx index watch`
-refreshes until interrupted or complete. On an interactive terminal, watch
+`ctx index watch` refreshes until complete. On an interactive terminal, watch
 redraws one progress block in place; when redirected, it appends plain snapshots
 without terminal control sequences. `--format jsonl` writes one JSON object per
 snapshot instead. `ctx index wait` exits zero when the requested readiness is
-reached and non-zero on timeout/error; status and wait use `--format json` for
-one structured result.
+reached and non-zero on timeout/error; wait uses `--format json` for one
+structured result. `ctx status` remains the complete one-shot authority.
 
 Example watch output:
 
 ```text
-History import      [##########------]  62%  71,402 / 115,123 records
-Lexical index       [######----------]  41%  47,812 / 115,123 records
-Semantic docs       [########--------]  54%  58,090 / 105,439 docs
-Semantic embeddings [###-------------]  22%  30,480 / 139,587 chunks
-
-lexical usable: yes
-semantic usable: partial
+Current index  ready  generation 01J...
+Refresh        running  7 / 12 sources  scanning
+Semantic      pending  58,090 searchable / 30,480 embedded
 ```
 
-Progress should use fields already available from the store, daemon jobs, and
-semantic worker reports. Estimates are allowed to be approximate and should be
-labelled as estimates.
+Progress uses only fields reported by the verified generation, refresh job, and
+semantic projection. It does not derive synthetic work units, rates, remaining
+work, or failure counts from unrelated counters.
 
 ## Architecture
 
@@ -164,7 +157,7 @@ The search command owns:
 The setup command owns:
 
 - creating the data root/config/store
-- source discovery/inventory
+- source discovery and scanning
 - daemon autostart unless explicitly disabled or the setup mode is catalog-only
 - printing initial background indexing estimates and status commands
 - queueing model acquisition for the daemon without downloading in the setup
@@ -210,7 +203,7 @@ The foreground `index` command owns:
    serve the existing index, and signal/autostart daemon work when allowed.
 
 4. Make setup foreground-light:
-   keep setup initialization and source inventory visible, start daemon work,
+   keep setup initialization and source scanning visible, start daemon work,
    print found counts/estimated readiness/watch commands, and avoid waiting for
    full semantic indexing by default.
 

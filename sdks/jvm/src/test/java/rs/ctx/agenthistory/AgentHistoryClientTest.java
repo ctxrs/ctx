@@ -43,11 +43,12 @@ public final class AgentHistoryClientTest {
     private static void normalizesSetupJsonAsInitStatus() {
         AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport(
                 "local-cli",
-                "{\"schema_version\":1,\"data_root\":\"/tmp/ctx\",\"mode\":\"ready\",\"indexed_items\":9,"
-                        + "\"catalog\":{\"cataloged_sessions\":1},\"import\":{\"resume\":false,\"totals\":{}},"
+                "{\"schema_version\":1,\"data_root\":\"/tmp/ctx\",\"indexed_items\":9,"
+                        + "\"lexical\":{\"status\":\"ready\",\"generation_id\":\"gen-9\"},"
+                        + "\"refresh\":{\"status\":\"ready\",\"generation_id\":\"gen-9\"},"
                         + "\"network_required\":false}"));
 
-        InitResponse response = client.init(AgentHistoryOptions.init().catalogOnly(true));
+        InitResponse response = client.init(AgentHistoryOptions.init());
 
         assertEquals("init", response.operation());
         assertEquals(Boolean.TRUE, response.getStatus().getInitialized());
@@ -58,7 +59,9 @@ public final class AgentHistoryClientTest {
     private static void wrapsRawStatusAsTypedEnvelope() {
         AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport(
                 "local-cli",
-                "{\"schema_version\":1,\"initialized\":true,\"indexed_items\":2,\"local_only\":true}"));
+                "{\"schema_version\":1,\"initialized\":true,\"indexed_items\":2,"
+                        + "\"lexical\":{\"status\":\"ready\",\"generation_id\":\"gen-2\"},"
+                        + "\"refresh\":{\"status\":\"ready\"},\"future_counter\":7}"));
 
         StatusResponse response = client.status();
 
@@ -72,6 +75,7 @@ public final class AgentHistoryClientTest {
         assertEquals(Integer.valueOf(2), AgentHistoryValue.integer(response.asMap().get("status") instanceof Map
                 ? ((Map<?, ?>) response.asMap().get("status")).get("indexedItems")
                 : null));
+        assertEquals(null, response.getStatus().asMap().get("futureCounter"));
     }
 
     private static void acceptsCanonicalSearchFixture() throws Exception {

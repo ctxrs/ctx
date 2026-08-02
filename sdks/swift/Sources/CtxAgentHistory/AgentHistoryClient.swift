@@ -45,9 +45,6 @@ public struct AgentHistoryClient: Sendable {
     public func initialize(_ options: InitOptions = InitOptions()) throws -> InitResponse {
         var arguments = ["setup", "--format=json"]
         appendOption(&arguments, "--progress", options.progress)
-        if options.catalogOnly {
-            arguments.append("--catalog-only")
-        }
         return try InitResponse(envelope: localEnvelope(operation: .initialize, arguments: arguments))
     }
 
@@ -344,37 +341,22 @@ private func backendWithRawDataRoot(_ backend: AgentHistoryBackend, _ raw: JSONV
 }
 
 private func normalizeStatus(_ raw: JSONValue) -> JSONValue {
-    guard case let .object(object) = raw else {
+    guard case let .object(current) = raw.camelizedPublicJSON().droppingNulls() else {
         return .object(["initialized": .bool(false), "localOnly": .bool(true)])
     }
-    let initialized: JSONValue
-    if let explicit = object["initialized"] {
-        initialized = explicit
-    } else if let mode = object["mode"]?.stringValue {
-        initialized = .bool(mode == "ready" || mode == "catalog_only")
-    } else {
-        initialized = .bool(false)
-    }
+    let initialized = current["initialized"]
+        ?? .bool(current["lexical"]?["generationId"]?.stringValue != nil)
     var status: [String: JSONValue] = [
         "initialized": initialized,
-        "localOnly": object["local_only"] ?? object["localOnly"] ?? .bool(true)
+        "localOnly": .bool(true)
     ]
-    copyFirst(["data_root", "dataRoot"], from: object, to: &status, as: "dataRoot")
-    copyFirst(["indexed_items", "indexedItems"], from: object, to: &status, as: "indexedItems", defaultValue: .number(0))
-    copyFirst(["indexed_sources", "indexedSources"], from: object, to: &status, as: "indexedSources", defaultValue: .number(0))
-    copyFirst(["cataloged_sessions", "catalogedSessions"], from: object, to: &status, as: "catalogedSessions", defaultValue: .number(0))
-    copyFirst(["indexed_catalog_sessions", "indexedCatalogSessions"], from: object, to: &status, as: "indexedCatalogSessions")
-    copyFirst(["pending_catalog_sessions", "pendingCatalogSessions"], from: object, to: &status, as: "pendingCatalogSessions", defaultValue: .number(0))
-    copyFirst(["failed_catalog_sessions", "failedCatalogSessions"], from: object, to: &status, as: "failedCatalogSessions", defaultValue: .number(0))
-    copyFirst(["stale_catalog_sessions", "staleCatalogSessions"], from: object, to: &status, as: "staleCatalogSessions", defaultValue: .number(0))
-    if let freshness = object["freshness"] {
-        status["freshness"] = freshness.camelizedPublicJSON().droppingNulls()
-    }
-    if let semantic = object["semantic"] {
-        status["semantic"] = semantic.camelizedPublicJSON().droppingNulls()
-    }
-    if let daemon = object["daemon"] {
-        status["daemon"] = daemon.camelizedPublicJSON().droppingNulls()
+    for key in [
+        "dataRoot", "readOnly", "indexedItems", "indexedSessions", "indexedEvents",
+        "indexedSources", "historyEpoch", "lexical", "refresh", "semantic", "daemon"
+    ] {
+        if let value = current[key] {
+            status[key] = value
+        }
     }
     return .object(status).droppingNulls()
 }

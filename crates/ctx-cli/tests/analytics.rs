@@ -356,7 +356,14 @@ fn import_and_index_emit_closed_safe_summaries() {
         "--format=json",
         "--no-daemon",
     ]);
-    run(&["index", "status", "--format=json"]);
+    run(&[
+        "index",
+        "wait",
+        "--lexical",
+        "--format=json",
+        "--timeout-seconds",
+        "1",
+    ]);
 
     let events = read_analytics_events(&events_path);
     assert_eq!(events.len(), 2);
@@ -367,7 +374,8 @@ fn import_and_index_emit_closed_safe_summaries() {
     assert_eq!(import["provider_filter"], "codex");
     assert_eq!(import["import_outcome"], "success");
     let index = analytics_event_properties(&events[1]);
-    assert_eq!(index["index_operation"], "status");
+    assert_eq!(index["index_operation"], "wait");
+    assert_eq!(index["wait_outcome"], "ready");
     assert!(index["lexical_state"].as_str().is_some());
     for event in &events {
         assert_analytics_properties_are_allowlisted(analytics_event_properties(event));

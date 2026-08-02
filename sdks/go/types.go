@@ -124,19 +124,19 @@ type StatusResponse struct {
 
 // StatusRecord describes local index state.
 type StatusRecord struct {
-	Initialized            bool       `json:"initialized"`
-	LocalOnly              bool       `json:"localOnly"`
-	DataRoot               string     `json:"dataRoot,omitempty"`
-	IndexedItems           int        `json:"indexedItems,omitempty"`
-	IndexedSources         int        `json:"indexedSources,omitempty"`
-	CatalogedSessions      int        `json:"catalogedSessions,omitempty"`
-	IndexedCatalogSessions int        `json:"indexedCatalogSessions,omitempty"`
-	PendingCatalogSessions int        `json:"pendingCatalogSessions,omitempty"`
-	FailedCatalogSessions  int        `json:"failedCatalogSessions,omitempty"`
-	StaleCatalogSessions   int        `json:"staleCatalogSessions,omitempty"`
-	Freshness              *Freshness `json:"freshness,omitempty"`
-	Semantic               Object     `json:"semantic,omitempty"`
-	Daemon                 Object     `json:"daemon,omitempty"`
+	Initialized     bool   `json:"initialized"`
+	LocalOnly       bool   `json:"localOnly"`
+	ReadOnly        bool   `json:"readOnly,omitempty"`
+	DataRoot        string `json:"dataRoot,omitempty"`
+	IndexedItems    int    `json:"indexedItems,omitempty"`
+	IndexedSessions int    `json:"indexedSessions,omitempty"`
+	IndexedEvents   int    `json:"indexedEvents,omitempty"`
+	IndexedSources  int    `json:"indexedSources,omitempty"`
+	HistoryEpoch    Object `json:"historyEpoch,omitempty"`
+	Lexical         Object `json:"lexical,omitempty"`
+	Refresh         Object `json:"refresh,omitempty"`
+	Semantic        Object `json:"semantic,omitempty"`
+	Daemon          Object `json:"daemon,omitempty"`
 }
 
 // InitResponse is returned by Client.Init.

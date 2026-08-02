@@ -141,9 +141,6 @@ export class LocalAgentHistoryClient {
 
   async init(options = {}) {
     const args = ["setup", "--format=json", "--progress", options.progress ?? "none"];
-    if (options.catalogOnly) {
-      args.push("--catalog-only");
-    }
     return this.#agentHistoryJson("init", args);
   }
 
@@ -326,7 +323,7 @@ export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
   switch (operation) {
     case "status":
     case "init":
-      envelope.status = camelizeKeys(raw);
+      envelope.status = normalizeStatus(raw);
       break;
     case "sources":
       envelope.sources = camelizeKeys(raw?.sources ?? []);
@@ -363,6 +360,32 @@ export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
   return envelope;
 }
 
+function normalizeStatus(raw) {
+  const current = camelizeKeys(raw ?? {});
+  const status = {};
+  for (const key of [
+    "initialized",
+    "readOnly",
+    "dataRoot",
+    "indexedItems",
+    "indexedSessions",
+    "indexedEvents",
+    "indexedSources",
+    "historyEpoch",
+    "lexical",
+    "refresh",
+    "semantic",
+    "daemon",
+  ]) {
+    if (current[key] !== undefined) {
+      status[key] = current[key];
+    }
+  }
+  status.initialized ??= typeof current.lexical?.generationId === "string";
+  status.localOnly = true;
+  return status;
+}
+
 function camelizeKeys(value) {
   if (Array.isArray(value)) {
     return value.map((item) => camelizeKeys(item));
@@ -374,7 +397,6 @@ function camelizeKeys(value) {
   for (const [key, item] of Object.entries(value)) {
     const camelKey = key.replace(/_([a-z])/g, (_, char) => char.toUpperCase());
     if (
-      camelKey === "databasePath" ||
       camelKey === "configPath" ||
       camelKey === "itemType" ||
       camelKey === "payloadType" ||

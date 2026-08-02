@@ -50,27 +50,36 @@ def envelope(operation: str, backend: Mapping[str, Any], **payload: Any) -> Json
 
 
 def normalize_status(raw: Mapping[str, Any]) -> Status:
-    status = _camelize_public(raw)
-    status.setdefault("initialized", False)
-    status.setdefault("localOnly", True)
-    status.setdefault("indexedItems", 0)
-    status.setdefault("indexedSources", 0)
-    status.setdefault("pendingCatalogSessions", 0)
-    status.setdefault("failedCatalogSessions", 0)
-    status.setdefault("staleCatalogSessions", 0)
+    current = _camelize_public(raw)
+    lexical = current.get("lexical") if isinstance(current, Mapping) else None
+    initialized = current.get("initialized")
+    if not isinstance(initialized, bool):
+        initialized = isinstance(lexical, Mapping) and bool(lexical.get("generationId"))
     return cast(
         Status,
         _drop_none(
             {
-                key: value
-                for key, value in status.items()
+                "initialized": initialized,
+                "localOnly": True,
+                **{
+                    key: current.get(key)
+                    for key in (
+                        "dataRoot",
+                        "readOnly",
+                        "indexedItems",
+                        "indexedSessions",
+                        "indexedEvents",
+                        "indexedSources",
+                        "historyEpoch",
+                        "lexical",
+                        "refresh",
+                        "semantic",
+                        "daemon",
+                    )
+                },
             }
         ),
     )
-
-
-def normalize_init(raw: Mapping[str, Any]) -> JsonObject:
-    return cast(JsonObject, _camelize_public(raw))
 
 
 def normalize_sources(raw: Mapping[str, Any]) -> list[ProviderSource]:

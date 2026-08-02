@@ -359,15 +359,7 @@ fn unsupported_reports_do_not_enter_setup_import_all_search_refresh_or_status() 
         discovery_status["schema_version"],
         baseline_status["schema_version"]
     );
-    for field in [
-        "cataloged_sessions",
-        "indexed_events",
-        "indexed_sessions",
-        "indexed_sources",
-        "inventory_units",
-        "pending_inventory_units",
-        "source_import_files",
-    ] {
+    for field in ["indexed_events", "indexed_sessions", "indexed_sources"] {
         assert_eq!(discovery_status[field], baseline_status[field], "{field}");
     }
     assert_eq!(

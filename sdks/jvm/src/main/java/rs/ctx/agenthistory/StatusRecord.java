@@ -5,11 +5,9 @@ import java.util.Map;
 /** Local agent history index status. */
 public final class StatusRecord {
     private final Map<String, Object> fields;
-    private final Freshness freshness;
 
     StatusRecord(Map<String, Object> fields) {
         this.fields = AgentHistoryValue.copyObject(fields);
-        this.freshness = Freshness.from(fields.get("freshness"));
     }
 
     static StatusRecord from(Object value) {
@@ -32,6 +30,14 @@ public final class StatusRecord {
         return getLocalOnly();
     }
 
+    public Boolean getReadOnly() {
+        return AgentHistoryValue.bool(fields.get("readOnly"));
+    }
+
+    public Boolean readOnly() {
+        return getReadOnly();
+    }
+
     public String getDataRoot() {
         return AgentHistoryValue.string(fields.get("dataRoot"));
     }
@@ -48,6 +54,22 @@ public final class StatusRecord {
         return getIndexedItems();
     }
 
+    public Integer getIndexedSessions() {
+        return AgentHistoryValue.integer(fields.get("indexedSessions"));
+    }
+
+    public Integer indexedSessions() {
+        return getIndexedSessions();
+    }
+
+    public Integer getIndexedEvents() {
+        return AgentHistoryValue.integer(fields.get("indexedEvents"));
+    }
+
+    public Integer indexedEvents() {
+        return getIndexedEvents();
+    }
+
     public Integer getIndexedSources() {
         return AgentHistoryValue.integer(fields.get("indexedSources"));
     }
@@ -56,52 +78,28 @@ public final class StatusRecord {
         return getIndexedSources();
     }
 
-    public Integer getCatalogedSessions() {
-        return AgentHistoryValue.integer(fields.get("catalogedSessions"));
+    public Map<String, Object> getHistoryEpoch() {
+        return AgentHistoryValue.objectAt(fields, "historyEpoch");
     }
 
-    public Integer catalogedSessions() {
-        return getCatalogedSessions();
+    public Map<String, Object> historyEpoch() {
+        return getHistoryEpoch();
     }
 
-    public Integer getIndexedCatalogSessions() {
-        return AgentHistoryValue.integer(fields.get("indexedCatalogSessions"));
+    public Map<String, Object> getLexical() {
+        return AgentHistoryValue.objectAt(fields, "lexical");
     }
 
-    public Integer indexedCatalogSessions() {
-        return getIndexedCatalogSessions();
+    public Map<String, Object> lexical() {
+        return getLexical();
     }
 
-    public Integer getPendingCatalogSessions() {
-        return AgentHistoryValue.integer(fields.get("pendingCatalogSessions"));
+    public Map<String, Object> getRefresh() {
+        return AgentHistoryValue.objectAt(fields, "refresh");
     }
 
-    public Integer pendingCatalogSessions() {
-        return getPendingCatalogSessions();
-    }
-
-    public Integer getFailedCatalogSessions() {
-        return AgentHistoryValue.integer(fields.get("failedCatalogSessions"));
-    }
-
-    public Integer failedCatalogSessions() {
-        return getFailedCatalogSessions();
-    }
-
-    public Integer getStaleCatalogSessions() {
-        return AgentHistoryValue.integer(fields.get("staleCatalogSessions"));
-    }
-
-    public Integer staleCatalogSessions() {
-        return getStaleCatalogSessions();
-    }
-
-    public Freshness getFreshness() {
-        return freshness;
-    }
-
-    public Freshness freshness() {
-        return freshness;
+    public Map<String, Object> refresh() {
+        return getRefresh();
     }
 
     public Map<String, Object> getSemantic() {

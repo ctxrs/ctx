@@ -158,23 +158,27 @@ pub struct AgentHistoryStatus {
     pub initialized: bool,
     pub local_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_items: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_sessions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_events: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_sources: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cataloged_sessions: Option<u64>,
+    pub history_epoch: Option<JsonObject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub indexed_catalog_sessions: Option<u64>,
+    pub lexical: Option<JsonObject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_catalog_sessions: Option<u64>,
+    pub refresh: Option<JsonObject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failed_catalog_sessions: Option<u64>,
+    pub semantic: Option<JsonObject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stale_catalog_sessions: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub freshness: Option<Freshness>,
+    pub daemon: Option<JsonObject>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: JsonObject,
 }
@@ -538,7 +542,7 @@ pub fn camelize_object_keys(value: &Value) -> Value {
 fn omitted_public_key(key: &str) -> bool {
     matches!(
         key,
-        "itemType" | "payloadType" | "recordType" | "databasePath" | "configPath"
+        "itemType" | "payloadType" | "recordType" | "configPath"
     )
 }
 

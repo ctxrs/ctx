@@ -17,7 +17,7 @@ const results = await client.search("sqlite storage", { refresh: "off" });
 ## API
 
 - `status()` wraps `ctx status --format json`.
-- `init({ catalogOnly, progress })` wraps `ctx setup --format json`.
+- `init({ progress })` wraps `ctx setup --format json`.
 - `sources()` wraps `ctx sources --format json`.
 - `import(options)` wraps `ctx import --format json`.
 - `sync(options)` is an alias for `import(options)`.

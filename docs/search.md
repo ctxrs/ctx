@@ -164,9 +164,9 @@ Explicit-only sources require `ctx import --provider ... --path ...`.
 Winner-only provider precedence prevents combining a selected replacement with
 stale defaults.
 
-`ctx status`, `ctx index status`, and search JSON report lexical generation,
-source catalog availability, semantic generation binding and coverage, daemon
-work, and typed fallback reasons.
+`ctx status` and search JSON report lexical generation, refresh state, semantic
+generation binding and coverage, daemon work, and typed fallback reasons.
+`ctx index watch` and `ctx index wait` expose a smaller readiness-only view.
 
 ## Core-backed presentation
 

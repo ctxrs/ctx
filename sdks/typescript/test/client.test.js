@@ -37,7 +37,7 @@ test("wraps status, init, sources, import, and sync CLI commands", async () => {
   }));
 
   const status = await client.status();
-  await client.init({ catalogOnly: true });
+  await client.init();
   const sources = await client.sources();
   const imported = await client.import({ provider: "codex", resume: true });
   await client.sync({ all: true });
@@ -59,7 +59,6 @@ test("wraps status, init, sources, import, and sync CLI commands", async () => {
         "--format=json",
         "--progress",
         "none",
-        "--catalog-only",
       ],
       ["--data-root", "/tmp/ctx-sdk-test", "sources", "--format=json"],
       [

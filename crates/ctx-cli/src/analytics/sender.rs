@@ -343,22 +343,6 @@ fn insert_client_operation_properties(
             );
             insert_optional_count(properties, "indexed_events_bucket", value.indexed_events);
             insert_optional_count(properties, "indexed_sources_bucket", value.indexed_sources);
-            insert_optional_count(properties, "inventory_units_bucket", value.inventory_units);
-            insert_optional_count(
-                properties,
-                "pending_inventory_units_bucket",
-                value.pending_inventory_units,
-            );
-            insert_optional_count(
-                properties,
-                "failed_inventory_units_bucket",
-                value.failed_inventory_units,
-            );
-            insert_optional_count(
-                properties,
-                "stale_inventory_units_bucket",
-                value.stale_inventory_units,
-            );
         }
         ClientOperationV1::Index(value) => {
             insert_optional_str(
@@ -385,22 +369,6 @@ fn insert_client_operation_properties(
                 value.semantic_state.map(IndexState::as_str),
             );
             insert_optional_count(properties, "indexed_items_bucket", value.indexed_items);
-            insert_optional_count(properties, "inventory_units_bucket", value.inventory_units);
-            insert_optional_count(
-                properties,
-                "pending_inventory_units_bucket",
-                value.pending_inventory_units,
-            );
-            insert_optional_count(
-                properties,
-                "failed_inventory_units_bucket",
-                value.failed_inventory_units,
-            );
-            insert_optional_count(
-                properties,
-                "stale_inventory_units_bucket",
-                value.stale_inventory_units,
-            );
         }
         ClientOperationV1::Sources(value) => {
             insert_bool(properties, "all_sources", value.all);

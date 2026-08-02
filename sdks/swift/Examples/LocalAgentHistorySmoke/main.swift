@@ -8,7 +8,7 @@ struct LocalAgentHistorySmoke {
         let client = config.makeClient()
 
         let status = try client.status()
-        let initialized = try client.initialize(InitOptions(catalogOnly: true))
+        let initialized = try client.initialize(InitOptions())
         let imported = try client.importHistory(ImportOptions(provider: "codex", resume: true))
         let synced = try client.sync(ImportOptions(all: true))
         let search = try client.search(
@@ -92,9 +92,9 @@ private final class FakeSmokeRunner: CommandRunner, @unchecked Sendable {
         let arguments = request.arguments.filter { $0 != "--data-root" && $0 != "/tmp/ctx-swift-local-agent-history-smoke" }
         switch Array(arguments.prefix(2)) {
         case ["status", "--format=json"]:
-            return CommandResult(stdout: #"{"initialized":true,"local_only":true,"data_root":"/tmp/ctx-swift-local-agent-history-smoke","indexed_items":3,"indexed_sources":1,"cataloged_sessions":1,"pending_catalog_sessions":0,"failed_catalog_sessions":0,"stale_catalog_sessions":0}"#)
+            return CommandResult(stdout: #"{"initialized":true,"local_only":true,"data_root":"/tmp/ctx-swift-local-agent-history-smoke","indexed_items":3,"indexed_sessions":1,"indexed_events":2,"indexed_sources":1,"lexical":{"status":"ready","generation_id":"gen-3"},"refresh":{"status":"ready","generation_id":"gen-3"}}"#)
         case ["setup", "--format=json"]:
-            return CommandResult(stdout: #"{"schema_version":1,"data_root":"/tmp/ctx-swift-local-agent-history-smoke","mode":"catalog_only","indexed_items":3,"network_required":false}"#)
+            return CommandResult(stdout: #"{"schema_version":1,"data_root":"/tmp/ctx-swift-local-agent-history-smoke","indexed_items":3,"lexical":{"status":"ready","generation_id":"gen-3"},"refresh":{"status":"ready","generation_id":"gen-3"},"network_required":false}"#)
         case ["import", "--format=json"]:
             return CommandResult(stdout: #"{"resume":true,"totals":{"imported_sources":1,"imported_sessions":1,"imported_events":1},"sources":[{"provider":"codex","path":"/tmp/ctx-sdk-fixture/session.jsonl","status":"imported","imported_sessions":1,"imported_events":1}]}"#)
         case ["search", "local agent history"]:

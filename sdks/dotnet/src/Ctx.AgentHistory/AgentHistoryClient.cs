@@ -36,10 +36,6 @@ public sealed class AgentHistoryClient
         options ??= new InitOptions();
         var args = new List<string> { "setup", "--format=json" };
         AddOption(args, "--progress", options.Progress);
-        if (options.CatalogOnly)
-        {
-            args.Add("--catalog-only");
-        }
 
         var raw = await InvokeAsync("init", args, cancellationToken).ConfigureAwait(false);
         var envelope = AgentHistoryContract.Envelope("init", _transport.Backend(raw), "status", AgentHistoryContract.NormalizeStatus(raw));

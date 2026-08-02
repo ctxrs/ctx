@@ -76,8 +76,8 @@ class AgentHistoryClient:
     def status(self) -> StatusResponse:
         return self._transport.status()
 
-    def init(self, *, catalog_only: bool = False, progress: Optional[str] = None) -> InitResponse:
-        return self._transport.init(catalog_only=catalog_only, progress=progress)
+    def init(self, *, progress: Optional[str] = None) -> InitResponse:
+        return self._transport.init(progress=progress)
 
     def sources(self) -> SourcesResponse:
         return self._transport.sources()

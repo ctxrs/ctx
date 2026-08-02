@@ -3,44 +3,44 @@ import Foundation
 public struct AgentHistoryStatus: Codable, Equatable, Sendable {
     public var initialized: Bool
     public var localOnly: Bool
+    public var readOnly: Bool?
     public var dataRoot: String?
     public var indexedItems: Int?
+    public var indexedSessions: Int?
+    public var indexedEvents: Int?
     public var indexedSources: Int?
-    public var catalogedSessions: Int?
-    public var indexedCatalogSessions: Int?
-    public var pendingCatalogSessions: Int?
-    public var failedCatalogSessions: Int?
-    public var staleCatalogSessions: Int?
-    public var freshness: AgentHistoryFreshness?
+    public var historyEpoch: JSONValue?
+    public var lexical: JSONValue?
+    public var refresh: JSONValue?
     public var semantic: JSONValue?
     public var daemon: JSONValue?
 
     public init(
         initialized: Bool,
         localOnly: Bool,
+        readOnly: Bool? = nil,
         dataRoot: String? = nil,
         indexedItems: Int? = nil,
+        indexedSessions: Int? = nil,
+        indexedEvents: Int? = nil,
         indexedSources: Int? = nil,
-        catalogedSessions: Int? = nil,
-        indexedCatalogSessions: Int? = nil,
-        pendingCatalogSessions: Int? = nil,
-        failedCatalogSessions: Int? = nil,
-        staleCatalogSessions: Int? = nil,
-        freshness: AgentHistoryFreshness? = nil,
+        historyEpoch: JSONValue? = nil,
+        lexical: JSONValue? = nil,
+        refresh: JSONValue? = nil,
         semantic: JSONValue? = nil,
         daemon: JSONValue? = nil
     ) {
         self.initialized = initialized
         self.localOnly = localOnly
+        self.readOnly = readOnly
         self.dataRoot = dataRoot
         self.indexedItems = indexedItems
+        self.indexedSessions = indexedSessions
+        self.indexedEvents = indexedEvents
         self.indexedSources = indexedSources
-        self.catalogedSessions = catalogedSessions
-        self.indexedCatalogSessions = indexedCatalogSessions
-        self.pendingCatalogSessions = pendingCatalogSessions
-        self.failedCatalogSessions = failedCatalogSessions
-        self.staleCatalogSessions = staleCatalogSessions
-        self.freshness = freshness
+        self.historyEpoch = historyEpoch
+        self.lexical = lexical
+        self.refresh = refresh
         self.semantic = semantic
         self.daemon = daemon
     }
