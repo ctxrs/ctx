@@ -358,6 +358,7 @@ fn manual_all_request(
                 "schema_version": 1,
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
+                "operation": "import",
                 "explicit_source_catalog": authority.to_json(),
             }),
         )
@@ -899,6 +900,7 @@ fn differing_catalog_authority_queues_one_successor_behind_a_running_refresh() {
                     "schema_version": 1,
                     "op": SOURCE_REFRESH_REQUEST_OP,
                     "mode": "wait",
+                    "operation": "import",
                     "explicit_source_catalog": authority.to_json(),
                 }),
             )
@@ -993,6 +995,7 @@ fn active_and_pending_refreshes_are_bounded_with_a_typed_busy_response() {
                     "schema_version": 1,
                     "op": SOURCE_REFRESH_REQUEST_OP,
                     "mode": "wait",
+                    "operation": "import",
                     "explicit_source_catalog": authority.to_json(),
                 }),
             )
@@ -1065,7 +1068,7 @@ fn terminal_history_is_trimmed_independently_from_inflight_capacity() {
 }
 
 #[test]
-fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
+fn default_executor_with_implicit_import_catalog_keeps_automatic_discovery_and_maps_progress() {
     let coordinator = CoreRefreshEngine::new();
     assert_eq!(
         coordinator.executor.implementation_name(),
@@ -1109,14 +1112,14 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
         ));
         Ok(())
     };
+    let implicit_catalog = load_explicit_source_catalog_authority(&data_root).unwrap();
     let execution = SourceBackedRefreshExecution {
         data_root: &data_root,
         index_root: &index_root,
         request_id: "all-provider-request",
-        explicit_source_catalog: None,
+        explicit_source_catalog: Some(&implicit_catalog),
         scope: SourceBackedRefreshScope::All,
         covered_route_ids: BTreeSet::new(),
-        fail_on_source_failure: false,
         report_progress: &report_progress,
     };
     let mut provider_wide_calls = 0;
@@ -1145,7 +1148,11 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
             assert_ne!(observed_discovery_duration, StdDuration::ZERO);
             assert_eq!(observed_data_root, data_root);
             assert_eq!(observed_index_root, index_root);
-            assert!(observed_explicit_source_catalog.is_none());
+            assert_eq!(
+                observed_explicit_source_catalog,
+                Some(&implicit_catalog),
+                "an implicit import catalog must not replace automatic discovery"
+            );
             assert_eq!(observed_scope, SourceBackedRefreshScope::All);
             assert!(observed_covered_route_ids.is_empty());
             progress(CaptureSourceBackedRefreshProgress {

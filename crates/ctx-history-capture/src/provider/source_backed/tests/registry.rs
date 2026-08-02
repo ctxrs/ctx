@@ -227,6 +227,53 @@ fn warm_success_advances_while_failed_route_is_carried_exactly() {
 }
 
 #[test]
+fn authoritative_executor_publishes_valid_route_and_receipts_carried_failure() {
+    let (valid_v1, _) = revisioned_receipt_route(31);
+    let failing = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 32);
+    let failing_id = failing.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(valid_v1);
+    initial_registry.register(failing.clone());
+    let temp = tempdir().unwrap();
+    let initial = SourceBackedRefreshExecutor::new(initial_registry, WriterOptions::default())
+        .refresh_scope(temp.path(), SourceBackedRefreshScope::All, |_| Ok(()))
+        .unwrap();
+    let retained_failing_route = initial
+        .commit
+        .manifest()
+        .source_route(&failing_id)
+        .unwrap()
+        .clone();
+
+    let (valid_v2, valid_v2_certificate) = revisioned_receipt_route(33);
+    let valid_id = valid_v2.metadata.route_identity.clone().unwrap();
+    let mut refresh_registry = SourceBackedProviderRegistry::new();
+    refresh_registry.register(valid_v2);
+    refresh_registry.register(fail_route_before_scan(
+        failing,
+        SourceBackedRouteErrorKind::Unavailable,
+    ));
+    let receipt = SourceBackedRefreshExecutor::new(refresh_registry, WriterOptions::default())
+        .refresh_scope(temp.path(), SourceBackedRefreshScope::All, |_| Ok(()))
+        .unwrap();
+
+    assert_eq!(receipt.successful_route_ids, vec![valid_id]);
+    assert_eq!(receipt.failed_routes.len(), 1);
+    assert_eq!(receipt.failed_routes[0].route_identity, failing_id.clone());
+    assert_eq!(
+        receipt.failed_routes[0].class,
+        SourceBackedSourceFailureClass::Unavailable
+    );
+    assert!(receipt.failed_routes[0].carried_forward);
+    assert_eq!(receipt.carried_failed_route_ids, vec![failing_id.clone()]);
+    assert_eq!(
+        receipt.commit.manifest().source_route(&failing_id),
+        Some(&retained_failing_route)
+    );
+    assert!(receipt.sources.contains(&valid_v2_certificate));
+}
+
+#[test]
 fn internal_route_failure_aborts_the_whole_cold_refresh() {
     let first_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let first = count_route_scans(

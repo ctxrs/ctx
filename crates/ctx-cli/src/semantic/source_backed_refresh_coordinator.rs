@@ -54,6 +54,7 @@ mod capture_refresh;
 mod client;
 mod coordinator_state;
 mod current_state;
+mod request;
 
 use capture_refresh::{
     execute_capture_owned_refresh, execute_source_backed_refresh, SourceBackedRefreshPlan,
@@ -77,6 +78,7 @@ pub(crate) use coordinator_state::{
     SourceBackedRefreshReceipt, SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
 };
 pub(crate) use current_state::SourceBackedRefreshCurrent;
+use request::{SourceBackedRefreshOperation, SourceBackedRefreshRequest};
 
 const SEARCH_DIRECTORY: &str = "search";
 const LEXICAL_DIRECTORY: &str = "lexical";

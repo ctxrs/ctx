@@ -1,6 +1,100 @@
 use super::*;
 
 #[test]
+fn ipc_refresh_request_requires_a_typed_operation() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = CoreRefreshEngine::new();
+    let missing = coordinator
+        .handle_ipc_request(
+            temp.path(),
+            &json!({
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "mode": "wait",
+            }),
+        )
+        .unwrap_err();
+    assert!(format!("{missing:#}").contains("request operation is missing"));
+
+    let invalid = coordinator
+        .handle_ipc_request(
+            temp.path(),
+            &json!({
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "mode": "wait",
+                "operation": "strict_import",
+            }),
+        )
+        .unwrap_err();
+    assert!(format!("{invalid:#}").contains("invalid daemon source refresh operation"));
+    assert!(!coordinator.has_pending_request());
+}
+
+#[test]
+fn automatic_import_with_implicit_catalog_upgrades_queued_route_work_without_rescan() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let coordinator = CoreRefreshEngine::new();
+    coordinator.reconcile_watch_routes([route_identity(0xa1)], EventWatermark::new(1, 0), 0);
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, u64::MAX)
+        .unwrap());
+    let scheduled = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("scheduled exact-route job");
+    let scheduled_request_id = request_id(&scheduled);
+    assert_eq!(scheduled["trigger"], "periodic");
+
+    let request = SourceBackedRefreshRequest::new(
+        SourceBackedRefreshMode::Wait,
+        SourceBackedRefreshOperation::Import,
+        None,
+    )
+    .to_json(&data_root)
+    .unwrap();
+    assert_eq!(request["operation"], "import");
+    let authority = ExplicitSourceCatalogAuthority::from_json(
+        request
+            .get("explicit_source_catalog")
+            .expect("implicit import pins a catalog snapshot"),
+    )
+    .unwrap();
+
+    let upgraded = coordinator
+        .handle_ipc_request(&data_root, &request)
+        .unwrap()
+        .expect("implicit-catalog import response");
+    let attached = coordinator
+        .handle_ipc_request(&data_root, &request)
+        .unwrap()
+        .expect("equivalent import response");
+
+    assert_eq!(request_id(&upgraded), scheduled_request_id);
+    assert_eq!(request_id(&attached), scheduled_request_id);
+    assert_eq!(attached["coalesced_requests"], 2);
+    assert_eq!(attached["operation"], "import");
+    assert_eq!(attached["trigger"], "import");
+    assert_eq!(attached["trigger_provenance"], "explicit_source_catalog");
+
+    let writer_launches = AtomicUsize::new(0);
+    let run = coordinator
+        .run_next_with(
+            |_, _| {
+                writer_launches.fetch_add(1, Ordering::SeqCst);
+                let mut publication = test_publication("implicit-import-generation");
+                publication.published_explicit_source_catalog = authority;
+                Ok(publication)
+            },
+            || Ok(Some("implicit-import-generation".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("upgraded all-route refresh");
+    assert_eq!(run.scope, SourceBackedRefreshScope::All);
+    assert_eq!(writer_launches.load(Ordering::SeqCst), 1);
+    assert!(!coordinator.has_pending_request());
+}
+
+#[test]
 fn duplicate_concurrent_requests_launch_one_writer() {
     const REQUESTS: usize = 16;
 
@@ -129,6 +223,7 @@ fn concurrent_refresh_request_uses_active_generation_without_reopening_inflight_
             &json!({
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
+                "operation": "refresh",
             }),
         )
         .unwrap()
@@ -178,6 +273,7 @@ fn wait_request_with_equivalent_catalog_attaches_to_running_refresh() {
                 &json!({
                     "op": SOURCE_REFRESH_REQUEST_OP,
                     "mode": "wait",
+                    "operation": "import",
                     "explicit_source_catalog": authority.to_json(),
                 }),
             )
@@ -250,6 +346,7 @@ fn multiple_equivalent_waiters_share_one_request_and_terminal_receipt() {
                         &json!({
                             "op": SOURCE_REFRESH_REQUEST_OP,
                             "mode": "wait",
+                            "operation": "import",
                             "explicit_source_catalog": authority.to_json(),
                         }),
                     )
@@ -315,6 +412,7 @@ fn equivalent_waiters_share_the_same_terminal_failure_status() {
                         &json!({
                             "op": SOURCE_REFRESH_REQUEST_OP,
                             "mode": "wait",
+                            "operation": "import",
                             "explicit_source_catalog": authority.to_json(),
                         }),
                     )
@@ -357,12 +455,13 @@ fn explicit_fresh_after_admitted_snapshot_queues_one_successor() {
             temp.path(),
             &json!({
                 "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "background",
+                "mode": "wait",
+                "operation": "import",
                 "explicit_source_catalog": authority.to_json(),
             }),
         )
         .unwrap()
-        .expect("background refresh response");
+        .expect("queued import response");
     let first_request_id = request_id(&first);
     let (gate, runner_started, runner_release) = RunningRefreshGate::new();
 
@@ -394,6 +493,7 @@ fn explicit_fresh_after_admitted_snapshot_queues_one_successor() {
                     &json!({
                         "op": SOURCE_REFRESH_REQUEST_OP,
                         "mode": "wait",
+                        "operation": "import",
                         "explicit_source_catalog": authority.to_json(),
                         "fresh_after_admitted_snapshot": true,
                     }),
@@ -456,7 +556,8 @@ fn ipc_job_records_source_refresh_only_search_autostart_provenance() {
             temp.path(),
             &json!({
                 "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "background",
+                "mode": "wait",
+                "operation": "refresh",
             }),
         )
         .unwrap()

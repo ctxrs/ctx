@@ -1,5 +1,6 @@
 use std::{
     cell::Cell,
+    collections::BTreeSet,
     fs,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -9,12 +10,23 @@ use std::{
 
 use super::*;
 use crate::analytics::{ProviderRefreshCompletedV1, Surface};
+use crate::semantic::dirty_source_routes::EventWatermark;
+use crate::semantic::source_backed_refresh_coordinator::{
+    source_backed_index_root, SourceBackedRefreshCurrent, SourceBackedRefreshExecution,
+    SourceBackedRefreshExecutor, SourceBackedRefreshPublication, SourceBackedRefreshTimings,
+};
 use ctx_history_capture::{
     ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
-    ProviderSourceStatus, SourceBackedProviderRegistry, SourceBackedRoute, SourceBackedRouteDriver,
-    SourceBackedSelectorAuthority,
+    ProviderSourceStatus, SourceBackedProviderRegistry, SourceBackedRefreshScope,
+    SourceBackedRoute, SourceBackedRouteDriver, SourceBackedSelectorAuthority,
 };
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{
+    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CoreRecord,
+    EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceKey, SourceObservation, TypedKey,
+};
+use ctx_history_index::{GenerationWriter, SourceRouteSnapshot, WriterOptions};
+use sha2::{Digest, Sha256};
 
 fn daemon_watch_test_catalog(path: PathBuf) -> SourceBackedWatchCatalog {
     let route = SourceBackedRoute::automatic(
@@ -36,6 +48,220 @@ fn daemon_watch_test_catalog(path: PathBuf) -> SourceBackedWatchCatalog {
     let mut registry = SourceBackedProviderRegistry::new();
     registry.register(route);
     registry.watch_catalog()
+}
+
+struct DurableFrontierFixture {
+    data_root: PathBuf,
+    provider_file: PathBuf,
+    catalog: SourceBackedWatchCatalog,
+    route: ctx_history_index::SourceRouteIdentity,
+    executor: Arc<dyn SourceBackedRefreshExecutor>,
+    writer_launches: Arc<AtomicUsize>,
+}
+
+impl DurableFrontierFixture {
+    fn new(root: &Path) -> Result<Self> {
+        let data_root = root.join("data");
+        let provider_file = root.join("provider").join("history.jsonl");
+        fs::create_dir_all(provider_file.parent().expect("provider parent"))?;
+        fs::write(&provider_file, b"one\n")?;
+        let catalog = daemon_watch_test_catalog(provider_file.clone());
+        let route = catalog
+            .route_ids()
+            .next()
+            .expect("frontier fixture route")
+            .clone();
+        let source = frontier_fixture_source();
+        write_frontier_fixture_generation(
+            &source_backed_index_root(&data_root),
+            &route,
+            &source,
+            &provider_file,
+            false,
+        )?;
+
+        let writer_launches = Arc::new(AtomicUsize::new(0));
+        let launches = Arc::clone(&writer_launches);
+        let refresh_route = route.clone();
+        let refresh_source = source.clone();
+        let refresh_file = provider_file.clone();
+        let executor: Arc<dyn SourceBackedRefreshExecutor> =
+            Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+                launches.fetch_add(1, Ordering::SeqCst);
+                let certified_bytes = fs::metadata(&refresh_file)?.len();
+                let generation_id = write_frontier_fixture_generation(
+                    execution.index_root,
+                    &refresh_route,
+                    &refresh_source,
+                    &refresh_file,
+                    true,
+                )?;
+                Ok(SourceBackedRefreshPublication {
+                    generation_id,
+                    published_explicit_source_catalog: execution
+                        .explicit_source_catalog
+                        .cloned()
+                        .expect("coordinator catalog authority"),
+                    scanned_routes: 1,
+                    unsupported_routes: 0,
+                    certified_source_count: 1,
+                    certified_source_bytes: certified_bytes,
+                    current: SourceBackedRefreshCurrent {
+                        source_count: 1,
+                        indexed_documents: 1,
+                        complete_records: 1,
+                        retained_records: 1,
+                        certified_source_bytes: certified_bytes,
+                        ..SourceBackedRefreshCurrent::default()
+                    },
+                    timings: SourceBackedRefreshTimings::default(),
+                    selected_route_ids: vec![refresh_route.as_str().to_owned()],
+                    successful_route_ids: vec![refresh_route.as_str().to_owned()],
+                    source_failures: Vec::new(),
+                })
+            });
+        let fixture = Self {
+            data_root,
+            provider_file,
+            catalog,
+            route,
+            executor,
+            writer_launches,
+        };
+        fixture.persist_acknowledged_frontier()?;
+        Ok(fixture)
+    }
+
+    fn persist_acknowledged_frontier(&self) -> Result<()> {
+        let coordinator = CoreRefreshEngine::with_executor(Arc::clone(&self.executor));
+        coordinator.initialize_watch_route_authority(self.catalog.route_ids().cloned());
+        assert_eq!(
+            coordinator.reconcile_route_freshness_frontier(
+                &self.data_root,
+                &self.catalog,
+                EventWatermark::new(1, 0),
+                0,
+            )?,
+            1
+        );
+        assert!(coordinator.enqueue_next_dirty_route(&self.data_root, u64::MAX)?);
+        let run = coordinator
+            .run_next(&self.data_root)
+            .expect("frontier refresh");
+        assert!(!run.failed, "{:#}", run.job);
+        assert!(matches!(run.scope, SourceBackedRefreshScope::Exact(_)));
+        assert!(!coordinator.has_scheduled_route_work());
+        assert!(self
+            .data_root
+            .join("daemon")
+            .join("route-freshness-frontier.json")
+            .is_file());
+        Ok(())
+    }
+
+    fn restarted_coordinator(&self) -> CoreRefreshEngine {
+        CoreRefreshEngine::with_executor(Arc::clone(&self.executor))
+    }
+}
+
+fn frontier_fixture_source() -> SourceKey {
+    SourceKey::derive(
+        "codex",
+        "codex_session_jsonl",
+        "session",
+        1,
+        SourceAnchor::CatalogLineage([0x5a; 32]),
+    )
+    .unwrap()
+}
+
+fn frontier_fixture_record(source: &SourceKey, body: String) -> CoreRecord {
+    let native_session = NativeSessionKey::native_id(
+        "session",
+        TypedKey::utf8("durable-frontier-session").unwrap(),
+    )
+    .unwrap();
+    let session_id = derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: "thread",
+        native_session_key: &native_session,
+    })
+    .unwrap();
+    let native_item =
+        NativeItemKey::native_id("message", TypedKey::utf8("durable-frontier-event").unwrap())
+            .unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: "message",
+        native_item_key: &native_item,
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let mut record = CoreRecord::new_selected(
+        event_id,
+        session_id,
+        session_id,
+        source.clone(),
+        0,
+        "message",
+        "primary",
+        true,
+        "durable-frontier-test-v1",
+        body,
+    )
+    .unwrap();
+    record.role = Some("user".to_owned());
+    record
+}
+
+fn frontier_fixture_certificate(source: &SourceKey, bytes: &[u8]) -> CertifiedSource {
+    let revision: [u8; 32] = Sha256::digest(bytes).into();
+    let observation =
+        SourceObservation::new(source.clone(), "test-file-digest-v1", revision.to_vec()).unwrap();
+    CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        "durable-frontier-test-v1",
+        revision,
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 1,
+            indexed_documents: 1,
+            certified_bytes: u64::try_from(bytes.len()).unwrap(),
+            ..ScannedSourceCounts::default()
+        },
+    )
+    .unwrap()
+}
+
+fn write_frontier_fixture_generation(
+    index_root: &Path,
+    route: &ctx_history_index::SourceRouteIdentity,
+    source: &SourceKey,
+    provider_file: &Path,
+    route_staged: bool,
+) -> Result<String> {
+    let bytes = fs::read(provider_file)?;
+    let mut writer = GenerationWriter::open(index_root, WriterOptions::default())?;
+    if route_staged {
+        writer.set_source_route_plan(BTreeSet::from([route.clone()]), BTreeSet::new())?;
+        writer.begin_source_route_stage(route.clone())?;
+    }
+    writer.begin_source(source.clone())?;
+    writer.add_core_record(frontier_fixture_record(
+        source,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    ))?;
+    writer.certify_source(frontier_fixture_certificate(source, &bytes))?;
+    if route_staged {
+        writer.finish_source_route_stage(route)?;
+    }
+    writer.set_present_source_routes(vec![SourceRouteSnapshot::present(
+        route.clone(),
+        vec![source.clone()],
+    )?])?;
+    Ok(writer.commit(|_| true)?.generation_id)
 }
 
 fn manual_run() -> DaemonRunFactsV1 {
@@ -162,7 +388,10 @@ fn safety_reconciliation_recovers_a_failed_startup_catalog_without_empty_authori
         .expect("safety reconciliation publishes catalog authority");
     assert_eq!(recovered.route_ids().next(), Some(&route));
     assert!(coordinator.watch_routes_initialized());
-    assert!(!coordinator.has_scheduled_route_work());
+    assert!(
+        coordinator.has_scheduled_route_work(),
+        "a route without a published frontier is cold and must be scheduled"
+    );
     assert_eq!(
         super::super::daemon_wakeup::daemon_wakeup_report(&data_root)["status"],
         "active"
@@ -207,7 +436,7 @@ fn safety_reconciliation_recreates_a_failed_startup_watcher_without_healthy_cata
     assert!(watch_runtime.file_watcher.is_none());
     assert!(watch_runtime.catalog.snapshot().is_some());
     assert!(coordinator.watch_routes_initialized());
-    assert!(!coordinator.has_scheduled_route_work());
+    assert!(coordinator.has_scheduled_route_work());
 
     watch_runtime.reconcile_catalog_and_route_authority_with(
         &data_root,
@@ -227,7 +456,7 @@ fn safety_reconciliation_recreates_a_failed_startup_watcher_without_healthy_cata
     assert_eq!(catalog_attempts.get(), 2);
     assert_eq!(watcher_attempts.get(), 2);
     assert!(watch_runtime.file_watcher.is_some());
-    assert!(!coordinator.has_scheduled_route_work());
+    assert!(coordinator.has_scheduled_route_work());
 
     watch_runtime.reconcile_catalog_and_route_authority_with(
         &data_root,
@@ -251,29 +480,44 @@ fn safety_reconciliation_recreates_a_failed_startup_watcher_without_healthy_cata
 #[test]
 fn clean_forced_watcher_recovery_schedules_zero_healthy_route_scans() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let data_root = temp.path().join("data");
-    let provider_root = temp.path().join("provider");
-    let provider_file = provider_root.join("history.jsonl");
-    fs::create_dir_all(&data_root)?;
-    fs::create_dir_all(&provider_root)?;
-    fs::write(&provider_file, b"{\"event\":1}\n")?;
-    let catalog = daemon_watch_test_catalog(provider_file);
-    let coordinator = CoreRefreshEngine::new();
+    let fixture = DurableFrontierFixture::new(temp.path())?;
+    let baseline_writer_launches = fixture.writer_launches.load(Ordering::SeqCst);
+    let coordinator = fixture.restarted_coordinator();
     let wakeup = Arc::new(DaemonWakeup::default());
     let mut watch_runtime = DaemonWatchRuntime::new(Arc::clone(&wakeup));
     watch_runtime.reconcile_catalog_and_route_authority_with(
-        &data_root,
+        &fixture.data_root,
         Some(&coordinator),
         WatchCatalogReconcileTrigger::Startup,
         false,
-        |_| Ok(catalog.clone()),
+        |_| Ok(fixture.catalog.clone()),
         DaemonFileWatcher::start,
     );
     assert!(coordinator.watch_routes_initialized());
     assert!(!coordinator.has_scheduled_route_work());
+    assert!(!coordinator.enqueue_next_dirty_route(&fixture.data_root, u64::MAX)?);
+    for _ in 0..3 {
+        let response = coordinator
+            .handle_ipc_request(
+                &fixture.data_root,
+                &json!({
+                    "schema_version": 1,
+                    "op": "source_refresh_request",
+                    "mode": "background",
+                    "operation": "refresh",
+                }),
+            )?
+            .expect("background maintenance wake");
+        assert_eq!(response["maintenance_wake"], true);
+        assert!(!coordinator.has_pending_request());
+    }
+    assert_eq!(
+        fixture.writer_launches.load(Ordering::SeqCst),
+        baseline_writer_launches
+    );
 
     watch_runtime.reconcile_catalog_and_route_authority_with(
-        &data_root,
+        &fixture.data_root,
         Some(&coordinator),
         WatchCatalogReconcileTrigger::WatcherRecovery,
         true,
@@ -286,7 +530,52 @@ fn clean_forced_watcher_recovery_schedules_zero_healthy_route_scans() -> Result<
     );
 
     assert!(!coordinator.has_scheduled_route_work());
-    assert!(!coordinator.enqueue_next_dirty_route(&data_root, u64::MAX)?);
+    assert!(!coordinator.enqueue_next_dirty_route(&fixture.data_root, u64::MAX)?);
+    assert_eq!(
+        fixture.writer_launches.load(Ordering::SeqCst),
+        baseline_writer_launches
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn startup_reconciliation_schedules_a_route_changed_while_daemon_was_stopped() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let fixture = DurableFrontierFixture::new(temp.path())?;
+    let baseline_writer_launches = fixture.writer_launches.load(Ordering::SeqCst);
+
+    // No watcher/runtime is alive here: this mutation must be recovered from
+    // the durable route frontier during the next production startup.
+    fs::write(&fixture.provider_file, b"one\ntwo\n")?;
+    let coordinator = fixture.restarted_coordinator();
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let mut watch_runtime = DaemonWatchRuntime::new(Arc::clone(&wakeup));
+    watch_runtime.reconcile_catalog_and_route_authority_with(
+        &fixture.data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::Startup,
+        false,
+        |_| Ok(fixture.catalog.clone()),
+        DaemonFileWatcher::start,
+    );
+
+    assert!(coordinator.has_scheduled_route_work());
+    std::thread::sleep(StdDuration::from_millis(300));
+    assert!(coordinator.enqueue_next_dirty_route(&fixture.data_root, u64::MAX)?);
+    let run = coordinator
+        .run_next(&fixture.data_root)
+        .expect("changed route catch-up");
+    assert!(!run.failed, "{:#}", run.job);
+    assert!(matches!(
+        run.scope,
+        SourceBackedRefreshScope::Exact(ref routes) if routes == &BTreeSet::from([fixture.route.clone()])
+    ));
+    assert_eq!(
+        fixture.writer_launches.load(Ordering::SeqCst),
+        baseline_writer_launches.saturating_add(1)
+    );
+    assert!(!coordinator.has_scheduled_route_work());
     Ok(())
 }
 

@@ -113,8 +113,8 @@ fn old_wait_request_recovers_typed_across_restart_and_returns_exact_generation()
             &json!({
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
+                "operation": "import",
                 "explicit_source_catalog": authority.to_json(),
-                "fail_on_source_failure": true,
             }),
         )
         .unwrap()
@@ -135,8 +135,8 @@ fn old_wait_request_recovers_typed_across_restart_and_returns_exact_generation()
             &json!({
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
+                "operation": "import",
                 "explicit_source_catalog": authority.to_json(),
-                "fail_on_source_failure": true,
             }),
         )
         .unwrap()
@@ -184,9 +184,9 @@ fn old_wait_request_recovers_typed_across_restart_and_returns_exact_generation()
                 &waiter_root,
                 waiter_old_request_id,
                 SourceBackedRefreshMode::Wait,
+                SourceBackedRefreshOperation::Import,
                 Some(&waiter_authority),
                 false,
-                true,
             )
             .unwrap()
         });
@@ -209,8 +209,8 @@ fn old_wait_request_recovers_typed_across_restart_and_returns_exact_generation()
         assert_eq!(
             service
                 .source_refresh
-                .request_authority_for_test(&active_request_id),
-            Some((authority.clone(), true))
+                .request_catalog_authority_for_test(&active_request_id),
+            Some(authority.clone())
         );
 
         let execute_generation = Arc::clone(&terminal_generation);

@@ -137,6 +137,7 @@ pub(super) fn run_automatic_source_refresh_import(
         "daemon_request_id": request_id,
         "daemon_request_metadata": {
             "owner": "daemon",
+            "operation": "import",
             "trigger": "import",
             "trigger_provenance": "automatic_provider_refresh",
         },

@@ -7,6 +7,7 @@ mod generation_authority;
 mod generation_observation;
 mod read_model;
 mod request_lifecycle;
+mod route_frontier;
 mod runtime_metadata;
 use generation_authority::CoreRefreshTerminalSuccess;
 pub(crate) use generation_authority::PinnedCorePublication;
@@ -16,6 +17,7 @@ use read_model::{
 pub(crate) use read_model::{
     SourceBackedRefreshReceipt, SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
 };
+use route_frontier::RouteFreshnessFrontier;
 use runtime_metadata::{
     source_catalog_refresh_runtime_metadata, source_refresh_runtime_metadata,
     SourceRefreshRuntimeMetadata,
@@ -43,7 +45,6 @@ pub(crate) struct SourceBackedRefreshExecution<'a> {
     pub(crate) explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
     pub(crate) scope: SourceBackedRefreshScope,
     pub(crate) covered_route_ids: BTreeSet<SourceRouteIdentity>,
-    pub(crate) fail_on_source_failure: bool,
     pub(super) report_progress: &'a dyn Fn(SourceBackedRefreshProgressUpdate) -> Result<()>,
 }
 
@@ -118,6 +119,7 @@ pub(super) struct CoreRefreshEngineState {
     route_admissions: BTreeMap<String, Vec<DirtySourceRouteAdmission>>,
     manual_all_continuations: BTreeMap<String, ManualAllContinuation>,
     watch_routes_initialized: bool,
+    route_freshness_frontier: Option<RouteFreshnessFrontier>,
 }
 
 #[derive(Debug, Clone)]
@@ -232,6 +234,7 @@ impl CoreRefreshEngine {
                 route_admissions: BTreeMap::new(),
                 manual_all_continuations: BTreeMap::new(),
                 watch_routes_initialized: false,
+                route_freshness_frontier: None,
             }),
             executor,
         }
@@ -285,6 +288,7 @@ impl CoreRefreshEngine {
         observed_at_ms: u64,
     ) {
         let mut state = self.lock_state();
+        let mut recorded_routes = BTreeSet::new();
         for (route, watermark) in routes {
             if state.known_route_ids.contains(&route) {
                 let recorded =
@@ -292,11 +296,64 @@ impl CoreRefreshEngine {
                         .dirty_routes
                         .record_event(route.clone(), watermark, observed_at_ms);
                 if recorded {
+                    recorded_routes.insert(route.clone());
                     for continuation in state.manual_all_continuations.values_mut() {
                         continuation.invalidate_route(&route);
                     }
                 }
             }
+        }
+        let frontier = state.route_freshness_frontier.clone();
+        drop(state);
+        if let Some(frontier) = frontier {
+            frontier.observe_routes(recorded_routes.iter());
+        }
+    }
+
+    /// Performs the daemon's bounded startup comparison between exact watch
+    /// targets and the route snapshots certified by the active Core
+    /// generation. Changed or uncertifiable routes enter the normal exact
+    /// dirty-route scheduler; matching routes remain clean.
+    pub(in crate::semantic) fn reconcile_route_freshness_frontier(
+        &self,
+        data_root: &Path,
+        catalog: &SourceBackedWatchCatalog,
+        watcher_watermark: EventWatermark,
+        observed_at_ms: u64,
+    ) -> Result<usize> {
+        let (published, open_warning) = match open_published_generation(data_root) {
+            Ok(published) => (published, None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "open active Core publication for route freshness reconciliation: {error:#}"
+                )),
+            ),
+        };
+        let reconciliation =
+            RouteFreshnessFrontier::reconcile(data_root, catalog, published.as_ref());
+        let dirty_count = reconciliation.dirty_routes.len();
+        let mut state = self.lock_state();
+        state.route_freshness_frontier = Some(reconciliation.frontier);
+        let known_dirty = reconciliation
+            .dirty_routes
+            .into_iter()
+            .filter(|route| state.known_route_ids.contains(route))
+            .collect::<Vec<_>>();
+        let watermark = state.dirty_routes.seed_watermark().max(watcher_watermark);
+        state
+            .dirty_routes
+            .seed_clean_exact_routes(known_dirty, watermark, observed_at_ms);
+        drop(state);
+
+        let warnings = open_warning
+            .into_iter()
+            .chain(reconciliation.warning)
+            .collect::<Vec<_>>();
+        if warnings.is_empty() {
+            Ok(dirty_count)
+        } else {
+            Err(anyhow!(warnings.join("; ")))
         }
     }
 
@@ -404,7 +461,6 @@ impl CoreRefreshEngine {
                 SourceRefreshRuntimeMetadata::periodic(),
                 Some(catalog),
                 refresh_scope,
-                false,
             );
             let request_id = attempt.request_id.clone();
             state.active_request_id = Some(request_id.clone());
@@ -427,7 +483,29 @@ impl CoreRefreshEngine {
                 if !matches!(mode, "background" | "wait") {
                     return Err(anyhow!("invalid daemon source refresh mode `{mode}`"));
                 }
+                let operation = SourceBackedRefreshOperation::from_request_json(request)?;
                 let explicit_catalog = request.get("explicit_source_catalog");
+                match (operation, mode, explicit_catalog) {
+                    (SourceBackedRefreshOperation::Refresh, _, Some(_)) => {
+                        return Err(anyhow!(
+                            "refresh operation cannot carry explicit source catalog authority"
+                        ))
+                    }
+                    (SourceBackedRefreshOperation::Import, "background", _) => {
+                        return Err(anyhow!(
+                            "import operation requires daemon refresh mode `wait`"
+                        ))
+                    }
+                    (SourceBackedRefreshOperation::Import, _, None) => {
+                        return Err(anyhow!(
+                            "import operation requires explicit source catalog authority"
+                        ))
+                    }
+                    _ => {}
+                }
+                if operation == SourceBackedRefreshOperation::Refresh && mode == "background" {
+                    return Ok(Some(self.background_maintenance_wake_response(data_root)?));
+                }
                 let requested_catalog = explicit_catalog
                     .map(ExplicitSourceCatalogAuthority::from_json)
                     .transpose()?
@@ -445,27 +523,20 @@ impl CoreRefreshEngine {
                         ))
                     }
                 };
-                let fail_on_source_failure = match request.get("fail_on_source_failure") {
-                    None | Some(Value::Bool(false)) => false,
-                    Some(Value::Bool(true)) => true,
-                    Some(_) => {
-                        return Err(anyhow!(
-                        "daemon source refresh fail-on-source-failure requirement must be boolean"
-                    ))
-                    }
-                };
                 let previous_generation = self.observed_published_generation(data_root)?;
-                let metadata = if explicit_catalog.is_some() {
-                    source_catalog_refresh_runtime_metadata(data_root)
-                } else {
-                    source_refresh_runtime_metadata(data_root)
+                let metadata = match operation {
+                    SourceBackedRefreshOperation::Import => {
+                        source_catalog_refresh_runtime_metadata(data_root)
+                    }
+                    SourceBackedRefreshOperation::Refresh => {
+                        source_refresh_runtime_metadata(data_root)
+                    }
                 };
                 let response = match self.enqueue_with_catalog_metadata(
                     previous_generation,
                     metadata,
                     Some(requested_catalog),
                     SourceBackedRefreshScope::All,
-                    fail_on_source_failure,
                     // Wait controls how the client observes the attempt; it is
                     // not itself a fresh-after-admission barrier.
                     admission,
@@ -500,6 +571,29 @@ impl CoreRefreshEngine {
             }
             _ => Ok(None),
         }
+    }
+
+    fn background_maintenance_wake_response(&self, data_root: &Path) -> Result<Value> {
+        let published_generation = self.observed_published_generation(data_root)?;
+        let metadata = source_refresh_runtime_metadata(data_root);
+        Ok(compact_json(json!({
+            "ok": true,
+            "schema_version": 1,
+            "owner": "daemon",
+            "request_id": Uuid::now_v7().to_string(),
+            "request_state": "queued",
+            "previous_generation": published_generation.clone(),
+            "published_generation": published_generation,
+            "progress": {
+                "phase": "maintenance_wake",
+                "completed_sources": 0,
+                "total_sources": 0,
+            },
+            "daemon_mode": metadata.daemon_mode.as_str(),
+            "trigger": metadata.trigger,
+            "trigger_provenance": metadata.trigger_provenance,
+            "maintenance_wake": true,
+        })))
     }
 
     fn run_next_with_terminal_success<Execute, Probe, Terminal, Published, Failed>(
@@ -573,9 +667,12 @@ impl CoreRefreshEngine {
                 )),
                 None,
             ),
-            (Err(error), Ok(observed)) => (Err(format!("{error:#}")), observed),
+            (Err(error), Ok(observed)) => {
+                (Err(source_backed_refresh_error_summary(&error)), observed)
+            }
             (Err(error), Err(probe_error)) => (Err(format!(
-                "{error:#}; verifying the retained generation also failed: {probe_error:#}"
+                "{}; verifying the retained generation also failed: {probe_error:#}",
+                source_backed_refresh_error_summary(&error)
             )), None),
         };
         let continuation = self
@@ -799,6 +896,30 @@ impl CoreRefreshEngine {
                 .and_then(|attempt| attempt.timings)
                 .unwrap_or_default();
         }
+        let frontier_publication = publication_ready
+            .then(|| {
+                state
+                    .route_freshness_frontier
+                    .clone()
+                    .zip(state.pinned_core_publication.as_ref().map(Arc::clone))
+            })
+            .flatten();
+        // Keep the dirty-ledger lock through durable frontier publication.
+        // A watcher event arriving after acknowledgement must either wait and
+        // leave this older candidate durable, or have invalidated the
+        // admission before this point. It must never update the candidate in
+        // the gap between acknowledgement and persistence.
+        let frontier_error = frontier_publication.and_then(|(frontier, publication)| {
+            frontier
+                .publish_acknowledged_routes(publication.verified_index_ref(), &covered_route_ids)
+                .err()
+                .map(|error| (frontier.data_root(), error))
+        });
+        drop(state);
+        if let Some((data_root, error)) = frontier_error {
+            let _ =
+                crate::semantic::daemon_wakeup::write_degraded_wakeup_receipt(&data_root, &error);
+        }
     }
 
     pub(super) fn lock_state(&self) -> std::sync::MutexGuard<'_, CoreRefreshEngineState> {
@@ -835,6 +956,30 @@ fn source_backed_refresh_failure_type(error: &anyhow::Error) -> Option<&'static 
     })
 }
 
+fn source_backed_refresh_error_summary(error: &anyhow::Error) -> String {
+    let failed_routes = error.chain().find_map(|cause| {
+        let SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes } =
+            cause.downcast_ref::<SourceBackedCoordinatorError>()?
+        else {
+            return None;
+        };
+        Some(failed_routes)
+    });
+    let Some(failed_routes) = failed_routes else {
+        return format!("{error:#}");
+    };
+    let mut summaries = failed_routes
+        .iter()
+        .map(|failure| format!("{} ({})", failure.provider.as_str(), failure.class.as_str()))
+        .collect::<Vec<_>>();
+    summaries.sort();
+    summaries.dedup();
+    format!(
+        "source-backed refresh retained no usable source; failed routes: {}",
+        summaries.join(", ")
+    )
+}
+
 fn find_attempt<'a>(
     state: &'a CoreRefreshEngineState,
     request_id: &str,
@@ -859,7 +1004,8 @@ fn coalesce_attempt(
     attempt: &mut SourceBackedRefreshAttempt,
     metadata: SourceRefreshRuntimeMetadata,
 ) -> Value {
-    if metadata.trigger == "import" {
+    if metadata.operation == SourceBackedRefreshOperation::Import {
+        attempt.operation = SourceBackedRefreshOperation::Import;
         attempt.trigger = metadata.trigger;
         attempt.trigger_provenance = metadata.trigger_provenance;
     }
@@ -910,7 +1056,6 @@ fn new_refresh_attempt(
     metadata: SourceRefreshRuntimeMetadata,
     requested_catalog: Option<ExplicitSourceCatalogAuthority>,
     refresh_scope: SourceBackedRefreshScope,
-    fail_on_source_failure: bool,
 ) -> SourceBackedRefreshAttempt {
     SourceBackedRefreshAttempt {
         request_id: Uuid::now_v7().to_string(),
@@ -921,7 +1066,7 @@ fn new_refresh_attempt(
         previous_generation: observed_generation.clone(),
         published_generation: observed_generation,
         refresh_scope,
-        fail_on_source_failure,
+        operation: metadata.operation,
         requested_explicit_source_catalog: requested_catalog,
         published_explicit_source_catalog: None,
         coalesced_requests: 0,
@@ -975,3 +1120,7 @@ fn source_route_ledger_now_ms() -> u64 {
         .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+#[path = "coordinator_state/frontier_behavior_tests.rs"]
+mod frontier_behavior_tests;

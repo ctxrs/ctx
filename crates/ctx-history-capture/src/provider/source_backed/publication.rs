@@ -165,45 +165,15 @@ impl SourceBackedRefreshExecutor {
             report_progress,
         )
     }
-
-    /// Runs a caller-owned refresh transaction that must not publish a
-    /// generation when any selected provider route fails.
-    pub fn refresh_scope_fail_closed(
-        &self,
-        index_root: impl AsRef<Path>,
-        scope: SourceBackedRefreshScope,
-        report_progress: impl FnMut(SourceBackedRefreshProgress) -> SourceBackedRouteResult<()>,
-    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
-        refresh_source_backed_generation_with_progress_and_discovery_timing(
-            index_root,
-            &self.registry,
-            self.writer_options.clone(),
-            self.discovery_duration,
-            self.work_budget,
-            SourceBackedRefreshPlan::fail_closed(scope),
-            report_progress,
-        )
-    }
 }
 
 struct SourceBackedRefreshPlan {
     scope: SourceBackedRefreshScope,
-    fail_on_source_failure: bool,
 }
 
 impl SourceBackedRefreshPlan {
     fn isolate(scope: SourceBackedRefreshScope) -> Self {
-        Self {
-            scope,
-            fail_on_source_failure: false,
-        }
-    }
-
-    fn fail_closed(scope: SourceBackedRefreshScope) -> Self {
-        Self {
-            scope,
-            fail_on_source_failure: true,
-        }
+        Self { scope }
     }
 }
 
@@ -527,15 +497,6 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                         writer.finish_source_route_stage(route_identity)?;
                         successful_this_attempt.insert(route_identity.clone());
                     } else {
-                        if plan.fail_on_source_failure {
-                            return Err(SourceBackedCoordinatorError::RouteScan {
-                                provider: route.metadata.source.provider,
-                                source: SourceBackedRouteError::new(
-                                    SourceBackedRouteErrorKind::SourceChanged,
-                                    "source changed during bounded refresh revalidation",
-                                ),
-                            });
-                        }
                         writer.rollback_source_route_stage(route_identity)?;
                         owners.retain(|_, owner| owner.route_index != route_index);
                         complete_inventory_owners.retain(|owner| owner.route_index != route_index);
@@ -560,12 +521,6 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                             source,
                         });
                     };
-                    if plan.fail_on_source_failure {
-                        return Err(SourceBackedCoordinatorError::RouteScan {
-                            provider: route.metadata.source.provider,
-                            source,
-                        });
-                    }
                     writer.rollback_source_route_stage(route_identity)?;
                     owners.retain(|_, owner| owner.route_index != route_index);
                     complete_inventory_owners.retain(|owner| owner.route_index != route_index);
@@ -617,15 +572,6 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 .iter()
                 .all(|path| path_presence(path) == PathPresence::Missing)
             {
-                if plan.fail_on_source_failure {
-                    return Err(SourceBackedCoordinatorError::RouteScan {
-                        provider: route.metadata.source.provider,
-                        source: SourceBackedRouteError::new(
-                            SourceBackedRouteErrorKind::SourceChanged,
-                            "certified-missing source changed during refresh verification",
-                        ),
-                    });
-                }
                 writer.rollback_source_route_stage(route_identity)?;
                 let carried_forward = writer.carry_failed_source_route_from_base(route_identity)?;
                 attempt_carried.insert(route_identity.clone());

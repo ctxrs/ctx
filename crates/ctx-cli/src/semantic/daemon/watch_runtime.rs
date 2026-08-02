@@ -94,6 +94,28 @@ impl DaemonWatchRuntime {
         }
     }
 
+    fn reconcile_route_freshness_frontier(
+        &self,
+        data_root: &Path,
+        refresh: &CoreRefreshEngine,
+        catalog: &SourceBackedWatchCatalog,
+    ) {
+        let watermark = self
+            .file_watcher
+            .as_ref()
+            .map(DaemonFileWatcher::startup_watermark)
+            .unwrap_or_else(|| EventWatermark::new(0, 0));
+        let result = refresh.reconcile_route_freshness_frontier(
+            data_root,
+            catalog,
+            watermark,
+            source_route_ledger_now_ms(),
+        );
+        if let Err(error) = result {
+            let _ = write_degraded_wakeup_receipt(data_root, &error);
+        }
+    }
+
     pub(super) fn reconcile_catalog_and_route_authority(
         &mut self,
         data_root: &Path,
@@ -183,6 +205,7 @@ impl DaemonWatchRuntime {
             if let (Some(catalog), Some(source_refresh)) = (self.catalog.snapshot(), source_refresh)
             {
                 source_refresh.initialize_watch_route_authority(catalog.route_ids().cloned());
+                self.reconcile_route_freshness_frontier(data_root, source_refresh, &catalog);
                 self.schedule_pending_missing_routes(data_root, source_refresh);
             }
         }

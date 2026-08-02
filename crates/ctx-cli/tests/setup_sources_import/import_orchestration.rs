@@ -614,19 +614,19 @@ fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
         (
             "missing",
             b"",
-            "invalid_source",
+            "custom (unreadable)",
             "invalid capture payload",
         ),
         (
             "unsupported",
             b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v999\"}\n",
-            "schema_incompatible",
+            "custom (incompatible)",
             "unsupported provider schema",
         ),
         (
             "duplicate",
             b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n",
-            "invalid_source",
+            "custom (unreadable)",
             "invalid capture payload",
         ),
     ];
@@ -910,7 +910,7 @@ fn import_all_skips_empty_gemini_source() {
 }
 
 #[test]
-fn import_all_fails_atomically_when_one_source_is_invalid() {
+fn import_all_publishes_valid_routes_and_reports_one_invalid_route() {
     let temp = finite_daemon_test_root();
     copy_dir_all(
         Path::new(&provider_history_fixture("codex-sessions")),
@@ -920,19 +920,33 @@ fn import_all_fails_atomically_when_one_source_is_invalid() {
     fs::create_dir_all(&opencode_dir).unwrap();
     fs::write(opencode_dir.join("opencode.db"), b"not sqlite").unwrap();
 
-    let output = ctx(&temp)
-        .args(["import", "--all", "--format=json", "--progress", "none"])
-        .assert()
-        .failure()
-        .get_output()
-        .clone();
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("source-backed scan failed for opencode")
-            && stderr.contains("not a database"),
-        "{stderr}"
+    let imported =
+        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
+    assert_eq!(imported["outcome"], "completed_with_source_failures");
+    assert_eq!(imported["failure_scope"], "source");
+    assert!(imported["totals"]["current_source_count"]
+        .as_u64()
+        .is_some_and(|count| count >= 1));
+    assert!(imported["totals"]["current_indexed_documents"]
+        .as_u64()
+        .is_some_and(|count| count >= 1));
+    let publication = &imported["sources"][0];
+    assert_eq!(
+        publication["daemon_request_metadata"]["operation"],
+        "import"
     );
+    assert!(publication["successful_route_ids"]
+        .as_array()
+        .is_some_and(|routes| !routes.is_empty()));
+    let failed = imported["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["provider"] == "opencode")
+        .expect("typed opencode route failure");
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(failed["class"], "unreadable");
+    assert_eq!(failed["carried_forward"], false);
 }
 
 #[test]
@@ -947,7 +961,7 @@ fn failed_import_attempt_does_not_count_as_indexed_history() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "source-backed scan failed for opencode",
+            "failed routes: opencode (unreadable)",
         ));
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));

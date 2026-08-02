@@ -4,7 +4,6 @@ pub(super) struct SourceBackedRefreshPlan<'a> {
     pub(super) explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
     pub(super) scope: SourceBackedRefreshScope,
     pub(super) covered_route_ids: BTreeSet<SourceRouteIdentity>,
-    pub(super) fail_on_source_failure: bool,
 }
 
 pub(super) fn execute_source_backed_refresh(
@@ -25,7 +24,6 @@ pub(super) fn execute_source_backed_refresh(
         explicit_source_catalog: plan.explicit_source_catalog,
         scope: plan.scope,
         covered_route_ids: plan.covered_route_ids,
-        fail_on_source_failure: plan.fail_on_source_failure,
         report_progress: &report_progress,
     })
 }
@@ -34,7 +32,6 @@ pub(super) fn execute_capture_owned_refresh(
     execution: SourceBackedRefreshExecution<'_>,
 ) -> Result<SourceBackedRefreshPublication> {
     let discovery = source_backed_discovery_context()?;
-    let fail_on_source_failure = execution.fail_on_source_failure;
     execute_capture_owned_refresh_with(
         execution,
         &discovery,
@@ -47,7 +44,7 @@ pub(super) fn execute_capture_owned_refresh(
               scope,
               covered_route_ids,
               report_progress| {
-            refresh_all_provider_sources_with_failure_handling(
+            refresh_all_provider_sources_route_local(
                 discovery,
                 report,
                 discovery_duration,
@@ -56,7 +53,6 @@ pub(super) fn execute_capture_owned_refresh(
                 explicit_source_catalog,
                 scope,
                 covered_route_ids,
-                fail_on_source_failure,
                 report_progress,
             )
         },
@@ -146,7 +142,7 @@ pub(super) fn refresh_all_provider_sources(
         CaptureSourceBackedRefreshProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> Result<SourceBackedRefreshPublication> {
-    refresh_all_provider_sources_with_failure_handling(
+    refresh_all_provider_sources_route_local(
         discovery,
         report,
         discovery_duration,
@@ -155,13 +151,12 @@ pub(super) fn refresh_all_provider_sources(
         explicit_source_catalog,
         scope,
         covered_route_ids,
-        false,
         report_progress,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn refresh_all_provider_sources_with_failure_handling(
+fn refresh_all_provider_sources_route_local(
     discovery: &DiscoveryContext,
     report: DiscoveryReport,
     discovery_duration: StdDuration,
@@ -170,7 +165,6 @@ fn refresh_all_provider_sources_with_failure_handling(
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     scope: SourceBackedRefreshScope,
     covered_route_ids: &BTreeSet<SourceRouteIdentity>,
-    fail_on_source_failure: bool,
     report_progress: &mut dyn FnMut(
         CaptureSourceBackedRefreshProgress,
     ) -> SourceBackedRouteResult<()>,
@@ -204,12 +198,9 @@ fn refresh_all_provider_sources_with_failure_handling(
         scope
     };
     let (executor, _issues) = build.into_refresh_executor(WriterOptions::default());
-    let receipt = if fail_on_source_failure {
-        executor.refresh_scope_fail_closed(index_root, physical_scope, report_progress)
-    } else {
-        executor.refresh_scope(index_root, physical_scope, report_progress)
-    }
-    .context("run capture-owned source-backed refresh")?;
+    let receipt = executor
+        .refresh_scope(index_root, physical_scope, report_progress)
+        .context("run capture-owned source-backed refresh")?;
     let current =
         SourceBackedRefreshCurrent::from_sources(&receipt.sources, receipt.removals.len())?;
     if current.source_count != receipt.certified_source_count

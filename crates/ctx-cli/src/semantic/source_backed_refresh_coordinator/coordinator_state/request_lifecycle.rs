@@ -29,9 +29,6 @@ impl CoreRefreshEngine {
                     .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
                 let covered_route_ids =
                     coordinator.admit_refresh_scope(request_id, &refresh_scope)?;
-                let fail_on_source_failure = coordinator
-                    .fail_on_source_failure(request_id)
-                    .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
                 coordinator.persist_job_status(data_root, request_id)?;
                 let publication = execute_source_backed_refresh(
                     executor.as_ref(),
@@ -42,7 +39,6 @@ impl CoreRefreshEngine {
                         explicit_source_catalog: Some(&requested_catalog),
                         scope: refresh_scope,
                         covered_route_ids,
-                        fail_on_source_failure,
                     },
                 )?;
                 let probe_started = StdInstant::now();
@@ -112,7 +108,6 @@ impl CoreRefreshEngine {
             SourceRefreshRuntimeMetadata::periodic(),
             Some(catalog),
             SourceBackedRefreshScope::All,
-            false,
             SourceRefreshAdmissionRequirement::AttachEquivalent,
         )
     }
@@ -141,7 +136,6 @@ impl CoreRefreshEngine {
             metadata,
             None,
             SourceBackedRefreshScope::All,
-            false,
             SourceRefreshAdmissionRequirement::AttachEquivalent,
         )
         .expect("requests without catalog authority always coalesce")
@@ -153,11 +147,10 @@ impl CoreRefreshEngine {
         metadata: SourceRefreshRuntimeMetadata,
         requested_catalog: Option<ExplicitSourceCatalogAuthority>,
         refresh_scope: SourceBackedRefreshScope,
-        fail_on_source_failure: bool,
         admission: SourceRefreshAdmissionRequirement,
     ) -> Result<Value> {
         let mut state = self.lock_state();
-        let is_manual_all = metadata.trigger == "import"
+        let is_manual_all = metadata.operation == SourceBackedRefreshOperation::Import
             && requested_catalog.is_some()
             && refresh_scope == SourceBackedRefreshScope::All;
         let mut continuation_predecessor = None;
@@ -181,11 +174,7 @@ impl CoreRefreshEngine {
                             &active.refresh_scope,
                             SourceBackedRefreshScope::Exact(routes) if routes.len() == 1
                         );
-                    if is_manual_all
-                        && same_catalog
-                        && automatic_exact
-                        && active.fail_on_source_failure == fail_on_source_failure
-                    {
+                    if is_manual_all && same_catalog && automatic_exact {
                         if active.state == SourceBackedRefreshState::Queued {
                             active.refresh_scope = SourceBackedRefreshScope::All;
                             return Ok(coalesce_attempt(active, metadata));
@@ -195,7 +184,6 @@ impl CoreRefreshEngine {
                     if active.requested_explicit_source_catalog.as_ref()
                         == requested_catalog.as_ref()
                         && active.refresh_scope == refresh_scope
-                        && active.fail_on_source_failure == fail_on_source_failure
                     {
                         return Ok(coalesce_attempt(active, metadata));
                     }
@@ -215,7 +203,6 @@ impl CoreRefreshEngine {
                             && attempt.requested_explicit_source_catalog.as_ref()
                                 == requested_catalog.as_ref()
                             && attempt.refresh_scope == refresh_scope
-                            && attempt.fail_on_source_failure == fail_on_source_failure
                     })
                     .map(|attempt| attempt.request_id.clone())
             });
@@ -239,7 +226,6 @@ impl CoreRefreshEngine {
             metadata,
             requested_catalog,
             refresh_scope,
-            fail_on_source_failure,
         );
         let response = attempt.to_json();
         let request_id = attempt.request_id.clone();
@@ -283,23 +269,14 @@ impl CoreRefreshEngine {
         find_attempt(&state, request_id).map(|attempt| attempt.refresh_scope.clone())
     }
 
-    fn fail_on_source_failure(&self, request_id: &str) -> Option<bool> {
-        let state = self.lock_state();
-        find_attempt(&state, request_id).map(|attempt| attempt.fail_on_source_failure)
-    }
-
     #[cfg(test)]
-    pub(in crate::semantic) fn request_authority_for_test(
+    pub(in crate::semantic) fn request_catalog_authority_for_test(
         &self,
         request_id: &str,
-    ) -> Option<(ExplicitSourceCatalogAuthority, bool)> {
+    ) -> Option<ExplicitSourceCatalogAuthority> {
         let state = self.lock_state();
-        find_attempt(&state, request_id).and_then(|attempt| {
-            attempt
-                .requested_explicit_source_catalog
-                .clone()
-                .map(|catalog| (catalog, attempt.fail_on_source_failure))
-        })
+        find_attempt(&state, request_id)
+            .and_then(|attempt| attempt.requested_explicit_source_catalog.clone())
     }
 
     fn admit_refresh_scope(

@@ -254,6 +254,7 @@ impl MissingFixtureHarness {
                 &json!({
                     "op": SOURCE_REFRESH_REQUEST_OP,
                     "mode": "wait",
+                    "operation": "import",
                     "explicit_source_catalog": authority.to_json(),
                 }),
             )
@@ -507,6 +508,7 @@ fn watcher_and_manual_race_cannot_overadvance_or_delete_a_live_route() {
                 &json!({
                     "op": SOURCE_REFRESH_REQUEST_OP,
                     "mode": "wait",
+                    "operation": "import",
                     "explicit_source_catalog": authority.to_json(),
                 }),
             )

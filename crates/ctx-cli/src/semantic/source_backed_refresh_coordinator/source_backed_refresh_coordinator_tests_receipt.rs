@@ -108,6 +108,7 @@ fn explicit_catalog_request_retains_daemon_metadata_and_authority() {
                 "schema_version": 1,
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
+                "operation": "import",
                 "explicit_source_catalog": authority.to_json(),
             }),
         )
@@ -168,6 +169,7 @@ fn mismatched_catalog_publication_is_not_recorded_as_verified() {
                 "schema_version": 1,
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
+                "operation": "import",
                 "explicit_source_catalog": requested.to_json(),
             }),
         )

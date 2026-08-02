@@ -93,6 +93,12 @@ fn all_cold_route_failures_keep_their_typed_daemon_classification() {
             .unwrap();
         assert!(run.failed);
         assert_eq!(run.job["failure_type"], expected, "{:#?}", run.job);
+        let last_error = run.job["last_error"].as_str().unwrap();
+        assert!(
+            last_error.contains(&format!("codex ({})", class.as_str())),
+            "{last_error}"
+        );
+        assert!(!last_error.contains(&"11".repeat(32)), "{last_error}");
     }
 }
 
@@ -542,6 +548,7 @@ fn recovered_wait_after_restart_attaches_to_equivalent_running_attempt() {
                 &json!({
                     "op": SOURCE_REFRESH_REQUEST_OP,
                     "mode": "wait",
+                    "operation": "import",
                     "explicit_source_catalog": authority.to_json(),
                 }),
             )
