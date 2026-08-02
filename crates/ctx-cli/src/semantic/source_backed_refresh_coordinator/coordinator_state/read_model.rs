@@ -108,6 +108,7 @@ pub(super) struct SourceBackedRefreshProgress {
     pub(super) completed_sources: usize,
     pub(super) total_sources: usize,
     pub(super) current_source: Option<String>,
+    pub(super) completed_records: Option<u64>,
 }
 
 impl Default for SourceBackedRefreshProgress {
@@ -117,6 +118,7 @@ impl Default for SourceBackedRefreshProgress {
             completed_sources: 0,
             total_sources: 0,
             current_source: None,
+            completed_records: None,
         }
     }
 }
@@ -128,6 +130,7 @@ impl SourceBackedRefreshProgress {
             "completed_sources": self.completed_sources,
             "total_sources": self.total_sources,
             "current_source": self.current_source,
+            "completed_records": self.completed_records,
         }))
     }
 }

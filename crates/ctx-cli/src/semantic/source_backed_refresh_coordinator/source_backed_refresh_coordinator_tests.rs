@@ -33,8 +33,14 @@ impl SourceBackedRefreshExecutor for TestExecutor {
         if let Some(error) = self.failure.as_deref() {
             return Err(anyhow!("{error}"));
         }
-        execution.report_progress("refreshing", 0, 1, Some("provider-neutral".to_owned()))?;
-        execution.report_progress("verifying", 1, 1, None)?;
+        execution.report_progress(
+            "refreshing",
+            0,
+            1,
+            Some("provider-neutral".to_owned()),
+            Some(7),
+        )?;
+        execution.report_progress("verifying", 1, 1, None, None)?;
         Ok(test_publication(self.generation_id.clone()))
     }
 }
@@ -535,6 +541,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
             update.completed_sources,
             update.total_sources,
             update.current_source,
+            update.completed_records,
         ));
         Ok(())
     };
@@ -578,6 +585,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
                 completed_sources: 0,
                 total_sources: 2,
                 current_source: None,
+                completed_records: None,
                 stage_duration: StdDuration::ZERO,
                 elapsed: StdDuration::ZERO,
                 certified_source_count: None,
@@ -588,6 +596,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
                 completed_sources: 1,
                 total_sources: 2,
                 current_source: Some("provider-wide-route".to_owned()),
+                completed_records: Some(11),
                 stage_duration: StdDuration::ZERO,
                 elapsed: StdDuration::ZERO,
                 certified_source_count: None,
@@ -598,6 +607,7 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
                 completed_sources: 2,
                 total_sources: 2,
                 current_source: None,
+                completed_records: None,
                 stage_duration: StdDuration::ZERO,
                 elapsed: StdDuration::ZERO,
                 certified_source_count: None,
@@ -614,15 +624,16 @@ fn default_executor_invokes_one_all_provider_callback_and_maps_progress() {
     assert_eq!(
         updates.into_inner().unwrap(),
         vec![
-            ("discovering".to_owned(), 0, 0, None),
-            ("discovering".to_owned(), 0, 2, None),
+            ("discovering".to_owned(), 0, 0, None, None),
+            ("discovering".to_owned(), 0, 2, None, None),
             (
                 "refreshing".to_owned(),
                 1,
                 2,
                 Some("provider-wide-route".to_owned()),
+                Some(11),
             ),
-            ("verifying".to_owned(), 2, 2, None),
+            ("verifying".to_owned(), 2, 2, None, None),
         ]
     );
 }
@@ -898,6 +909,7 @@ fn duplicate_concurrent_requests_launch_one_writer() {
                     0,
                     1,
                     Some("source-a".to_owned()),
+                    Some(1),
                 );
                 Ok(test_publication("generation-2"))
             },
@@ -914,6 +926,7 @@ fn duplicate_concurrent_requests_launch_one_writer() {
         .status(&expected_request_id)
         .expect("published request status");
     assert_eq!(status["request_state"], "published");
+    assert!(status["progress"].get("completed_records").is_none());
     assert_eq!(status["published_generation"], "generation-2");
     assert_eq!(status["generation_changed"], true);
     assert_eq!(status["receipt"]["previous_generation"], "generation-1");
@@ -1345,6 +1358,7 @@ fn failed_refresh_retains_the_previous_published_generation() {
                     0,
                     1,
                     Some("source-a".to_owned()),
+                    Some(3),
                 );
                 Err(anyhow!("injected writer failure before publication"))
             },
@@ -1370,6 +1384,7 @@ fn failed_refresh_retains_the_previous_published_generation() {
     assert_eq!(run.job["status"], "failed");
     assert_eq!(run.job["published_generation"], "generation-1");
     assert_eq!(run.job["progress"]["phase"], "failed");
+    assert!(run.job["progress"].get("completed_records").is_none());
 }
 
 #[test]
@@ -1593,8 +1608,10 @@ fn recovered_wait_after_restart_attaches_to_equivalent_running_attempt() {
             0,
             1,
             Some("interrupted-source".to_owned()),
+            Some(5),
         )
         .expect("interrupted running job");
+    assert_eq!(running_job["progress"]["completed_records"], 5);
     write_daemon_job_status(
         &daemon_source_backed_refresh_job_path(temp.path()),
         &running_job,

@@ -211,6 +211,22 @@ fn render_status_human(
             }
         }
     }
+    if component_status(&report["refresh"]) == "pending" {
+        let progress = report["refresh"].get("progress");
+        if let Some(source) = progress
+            .and_then(|progress| progress.get("current_source"))
+            .and_then(Value::as_str)
+            .filter(|source| !source.is_empty())
+        {
+            history_values.push(("Active source", source.to_owned()));
+        }
+        if let Some(records) = progress
+            .and_then(|progress| progress.get("completed_records"))
+            .and_then(Value::as_u64)
+        {
+            history_values.push(("Accepted", counted(records, "record", "records")));
+        }
+    }
     let history_fields = history_values
         .iter()
         .map(|(label, value)| Field::new(label, value.as_str()))
@@ -609,6 +625,23 @@ mod tests {
         let context = context(80, ColorMode::Never);
         let rendered = render_report(&context, &report).render_plain();
         assert!(rendered.contains("1 history service is catching up; search remains available."));
+    }
+
+    #[test]
+    fn active_refresh_status_shows_accepted_records_without_inventing_a_total() {
+        let mut report = status_report(true, "ready", "pending");
+        report["refresh"]["progress"] = json!({
+            "phase": "refreshing",
+            "completed_sources": 2,
+            "total_sources": 6,
+            "current_source": "~/.local/share/opencode/opencode.db",
+            "completed_records": 1234,
+        });
+
+        let rendered = render_report(&context(80, ColorMode::Never), &report).render_plain();
+        assert!(rendered.contains("Active source  ~/.local/share/opencode/opencode.db"));
+        assert!(rendered.contains("Accepted       1,234 records"));
+        assert!(!rendered.contains("records /"));
     }
 
     #[test]

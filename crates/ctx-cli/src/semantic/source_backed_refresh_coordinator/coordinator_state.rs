@@ -24,6 +24,7 @@ pub(super) struct SourceBackedRefreshProgressUpdate {
     pub(super) completed_sources: usize,
     pub(super) total_sources: usize,
     pub(super) current_source: Option<String>,
+    pub(super) completed_records: Option<u64>,
 }
 
 /// Daemon-owned execution context passed to the capture refresh callback.
@@ -48,12 +49,14 @@ impl SourceBackedRefreshExecution<'_> {
         completed_sources: usize,
         total_sources: usize,
         current_source: Option<String>,
+        completed_records: Option<u64>,
     ) -> Result<()> {
         (self.report_progress)(SourceBackedRefreshProgressUpdate {
             phase: phase.to_owned(),
             completed_sources,
             total_sources,
             current_source,
+            completed_records,
         })
     }
 }
@@ -684,6 +687,7 @@ impl CoreRefreshEngine {
         completed_sources: usize,
         total_sources: usize,
         current_source: Option<String>,
+        completed_records: Option<u64>,
     ) -> Option<Value> {
         let mut state = self.lock_state();
         let attempt = find_attempt_mut(&mut state, request_id)?;
@@ -695,6 +699,7 @@ impl CoreRefreshEngine {
             completed_sources,
             total_sources,
             current_source,
+            completed_records,
         };
         Some(attempt.job_json())
     }
@@ -781,6 +786,7 @@ impl CoreRefreshEngine {
             let attempt = find_attempt_mut(&mut state, &request_id)?;
             attempt.finished_at_ms = Some(utc_now().timestamp_millis());
             attempt.progress.current_source = None;
+            attempt.progress.completed_records = None;
             if observed_for_status.is_some() {
                 attempt.published_generation = observed_for_status.clone();
             }

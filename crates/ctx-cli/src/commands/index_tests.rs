@@ -59,6 +59,8 @@ fn readiness(
                 "phase": if refresh_status == "ready" { "published" } else { "scanning_provider_sources" },
                 "completed_sources": completed_sources,
                 "total_sources": 12,
+                "current_source": if refresh_status == "ready" { serde_json::Value::Null } else { json!("source.db") },
+                "completed_records": if refresh_status == "ready" { serde_json::Value::Null } else { json!(1234) },
             },
         },
         "semantic": {
@@ -118,6 +120,7 @@ fn machine_snapshot_contains_only_authoritative_readiness_units() {
     let rendered: serde_json::Value = serde_json::from_str(rendered.trim()).unwrap();
     assert_eq!(rendered["refresh"]["progress"]["completed_sources"], 0);
     assert_eq!(rendered["refresh"]["progress"]["total_sources"], 12);
+    assert_eq!(rendered["refresh"]["progress"]["completed_records"], 1234);
     for obsolete in [
         "inventory_units",
         "pending_inventory_units",

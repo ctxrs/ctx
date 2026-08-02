@@ -184,6 +184,8 @@ pub struct SourceBackedGenerationSink<'writer> {
     pub(in super::super) applied_removals: &'writer mut Vec<SourceBackedCertifiedRemoval>,
     pub(in super::super) route_index: usize,
     pub(in super::super) leaf_worker_budget: usize,
+    pub(in super::super) record_progress:
+        Option<&'writer mut dyn FnMut() -> SourceBackedCoordinatorResult<()>>,
 }
 
 #[derive(Clone)]
@@ -225,6 +227,9 @@ impl SourceBackedGenerationSink<'_> {
 
     pub fn add_core_record(&mut self, record: CoreRecord) -> SourceBackedCoordinatorResult<()> {
         self.writer.add_core_record(record)?;
+        if let Some(report_progress) = self.record_progress.as_mut() {
+            report_progress()?;
+        }
         Ok(())
     }
 

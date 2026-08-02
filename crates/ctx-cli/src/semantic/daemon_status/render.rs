@@ -239,13 +239,26 @@ pub(in crate::semantic) fn render_daemon_status_human(
         let mut history_fields = vec![state_field("Status", history_state, history_token)];
         let mut history_details = Vec::new();
         if history_catching_up {
-            if let Some(phase) = core_refresh
-                .and_then(|job| job.get("progress"))
+            let progress = core_refresh.and_then(|job| job.get("progress"));
+            if let Some(phase) = progress
                 .and_then(|progress| progress.get("phase"))
                 .and_then(Value::as_str)
                 .filter(|phase| !phase.is_empty())
             {
                 history_details.push(("Progress", humanize_code(phase)));
+            }
+            if let Some(source) = progress
+                .and_then(|progress| progress.get("current_source"))
+                .and_then(Value::as_str)
+                .filter(|source| !source.is_empty())
+            {
+                history_details.push(("Source", source.to_owned()));
+            }
+            if let Some(records) = progress
+                .and_then(|progress| progress.get("completed_records"))
+                .and_then(Value::as_u64)
+            {
+                history_details.push(("Accepted", counted(records, "record", "records")));
             }
         }
         if let Some(count) = core_refresh

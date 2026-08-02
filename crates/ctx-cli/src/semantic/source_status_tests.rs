@@ -127,6 +127,26 @@ fn pristine_source_status_is_read_only_and_exposes_stable_paths() {
 }
 
 #[test]
+fn refresh_report_preserves_optional_active_source_record_progress() {
+    let job = json!({
+        "request_state": "running",
+        "progress": {
+            "phase": "refreshing",
+            "completed_sources": 2,
+            "total_sources": 6,
+            "current_source": "source.db",
+            "completed_records": 1234,
+        },
+    });
+    let daemon = json!({"running": true});
+
+    let report = refresh_report(Some(&job), None, &daemon);
+
+    assert_eq!(report["progress"]["current_source"], "source.db");
+    assert_eq!(report["progress"]["completed_records"], 1234);
+}
+
+#[test]
 fn source_daemon_report_preserves_semantic_terminal_job_facts() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");

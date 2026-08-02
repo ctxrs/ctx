@@ -373,8 +373,14 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
         let coordinator = CoreRefreshEngine::with_executor(Arc::new(
             move |execution: SourceBackedRefreshExecution<'_>| {
                 calls.fetch_add(1, Ordering::SeqCst);
-                execution.report_progress("refreshing", 0, 1, Some("all-providers".to_owned()))?;
-                execution.report_progress("verifying", 1, 1, None)?;
+                execution.report_progress(
+                    "refreshing",
+                    0,
+                    1,
+                    Some("all-providers".to_owned()),
+                    Some(12),
+                )?;
+                execution.report_progress("verifying", 1, 1, None, None)?;
                 let writer = ctx_history_index::GenerationWriter::open(
                     execution.index_root,
                     ctx_history_index::WriterOptions::default(),

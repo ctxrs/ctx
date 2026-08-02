@@ -72,6 +72,7 @@ impl SinkHarness {
             route_index: 0,
             leaf_worker_budget: self.leaf_worker_budget,
             applied_removals: &mut Vec::new(),
+            record_progress: None,
         };
         sink.run_parallel_leaf_scans(jobs, worker_count, scan)
     }
@@ -632,6 +633,7 @@ fn worker_budget_reserves_indexers_runtime_and_caps_scanners() {
         route_index: 0,
         leaf_worker_budget: harness.leaf_worker_budget,
         applied_removals: &mut Vec::new(),
+        record_progress: None,
     };
     assert_eq!(sink.recommended_leaf_workers(0), 0);
     assert_eq!(sink.recommended_leaf_workers(2), 2);

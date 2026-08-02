@@ -205,12 +205,26 @@ fn render_refresh_progress(readiness: &Value, context: &RenderContext) -> Docume
             )
         })
         .unwrap_or_else(|| "measuring".to_owned());
+    let current_source =
+        value_at(readiness, &["refresh", "progress", "current_source"]).and_then(Value::as_str);
+    let completed_records = u64_at(readiness, &["refresh", "progress", "completed_records"]);
     let phase = humanize(&phase);
+    let mut details = vec![("Sources", sources), ("Phase", phase)];
+    if let Some(current_source) = current_source {
+        details.push(("Source", current_source.to_owned()));
+        if let Some(completed_records) = completed_records {
+            details.push((
+                "Records",
+                format!("{} accepted", format_count_u64(completed_records)),
+            ));
+        }
+    }
+    let detail_fields = details
+        .iter()
+        .map(|(label, value)| Field::new(*label, value.as_str()))
+        .collect::<Vec<_>>();
     document.push_blank();
-    document.append(fields(
-        context,
-        &[Field::new("Sources", &sources), Field::new("Phase", &phase)],
-    ));
+    document.append(fields(context, &detail_fields));
     document
 }
 
@@ -425,6 +439,8 @@ mod tests {
                     "phase": "scanning_provider_sources",
                     "completed_sources": 7,
                     "total_sources": 12,
+                    "current_source": "~/.local/share/opencode/opencode.db",
+                    "completed_records": 1234,
                 },
             },
             "semantic": {
@@ -459,6 +475,8 @@ mod tests {
         assert!(rendered.starts_with("✓ Your history is searchable"));
         assert!(rendered.contains("Refresh"));
         assert!(rendered.contains("7 / 12"));
+        assert!(rendered.contains("~/.local/share/opencode/opencode.db"));
+        assert!(rendered.contains("1,234 accepted"));
         assert!(!rendered.contains("inventory"));
         assert!(!rendered.contains("history file"));
     }

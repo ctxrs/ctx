@@ -761,6 +761,88 @@ fn committed_progress_failure_does_not_hide_visible_publication() {
     );
 }
 
+#[test]
+fn source_record_progress_resets_per_route_and_is_absent_outside_scans() {
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(fixture_route(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        1,
+    ));
+    registry.register(fixture_route(
+        CaptureProvider::Hermes,
+        "hermes_state_sqlite",
+        2,
+    ));
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+    let mut updates = Vec::new();
+
+    let replay = refresh_source_backed_generation_with_progress(
+        temp.path(),
+        &registry,
+        WriterOptions::default(),
+        |progress| {
+            updates.push((
+                progress.phase,
+                progress.current_source,
+                progress.completed_records,
+            ));
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(replay.commit.generation_id, initial.commit.generation_id);
+
+    let active = updates
+        .iter()
+        .filter(|(_, source, _)| source.is_some())
+        .map(|(_, _, completed_records)| *completed_records)
+        .collect::<Vec<_>>();
+    assert_eq!(active, vec![Some(0), Some(1), Some(0), Some(1)]);
+    assert!(updates
+        .iter()
+        .filter(|(_, source, _)| source.is_none())
+        .all(|(_, _, completed_records)| completed_records.is_none()));
+}
+
+#[test]
+fn accepted_record_progress_failure_stays_typed_and_prevents_publication() {
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(fixture_route(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        1,
+    ));
+    let temp = tempdir().unwrap();
+
+    let error = refresh_source_backed_generation_with_progress(
+        temp.path(),
+        &registry,
+        WriterOptions::default(),
+        |progress| {
+            if progress.completed_records == Some(1) {
+                Err(SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "injected source-record progress failure",
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::Progress(SourceBackedRouteError { detail, .. })
+            if detail == "injected source-record progress failure"
+    ));
+    assert!(VerifiedIndex::open(temp.path()).is_err());
+}
+
 fn revisioned_receipt_route(revision: u8) -> (SourceBackedRoute, CertifiedSource) {
     let source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 91);
     let session_id = fixture_session_id(&source);

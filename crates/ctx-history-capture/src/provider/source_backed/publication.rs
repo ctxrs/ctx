@@ -6,6 +6,8 @@ pub struct SourceBackedRefreshProgress {
     pub completed_sources: usize,
     pub total_sources: usize,
     pub current_source: Option<String>,
+    /// Core records accepted for the active source route. No total is implied.
+    pub completed_records: Option<u64>,
     /// Time spent in the current phase when this event was emitted.
     pub stage_duration: Duration,
     /// Total measured discovery plus refresh time at this event.
@@ -14,6 +16,35 @@ pub struct SourceBackedRefreshProgress {
     pub certified_source_count: Option<usize>,
     /// Commit-derived byte evidence, available only after publication.
     pub certified_source_bytes: Option<u64>,
+}
+
+const SOURCE_RECORD_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Default)]
+struct SourceRecordProgress {
+    completed_records: u64,
+    last_emitted_records: u64,
+    last_emitted_at: Option<Instant>,
+}
+
+impl SourceRecordProgress {
+    fn accepted_at(&mut self, now: Instant) -> Option<u64> {
+        self.completed_records = self.completed_records.saturating_add(1);
+        let should_emit = self.last_emitted_at.is_none_or(|last| {
+            now.saturating_duration_since(last) >= SOURCE_RECORD_PROGRESS_INTERVAL
+        });
+        should_emit.then(|| self.mark_emitted(now))
+    }
+
+    fn flush_at(&mut self, now: Instant) -> Option<u64> {
+        (self.completed_records != self.last_emitted_records).then(|| self.mark_emitted(now))
+    }
+
+    fn mark_emitted(&mut self, now: Instant) -> u64 {
+        self.last_emitted_at = Some(now);
+        self.last_emitted_records = self.completed_records;
+        self.completed_records
+    }
 }
 
 /// Capture-owned executor that can be installed behind the daemon's
@@ -218,6 +249,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         completed_sources: 0,
         total_sources: scanned_routes,
         current_source: None,
+        completed_records: None,
         stage_duration: discovery_duration,
         elapsed: discovery_duration,
         certified_source_count: None,
@@ -292,6 +324,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                 completed_sources: completed_routes,
                 total_sources: scanned_routes,
                 current_source: Some(route.metadata.source.path.display().to_string()),
+                completed_records: Some(0),
                 stage_duration: scan_started.elapsed(),
                 elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
                 certified_source_count: None,
@@ -300,6 +333,34 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             .map_err(SourceBackedCoordinatorError::Progress)?;
             writer.begin_source_route_stage(route_identity.clone())?;
             let removal_checkpoint = applied_removals.len();
+            let current_source = route.metadata.source.path.display().to_string();
+            let mut record_progress = SourceRecordProgress::default();
+            let mut progress_failure = None::<SourceBackedRouteError>;
+            let mut report_accepted_record = || {
+                if let Some(error) = progress_failure.as_ref() {
+                    return Err(SourceBackedCoordinatorError::Progress(error.clone()));
+                }
+                let Some(completed_records) = record_progress.accepted_at(Instant::now()) else {
+                    return Ok(());
+                };
+                match report_progress(SourceBackedRefreshProgress {
+                    phase: "refreshing",
+                    completed_sources: completed_routes,
+                    total_sources: scanned_routes,
+                    current_source: Some(current_source.clone()),
+                    completed_records: Some(completed_records),
+                    stage_duration: scan_started.elapsed(),
+                    elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
+                    certified_source_count: None,
+                    certified_source_bytes: None,
+                }) {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        progress_failure = Some(error.clone());
+                        Err(SourceBackedCoordinatorError::Progress(error))
+                    }
+                }
+            };
             let scan_result = {
                 let mut sink = SourceBackedGenerationSink {
                     writer: &mut writer,
@@ -308,9 +369,28 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
                     applied_removals: &mut applied_removals,
                     route_index,
                     leaf_worker_budget: work_budget,
+                    record_progress: Some(&mut report_accepted_record),
                 };
                 (driver.scan)(&mut sink)
             };
+            drop(report_accepted_record);
+            if let Some(error) = progress_failure {
+                return Err(SourceBackedCoordinatorError::Progress(error));
+            }
+            if let Some(completed_records) = record_progress.flush_at(Instant::now()) {
+                report_progress(SourceBackedRefreshProgress {
+                    phase: "refreshing",
+                    completed_sources: completed_routes,
+                    total_sources: scanned_routes,
+                    current_source: Some(current_source),
+                    completed_records: Some(completed_records),
+                    stage_duration: scan_started.elapsed(),
+                    elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
+                    certified_source_count: None,
+                    certified_source_bytes: None,
+                })
+                .map_err(SourceBackedCoordinatorError::Progress)?;
+            }
             match scan_result {
                 Ok(()) => {
                     writer.finish_source_route_stage(route_identity)?;
@@ -396,6 +476,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
             completed_sources: completed_routes,
             total_sources: scanned_routes,
             current_source: None,
+            completed_records: None,
             stage_duration: scan_started.elapsed(),
             elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
             certified_source_count: None,
@@ -560,6 +641,7 @@ fn refresh_source_backed_generation_with_progress_and_discovery_timing(
         completed_sources: successful_scanned_routes,
         total_sources: scanned_routes,
         current_source: None,
+        completed_records: None,
         stage_duration: commit_duration,
         elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
         certified_source_count: Some(commit.certified_sources),
@@ -800,5 +882,37 @@ mod ownership_tests {
             .unwrap_err(),
             ProjectionContractError::DuplicateInventorySource
         );
+    }
+
+    #[test]
+    fn source_record_progress_is_prompt_throttled_monotonic_and_flushable() {
+        let started = Instant::now();
+        let mut progress = SourceRecordProgress::default();
+
+        assert_eq!(progress.accepted_at(started), Some(1));
+        assert_eq!(
+            progress.accepted_at(started + Duration::from_millis(500)),
+            None
+        );
+        assert_eq!(
+            progress.accepted_at(started + SOURCE_RECORD_PROGRESS_INTERVAL),
+            Some(3)
+        );
+        assert_eq!(
+            progress.accepted_at(started + Duration::from_millis(1_100)),
+            None
+        );
+        assert_eq!(
+            progress.flush_at(started + Duration::from_millis(1_100)),
+            Some(4)
+        );
+        assert_eq!(
+            progress.flush_at(started + Duration::from_millis(1_100)),
+            None
+        );
+
+        let mut next_source = SourceRecordProgress::default();
+        assert_eq!(next_source.completed_records, 0);
+        assert_eq!(next_source.accepted_at(started), Some(1));
     }
 }
