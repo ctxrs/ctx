@@ -606,6 +606,7 @@ fn event_page_is_authoritatively_validated_before_exchange() {
         materialization_id: "d".repeat(64),
         core_generation_id: "a".repeat(64),
         reconciliation: CoreSourceReconciliation {
+            materialize_index: 0,
             delta: CoreSourceDelta::Present(CoreSourceState {
                 source,
                 core_record_accumulator: "0".repeat(64),
