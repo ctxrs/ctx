@@ -1,5 +1,100 @@
 use super::*;
 
+fn empty_terminal_receipt_fixture() -> (tempfile::TempDir, Value, PinnedSourceBackedGeneration) {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let receipt = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                WriterOptions::default(),
+            )?
+            .commit(|_| true)?;
+            Ok(empty_test_publication(receipt.generation_id))
+        },
+    ));
+    coordinator.enqueue_periodic(&data_root).unwrap();
+    let run = coordinator.run_next(&data_root).expect("empty refresh");
+    assert!(!run.failed);
+    let pin = pin_published_generation(&data_root)
+        .unwrap()
+        .expect("empty published generation");
+    (temp, run.job, pin)
+}
+
+#[test]
+fn current_terminal_receipt_requires_every_route_outcome_array() {
+    let (_temp, response, pin) = empty_terminal_receipt_fixture();
+
+    for field in [
+        "selected_route_ids",
+        "successful_route_ids",
+        "source_failures",
+    ] {
+        let mut missing = response.clone();
+        assert!(missing["receipt"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field)
+            .is_some());
+
+        let error = published_refresh_receipt(&missing, &pin)
+            .expect_err("missing current-protocol route outcome array must fail");
+        assert!(
+            format!("{error:#}").contains(&format!("required {field} array")),
+            "unexpected error for {field}: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn current_terminal_receipt_rejects_malformed_route_outcome_arrays() {
+    let (_temp, response, pin) = empty_terminal_receipt_fixture();
+    let cases = [
+        ("selected_route_ids", json!(null)),
+        ("successful_route_ids", json!({})),
+        ("source_failures", json!("none")),
+        ("selected_route_ids", json!([17])),
+    ];
+
+    for (field, malformed_value) in cases {
+        let mut malformed = response.clone();
+        malformed["receipt"][field] = malformed_value;
+
+        let error = published_refresh_receipt(&malformed, &pin)
+            .expect_err("malformed current-protocol route outcome array must fail");
+        assert!(
+            format!("{error:#}").contains(field),
+            "unexpected error for {field}: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn current_terminal_receipt_rejects_inconsistent_route_outcome_partition() {
+    let (_temp, mut response, pin) = empty_terminal_receipt_fixture();
+    response["receipt"]["successful_route_ids"] = json!(["11".repeat(32)]);
+
+    let error = published_refresh_receipt(&response, &pin)
+        .expect_err("unselected successful route must fail partition validation");
+    assert!(
+        format!("{error:#}").contains("invalid route-result partition"),
+        "unexpected partition error: {error:#}"
+    );
+}
+
+#[test]
+fn current_terminal_receipt_preserves_legitimate_empty_route_outcome_arrays() {
+    let (_temp, response, pin) = empty_terminal_receipt_fixture();
+    let receipt = published_refresh_receipt(&response, &pin)
+        .expect("present empty arrays describe a legitimate empty current receipt");
+
+    assert!(receipt.selected_route_ids.is_empty());
+    assert!(receipt.successful_route_ids.is_empty());
+    assert!(receipt.source_failures.is_empty());
+    assert_eq!(receipt.to_json()["outcome"], "completed");
+}
+
 #[test]
 fn explicit_catalog_request_retains_daemon_metadata_and_authority() {
     let temp = tempfile::tempdir().unwrap();

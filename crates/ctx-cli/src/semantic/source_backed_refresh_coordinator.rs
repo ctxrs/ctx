@@ -686,9 +686,11 @@ fn published_refresh_receipt(
         sources_with_rejections: required_usize(current_value, "current_sources_with_rejections")?,
         removed_source_count: required_usize(current_value, "removed_source_count")?,
     };
-    let selected_route_ids = optional_string_array(value.get("selected_route_ids"))?;
-    let successful_route_ids = optional_string_array(value.get("successful_route_ids"))?;
-    let source_failures = optional_source_failures(value.get("source_failures"))?;
+    let selected_route_ids =
+        required_route_identity_array(value.get("selected_route_ids"), "selected_route_ids")?;
+    let successful_route_ids =
+        required_route_identity_array(value.get("successful_route_ids"), "successful_route_ids")?;
+    let source_failures = required_source_failures(value.get("source_failures"))?;
     let failed_route_ids = source_failures
         .iter()
         .map(|failure| failure.route_identity.clone())
@@ -769,13 +771,16 @@ fn published_refresh_receipt(
     })
 }
 
-fn optional_string_array(value: Option<&Value>) -> Result<Vec<String>> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    let values = value
-        .as_array()
-        .ok_or_else(|| anyhow!("daemon source refresh route identities are malformed"))?;
+fn required_route_identity_array(
+    value: Option<&Value>,
+    field: &'static str,
+) -> Result<Vec<String>> {
+    let value = value.ok_or_else(|| {
+        anyhow!("published daemon source refresh receipt has no required {field} array")
+    })?;
+    let values = value.as_array().ok_or_else(|| {
+        anyhow!("published daemon source refresh receipt {field} must be an array")
+    })?;
     values
         .iter()
         .map(|value| {
@@ -783,20 +788,26 @@ fn optional_string_array(value: Option<&Value>) -> Result<Vec<String>> {
                 .as_str()
                 .filter(|value| is_sha256_identity(value))
                 .map(str::to_owned)
-                .ok_or_else(|| anyhow!("daemon source refresh route identity is malformed"))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "published daemon source refresh receipt {field} contains a malformed route identity"
+                    )
+                })
         })
         .collect()
 }
 
-fn optional_source_failures(
+fn required_source_failures(
     value: Option<&Value>,
 ) -> Result<Vec<SourceBackedRefreshSourceFailure>> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
+    let value = value.ok_or_else(|| {
+        anyhow!("published daemon source refresh receipt has no required source_failures array")
+    })?;
     value
         .as_array()
-        .ok_or_else(|| anyhow!("daemon source refresh source failures are malformed"))?
+        .ok_or_else(|| {
+            anyhow!("published daemon source refresh receipt source_failures must be an array")
+        })?
         .iter()
         .map(|value| {
             let value = value
