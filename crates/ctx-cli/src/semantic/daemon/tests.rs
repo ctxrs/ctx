@@ -158,6 +158,132 @@ fn persistent_default_never_has_a_finite_idle_exit() {
     ));
 }
 
+#[test]
+fn due_consumer_retry_wait_loop_blocks_and_wakes_when_query_becomes_idle() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let generation = ctx_history_index::GenerationWriter::open(
+        super::super::source_backed_refresh_coordinator::source_backed_index_root(temp.path()),
+        ctx_history_index::WriterOptions::default(),
+    )?
+    .commit(|_| true)?
+    .generation_id;
+    let wakeup = Arc::new(super::super::daemon_wakeup::DaemonWakeup::default());
+    let activity = Arc::new(
+        super::super::query_service::DaemonQueryActivity::with_idle_wakeup(Arc::clone(&wakeup)),
+    );
+    let request = activity.begin_request().expect("foreground query");
+    let mut runtime = DaemonRuntime::default();
+    runtime.pro_retry.consecutive_failures = 1;
+    runtime.pro_retry.retry_not_before = Some(Instant::now() - StdDuration::from_secs(1));
+    runtime.pro_retry.retry_not_before_at_ms = Some(utc_now().timestamp_millis() - 1);
+    runtime.history_retry.consecutive_failures = 1;
+    runtime.history_retry.retry_not_before = Some(Instant::now() - StdDuration::from_secs(1));
+    runtime.history_retry.retry_not_before_at_ms = Some(utc_now().timestamp_millis() - 1);
+
+    let deferred = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        Some(activity.as_ref()),
+        None,
+    )?;
+    assert!(!deferred.did_work);
+    assert_eq!(runtime.pro_retry.retry_after_ms(), Some(0));
+
+    let now = Instant::now();
+    let wait_for =
+        daemon_wait_duration(&runtime, now + StdDuration::from_secs(30), None, None, now);
+    assert!(wait_for > StdDuration::ZERO);
+    assert!(wait_for <= super::super::daemon_scheduler::DAEMON_CONSUMER_RETRY_QUERY_GRACE);
+
+    drop(request);
+    let wake = wakeup.wait(wait_for);
+    assert!(
+        !wake.timed_out,
+        "query-idle transition must wake the daemon"
+    );
+
+    let retried = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        Some(activity.as_ref()),
+        None,
+    )?;
+    assert!(!retried.failed);
+    assert!(runtime.consumer_retry_deferral.retry_at.is_none());
+    let status = super::super::source_backed_pro_catch_up::read_status_json(temp.path())
+        .expect("Pro retry attempt");
+    assert_eq!(status["core_generation_id"], generation);
+    assert_eq!(status["attempts"], 1);
+    Ok(())
+}
+
+#[test]
+fn continuous_query_wait_loop_reaches_consumer_retry_fairness_deadline() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let generation = ctx_history_index::GenerationWriter::open(
+        super::super::source_backed_refresh_coordinator::source_backed_index_root(temp.path()),
+        ctx_history_index::WriterOptions::default(),
+    )?
+    .commit(|_| true)?
+    .generation_id;
+    let wakeup = Arc::new(super::super::daemon_wakeup::DaemonWakeup::default());
+    let activity = Arc::new(
+        super::super::query_service::DaemonQueryActivity::with_idle_wakeup(Arc::clone(&wakeup)),
+    );
+    let _request = activity.begin_request().expect("continuous query");
+    let mut runtime = DaemonRuntime::default();
+    runtime.pro_retry.consecutive_failures = 1;
+    runtime.pro_retry.retry_not_before = Some(Instant::now() - StdDuration::from_secs(1));
+    runtime.pro_retry.retry_not_before_at_ms = Some(utc_now().timestamp_millis() - 1);
+
+    let deferred = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        Some(activity.as_ref()),
+        None,
+    )?;
+    assert!(!deferred.did_work);
+    assert!(runtime.consumer_retry_deferral.retry_at.is_some());
+
+    let deadline = Instant::now();
+    runtime.consumer_retry_deferral.retry_at = Some(deadline);
+    let wait_for = daemon_wait_duration(
+        &runtime,
+        deadline + StdDuration::from_secs(30),
+        None,
+        None,
+        deadline,
+    );
+    assert_eq!(wait_for, StdDuration::ZERO);
+    assert!(wakeup.wait(wait_for).timed_out);
+
+    let fair = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        Some(activity.as_ref()),
+        None,
+    )?;
+    assert!(!fair.failed);
+    assert!(runtime.consumer_retry_deferral.retry_at.is_none());
+    let status = super::super::source_backed_pro_catch_up::read_status_json(temp.path())
+        .expect("fair Pro retry attempt");
+    assert_eq!(status["core_generation_id"], generation);
+    assert_eq!(status["attempts"], 1);
+    Ok(())
+}
+
 fn test_daemon_run_args() -> DaemonRunArgs {
     DaemonRunArgs {
         foreground: false,

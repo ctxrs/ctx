@@ -308,6 +308,10 @@ impl PinnedSourceBackedGeneration {
         self.index
     }
 
+    pub(super) fn verified_index(&self) -> &VerifiedIndex {
+        &self.index
+    }
+
     #[cfg(test)]
     pub(crate) fn from_index(index: VerifiedIndex) -> Self {
         Self { index }

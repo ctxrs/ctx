@@ -5,6 +5,35 @@ pub(super) struct DaemonSidecarDrain {
     pub(super) semantic_attempted_generation: Option<String>,
 }
 
+pub(super) const DAEMON_CONSUMER_RETRY_QUERY_GRACE: StdDuration = StdDuration::from_secs(2);
+
+#[derive(Debug, Default)]
+pub(super) struct DaemonConsumerRetryDeferral {
+    pub(super) retry_at: Option<Instant>,
+}
+
+impl DaemonConsumerRetryDeferral {
+    fn defer_for_foreground_query(&mut self, now: Instant) -> bool {
+        let retry_at = self
+            .retry_at
+            .get_or_insert(now + DAEMON_CONSUMER_RETRY_QUERY_GRACE);
+        if now < *retry_at {
+            return true;
+        }
+        self.reset();
+        false
+    }
+
+    pub(super) fn remaining(&self, now: Instant) -> Option<StdDuration> {
+        self.retry_at
+            .and_then(|retry_at| retry_at.checked_duration_since(now))
+    }
+
+    fn reset(&mut self) {
+        self.retry_at = None;
+    }
+}
+
 fn immediate_follow_up(mut iteration: DaemonIteration) -> DaemonIteration {
     iteration.continue_immediately = true;
     iteration
@@ -22,6 +51,10 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
     let source_refresh_requested =
         source_refresh.is_some_and(CoreRefreshEngine::has_pending_request);
     if runtime.config.daemon.mode.runs_only_source_refresh() {
+        runtime.consumer_retry_deferral.reset();
+        if let Some(activity) = query_activity {
+            activity.cancel_idle_wakeup();
+        }
         return Ok(
             run_pending_core_refresh(data_root, runtime, source_refresh)?.unwrap_or_else(|| {
                 DaemonIteration::new(false, false, DaemonCycleStateV1::unknown())
@@ -29,17 +62,46 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
         );
     }
     let query_generation = query_activity.map(|activity| activity.snapshot().1);
-    if !source_refresh_requested
-        && daemon_foreground_query_preempts(query_activity, query_generation)
-    {
-        return Ok(DaemonIteration::new(
-            false,
-            false,
-            DaemonCycleStateV1::unknown(),
-        ));
-    }
     if source_refresh_requested {
+        runtime.consumer_retry_deferral.reset();
+        if let Some(activity) = query_activity {
+            activity.cancel_idle_wakeup();
+        }
         return run_core_refresh(data_root, runtime, source_refresh, false);
+    }
+    if daemon_foreground_query_preempts(query_activity, query_generation) {
+        if !daemon_consumer_retry_due(runtime) {
+            runtime.consumer_retry_deferral.reset();
+            if let Some(activity) = query_activity {
+                activity.cancel_idle_wakeup();
+            }
+            return Ok(DaemonIteration::new(
+                false,
+                false,
+                DaemonCycleStateV1::unknown(),
+            ));
+        }
+        if runtime
+            .consumer_retry_deferral
+            .defer_for_foreground_query(Instant::now())
+        {
+            if let Some(activity) = query_activity {
+                activity.wake_daemon_when_idle();
+            }
+            return Ok(DaemonIteration::new(
+                false,
+                false,
+                DaemonCycleStateV1::unknown(),
+            ));
+        }
+        if let Some(activity) = query_activity {
+            activity.cancel_idle_wakeup();
+        }
+    } else {
+        runtime.consumer_retry_deferral.reset();
+        if let Some(activity) = query_activity {
+            activity.cancel_idle_wakeup();
+        }
     }
     if let Some(iteration) = run_pending_core_pro_catch_up(data_root, runtime, source_refresh)? {
         return Ok(iteration);
@@ -91,6 +153,8 @@ fn run_pending_core_semantic_catch_up(
     };
     let generation_id = generation.generation_id();
     let page_continuation_pending = semantic_page_continuation_pending(data_root, generation_id);
+    let retry_due =
+        runtime.semantic_retry.consecutive_failures > 0 && runtime.semantic_retry.ready();
     if runtime.sidecar_drain.generation.as_deref() == Some(generation_id)
         && runtime
             .sidecar_drain
@@ -98,6 +162,7 @@ fn run_pending_core_semantic_catch_up(
             .as_deref()
             == Some(generation_id)
         && !page_continuation_pending
+        && !retry_due
     {
         return Ok(None);
     }
@@ -136,13 +201,28 @@ fn run_pending_core_pro_catch_up(
     if !daemon_mode_runs_core_pro_catch_up(runtime.config.daemon.mode) {
         return Ok(None);
     }
-    let Some(authority) = source_refresh.and_then(CoreRefreshEngine::pinned_core_publication)
-    else {
+    let retry_due = runtime.pro_retry.consecutive_failures > 0 && runtime.pro_retry.ready();
+    let retained_authority = source_refresh.and_then(CoreRefreshEngine::pinned_core_publication);
+    let durable_authority = if retained_authority.is_none() && retry_due {
+        pin_published_generation(data_root)?
+    } else {
+        None
+    };
+    let authority = retained_authority
+        .as_deref()
+        .map(SourceBackedProCoreAuthority::Retained)
+        .or_else(|| {
+            durable_authority
+                .as_ref()
+                .map(SourceBackedProCoreAuthority::Durable)
+        });
+    let Some(authority) = authority else {
         return Ok(None);
     };
     let generation = authority.generation_id();
     if runtime.sidecar_drain.generation.as_deref() == Some(generation)
         && runtime.sidecar_drain.pro_attempted_generation.as_deref() == Some(generation)
+        && !retry_due
     {
         return Ok(None);
     }
@@ -150,8 +230,7 @@ fn run_pending_core_pro_catch_up(
     if !runtime.pro_retry.ready() {
         return Ok(None);
     }
-    let run =
-        run_pro_catch_up_with_retry(data_root, runtime, generation, Some(authority.as_ref()))?;
+    let run = run_pro_catch_up_with_retry(data_root, runtime, generation, authority)?;
     runtime.sidecar_drain.pro_attempted_generation = Some(generation.to_owned());
     runtime.sidecar_drain.generation = Some(generation.to_owned());
     Ok(Some(core_pro_catch_up_iteration(run.did_work)))
@@ -230,7 +309,7 @@ fn run_pro_catch_up_with_retry(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     core_generation_id: &str,
-    authority: Option<&PinnedCorePublication>,
+    authority: SourceBackedProCoreAuthority<'_>,
 ) -> Result<SourceBackedProCatchUpRun> {
     prepare_pro_retry_for_generation(runtime, data_root, core_generation_id);
     if !runtime.pro_retry.ready() {
@@ -362,15 +441,37 @@ pub(super) fn restore_daemon_source_refresh_retry(runtime: &mut DaemonRuntime, d
 
 pub(super) fn restore_daemon_consumer_retries(runtime: &mut DaemonRuntime, data_root: &Path) {
     let pro = read_pro_status(data_root);
-    runtime.pro_retry.restore(pro.as_ref());
+    restore_consumer_retry(&mut runtime.pro_retry, pro.as_ref());
     let semantic = read_daemon_job_status(&daemon_semantic_job_path(data_root));
-    runtime.semantic_retry.restore(semantic.as_ref());
+    restore_consumer_retry(&mut runtime.semantic_retry, semantic.as_ref());
+}
+
+fn restore_consumer_retry(backoff: &mut DaemonRetryBackoff, status: Option<&Value>) {
+    backoff.restore(status);
+    let persisted_failures = status
+        .and_then(|status| status.get("consecutive_failures"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(u64::from(u32::MAX)) as u32;
+    if backoff.consecutive_failures == 0
+        && persisted_failures > 0
+        && status
+            .and_then(|status| status.get("retryable"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        backoff.consecutive_failures = persisted_failures;
+    }
+}
+
+pub(super) fn daemon_consumer_retry_due(runtime: &DaemonRuntime) -> bool {
+    (runtime.pro_retry.consecutive_failures > 0 && runtime.pro_retry.ready())
+        || (runtime.semantic_retry.consecutive_failures > 0 && runtime.semantic_retry.ready())
 }
 
 pub(super) fn daemon_retry_due(runtime: &DaemonRuntime) -> bool {
     (runtime.history_retry.consecutive_failures > 0 && runtime.history_retry.ready())
-        || (runtime.pro_retry.consecutive_failures > 0 && runtime.pro_retry.ready())
-        || (runtime.semantic_retry.consecutive_failures > 0 && runtime.semantic_retry.ready())
+        || daemon_consumer_retry_due(runtime)
 }
 
 fn core_refresh_failed_job(data_root: &Path, message: String) -> Value {
@@ -593,11 +694,9 @@ use super::{
     source_backed_pro_catch_up::{
         persist_status_json as persist_pro_status, read_status_json as read_pro_status,
         run_after_core_publication, status_generation as pro_status_generation,
-        SourceBackedProCatchUpRun,
+        SourceBackedProCatchUpRun, SourceBackedProCoreAuthority,
     },
-    source_backed_refresh_coordinator::{
-        pin_published_generation, CoreRefreshEngine, PinnedCorePublication,
-    },
+    source_backed_refresh_coordinator::{pin_published_generation, CoreRefreshEngine},
 };
 
 #[cfg(test)]

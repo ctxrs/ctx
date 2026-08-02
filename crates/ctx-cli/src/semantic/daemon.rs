@@ -38,7 +38,7 @@ use super::{
     daemon_scheduler::{
         daemon_retry_due, daemon_run_start_mode, restore_daemon_consumer_retries,
         restore_daemon_source_refresh_retry, run_daemon_scheduler_cycle_with_activity,
-        DaemonSidecarDrain,
+        DaemonConsumerRetryDeferral, DaemonSidecarDrain,
     },
     daemon_status::{
         daemon_report_failure_message, render_daemon_disable_receipt, render_daemon_enable_receipt,
@@ -117,6 +117,7 @@ pub(super) struct DaemonRuntime {
     pub(super) semantic_retry: DaemonRetryBackoff,
     pub(super) semantic_blocked_job: Option<Value>,
     pub(super) sidecar_drain: DaemonSidecarDrain,
+    pub(super) consumer_retry_deferral: DaemonConsumerRetryDeferral,
     pub(super) config: AppConfig,
 }
 
@@ -815,19 +816,8 @@ pub(super) fn run_daemon_inner(
                 idle_since = Some(Instant::now());
             }
             let now = Instant::now();
-            let mut wait_for = next_safety_reconcile.saturating_duration_since(now);
-            if let Some(retry_after_ms) = runtime.history_retry.retry_after_ms() {
-                wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
-            }
-            if let Some(retry_after_ms) = runtime.semantic_retry.retry_after_ms() {
-                wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
-            }
-            if let Some(retry_after_ms) = runtime.pro_retry.retry_after_ms() {
-                wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
-            }
-            if let (Some(idle), Some(limit)) = (idle_since, idle_exit) {
-                wait_for = wait_for.min(limit.saturating_sub(idle.elapsed()));
-            }
+            let wait_for =
+                daemon_wait_duration(&runtime, next_safety_reconcile, idle_since, idle_exit, now);
             let wake = wakeup.wait(wait_for);
             if wake.shutdown {
                 break;
@@ -958,6 +948,33 @@ pub(super) fn run_daemon_inner(
         )?;
     }
     Ok(daemon_report_with_disabled_status(data_root, !args.force))
+}
+
+fn daemon_wait_duration(
+    runtime: &DaemonRuntime,
+    next_safety_reconcile: Instant,
+    idle_since: Option<Instant>,
+    idle_exit: Option<StdDuration>,
+    now: Instant,
+) -> StdDuration {
+    let mut wait_for = next_safety_reconcile.saturating_duration_since(now);
+    if let Some(remaining) = runtime.consumer_retry_deferral.remaining(now) {
+        wait_for = wait_for.min(remaining);
+    } else {
+        if let Some(retry_after_ms) = runtime.history_retry.retry_after_ms() {
+            wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
+        }
+        if let Some(retry_after_ms) = runtime.semantic_retry.retry_after_ms() {
+            wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
+        }
+        if let Some(retry_after_ms) = runtime.pro_retry.retry_after_ms() {
+            wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
+        }
+    }
+    if let (Some(idle), Some(limit)) = (idle_since, idle_exit) {
+        wait_for = wait_for.min(limit.saturating_sub(now.saturating_duration_since(idle)));
+    }
+    wait_for
 }
 
 #[cfg(test)]

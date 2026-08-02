@@ -7,7 +7,9 @@ use std::{
 #[cfg(unix)]
 use std::{fs, net::Shutdown, os::unix::net::UnixStream};
 
-use crate::semantic::source_backed_refresh_coordinator::CoreRefreshEngine;
+use crate::semantic::{
+    daemon_wakeup::DaemonWakeup, source_backed_refresh_coordinator::CoreRefreshEngine,
+};
 
 use super::transport::{remove_daemon_service_endpoint, DaemonIpcService};
 
@@ -69,6 +71,7 @@ impl Drop for DaemonQueryService {
 #[derive(Default)]
 pub(in crate::semantic) struct DaemonQueryActivity {
     pub(in crate::semantic) state: Mutex<DaemonQueryActivityState>,
+    idle_wakeup: Option<Arc<DaemonWakeup>>,
 }
 
 #[derive(Default)]
@@ -77,6 +80,7 @@ pub(in crate::semantic) struct DaemonQueryActivityState {
     pub(in crate::semantic) stopping: bool,
     pub(in crate::semantic) active_requests: usize,
     pub(in crate::semantic) generation: u64,
+    wake_when_idle: bool,
 }
 
 pub(in crate::semantic) struct DaemonQueryRequestGuard {
@@ -90,7 +94,14 @@ impl DaemonQueryActivity {
                 accepting: true,
                 ..DaemonQueryActivityState::default()
             }),
+            idle_wakeup: None,
         }
+    }
+
+    pub(in crate::semantic) fn with_idle_wakeup(idle_wakeup: Arc<DaemonWakeup>) -> Self {
+        let mut activity = Self::new();
+        activity.idle_wakeup = Some(idle_wakeup);
+        activity
     }
 
     pub(in crate::semantic) fn state(&self) -> std::sync::MutexGuard<'_, DaemonQueryActivityState> {
@@ -113,6 +124,27 @@ impl DaemonQueryActivity {
     pub(in crate::semantic) fn snapshot(&self) -> (usize, u64) {
         let state = self.state();
         (state.active_requests, state.generation)
+    }
+
+    pub(in crate::semantic) fn wake_daemon_when_idle(&self) {
+        let should_signal = {
+            let mut state = self.state();
+            if state.active_requests == 0 {
+                true
+            } else {
+                state.wake_when_idle = true;
+                false
+            }
+        };
+        if should_signal {
+            if let Some(wakeup) = self.idle_wakeup.as_ref() {
+                wakeup.signal_ipc();
+            }
+        }
+    }
+
+    pub(in crate::semantic) fn cancel_idle_wakeup(&self) {
+        self.state().wake_when_idle = false;
     }
 
     pub(in crate::semantic) fn try_stop_accepting_if_idle(&self, observed_generation: u64) -> bool {
@@ -147,6 +179,16 @@ impl Drop for DaemonQueryRequestGuard {
         let mut state = self.activity.state();
         state.active_requests = state.active_requests.saturating_sub(1);
         state.generation = state.generation.wrapping_add(1);
+        let should_signal = state.active_requests == 0 && state.wake_when_idle;
+        if should_signal {
+            state.wake_when_idle = false;
+        }
+        drop(state);
+        if should_signal {
+            if let Some(wakeup) = self.activity.idle_wakeup.as_ref() {
+                wakeup.signal_ipc();
+            }
+        }
     }
 }
 

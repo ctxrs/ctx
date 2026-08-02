@@ -150,7 +150,11 @@ pub(super) fn reload_daemon_runtime_config(
         }
     }
     if semantic_runtime_requested && query_service.is_none() {
-        match start_daemon_query_service(data_root, runtime.semantic_runtime.clone()) {
+        match start_daemon_query_service(
+            data_root,
+            runtime.semantic_runtime.clone(),
+            Arc::clone(wakeup),
+        ) {
             Ok(service) => {
                 *query_service = Some(service);
                 // The query service thread keeps normal interactive priority.

@@ -27,6 +27,11 @@ impl PinnedCorePublication {
         &self.receipt
     }
 
+    pub(in crate::semantic) fn verified_index_ref(&self) -> &VerifiedIndex {
+        self.verified_index.as_ref()
+    }
+
+    #[cfg(test)]
     pub(crate) fn verified_index(&self) -> Option<Arc<VerifiedIndex>> {
         Some(Arc::clone(&self.verified_index))
     }

@@ -24,12 +24,13 @@ use crate::{
 };
 
 use super::{
-    daemon_core_refresh_job_path, daemon_job_should_backoff, daemon_mode_runs_core_pro_catch_up,
-    daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path, persist_pro_status,
-    prepare_pro_retry_for_generation, read_daemon_job_status, read_pro_status,
-    record_daemon_job_retry, restore_daemon_consumer_retries,
-    run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
-    run_pro_catch_up_with_retry, write_daemon_job_status, DaemonRetryBackoff, DaemonRuntime,
+    daemon_consumer_retry_due, daemon_core_refresh_job_path, daemon_job_should_backoff,
+    daemon_mode_runs_core_pro_catch_up, daemon_mode_runs_core_semantic_projection,
+    daemon_semantic_job_path, persist_pro_status, prepare_pro_retry_for_generation,
+    read_daemon_job_status, read_pro_status, record_daemon_job_retry,
+    restore_daemon_consumer_retries, run_daemon_scheduler_cycle_with_activity,
+    run_pending_core_pro_catch_up, run_pro_catch_up_with_retry, write_daemon_job_status,
+    DaemonRetryBackoff, DaemonRuntime, SourceBackedProCoreAuthority,
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";
@@ -829,7 +830,10 @@ fn failed_pro_status(generation: &str) -> Value {
 #[test]
 fn pro_failure_backoff_is_independent_and_skips_until_due() {
     let temp = tempfile::tempdir().unwrap();
-    let generation = "a".repeat(64);
+    let generation = publish_empty_core_generation(temp.path());
+    let durable = super::pin_published_generation(temp.path())
+        .unwrap()
+        .expect("durable Core generation");
     let mut runtime = DaemonRuntime::default();
     runtime.history_retry.record_failure();
     runtime.semantic_retry.record_failure();
@@ -846,12 +850,114 @@ fn pro_failure_backoff_is_independent_and_skips_until_due() {
         semantic_failures
     );
 
-    let skipped =
-        run_pro_catch_up_with_retry(temp.path(), &mut runtime, &generation, None).unwrap();
+    let skipped = run_pro_catch_up_with_retry(
+        temp.path(),
+        &mut runtime,
+        &generation,
+        SourceBackedProCoreAuthority::Durable(&durable),
+    )
+    .unwrap();
     assert!(!skipped.did_work);
     assert_eq!(skipped.status["reason"], "retry_backoff");
     assert_eq!(skipped.status["consecutive_failures"], 1);
     assert_eq!(read_pro_status(temp.path()).unwrap()["status"], "error");
+}
+
+#[test]
+fn persisted_due_pro_retry_reopens_durable_core_after_process_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    let mut first = DaemonRuntime::default();
+    let mut status = record_daemon_job_retry(&mut first.pro_retry, failed_pro_status(&generation));
+    status["retry_not_before_at_ms"] = json!(ctx_history_core::utc_now().timestamp_millis() - 1);
+    persist_pro_status(temp.path(), &status).unwrap();
+
+    let coordinator = CoreRefreshEngine::new();
+    assert!(coordinator.pinned_core_publication().is_none());
+    let mut restarted = DaemonRuntime::default();
+    restore_daemon_consumer_retries(&mut restarted, temp.path());
+    assert!(daemon_consumer_retry_due(&restarted));
+    assert!(restarted.pro_retry.ready());
+
+    let (iteration, verified_opens) =
+        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
+            run_daemon_scheduler_cycle_with_activity(
+                &daemon_args(),
+                temp.path(),
+                &mut restarted,
+                None,
+                false,
+                None,
+                Some(&coordinator),
+            )
+            .unwrap()
+        });
+
+    assert_eq!(
+        verified_opens, 1,
+        "restart must reopen durable active Core once"
+    );
+    assert!(!iteration.failed);
+    let retried = read_pro_status(temp.path()).expect("retried Pro status");
+    assert_eq!(retried["core_generation_id"], generation);
+    assert_eq!(retried["attempts"], 2);
+    assert_eq!(
+        restarted.sidecar_drain.pro_attempted_generation.as_deref(),
+        Some(generation.as_str())
+    );
+}
+
+#[test]
+fn active_queries_defer_due_consumer_retry_only_until_fairness_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _hooks = install_jobs(
+        calls.clone(),
+        Some(json!({
+            "status": "ready",
+            "source_generation_ready": true,
+            "source_work_remaining": false,
+        })),
+    );
+    let activity = std::sync::Arc::new(super::DaemonQueryActivity::new());
+    let _request = activity.begin_request().expect("foreground query");
+    let mut runtime = DaemonRuntime::default();
+    runtime.semantic_retry.consecutive_failures = 1;
+    runtime.semantic_retry.retry_not_before = Some(std::time::Instant::now());
+    runtime.sidecar_drain.generation = Some(generation.clone());
+    runtime.sidecar_drain.pro_attempted_generation = Some(generation.clone());
+
+    let deferred = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        Some(activity.as_ref()),
+        None,
+    )
+    .unwrap();
+    assert!(!deferred.did_work);
+    assert!(runtime.consumer_retry_deferral.retry_at.is_some());
+    assert!(calls.borrow().is_empty());
+
+    runtime.consumer_retry_deferral.retry_at = Some(std::time::Instant::now());
+    let fair = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        Some(activity.as_ref()),
+        None,
+    )
+    .unwrap();
+
+    assert!(!fair.failed);
+    assert!(runtime.consumer_retry_deferral.retry_at.is_none());
+    assert_eq!(&*calls.borrow(), &["semantic_index"]);
+    assert_eq!(runtime.semantic_retry.consecutive_failures, 0);
 }
 
 #[test]
