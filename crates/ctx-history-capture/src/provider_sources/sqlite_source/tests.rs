@@ -230,7 +230,7 @@ fn stock_sqlite_reads_active_wal_read_only_and_query_only() {
             .unwrap()
             .pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))
             .unwrap(),
-        1
+        2
     );
     assert!(snapshot
         .connection()
@@ -282,6 +282,50 @@ fn stock_sqlite_reads_active_wal_read_only_and_query_only() {
             .unwrap(),
         1
     );
+}
+
+#[test]
+fn shared_snapshot_policies_keep_cross_provider_temp_work_off_the_filesystem() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("ctx-data");
+    for (name, logical) in [("strict-provider", false), ("logical-provider", true)] {
+        let provider = temp.path().join(name);
+        fs::create_dir_all(&provider).unwrap();
+        let database = provider.join("provider.sqlite");
+        create_database(&database, name);
+        let before = directory_file_bytes(&provider);
+        let authority = retain_parent_in_data_root(&data_root, &provider);
+        let snapshot = if logical {
+            authority
+                .open_logical_online_backup_snapshot(OsStr::new("provider.sqlite"))
+                .unwrap()
+        } else {
+            open_root_handle_sqlite_source_snapshot(&authority, OsStr::new("provider.sqlite"))
+                .unwrap()
+        };
+        let connection = snapshot.connection().unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        let values = connection
+            .prepare(
+                "with recursive generated(value) as (
+                     values(4096) union all select value - 1 from generated where value > 1
+                 )
+                 select value from generated order by printf('%08d', value)",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(values.len(), 4096);
+        snapshot.finish().unwrap();
+        assert_eq!(directory_file_bytes(&provider), before);
+    }
 }
 
 #[test]

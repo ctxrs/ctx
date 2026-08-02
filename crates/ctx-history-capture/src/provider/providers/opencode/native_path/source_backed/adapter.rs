@@ -83,6 +83,8 @@ pub(super) struct OpenCodeSqliteWorkCounters {
     pub(super) fallback_payload_hydrations: u64,
     pub(super) max_buffered_payload_rows: u64,
     pub(super) fallback_disk_sort: bool,
+    pub(super) fallback_sort_rows: u64,
+    pub(super) fallback_scratch_bytes: u64,
     pub(super) exact_replays: u64,
     pub(super) terminal_fences: u64,
     pub(super) terminal_revalidations: u64,
@@ -175,6 +177,8 @@ impl ReplacementDocumentTree for OpenCodeDocumentTreeAdapter {
             work.fallback_payload_hydrations = scan.bounds.fallback_payload_hydrations;
             work.max_buffered_payload_rows = scan.bounds.max_buffered_payload_rows;
             work.fallback_disk_sort = scan.bounds.fallback_disk_sort;
+            work.fallback_sort_rows = scan.bounds.fallback_sort_rows;
+            work.fallback_scratch_bytes = scan.bounds.fallback_scratch_bytes;
         }
         let observation = scan.certificate.observation().clone();
         Ok(DocumentSourceTerminal {
@@ -417,6 +421,11 @@ fn finalize_work_counters(
         || (counters.fallback_disk_sort
             && counters.fallback_payload_hydrations != counters.logical_rows_projected)
         || (!counters.fallback_disk_sort && counters.fallback_payload_hydrations != 0)
+        || (counters.fallback_disk_sort
+            && (counters.fallback_sort_rows != counters.logical_rows_projected
+                || counters.fallback_scratch_bytes == 0))
+        || (!counters.fallback_disk_sort
+            && (counters.fallback_sort_rows != 0 || counters.fallback_scratch_bytes != 0))
         || (leaf.observation.schema.message_part_indexed_streaming
             && counters.schema_event_validation_traversals != 2)
         || (exact_replay

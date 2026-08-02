@@ -753,9 +753,13 @@ pub(super) fn configure_and_pin_snapshot(connection: &Connection) -> SqliteSourc
     connection
         .pragma_update(None, "query_only", true)
         .map_err(|source| sqlite_error("enabling provider query-only mode", source))?;
+    // SQLite has no connection-local filesystem temp-directory authority.
+    // Shared snapshots therefore permit only memory temp state for their
+    // bounded/indexed queries. The one unindexed OpenCode corpus ordering path
+    // uses its own size-capped ordinary database under the ctx data root.
     connection
-        .pragma_update(None, "temp_store", "FILE")
-        .map_err(|source| sqlite_error("forcing file-backed SQLite temporary storage", source))?;
+        .pragma_update(None, "temp_store", "MEMORY")
+        .map_err(|source| sqlite_error("disabling provider SQLite temporary files", source))?;
     connection
         .pragma_update(None, "mmap_size", 0_i64)
         .map_err(|source| sqlite_error("disabling provider database mmap", source))?;
@@ -768,9 +772,9 @@ pub(super) fn configure_and_pin_snapshot(connection: &Connection) -> SqliteSourc
     let temp_store: i64 = connection
         .pragma_query_value(None, "temp_store", |row| row.get(0))
         .map_err(|source| sqlite_error("verifying provider temporary storage", source))?;
-    if temp_store != 1 {
+    if temp_store != 2 {
         return Err(SqliteSourceAccessError::SnapshotUnavailable {
-            reason: "provider SQLite temporary storage is not file-backed".to_owned(),
+            reason: "provider SQLite temporary storage is not memory-only".to_owned(),
         });
     }
     connection

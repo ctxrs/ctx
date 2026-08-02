@@ -15,6 +15,22 @@ pub(super) fn source_backed_event_order_sql(schema: &OpenCodeNativeSchema) -> &'
     sql::source_backed_event_order_sql(schema)
 }
 
+pub(super) fn source_backed_fallback_sort_key_sql(schema: &OpenCodeNativeSchema) -> &'static str {
+    sql::source_backed_fallback_sort_key_sql(schema)
+}
+
+pub(super) fn source_backed_indexed_message_ids_sql() -> &'static str {
+    sql::source_backed_indexed_message_ids_sql()
+}
+
+pub(super) fn source_backed_indexed_part_rowids_sql() -> &'static str {
+    sql::source_backed_indexed_part_rowids_sql()
+}
+
+pub(super) fn source_backed_fallback_event_by_rowid_sql(schema: &OpenCodeNativeSchema) -> String {
+    sql::source_backed_fallback_event_by_rowid_sql(schema)
+}
+
 pub(super) fn source_backed_decode_order(
     order_tag: i64,
     session_identity: &str,
