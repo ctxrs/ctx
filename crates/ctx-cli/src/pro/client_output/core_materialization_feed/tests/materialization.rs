@@ -2,6 +2,32 @@ use super::batching_replay::benchmark_page_builder;
 use super::*;
 
 #[test]
+fn manifest_preflight_rebuild_required_finish_retries_the_generation_once() {
+    let (_temp, index) = single_source_index("rebuild-required-once.jsonl", Vec::new());
+    let mut consumer = Consumer::new();
+    consumer.rebuild_required_finishes = 1;
+
+    let report = sync_core_feed(&index, None, &mut consumer).unwrap();
+
+    assert_eq!(report.receipt.core_generation_id, index.generation_id());
+    assert_eq!(consumer.finish_requests.len(), 2);
+    assert!(consumer.finish.is_some());
+}
+
+#[test]
+fn manifest_preflight_rebuild_required_finish_retry_is_bounded() {
+    let (_temp, index) = single_source_index("rebuild-required-bounded.jsonl", Vec::new());
+    let mut consumer = Consumer::new();
+    consumer.rebuild_required_finishes = 2;
+
+    let error = sync_core_feed(&index, None, &mut consumer).unwrap_err();
+
+    assert_eq!(crate::pro::stable_error_code(&error), Some("needs_rebuild"));
+    assert_eq!(consumer.finish_requests.len(), 2);
+    assert!(consumer.finish.is_none());
+}
+
+#[test]
 fn incremental_builder_matches_legacy_item_boundaries() {
     for count in [
         0,

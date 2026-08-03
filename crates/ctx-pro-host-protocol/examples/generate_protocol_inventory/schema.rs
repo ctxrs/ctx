@@ -96,6 +96,13 @@ pub(super) fn inventory() -> Value {
         ],
         "capabilities": wire_names(&capabilities, Capability::wire_name),
         "enums": {
+            "error_class": [
+                "entitlement_expired", "key_store_unavailable", "key_store_locked",
+                "not_materialized", "protocol_mismatch", "missing_source",
+                "missing_repository", "resource_not_found", "stale_fact",
+                "line_out_of_range", "stale_snapshot", "ambiguous", "corrupt",
+                "invalid_request", "bounds", "rebuild_required", "sequence", "internal"
+            ],
             "core_projection_currentness": [
                 "not_materialized", "partial", "stale", "needs_rebuild", "current"
             ],

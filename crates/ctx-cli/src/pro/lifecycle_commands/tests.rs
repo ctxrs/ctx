@@ -696,7 +696,7 @@ fn pro_status(access_state: &str) -> ProStatus {
         storage_evidence: Some(ProStorageEvidence {
             graph_manifest_schema: 3,
             flat_format_version: 2,
-            materializer_checkpoint_version: 3,
+            materializer_checkpoint_version: 4,
             journal_pack_format_version: 3,
             legacy_journals_written: 0,
             journal_pages_written: 2,

@@ -242,6 +242,7 @@ struct Consumer {
     event_state_response_loss_after: Option<u64>,
     event_response_loss_after: Option<u64>,
     lose_finish_response: bool,
+    rebuild_required_finishes: u8,
     delta_pages: Vec<CoreSourceDeltaPage>,
     state_requests: Vec<CoreEventStatePageRequest>,
     event_pages: Vec<CoreEventDeltaPage>,
@@ -680,6 +681,12 @@ impl CoreMaterializationConsumer for Consumer {
         &mut self,
         request: FinishCoreMaterializationRequest,
     ) -> Result<CoreMaterializationFinished> {
+        self.finish_requests.push(request.clone());
+        if self.rebuild_required_finishes != 0 {
+            self.rebuild_required_finishes -= 1;
+            self.known_accumulators.clear();
+            bail!("needs_rebuild");
+        }
         let response = CoreMaterializationFinished {
             receipt: CoreMaterializationReceipt {
                 core_generation_id: request.head.core_generation_id.clone(),
@@ -695,7 +702,6 @@ impl CoreMaterializationConsumer for Consumer {
             replayed: self.replay_begin,
         };
         self.last_receipt = Some(response.receipt.clone());
-        self.finish_requests.push(request.clone());
         self.finish = Some(request);
         if self.lose_finish_response {
             self.lose_finish_response = false;

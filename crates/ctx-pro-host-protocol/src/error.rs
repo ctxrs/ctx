@@ -18,6 +18,7 @@ pub enum ErrorClass {
     Corrupt,
     InvalidRequest,
     Bounds,
+    RebuildRequired,
     Sequence,
     Internal,
 }
