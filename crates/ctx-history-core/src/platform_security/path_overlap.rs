@@ -57,12 +57,13 @@ fn validate_provider_source_outside_data_root_with(
 ) -> io::Result<()> {
     let data_root = absolute_data_root_path(data_root)?;
     validate_absolute_path(source_root, "provider source root")?;
+    let source_root = normalize_platform_namespace_alias(source_root);
 
-    let source_before = inspect_named_endpoint(source_root, false)?;
+    let source_before = inspect_named_endpoint(&source_root, false)?;
     after_source_observation();
     let data = resolve_path(&data_root, true)?;
-    let source = resolve_path(source_root, false)?;
-    let source_after = inspect_named_endpoint(source_root, false)?;
+    let source = resolve_path(&source_root, false)?;
+    let source_after = inspect_named_endpoint(&source_root, false)?;
     if source_before != source_after {
         return Err(overlap_error(
             "provider source root changed during overlap validation",
@@ -117,7 +118,26 @@ pub(super) fn absolute_data_root_path(path: &Path) -> io::Result<PathBuf> {
         }
     }
     validate_absolute_path(&normalized, label)?;
-    Ok(normalized)
+    Ok(normalize_platform_namespace_alias(&normalized))
+}
+
+pub(super) fn normalize_platform_namespace_alias(path: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        rewrite_macos_var_alias(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        path.to_path_buf()
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn rewrite_macos_var_alias(path: &Path) -> PathBuf {
+    let Ok(suffix) = path.strip_prefix("/var") else {
+        return path.to_path_buf();
+    };
+    Path::new("/private/var").join(suffix)
 }
 
 fn validate_absolute_path(path: &Path, label: &str) -> io::Result<()> {
@@ -322,6 +342,54 @@ fn overlap_error(detail: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macos_var_alias_rewrite_is_component_bounded() {
+        assert_eq!(
+            rewrite_macos_var_alias(Path::new("/var")),
+            Path::new("/private/var")
+        );
+        assert_eq!(
+            rewrite_macos_var_alias(Path::new("/var/folders/user/data")),
+            Path::new("/private/var/folders/user/data")
+        );
+        assert_eq!(
+            rewrite_macos_var_alias(Path::new("/var/folders/user/data")),
+            rewrite_macos_var_alias(Path::new("/private/var/folders/user/data"))
+        );
+        assert_eq!(
+            rewrite_macos_var_alias(Path::new("/variant/data")),
+            Path::new("/variant/data")
+        );
+        assert_eq!(
+            rewrite_macos_var_alias(Path::new("var/data")),
+            Path::new("var/data")
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn non_macos_platform_normalization_leaves_var_unchanged() {
+        assert_eq!(
+            normalize_platform_namespace_alias(Path::new("/var/folders/user/data")),
+            Path::new("/var/folders/user/data")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_var_alias_cannot_bypass_overlap_validation() {
+        let temp = tempfile::tempdir_in("/private/var/tmp").unwrap();
+        let data = temp.path().join("data");
+        let source = data.join("provider");
+        fs::create_dir_all(&source).unwrap();
+
+        let alias_data = Path::new("/var").join(data.strip_prefix("/private/var").unwrap());
+        let alias_source = Path::new("/var").join(source.strip_prefix("/private/var").unwrap());
+
+        assert!(validate_provider_source_outside_data_root(&alias_data, &source).is_err());
+        assert!(validate_provider_source_outside_data_root(&data, &alias_source).is_err());
+    }
 
     #[test]
     fn equal_ancestor_and_descendant_roots_are_rejected() {
