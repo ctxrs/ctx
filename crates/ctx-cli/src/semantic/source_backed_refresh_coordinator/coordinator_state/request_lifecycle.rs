@@ -189,6 +189,32 @@ impl CoreRefreshEngine {
             let verified = verified.ok_or_else(|| {
                 anyhow!("interrupted source refresh advanced Core without a verified generation")
             })?;
+            if verified.publication_metadata().is_none() {
+                // Publications written before the refresh control plane carry
+                // no source-refresh receipt, so there is nothing exact to
+                // recover. Accept the verified generation as terminal-complete
+                // and install any queued successors; the next scheduled
+                // refresh publishes with metadata again. Publications with
+                // present-but-malformed metadata keep failing closed below.
+                if !queued_successors.is_empty() {
+                    let durable_request_id = {
+                        let mut state = self.lock_state();
+                        install_recovered_successors(&mut state, queued_successors)?;
+                        state.current_published_generation = Some(active_generation);
+                        state
+                            .active_request_id
+                            .as_deref()
+                            .ok_or_else(|| {
+                                anyhow!("recovered source refresh successor is unavailable")
+                            })?
+                            .to_owned()
+                    };
+                    self.persist_job_status(data_root, &durable_request_id)?;
+                    return Ok(true);
+                }
+                self.lock_state().current_published_generation = Some(active_generation);
+                return Ok(false);
+            }
             let metadata = SourceBackedPublicationMetadata::decode(&verified)
                 .context("recover exact terminal refresh receipt from Core publication metadata")?;
             let job_request_id = job
