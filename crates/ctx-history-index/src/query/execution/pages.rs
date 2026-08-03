@@ -83,6 +83,48 @@ impl VerifiedIndex {
         limit: usize,
         budget: CoreEventPageBudget,
     ) -> Result<CoreSourceEventPage> {
+        let plan = self.plan_core_source_event_page_with_budget(source, cursor, limit, budget)?;
+        self.materialize_core_source_event_page(plan)
+    }
+
+    /// Enumerates one source page while retaining each record's exact stored
+    /// Core JSON for digesting and byte-identical derived transport.
+    pub fn stored_core_source_event_page(
+        &self,
+        source: &SourceKey,
+        cursor: Option<&SourceEventCursor>,
+        limit: usize,
+    ) -> Result<StoredCoreSourceEventPage> {
+        self.stored_core_source_event_page_with_budget(
+            source,
+            cursor,
+            limit,
+            DEFAULT_CORE_EVENT_PAGE_BUDGET,
+        )
+    }
+
+    /// Enumerates one exact-source page under explicit byte bounds while
+    /// retaining every record's canonical stored JSON.
+    pub fn stored_core_source_event_page_with_budget(
+        &self,
+        source: &SourceKey,
+        cursor: Option<&SourceEventCursor>,
+        limit: usize,
+        budget: CoreEventPageBudget,
+    ) -> Result<StoredCoreSourceEventPage> {
+        let plan = self.plan_core_source_event_page_with_budget(source, cursor, limit, budget)?;
+        self.materialize_stored_core_source_event_page(plan)
+    }
+
+    /// Selects one exact-source page and reports its exact retained byte cost
+    /// without loading or decoding any stored Core record.
+    pub fn plan_core_source_event_page_with_budget(
+        &self,
+        source: &SourceKey,
+        cursor: Option<&SourceEventCursor>,
+        limit: usize,
+        budget: CoreEventPageBudget,
+    ) -> Result<CoreSourceEventPagePlan> {
         if !(1..=MAX_SOURCE_EVENT_PAGE_ITEMS).contains(&limit) {
             return Err(IndexError::InvalidSourceEventPageSize {
                 requested: limit,
@@ -98,11 +140,9 @@ impl VerifiedIndex {
         let candidates =
             self.source_event_addresses_after(source, after, limit.saturating_add(1))?;
         let candidate_count = candidates.len();
-        let fields = fields_from_schema(self.searcher.schema())?;
         let mut items = Vec::with_capacity(limit.min(candidate_count));
         let mut encoded_core_bytes = 0_usize;
         let mut content_bytes = 0_usize;
-        let mut consumed = 0_usize;
         for candidate in candidates {
             if items.len() == limit {
                 break;
@@ -123,45 +163,172 @@ impl VerifiedIndex {
             {
                 break;
             }
-            let (record, actual_encoded_core_bytes) =
-                stored_core_event_record_with_size(&self.searcher, candidate.address, fields)?;
-            let actual_order = SourceEventOrderKey::for_core_record(
-                &record.core_record,
-                actual_encoded_core_bytes,
-            )?;
-            if actual_order != order
-                || record.event_id.digest() != candidate.identity_digest
-                || !record.core_record.source.exact_descriptor_eq(source)
-            {
-                return Err(IndexError::InvalidStoredDocumentField(
-                    SOURCE_EVENT_ORDER_FIELD,
-                ));
-            }
             encoded_core_bytes = encoded_core_bytes
-                .checked_add(actual_order.encoded_core_bytes())
+                .checked_add(order.encoded_core_bytes())
                 .ok_or(IndexError::CountOverflow)?;
             content_bytes = content_bytes
-                .checked_add(actual_order.content_bytes())
+                .checked_add(order.content_bytes())
                 .ok_or(IndexError::CountOverflow)?;
-            items.push(record);
-            consumed = consumed.checked_add(1).ok_or(IndexError::CountOverflow)?;
+            items.push(candidate);
         }
-        let terminal = consumed == candidate_count;
-        let next_cursor = if terminal {
-            None
-        } else {
-            items.last().map(|event| {
-                SourceEventCursor::new(self.generation_id.clone(), source.clone(), event.event_id)
-            })
-        };
-        Ok(CoreSourceEventPage {
+        let terminal = items.len() == candidate_count;
+        Ok(CoreSourceEventPagePlan {
             generation_id: self.generation_id.clone(),
             source: source.clone(),
             items,
             encoded_core_bytes,
             content_bytes,
-            next_cursor,
             terminal,
+        })
+    }
+
+    /// Loads and decodes a previously selected page, revalidating every size
+    /// suffix and identity projection against the pinned generation.
+    pub fn materialize_core_source_event_page(
+        &self,
+        plan: CoreSourceEventPagePlan,
+    ) -> Result<CoreSourceEventPage> {
+        if plan.generation_id != self.generation_id {
+            return Err(IndexError::SourceEventCursorGenerationMismatch {
+                cursor_generation: plan.generation_id,
+                pinned_generation: self.generation_id.clone(),
+            });
+        }
+        self.validate_source_event_source(&plan.source)?;
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let mut items = Vec::with_capacity(plan.items.len());
+        let mut actual_encoded_core_bytes = 0_usize;
+        let mut actual_content_bytes = 0_usize;
+        for candidate in plan.items {
+            let expected_order =
+                candidate
+                    .source_order
+                    .ok_or(IndexError::InvalidStoredDocumentField(
+                        SOURCE_EVENT_ORDER_FIELD,
+                    ))?;
+            let (record, stored_core_bytes) =
+                stored_core_event_record_with_size(&self.searcher, candidate.address, fields)?;
+            let actual_order =
+                SourceEventOrderKey::for_core_record(&record.core_record, stored_core_bytes)?;
+            if actual_order != expected_order
+                || record.event_id.digest() != candidate.identity_digest
+                || !record.core_record.source.exact_descriptor_eq(&plan.source)
+            {
+                return Err(IndexError::InvalidStoredDocumentField(
+                    SOURCE_EVENT_ORDER_FIELD,
+                ));
+            }
+            actual_encoded_core_bytes = actual_encoded_core_bytes
+                .checked_add(actual_order.encoded_core_bytes())
+                .ok_or(IndexError::CountOverflow)?;
+            actual_content_bytes = actual_content_bytes
+                .checked_add(actual_order.content_bytes())
+                .ok_or(IndexError::CountOverflow)?;
+            items.push(record);
+        }
+        if actual_encoded_core_bytes != plan.encoded_core_bytes
+            || actual_content_bytes != plan.content_bytes
+        {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SOURCE_EVENT_ORDER_FIELD,
+            ));
+        }
+        let next_cursor = if plan.terminal {
+            None
+        } else {
+            items.last().map(|event| {
+                SourceEventCursor::new(
+                    self.generation_id.clone(),
+                    plan.source.clone(),
+                    event.event_id,
+                )
+            })
+        };
+        Ok(CoreSourceEventPage {
+            generation_id: self.generation_id.clone(),
+            source: plan.source,
+            items,
+            encoded_core_bytes: actual_encoded_core_bytes,
+            content_bytes: actual_content_bytes,
+            next_cursor,
+            terminal: plan.terminal,
+        })
+    }
+
+    /// Loads one planned source page while retaining the exact stored Core
+    /// JSON behind every decoded record.
+    pub fn materialize_stored_core_source_event_page(
+        &self,
+        plan: CoreSourceEventPagePlan,
+    ) -> Result<StoredCoreSourceEventPage> {
+        if plan.generation_id != self.generation_id {
+            return Err(IndexError::SourceEventCursorGenerationMismatch {
+                cursor_generation: plan.generation_id,
+                pinned_generation: self.generation_id.clone(),
+            });
+        }
+        self.validate_source_event_source(&plan.source)?;
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let mut items = Vec::with_capacity(plan.items.len());
+        let mut actual_encoded_core_bytes = 0_usize;
+        let mut actual_content_bytes = 0_usize;
+        for candidate in plan.items {
+            let expected_order =
+                candidate
+                    .source_order
+                    .ok_or(IndexError::InvalidStoredDocumentField(
+                        SOURCE_EVENT_ORDER_FIELD,
+                    ))?;
+            let record = stored_core_event_record_with_source_json(
+                &self.searcher,
+                candidate.address,
+                fields,
+            )?;
+            let stored_core_bytes = record.stored_json.encoded_core_record()?.len();
+            let actual_order =
+                SourceEventOrderKey::for_core_record(&record.core_record, stored_core_bytes)?;
+            if actual_order != expected_order
+                || record.core_record.event_id.digest() != candidate.identity_digest
+                || !record.core_record.source.exact_descriptor_eq(&plan.source)
+            {
+                return Err(IndexError::InvalidStoredDocumentField(
+                    SOURCE_EVENT_ORDER_FIELD,
+                ));
+            }
+            actual_encoded_core_bytes = actual_encoded_core_bytes
+                .checked_add(actual_order.encoded_core_bytes())
+                .ok_or(IndexError::CountOverflow)?;
+            actual_content_bytes = actual_content_bytes
+                .checked_add(actual_order.content_bytes())
+                .ok_or(IndexError::CountOverflow)?;
+            items.push(record);
+        }
+        if actual_encoded_core_bytes != plan.encoded_core_bytes
+            || actual_content_bytes != plan.content_bytes
+        {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SOURCE_EVENT_ORDER_FIELD,
+            ));
+        }
+        let next_cursor = if plan.terminal {
+            None
+        } else {
+            items.last().map(|event| {
+                SourceEventCursor::new(
+                    self.generation_id.clone(),
+                    plan.source.clone(),
+                    event.core_record.event_id,
+                )
+            })
+        };
+        Ok(StoredCoreSourceEventPage {
+            generation_id: self.generation_id.clone(),
+            source: plan.source,
+            items,
+            encoded_core_bytes: actual_encoded_core_bytes,
+            content_bytes: actual_content_bytes,
+            next_cursor,
+            terminal: plan.terminal,
         })
     }
 

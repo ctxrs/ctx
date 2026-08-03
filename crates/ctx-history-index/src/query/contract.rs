@@ -171,6 +171,74 @@ pub struct CoreSourceEventPage {
     pub terminal: bool,
 }
 
+/// One decoded Core record retaining the exact stored JSON that produced it.
+///
+/// The backing Tantivy document remains page-bounded and owns the byte slice,
+/// so derived consumers avoid a second serialization or a body-sized clone.
+#[derive(Debug)]
+pub struct StoredCoreEventRecord {
+    pub core_record: CoreRecord,
+    pub stored_json: StoredCoreRecordJson,
+}
+
+/// Owned backing storage for one exact, already-validated Core JSON value.
+#[derive(Debug)]
+pub struct StoredCoreRecordJson {
+    pub content_bytes: usize,
+    pub(super) document: TantivyDocument,
+    pub(super) core_record_field: tantivy::schema::Field,
+}
+
+impl StoredCoreRecordJson {
+    pub fn encoded_core_record(&self) -> Result<&[u8]> {
+        unique_required_bytes(&self.document, self.core_record_field, "core_record")
+    }
+}
+
+/// One deterministic source page retaining each record's exact stored JSON.
+#[derive(Debug)]
+pub struct StoredCoreSourceEventPage {
+    pub generation_id: String,
+    pub source: SourceKey,
+    pub items: Vec<StoredCoreEventRecord>,
+    pub encoded_core_bytes: usize,
+    pub content_bytes: usize,
+    pub next_cursor: Option<SourceEventCursor>,
+    pub terminal: bool,
+}
+
+/// Opaque metadata selection for one complete-Core source page.
+///
+/// The plan retains only document addresses and authenticated order-key size
+/// suffixes so callers can reserve exact bytes before records are decoded.
+#[derive(Debug)]
+pub struct CoreSourceEventPagePlan {
+    pub(super) generation_id: String,
+    pub(super) source: SourceKey,
+    pub(super) items: Vec<EventAddressCandidate>,
+    pub(super) encoded_core_bytes: usize,
+    pub(super) content_bytes: usize,
+    pub(super) terminal: bool,
+}
+
+impl CoreSourceEventPagePlan {
+    pub fn item_count(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn encoded_core_bytes(&self) -> usize {
+        self.encoded_core_bytes
+    }
+
+    pub fn content_bytes(&self) -> usize {
+        self.content_bytes
+    }
+
+    pub fn terminal(&self) -> bool {
+        self.terminal
+    }
+}
+
 /// Complete requested-order Core records plus exact retained byte totals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreEventBatch {

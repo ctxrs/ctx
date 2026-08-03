@@ -172,6 +172,54 @@ fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
 }
 
 #[test]
+fn stored_core_source_page_retains_canonical_round_trip_bytes() {
+    let temp = tempdir().unwrap();
+    let source = source("stored-core-page.jsonl");
+    let records = vec![
+        document(&source, 1, "plain body"),
+        document(&source, 2, "escaped \0 \"body\" ☃"),
+    ];
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in &records {
+        writer.add_core_record(record.clone()).unwrap();
+    }
+    writer.certify_source(certificate(&source, 1, 2)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    crate::query::reset_stored_core_event_record_materializations();
+    let plan = index
+        .plan_core_source_event_page_with_budget(&source, None, 2, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+        .unwrap();
+    assert_eq!(plan.item_count(), 2);
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        0,
+        "planning must remain metadata-only"
+    );
+    let page = index
+        .materialize_stored_core_source_event_page(plan)
+        .unwrap();
+
+    assert!(page.terminal);
+    assert!(page.next_cursor.is_none());
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        page.items.len()
+    );
+    let mut retained_bytes = 0_usize;
+    for item in &page.items {
+        let stored = item.stored_json.encoded_core_record().unwrap();
+        assert_eq!(stored, item.core_record.encode_stored().unwrap());
+        assert_eq!(CoreRecord::decode_stored(stored).unwrap(), item.core_record);
+        retained_bytes = retained_bytes.checked_add(stored.len()).unwrap();
+    }
+    assert_eq!(retained_bytes, page.encoded_core_bytes);
+}
+
+#[test]
 fn source_event_second_page_reopens_without_materializing_the_remaining_source() {
     const EVENT_COUNT: u64 = 1_024;
     const PAGE_LIMIT: usize = 17;

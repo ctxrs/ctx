@@ -32,6 +32,38 @@ fn commit_binds_manifest_and_searchable_documents() {
 }
 
 #[test]
+fn manifest_accumulator_uses_the_fingerprinted_event_binding() {
+    use sha2::{Digest, Sha256};
+
+    let temp = tempdir().unwrap();
+    let source = source("event-binding-accumulator.jsonl");
+    let record = document(&source, 1, "bound accumulator record");
+    let event_id = record.event_id;
+    let encoded_record = record.encode_stored().unwrap();
+    let record_leaf = ctx_history_core::core_record_leaf_digest(event_id, &encoded_record).unwrap();
+    let canonical_event_id = event_id.encode_canonical().unwrap();
+    let mut expected = Sha256::new();
+    expected.update(ctx_history_core::CORE_RECORD_ACCUMULATOR_IDENTITY);
+    expected.update((canonical_event_id.len() as u64).to_be_bytes());
+    expected.update(canonical_event_id);
+    expected.update(record_leaf);
+    let expected: [u8; 32] = expected.finalize().into();
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(record).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    let receipt = writer.commit(|_| true).unwrap();
+    let aggregate = receipt.manifest().core_record_aggregates.first().unwrap();
+
+    assert_eq!(aggregate.accumulator_bytes().unwrap(), expected);
+    assert_ne!(
+        expected, record_leaf,
+        "raw Core leaves are not accumulator addends"
+    );
+}
+
+#[test]
 fn logical_generation_identity_excludes_physical_index_topology() {
     let source = source("independent-logical-generation.jsonl");
     let publish = |root: &Path| {
