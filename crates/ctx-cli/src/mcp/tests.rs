@@ -102,6 +102,54 @@ fn sql_is_neither_advertised_nor_handled_as_an_mcp_tool() {
     );
 }
 
+#[test]
+fn query_events_is_advertised_as_one_read_only_bounded_page_with_canonical_args() {
+    let tool = tool_definitions()
+        .into_iter()
+        .find(|tool| tool["name"] == "query_events")
+        .expect("query_events tool definition");
+    assert_eq!(tool["annotations"]["readOnlyHint"], true);
+    let properties = tool["inputSchema"]["properties"].as_object().unwrap();
+    for canonical in ["parent_session", "root_session", "limit", "content"] {
+        assert!(properties.contains_key(canonical), "missing {canonical}");
+    }
+    for removed in [
+        "parent",
+        "root",
+        "max_items",
+        "page_items",
+        "max_bytes",
+        "byte_budget",
+    ] {
+        assert!(!properties.contains_key(removed));
+    }
+    assert_eq!(properties["limit"]["default"], 10_000);
+}
+
+#[test]
+fn query_events_rejects_removed_aliases_and_page_budget_arguments() {
+    let temp = tempfile::tempdir().unwrap();
+    for removed in [
+        "parent",
+        "root",
+        "max_items",
+        "page_items",
+        "max_bytes",
+        "byte_budget",
+    ] {
+        let (handled, _) = handle_tools_call(
+            json!({"name": "query_events", "arguments": {(removed): 1}}),
+            temp.path(),
+        );
+        let handled = handled.unwrap().value;
+        assert_eq!(handled["isError"], true, "accepted {removed}");
+        assert_eq!(
+            handled["structuredContent"]["error_code"],
+            "invalid_request"
+        );
+    }
+}
+
 fn run_one_status_response(
     failure: OutputFailure,
 ) -> (

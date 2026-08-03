@@ -11,6 +11,7 @@ required_paths=(
   docs/getting-started.md
   docs/first-10-minutes.md
   docs/cli-reference.md
+  docs/event-queries.md
   docs/contracts/json.md
   docs/storage.md
   docs/privacy-storage.md
@@ -75,12 +76,19 @@ scan_docs() {
   fi
 }
 
-unsupported_surface_pattern='dashboard|shim|shims|pull request|pull-request|pr evidence|pr-evidence|ctx pr([^[:alnum:]_]|$)|ctx publish|ctx evidence|ctx skill (install|status)([^[:alnum:]_]|$)|ctx update|ctx uninstall|\bADE\b|automatic summar|\bMVP\b|recover prior decisions|ctx remembers everything|privacy-first|ctx context|ctx list|ctx validate|normalized-only|normalized only|normalized_import_only|normalized provider JSONL|CTX_PROVIDER_NORMALIZED_IMPORT_DEV|[W]ork Recorder|[w]ork recorder|\bwork-[r]ecord\b'
+unsupported_surface_pattern='dashboard|shim|shims|pull request|pull-request|pr evidence|pr-evidence|ctx pr([^[:alnum:]_]|$)|ctx publish|ctx evidence|ctx skill (install|status)([^[:alnum:]_]|$)|ctx update|ctx uninstall|\bADE\b|automatic summar|\bMVP\b|recover prior decisions|ctx remembers everything|privacy-first|ctx context|ctx export|ctx validate|normalized-only|normalized only|normalized_import_only|normalized provider JSONL|CTX_PROVIDER_NORMALIZED_IMPORT_DEV|[W]ork Recorder|[w]ork recorder|\bwork-[r]ecord\b'
 private_path_pattern='/home/[d]addy|/home/[^[:space:]]+/(code|Documents|Desktop)|/Users/[^[:space:]]+/(code|Documents|Desktop)|ctx-[p]rivate|ctx-multi-repo-workspace|\.ctx/worktrees'
 
 if scan_docs "${unsupported_surface_pattern}" "${public_docs[@]}"; then
     printf 'public docs contain removed or unsupported product surface wording\n' >&2
     exit 1
+fi
+
+# `--until` is public only for the paired `ctx list events` chronology range.
+# Keep rejecting the former search and single-record show spellings.
+if scan_docs 'ctx search.*--until|ctx show (session|event)([[:space:]]|<).*--until' "${public_docs[@]}"; then
+  printf 'public docs attach --until to an unsupported command\n' >&2
+  exit 1
 fi
 
 if scan_docs "${private_path_pattern}" "${public_docs[@]}"; then

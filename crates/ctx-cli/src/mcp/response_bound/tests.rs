@@ -97,6 +97,45 @@ fn show_tool_call_detection_covers_both_show_tools() {
 }
 
 #[test]
+fn query_events_detection_and_final_response_bound_are_exact() {
+    let call = json!({
+        "method": "tools/call",
+        "params": {"name": "query_events", "arguments": {}},
+    });
+    assert!(is_query_events_tool_call(&call));
+    assert!(!is_query_events_tool_call(&json!({
+        "method": "tools/call",
+        "params": {"name": "show_event", "arguments": {}},
+    })));
+
+    let response_id = json!(9);
+    let response = success_response(
+        response_id.clone(),
+        tool_result(json!({
+            "payload_type": "event_range_page",
+            "events": [{"text": "x".repeat(2_000)}],
+            "next_cursor": "opaque-cursor"
+        })),
+    );
+    let exact = serialized_json_line_bytes(&response).unwrap();
+    assert_eq!(
+        bound_query_events_mcp_response(response.clone(), response_id.clone(), exact),
+        response
+    );
+
+    let bounded = bound_query_events_mcp_response(response, response_id, TEST_OUTPUT_LIMIT);
+    assert_eq!(bounded["result"]["isError"], true);
+    assert_eq!(
+        bounded["result"]["structuredContent"]["error_code"],
+        "output_limit_exceeded"
+    );
+    assert!(bounded["result"]["structuredContent"]
+        .get("next_cursor")
+        .is_none());
+    assert!(serialized_json_line_bytes(&bounded).unwrap() <= TEST_OUTPUT_LIMIT);
+}
+
+#[test]
 fn final_mcp_serialization_is_bounded_after_json_expansion() {
     assert_eq!(
         crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,

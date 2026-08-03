@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 mod arguments;
 mod input;
 mod pro;
+mod query_events;
 mod response;
 mod response_bound;
 mod show;
@@ -28,16 +29,23 @@ use pro::{
     pro_blame_tool, required_blame_target, tool_pro_blame, tool_pro_status,
     MCP_BLAME_MAX_OUTPUT_BYTES,
 };
+use query_events::tool_query_events;
 use response::{
     error_response, invalid_request_response, invalid_tool_request, json_rpc_error,
     success_response, tool_error_result, tool_result,
 };
 use response_bound::{
-    bound_blame_mcp_response, bound_show_mcp_response, is_blame_tool_call, is_show_tool_call,
+    bound_blame_mcp_response, bound_query_events_mcp_response, bound_show_mcp_response,
+    is_blame_tool_call, is_query_events_tool_call, is_show_tool_call,
 };
 use show::{tool_show_event, tool_show_session};
 use telemetry::{McpHandled, McpTelemetry, RequestDescriptor};
 use text::render_tool_text;
+
+#[cfg(test)]
+pub(crate) fn query_events_for_test(arguments: &Value, data_root: &Path) -> Result<Value> {
+    tool_query_events(arguments, data_root)
+}
 
 use super::{
     compact_json, config, discovered_plugin_sources_json, search_has_intent, sources_json,
@@ -270,6 +278,7 @@ fn handle_message(
     }
     let bound_show = is_show_tool_call(&message);
     let bound_blame = is_blame_tool_call(&message);
+    let bound_query_events = is_query_events_tool_call(&message);
     let id = message
         .as_object()
         .and_then(|object| object.get("id"))
@@ -360,6 +369,12 @@ fn handle_message(
                 bound_show_mcp_response(response, response_id, MCP_PRESENTATION_MAX_OUTPUT_BYTES)
             } else if bound_blame {
                 bound_blame_mcp_response(response, response_id, MCP_BLAME_MAX_OUTPUT_BYTES)
+            } else if bound_query_events {
+                bound_query_events_mcp_response(
+                    response,
+                    response_id,
+                    MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+                )
             } else {
                 response
             }),
@@ -467,6 +482,7 @@ fn handle_tools_call(
         },
         "show_session" => McpHandled::plain(tool_show_session(&arguments, data_root)),
         "show_event" => McpHandled::plain(tool_show_event(&arguments, data_root)),
+        "query_events" => McpHandled::plain(tool_query_events(&arguments, data_root)),
         "pro_status" => tool_pro_status(data_root),
         "blame" => {
             let parsed_target = required_blame_target(&arguments);
@@ -700,6 +716,42 @@ fn tool_definitions() -> Vec<Value> {
                 "after": { "type": "integer", "minimum": 0, "default": 0 },
                 "window": { "type": "integer", "minimum": 0 }
             }), vec!["ctx_event_id"]),
+            "annotations": { "readOnlyHint": true },
+        }),
+        json!({
+            "name": "query_events",
+            "title": "Query Events",
+            "description": "Return one bounded deterministic page from the pinned normalized Core event corpus.",
+            "inputSchema": object_schema(json!({
+                "since": { "type": "string", "description": "Inclusive millisecond-aligned absolute RFC3339 lower bound; requires until." },
+                "until": { "type": "string", "description": "Exclusive millisecond-aligned absolute RFC3339 upper bound; requires since." },
+                "providers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                "source": { "type": "string", "description": "Exact public ctx source UUID." },
+                "history_source": { "type": "string" },
+                "provider_key": { "type": "string" },
+                "source_id": { "type": "string" },
+                "source_format": { "type": "string" },
+                "provider_session": { "type": "string" },
+                "session": { "type": "string", "description": "Exact public ctx session UUID." },
+                "parent_session": { "type": "string", "description": "Exact public parent ctx session UUID." },
+                "root_session": { "type": "string", "description": "Exact public root ctx session UUID." },
+                "branch": { "type": "string" },
+                "workspace": { "type": "string" },
+                "event_type": { "type": "string", "description": "Exact open event type string." },
+                "role": { "type": "string" },
+                "agent_type": { "type": "string" },
+                "scope": { "type": "string", "enum": ["all", "primary", "subagent"], "default": "all" },
+                "file": { "type": "string" },
+                "direction": { "type": "string", "enum": ["ascending", "descending"], "default": "ascending" },
+                "cursor": { "type": "string", "description": "Opaque next_cursor from the preceding page of this exact selection and generation." },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": crate::commands::list::events::MAX_EVENT_QUERY_LIMIT,
+                    "default": crate::commands::list::events::DEFAULT_EVENT_QUERY_LIMIT
+                },
+                "content": { "type": "string", "enum": ["full", "text", "none"], "default": "full" }
+            }), vec![]),
             "annotations": { "readOnlyHint": true },
         }),
         json!({

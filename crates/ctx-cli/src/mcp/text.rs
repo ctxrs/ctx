@@ -20,6 +20,7 @@ pub(super) fn render_tool_text(value: &Value) -> String {
     match payload_type {
         Some("session_transcript") => render_session_text(value),
         Some("event_window") => render_event_window_text(value),
+        Some("event_range_page") => render_event_range_page_text(value),
         Some("search_results") => render_search_text(value),
         _ if value.get("sources").and_then(Value::as_array).is_some() => render_sources_text(value),
         _ if value.get("initialized").and_then(Value::as_bool).is_some() => {
@@ -27,6 +28,20 @@ pub(super) fn render_tool_text(value: &Value) -> String {
         }
         _ => render_generic_text(value),
     }
+}
+
+fn render_event_range_page_text(value: &Value) -> String {
+    let events = value
+        .get("events")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let mut out = String::from("ctx query_events\n");
+    out.push_str(&format!("events: {events}\n"));
+    push_key_value(&mut out, "generation_id", value.get("generation_id"));
+    push_key_value(&mut out, "terminal", value.get("terminal"));
+    push_key_value(&mut out, "truncated", value.get("truncated"));
+    push_key_value(&mut out, "next_cursor", value.get("next_cursor"));
+    out
 }
 
 fn render_status_text(value: &Value) -> String {

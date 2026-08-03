@@ -1,10 +1,15 @@
 use std::{collections::BTreeSet, path::Path};
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, CoreContentPolicyStatus, CoreRecord,
-    EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceKey, SourceObservation, TypedKey,
+    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend,
+    CertifiedSourceDeletion, CertifiedSourceInventory, CoreContentPolicyStatus, CoreRecord,
+    EventIdentityInput, NativeItemKey, NativeSessionKey, RepositoryBinding, RepositoryEvidence,
+    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
+    RepositoryFileObservationKind, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
+    SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation, SubrecordSelector,
+    TypedKey,
 };
+use tantivy::indexer::NoMergePolicy;
 use tempfile::tempdir;
 
 use super::*;
@@ -86,6 +91,35 @@ fn certificate(source: &SourceKey, revision: u8, documents: usize) -> CertifiedS
     .unwrap()
 }
 
+fn appendable_certificate(source: &SourceKey, revision: u8, documents: usize) -> CertifiedSource {
+    let bytes = documents as u64 * 10;
+    let observation =
+        SourceObservation::new(source.clone(), "regular-file-v1", vec![revision]).unwrap();
+    CertifiedSource::certify_with_frontier(
+        observation.clone(),
+        observation,
+        "event-range-test-parser-v1",
+        [revision; 32],
+        ScannedSourceCounts {
+            complete_records: documents as u64,
+            retained_records: documents as u64,
+            indexed_documents: documents as u64,
+            certified_bytes: bytes,
+            ..ScannedSourceCounts::default()
+        },
+        Some(
+            SourceFrontier::new(
+                "jsonl-byte-offset",
+                TypedKey::U64(bytes),
+                bytes,
+                [revision; 32],
+            )
+            .unwrap(),
+        ),
+    )
+    .unwrap()
+}
+
 fn publish(root: &Path, revision: u8, sources: &[(SourceKey, Vec<CoreRecord>)]) -> String {
     let mut writer = GenerationWriter::open(root, WriterOptions::default()).unwrap();
     for (source, records) in sources {
@@ -100,19 +134,66 @@ fn publish(root: &Path, revision: u8, sources: &[(SourceKey, Vec<CoreRecord>)]) 
     writer.commit(|_| true).unwrap().generation_id
 }
 
+fn deletion_evidence(
+    source: &SourceKey,
+    revision: u8,
+) -> (CertifiedSourceDeletion, CertifiedSourceInventory) {
+    let observation = SourceInventoryObservation::new(
+        source.provider(),
+        "provider-root",
+        TypedKey::utf8("event-range-test-root").unwrap(),
+        "tree-inventory-v1",
+        vec![revision],
+    )
+    .unwrap();
+    let inventory = CertifiedSourceInventory::certify(
+        observation.clone(),
+        observation,
+        "event-range-test-discovery-v1",
+        Vec::new(),
+    )
+    .unwrap();
+    let deletion = CertifiedSourceDeletion::from_inventory(source.clone(), &inventory).unwrap();
+    (deletion, inventory)
+}
+
 fn sorted_ids(records: &[CoreRecord]) -> Vec<uuid::Uuid> {
     let mut coordinates = records
         .iter()
         .filter_map(|record| {
-            record
-                .occurred_at_unix_ms
-                .map(|occurred| (occurred, record.event_sequence, record.event_id.as_uuid()))
+            record.occurred_at_unix_ms.map(|occurred| {
+                (
+                    occurred,
+                    record.event_sequence,
+                    record.event_id.digest(),
+                    record.event_id.as_uuid(),
+                )
+            })
         })
         .collect::<Vec<_>>();
     coordinates.sort_unstable();
     coordinates
         .into_iter()
-        .map(|coordinate| coordinate.2)
+        .map(|coordinate| coordinate.3)
+        .collect()
+}
+
+fn sorted_all_ids(records: &[CoreRecord]) -> Vec<uuid::Uuid> {
+    let mut coordinates = records
+        .iter()
+        .map(|record| {
+            let encoded = record.encode_stored().unwrap();
+            let content = core_content_bytes(&record.content).unwrap();
+            (
+                EventRangeOrderKey::for_core_record(record, encoded.len(), content).unwrap(),
+                record.event_id.as_uuid(),
+            )
+        })
+        .collect::<Vec<_>>();
+    coordinates.sort_unstable_by_key(|(order, _)| *order);
+    coordinates
+        .into_iter()
+        .map(|(_, event_id)| event_id)
         .collect()
 }
 
@@ -192,6 +273,166 @@ fn range_is_half_open_timestamped_provider_neutral_and_tie_ordered() {
 }
 
 #[test]
+fn all_domain_includes_untimestamped_tail_and_descending_is_exact_reverse() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "all-events");
+    let records = vec![
+        record(&source, 1, 8, None, "untimed-later"),
+        record(&source, 2, 2, Some(101), "timed-later"),
+        record(&source, 3, 1, None, "untimed-earlier"),
+        record(&source, 4, 9, Some(100), "timed-earlier"),
+    ];
+    publish(temp.path(), 1, &[(source, records.clone())]);
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+
+    let ascending = CoreEventRangeSelection::all(CoreEventRangeFilters::default()).unwrap();
+    let mut expected = records
+        .iter()
+        .map(|record| {
+            let encoded = record.encode_stored().unwrap();
+            let content = core_content_bytes(&record.content).unwrap();
+            (
+                EventRangeOrderKey::for_core_record(record, encoded.len(), content).unwrap(),
+                record.event_id.as_uuid(),
+            )
+        })
+        .collect::<Vec<_>>();
+    expected.sort_unstable_by_key(|(order, _)| *order);
+    let expected = expected
+        .into_iter()
+        .map(|(_, event_id)| event_id)
+        .collect::<Vec<_>>();
+    assert_eq!(traverse(&index, &ascending, 1), expected);
+
+    let descending = CoreEventRangeSelection::all(CoreEventRangeFilters {
+        direction: CoreEventRangeDirection::Descending,
+        ..CoreEventRangeFilters::default()
+    })
+    .unwrap();
+    let mut reversed = expected;
+    reversed.reverse();
+    assert_eq!(traverse(&index, &descending, 2), reversed);
+}
+
+#[test]
+fn thirty_two_segment_oracle_covers_heap_directions_boundaries_and_indexed_filter() {
+    const SEGMENTS: usize = 32;
+    const EVENTS_PER_SEGMENT: usize = 2;
+
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "thirty-two-segment-range");
+    let mut records = Vec::with_capacity(SEGMENTS * EVENTS_PER_SEGMENT);
+    for segment in 0..SEGMENTS {
+        let revision = u8::try_from(segment + 1).unwrap();
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer
+            .writer_mut()
+            .unwrap()
+            .set_merge_policy(Box::<NoMergePolicy>::default());
+        let append_base = if segment == 0 {
+            writer.begin_source(source.clone()).unwrap();
+            None
+        } else {
+            Some(writer.begin_source_append(source.clone()).unwrap().clone())
+        };
+
+        let mut assistant = record(
+            &source,
+            segment as u64,
+            ((SEGMENTS - segment) % 7) as u64,
+            (segment % 3 != 0).then_some(1_000 + (segment % 4) as i64),
+            &format!("assistant-{segment}"),
+        );
+        assistant.role = Some("assistant".to_owned());
+        let mut user = record(
+            &source,
+            (segment + SEGMENTS) as u64,
+            (segment % 7) as u64,
+            (segment % 5 != 0).then_some(1_000 + ((segment + 1) % 4) as i64),
+            &format!("user-{segment}"),
+        );
+        user.role = Some("user".to_owned());
+
+        // Reverse the local insertion order so neither insertion nor segment
+        // order can accidentally satisfy the global chronology oracle.
+        writer.add_core_record(user.clone()).unwrap();
+        writer.add_core_record(assistant.clone()).unwrap();
+        records.extend([assistant, user]);
+
+        let certified =
+            appendable_certificate(&source, revision, (segment + 1) * EVENTS_PER_SEGMENT);
+        if let Some(base) = append_base {
+            let frontier = base.frontier().unwrap();
+            writer
+                .certify_source_append(
+                    CertifiedSourceAppend::certify(
+                        &base,
+                        certified,
+                        frontier.certified_prefix_bytes(),
+                        *frontier.certified_prefix_digest(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        } else {
+            writer.certify_source(certified).unwrap();
+        }
+        writer.commit(|_| true).unwrap();
+    }
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    assert!(
+        index.searcher.segment_readers().len() >= SEGMENTS,
+        "descending merger test requires at least {SEGMENTS} live segments"
+    );
+    let expected = sorted_all_ids(&records);
+    let assistant_records = records
+        .iter()
+        .filter(|record| record.role.as_deref() == Some("assistant"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let expected_assistants = sorted_all_ids(&assistant_records);
+
+    for limit in [1, 2, 3, 7, 17] {
+        for direction in [
+            CoreEventRangeDirection::Ascending,
+            CoreEventRangeDirection::Descending,
+        ] {
+            let selection = CoreEventRangeSelection::all(CoreEventRangeFilters {
+                direction,
+                ..CoreEventRangeFilters::default()
+            })
+            .unwrap();
+            let mut directional_expected = expected.clone();
+            if direction == CoreEventRangeDirection::Descending {
+                directional_expected.reverse();
+            }
+            assert_eq!(
+                traverse(&index, &selection, limit),
+                directional_expected,
+                "unfiltered direction={direction:?} limit={limit}"
+            );
+
+            let filtered = CoreEventRangeSelection::all(CoreEventRangeFilters {
+                role: Some("assistant".to_owned()),
+                direction,
+                ..CoreEventRangeFilters::default()
+            })
+            .unwrap();
+            let mut filtered_expected = expected_assistants.clone();
+            if direction == CoreEventRangeDirection::Descending {
+                filtered_expected.reverse();
+            }
+            assert_eq!(
+                traverse(&index, &filtered, limit),
+                filtered_expected,
+                "indexed filter direction={direction:?} limit={limit}"
+            );
+        }
+    }
+}
+
+#[test]
 fn randomized_oracle_has_no_gaps_or_duplicates_at_every_boundary() {
     let temp = tempdir().unwrap();
     let source = test_source("codex", "randomized");
@@ -260,7 +501,9 @@ fn cursor_binds_version_generation_selection_coordinate_and_checksum() {
     ));
 
     let mut invalid_coordinate = cursor.clone();
-    invalid_coordinate.after.event_id = uuid::Uuid::nil();
+    let mut invalid_order = invalid_coordinate.after.into_bytes();
+    invalid_order[17] ^= 1;
+    invalid_coordinate.after = EventRangeOrderKey::decode(&invalid_order).unwrap();
     assert!(matches!(
         first.core_event_range_page(&selection, Some(&invalid_coordinate), 1),
         Err(CoreEventRangeError::InvalidCursorCoordinate)
@@ -370,6 +613,162 @@ fn complete_unicode_structured_and_policy_content_stays_generation_owned() {
 }
 
 #[test]
+fn unknown_event_type_full_identity_relationships_and_metadata_roundtrip_exactly() {
+    let temp = tempdir().unwrap();
+    let source = test_source("future-provider", "full-identity-雪");
+    let session = |name: &str| {
+        let key = NativeSessionKey::native_id("thread", TypedKey::utf8(name).unwrap()).unwrap();
+        derive_session_id(SessionIdentityInput {
+            source: &source,
+            logical_session_kind: "thread",
+            native_session_key: &key,
+        })
+        .unwrap()
+    };
+    let root_session_id = session("root");
+    let parent_session_id = session("parent");
+    let session_id = session("child");
+    let native_event_id = TypedKey::Composite(vec![
+        TypedKey::utf8("future-key").unwrap(),
+        TypedKey::U64(42),
+    ]);
+    let native_item_key = NativeItemKey::native_id("future-item", native_event_id.clone()).unwrap();
+    let selector =
+        SubrecordSelector::native_id("future-part", TypedKey::utf8("part-β").unwrap()).unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source: &source,
+        session_id,
+        logical_item_kind: "future-item",
+        native_item_key: &native_item_key,
+        subrecord_selector: Some(&selector),
+    })
+    .unwrap();
+    let mut expected = CoreRecord::new_selected(
+        event_id,
+        session_id,
+        root_session_id,
+        source.clone(),
+        42,
+        "provider_future_event_v99",
+        "specialist",
+        false,
+        "event-range-test-future-parser-v7",
+        "complete 雪 🦀 body",
+    )
+    .unwrap();
+    expected.parent_session_id = Some(parent_session_id);
+    expected.provider_session_id = Some("provider-thread-β".to_owned());
+    expected.native_event_id = Some(native_event_id);
+    expected.occurred_at_unix_ms = Some(1_700_000_000_123);
+    expected.role = Some("future-role".to_owned());
+    expected.workspace = Some("工作区/ctx".to_owned());
+    expected.branch = Some("feature/雪".to_owned());
+    expected.cwd = Some("/workspace/ctx".to_owned());
+    expected.metadata.insert(
+        "future_metadata".to_owned(),
+        serde_json::json!({"nested": [1, true, {"value": "β"}]}),
+    );
+    expected.repository_bindings.push(RepositoryBinding {
+        binding_id: "binding-future".to_owned(),
+        logical_repository_id: "repo-future".to_owned(),
+        checkout_id: None,
+        worktree_id: None,
+        aliases: Vec::new(),
+        git_object_format: None,
+        local_root_authorization: None,
+        evidence: vec![RepositoryEvidence {
+            kind: RepositoryEvidenceKind::FileActivity,
+            confidence: RepositoryEvidenceConfidence::Explicit,
+        }],
+        association_policy_revision: ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    });
+    expected
+        .repository_file_observations
+        .push(RepositoryFileObservation {
+            repository_binding_id: "binding-future".to_owned(),
+            relative_path: "src/future.rs".to_owned(),
+            kind: RepositoryFileObservationKind::Modified,
+            prior_relative_path: None,
+        });
+    expected.validate_contract().unwrap();
+
+    publish(temp.path(), 1, &[(source.clone(), vec![expected.clone()])]);
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::all(CoreEventRangeFilters::default()).unwrap();
+    let page = index.core_event_range_page(&selection, None, 8).unwrap();
+
+    assert!(page.terminal);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].event_type, "provider_future_event_v99");
+    assert!(page.items[0].source.exact_descriptor_eq(&source));
+    assert_eq!(page.items[0].parent_session_id, Some(parent_session_id));
+    assert_eq!(page.items[0].root_session_id, root_session_id);
+    assert_eq!(page.items[0].core_record, expected);
+}
+
+#[test]
+fn active_range_tracks_noop_rewrite_and_certified_deletion() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "lifecycle");
+    let original = (0..4)
+        .map(|nonce| {
+            record(
+                &source,
+                nonce,
+                nonce,
+                Some(100 + nonce as i64),
+                &format!("original-{nonce}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let first_generation = publish(temp.path(), 1, &[(source.clone(), original.clone())]);
+    let selection = CoreEventRangeSelection::all(CoreEventRangeFilters::default()).unwrap();
+    assert_eq!(
+        traverse(&VerifiedIndex::open(temp.path()).unwrap(), &selection, 2),
+        sorted_ids(&original)
+    );
+
+    let no_op_generation = publish(temp.path(), 1, &[(source.clone(), original.clone())]);
+    assert_eq!(no_op_generation, first_generation);
+    assert_eq!(
+        traverse(&VerifiedIndex::open(temp.path()).unwrap(), &selection, 1),
+        sorted_ids(&original)
+    );
+
+    let rewritten = (2..7)
+        .map(|nonce| {
+            record(
+                &source,
+                nonce,
+                nonce % 3,
+                Some(1_000 + nonce as i64),
+                &format!("rewritten-{nonce}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let rewritten_generation = publish(temp.path(), 2, &[(source.clone(), rewritten.clone())]);
+    assert_ne!(rewritten_generation, first_generation);
+    let rewritten_index = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(
+        traverse(&rewritten_index, &selection, 2),
+        sorted_ids(&rewritten)
+    );
+    assert_eq!(rewritten_index.document_count(), rewritten.len() as u64);
+
+    let (deletion, inventory) = deletion_evidence(&source, 3);
+    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    deleting.delete_source(deletion, inventory).unwrap();
+    let deleted_generation = deleting.commit(|_| true).unwrap().generation_id;
+    assert_ne!(deleted_generation, rewritten_generation);
+    let deleted = VerifiedIndex::open(temp.path()).unwrap();
+    let page = deleted.core_event_range_page(&selection, None, 2).unwrap();
+    assert!(page.terminal);
+    assert!(page.items.is_empty());
+    assert_eq!(deleted.document_count(), 0);
+    assert!(deleted.manifest().sources.is_empty());
+}
+
+#[test]
 fn invalid_ranges_filters_and_limits_fail_before_querying() {
     assert!(matches!(
         CoreEventRangeSelection::new(10, 10, Vec::<String>::new()),
@@ -381,7 +780,7 @@ fn invalid_ranges_filters_and_limits_fail_before_querying() {
     ));
     assert!(matches!(
         CoreEventRangeSelection::new(0, 1, [" "]),
-        Err(CoreEventRangeError::InvalidProviderSelection)
+        Err(CoreEventRangeError::InvalidFilter { field: "provider" })
     ));
     assert!(matches!(
         CoreEventRangeSelection::new(
@@ -389,7 +788,7 @@ fn invalid_ranges_filters_and_limits_fail_before_querying() {
             1,
             (0..=MAX_EVENT_RANGE_PROVIDERS).map(|index| format!("provider-{index}")),
         ),
-        Err(CoreEventRangeError::InvalidProviderSelection)
+        Err(CoreEventRangeError::InvalidFilter { field: "provider" })
     ));
 
     let temp = tempdir().unwrap();
@@ -405,4 +804,410 @@ fn invalid_ranges_filters_and_limits_fail_before_querying() {
         index.core_event_range_page(&selection, None, 0),
         Err(CoreEventRangeError::InvalidPageSize { .. })
     ));
+}
+
+#[test]
+fn complete_filters_apply_before_item_and_byte_limits() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "filters");
+    let mut primary = record(&source, 1, 1, Some(100), "primary");
+    primary.branch = Some("main".to_owned());
+    primary.event_type = "tool_result".to_owned();
+    primary.role = Some("assistant".to_owned());
+    primary.agent_type = "codex".to_owned();
+    primary.workspace = Some("/Work/CTX".to_owned());
+    let mut subagent = record(&source, 2, 2, Some(101), "subagent");
+    subagent.is_primary = false;
+    subagent.agent_type = "subagent".to_owned();
+    let session_id = primary.session_id.as_uuid();
+    publish(
+        temp.path(),
+        1,
+        &[(source.clone(), vec![primary.clone(), subagent])],
+    );
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::with_filters(
+        100,
+        102,
+        CoreEventRangeFilters {
+            providers: vec!["codex".to_owned()],
+            source_identity: Some(source.identity().as_uuid()),
+            source_format: Some(source.source_format().to_owned()),
+            provider_session_id: primary.provider_session_id.clone(),
+            session_id: Some(session_id),
+            root_session_id: Some(session_id),
+            branch: primary.branch.clone(),
+            workspace: Some("work/ctx".to_owned()),
+            event_type: Some(primary.event_type.clone()),
+            role: primary.role.clone(),
+            agent_type: Some(primary.agent_type.clone()),
+            scope: CoreEventRangeScope::Primary,
+            ..CoreEventRangeFilters::default()
+        },
+    )
+    .unwrap();
+    let page = index.core_event_range_page(&selection, None, 1).unwrap();
+    assert!(page.terminal);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].event_id, primary.event_id);
+
+    let subagents = CoreEventRangeSelection::with_filters(
+        100,
+        102,
+        CoreEventRangeFilters {
+            scope: CoreEventRangeScope::Subagent,
+            ..CoreEventRangeFilters::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        index
+            .core_event_range_page(&subagents, None, 1)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn exact_source_filter_skips_nonmatching_records_before_core_decode() {
+    let temp = tempdir().unwrap();
+    let decoy_source = test_source("codex", "source-filter-decoy");
+    let selected_source = test_source("codex", "source-filter-selected");
+    let decoys = (0..32)
+        .map(|nonce| record(&decoy_source, nonce, nonce, Some(100), "decoy"))
+        .collect::<Vec<_>>();
+    let selected = record(&selected_source, 100, 100, Some(101), "selected");
+    publish(
+        temp.path(),
+        1,
+        &[
+            (decoy_source, decoys),
+            (selected_source.clone(), vec![selected.clone()]),
+        ],
+    );
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::with_filters(
+        100,
+        102,
+        CoreEventRangeFilters {
+            source_identity: Some(selected_source.identity().as_uuid()),
+            ..CoreEventRangeFilters::default()
+        },
+    )
+    .unwrap();
+    crate::query::reset_stored_core_event_record_materializations();
+    let page = index.core_event_range_page(&selection, None, 1).unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].event_id, selected.event_id);
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 1);
+}
+
+#[test]
+fn custom_source_and_touched_file_filters_apply_before_limit() {
+    let temp = tempdir().unwrap();
+    let source = test_source("custom", "custom-filters");
+    let mut decoy = record(&source, 1, 1, Some(100), "decoy");
+    decoy.native_event_id = Some(TypedKey::Composite(vec![
+        TypedKey::utf8("other-provider").unwrap(),
+        TypedKey::utf8("other-source").unwrap(),
+        TypedKey::utf8("event_id:decoy").unwrap(),
+    ]));
+    let mut matching = record(&source, 2, 2, Some(101), "matching");
+    matching.native_event_id = Some(TypedKey::Composite(vec![
+        TypedKey::utf8("demo-agent").unwrap(),
+        TypedKey::utf8("archive/year/08").unwrap(),
+        TypedKey::utf8("event_id:matching").unwrap(),
+    ]));
+    matching.repository_bindings.push(RepositoryBinding {
+        binding_id: "binding-1".to_owned(),
+        logical_repository_id: "repo-1".to_owned(),
+        checkout_id: None,
+        worktree_id: None,
+        aliases: Vec::new(),
+        git_object_format: None,
+        local_root_authorization: None,
+        evidence: vec![RepositoryEvidence {
+            kind: RepositoryEvidenceKind::FileActivity,
+            confidence: RepositoryEvidenceConfidence::Explicit,
+        }],
+        association_policy_revision: ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    });
+    matching
+        .repository_file_observations
+        .push(RepositoryFileObservation {
+            repository_binding_id: "binding-1".to_owned(),
+            relative_path: "Crates/Feed/SRC/lib.rs".to_owned(),
+            kind: RepositoryFileObservationKind::Modified,
+            prior_relative_path: None,
+        });
+    publish(temp.path(), 1, &[(source, vec![decoy, matching.clone()])]);
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::with_filters(
+        100,
+        102,
+        CoreEventRangeFilters {
+            providers: vec!["custom".to_owned()],
+            history_source: Some("demo-agent/archive/year/08".to_owned()),
+            provider_key: Some("demo-agent".to_owned()),
+            source_id: Some("archive/year/08".to_owned()),
+            file: Some("feed/src/LIB.rs".to_owned()),
+            ..CoreEventRangeFilters::default()
+        },
+    )
+    .unwrap();
+    let page = index.core_event_range_page(&selection, None, 1).unwrap();
+    assert!(page.terminal);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].event_id, matching.event_id);
+    assert_eq!(page.items[0].touched_files, vec!["Crates/Feed/SRC/lib.rs"]);
+}
+
+#[test]
+fn valid_oversized_singleton_always_advances() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "budget");
+    let records = vec![
+        record(&source, 1, 1, Some(10), &"large".repeat(100)),
+        record(&source, 2, 2, Some(11), "next"),
+    ];
+    publish(temp.path(), 1, &[(source, records.clone())]);
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::new(10, 12, Vec::<String>::new()).unwrap();
+    let budget = CoreEventPageBudget::new(1, 1);
+    let first = index
+        .core_event_range_page_with_budget(&selection, None, 8, budget)
+        .unwrap();
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(first.items[0].event_id, records[0].event_id);
+    assert!(first.oversized_singleton);
+    assert!(!first.terminal);
+    let second = index
+        .core_event_range_page_with_budget(&selection, first.next_cursor.as_ref(), 8, budget)
+        .unwrap();
+    assert_eq!(second.items.len(), 1);
+    assert_eq!(second.items[0].event_id, records[1].event_id);
+    assert!(second.oversized_singleton);
+    assert!(second.terminal);
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn strict_budget_rejects_escape_heavy_record_before_core_materialization() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "strict-budget");
+    let large = record(&source, 1, 1, Some(10), &"\0\"\\\n".repeat(4_096));
+    let encoded_core_bytes = large.encode_stored().unwrap().len();
+    let content_bytes = core_content_bytes(&large.content).unwrap();
+    publish(temp.path(), 1, &[(source, vec![large])]);
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::new(10, 11, Vec::<String>::new()).unwrap();
+    let strict_budget = CoreEventPageBudget::new(encoded_core_bytes - 1, content_bytes.max(1));
+
+    crate::query::reset_stored_core_event_record_materializations();
+    crate::query::reset_core_record_decodes();
+    let error = index
+        .core_event_range_page_with_strict_budget(
+            &selection,
+            None,
+            1,
+            DEFAULT_CORE_EVENT_PAGE_BUDGET,
+            strict_budget,
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CoreEventRangeError::RecordExceedsStrictBudget {
+            encoded_core_bytes: actual,
+            maximum_encoded_core_bytes,
+            ..
+        } if actual == encoded_core_bytes && maximum_encoded_core_bytes == encoded_core_bytes - 1
+    ));
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+    assert_eq!(crate::query::core_record_decodes(), 0);
+}
+
+#[test]
+fn nonterminal_cursor_reuses_admitted_key_without_reserializing_maximum_record() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "maximum-cursor-record");
+    let maximum_body = format!(
+        "x{}",
+        " ".repeat(ctx_history_core::MAX_CORE_CONTENT_BYTES - 1)
+    );
+    let records = vec![
+        record(&source, 1, 1, Some(10), &maximum_body),
+        record(&source, 2, 2, Some(11), "next"),
+    ];
+    publish(temp.path(), 1, &[(source, records)]);
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::new(10, 12, Vec::<String>::new()).unwrap();
+
+    crate::query::reset_event_range_cursor_record_reserializations();
+    let page = index.core_event_range_page(&selection, None, 1).unwrap();
+    assert!(!page.terminal);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.content_bytes, ctx_history_core::MAX_CORE_CONTENT_BYTES);
+    assert_eq!(
+        crate::query::event_range_cursor_record_reserializations(),
+        0
+    );
+    assert_eq!(
+        page.cursor_after(0).unwrap(),
+        page.next_cursor,
+        "trimmed-page cursor must reuse the same admitted key"
+    );
+    assert_eq!(
+        page.usage_for_prefix(1).unwrap(),
+        Some((page.encoded_core_bytes, page.content_bytes)),
+        "trimmed-page accounting must reuse admitted key sizes"
+    );
+    assert_eq!(
+        crate::query::event_range_cursor_record_reserializations(),
+        0
+    );
+}
+
+#[test]
+fn byte_budget_bounds_every_nonoversized_page_across_cursor_backpressure() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "bounded-pages");
+    let records = (0..17)
+        .map(|nonce| record(&source, nonce, nonce, Some(100 + nonce as i64), "fixed"))
+        .collect::<Vec<_>>();
+    let maximum_encoded = records
+        .iter()
+        .map(|record| record.encode_stored().unwrap().len())
+        .max()
+        .unwrap();
+    let maximum_content = records
+        .iter()
+        .map(|record| core_content_bytes(&record.content).unwrap())
+        .max()
+        .unwrap();
+    publish(temp.path(), 1, &[(source, records.clone())]);
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::new(100, 200, Vec::<String>::new()).unwrap();
+    let budget = CoreEventPageBudget::new(maximum_encoded, maximum_content);
+    let mut cursor = None;
+    let mut returned = Vec::new();
+    let mut pages = 0;
+    loop {
+        let page = index
+            .core_event_range_page_with_budget(&selection, cursor.as_ref(), 8, budget)
+            .unwrap();
+        pages += 1;
+        assert!(!page.oversized_singleton);
+        assert!(page.encoded_core_bytes <= maximum_encoded);
+        assert!(page.content_bytes <= maximum_content);
+        assert_eq!(page.items.len(), 1);
+        returned.push(page.items[0].event_id.as_uuid());
+        if page.terminal {
+            assert!(page.next_cursor.is_none());
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+    assert_eq!(pages, records.len());
+    assert_eq!(returned, sorted_ids(&records));
+}
+
+#[test]
+fn keyset_pages_visit_only_forward_range_terms() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "linear");
+    let records = (0..257)
+        .map(|nonce| record(&source, nonce, nonce % 5, Some(1_000), "body"))
+        .collect::<Vec<_>>();
+    publish(temp.path(), 1, &[(source, records)]);
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::new(1_000, 1_001, Vec::<String>::new()).unwrap();
+    crate::query::reset_event_range_order_term_visits();
+    let ids = traverse(&index, &selection, 7);
+    assert_eq!(ids.len(), 257);
+    let pages = 257_usize.div_ceil(7);
+    assert!(crate::query::event_range_order_term_visits() <= 257 + pages);
+}
+
+#[test]
+fn descending_keyset_pages_reverse_the_same_total_order() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "descending");
+    let records = (0..97)
+        .map(|nonce| {
+            record(
+                &source,
+                nonce,
+                nonce % 7,
+                Some(1_000 + (nonce % 5) as i64),
+                "body",
+            )
+        })
+        .collect::<Vec<_>>();
+    publish(temp.path(), 1, &[(source, records.clone())]);
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let ascending = CoreEventRangeSelection::new(1_000, 1_005, Vec::<String>::new()).unwrap();
+    let descending = CoreEventRangeSelection::with_filters(
+        1_000,
+        1_005,
+        CoreEventRangeFilters {
+            direction: CoreEventRangeDirection::Descending,
+            ..CoreEventRangeFilters::default()
+        },
+    )
+    .unwrap();
+    let ascending_ids = traverse(&index, &ascending, 11);
+    let descending_ids = traverse(&index, &descending, 11);
+    assert_eq!(
+        descending_ids,
+        ascending_ids.into_iter().rev().collect::<Vec<_>>()
+    );
+
+    let page = index.core_event_range_page(&descending, None, 1).unwrap();
+    assert!(matches!(
+        page.next_cursor.unwrap().validate_selection(&ascending),
+        Err(CoreEventRangeError::CursorSelectionMismatch)
+    ));
+}
+
+#[test]
+fn indexed_selective_continuation_never_walks_chronology_or_materializes_decoys() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "indexed-selective");
+    let mut records = (0..513)
+        .map(|nonce| record(&source, nonce, nonce, Some(10_000 + nonce as i64), "decoy"))
+        .collect::<Vec<_>>();
+    for record in &mut records {
+        record.event_type = "future_decoy_type".to_owned();
+    }
+    let selected_offsets = [3_usize, 64, 129, 255, 384, 512];
+    for offset in selected_offsets {
+        records[offset].event_type = "future_selected_type".to_owned();
+    }
+    let selected_ids = selected_offsets
+        .iter()
+        .map(|offset| records[*offset].event_id.as_uuid())
+        .collect::<Vec<_>>();
+    publish(temp.path(), 1, &[(source, records)]);
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::with_filters(
+        10_000,
+        11_000,
+        CoreEventRangeFilters {
+            event_type: Some("future_selected_type".to_owned()),
+            ..CoreEventRangeFilters::default()
+        },
+    )
+    .unwrap();
+    crate::query::reset_event_range_order_term_visits();
+    crate::query::reset_stored_core_event_record_materializations();
+    let returned = traverse(&index, &selection, 2);
+    assert_eq!(returned, selected_ids);
+    assert_eq!(crate::query::event_range_order_term_visits(), 0);
+    assert_eq!(
+        crate::query::stored_core_event_record_materializations(),
+        selected_ids.len()
+    );
 }

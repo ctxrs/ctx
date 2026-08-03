@@ -320,6 +320,7 @@ pub(crate) struct SourcesTelemetry {
 pub(crate) enum TargetKind {
     Session,
     Event,
+    Events,
 }
 
 impl TargetKind {
@@ -327,6 +328,7 @@ impl TargetKind {
         match self {
             Self::Session => "session",
             Self::Event => "event",
+            Self::Events => "events",
         }
     }
 }
@@ -507,6 +509,7 @@ pub(crate) enum DocTopicId {
     CliReference,
     Docs,
     Search,
+    EventQueries,
     Mcp,
     McpIntegrations,
     Upgrade,
@@ -534,6 +537,7 @@ impl DocTopicId {
             "cli-reference" => Self::CliReference,
             "docs" => Self::Docs,
             "search" => Self::Search,
+            "event-queries" => Self::EventQueries,
             "mcp" => Self::Mcp,
             "mcp-integrations" => Self::McpIntegrations,
             "upgrade" => Self::Upgrade,
@@ -562,6 +566,7 @@ impl DocTopicId {
             Self::CliReference => "cli-reference",
             Self::Docs => "docs",
             Self::Search => "search",
+            Self::EventQueries => "event-queries",
             Self::Mcp => "mcp",
             Self::McpIntegrations => "mcp-integrations",
             Self::Upgrade => "upgrade",

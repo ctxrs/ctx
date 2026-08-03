@@ -66,9 +66,9 @@ mod parser_prop_tests;
 
 pub(crate) use cli::{
     Cli, DaemonArgs, DaemonCommand, DaemonDisableArgs, DaemonRunArgs, DaemonStartModeArg,
-    DaemonTriggerCommandArg, DoctorArgs, FormatArgs, ImportArgs, SearchArgs, SearchBackendArg,
-    SetupArgs, ShowArgs, ShowTarget, SourcesArgs, StatsArgs, StatusArgs, UsageStatusMode,
-    MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
+    DaemonTriggerCommandArg, DoctorArgs, FormatArgs, ImportArgs, ListArgs, ListTarget, SearchArgs,
+    SearchBackendArg, SetupArgs, ShowArgs, ShowTarget, SourcesArgs, StatsArgs, StatusArgs,
+    UsageStatusMode, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
 };
 pub(crate) use commands::locate::LocateTarget;
 pub(crate) use commands::search::RefreshArg;

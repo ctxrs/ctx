@@ -453,7 +453,7 @@ fn semantic_generation_uses_exact_per_source_core_aggregates_without_candidate_t
     )?;
     let generation = SourceBackedSemanticGeneration::from_verified_index(&index)?;
     assert_eq!(SOURCE_CONTRACT_VERSION, 11);
-    assert_eq!(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION, 16);
+    assert_eq!(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION, 17);
     assert_eq!(index.semantic_eligible_event_count()?, 5);
     assert_eq!(generation.core_generation_id, index.generation_id());
     assert_eq!(generation.sources.len(), 2);

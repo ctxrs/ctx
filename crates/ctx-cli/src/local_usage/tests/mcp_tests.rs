@@ -113,3 +113,20 @@ fn recorder_counts_one_delivered_mcp_response_once() {
     assert_eq!(current.summary.calls, 1);
     assert_eq!(current.summary.delivered_output_bytes, 123);
 }
+
+#[test]
+fn query_events_counts_the_delivered_page_after_mcp_adaptation() {
+    let invocation = McpInvocation::recognized("query_events").unwrap();
+    let response = json!({
+        "result": {
+            "structuredContent": {
+                "payload_type": "event_range_page",
+                "events": [{}, {}]
+            }
+        }
+    });
+    let completed = invocation.completed(&response, Duration::ZERO, 321);
+    assert_eq!(completed.operation, "show_event");
+    assert_eq!(completed.result_count, 2);
+    assert_eq!(completed.delivered_output_bytes, 321);
+}

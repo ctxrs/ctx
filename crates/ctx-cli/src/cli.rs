@@ -5,6 +5,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use crate::{
     commands,
     commands::{
+        list::ListEventsArgs,
         locate::LocateArgs,
         search::RefreshArg,
         show::{ShowEventArgs, ShowSessionArgs},
@@ -97,12 +98,12 @@ pub(crate) enum CommandRoot {
     Import(ImportArgs),
     #[command(about = "Show an indexed session or event")]
     Show(ShowArgs),
+    #[command(about = "List filtered events from one immutable Core generation")]
+    List(ListArgs),
     #[command(about = "Locate Core source identity for an indexed session or event")]
     Locate(LocateArgs),
     #[command(about = "Search indexed agent history")]
     Search(SearchArgs),
-    #[command(about = "Export bounded data from one immutable Core generation")]
-    Export(commands::export::ExportArgs),
     #[command(
         about = "Set up, resume, repair, manage, or remove local ctx Pro",
         long_about = "Set up, resume, repair, manage, or remove local ctx Pro. Bare `ctx pro` runs the idempotent setup path; `ctx pro setup` is an explicit synonym. `ctx status` does not mutate canonical history or graph data; entitlement authorization may advance nonsecret anti-clock-rollback metadata.",
@@ -284,6 +285,18 @@ pub(crate) enum ShowTarget {
     Session(ShowSessionArgs),
     #[command(about = "Show one event or a surrounding event window")]
     Event(ShowEventArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ListArgs {
+    #[command(subcommand)]
+    pub(crate) target: ListTarget,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ListTarget {
+    #[command(about = "List deterministic Core event pages")]
+    Events(Box<ListEventsArgs>),
 }
 
 #[derive(Debug, Args)]

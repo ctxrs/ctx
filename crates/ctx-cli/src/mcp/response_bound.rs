@@ -17,6 +17,47 @@ pub(super) fn is_blame_tool_call(message: &Value) -> bool {
         && message.pointer("/params/name").and_then(Value::as_str) == Some("blame")
 }
 
+pub(super) fn is_query_events_tool_call(message: &Value) -> bool {
+    message.get("method").and_then(Value::as_str) == Some("tools/call")
+        && message.pointer("/params/name").and_then(Value::as_str) == Some("query_events")
+}
+
+pub(super) fn bound_query_events_mcp_response(
+    response: Value,
+    response_id: Value,
+    output_limit_bytes: usize,
+) -> Value {
+    let actual_bytes = serialized_json_line_bytes(&response).unwrap_or(usize::MAX);
+    if actual_bytes <= output_limit_bytes {
+        return response;
+    }
+
+    let message = "query_events response exceeds the MCP output limit; retry with content=text or content=none";
+    let result = json!({
+        "isError": true,
+        "content": [{ "type": "text", "text": message }],
+        "structuredContent": {
+            "error": message,
+            "error_code": "output_limit_exceeded",
+            "actual_bytes": actual_bytes,
+            "maximum_bytes": output_limit_bytes,
+            "retryable": true,
+            "recommendation": "retry with content=text or content=none",
+        },
+    });
+    let bounded = success_response(response_id, result);
+    if serialized_json_line_bytes(&bounded).is_ok_and(|bytes| bytes <= output_limit_bytes) {
+        bounded
+    } else {
+        error_response(
+            Value::Null,
+            -32603,
+            "query_events response too large",
+            Some(json!({ "error": "output_limit_exceeded" })),
+        )
+    }
+}
+
 pub(super) fn bound_blame_mcp_response(
     response: Value,
     response_id: Value,

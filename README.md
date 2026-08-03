@@ -64,8 +64,9 @@ ctx show event <ctx-event-id> --window 3
 # Or print a compact transcript of the original session
 ctx show session <ctx-session-id>
 
-# Export one complete UTC day from a stable Core generation
-ctx export events --since 2026-08-01T00:00:00Z --until 2026-08-02T00:00:00Z --format jsonl
+# Stream normalized events through jq with indexed selection inside ctx
+ctx list events --provider codex --content text --format jsonl |
+  jq -r 'select(.record_type == "event_range_event") | .event.text // empty'
 ```
 
 Those IDs let your current agent recover as much context from previous sessions as it needs.

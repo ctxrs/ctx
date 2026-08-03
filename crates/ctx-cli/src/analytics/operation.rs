@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::cli::{CommandRoot, ShowTarget};
+use crate::cli::{CommandRoot, ListTarget, ShowTarget};
 use crate::commands::locate::LocateTarget;
 
 use super::*;
@@ -190,6 +190,20 @@ impl ClientOperationDraft {
                     events_returned: None,
                 }),
             },
+            CommandRoot::List(args) => match &args.target {
+                ListTarget::Events(args) => ClientOperationV1::Show(ShowTelemetry {
+                    target_kind: TargetKind::Events,
+                    transcript_mode: None,
+                    output_format: match args.format {
+                        crate::commands::list::EventQueryFormat::Json => RenderFormat::Json,
+                        crate::commands::list::EventQueryFormat::Jsonl => RenderFormat::Jsonl,
+                    },
+                    writes_out_file: false,
+                    provider_lookup: !args.provider.is_empty(),
+                    window: None,
+                    events_returned: None,
+                }),
+            },
             CommandRoot::Locate(args) => match &args.target {
                 LocateTarget::Session(args) => ClientOperationV1::Locate(LocateTelemetry {
                     target_kind: TargetKind::Session,
@@ -261,7 +275,6 @@ impl ClientOperationDraft {
             }),
             CommandRoot::Doctor(_) => ClientOperationV1::Doctor(DoctorTelemetry::default()),
             CommandRoot::Pro(_)
-            | CommandRoot::Export(_)
             | CommandRoot::Referral(_)
             | CommandRoot::Blame(_)
             | CommandRoot::Stats(_)

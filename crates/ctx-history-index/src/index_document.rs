@@ -12,7 +12,7 @@ use ctx_history_core::{
 
 use crate::{Fields, IndexError, Result};
 
-const BASE_FIELD_VALUES: usize = 29;
+const BASE_FIELD_VALUES: usize = 30;
 pub(crate) const SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN: usize = 64;
 pub(crate) const SOURCE_EVENT_ORDER_KEY_LEN: usize = 104;
 const SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET: usize = SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN;
@@ -31,6 +31,130 @@ const SESSION_EVENT_ORDER_FIELD: &str = "session_event_order";
 
 pub(crate) const SEMANTIC_EVENT_ORDER_KEY_LEN: usize = 32;
 const SEMANTIC_EVENT_ORDER_FIELD: &str = "semantic_event_order";
+
+pub(crate) const EVENT_RANGE_ORDER_KEY_LEN: usize = 57;
+const EVENT_RANGE_ORDER_TIMESTAMP_OFFSET: usize = 1;
+const EVENT_RANGE_ORDER_SEQUENCE_OFFSET: usize = 9;
+const EVENT_RANGE_ORDER_EVENT_DIGEST_OFFSET: usize = 17;
+const EVENT_RANGE_ORDER_ENCODED_BYTES_OFFSET: usize = 49;
+const EVENT_RANGE_ORDER_CONTENT_BYTES_OFFSET: usize = 53;
+const EVENT_RANGE_ORDER_FIELD: &str = "event_range_order";
+
+/// Unique global chronological key for efficient bounded event traversal.
+///
+/// The fixed-width big-endian layout preserves `(time_class, occurred_at_ms,
+/// event_sequence, full_event_digest)` order and carries exact size metadata
+/// so page budgets can be decided before loading a stored Core record. A
+/// timestamped range selects class zero; complete enumeration also includes
+/// untimestamped class-one records without weakening identity equality to the
+/// compact public UUID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct EventRangeOrderKey([u8; EVENT_RANGE_ORDER_KEY_LEN]);
+
+impl EventRangeOrderKey {
+    pub(crate) fn for_core_record(
+        record: &CoreRecord,
+        encoded_core_bytes: usize,
+        content_bytes: usize,
+    ) -> Result<Self> {
+        if encoded_core_bytes == 0 || encoded_core_bytes > MAX_ENCODED_CORE_RECORD_BYTES {
+            return Err(IndexError::DocumentFieldTooLarge {
+                field: "core_record",
+                actual: encoded_core_bytes,
+                maximum: MAX_ENCODED_CORE_RECORD_BYTES,
+            });
+        }
+        if content_bytes > MAX_CORE_CONTENT_BYTES {
+            return Err(IndexError::DocumentFieldTooLarge {
+                field: "core_content",
+                actual: content_bytes,
+                maximum: MAX_CORE_CONTENT_BYTES,
+            });
+        }
+        let encoded_core_bytes = u32::try_from(encoded_core_bytes).map_err(|_| {
+            IndexError::WriterInvariant("encoded Core size does not fit the event range key")
+        })?;
+        let content_bytes = u32::try_from(content_bytes).map_err(|_| {
+            IndexError::WriterInvariant("Core content size does not fit the event range key")
+        })?;
+        let mut key = [0_u8; EVENT_RANGE_ORDER_KEY_LEN];
+        if let Some(occurred_at_unix_ms) = record.occurred_at_unix_ms {
+            let sortable_timestamp = (occurred_at_unix_ms as u64) ^ (1_u64 << 63);
+            key[EVENT_RANGE_ORDER_TIMESTAMP_OFFSET..EVENT_RANGE_ORDER_SEQUENCE_OFFSET]
+                .copy_from_slice(&sortable_timestamp.to_be_bytes());
+        } else {
+            key[0] = 1;
+        }
+        key[EVENT_RANGE_ORDER_SEQUENCE_OFFSET..EVENT_RANGE_ORDER_EVENT_DIGEST_OFFSET]
+            .copy_from_slice(&record.event_sequence.to_be_bytes());
+        key[EVENT_RANGE_ORDER_EVENT_DIGEST_OFFSET..EVENT_RANGE_ORDER_ENCODED_BYTES_OFFSET]
+            .copy_from_slice(&record.event_id.digest());
+        key[EVENT_RANGE_ORDER_ENCODED_BYTES_OFFSET..EVENT_RANGE_ORDER_CONTENT_BYTES_OFFSET]
+            .copy_from_slice(&encoded_core_bytes.to_be_bytes());
+        key[EVENT_RANGE_ORDER_CONTENT_BYTES_OFFSET..].copy_from_slice(&content_bytes.to_be_bytes());
+        Ok(Self(key))
+    }
+
+    pub(crate) fn decode(encoded: &[u8]) -> Result<Self> {
+        let key: [u8; EVENT_RANGE_ORDER_KEY_LEN] = encoded
+            .try_into()
+            .map_err(|_| IndexError::InvalidStoredDocumentField(EVENT_RANGE_ORDER_FIELD))?;
+        let key = Self(key);
+        if key.0[0] > 1
+            || (key.0[0] == 1
+                && key.0[EVENT_RANGE_ORDER_TIMESTAMP_OFFSET..EVENT_RANGE_ORDER_SEQUENCE_OFFSET]
+                    != [0_u8; 8])
+            || key.encoded_core_bytes() == 0
+            || key.encoded_core_bytes() > MAX_ENCODED_CORE_RECORD_BYTES
+            || key.content_bytes() > MAX_CORE_CONTENT_BYTES
+        {
+            return Err(IndexError::InvalidStoredDocumentField(
+                EVENT_RANGE_ORDER_FIELD,
+            ));
+        }
+        Ok(key)
+    }
+
+    pub(crate) fn timestamp_prefix(occurred_at_unix_ms: i64) -> [u8; 9] {
+        let mut prefix = [0_u8; 9];
+        prefix[1..].copy_from_slice(&((occurred_at_unix_ms as u64) ^ (1_u64 << 63)).to_be_bytes());
+        prefix
+    }
+
+    pub(crate) fn occurred_at_unix_ms(self) -> Option<i64> {
+        (self.0[0] == 0).then(|| {
+            let encoded = self.0
+                [EVENT_RANGE_ORDER_TIMESTAMP_OFFSET..EVENT_RANGE_ORDER_SEQUENCE_OFFSET]
+                .try_into()
+                .expect("fixed event range timestamp layout");
+            (u64::from_be_bytes(encoded) ^ (1_u64 << 63)) as i64
+        })
+    }
+
+    pub(crate) fn encoded_core_bytes(self) -> usize {
+        u32::from_be_bytes(
+            self.0[EVENT_RANGE_ORDER_ENCODED_BYTES_OFFSET..EVENT_RANGE_ORDER_CONTENT_BYTES_OFFSET]
+                .try_into()
+                .expect("fixed event range encoded-size layout"),
+        ) as usize
+    }
+
+    pub(crate) fn content_bytes(self) -> usize {
+        u32::from_be_bytes(
+            self.0[EVENT_RANGE_ORDER_CONTENT_BYTES_OFFSET..]
+                .try_into()
+                .expect("fixed event range content-size layout"),
+        ) as usize
+    }
+
+    pub(crate) fn into_bytes(self) -> [u8; EVENT_RANGE_ORDER_KEY_LEN] {
+        self.0
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; EVENT_RANGE_ORDER_KEY_LEN] {
+        &self.0
+    }
+}
 
 /// Core-owned global event order term.
 ///
@@ -503,6 +627,11 @@ impl IndexDocument {
             core_content_bytes,
         )?;
         let session_event_order = SessionEventOrderKey::for_core_record(&record)?;
+        let event_range_order = EventRangeOrderKey::for_core_record(
+            &record,
+            core_record_encoded_bytes,
+            core_content_bytes,
+        )?;
         let repository_path_values = record
             .repository_file_observations
             .iter()
@@ -611,6 +740,7 @@ impl IndexDocument {
             fields.semantic_event_order,
             semantic_event_order.into_bytes(),
         );
+        target.add_bytes(fields.event_range_order, event_range_order.into_bytes());
         Ok(target)
     }
 }

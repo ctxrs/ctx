@@ -278,7 +278,7 @@ fn assert_valid_recommit_without_projection_is_rejected(field_name: &'static str
         .next()
         .unwrap();
     let complete = indexed_document(decoded_stored_core(&searcher, address));
-    let omitted = required_field(&searcher.schema(), field_name).unwrap();
+    let omitted = required_field(searcher.schema(), field_name).unwrap();
     let mut forged = TantivyDocument::default();
     for (field, value) in complete.field_values() {
         if field != omitted {
@@ -323,6 +323,7 @@ enum QueryProjectionMutation {
     Text(&'static str, &'static str),
     U64(&'static str, u64),
     I64(&'static str, i64),
+    Bytes(&'static str, &'static [u8]),
 }
 
 impl QueryProjectionMutation {
@@ -331,7 +332,8 @@ impl QueryProjectionMutation {
             Self::Omit(field)
             | Self::Text(field, _)
             | Self::U64(field, _)
-            | Self::I64(field, _) => field,
+            | Self::I64(field, _)
+            | Self::Bytes(field, _) => field,
         }
     }
 }
@@ -424,6 +426,7 @@ fn recommit_candidate_with_query_projection_mutation(
         QueryProjectionMutation::Text(_, value) => forged.add_text(target, value),
         QueryProjectionMutation::U64(_, value) => forged.add_u64(target, value),
         QueryProjectionMutation::I64(_, value) => forged.add_i64(target, value),
+        QueryProjectionMutation::Bytes(_, value) => forged.add_bytes(target, value),
     }
     drop(searcher);
     drop(reader);
@@ -445,6 +448,8 @@ fn recommit_candidate_with_query_projection_mutation(
 
 #[test]
 fn candidate_publication_rejects_every_query_authoritative_projection_mutation() {
+    const CORRUPT_EVENT_RANGE_ORDER: [u8; crate::index_document::EVENT_RANGE_ORDER_KEY_LEN] =
+        [0x5a; crate::index_document::EVENT_RANGE_ORDER_KEY_LEN];
     let cases = [
         ("event_type", QueryProjectionMutation::Omit("event_type")),
         ("role", QueryProjectionMutation::Text("role", "assistant")),
@@ -475,6 +480,14 @@ fn candidate_publication_rejects_every_query_authoritative_projection_mutation()
         (
             "size",
             QueryProjectionMutation::U64("core_content_bytes", 1),
+        ),
+        (
+            "event_range_order_omitted",
+            QueryProjectionMutation::Omit("event_range_order"),
+        ),
+        (
+            "event_range_order_corrupt",
+            QueryProjectionMutation::Bytes("event_range_order", &CORRUPT_EVENT_RANGE_ORDER),
         ),
     ];
 
@@ -1096,13 +1109,33 @@ fn incompatible_schema_generation_is_rebuilt_without_interpretation() {
 
 #[test]
 fn schema_without_encoded_core_size_is_rebuilt_without_fallback() {
-    assert_eq!(LEXICAL_SCHEMA_VERSION, 16);
+    assert_eq!(LEXICAL_SCHEMA_VERSION, 17);
     assert_active_meta_incompatibility_is_rebuilt(
         "encoded-size-schema-rebuild.jsonl",
         |meta| {
             let schema = meta["schema"].as_array_mut().unwrap();
             let current_fields = schema.len();
             schema.retain(|field| field["name"] != "core_record_encoded_bytes");
+            assert_eq!(schema.len() + 1, current_fields);
+        },
+        |error| {
+            assert!(matches!(
+                error,
+                IndexError::SchemaMismatch(LEXICAL_SCHEMA_VERSION)
+            ));
+        },
+    );
+}
+
+#[test]
+fn schema_without_event_range_order_is_rebuilt_without_fallback() {
+    assert_eq!(LEXICAL_SCHEMA_VERSION, 17);
+    assert_active_meta_incompatibility_is_rebuilt(
+        "event-range-order-schema-rebuild.jsonl",
+        |meta| {
+            let schema = meta["schema"].as_array_mut().unwrap();
+            let current_fields = schema.len();
+            schema.retain(|field| field["name"] != "event_range_order");
             assert_eq!(schema.len() + 1, current_fields);
         },
         |error| {

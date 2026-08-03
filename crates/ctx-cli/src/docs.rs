@@ -142,6 +142,15 @@ const TOPICS: &[DocTopic] = &[
         body: include_str!("../../../docs/search.md"),
     },
     DocTopic {
+        id: "event-queries",
+        title: "Event Queries And JSONL",
+        audience: "integrator-agent",
+        summary: "Deterministic Core event pages, JSONL streaming, cursors, and jq composition.",
+        tags: &["events", "jsonl", "jq", "query"],
+        source_path: "docs/event-queries.md",
+        body: include_str!("../../../docs/event-queries.md"),
+    },
+    DocTopic {
         id: "mcp",
         title: "MCP",
         audience: "agent",
@@ -847,6 +856,20 @@ mod ui_tests {
         assert!(rendered.contains("Matches\n"));
         assert!(rendered.contains("Next\n  ctx docs show search\n"));
         assert_fits(&document, &context);
+    }
+
+    #[test]
+    fn event_queries_is_embedded_with_stable_search_tags() {
+        let topic = TOPICS
+            .iter()
+            .find(|topic| topic.id == "event-queries")
+            .unwrap();
+        assert_eq!(topic.tags, ["events", "jsonl", "jq", "query"]);
+        assert!(topic.body.contains("ctx list events"));
+        assert_eq!(
+            DocTopicId::from_known_id(topic.id).unwrap().as_str(),
+            topic.id
+        );
     }
 
     #[test]

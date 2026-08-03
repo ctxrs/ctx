@@ -2,19 +2,41 @@ use super::*;
 
 use sha2::{Digest, Sha256};
 
-use crate::is_generation_id;
+use crate::{index_document::EventRangeOrderKey, is_generation_id};
 
-const EVENT_RANGE_CURSOR_VERSION: u8 = 1;
-const EVENT_RANGE_CURSOR_BYTES: usize = 161;
+const EVENT_RANGE_CURSOR_VERSION: u8 = 2;
+const EVENT_RANGE_CURSOR_BYTES: usize =
+    1 + 64 + 32 + crate::index_document::EVENT_RANGE_ORDER_KEY_LEN + 32;
 pub const MAX_CORE_EVENT_RANGE_PAGE_ITEMS: usize = 4_096;
 const MAX_EVENT_RANGE_PROVIDERS: usize = 64;
-
 const MAX_PROVIDER_FILTER_BYTES: usize = 256;
 const CURSOR_PAYLOAD_BYTES: usize = EVENT_RANGE_CURSOR_BYTES - 32;
-const CURSOR_DOMAIN: &[u8] = b"ctx-core-event-range-cursor-v1\0";
-const SELECTION_DOMAIN: &[u8] = b"ctx-core-event-range-selection-v1\0";
+const CURSOR_DOMAIN: &[u8] = b"ctx-core-event-range-cursor-v2\0";
+const SELECTION_DOMAIN: &[u8] = b"ctx-core-event-range-selection-v3\0";
+const EVENT_RANGE_ORDER_FIELD: &str = "event_range_order";
 
-type EventRangeSortKey = (i64, u64, u64, u64);
+mod selection;
+mod term_merger;
+
+use term_merger::{OrderedTermMerger, ReverseTermMerger};
+
+#[derive(Debug, Clone, Copy)]
+struct EventRangeAddressCandidate {
+    order: EventRangeOrderKey,
+    address: DocAddress,
+}
+
+#[derive(Debug)]
+struct EventRangeCandidate {
+    order: EventRangeOrderKey,
+    record: CoreEventRecord,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EventRangePageBudgets {
+    aggregate: CoreEventPageBudget,
+    strict: Option<CoreEventPageBudget>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreEventRangeError {
@@ -27,10 +49,19 @@ pub enum CoreEventRangeError {
         since_unix_ms: i64,
         until_unix_ms: i64,
     },
-    #[error("invalid event range provider selection")]
-    InvalidProviderSelection,
+    #[error("invalid event range filter {field}")]
+    InvalidFilter { field: &'static str },
     #[error("event range page size {requested} is outside 1..={maximum}")]
     InvalidPageSize { requested: usize, maximum: usize },
+    #[error(
+        "event range record requires {encoded_core_bytes} encoded Core bytes and {content_bytes} content bytes, exceeding strict limits {maximum_encoded_core_bytes} and {maximum_content_bytes}"
+    )]
+    RecordExceedsStrictBudget {
+        encoded_core_bytes: usize,
+        content_bytes: usize,
+        maximum_encoded_core_bytes: usize,
+        maximum_content_bytes: usize,
+    },
     #[error("invalid event range cursor encoding or integrity")]
     InvalidCursor,
     #[error("event range cursor selection does not match this request")]
@@ -46,125 +77,80 @@ pub enum CoreEventRangeError {
 
 type CoreEventRangeResult<T> = std::result::Result<T, CoreEventRangeError>;
 
-/// Canonical half-open event selection shared by first and continuation pages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CoreEventRangeScope {
+    #[default]
+    All,
+    Primary,
+    Subagent,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CoreEventRangeDirection {
+    #[default]
+    Ascending,
+    Descending,
+}
+
+/// Which part of the immutable Core event corpus is enumerated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreEventRangeDomain {
+    /// Every event, with timestamped events first and untimestamped events in a
+    /// deterministic tail (or the exact reverse for descending traversal).
+    All,
+    /// Timestamped events in the half-open interval `[since, until)`.
+    Timestamped {
+        since_unix_ms: i64,
+        until_unix_ms: i64,
+    },
+}
+
+/// Filters evaluated against one immutable Core generation before page limits.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoreEventRangeFilters {
+    pub providers: Vec<String>,
+    pub source_identity: Option<Uuid>,
+    pub history_source: Option<String>,
+    pub provider_key: Option<String>,
+    pub source_id: Option<String>,
+    pub source_format: Option<String>,
+    pub provider_session_id: Option<String>,
+    pub session_id: Option<Uuid>,
+    pub parent_session_id: Option<Uuid>,
+    pub root_session_id: Option<Uuid>,
+    pub branch: Option<String>,
+    pub workspace: Option<String>,
+    pub event_type: Option<String>,
+    pub role: Option<String>,
+    pub agent_type: Option<String>,
+    pub scope: CoreEventRangeScope,
+    pub file: Option<String>,
+    pub direction: CoreEventRangeDirection,
+}
+
+/// Canonical event selection shared by first and continuation pages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreEventRangeSelection {
-    since_unix_ms: i64,
-    until_unix_ms: i64,
-    providers: Vec<String>,
+    domain: CoreEventRangeDomain,
+    filters: CoreEventRangeFilters,
+    history_source_parts: Option<(String, String)>,
     digest: [u8; 32],
 }
 
-impl CoreEventRangeSelection {
-    pub fn new<I, S>(
-        since_unix_ms: i64,
-        until_unix_ms: i64,
-        providers: I,
-    ) -> CoreEventRangeResult<Self>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        if since_unix_ms >= until_unix_ms {
-            return Err(CoreEventRangeError::InvalidRange {
-                since_unix_ms,
-                until_unix_ms,
-            });
-        }
-        let mut providers = providers
-            .into_iter()
-            .map(Into::into)
-            .map(|provider: String| provider.trim().to_owned())
-            .collect::<Vec<_>>();
-        if providers.iter().any(String::is_empty) {
-            return Err(CoreEventRangeError::InvalidProviderSelection);
-        }
-        if providers
-            .iter()
-            .any(|provider| provider.len() > MAX_PROVIDER_FILTER_BYTES)
-        {
-            return Err(CoreEventRangeError::InvalidProviderSelection);
-        }
-        providers.sort_unstable();
-        providers.dedup();
-        if providers.len() > MAX_EVENT_RANGE_PROVIDERS {
-            return Err(CoreEventRangeError::InvalidProviderSelection);
-        }
-        let digest = selection_digest(since_unix_ms, until_unix_ms, &providers);
-        Ok(Self {
-            since_unix_ms,
-            until_unix_ms,
-            providers,
-            digest,
-        })
-    }
-
-    fn accepts_provider(&self, provider: &str) -> bool {
-        self.providers.is_empty()
-            || self
-                .providers
-                .binary_search_by(|candidate| candidate.as_str().cmp(provider))
-                .is_ok()
-    }
-
-    pub fn cursor_for(
-        &self,
-        generation_id: &str,
-        event: &CoreEventRecord,
-    ) -> CoreEventRangeResult<CoreEventRangeCursor> {
-        let coordinate = CoreEventRangeCoordinate::from_event(event)?;
-        if !self.accepts_coordinate(coordinate) || !self.accepts_provider(&event.provider) {
-            return Err(CoreEventRangeError::InvalidCursorCoordinate);
-        }
-        CoreEventRangeCursor::new(generation_id, self.digest, coordinate)
-    }
-
-    fn accepts_coordinate(&self, coordinate: CoreEventRangeCoordinate) -> bool {
-        (self.since_unix_ms..self.until_unix_ms).contains(&coordinate.occurred_at_unix_ms)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct CoreEventRangeCoordinate {
-    occurred_at_unix_ms: i64,
-    event_sequence: u64,
-    event_id: Uuid,
-}
-
-impl CoreEventRangeCoordinate {
-    fn from_event(event: &CoreEventRecord) -> CoreEventRangeResult<Self> {
-        let occurred_at_unix_ms = event
-            .occurred_at_unix_ms
-            .ok_or(CoreEventRangeError::InvalidCursorCoordinate)?;
-        Ok(Self {
-            occurred_at_unix_ms,
-            event_sequence: event.event_sequence,
-            event_id: event.event_id.as_uuid(),
-        })
-    }
-
-    fn from_sort_key(key: EventRangeSortKey) -> Self {
-        Self {
-            occurred_at_unix_ms: key.0,
-            event_sequence: key.1,
-            event_id: Uuid::from_u128((u128::from(key.2) << 64) | u128::from(key.3)),
-        }
-    }
-}
-
-/// Fixed-size, versioned, tamper-evident cursor for one immutable generation.
+/// Fixed-size, versioned cursor for one immutable generation. The checksum
+/// detects accidental corruption; it is not an authentication mechanism.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreEventRangeCursor {
     generation_id: String,
     selection_digest: [u8; 32],
-    after: CoreEventRangeCoordinate,
+    after: EventRangeOrderKey,
 }
 
 impl CoreEventRangeCursor {
     fn new(
         generation_id: &str,
         selection_digest: [u8; 32],
-        after: CoreEventRangeCoordinate,
+        after: EventRangeOrderKey,
     ) -> CoreEventRangeResult<Self> {
         if !is_generation_id(generation_id) {
             return Err(CoreEventRangeError::InvalidCursor);
@@ -187,7 +173,7 @@ impl CoreEventRangeCursor {
         if self.selection_digest != selection.digest {
             return Err(CoreEventRangeError::CursorSelectionMismatch);
         }
-        if !selection.accepts_coordinate(self.after) {
+        if !selection.accepts_order(self.after) {
             return Err(CoreEventRangeError::InvalidCursorCoordinate);
         }
         Ok(())
@@ -198,19 +184,14 @@ impl CoreEventRangeCursor {
         encoded[0] = EVENT_RANGE_CURSOR_VERSION;
         encoded[1..65].copy_from_slice(self.generation_id.as_bytes());
         encoded[65..97].copy_from_slice(&self.selection_digest);
-        encoded[97..105].copy_from_slice(&self.after.occurred_at_unix_ms.to_be_bytes());
-        encoded[105..113].copy_from_slice(&self.after.event_sequence.to_be_bytes());
-        encoded[113..129].copy_from_slice(self.after.event_id.as_bytes());
+        encoded[97..CURSOR_PAYLOAD_BYTES].copy_from_slice(self.after.as_bytes());
         let checksum = cursor_checksum(&encoded[..CURSOR_PAYLOAD_BYTES]);
         encoded[CURSOR_PAYLOAD_BYTES..].copy_from_slice(&checksum);
         encoded
     }
 
     pub fn decode(encoded: &[u8]) -> CoreEventRangeResult<Self> {
-        if encoded.len() != EVENT_RANGE_CURSOR_BYTES {
-            return Err(CoreEventRangeError::InvalidCursor);
-        }
-        if encoded[0] != EVENT_RANGE_CURSOR_VERSION {
+        if encoded.len() != EVENT_RANGE_CURSOR_BYTES || encoded[0] != EVENT_RANGE_CURSOR_VERSION {
             return Err(CoreEventRangeError::InvalidCursor);
         }
         if cursor_checksum(&encoded[..CURSOR_PAYLOAD_BYTES]) != encoded[CURSOR_PAYLOAD_BYTES..] {
@@ -218,19 +199,11 @@ impl CoreEventRangeCursor {
         }
         let generation_id =
             std::str::from_utf8(&encoded[1..65]).map_err(|_| CoreEventRangeError::InvalidCursor)?;
-        let selection_digest = fixed_cursor_bytes(&encoded[65..97])?;
-        let occurred_at_unix_ms = i64::from_be_bytes(fixed_cursor_bytes(&encoded[97..105])?);
-        let event_sequence = u64::from_be_bytes(fixed_cursor_bytes(&encoded[105..113])?);
-        let event_id = Uuid::from_bytes(fixed_cursor_bytes(&encoded[113..129])?);
-        Self::new(
-            generation_id,
-            selection_digest,
-            CoreEventRangeCoordinate {
-                occurred_at_unix_ms,
-                event_sequence,
-                event_id,
-            },
-        )
+        let mut selection_digest = [0_u8; 32];
+        selection_digest.copy_from_slice(&encoded[65..97]);
+        let after = EventRangeOrderKey::decode(&encoded[97..CURSOR_PAYLOAD_BYTES])
+            .map_err(|_| CoreEventRangeError::InvalidCursor)?;
+        Self::new(generation_id, selection_digest, after)
     }
 }
 
@@ -238,14 +211,53 @@ impl CoreEventRangeCursor {
 pub struct CoreEventRangePage {
     pub generation_id: String,
     pub items: Vec<CoreEventRecord>,
+    pub encoded_core_bytes: usize,
+    pub content_bytes: usize,
+    pub oversized_singleton: bool,
     pub next_cursor: Option<CoreEventRangeCursor>,
     pub terminal: bool,
+    order_keys: Vec<EventRangeOrderKey>,
+    selection_digest: [u8; 32],
 }
 
-#[derive(Debug, Clone, Copy)]
-struct EventRangeAddressCandidate {
-    coordinate: CoreEventRangeCoordinate,
-    address: DocAddress,
+impl CoreEventRangePage {
+    /// Returns a continuation cursor after an item retained from this page.
+    /// This reuses the order key verified during traversal and never
+    /// reserializes the Core record.
+    pub fn cursor_after(
+        &self,
+        item_index: usize,
+    ) -> CoreEventRangeResult<Option<CoreEventRangeCursor>> {
+        self.order_keys
+            .get(item_index)
+            .copied()
+            .map(|order| {
+                CoreEventRangeCursor::new(&self.generation_id, self.selection_digest, order)
+            })
+            .transpose()
+    }
+
+    /// Returns exact Core byte usage for the first `item_count` records from
+    /// the order keys already verified during traversal.
+    pub fn usage_for_prefix(
+        &self,
+        item_count: usize,
+    ) -> CoreEventRangeResult<Option<(usize, usize)>> {
+        let Some(order_keys) = self.order_keys.get(..item_count) else {
+            return Ok(None);
+        };
+        let mut encoded_core_bytes = 0_usize;
+        let mut content_bytes = 0_usize;
+        for order in order_keys {
+            encoded_core_bytes = encoded_core_bytes
+                .checked_add(order.encoded_core_bytes())
+                .ok_or(IndexError::CountOverflow)?;
+            content_bytes = content_bytes
+                .checked_add(order.content_bytes())
+                .ok_or(IndexError::CountOverflow)?;
+        }
+        Ok(Some((encoded_core_bytes, content_bytes)))
+    }
 }
 
 impl VerifiedIndex {
@@ -255,12 +267,80 @@ impl VerifiedIndex {
         cursor: Option<&CoreEventRangeCursor>,
         limit: usize,
     ) -> CoreEventRangeResult<CoreEventRangePage> {
+        self.core_event_range_page_with_budget(
+            selection,
+            cursor,
+            limit,
+            DEFAULT_CORE_EVENT_PAGE_BUDGET,
+        )
+    }
+
+    pub fn core_event_range_page_with_budget(
+        &self,
+        selection: &CoreEventRangeSelection,
+        cursor: Option<&CoreEventRangeCursor>,
+        limit: usize,
+        budget: CoreEventPageBudget,
+    ) -> CoreEventRangeResult<CoreEventRangePage> {
+        self.core_event_range_page_with_budgets(selection, cursor, limit, budget, None)
+    }
+
+    /// Returns a page while rejecting any record that exceeds `strict_budget`
+    /// before reading its stored Core bytes. The ordinary aggregate budget
+    /// retains oversized-singleton progress semantics.
+    pub fn core_event_range_page_with_strict_budget(
+        &self,
+        selection: &CoreEventRangeSelection,
+        cursor: Option<&CoreEventRangeCursor>,
+        limit: usize,
+        budget: CoreEventPageBudget,
+        strict_budget: CoreEventPageBudget,
+    ) -> CoreEventRangeResult<CoreEventRangePage> {
+        self.core_event_range_page_with_budgets(
+            selection,
+            cursor,
+            limit,
+            budget,
+            Some(strict_budget),
+        )
+    }
+
+    fn core_event_range_page_with_budgets(
+        &self,
+        selection: &CoreEventRangeSelection,
+        cursor: Option<&CoreEventRangeCursor>,
+        limit: usize,
+        budget: CoreEventPageBudget,
+        strict_budget: Option<CoreEventPageBudget>,
+    ) -> CoreEventRangeResult<CoreEventRangePage> {
         if !(1..=MAX_CORE_EVENT_RANGE_PAGE_ITEMS).contains(&limit) {
             return Err(CoreEventRangeError::InvalidPageSize {
                 requested: limit,
                 maximum: MAX_CORE_EVENT_RANGE_PAGE_ITEMS,
             });
         }
+        super::execution::validate_core_event_page_budget(budget)?;
+        if let Some(strict_budget) = strict_budget {
+            super::execution::validate_core_event_page_budget(strict_budget)?;
+        }
+        let source_token = self.event_range_source_token(selection);
+        if selection.filters.source_identity.is_some() && source_token.is_none() {
+            if cursor.is_some() {
+                return Err(CoreEventRangeError::InvalidCursorCoordinate);
+            }
+            return Ok(CoreEventRangePage {
+                generation_id: self.generation_id.clone(),
+                items: Vec::new(),
+                encoded_core_bytes: 0,
+                content_bytes: 0,
+                oversized_singleton: false,
+                next_cursor: None,
+                terminal: true,
+                order_keys: Vec::new(),
+                selection_digest: selection.digest,
+            });
+        }
+        let fields = fields_from_schema(self.searcher.schema())?;
         if let Some(cursor) = cursor {
             if cursor.generation_id != self.generation_id {
                 return Err(CoreEventRangeError::CursorGenerationMismatch {
@@ -269,38 +349,343 @@ impl VerifiedIndex {
                 });
             }
             cursor.validate_selection(selection)?;
-            self.validate_event_range_cursor(selection, cursor)?;
+            self.validate_event_range_cursor(selection, cursor, fields, source_token.as_deref())?;
         }
 
-        let fields = fields_from_schema(self.searcher.schema())?;
-        let candidates = self.event_range_candidates(
-            selection,
-            cursor.map(|cursor| cursor.after),
-            limit.saturating_add(1),
-            fields,
-        )?;
-        let candidate_count = candidates.len();
-        let mut items = Vec::with_capacity(limit.min(candidate_count));
+        let budgets = EventRangePageBudgets {
+            aggregate: budget,
+            strict: strict_budget,
+        };
+        let (candidates, has_more, encoded_core_bytes, content_bytes) = self
+            .event_range_candidates(
+                selection,
+                cursor.map(|cursor| cursor.after),
+                limit,
+                budgets,
+                fields,
+                source_token.as_deref(),
+            )?;
+        let order_keys = candidates
+            .iter()
+            .map(|candidate| candidate.order)
+            .collect::<Vec<_>>();
+        let items = candidates
+            .into_iter()
+            .map(|candidate| candidate.record)
+            .collect::<Vec<_>>();
+
+        let terminal = !has_more;
+        let next_cursor = if terminal {
+            None
+        } else {
+            order_keys
+                .last()
+                .copied()
+                .map(|order| {
+                    CoreEventRangeCursor::new(&self.generation_id, selection.digest, order)
+                })
+                .transpose()?
+        };
+        if !terminal && next_cursor.is_none() {
+            return Err(CoreEventRangeError::InvalidCursorCoordinate);
+        }
+        let oversized_singleton = items.len() == 1
+            && (encoded_core_bytes > budget.maximum_encoded_core_bytes
+                || content_bytes > budget.maximum_content_bytes);
+        Ok(CoreEventRangePage {
+            generation_id: self.generation_id.clone(),
+            items,
+            encoded_core_bytes,
+            content_bytes,
+            oversized_singleton,
+            next_cursor,
+            terminal,
+            order_keys,
+            selection_digest: selection.digest,
+        })
+    }
+
+    fn validate_event_range_cursor(
+        &self,
+        selection: &CoreEventRangeSelection,
+        cursor: &CoreEventRangeCursor,
+        fields: Fields,
+        source_token: Option<&str>,
+    ) -> CoreEventRangeResult<()> {
+        let exact_order = TermQuery::new(
+            Term::from_field_bytes(fields.event_range_order, cursor.after.as_bytes()),
+            IndexRecordOption::Basic,
+        );
+        let query = BooleanQuery::new(vec![
+            (Occur::Must, Box::new(exact_order)),
+            (
+                Occur::Must,
+                event_range_filter_query(selection, fields, source_token)?,
+            ),
+        ]);
+        if self
+            .searcher
+            .search(&query, &Count)
+            .map_err(IndexError::from)?
+            != 1
+        {
+            return Err(CoreEventRangeError::InvalidCursorCoordinate);
+        }
+        Ok(())
+    }
+
+    fn event_range_source_token(&self, selection: &CoreEventRangeSelection) -> Option<String> {
+        let expected = selection.filters.source_identity?;
+        self.manifest.sources.iter().find_map(|certified| {
+            let source = certified.observation().source();
+            (source.identity().as_uuid() == expected).then(|| source_token(source))
+        })
+    }
+
+    fn event_range_candidates(
+        &self,
+        selection: &CoreEventRangeSelection,
+        after: Option<EventRangeOrderKey>,
+        limit: usize,
+        budgets: EventRangePageBudgets,
+        fields: Fields,
+        source_token: Option<&str>,
+    ) -> CoreEventRangeResult<(Vec<EventRangeCandidate>, bool, usize, usize)> {
+        if selection.has_fully_indexed_filter() {
+            return self.indexed_event_range_candidates(
+                selection,
+                after,
+                limit,
+                budgets,
+                fields,
+                source_token,
+            );
+        }
+        let segments = self.searcher.segment_readers();
+        let inverted_indexes = segments
+            .iter()
+            .map(|segment| segment.inverted_index(fields.event_range_order))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(IndexError::from)?;
+        let range_bounds = match selection.domain {
+            CoreEventRangeDomain::All => None,
+            CoreEventRangeDomain::Timestamped {
+                since_unix_ms,
+                until_unix_ms,
+            } => Some((
+                EventRangeOrderKey::timestamp_prefix(since_unix_ms),
+                EventRangeOrderKey::timestamp_prefix(until_unix_ms),
+            )),
+        };
+        let streams = if selection.filters.direction == CoreEventRangeDirection::Ascending {
+            inverted_indexes
+                .iter()
+                .map(|inverted| {
+                    let mut range = inverted.terms().range();
+                    if let Some((since, until)) = range_bounds.as_ref() {
+                        range = range.ge(since).lt(until);
+                    }
+                    if let Some(after) = after.as_ref() {
+                        range = range.gt(after.as_bytes());
+                    }
+                    range.into_stream()
+                })
+                .collect::<std::io::Result<Vec<_>>>()
+        } else {
+            inverted_indexes
+                .iter()
+                .map(|inverted| {
+                    let mut range = inverted.terms().range();
+                    if let Some((since, until)) = range_bounds.as_ref() {
+                        range = range.ge(since).lt(until);
+                    }
+                    if let Some(after) = after.as_ref() {
+                        range = range.lt(after.as_bytes());
+                    }
+                    range.backward().into_stream()
+                })
+                .collect::<std::io::Result<Vec<_>>>()
+        }
+        .map_err(IndexError::from)?;
+        let mut merged = match selection.filters.direction {
+            CoreEventRangeDirection::Ascending => {
+                OrderedTermMerger::Ascending(TermMerger::new(streams))
+            }
+            CoreEventRangeDirection::Descending => {
+                OrderedTermMerger::Descending(ReverseTermMerger::new(streams))
+            }
+        };
+        let mut candidates = Vec::with_capacity(limit);
         let mut encoded_core_bytes = 0_usize;
         let mut content_bytes = 0_usize;
-
-        for candidate in candidates.iter().copied().take(limit) {
-            let (preflight_id, candidate_encoded_bytes, candidate_content_bytes) =
-                core_event_fast_preflight(&self.searcher, candidate.address)?;
-            if preflight_id != candidate.coordinate.event_id {
+        while merged.advance()? {
+            #[cfg(test)]
+            EVENT_RANGE_ORDER_TERM_VISITS
+                .set(EVENT_RANGE_ORDER_TERM_VISITS.get().saturating_add(1));
+            let order = EventRangeOrderKey::decode(merged.key())?;
+            let mut address = None;
+            for (segment_ord, term_info) in merged.current_segment_ords_and_term_infos() {
+                let inverted = inverted_indexes.get(segment_ord).ok_or(
+                    IndexError::InvalidStoredDocumentField(EVENT_RANGE_ORDER_FIELD),
+                )?;
+                let segment =
+                    segments
+                        .get(segment_ord)
+                        .ok_or(IndexError::InvalidStoredDocumentField(
+                            EVENT_RANGE_ORDER_FIELD,
+                        ))?;
+                let mut postings = inverted
+                    .read_postings_from_terminfo(&term_info, IndexRecordOption::Basic)
+                    .map_err(IndexError::from)?;
+                let mut doc_id = postings.doc();
+                while doc_id != TERMINATED {
+                    if !segment.is_deleted(doc_id) {
+                        let segment_ord =
+                            u32::try_from(segment_ord).map_err(|_| IndexError::CountOverflow)?;
+                        if address
+                            .replace(DocAddress::new(segment_ord, doc_id))
+                            .is_some()
+                        {
+                            return Err(IndexError::InvalidStoredDocumentField(
+                                EVENT_RANGE_ORDER_FIELD,
+                            )
+                            .into());
+                        }
+                    }
+                    doc_id = postings.advance();
+                }
+            }
+            let Some(address) = address else {
+                continue;
+            };
+            if candidates.len() >= limit {
+                return Ok((candidates, true, encoded_core_bytes, content_bytes));
+            }
+            enforce_strict_budget(order, budgets.strict)?;
+            let admitted = candidates.is_empty()
+                || super::execution::core_event_page_budget_admits(
+                    budgets.aggregate,
+                    encoded_core_bytes,
+                    content_bytes,
+                    order.encoded_core_bytes(),
+                    order.content_bytes(),
+                );
+            if !admitted {
+                return Ok((candidates, true, encoded_core_bytes, content_bytes));
+            }
+            let (record, actual_encoded_bytes) =
+                stored_core_event_record_with_size(&self.searcher, address, fields)?;
+            let actual_content_bytes = core_content_bytes(&record.core_record.content)?;
+            if actual_encoded_bytes != order.encoded_core_bytes()
+                || actual_content_bytes != order.content_bytes()
+                || EventRangeOrderKey::for_core_record(
+                    &record.core_record,
+                    actual_encoded_bytes,
+                    actual_content_bytes,
+                )? != order
+            {
                 return Err(CoreEventRangeError::InvalidCursorCoordinate);
             }
-            if !items.is_empty()
-                && (!budget_admits(
+            if !selection.accepts_record(&record) {
+                continue;
+            }
+            encoded_core_bytes = encoded_core_bytes
+                .checked_add(order.encoded_core_bytes())
+                .ok_or(IndexError::CountOverflow)?;
+            content_bytes = content_bytes
+                .checked_add(order.content_bytes())
+                .ok_or(IndexError::CountOverflow)?;
+            candidates.push(EventRangeCandidate { order, record });
+        }
+        Ok((candidates, false, encoded_core_bytes, content_bytes))
+    }
+
+    fn indexed_event_range_candidates(
+        &self,
+        selection: &CoreEventRangeSelection,
+        after: Option<EventRangeOrderKey>,
+        limit: usize,
+        budgets: EventRangePageBudgets,
+        fields: Fields,
+        source_token: Option<&str>,
+    ) -> CoreEventRangeResult<(Vec<EventRangeCandidate>, bool, usize, usize)> {
+        let base_query = event_range_filter_query(selection, fields, source_token)?;
+        let query: Box<dyn Query> = if let Some(after) = after {
+            let range = match selection.filters.direction {
+                CoreEventRangeDirection::Ascending => RangeQuery::new(
+                    Bound::Excluded(Term::from_field_bytes(
+                        fields.event_range_order,
+                        after.as_bytes(),
+                    )),
+                    Bound::Unbounded,
+                ),
+                CoreEventRangeDirection::Descending => RangeQuery::new(
+                    Bound::Unbounded,
+                    Bound::Excluded(Term::from_field_bytes(
+                        fields.event_range_order,
+                        after.as_bytes(),
+                    )),
+                ),
+            };
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Must, base_query),
+                (Occur::Must, Box::new(range)),
+            ]))
+        } else {
+            base_query
+        };
+        let requested = limit.saturating_add(1);
+        let order = match selection.filters.direction {
+            CoreEventRangeDirection::Ascending => tantivy::Order::Asc,
+            CoreEventRangeDirection::Descending => tantivy::Order::Desc,
+        };
+        let collector = TopDocs::with_limit(requested).order_by((
+            tantivy::collector::sort_key::SortByBytes::for_field(EVENT_RANGE_ORDER_FIELD),
+            order,
+        ));
+        let hits: Vec<(Option<Vec<u8>>, DocAddress)> = self
+            .searcher
+            .search(query.as_ref(), &collector)
+            .map_err(IndexError::from)?;
+        let candidates = hits
+            .into_iter()
+            .map(|(key, address)| {
+                let key = key.ok_or(IndexError::InvalidStoredDocumentField(
+                    EVENT_RANGE_ORDER_FIELD,
+                ))?;
+                Ok(EventRangeAddressCandidate {
+                    order: EventRangeOrderKey::decode(&key)?,
+                    address,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if candidates.windows(2).any(|pair| {
+            pair[0].order == pair[1].order
+                || (selection.filters.direction == CoreEventRangeDirection::Ascending
+                    && pair[0].order > pair[1].order)
+                || (selection.filters.direction == CoreEventRangeDirection::Descending
+                    && pair[0].order < pair[1].order)
+        }) {
+            return Err(CoreEventRangeError::InvalidCursorCoordinate);
+        }
+
+        let candidate_count = candidates.len();
+        let mut records = Vec::with_capacity(limit.min(candidate_count));
+        let mut encoded_core_bytes = 0_usize;
+        let mut content_bytes = 0_usize;
+        for candidate in candidates.iter().take(limit) {
+            let candidate_encoded_bytes = candidate.order.encoded_core_bytes();
+            let candidate_content_bytes = candidate.order.content_bytes();
+            enforce_strict_budget(candidate.order, budgets.strict)?;
+            let admitted = records.is_empty()
+                || super::execution::core_event_page_budget_admits(
+                    budgets.aggregate,
                     encoded_core_bytes,
-                    candidate_encoded_bytes,
-                    DEFAULT_CORE_EVENT_PAGE_BUDGET.maximum_encoded_core_bytes,
-                ) || !budget_admits(
                     content_bytes,
+                    candidate_encoded_bytes,
                     candidate_content_bytes,
-                    DEFAULT_CORE_EVENT_PAGE_BUDGET.maximum_content_bytes,
-                ))
-            {
+                );
+            if !admitted {
                 break;
             }
             let (record, actual_encoded_bytes) =
@@ -308,8 +693,12 @@ impl VerifiedIndex {
             let actual_content_bytes = core_content_bytes(&record.core_record.content)?;
             if actual_encoded_bytes != candidate_encoded_bytes
                 || actual_content_bytes != candidate_content_bytes
-                || CoreEventRangeCoordinate::from_event(&record)? != candidate.coordinate
-                || !selection.accepts_provider(&record.provider)
+                || EventRangeOrderKey::for_core_record(
+                    &record.core_record,
+                    actual_encoded_bytes,
+                    actual_content_bytes,
+                )? != candidate.order
+                || !selection.accepts_record(&record)
             {
                 return Err(CoreEventRangeError::InvalidCursorCoordinate);
             }
@@ -319,185 +708,209 @@ impl VerifiedIndex {
             content_bytes = content_bytes
                 .checked_add(actual_content_bytes)
                 .ok_or(IndexError::CountOverflow)?;
-            items.push(record);
+            records.push(EventRangeCandidate {
+                order: candidate.order,
+                record,
+            });
         }
-
-        let terminal = items.len() == candidate_count;
-        let next_cursor = if terminal {
-            None
-        } else {
-            items
-                .last()
-                .map(|event| selection.cursor_for(&self.generation_id, event))
-                .transpose()?
-        };
-        if !terminal && next_cursor.is_none() {
-            return Err(CoreEventRangeError::InvalidCursorCoordinate);
-        }
-        Ok(CoreEventRangePage {
-            generation_id: self.generation_id.clone(),
-            items,
-            next_cursor,
-            terminal,
-        })
-    }
-
-    fn validate_event_range_cursor(
-        &self,
-        selection: &CoreEventRangeSelection,
-        cursor: &CoreEventRangeCursor,
-    ) -> CoreEventRangeResult<()> {
-        let Some(event) = self.core_event_by_id(cursor.after.event_id)? else {
-            return Err(CoreEventRangeError::InvalidCursorCoordinate);
-        };
-        if CoreEventRangeCoordinate::from_event(&event)? != cursor.after
-            || !selection.accepts_provider(&event.provider)
-        {
-            return Err(CoreEventRangeError::InvalidCursorCoordinate);
-        }
-        Ok(())
-    }
-
-    fn event_range_candidates(
-        &self,
-        selection: &CoreEventRangeSelection,
-        after: Option<CoreEventRangeCoordinate>,
-        limit: usize,
-        fields: Fields,
-    ) -> CoreEventRangeResult<Vec<EventRangeAddressCandidate>> {
-        validate_session_event_coordinate_fast_fields(&self.searcher)?;
-        let query = event_range_query(selection, after, fields);
-        let collector = TopDocs::with_limit(limit).tweak_score(event_range_score);
-        type EventRangeHit = (Reverse<EventRangeSortKey>, DocAddress);
-        let hits: Vec<EventRangeHit> = self
-            .searcher
-            .search(query.as_ref(), &collector)
-            .map_err(IndexError::from)?;
-        let mut candidates = hits
-            .into_iter()
-            .map(|(Reverse(key), address)| EventRangeAddressCandidate {
-                coordinate: CoreEventRangeCoordinate::from_sort_key(key),
-                address,
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_by_key(|candidate| candidate.coordinate);
-        if candidates
-            .windows(2)
-            .any(|pair| pair[0].coordinate >= pair[1].coordinate)
-        {
-            return Err(CoreEventRangeError::InvalidCursorCoordinate);
-        }
-        Ok(candidates)
+        let has_more = records.len() < candidate_count;
+        Ok((records, has_more, encoded_core_bytes, content_bytes))
     }
 }
 
-fn event_range_query(
+fn enforce_strict_budget(
+    order: EventRangeOrderKey,
+    strict_budget: Option<CoreEventPageBudget>,
+) -> CoreEventRangeResult<()> {
+    let Some(strict_budget) = strict_budget else {
+        return Ok(());
+    };
+    if super::execution::core_event_page_budget_admits(
+        strict_budget,
+        0,
+        0,
+        order.encoded_core_bytes(),
+        order.content_bytes(),
+    ) {
+        return Ok(());
+    }
+    Err(CoreEventRangeError::RecordExceedsStrictBudget {
+        encoded_core_bytes: order.encoded_core_bytes(),
+        content_bytes: order.content_bytes(),
+        maximum_encoded_core_bytes: strict_budget.maximum_encoded_core_bytes,
+        maximum_content_bytes: strict_budget.maximum_content_bytes,
+    })
+}
+
+impl CoreEventRangeSelection {
+    fn has_fully_indexed_filter(&self) -> bool {
+        self.filters.source_identity.is_some()
+            || !self.filters.providers.is_empty()
+            || self.filters.history_source.is_some()
+            || self.filters.provider_key.is_some()
+            || self.filters.source_id.is_some()
+            || self.filters.source_format.is_some()
+            || self.filters.provider_session_id.is_some()
+            || self.filters.session_id.is_some()
+            || self.filters.parent_session_id.is_some()
+            || self.filters.root_session_id.is_some()
+            || self.filters.branch.is_some()
+            || self.filters.workspace.is_some()
+            || self.filters.event_type.is_some()
+            || self.filters.role.is_some()
+            || self.filters.agent_type.is_some()
+            || self.filters.scope != CoreEventRangeScope::All
+            || self.filters.file.is_some()
+    }
+}
+
+fn event_range_filter_query(
     selection: &CoreEventRangeSelection,
-    after: Option<CoreEventRangeCoordinate>,
     fields: Fields,
-) -> Box<dyn Query> {
-    let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
-        Occur::Must,
-        Box::new(RangeQuery::new(
-            Bound::Included(Term::from_field_i64(
-                fields.occurred_at_unix_ms,
-                selection.since_unix_ms,
+    source_token: Option<&str>,
+) -> Result<Box<dyn Query>> {
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+    if let CoreEventRangeDomain::Timestamped {
+        since_unix_ms,
+        until_unix_ms,
+    } = selection.domain
+    {
+        add_filter_clause(
+            &mut clauses,
+            Box::new(RangeQuery::new(
+                Bound::Included(Term::from_field_i64(
+                    fields.occurred_at_unix_ms,
+                    since_unix_ms,
+                )),
+                Bound::Excluded(Term::from_field_i64(
+                    fields.occurred_at_unix_ms,
+                    until_unix_ms,
+                )),
             )),
-            Bound::Excluded(Term::from_field_i64(
-                fields.occurred_at_unix_ms,
-                selection.until_unix_ms,
+        );
+    }
+    if let Some(source_token) = source_token {
+        add_filter_clause(
+            &mut clauses,
+            Box::new(TermQuery::new(
+                Term::from_field_text(fields.source_key, source_token),
+                IndexRecordOption::Basic,
             )),
-        )),
-    )];
-    if !selection.providers.is_empty() {
-        clauses.push((
-            Occur::Must,
+        );
+    }
+    if !selection.filters.providers.is_empty() {
+        add_filter_clause(
+            &mut clauses,
             Box::new(TermSetQuery::new(
                 selection
+                    .filters
                     .providers
                     .iter()
                     .map(|provider| Term::from_field_text(fields.provider, provider))
                     .collect::<Vec<_>>(),
             )),
-        ));
+        );
     }
-    if let Some(after) = after {
-        let occurred = Term::from_field_i64(fields.occurred_at_unix_ms, after.occurred_at_unix_ms);
-        let sequence = Term::from_field_u64(fields.event_sequence, after.event_sequence);
-        let event_id = Term::from_field_text(fields.event_id, &after.event_id.to_string());
-        clauses.push((
-            Occur::Must,
-            Box::new(BooleanQuery::union(vec![
-                strict_after(occurred.clone(), []),
-                strict_after(sequence.clone(), [occurred.clone()]),
-                strict_after(event_id, [occurred, sequence]),
-            ])),
-        ));
+    for (field, field_name, value) in [
+        (
+            fields.source_format,
+            "source_format",
+            selection.filters.source_format.as_deref(),
+        ),
+        (
+            fields.provider_session_id,
+            "provider_session_id",
+            selection.filters.provider_session_id.as_deref(),
+        ),
+        (fields.branch, "branch", selection.filters.branch.as_deref()),
+        (
+            fields.event_type,
+            "event_type",
+            selection.filters.event_type.as_deref(),
+        ),
+        (fields.role, "role", selection.filters.role.as_deref()),
+        (
+            fields.agent_type,
+            "agent_type",
+            selection.filters.agent_type.as_deref(),
+        ),
+        (
+            fields.custom_provider_key,
+            "provider_key",
+            selection.filters.provider_key.as_deref(),
+        ),
+        (
+            fields.custom_source_id,
+            "source_id",
+            selection.filters.source_id.as_deref(),
+        ),
+    ] {
+        add_optional_text_filter(&mut clauses, field, field_name, value)?;
     }
-    Box::new(BooleanQuery::new(clauses))
-}
-
-fn strict_after<const N: usize>(term: Term, equal: [Term; N]) -> Box<dyn Query> {
-    let mut clauses = equal
-        .into_iter()
-        .map(|term| Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>)
-        .collect::<Vec<_>>();
-    clauses.push(Box::new(RangeQuery::new(
-        Bound::Excluded(term),
-        Bound::Unbounded,
-    )));
-    Box::new(BooleanQuery::intersection(clauses))
-}
-
-fn event_range_score(
-    segment: &SegmentReader,
-) -> impl Fn(DocId, Score) -> Reverse<EventRangeSortKey> {
-    let occurred_at = segment.fast_fields().i64(OCCURRED_AT_UNIX_MS_FIELD).ok();
-    let sequence = segment
-        .fast_fields()
-        .u64(EVENT_SEQUENCE_FIELD)
-        .ok()
-        .map(|column| column.first_or_default_col(0));
-    let high = segment
-        .fast_fields()
-        .u64(EVENT_ID_HIGH_FIELD)
-        .ok()
-        .map(|column| column.first_or_default_col(0));
-    let low = segment
-        .fast_fields()
-        .u64(EVENT_ID_LOW_FIELD)
-        .ok()
-        .map(|column| column.first_or_default_col(0));
-    move |doc, _score| {
-        Reverse((
-            occurred_at
-                .as_ref()
-                .and_then(|column| column.first(doc))
-                .unwrap_or(i64::MIN),
-            sequence.as_ref().map_or(0, |column| column.get_val(doc)),
-            high.as_ref().map_or(0, |column| column.get_val(doc)),
-            low.as_ref().map_or(0, |column| column.get_val(doc)),
-        ))
+    add_optional_uuid_filter(
+        &mut clauses,
+        fields.session_id,
+        selection.filters.session_id,
+    );
+    add_optional_uuid_filter(
+        &mut clauses,
+        fields.parent_session_id,
+        selection.filters.parent_session_id,
+    );
+    add_optional_uuid_filter(
+        &mut clauses,
+        fields.root_session_id,
+        selection.filters.root_session_id,
+    );
+    if let Some((provider_key, source_id)) = &selection.history_source_parts {
+        add_optional_text_filter(
+            &mut clauses,
+            fields.custom_provider_key,
+            "history_source",
+            Some(provider_key),
+        )?;
+        add_optional_text_filter(
+            &mut clauses,
+            fields.custom_source_id,
+            "history_source",
+            Some(source_id),
+        )?;
     }
-}
-
-fn budget_admits(retained: usize, candidate: usize, maximum: usize) -> bool {
-    retained
-        .checked_add(candidate)
-        .is_some_and(|total| total <= maximum)
-}
-
-fn selection_digest(since: i64, until: i64, providers: &[String]) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(SELECTION_DOMAIN);
-    digest.update(since.to_be_bytes());
-    digest.update(until.to_be_bytes());
-    digest.update((providers.len() as u64).to_be_bytes());
-    for provider in providers {
-        digest.update((provider.len() as u64).to_be_bytes());
-        digest.update(provider.as_bytes());
+    if selection.filters.scope != CoreEventRangeScope::All {
+        let expected = u64::from(selection.filters.scope == CoreEventRangeScope::Primary);
+        add_filter_clause(
+            &mut clauses,
+            Box::new(TermQuery::new(
+                Term::from_field_u64(fields.is_primary, expected),
+                IndexRecordOption::Basic,
+            )),
+        );
     }
-    digest.finalize().into()
+    if let Some(workspace) = selection.filters.workspace.as_deref() {
+        add_filter_clause(
+            &mut clauses,
+            Box::new(metadata_contains_query(
+                fields.workspace_filter,
+                "workspace",
+                workspace,
+            )?),
+        );
+    }
+    if let Some(file) = selection.filters.file.as_deref() {
+        add_filter_clause(
+            &mut clauses,
+            Box::new(metadata_contains_query(
+                fields.touched_file_filter,
+                "file",
+                file,
+            )?),
+        );
+    }
+    if clauses.is_empty() {
+        Ok(Box::new(AllQuery))
+    } else {
+        Ok(Box::new(BooleanQuery::new(clauses)))
+    }
 }
 
 fn cursor_checksum(payload: &[u8]) -> [u8; 32] {
@@ -505,12 +918,6 @@ fn cursor_checksum(payload: &[u8]) -> [u8; 32] {
     digest.update(CURSOR_DOMAIN);
     digest.update(payload);
     digest.finalize().into()
-}
-
-fn fixed_cursor_bytes<const N: usize>(bytes: &[u8]) -> CoreEventRangeResult<[u8; N]> {
-    bytes
-        .try_into()
-        .map_err(|_| CoreEventRangeError::InvalidCursor)
 }
 
 #[cfg(test)]

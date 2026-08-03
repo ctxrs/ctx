@@ -369,6 +369,10 @@ fn expected_query_projection_delta(
         fields.semantic_event_order,
         &record.semantic_event_order,
     ));
+    add(Term::from_field_bytes(
+        fields.event_range_order,
+        &record.event_range_order,
+    ));
 
     // Basic postings expose one membership per distinct term and document even
     // when Core contributes the same exact value through multiple properties.
@@ -430,6 +434,23 @@ fn verify_query_fast_fields(
         "core_record_encoded_bytes",
         u64::try_from(record.stored_core_bytes).map_err(|_| IndexError::CountOverflow)?
     );
+    let event_range_order = segment
+        .fast_fields()
+        .bytes("event_range_order")?
+        .ok_or(IndexError::InvalidStoredDocumentField("event_range_order"))?;
+    let mut term_ords = event_range_order.term_ords(doc_id);
+    let term_ord = term_ords
+        .next()
+        .ok_or(IndexError::InvalidStoredDocumentField("event_range_order"))?;
+    if term_ords.next().is_some() {
+        return Err(IndexError::InvalidStoredDocumentField("event_range_order"));
+    }
+    let mut actual_event_range_order = Vec::with_capacity(record.event_range_order.len());
+    if !event_range_order.ord_to_bytes(term_ord, &mut actual_event_range_order)?
+        || actual_event_range_order.as_slice() != record.event_range_order
+    {
+        return Err(IndexError::InvalidStoredDocumentField("event_range_order"));
+    }
     Ok(())
 }
 
@@ -453,7 +474,7 @@ fn verify_remaining_query_projections(
     Ok(())
 }
 
-fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 20] {
+fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 21] {
     [
         fields.event_identity_digest,
         fields.source_key,
@@ -475,6 +496,7 @@ fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 20] {
         fields.source_event_order,
         fields.session_event_order,
         fields.semantic_event_order,
+        fields.event_range_order,
     ]
 }
 
