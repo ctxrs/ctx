@@ -172,10 +172,12 @@ never checkpoint or write provider data.
 - `usage.sqlite` contains only the bounded content-free aggregates documented
   above. It is product state, not history or search authority.
 
-Search, show, locate, and MCP retrieval read the active verified Core/Tantivy
-generation. Show presents complete policy-selected normalized records stored in
-Core, while locate returns bounded Core source identity metadata; neither
-reopens provider history at query time. Provider changes become visible after
+Search, show, locate, export, and MCP retrieval read verified Core/Tantivy
+generations. Export continuations may reopen the named active or retained
+previous generation; JSONL holds one generation pin for its whole traversal.
+Show and export present complete policy-selected normalized records stored in
+Core, while locate returns bounded Core source identity metadata. None of these
+read paths reopens provider history. Provider changes become visible after
 import or daemon refresh publishes a new Core generation.
 
 Lexical publication keeps the active generation and one previous generation
@@ -348,6 +350,7 @@ local upsert as described above.
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, and local history-source plugin manifests | none |
 | `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v1 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, and optional daemon files; Pro and semantic work is daemon-owned and does not delay foreground completion |
 | `ctx show session` / `ctx show event` | complete policy-selected records in the active verified Core/Tantivy generation | selected `--out` path for `show session` when provided |
+| `ctx export events` | complete timestamped records in one active or retained immutable Core/Tantivy generation | none; export does not refresh providers, publish a generation, or record usage/telemetry |
 | `ctx search` | active verified Core/Tantivy generation and existing semantic generation; depending on refresh mode, bounded provider discovery/path metadata | candidate Core generation publication only when refresh runs; background mode may write daemon state, and semantic-enabled search may create query endpoint files |
 | `ctx pro` / `ctx pro setup` | selected credential store, commercial account state, signed release metadata/artifact, pinned Core materialization feed, and an optional first-challenge codename only for `ctx pro --referral <codename>` | selected credential store, signed helper installation, encrypted derived graph, and an optional opaque referral claim after accepted activation; the raw codename is not retained, and the explicit `setup` form is a synonym without referral attribution |
 | `ctx pro manage` | selected credential store and commercial account state | may refresh the WorkOS session in the selected credential store and open a hosted billing-portal URL |

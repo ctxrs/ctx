@@ -1,10 +1,12 @@
 mod contract;
+mod event_range;
 mod execution;
 mod filtering;
 mod records;
 mod verification;
 
 pub use contract::*;
+pub use event_range::*;
 use filtering::*;
 pub(crate) use records::stored_event_record;
 use records::{

@@ -652,6 +652,46 @@ JSON and JSONL, MCP, noninteractive output, empty or failed results, install and
 setup, Core commands, and later blame results. Showing the copy makes no network
 request and is not reported remotely.
 
+## Export events
+
+```bash
+ctx export events --since 2026-08-01T00:00:00Z --until 2026-08-02T00:00:00Z
+ctx export events --since 2026-08-01T00:00:00Z --until 2026-08-02T00:00:00Z --provider codex --provider claude --format json
+ctx export events --since 2026-08-01T00:00:00Z --until 2026-08-02T00:00:00Z --format jsonl
+```
+
+`export events` reads complete timestamped events from one immutable verified
+Core generation in ascending `(occurred_at_unix_ms, event_sequence,
+ctx_event_id)` order. `--since` is inclusive, `--until` is exclusive, and both
+must be absolute RFC3339 timestamps. Events without a timestamp are outside
+this range contract. With no `--provider`, every provider and both primary and
+subagent sessions are included. Repeat `--provider` to select more than one
+provider.
+
+`--format json` writes one compact resumable page. The versioned object contains
+`generation_id`, `events`, `next_cursor`, `terminal`, and `usage`; `usage.bytes`
+is the exact stdout byte count including the final newline. Continue with the
+same range, provider selection, and returned `--cursor`. A cursor binds its
+version, generation, selection, and last coordinate. Continuation reads that
+named active or retained previous generation and returns a typed
+`generation_not_retained` error after eviction.
+
+`--format jsonl` follows internal pages to completion while holding the same
+generation pin for the whole process. Each line is one event object, in the
+same order and shape as the JSON page's `events`; each standalone event carries
+its own `schema_version`. `--max-items` and
+`--max-bytes` bound each internal page. The final serialized page or JSONL
+batch never exceeds `--max-bytes`; an event that cannot fit alone returns a
+typed `event_too_large` error with a cursor that resumes immediately before
+that event.
+
+Every event includes its Core event, session, root-session, parent-session, and
+source IDs when applicable; provider/runtime format, provider-native IDs,
+workspace, cwd, type, role, timestamp, sequence, normalized text, structured
+content, and content policy completeness. All fields come from the same Core
+generation. Export never opens provider sources, refreshes history, or writes
+state. Machine data goes to stdout and one compact typed error goes to stderr.
+
 ## Show
 
 ```bash
