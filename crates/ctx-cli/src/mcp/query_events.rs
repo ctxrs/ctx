@@ -9,10 +9,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{invalid_tool_request, optional_string, optional_usize};
-use crate::commands::show::events::{
+use crate::commands::list::events::{
     decode_cursor, event_range_page_value, mcp_event_query_core_record_bytes, selection,
-    validated_limit, wire_domain, EventContentProjection, EventQueryWireRequest,
-    DEFAULT_EVENT_QUERY_LIMIT,
+    validated_limit, EventContentProjection, EventQueryWireRequest, DEFAULT_EVENT_QUERY_LIMIT,
 };
 use crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES;
 
@@ -36,23 +35,23 @@ pub(super) fn tool_query_events(arguments: &Value, data_root: &Path) -> Result<V
     let file = optional_string(arguments, "file")?;
     let direction = optional_direction(arguments)?;
     let filters = CoreEventRangeFilters {
-        providers: providers.clone(),
+        providers,
         source_identity: parse_optional_uuid("source", source.as_deref())?,
-        history_source: history_source.clone(),
-        provider_key: provider_key.clone(),
-        source_id: source_id.clone(),
-        source_format: source_format.clone(),
-        provider_session_id: provider_session.clone(),
+        history_source,
+        provider_key,
+        source_id,
+        source_format,
+        provider_session_id: provider_session,
         session_id: parse_optional_uuid("session", session.as_deref())?,
         parent_session_id: parse_optional_uuid("parent_session", parent_session.as_deref())?,
         root_session_id: parse_optional_uuid("root_session", root_session.as_deref())?,
-        branch: branch.clone(),
-        workspace: workspace.clone(),
-        event_type: event_type.clone(),
-        role: role.clone(),
-        agent_type: agent_type.clone(),
+        branch,
+        workspace,
+        event_type,
+        role,
+        agent_type,
         scope,
-        file: file.clone(),
+        file,
         direction,
     };
     let since = optional_string(arguments, "since")?;
@@ -68,34 +67,7 @@ pub(super) fn tool_query_events(arguments: &Value, data_root: &Path) -> Result<V
         .unwrap_or(DEFAULT_EVENT_QUERY_LIMIT);
     let limit = validated_limit(limit)?;
     let content = optional_content_projection(arguments)?;
-    let wire_filters = compact_filters(
-        &providers,
-        [
-            ("source", source.as_deref()),
-            ("history_source", history_source.as_deref()),
-            ("provider_key", provider_key.as_deref()),
-            ("source_id", source_id.as_deref()),
-            ("source_format", source_format.as_deref()),
-            ("provider_session_id", provider_session.as_deref()),
-            ("session", session.as_deref()),
-            ("parent_session", parent_session.as_deref()),
-            ("root_session", root_session.as_deref()),
-            ("branch", branch.as_deref()),
-            ("workspace", workspace.as_deref()),
-            ("event_type", event_type.as_deref()),
-            ("role", role.as_deref()),
-            ("agent_type", agent_type.as_deref()),
-            ("file", file.as_deref()),
-        ],
-        scope,
-    );
-    let request = EventQueryWireRequest::new(
-        wire_domain(since.as_deref(), until.as_deref()),
-        wire_filters,
-        direction,
-        content,
-        limit,
-    );
+    let request = EventQueryWireRequest::from_selection(&selection, content, limit);
     let record_bytes = mcp_event_query_core_record_bytes(MCP_PRESENTATION_MAX_OUTPUT_BYTES);
     let strict_budget =
         CoreEventPageBudget::new(record_bytes, record_bytes.min(MAX_CORE_CONTENT_BYTES));
@@ -136,33 +108,6 @@ fn parse_optional_uuid(key: &'static str, value: Option<&str>) -> Result<Option<
                 .map_err(|_| invalid_tool_request(format!("{key} must be a full UUID")))
         })
         .transpose()
-}
-
-fn compact_filters<const N: usize>(
-    providers: &[String],
-    values: [(&str, Option<&str>); N],
-    scope: CoreEventRangeScope,
-) -> Value {
-    let mut filters = serde_json::Map::new();
-    if !providers.is_empty() {
-        filters.insert("providers".to_owned(), serde_json::json!(providers));
-    }
-    for (key, value) in values {
-        if let Some(value) = value {
-            filters.insert(key.to_owned(), serde_json::json!(value));
-        }
-    }
-    if scope != CoreEventRangeScope::All {
-        filters.insert(
-            "scope".to_owned(),
-            serde_json::json!(match scope {
-                CoreEventRangeScope::All => "all",
-                CoreEventRangeScope::Primary => "primary",
-                CoreEventRangeScope::Subagent => "subagent",
-            }),
-        );
-    }
-    Value::Object(filters)
 }
 
 fn optional_scope(arguments: &Value) -> Result<CoreEventRangeScope> {

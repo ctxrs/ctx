@@ -127,9 +127,9 @@ fn help_exposes_session_retrieval_commands() {
         "sources",
         "import",
         "show",
+        "list",
         "locate",
         "search",
-        "export",
         "docs",
         "mcp",
         "integrations",
@@ -150,7 +150,6 @@ fn help_exposes_session_retrieval_commands() {
         "link-pr",
         "record",
         "research",
-        "list",
         "validate",
         "report",
         "schema",
@@ -647,11 +646,11 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
         ),
         ("show", vec!["Usage: ctx show", "session", "event"]),
         (
-            "export",
+            "list",
             vec![
-                "Usage: ctx export",
+                "Usage: ctx list",
                 "events",
-                "Export bounded data from one immutable Core generation",
+                "List filtered events from one immutable Core generation",
             ],
         ),
         (
@@ -767,7 +766,7 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
         &["import", "--help"],
         &["show", "session", "--help"],
         &["show", "event", "--help"],
-        &["export", "events", "--help"],
+        &["list", "events", "--help"],
         &["search", "--help"],
         &["pro", "--help"],
         &["pro", "setup", "--help"],
@@ -1221,7 +1220,7 @@ fn removed_public_commands_are_rejected() {
         .unwrap_or(&root_help);
     for removed in [
         "context",
-        "list",
+        "export",
         "validate",
         "materialize",
         "related",
@@ -1236,7 +1235,6 @@ fn removed_public_commands_are_rejected() {
 
     for args in [
         vec!["context", "onboarding", "--format=json"],
-        vec!["list", "--format=json"],
         vec!["export", "session", "00000000-0000-0000-0000-000000000000"],
         vec!["validate", "--format=json"],
         vec!["materialize", "--format=json"],

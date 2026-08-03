@@ -84,7 +84,7 @@ if scan_docs "${unsupported_surface_pattern}" "${public_docs[@]}"; then
     exit 1
 fi
 
-# `--until` is public only for the paired `ctx show events` chronology range.
+# `--until` is public only for the paired `ctx list events` chronology range.
 # Keep rejecting the former search and single-record show spellings.
 if scan_docs 'ctx search.*--until|ctx show (session|event)([[:space:]]|<).*--until' "${public_docs[@]}"; then
   printf 'public docs attach --until to an unsupported command\n' >&2

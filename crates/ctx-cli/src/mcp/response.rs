@@ -38,8 +38,8 @@ pub(super) fn tool_result(structured: Value) -> Value {
 }
 
 pub(super) fn tool_error_result(err: Error) -> Value {
-    if let Some(error) = err.downcast_ref::<crate::commands::show::events::EventQueryError>() {
-        let structured = crate::commands::show::events::event_query_error_value(error);
+    if let Some(error) = err.downcast_ref::<crate::commands::list::events::EventQueryError>() {
+        let structured = crate::commands::list::events::event_query_error_value(error);
         return json!({
             "isError": true,
             "content": [{ "type": "text", "text": error.to_string() }],

@@ -8,9 +8,9 @@ use crate::{
     cli::{CommandRoot, DaemonCommand, DaemonTriggerCommandArg, ImportArgs, ShowArgs, ShowTarget},
     commands::{
         doctor::run_doctor,
-        export::run_export,
         import::{run_import, ProviderRefreshCollector},
         index::run_index,
+        list::run_list,
         locate::run_locate,
         search::run_search,
         setup::run_setup,
@@ -318,6 +318,16 @@ pub(crate) fn run_cli() -> Result<()> {
             &mut local_usage_draft,
             &mut ui,
         ),
+        CommandRoot::List(args) => run_list(
+            args,
+            data_root.clone(),
+            analytics_draft
+                .as_mut()
+                .expect("list has a telemetry draft")
+                .show_mut(),
+            &mut local_usage_draft,
+            &mut ui,
+        ),
         CommandRoot::Locate(args) => run_locate(
             args,
             data_root.clone(),
@@ -340,7 +350,6 @@ pub(crate) fn run_cli() -> Result<()> {
             &mut local_usage_draft,
             &mut ui,
         ),
-        CommandRoot::Export(args) => run_export(args, data_root.clone(), &mut ui),
         CommandRoot::Pro(args) => {
             let validation = args.validate_invocation();
             if validation.is_err() && !data_root.exists() {
@@ -550,12 +559,12 @@ fn command_json_output(command: &CommandRoot) -> bool {
         CommandRoot::Sources(args) => args.format.is_json(),
         CommandRoot::Import(args) => args.format.is_json(),
         CommandRoot::Show(args) => show_json_output(args),
+        CommandRoot::List(_) => true,
         CommandRoot::Locate(args) => match &args.target {
             crate::LocateTarget::Session(args) => args.format.is_json(),
             crate::LocateTarget::Event(args) => args.format.is_json(),
         },
         CommandRoot::Search(args) => args.format.is_json(),
-        CommandRoot::Export(_) => true,
         CommandRoot::Pro(args) => args.json_output(),
         CommandRoot::Referral(args) => args.json_output(),
         CommandRoot::Blame(args) => args.json_output(),
@@ -580,7 +589,6 @@ fn show_json_output(args: &ShowArgs) -> bool {
     match &args.target {
         ShowTarget::Session(args) => args.format == OutputFormat::Json,
         ShowTarget::Event(args) => args.format == OutputFormat::Json,
-        ShowTarget::Events(_) => true,
     }
 }
 
@@ -600,8 +608,9 @@ fn command_machine_readable_output(command: &CommandRoot, json_output: bool) -> 
                 &args.target,
                 ShowTarget::Event(args)
                     if matches!(args.format, OutputFormat::Jsonl | OutputFormat::Markdown)
-            ) || matches!(&args.target, ShowTarget::Events(_))
+            )
         }
+        CommandRoot::List(_) => true,
         CommandRoot::Mcp(_) => true,
         _ => false,
     }

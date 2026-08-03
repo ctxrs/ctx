@@ -3,17 +3,15 @@ use std::{io::Write, path::Path, path::PathBuf};
 use anyhow::Result;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, SecondsFormat, Utc};
-use clap::{Args, ValueEnum};
 use ctx_history_core::{
     CoreContentPolicyStatus, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
 };
 use ctx_history_index::{
-    CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeDirection, CoreEventRangeError,
-    CoreEventRangeFilters, CoreEventRangePage, CoreEventRangeScope, CoreEventRangeSelection,
-    CoreEventRecord, IndexError, VerifiedIndex,
+    CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeError, CoreEventRangeFilters,
+    CoreEventRangePage, CoreEventRangeSelection, CoreEventRecord, IndexError, VerifiedIndex,
 };
 use serde::Serialize;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
@@ -21,6 +19,14 @@ use crate::{
     analytics::ShowTelemetry,
     local_usage::{CliUsage, ResultObservationAction},
     ui::Ui,
+};
+
+mod request;
+
+#[cfg(test)]
+use ctx_history_index::{CoreEventRangeDirection, CoreEventRangeScope};
+pub(crate) use request::{
+    EventContentProjection, EventQueryFormat, EventQueryWireRequest, ListEventsArgs,
 };
 
 pub(crate) const EVENT_QUERY_SCHEMA_VERSION: u8 = 1;
@@ -39,162 +45,6 @@ pub(crate) const MAX_EVENT_QUERY_WIRE_RECORD_BYTES: usize =
 /// before a record is materialized.
 pub(crate) const fn mcp_event_query_core_record_bytes(response_cap: usize) -> usize {
     response_cap / 8
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ShowEventsArgs {
-    #[arg(
-        long,
-        requires = "until",
-        help = "Inclusive millisecond-aligned absolute RFC3339 lower bound"
-    )]
-    pub(crate) since: Option<String>,
-    #[arg(
-        long,
-        requires = "since",
-        help = "Exclusive millisecond-aligned absolute RFC3339 upper bound"
-    )]
-    pub(crate) until: Option<String>,
-    #[arg(
-        long,
-        help = "Filter by exact provider; repeat to select more than one"
-    )]
-    pub(crate) provider: Vec<String>,
-    #[arg(long, help = "Filter by exact public ctx source UUID")]
-    pub(crate) source: Option<String>,
-    #[arg(
-        long = "history-source",
-        help = "Filter custom history source as provider-key/source-id"
-    )]
-    pub(crate) history_source: Option<String>,
-    #[arg(long = "provider-key", help = "Filter by custom history provider key")]
-    pub(crate) provider_key: Option<String>,
-    #[arg(long = "source-id", help = "Filter by custom history source ID")]
-    pub(crate) source_id: Option<String>,
-    #[arg(long = "source-format", help = "Filter by exact indexed source format")]
-    pub(crate) source_format: Option<String>,
-    #[arg(
-        long = "provider-session",
-        help = "Filter by exact provider-native session ID"
-    )]
-    pub(crate) provider_session: Option<String>,
-    #[arg(long, help = "Filter by exact public ctx session UUID")]
-    pub(crate) session: Option<String>,
-    #[arg(
-        long = "parent-session",
-        help = "Filter by exact public parent ctx session UUID"
-    )]
-    pub(crate) parent_session: Option<String>,
-    #[arg(
-        long = "root-session",
-        help = "Filter by exact public root ctx session UUID"
-    )]
-    pub(crate) root_session: Option<String>,
-    #[arg(long, help = "Filter by exact branch")]
-    pub(crate) branch: Option<String>,
-    #[arg(long, help = "Filter by case-insensitive workspace or cwd substring")]
-    pub(crate) workspace: Option<String>,
-    #[arg(
-        long = "event-type",
-        help = "Filter by exact event type, including provider-defined values"
-    )]
-    pub(crate) event_type: Option<String>,
-    #[arg(long, help = "Filter by exact role")]
-    pub(crate) role: Option<String>,
-    #[arg(long = "agent-type", help = "Filter by exact agent type")]
-    pub(crate) agent_type: Option<String>,
-    #[arg(long, value_enum, default_value_t = EventQueryScope::All)]
-    pub(crate) scope: EventQueryScope,
-    #[arg(long, help = "Filter by case-insensitive touched-file substring")]
-    pub(crate) file: Option<String>,
-    #[arg(long, value_enum, default_value_t = EventQueryDirection::Ascending)]
-    pub(crate) direction: EventQueryDirection,
-    #[arg(long, help = "Resume from an opaque cursor returned by a prior page")]
-    pub(crate) cursor: Option<String>,
-    #[arg(
-        long,
-        default_value_t = DEFAULT_EVENT_QUERY_LIMIT,
-        help = "Maximum events returned across the complete invocation"
-    )]
-    pub(crate) limit: u64,
-    #[arg(long, value_enum, default_value_t = EventContentProjection::Full)]
-    pub(crate) content: EventContentProjection,
-    #[arg(long, value_enum, default_value_t = EventQueryFormat::Json)]
-    pub(crate) format: EventQueryFormat,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum EventQueryFormat {
-    Json,
-    Jsonl,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum EventContentProjection {
-    Full,
-    Text,
-    None,
-}
-
-impl EventContentProjection {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::Text => "text",
-            Self::None => "none",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum EventQueryScope {
-    All,
-    Primary,
-    Subagent,
-}
-
-impl EventQueryScope {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Primary => "primary",
-            Self::Subagent => "subagent",
-        }
-    }
-}
-
-impl From<EventQueryScope> for CoreEventRangeScope {
-    fn from(value: EventQueryScope) -> Self {
-        match value {
-            EventQueryScope::All => Self::All,
-            EventQueryScope::Primary => Self::Primary,
-            EventQueryScope::Subagent => Self::Subagent,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum EventQueryDirection {
-    Ascending,
-    Descending,
-}
-
-impl EventQueryDirection {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Ascending => "ascending",
-            Self::Descending => "descending",
-        }
-    }
-}
-
-impl From<EventQueryDirection> for CoreEventRangeDirection {
-    fn from(value: EventQueryDirection) -> Self {
-        match value {
-            EventQueryDirection::Ascending => Self::Ascending,
-            EventQueryDirection::Descending => Self::Descending,
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -239,7 +89,7 @@ pub(crate) enum EventQueryError {
 }
 
 pub(crate) fn run(
-    args: ShowEventsArgs,
+    args: ListEventsArgs,
     data_root: PathBuf,
     telemetry: &mut ShowTelemetry,
     local_usage: &mut CliUsage,
@@ -271,7 +121,7 @@ fn is_broken_pipe(error: &EventQueryError) -> bool {
 }
 
 fn execute(
-    args: ShowEventsArgs,
+    args: ListEventsArgs,
     data_root: &Path,
     writer: &mut dyn Write,
 ) -> std::result::Result<usize, EventQueryError> {
@@ -282,7 +132,7 @@ fn execute(
     }
     let index = open_event_range_index(data_root, cursor.as_ref())?;
     let limit = validated_limit(args.limit)?;
-    let request = EventQueryWireRequest::from_cli(&args, limit);
+    let request = EventQueryWireRequest::from_selection(&selection, args.content, limit);
     match args.format {
         EventQueryFormat::Json => {
             let page = bounded_page(&index, &selection, cursor.as_ref(), &request, None)?;
@@ -323,100 +173,6 @@ fn validate_resource_limit(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct EventQueryWireRequest {
-    pub(crate) domain: Value,
-    pub(crate) filters: Value,
-    pub(crate) direction: &'static str,
-    pub(crate) content: EventContentProjection,
-    pub(crate) limit: usize,
-}
-
-impl EventQueryWireRequest {
-    fn from_cli(args: &ShowEventsArgs, limit: usize) -> Self {
-        let mut filters = Map::new();
-        if !args.provider.is_empty() {
-            filters.insert("providers".to_owned(), json!(args.provider));
-        }
-        insert_optional(&mut filters, "source", args.source.as_deref());
-        insert_optional(
-            &mut filters,
-            "history_source",
-            args.history_source.as_deref(),
-        );
-        insert_optional(&mut filters, "provider_key", args.provider_key.as_deref());
-        insert_optional(&mut filters, "source_id", args.source_id.as_deref());
-        insert_optional(&mut filters, "source_format", args.source_format.as_deref());
-        insert_optional(
-            &mut filters,
-            "provider_session_id",
-            args.provider_session.as_deref(),
-        );
-        insert_optional(&mut filters, "session", args.session.as_deref());
-        insert_optional(
-            &mut filters,
-            "parent_session",
-            args.parent_session.as_deref(),
-        );
-        insert_optional(&mut filters, "root_session", args.root_session.as_deref());
-        insert_optional(&mut filters, "branch", args.branch.as_deref());
-        insert_optional(&mut filters, "workspace", args.workspace.as_deref());
-        insert_optional(&mut filters, "event_type", args.event_type.as_deref());
-        insert_optional(&mut filters, "role", args.role.as_deref());
-        insert_optional(&mut filters, "agent_type", args.agent_type.as_deref());
-        if args.scope != EventQueryScope::All {
-            filters.insert("scope".to_owned(), json!(args.scope.as_str()));
-        }
-        insert_optional(&mut filters, "file", args.file.as_deref());
-        Self {
-            domain: wire_domain(args.since.as_deref(), args.until.as_deref()),
-            filters: Value::Object(filters),
-            direction: args.direction.as_str(),
-            content: args.content,
-            limit,
-        }
-    }
-
-    pub(crate) fn new(
-        domain: Value,
-        filters: Value,
-        direction: CoreEventRangeDirection,
-        content: EventContentProjection,
-        limit: usize,
-    ) -> Self {
-        Self {
-            domain,
-            filters,
-            direction: match direction {
-                CoreEventRangeDirection::Ascending => "ascending",
-                CoreEventRangeDirection::Descending => "descending",
-            },
-            content,
-            limit,
-        }
-    }
-
-    fn page_items(&self) -> usize {
-        self.limit.min(EVENT_QUERY_PAGE_ITEMS)
-    }
-}
-
-pub(crate) fn wire_domain(since: Option<&str>, until: Option<&str>) -> Value {
-    match (since, until) {
-        (Some(since), Some(until)) => json!({
-            "kind": "range",
-            "range": { "since": since, "until": until },
-        }),
-        _ => json!({ "kind": "all" }),
-    }
-}
-
-fn insert_optional(object: &mut Map<String, Value>, key: &str, value: Option<&str>) {
-    if let Some(value) = value {
-        object.insert(key.to_owned(), json!(value));
-    }
-}
-
 pub(crate) fn selection(
     since: Option<&str>,
     until: Option<&str>,
@@ -435,7 +191,7 @@ pub(crate) fn selection(
 }
 
 fn selection_from_args(
-    args: &ShowEventsArgs,
+    args: &ListEventsArgs,
 ) -> std::result::Result<CoreEventRangeSelection, EventQueryError> {
     selection(
         args.since.as_deref(),
@@ -1168,7 +924,7 @@ pub(crate) fn event_query_error_value(error: &EventQueryError) -> Value {
         "retryable": output_limit_exceeded,
         "restart_required": error_code == "generation_not_retained",
         "recommendation": if output_limit_exceeded {
-            Some("use CLI JSONL with ctx show events")
+            Some("use CLI JSONL with ctx list events")
         } else if matches!(error, EventQueryError::WireRecordTooLarge { .. }) {
             Some("retry with --content text or --content none")
         } else {

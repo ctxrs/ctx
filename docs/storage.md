@@ -172,13 +172,13 @@ never checkpoint or write provider data.
 - `usage.sqlite` contains only the bounded content-free aggregates documented
   above. It is product state, not history or search authority.
 
-Search, show, locate, export, and MCP retrieval read verified Core/Tantivy
-generations. Export continuations may reopen the named active or retained
-previous generation; JSONL holds one generation pin for its whole traversal.
-Show and export present complete policy-selected normalized records stored in
-Core, while locate returns bounded Core source identity metadata. None of these
-read paths reopens provider history. Provider changes become visible after
-import or daemon refresh publishes a new Core generation.
+Search, show, list, locate, and MCP retrieval read verified Core/Tantivy
+generations. List continuations remain bound to the named active or retained
+generation, and JSONL holds one generation pin for its whole traversal. Show
+and list present complete policy-selected normalized records stored in Core,
+while locate returns bounded Core source identity metadata. None of these read
+paths reopens provider history. Provider changes become visible after import or
+daemon refresh publishes a new Core generation.
 
 Lexical publication keeps the active generation and one previous generation
 for recovery and pinned readers; their manifests and integrity receipts use the

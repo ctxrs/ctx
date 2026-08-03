@@ -747,8 +747,8 @@ fn tool_definitions() -> Vec<Value> {
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": crate::commands::show::events::MAX_EVENT_QUERY_LIMIT,
-                    "default": crate::commands::show::events::DEFAULT_EVENT_QUERY_LIMIT
+                    "maximum": crate::commands::list::events::MAX_EVENT_QUERY_LIMIT,
+                    "default": crate::commands::list::events::DEFAULT_EVENT_QUERY_LIMIT
                 },
                 "content": { "type": "string", "enum": ["full", "text", "none"], "default": "full" }
             }), vec![]),

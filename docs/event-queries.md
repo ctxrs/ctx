@@ -1,6 +1,6 @@
 # Event queries and JSONL
 
-`ctx show events` enumerates complete normalized events from one immutable
+`ctx list events` enumerates complete normalized events from one immutable
 Core/Tantivy generation. It is a deterministic machine-oriented complement to
 ranked `ctx search` and session-oriented `ctx show session`; it is not a SQL or
 general expression language.
@@ -68,7 +68,7 @@ JSONL.
 Select complete message events from one provider:
 
 ```bash
-ctx show events --provider codex --event-type message --content full \
+ctx list events --provider codex --event-type message --content full \
   --limit 1000 --format jsonl |
   jq -c 'select(.record_type == "event_range_event") | .event'
 ```
@@ -77,7 +77,7 @@ Enumerate one root task's subagents while retaining only event identity,
 relationship, and chronology fields:
 
 ```bash
-ctx show events --root-session 01234567-89ab-8def-8123-456789abcdef \
+ctx list events --root-session 01234567-89ab-8def-8123-456789abcdef \
   --scope subagent --content none --limit 1000 --format jsonl |
   jq -c 'select(.record_type == "event_range_event") | .event |
     {ctx_event_id, ctx_session_id, parent_ctx_session_id,
@@ -87,7 +87,7 @@ ctx show events --root-session 01234567-89ab-8def-8123-456789abcdef \
 Query a time window and print normalized text without materializing the stream:
 
 ```bash
-ctx show events --since 2026-08-01T00:00:00Z \
+ctx list events --since 2026-08-01T00:00:00Z \
   --until 2026-08-02T00:00:00Z --content text --format jsonl |
   jq -r 'select(.record_type == "event_range_event") |
     [.event.ctx_event_id, (.event.text // "")] | @tsv'
@@ -96,7 +96,7 @@ ctx show events --since 2026-08-01T00:00:00Z \
 Inspect completion and truncation metadata:
 
 ```bash
-ctx show events --source 01234567-89ab-8def-8123-456789abcdef \
+ctx list events --source 01234567-89ab-8def-8123-456789abcdef \
   --limit 100 --format jsonl |
   jq -c 'select(.record_type == "event_range_completion")'
 ```

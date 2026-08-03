@@ -467,7 +467,7 @@ not an MCP pagination envelope.
 Event JSON remains one `event_window` object with `target: "event"`, `format`,
 `event`, and `events[]`.
 
-Event-range JSON from `ctx show events --format json` is one
+Event-range JSON from `ctx list events --format json` is one
 `event_range_page` with `schema_version: 1`, the pinned `generation_id`, the
 normalized request domain/filters/direction, `content`, bounded
 `events[]`, the requested limit and page usage, `terminal`, `truncated`, `next_cursor`, and

@@ -33,7 +33,7 @@ fixed documented count. Core tools include:
 
 `query_events` accepts the same typed identity, relationship, source, role,
 event, workspace/file, chronology, order, and content-projection inputs as
-`ctx show events`, plus an opaque continuation cursor. It returns one
+`ctx list events`, plus an opaque continuation cursor. It returns one
 `event_range_page` in `structuredContent`, including events, the pinned Core
 generation, request selection, page usage, freshness/frontier state,
 terminal/truncation state, and `next_cursor` when more results remain. It is

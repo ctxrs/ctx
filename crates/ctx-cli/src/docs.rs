@@ -865,7 +865,7 @@ mod ui_tests {
             .find(|topic| topic.id == "event-queries")
             .unwrap();
         assert_eq!(topic.tags, ["events", "jsonl", "jq", "query"]);
-        assert!(topic.body.contains("ctx show events"));
+        assert!(topic.body.contains("ctx list events"));
         assert_eq!(
             DocTopicId::from_known_id(topic.id).unwrap().as_str(),
             topic.id

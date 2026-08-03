@@ -20,25 +20,68 @@ use crate::{
     analytics::{RenderFormat, ShowTelemetry, TargetKind},
     cli::CommandRoot,
     ui::{RenderContext, StreamKind, TestContext},
-    Cli, ShowTarget,
+    Cli, ListTarget,
 };
 
-fn parse_events(arguments: &[&str]) -> ShowEventsArgs {
+fn parse_events(arguments: &[&str]) -> ListEventsArgs {
     let cli = Cli::try_parse_from(arguments).expect("event query arguments should parse");
-    let CommandRoot::Show(show) = cli.command else {
-        panic!("expected show command");
+    let CommandRoot::List(list) = cli.command else {
+        panic!("expected list command");
     };
-    let ShowTarget::Events(events) = show.target else {
-        panic!("expected events target");
-    };
+    let ListTarget::Events(events) = list.target;
     *events
 }
 
 #[test]
 fn all_domain_is_explicit_and_defaults_when_omitted() {
-    let defaulted = parse_events(&["ctx", "show", "events"]);
+    let defaulted = parse_events(&["ctx", "list", "events"]);
     assert!(defaulted.since.is_none() && defaulted.until.is_none());
     assert_eq!(defaulted.limit, DEFAULT_EVENT_QUERY_LIMIT);
+}
+
+#[test]
+fn wire_receipt_uses_the_normalized_selection() {
+    let args = parse_events(&[
+        "ctx",
+        "list",
+        "events",
+        "--since",
+        "2026-08-01T00:00:00+00:00",
+        "--until",
+        "2026-08-02T00:00:00Z",
+        "--provider",
+        " codex ",
+        "--provider",
+        "codex",
+        "--workspace",
+        " CTX ",
+        "--scope",
+        "subagent",
+        "--direction",
+        "descending",
+    ]);
+    let selection = selection_from_args(&args).unwrap();
+    let request = EventQueryWireRequest::from_selection(&selection, args.content, 10);
+
+    assert_eq!(
+        request.domain,
+        json!({
+            "kind": "range",
+            "range": {
+                "since": "2026-08-01T00:00:00.000Z",
+                "until": "2026-08-02T00:00:00.000Z",
+            },
+        })
+    );
+    assert_eq!(
+        request.filters,
+        json!({
+            "providers": ["codex"],
+            "workspace": "ctx",
+            "scope": "subagent",
+        })
+    );
+    assert_eq!(request.direction, "descending");
 }
 
 #[test]
@@ -53,7 +96,7 @@ fn unreleased_aliases_and_page_budget_flags_are_rejected() {
         "--byte-budget",
     ] {
         assert!(
-            Cli::try_parse_from(["ctx", "show", "events", flag]).is_err(),
+            Cli::try_parse_from(["ctx", "list", "events", flag]).is_err(),
             "unexpectedly accepted {flag}"
         );
     }
@@ -64,7 +107,7 @@ fn every_core_filter_and_canonical_relationship_flag_maps_to_selection() {
     let id = "01234567-89ab-4def-8123-456789abcdef";
     let args = parse_events(&[
         "ctx",
-        "show",
+        "list",
         "events",
         "--provider",
         "codex",
@@ -164,12 +207,13 @@ fn machine_errors_are_typed_for_ranges_cursors_and_resource_limits() {
 }
 
 #[test]
-fn help_exposes_only_the_compact_show_events_route() {
+fn help_exposes_only_the_compact_list_events_route() {
     let command = Cli::command();
     assert!(command
         .get_subcommands()
         .all(|subcommand| subcommand.get_name() != "export"));
-    let help = Cli::try_parse_from(["ctx", "show", "events", "--help"])
+    assert!(Cli::try_parse_from(["ctx", "show", "events"]).is_err());
+    let help = Cli::try_parse_from(["ctx", "list", "events", "--help"])
         .unwrap_err()
         .to_string();
     for expected in ["--since", "--until", "--parent-session", "--root-session"] {
@@ -625,7 +669,7 @@ fn mcp_rejects_near_limit_escape_heavy_record_with_typed_error() {
     assert_eq!(value["retryable"], true);
     assert_eq!(
         value["recommendation"],
-        "use CLI JSONL with ctx show events"
+        "use CLI JSONL with ctx list events"
     );
 }
 
@@ -683,7 +727,7 @@ fn broken_pipe_is_quiet_and_successful() {
         events_returned: None,
     };
     let mut usage = crate::local_usage::CliUsage::excluded();
-    let args = parse_events(&["ctx", "show", "events", "--format", "jsonl"]);
+    let args = parse_events(&["ctx", "list", "events", "--format", "jsonl"]);
     assert!(run(
         args,
         temp.path().to_path_buf(),

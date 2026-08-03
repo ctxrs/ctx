@@ -5,7 +5,7 @@
   "provenance_kind": "content_addressed_candidate",
   "scope": "selected_typed_telemetry_contract_inventory",
   "files": {
-    "crates/ctx-cli/src/analytics/operation.rs": "21e26d8c6adefcb365f7aa56cdc85ec9f7ff86c1991502db8a2a886698d3b2a5",
+    "crates/ctx-cli/src/analytics/operation.rs": "fcb4716ed04b59badc93876d1208daab8eaabffd76f4dfd4448b3934a6eb0404",
     "crates/ctx-cli/src/analytics/daemon.rs": "6eb120f37ed78927bdda09688f6ff824af3d850114c1fdbe92e3b1c93aa1e9a9",
     "crates/ctx-cli/src/analytics/mcp.rs": "be152db3403da305245939e2ffdc836d6a20d86079a1dec5ff574e2e785dd263",
     "crates/ctx-cli/src/analytics/runtime.rs": "b2ab7fb8655d1eafc34e997472f2fdb0a4afa33029a8b92b47f9f752e4d951a6",

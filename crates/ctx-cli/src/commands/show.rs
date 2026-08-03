@@ -1,5 +1,3 @@
-pub(crate) mod events;
-
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -12,8 +10,6 @@ use crate::provider_args::ProviderArg;
 use crate::transcript::TranscriptMode;
 use crate::ui::Ui;
 use crate::{parse_event_window_limit, parse_provider_arg, ShowArgs};
-
-pub(crate) use events::{EventQueryFormat, ShowEventsArgs};
 
 #[derive(Debug, Args)]
 pub(crate) struct ShowSessionArgs {
@@ -68,16 +64,5 @@ pub(crate) fn run_show(
     local_usage: &mut CliUsage,
     ui: &mut Ui,
 ) -> Result<()> {
-    match args.target {
-        crate::ShowTarget::Events(args) => {
-            events::run(*args, data_root, telemetry, local_usage, ui)
-        }
-        target => crate::commands::source_index::run_show(
-            ShowArgs { target },
-            data_root,
-            telemetry,
-            local_usage,
-            ui,
-        ),
-    }
+    crate::commands::source_index::run_show(args, data_root, telemetry, local_usage, ui)
 }
