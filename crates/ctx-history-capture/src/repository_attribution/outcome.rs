@@ -11,8 +11,9 @@ use url::Url;
 
 use super::shell::BoundedCommitProducer;
 use super::{
-    bounded_outcome_plan, lexical_absolute, BoundedOutcomeOperation, BoundedOutcomePlan,
-    BoundedOutcomePlanDisposition,
+    bounded_outcome_plan, exact_pull_request_association, lexical_absolute,
+    BoundedOutcomeOperation, BoundedOutcomePlan, BoundedOutcomePlanDisposition,
+    UnscopedPullRequestAssociationObservation,
 };
 use crate::OutputOutcome;
 
@@ -67,16 +68,65 @@ pub(crate) struct LinkedOutcomeEvidence {
     pub(crate) outcome_operation_repository_path: Option<String>,
     pub(crate) outcome_output_repository_path: Option<String>,
     pub(crate) outcomes: Vec<UnscopedOutcomeObservation>,
+    pub(crate) pull_request_associations: Vec<UnscopedPullRequestAssociationObservation>,
     pub(crate) abstentions: Vec<(RepositoryAbstentionReason, &'static str)>,
 }
 
 pub(crate) fn linked_outcome_evidence(
     input: LinkedOutcomeInput<'_>,
 ) -> Option<LinkedOutcomeEvidence> {
+    let declared_base = input
+        .declared_workdir
+        .and_then(|value| lexical_absolute(value, None));
     let base = input
         .declared_workdir
         .or(input.session_cwd)
         .and_then(|value| lexical_absolute(value, None));
+    if let Some(base) = declared_base.as_deref().filter(|base| {
+        super::shell::bounded_pull_request_association_query(input.command, base).is_some()
+    }) {
+        let operation_path = Some(base.to_string_lossy().into_owned());
+        if input.result_outcome != OutputOutcome::Success {
+            return Some(abstained(
+                operation_path,
+                None,
+                RepositoryAbstentionReason::OutcomeResultInadmissible,
+                "recognized_pull_request_association_query_did_not_succeed",
+            ));
+        }
+        let Some(linkage) = exact_result_linkage(&input) else {
+            return Some(abstained(
+                operation_path,
+                None,
+                RepositoryAbstentionReason::ProviderOutputUnjoined,
+                "pull_request_association_linkage_is_missing_or_ambiguous",
+            ));
+        };
+        let Some(association) = exact_pull_request_association(
+            input.command,
+            base.to_str()?,
+            input.result_output,
+            linkage,
+        ) else {
+            return Some(abstained(
+                operation_path,
+                None,
+                RepositoryAbstentionReason::OutcomeResultInadmissible,
+                "linked_result_has_no_exact_pull_request_association",
+            ));
+        };
+        return Some(LinkedOutcomeEvidence {
+            provider_native_repository_aliases: vec![association
+                .pull_request
+                .forge_repository
+                .clone()],
+            outcome_operation_repository_path: Some(association.repository_path.clone()),
+            outcome_output_repository_path: None,
+            outcomes: Vec::new(),
+            pull_request_associations: vec![association],
+            abstentions: Vec::new(),
+        });
+    }
     let plan = match base.as_deref() {
         Some(base) => bounded_outcome_plan(input.command, base),
         None => match bounded_outcome_plan(input.command, Path::new("/")) {
@@ -128,31 +178,13 @@ pub(crate) fn linked_outcome_evidence(
             "recognized_outcome_command_did_not_succeed",
         ));
     }
-    if input.origin_call_id.is_empty()
-        || input.result_call_id.is_empty()
-        || input.origin_call_id.len() > MAX_LINKAGE_CALL_ID_BYTES
-        || input.result_call_id.len() > MAX_LINKAGE_CALL_ID_BYTES
-        || input
-            .continuation_call_id_sha256
-            .iter()
-            .collect::<HashSet<_>>()
-            .len()
-            != input.continuation_call_id_sha256.len()
-    {
+    let Some(linkage) = exact_result_linkage(&input) else {
         return Some(abstained(
             operation_path,
             output_path,
             RepositoryAbstentionReason::ProviderOutputUnjoined,
             "outcome_linkage_is_missing_oversized_or_ambiguous",
         ));
-    }
-    let linkage = RepositoryOutcomeLinkage {
-        provider: input.provider.to_owned(),
-        origin_call_id: input.origin_call_id.to_owned(),
-        result_call_id: input.result_call_id.to_owned(),
-        origin_event_sequence: input.origin_event_sequence,
-        continuation_call_id_sha256: input.continuation_call_id_sha256.to_vec(),
-        result_record_sha256: input.result_record_sha256,
     };
     let parsed = parse_operation_result(
         input.result_output,
@@ -167,6 +199,7 @@ pub(crate) fn linked_outcome_evidence(
             outcome_operation_repository_path: operation_path,
             outcome_output_repository_path: output_path,
             outcomes: vec![(*outcome).into()],
+            pull_request_associations: Vec::new(),
             abstentions: Vec::new(),
         }),
         OperationResult::Deferred(deferred) => Some(LinkedOutcomeEvidence {
@@ -174,6 +207,7 @@ pub(crate) fn linked_outcome_evidence(
             outcome_operation_repository_path: operation_path,
             outcome_output_repository_path: output_path,
             outcomes: vec![UnscopedOutcomeObservation::DeferredCommit(deferred)],
+            pull_request_associations: Vec::new(),
             abstentions: if matches!(
                 plan.operation,
                 BoundedOutcomeOperation::Commit {
@@ -204,6 +238,32 @@ pub(crate) fn linked_outcome_evidence(
     }
 }
 
+fn exact_result_linkage(input: &LinkedOutcomeInput<'_>) -> Option<RepositoryOutcomeLinkage> {
+    if input.origin_call_id.is_empty()
+        || input.result_call_id.is_empty()
+        || input.origin_call_id.len() > MAX_LINKAGE_CALL_ID_BYTES
+        || input.result_call_id.len() > MAX_LINKAGE_CALL_ID_BYTES
+        || input.result_record_sha256 == [0; 32]
+        || input.continuation_call_id_sha256.contains(&[0; 32])
+        || input
+            .continuation_call_id_sha256
+            .iter()
+            .collect::<HashSet<_>>()
+            .len()
+            != input.continuation_call_id_sha256.len()
+    {
+        return None;
+    }
+    Some(RepositoryOutcomeLinkage {
+        provider: input.provider.to_owned(),
+        origin_call_id: input.origin_call_id.to_owned(),
+        result_call_id: input.result_call_id.to_owned(),
+        origin_event_sequence: input.origin_event_sequence,
+        continuation_call_id_sha256: input.continuation_call_id_sha256.to_vec(),
+        result_record_sha256: input.result_record_sha256,
+    })
+}
+
 fn abstained(
     operation_path: Option<String>,
     output_path: Option<String>,
@@ -215,6 +275,7 @@ fn abstained(
         outcome_operation_repository_path: operation_path,
         outcome_output_repository_path: output_path,
         outcomes: Vec::new(),
+        pull_request_associations: Vec::new(),
         abstentions: vec![(reason, detail)],
     }
 }

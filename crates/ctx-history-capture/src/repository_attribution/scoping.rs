@@ -4,12 +4,13 @@ use ctx_history_core::{
     CoreRecordAnnotation, RepositoryAbstentionReason, RepositoryEvidence,
     RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileInvocationEvidence,
     RepositoryFileInvocationKind, RepositoryFileObservation, RepositoryFileObservationKind,
-    RepositoryOutcomeObservation, RepositoryVcsObservation, RepositoryVcsObservationKind,
+    RepositoryOutcomeObservation, RepositoryPullRequestAssociationObservation,
+    RepositoryVcsObservation, RepositoryVcsObservationKind,
 };
 
 use super::{
-    push_abstention, CertifiedCandidate, ScopedFileInput, ScopedRepositoryFileInvocationEvidence,
-    ScopedVcsInput,
+    identity::binding_accepts_forge_repository, push_abstention, CertifiedCandidate,
+    ScopedFileInput, ScopedRepositoryFileInvocationEvidence, ScopedVcsInput,
 };
 
 pub(super) fn scope_file_invocations(
@@ -247,6 +248,76 @@ pub(super) fn scope_outcomes(
                     relative_path: None,
                 }),
         );
+}
+
+pub(super) fn scope_pull_request_associations(
+    annotation: &mut CoreRecordAnnotation,
+    associations: Vec<(Option<String>, RepositoryPullRequestAssociationObservation)>,
+) {
+    for (certified_binding_id, association) in associations {
+        let matching = annotation
+            .repository_bindings
+            .iter()
+            .enumerate()
+            .filter(|(_, binding)| {
+                certified_binding_id.as_ref().map_or_else(
+                    || {
+                        binding_accepts_forge_repository(
+                            binding,
+                            &association.pull_request.forge_repository,
+                        )
+                    },
+                    |binding_id| &binding.binding_id == binding_id,
+                )
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let [binding_index] = matching.as_slice() else {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::ProviderNativeResult,
+                if matching.is_empty() {
+                    RepositoryAbstentionReason::OutcomeRepositoryUnbound
+                } else {
+                    RepositoryAbstentionReason::ConflictingIdentity
+                },
+                "pull_request_association_has_no_unique_binding",
+            );
+            continue;
+        };
+        let binding = &mut annotation.repository_bindings[*binding_index];
+        if !binding_accepts_forge_repository(binding, &association.pull_request.forge_repository)
+            || binding
+                .git_object_format
+                .is_some_and(|format| format != association.merged_as.format)
+        {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::ProviderNativeResult,
+                RepositoryAbstentionReason::ConflictingIdentity,
+                "pull_request_association_object_format_conflicts_with_binding",
+            );
+            continue;
+        }
+        binding.git_object_format = Some(association.merged_as.format);
+        let evidence = RepositoryEvidence {
+            kind: RepositoryEvidenceKind::ProviderNativeResult,
+            confidence: RepositoryEvidenceConfidence::Explicit,
+        };
+        if !binding.evidence.contains(&evidence) {
+            binding.evidence.push(evidence);
+        }
+        annotation
+            .repository_vcs_observations
+            .push(RepositoryVcsObservation {
+                repository_binding_id: binding.binding_id.clone(),
+                kind: RepositoryVcsObservationKind::PullRequestAssociation(Box::new(association)),
+                object_id: None,
+                parent_object_ids: Vec::new(),
+                reference: None,
+                relative_path: None,
+            });
+    }
 }
 
 fn exact_provider_outcome_binding(

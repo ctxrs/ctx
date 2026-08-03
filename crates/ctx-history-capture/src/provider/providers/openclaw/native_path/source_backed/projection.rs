@@ -261,6 +261,7 @@ impl OpenClawProjector {
                 input.outcome_operation_repository_path = linked.outcome_operation_repository_path;
                 input.outcome_output_repository_path = linked.outcome_output_repository_path;
                 input.outcome_observations = linked.outcomes;
+                input.pull_request_associations = linked.pull_request_associations;
                 input.outcome_abstentions = linked.abstentions;
             }
         }

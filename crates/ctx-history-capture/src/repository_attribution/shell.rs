@@ -1,5 +1,7 @@
 #[path = "shell/outcome_plan.rs"]
 mod outcome_plan;
+#[path = "shell/pull_request.rs"]
+mod pull_request;
 
 use std::path::{Component, Path, PathBuf};
 
@@ -9,6 +11,7 @@ pub(crate) use outcome_plan::{
     bounded_outcome_evidence_relevant, bounded_outcome_plan, BoundedCommitProducer,
     BoundedOutcomeOperation, BoundedOutcomePlan, BoundedOutcomePlanDisposition,
 };
+pub(crate) use pull_request::bounded_pull_request_association_query;
 
 use ctx_history_core::{RepositoryAbstentionReason, RepositoryEvidenceKind};
 

@@ -131,9 +131,11 @@ ctx_rust_test(
     name = "repository_shell_outcomes_tests",
     srcs = [
         "tests/repository_shell_outcomes.rs",
+        "src/repository_attribution/association.rs",
         "src/repository_attribution/outcome.rs",
         "src/repository_attribution/shell.rs",
         "src/repository_attribution/shell/outcome_plan.rs",
+        "src/repository_attribution/shell/pull_request.rs",
     ],
     crate_name = "repository_shell_outcomes",
     crate_root = "tests/repository_shell_outcomes.rs",

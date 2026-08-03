@@ -28,6 +28,7 @@ use crate::OutputOutcome;
 mod certification;
 #[cfg(unix)]
 mod local_root_authorization;
+mod pull_request_association;
 
 fn run_git(path: &Path, arguments: &[&str]) {
     let status = Command::new("/usr/bin/git")

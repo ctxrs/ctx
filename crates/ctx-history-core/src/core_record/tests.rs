@@ -901,6 +901,62 @@ fn repository_outcome_requires_one_scoped_binding_and_exact_shape() {
 }
 
 #[test]
+fn pull_request_association_is_exact_scoped_and_membership_is_atomic() {
+    let mut record = record();
+    record.repository_bindings.push(binding());
+    let mut association = RepositoryPullRequestAssociationObservation {
+        pull_request: RepositoryPullRequestIdentity {
+            forge_repository: RepositoryAlias {
+                kind: RepositoryAliasKind::Forge,
+                host: "github.com".to_owned(),
+                namespace: vec!["ctxrs".to_owned()],
+                name: "ctx".to_owned(),
+                remote_name: None,
+            },
+            number: 203,
+            provider_id: None,
+        },
+        merged_as: oid('d'),
+        contains_commits: vec![oid('a')],
+        linkage: RepositoryOutcomeLinkage {
+            provider: "codex".to_owned(),
+            origin_call_id: "origin".to_owned(),
+            result_call_id: "result".to_owned(),
+            origin_event_sequence: 7,
+            continuation_call_id_sha256: Vec::new(),
+            result_record_sha256: [7; 32],
+        },
+        association_capture_revision: CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION,
+    };
+    record
+        .repository_vcs_observations
+        .push(RepositoryVcsObservation {
+            repository_binding_id: "binding-1".to_owned(),
+            kind: RepositoryVcsObservationKind::PullRequestAssociation(Box::new(
+                association.clone(),
+            )),
+            object_id: None,
+            parent_object_ids: Vec::new(),
+            reference: None,
+            relative_path: None,
+        });
+    record.validate_contract().unwrap();
+
+    association.contains_commits = vec![oid('b'), oid('a')];
+    assert!(matches!(
+        association.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryPullRequestAssociation)
+    ));
+    association.contains_commits.clear();
+    association.validate_contract().unwrap();
+    association.merged_as.hex = "deadbeef".to_owned();
+    assert!(matches!(
+        association.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryPullRequestAssociation)
+    ));
+}
+
+#[test]
 fn replacement_lineage_and_pull_request_shapes_are_explicit() {
     let mut commit = outcome(RepositoryOutcomeKind::Commit);
     commit
@@ -1074,14 +1130,14 @@ fn every_bound_revision_and_accumulator_identity_changes_the_core_contract_finge
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
-        "674bf76268eb8dd75e265585306738ba8ca40fc4fe8d142e13916112018f6215"
+        "1994a5d75f6bdcaa9ee24a76706e0260b3684557a8115473a45d1cef44e33684"
     );
     assert_eq!(
         core_record_contract_fingerprint_for(CoreContractRevisions {
             accumulator_identity: b"",
             ..current
         }),
-        "4b98a0de80615ce7742d79622dc5743482d3ed4a8c7b48a002cdb681fd39c7a0"
+        "4d68d4978623bf022500bcf7a3535f0702725016b1f607b6b68682ef4b8e88c3"
     );
     for changed in [
         CoreContractRevisions {
@@ -1102,6 +1158,12 @@ fn every_bound_revision_and_accumulator_identity_changes_the_core_contract_finge
         },
         CoreContractRevisions {
             repository_association_policy: current.repository_association_policy + 1,
+            ..current
+        },
+        CoreContractRevisions {
+            repository_pull_request_association_capture: current
+                .repository_pull_request_association_capture
+                + 1,
             ..current
         },
         CoreContractRevisions {
