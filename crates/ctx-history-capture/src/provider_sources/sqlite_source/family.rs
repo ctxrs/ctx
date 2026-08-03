@@ -299,7 +299,10 @@ impl SqliteSourceFamily {
             expected.shared_memory_token.as_ref(),
         ) {
             (Some(shared_memory), Some(expected_token))
-                if shared_memory.content_digest()? == *expected_token => {}
+                if shared_memory
+                    .content_digest()
+                    .map_err(map_revalidation_error)?
+                    == *expected_token => {}
             (None, None) => {}
             _ => return Err(SqliteSourceAccessError::SourceChanged),
         }
@@ -327,10 +330,12 @@ impl SqliteSourceFamily {
                     .as_ref()
                     .ok_or(SqliteSourceAccessError::SourceChanged)?;
                 wal.revalidate(&self.authority, expected_state)?;
-                if expected.wal_token.as_ref().is_some_and(|expected_token| {
-                    wal.bounded_token()
-                        .is_ok_and(|token| &token == expected_token)
-                }) {
+                let expected_token = expected
+                    .wal_token
+                    .as_ref()
+                    .ok_or(SqliteSourceAccessError::SourceChanged)?;
+                let token = wal.bounded_token().map_err(map_revalidation_error)?;
+                if &token == expected_token {
                     Ok(())
                 } else {
                     Err(SqliteSourceAccessError::SourceChanged)
@@ -771,9 +776,63 @@ pub(super) fn map_provider_source_error(
     }
 }
 
+pub(super) fn map_provider_source_revalidation_error(
+    error: CaptureError,
+    operation: &'static str,
+    path: &Path,
+) -> SqliteSourceAccessError {
+    map_revalidation_error(map_provider_source_error(error, operation, path))
+}
+
+pub(super) fn map_revalidation_io_error(
+    source: std::io::Error,
+    operation: &'static str,
+    path: &Path,
+) -> SqliteSourceAccessError {
+    map_revalidation_error(SqliteSourceAccessError::Io {
+        operation,
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 pub(super) fn map_revalidation_error(error: SqliteSourceAccessError) -> SqliteSourceAccessError {
-    let _ = error;
-    SqliteSourceAccessError::SourceChanged
+    match error {
+        SqliteSourceAccessError::Io {
+            operation,
+            path,
+            source,
+        } if resource_exhaustion_io_error(&source) => {
+            SqliteSourceAccessError::ResourceUnavailable {
+                operation,
+                path,
+                source,
+            }
+        }
+        error if error.is_retryable_resource_unavailable() => error,
+        _ => SqliteSourceAccessError::SourceChanged,
+    }
+}
+
+fn resource_exhaustion_io_error(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::OutOfMemory
+            | std::io::ErrorKind::StorageFull
+            | std::io::ErrorKind::QuotaExceeded
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    if error.raw_os_error().is_some_and(|code| {
+        matches!(
+            code,
+            libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOSPC | libc::EDQUOT
+        )
+    }) {
+        return true;
+    }
+    false
 }
 
 pub(super) fn configure_and_pin_snapshot(connection: &Connection) -> SqliteSourceAccessResult<()> {

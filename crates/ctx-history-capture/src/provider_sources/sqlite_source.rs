@@ -83,6 +83,13 @@ pub(crate) enum SqliteSourceAccessError {
         #[source]
         source: rusqlite::Error,
     },
+    #[error("SQLite source resource is unavailable during {operation} for {path:?}: {source}")]
+    ResourceUnavailable {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("private SQLite scratch resource is unavailable during {operation}: {source}")]
     ScratchSqliteUnavailable {
         operation: &'static str,
@@ -141,7 +148,9 @@ impl SqliteSourceAccessError {
     pub(crate) const fn is_retryable_resource_unavailable(&self) -> bool {
         matches!(
             self,
-            Self::ScratchSqliteUnavailable { .. } | Self::ScratchIoUnavailable { .. }
+            Self::ResourceUnavailable { .. }
+                | Self::ScratchSqliteUnavailable { .. }
+                | Self::ScratchIoUnavailable { .. }
         )
     }
 
@@ -602,7 +611,13 @@ impl SqliteSourceDirectoryAuthority {
         let retained = self
             .directory
             .try_clone_authority_handle()
-            .map_err(|_| SqliteSourceAccessError::SourceChanged)
+            .map_err(|source| {
+                map_revalidation_io_error(
+                    source,
+                    "retaining the approved SQLite parent capability during revalidation",
+                    &self.path,
+                )
+            })
             .and_then(|directory| {
                 NativeFileState::read(&directory, &self.path, ExpectedObjectKind::Directory)
                     .map_err(map_revalidation_error)
@@ -610,14 +625,29 @@ impl SqliteSourceDirectoryAuthority {
         if retained.identity != self.identity {
             return Err(SqliteSourceAccessError::SourceChanged);
         }
-        let named_root = ProviderSourceRoot::open(&self.path)
-            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
-        let named_directory = named_root
-            .directory()
-            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+        let named_root = ProviderSourceRoot::open(&self.path).map_err(|error| {
+            map_provider_source_revalidation_error(
+                error,
+                "reopening the approved SQLite parent capability during revalidation",
+                &self.path,
+            )
+        })?;
+        let named_directory = named_root.directory().map_err(|error| {
+            map_provider_source_revalidation_error(
+                error,
+                "retaining the reopened SQLite parent capability during revalidation",
+                &self.path,
+            )
+        })?;
         let named = named_directory
             .try_clone_authority_handle()
-            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+            .map_err(|source| {
+                map_revalidation_io_error(
+                    source,
+                    "retaining the reopened SQLite parent capability handle during revalidation",
+                    &self.path,
+                )
+            })?;
         let named_state = NativeFileState::read(&named, &self.path, ExpectedObjectKind::Directory)
             .map_err(map_revalidation_error)?;
         if named_state.identity == self.identity {
@@ -661,29 +691,42 @@ impl SqliteSourceTerminalFence {
     /// Revalidates the exact retained source family without opening SQLite or
     /// acquiring another source snapshot.
     pub(crate) fn revalidate(&self) -> SqliteSourceAccessResult<()> {
-        let root = ProviderSourceRoot::open(&self.inner.approved_parent_path)
-            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
-        let directory = root
-            .directory()
-            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
-        let authority_handle = directory
-            .try_clone_authority_handle()
-            .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+        let root = ProviderSourceRoot::open(&self.inner.approved_parent_path).map_err(|error| {
+            map_provider_source_revalidation_error(
+                error,
+                "reopening the approved SQLite parent for terminal revalidation",
+                &self.inner.approved_parent_path,
+            )
+        })?;
+        let directory = root.directory().map_err(|error| {
+            map_provider_source_revalidation_error(
+                error,
+                "retaining the reopened SQLite parent for terminal revalidation",
+                &self.inner.approved_parent_path,
+            )
+        })?;
+        let authority_handle = directory.try_clone_authority_handle().map_err(|source| {
+            map_revalidation_io_error(
+                source,
+                "retaining the reopened SQLite parent handle for terminal revalidation",
+                &self.inner.approved_parent_path,
+            )
+        })?;
         let authority = SqliteSourceDirectoryAuthority::retain(
             &self.inner.data_root,
             &authority_handle,
             &self.inner.approved_parent_path,
         )
-        .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+        .map_err(map_revalidation_error)?;
         match self.inner.policy {
             SqliteSourceSnapshotPolicy::StrictPhysicalFamily => {
                 let family = SqliteSourceFamily::open(&authority, &self.inner.database_name, || {})
-                    .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+                    .map_err(map_revalidation_error)?;
                 family.revalidate(&self.inner.native_evidence)?;
             }
             SqliteSourceSnapshotPolicy::LogicalOnlineBackup => {
                 let family = SqliteSourceFamily::open(&authority, &self.inner.database_name, || {})
-                    .map_err(|_| SqliteSourceAccessError::SourceChanged)?;
+                    .map_err(map_revalidation_error)?;
                 family.revalidate_logical_database_identity(&self.inner.native_evidence)?;
             }
         }
@@ -895,7 +938,8 @@ mod snapshot;
 
 use family::{
     capture_sqlite_evidence, clear_snapshot_authorizer, configure_and_pin_snapshot,
-    map_provider_source_error, map_revalidation_error, sqlite_error, validate_approved_parent_path,
+    map_provider_source_error, map_provider_source_revalidation_error, map_revalidation_error,
+    map_revalidation_io_error, sqlite_error, validate_approved_parent_path,
     verify_connection_read_only, verify_snapshot_active, ExpectedObjectKind, NativeFileIdentity,
     NativeFileState, SqliteConnectionEvidence, SqliteFamilyEvidence, SqliteFamilyMember,
     SqliteSchemaEvidence, SqliteSnapshotEvidence, SqliteSourceFamily,
