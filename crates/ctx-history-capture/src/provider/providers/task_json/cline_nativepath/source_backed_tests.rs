@@ -4,7 +4,7 @@ fn direct_core_projection_is_complete_and_self_contained() {
     let production = sources.join("\n");
     assert!(production.contains("CoreRecord::new_selected"));
     assert!(production.contains("native_event_id = Some"));
-    assert!(production.contains("PARSER_REVISION"));
+    assert!(production.contains("dialect.parser_revision"));
     assert!(production.contains("validate_contract"));
     assert!(production.contains("lexical_event_body(&event)"));
     for removed_api in [

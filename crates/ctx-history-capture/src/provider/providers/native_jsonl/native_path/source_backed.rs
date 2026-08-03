@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use super::{
     reader::DirectJsonlProjector, DirectJsonlEvent, DirectJsonlRejection,
-    DirectJsonlRetryDiscriminator, DirectJsonlSession, DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
+    DirectJsonlRetryDiscriminator, DirectJsonlSession,
 };
 use crate::{
     common::io::{
@@ -77,6 +77,7 @@ pub(crate) struct DirectJsonlFamilyAdapter {
     provider: CaptureProvider,
     source_format: &'static str,
     schema_variant: &'static str,
+    parser_revision: &'static str,
 }
 
 impl DirectJsonlFamilyAdapter {
@@ -84,11 +85,13 @@ impl DirectJsonlFamilyAdapter {
         provider: CaptureProvider,
         source_format: &'static str,
         schema_variant: &'static str,
+        parser_revision: &'static str,
     ) -> Self {
         Self {
             provider,
             source_format,
             schema_variant,
+            parser_revision,
         }
     }
 
@@ -212,7 +215,7 @@ impl JsonlFamilyAdapter for DirectJsonlFamilyAdapter {
     }
 
     fn parser_revision(&self) -> &'static str {
-        DIRECT_JSONL_NATIVEPATH_PARSER_REVISION
+        self.parser_revision
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
@@ -680,7 +683,7 @@ fn project_event(
         event.event_type.as_str(),
         session.agent_type.as_str(),
         session.is_primary,
-        DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
+        adapter.parser_revision,
         body,
     )?;
     record.parent_session_id = parent_session_id;

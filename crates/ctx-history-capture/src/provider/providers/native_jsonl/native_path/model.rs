@@ -3,8 +3,6 @@ use ctx_history_core::{AgentType, EventRole, EventType, FileChangeKind, SessionS
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub(crate) const DIRECT_JSONL_NATIVEPATH_PARSER_REVISION: &str = "direct-native-jsonl-parser-v4";
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct DirectJsonlSession {
     pub(crate) native_session_id: String,

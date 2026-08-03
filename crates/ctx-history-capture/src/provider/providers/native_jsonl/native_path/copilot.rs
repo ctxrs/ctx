@@ -3,11 +3,14 @@ use serde_json::Value;
 
 use crate::COPILOT_CLI_SOURCE_FORMAT;
 
+const PARSER_REVISION: &str = "direct-native-jsonl-parser-v4";
+
 pub(crate) const fn copilot_source_backed_adapter() -> super::DirectJsonlFamilyAdapter {
     super::DirectJsonlFamilyAdapter::new(
         CaptureProvider::CopilotCli,
         COPILOT_CLI_SOURCE_FORMAT,
         "copilot-cli-direct-native-jsonl-v1",
+        PARSER_REVISION,
     )
 }
 

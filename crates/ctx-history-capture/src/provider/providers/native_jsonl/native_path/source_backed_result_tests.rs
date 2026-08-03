@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, path::Path};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    AgentType, CaptureProvider, CoreRecord, EventType, SessionStatus, TypedKey,
-    MAX_ENCODED_CORE_RECORD_BYTES,
+    core_record_leaf_sha256, AgentType, CaptureProvider, CoreRecord, EventType, SessionStatus,
+    TypedKey, MAX_ENCODED_CORE_RECORD_BYTES,
 };
 use serde_json::{json, Value};
 
@@ -91,13 +91,18 @@ fn native_subrecord_index(record: &CoreRecord) -> u64 {
 fn project_all(provider: CaptureProvider, values: &[Value]) -> (Vec<CoreRecord>, u64) {
     let adapter = adapter(provider);
     let session = session(provider);
+    let source_path = if provider == CaptureProvider::Windsurf {
+        format!("{}.jsonl", session.native_session_id)
+    } else {
+        "direct-jsonl-identity-contract.jsonl".to_owned()
+    };
     let (source, session_id) = adapter
         .session_identity(&session.native_session_id)
         .unwrap();
     let direct = DirectJsonlProjector::new(
         provider,
         adapter.source_format,
-        Path::new("direct-jsonl-identity-contract.jsonl"),
+        Path::new(&source_path),
         None,
         DateTime::<Utc>::UNIX_EPOCH,
         Some(session.clone()),
@@ -137,6 +142,66 @@ fn event_ids_by_body(records: &[CoreRecord]) -> BTreeMap<String, String> {
             )
         })
         .collect()
+}
+
+#[test]
+fn copilot_and_windsurf_replay_preserve_current_revision_ids_and_records() {
+    let cases = [
+        (
+            CaptureProvider::Windsurf,
+            json!({
+                "id": "windsurf-replay-event",
+                "type": "user_input",
+                "timestamp": "2026-08-03T12:34:56Z",
+                "user_input": {"user_response": "windsurf replay body"}
+            }),
+            "ac4f77cb-6658-8c1d-89fe-6d23fbf96fd0",
+            "6c78de65-0cee-8b0c-841f-56d0004e2af8",
+            "cb5a35bb-fb49-8701-8739-101eb01c524f",
+            "6e71cb85307368ff844c578c96c7744157b51de8dd8b1104475e350938fa4d6e",
+        ),
+        (
+            CaptureProvider::CopilotCli,
+            json!({
+                "id": "copilot-replay-event",
+                "type": "user.message",
+                "timestamp": "2026-08-03T12:34:56Z",
+                "data": {"content": "copilot replay body"}
+            }),
+            "c1ebd99c-7338-859b-891d-1c7e04d9ae9d",
+            "5ff93a01-4aa3-82f8-8d9e-784490016567",
+            "8d4627ce-c12c-8d64-af2d-d85ac722121f",
+            "3f32e8390eceecf11dbd66d8b6bd7cd522e3fdbbe9a2a001ba69ac65e0c561c7",
+        ),
+    ];
+
+    for (provider, value, event_id, session_id, source_id, record_leaf) in cases {
+        let adapter = adapter(provider);
+        assert_eq!(
+            JsonlFamilyAdapter::parser_revision(&adapter),
+            "direct-native-jsonl-parser-v4"
+        );
+        let (initial, rejected) = project_all(provider, std::slice::from_ref(&value));
+        assert_eq!(rejected, 0);
+        assert_eq!(initial.len(), 1);
+        let (replay, replay_rejected) = project_all(provider, std::slice::from_ref(&value));
+        assert_eq!(replay_rejected, 0);
+        assert_eq!(replay, initial);
+        let record = &initial[0];
+        assert_eq!(record.parser_revision, "direct-native-jsonl-parser-v4");
+        assert_eq!(record.event_id.to_string(), event_id, "{provider:?}");
+        assert_eq!(record.session_id.to_string(), session_id, "{provider:?}");
+        assert_eq!(
+            record.source.identity().to_string(),
+            source_id,
+            "{provider:?}"
+        );
+        assert_eq!(
+            core_record_leaf_sha256(record).unwrap(),
+            record_leaf,
+            "{provider:?}"
+        );
+    }
 }
 
 fn factory_result(id: &str, parent_id: Option<&str>, call_id: &str, body: &str) -> Value {
