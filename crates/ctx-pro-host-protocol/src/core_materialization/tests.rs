@@ -390,7 +390,7 @@ fn multi_source_event_delta_pages_request(
         .collect::<Vec<_>>();
     sources.sort_by_key(|(source, _)| source.identity().digest());
     let mut pages = Vec::new();
-    for (source, page_count) in sources {
+    for (materialize_index, (source, page_count)) in sources.into_iter().enumerate() {
         let source_state = state(source.clone(), 2, u64::try_from(page_count).unwrap());
         let mut records = (0..page_count)
             .map(|index| {
@@ -411,7 +411,7 @@ fn multi_source_event_delta_pages_request(
                     materialization_id: "d".repeat(64),
                     core_generation_id: "a".repeat(64),
                     reconciliation: CoreSourceReconciliation {
-                        materialize_index: 0,
+                        materialize_index: u32::try_from(materialize_index).unwrap(),
                         delta: CoreSourceDelta::Present(source_state.clone()),
                     },
                     page_index: u32::try_from(index).unwrap(),
@@ -421,6 +421,45 @@ fn multi_source_event_delta_pages_request(
         );
     }
     ApplyCoreEventDeltaPagesRequest { pages }
+}
+
+fn mixed_present_and_removed_event_delta_pages_request(
+    present_source: SourceKey,
+    removed_source: SourceKey,
+) -> ApplyCoreEventDeltaPagesRequest {
+    let present_record = record(&present_source, 1, "present source".to_owned(), false);
+    let removed_event_id = record(&removed_source, 1, "removed source".to_owned(), false).event_id;
+    ApplyCoreEventDeltaPagesRequest {
+        pages: vec![
+            CoreEventDeltaPage {
+                materialization_id: "d".repeat(64),
+                core_generation_id: "a".repeat(64),
+                reconciliation: CoreSourceReconciliation {
+                    materialize_index: 0,
+                    delta: CoreSourceDelta::Present(state(present_source, 2, 1)),
+                },
+                page_index: 0,
+                terminal: true,
+                deltas: vec![CoreEventDelta::Added(present_record)],
+            },
+            CoreEventDeltaPage {
+                materialization_id: "d".repeat(64),
+                core_generation_id: "a".repeat(64),
+                reconciliation: CoreSourceReconciliation {
+                    materialize_index: 1,
+                    delta: CoreSourceDelta::Removed(CoreSourceRemoval {
+                        source: removed_source,
+                    }),
+                },
+                page_index: 0,
+                terminal: true,
+                deltas: vec![CoreEventDelta::Tombstoned(CoreEventTombstone {
+                    event_id: removed_event_id,
+                    prior_core_record_sha256: "e".repeat(64),
+                })],
+            },
+        ],
+    }
 }
 
 fn event_delta_pages_applied(
@@ -591,6 +630,36 @@ fn event_delta_page_envelope_accepts_ordered_source_pinned_sub_batches() {
 }
 
 #[test]
+fn event_delta_page_envelope_accepts_mixed_sources_in_both_digest_orders() {
+    let mut sources = [source(64), source(65)];
+    sources.sort_by_key(|source| source.identity().digest());
+    let lower = sources[0].clone();
+    let higher = sources[1].clone();
+
+    for (present, removed, present_digest_is_lower) in [
+        (lower.clone(), higher.clone(), true),
+        (higher, lower, false),
+    ] {
+        let present_digest = present.identity().digest();
+        let removed_digest = removed.identity().digest();
+        let request = mixed_present_and_removed_event_delta_pages_request(present, removed);
+        assert_eq!(
+            request
+                .pages
+                .iter()
+                .map(|page| page.reconciliation.materialize_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(present_digest < removed_digest, present_digest_is_lower);
+        request.validate().unwrap();
+        event_delta_pages_applied(&request)
+            .validate_for(&request)
+            .unwrap();
+    }
+}
+
+#[test]
 fn event_delta_page_envelope_rejects_invalid_source_sub_batch_boundaries() {
     let request = multi_source_event_delta_pages_request(&[2, 1]);
     let first_source = request.pages[0].reconciliation.delta.source();
@@ -637,6 +706,46 @@ fn event_delta_page_envelope_rejects_invalid_source_sub_batch_boundaries() {
         CoreSourceDelta::Present(state(first_source, 9, 2));
     assert_eq!(
         mismatched_reconciliation.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+}
+
+#[test]
+fn event_delta_page_envelope_rejects_malformed_materialize_index_ordering() {
+    let mut sources = [source(66), source(67)];
+    sources.sort_by_key(|source| source.identity().digest());
+    let request =
+        mixed_present_and_removed_event_delta_pages_request(sources[0].clone(), sources[1].clone());
+
+    let mut duplicate = request.clone();
+    duplicate.pages[1].reconciliation.materialize_index = 0;
+    assert_eq!(
+        duplicate.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let mut descending = request.clone();
+    descending.pages[0].reconciliation.materialize_index = 2;
+    assert_eq!(
+        descending.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let mut repeated_source = request;
+    let mut repeated_page = repeated_source.pages[0].clone();
+    repeated_page.reconciliation.materialize_index = 2;
+    repeated_source.pages.push(repeated_page);
+    assert_eq!(
+        repeated_source.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let mut changed_within_source = event_delta_pages_request(2, true);
+    changed_within_source.pages[1]
+        .reconciliation
+        .materialize_index = 1;
+    assert_eq!(
+        changed_within_source.validate().unwrap_err().class,
         ErrorClass::Sequence
     );
 }

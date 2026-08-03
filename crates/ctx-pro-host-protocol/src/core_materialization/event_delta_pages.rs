@@ -42,6 +42,8 @@ impl ApplyCoreEventDeltaPagesRequest {
         let mut prior_event_id = None;
         let mut prior_terminal = false;
         let mut prior_source = None;
+        let mut prior_materialize_index = None;
+        let mut seen_sources = Vec::with_capacity(self.pages.len());
         for (position, page) in self.pages.iter().enumerate() {
             if validate_pages {
                 page.validate()?;
@@ -53,31 +55,35 @@ impl ApplyCoreEventDeltaPagesRequest {
             }
             let source = page.reconciliation.delta.source().identity().digest();
             let same_source = prior_source == Some(source);
+            if !same_source {
+                if seen_sources.contains(&source) {
+                    return Err(batch_sequence_error());
+                }
+                seen_sources.push(source);
+            }
             if position != 0 {
                 if same_source {
                     if prior_terminal
                         || prior_page_index
                             .is_some_and(|index: u32| index.checked_add(1) != Some(page.page_index))
+                        || prior_materialize_index != Some(page.reconciliation.materialize_index)
+                        || !core_source_delta_exact_eq(
+                            &page.reconciliation.delta,
+                            &self.pages[position - 1].reconciliation.delta,
+                        )
                     {
                         return Err(batch_sequence_error());
                     }
                 } else {
                     if !prior_terminal
                         || page.page_index != 0
-                        || prior_source.is_some_and(|prior| prior >= source)
+                        || prior_materialize_index
+                            .is_some_and(|prior| prior >= page.reconciliation.materialize_index)
                     {
                         return Err(batch_sequence_error());
                     }
                     prior_event_id = None;
                 }
-            }
-            if same_source
-                && !core_source_delta_exact_eq(
-                    &page.reconciliation.delta,
-                    &self.pages[position - 1].reconciliation.delta,
-                )
-            {
-                return Err(batch_sequence_error());
             }
             if let Some(first_delta) = page.deltas.first() {
                 let current = first_delta.event_id().digest();
@@ -91,6 +97,7 @@ impl ApplyCoreEventDeltaPagesRequest {
             prior_page_index = Some(page.page_index);
             prior_terminal = page.terminal;
             prior_source = Some(source);
+            prior_materialize_index = Some(page.reconciliation.materialize_index);
         }
         Ok(())
     }
@@ -149,7 +156,7 @@ impl ApplyCoreEventDeltaPagesRequest {
 fn batch_sequence_error() -> ProtocolError {
     ProtocolError::new(
         ErrorClass::Sequence,
-        "Core event delta page envelope must contain ordered source-pinned contiguous sub-batches",
+        "Core event delta page envelope must contain materialize-index-ordered source-pinned contiguous sub-batches",
     )
 }
 

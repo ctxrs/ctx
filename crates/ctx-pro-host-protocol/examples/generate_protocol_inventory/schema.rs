@@ -280,7 +280,7 @@ pub(super) fn inventory() -> Value {
             "removal": "source_removal_is_resumable_as_bounded_event_tombstone_pages_and_deletes_source_control_state only_on_its_terminal_page",
             "replacement": "prior_event_removal_and_replacement_record_insertion_are_atomic_in_one_bounded_event_delta_page",
             "event_delta_batching": {
-                "request": "one_to_sixteen_pages_partitioned_into_strictly_source_ordered_source_pinned_contiguous_sub_batches_with_terminal_source_boundaries_and_strict_per_source_event_order",
+                "request": "one_to_sixteen_pages_partitioned_into_one_contiguous_sub_batch_per_source_each_sharing_one_materialize_index_with_sub_batches_following_strictly_increasing_materialize_index_order_and_terminal_source_boundaries_and_each_source_retaining_strict_event_order",
                 "aggregate_input": "exact_compact_request_json_is_at_most_sixty_eight_mib_while_every_page_retains_its_existing_bounds",
                 "prepared_output": "helper_prepared_output_accounting_is_at_most_one_hundred_twenty_eight_mib",
                 "acknowledgement": "one_ordered_count_exact_page_acknowledgement_per_requested_page"
