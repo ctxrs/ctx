@@ -131,6 +131,14 @@ complete audit from the number of returned hits. If the requested conclusion
 cannot be supported with search, show, and locate evidence, state that limit
 and report the strongest retrieved evidence instead.
 
+For advanced querying or complete deterministic event enumeration, use
+`ctx list events`. Read the full filter, range, cursor, and output documentation
+before use:
+
+```bash
+ctx docs show event-queries
+```
+
 ## History Research Reports
 
 When asked to research a historical topic, stay read-only unless the user also
