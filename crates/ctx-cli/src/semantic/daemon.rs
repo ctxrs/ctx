@@ -35,10 +35,11 @@ use super::{
     },
     daemon_retry::DaemonRetryBackoff,
     daemon_scheduler::{
-        daemon_retry_due, daemon_run_start_mode, restore_daemon_background_refresh_cadence,
-        restore_daemon_consumer_retries, restore_daemon_source_refresh_retry,
-        run_daemon_scheduler_cycle_with_activity, DaemonBackgroundRefreshCadence,
-        DaemonConsumerRetryDeferral, DaemonSidecarDrain,
+        daemon_retry_due, daemon_run_start_mode,
+        preserve_daemon_background_refresh_recovery_provenance,
+        restore_daemon_background_refresh_cadence, restore_daemon_consumer_retries,
+        restore_daemon_source_refresh_retry, run_daemon_scheduler_cycle_with_activity,
+        DaemonBackgroundRefreshCadence, DaemonConsumerRetryDeferral, DaemonSidecarDrain,
     },
     daemon_status::{
         daemon_report_failure_message, render_daemon_disable_receipt, render_daemon_enable_receipt,
@@ -183,35 +184,6 @@ pub(super) fn daemon_test_job(job: &'static str) -> Option<Value> {
         }
     })
 }
-
-#[cfg(test)]
-thread_local! {
-    static AFTER_SOURCE_REFRESH_RECOVERY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn install_after_source_refresh_recovery_hook_for_test(hook: impl FnOnce() + 'static) {
-    AFTER_SOURCE_REFRESH_RECOVERY_HOOK.with(|slot| {
-        let previous = slot.replace(Some(Box::new(hook)));
-        assert!(
-            previous.is_none(),
-            "source refresh recovery test hooks must not nest"
-        );
-    });
-}
-
-#[cfg(test)]
-fn run_after_source_refresh_recovery_hook() {
-    AFTER_SOURCE_REFRESH_RECOVERY_HOOK.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().take() {
-            hook();
-        }
-    });
-}
-
-#[cfg(not(test))]
-fn run_after_source_refresh_recovery_hook() {}
 
 fn daemon_previous_status_needs_recovery(status: Option<&Value>) -> bool {
     status
@@ -806,14 +778,15 @@ fn recover_source_refresh_before_background_cadence(
     source_refresh: Option<&CoreRefreshEngine>,
 ) -> Result<()> {
     if let Some(source_refresh) = source_refresh {
+        preserve_daemon_background_refresh_recovery_provenance(data_root)
+            .context("preserve automatic Core refresh provenance before recovery")?;
         source_refresh
             .recover_interrupted_publication(data_root)
             .context("recover interrupted Core refresh before daemon readiness")?;
     }
-    // Recovery may turn a pre-crash `running` periodic job into the durable
-    // terminal publication that owns the cooldown timestamps. Restore only
-    // after that transition so restart cannot erase background rest.
-    run_after_source_refresh_recovery_hook();
+    // Recovery replaces the original trigger with `recovery`. Restore only
+    // after that transition, using the request-bound automatic provenance
+    // preserved above, so restart cannot erase background rest.
     restore_daemon_background_refresh_cadence(runtime, data_root);
     Ok(())
 }

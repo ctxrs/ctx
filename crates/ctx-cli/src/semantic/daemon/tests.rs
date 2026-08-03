@@ -12,8 +12,9 @@ use super::*;
 use crate::analytics::{ProviderRefreshCompletedV1, Surface};
 use crate::semantic::dirty_source_routes::EventWatermark;
 use crate::semantic::source_backed_refresh_coordinator::{
-    source_backed_index_root, SourceBackedRefreshCurrent, SourceBackedRefreshExecution,
-    SourceBackedRefreshExecutor, SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
+    coordinate_source_backed_refresh, source_backed_index_root, SourceBackedRefreshCurrent,
+    SourceBackedRefreshExecution, SourceBackedRefreshExecutor, SourceBackedRefreshMode,
+    SourceBackedRefreshPublication, SourceBackedRefreshReceipt, SourceBackedRefreshRouteResult,
     SourceBackedRefreshTimings,
 };
 use ctx_history_capture::{
@@ -26,7 +27,7 @@ use ctx_history_core::{
     EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
     SourceAnchor, SourceKey, SourceObservation, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, SourceRouteSnapshot, WriterOptions};
+use ctx_history_index::{GenerationWriter, IndexError, SourceRouteSnapshot, WriterOptions};
 use sha2::{Digest, Sha256};
 
 fn daemon_watch_test_catalog(path: PathBuf) -> SourceBackedWatchCatalog {
@@ -920,39 +921,58 @@ fn recovered_periodic_publication_restores_crash_cooldown_before_explicit_bypass
     let temp = tempfile::tempdir()?;
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root)?;
-    super::super::paths_status::write_daemon_job_status(
-        &daemon_core_refresh_job_path(&data_root),
-        &json!({
-            "trigger": "periodic",
-            "request_state": "running",
-            "started_at_ms": 1,
-        }),
-    )?;
+    let interrupted = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let request_id = execution.request_id.to_owned();
+            let published = GenerationWriter::open(execution.index_root, WriterOptions::default())?
+                .commit_with_publication_metadata(
+                    |_| true,
+                    |context| {
+                        let generation_id = context.generation_id().to_owned();
+                        let receipt = SourceBackedRefreshReceipt {
+                            previous_generation: None,
+                            published_generation: generation_id.clone(),
+                            generation_changed: true,
+                            published_explicit_source_catalog: None,
+                            current: SourceBackedRefreshCurrent::default(),
+                            route_results: Vec::new(),
+                            catalog_route_bindings: Vec::new(),
+                        };
+                        serde_json::to_vec(&json!({
+                            "version": 1,
+                            "request_id": request_id,
+                            "operation": "refresh",
+                            "refresh_scope": {"kind": "all"},
+                            "receipt": receipt.to_json(),
+                            "route_observations": [],
+                        }))
+                        .map_err(|error| IndexError::PublicationMetadata(error.to_string()))
+                    },
+                )?;
+            Err(anyhow!(
+                "injected crash after automatic publication {}",
+                published.receipt().generation_id
+            ))
+        },
+    ));
+    interrupted.enqueue_periodic(&data_root)?;
+    let failed = interrupted
+        .run_next(&data_root)
+        .expect("interrupted automatic publication");
+    assert!(failed.failed);
+    let interrupted_status = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root))
+        .expect("interrupted automatic status");
+    assert_eq!(interrupted_status["trigger"], "periodic");
+    assert_eq!(interrupted_status["trigger_provenance"], "daemon_scheduler");
+    let interrupted_request_id = interrupted_status["request_id"]
+        .as_str()
+        .expect("interrupted request ID")
+        .to_owned();
+    drop(interrupted);
 
-    let recovery_root = data_root.clone();
-    install_after_source_refresh_recovery_hook_for_test(move || {
-        let finished_at_ms = source_route_ledger_now_ms();
-        super::super::paths_status::write_daemon_job_status(
-            &daemon_core_refresh_job_path(&recovery_root),
-            &json!({
-                "trigger": "periodic",
-                "request_state": "published",
-                "status": "completed",
-                "started_at_ms": finished_at_ms.saturating_sub(1_000),
-                "finished_at_ms": finished_at_ms,
-            }),
-        )
-        .expect("persist recovered automatic publication");
-    });
-
-    let mut runtime = DaemonRuntime::default();
-    recover_source_refresh_before_background_cadence(&mut runtime, &data_root, None)?;
     assert!(
-        runtime
-            .background_refresh_cadence
-            .remaining(Instant::now())
-            .is_some_and(|remaining| remaining > StdDuration::ZERO),
-        "recovered periodic publication must retain background cooldown"
+        coordinate_source_backed_refresh(&data_root, SourceBackedRefreshMode::Off).is_ok(),
+        "committed generation must remain readable at the crash point"
     );
 
     let calls = Arc::new(AtomicUsize::new(0));
@@ -976,6 +996,24 @@ fn recovered_periodic_publication_restores_crash_cooldown_before_explicit_bypass
             })
         },
     ));
+    let mut runtime = DaemonRuntime::default();
+    recover_source_refresh_before_background_cadence(&mut runtime, &data_root, Some(&coordinator))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let recovered_status = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root))
+        .expect("actual recovered automatic status");
+    assert_eq!(recovered_status["request_id"], interrupted_request_id);
+    assert_eq!(recovered_status["request_state"], "published");
+    assert_eq!(recovered_status["status"], "completed");
+    assert_eq!(recovered_status["trigger"], "recovery");
+    assert_eq!(recovered_status["trigger_provenance"], "commit_payload");
+    assert!(
+        runtime
+            .background_refresh_cadence
+            .remaining(Instant::now())
+            .is_some_and(|remaining| remaining > StdDuration::ZERO),
+        "actual recovered automatic publication must retain background cooldown"
+    );
+
     coordinator
         .handle_ipc_request(
             &data_root,

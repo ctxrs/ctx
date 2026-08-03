@@ -41,8 +41,9 @@ use super::{
     daemon_job_should_backoff, daemon_mode_runs_core_pro_catch_up,
     daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path,
     install_before_core_scheduler_status_hook_for_test, persist_pro_status,
-    prepare_pro_retry_for_generation, read_daemon_job_status, read_pro_status,
-    record_daemon_job_retry, record_source_refresh_retry, restore_daemon_consumer_retries,
+    prepare_pro_retry_for_generation, preserve_daemon_background_refresh_recovery_provenance,
+    read_daemon_job_status, read_pro_status, record_daemon_job_retry, record_source_refresh_retry,
+    restore_daemon_background_refresh_cadence, restore_daemon_consumer_retries,
     run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
     run_pending_core_refresh, run_pro_catch_up_with_retry, write_daemon_job_status,
     DaemonBackgroundRefreshCadence, DaemonRetryBackoff, DaemonRuntime,
@@ -462,10 +463,13 @@ fn background_rest_is_bounded_and_restores_from_periodic_terminal_status() {
     let mut cadence = DaemonBackgroundRefreshCadence::default();
     cadence.restore(
         Some(&json!({
+            "operation": "refresh",
             "trigger": "periodic",
+            "trigger_provenance": "daemon_scheduler",
             "started_at_ms": 1_000,
             "finished_at_ms": 31_000,
         })),
+        None,
         40_000,
         now,
     );
@@ -477,10 +481,13 @@ fn background_rest_is_bounded_and_restores_from_periodic_terminal_status() {
     let mut skewed = DaemonBackgroundRefreshCadence::default();
     skewed.restore(
         Some(&json!({
+            "operation": "refresh",
             "trigger": "periodic",
+            "trigger_provenance": "daemon_scheduler",
             "started_at_ms": 1,
             "finished_at_ms": 10_000_000,
         })),
+        None,
         0,
         now,
     );
@@ -492,14 +499,55 @@ fn background_rest_is_bounded_and_restores_from_periodic_terminal_status() {
     let mut explicit = DaemonBackgroundRefreshCadence::default();
     explicit.restore(
         Some(&json!({
+            "operation": "import",
             "trigger": "import",
+            "trigger_provenance": "explicit_source_catalog",
             "started_at_ms": 1_000,
             "finished_at_ms": 31_000,
         })),
+        None,
         40_000,
         now,
     );
     assert!(explicit.ready(now));
+}
+
+#[test]
+fn unrelated_manual_recovery_does_not_restore_background_cooldown() {
+    let temp = tempfile::tempdir().unwrap();
+    ctx_history_core::platform_security::establish_private_data_root(temp.path()).unwrap();
+    write_daemon_job_status(
+        &daemon_core_refresh_job_path(temp.path()),
+        &json!({
+            "request_id": "manual-recovery",
+            "operation": "refresh",
+            "trigger": "search",
+            "trigger_provenance": "manual",
+        }),
+    )
+    .unwrap();
+    preserve_daemon_background_refresh_recovery_provenance(temp.path()).unwrap();
+    write_daemon_job_status(
+        &daemon_core_refresh_job_path(temp.path()),
+        &json!({
+            "request_id": "manual-recovery",
+            "request_state": "published",
+            "status": "completed",
+            "trigger": "recovery",
+            "trigger_provenance": "commit_payload",
+            "started_at_ms": 1_000,
+            "finished_at_ms": 2_000,
+            "published_generation": "manual-generation",
+            "receipt": {},
+        }),
+    )
+    .unwrap();
+
+    let mut runtime = DaemonRuntime::default();
+    restore_daemon_background_refresh_cadence(&mut runtime, temp.path());
+    assert!(runtime
+        .background_refresh_cadence
+        .ready(std::time::Instant::now()));
 }
 
 #[test]
