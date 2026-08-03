@@ -7,7 +7,7 @@ use ctx_pro_host_protocol::ProFilesystemLayout;
 use tempfile::tempdir;
 
 #[test]
-fn release_binary_ignores_all_untrusted_helper_overrides() {
+fn release_binary_does_not_accept_local_helper_or_authorizer_overrides() {
     let root = tempdir().unwrap();
     let helper = root.path().join("untrusted-ctx-pro");
     let executed = root.path().join("executed");
@@ -22,6 +22,12 @@ fn release_binary_ignores_all_untrusted_helper_overrides() {
         .unwrap()
         .env("CTX_PRO_CHANNEL", "staging")
         .env("CTX_PRO_HELPER", &helper)
+        .env("CTX_PRO_QUALIFICATION_AUTHORIZER_PATH", &helper)
+        .env(
+            "CTX_PRO_QUALIFICATION_AUTHORIZER_SHA256",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .env("CTX_PRO_QUALIFICATION_STATE_ROOT", root.path())
         .args([
             "--data-root",
             root.path().to_str().unwrap(),

@@ -1,4 +1,4 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
 load("//tools/bazel:ctx_rust.bzl", "ctx_rust_binary", "ctx_rust_test")
@@ -248,6 +248,30 @@ ctx_rust_test(
         "CARGO_BIN_EXE_ctx": "$(rootpath :ctx)",
     },
     tags = ["exclusive"],
+)
+
+ctx_rust_test(
+    name = "pro_qualification_authorizer_tests",
+    srcs = ["src/pro/qualification_authorizer.rs"],
+    crate_name = "pro_qualification_authorizer_tests",
+    crate_root = "src/pro/qualification_authorizer.rs",
+    edition = crate_edition(),
+    aliases = aliases(
+        normal = True,
+        normal_dev = True,
+    ),
+    deps = crate_deps([
+        "anyhow",
+        "libc",
+        "sha2",
+        "tempfile",
+        "windows-sys",
+    ]) + ["//crates/ctx-history-core:lib"],
+    tags = [
+        "manual",
+        "qualification",
+        "security",
+    ],
 )
 
 ctx_rust_test(

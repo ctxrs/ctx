@@ -17,6 +17,8 @@ mod lifecycle;
 mod local_deletion;
 mod pending_materialization;
 mod pricing;
+#[cfg(ctx_pro_qualification)]
+mod qualification_authorizer;
 mod referral;
 mod render;
 mod request_identity;

@@ -4,6 +4,7 @@ load("@crates//:defs.bzl", "aliases", "crate_deps", "crate_edition")
 load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
 
 CTX_CLI_RUSTC_FLAGS = [
+    "--check-cfg=cfg(ctx_pro_qualification)",
     "--check-cfg=cfg(ctx_pro_test_helper)",
     "--check-cfg=cfg(ctx_release_qualification)",
     "--check-cfg=cfg(ctx_cli_test_support_fixtures)",
