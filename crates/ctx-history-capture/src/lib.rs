@@ -122,7 +122,7 @@ pub use provider::source_backed::{
     register_shelley_source_backed_route, register_warp_source_backed_route,
     source_backed_refresh_work_budget, source_backed_route_constructor,
     source_backed_route_inventory, CrushProjectDatabaseV0, CrushProjectInventoryObservationV0,
-    CrushProjectInventorySourceV0, SourceBackedAutomaticRegistryBuild,
+    CrushProjectInventorySourceV0, RouteObservation, SourceBackedAutomaticRegistryBuild,
     SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
     SourceBackedCertifiedRemoval, SourceBackedCoordinatorError, SourceBackedCoordinatorResult,
     SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,

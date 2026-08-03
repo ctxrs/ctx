@@ -24,6 +24,7 @@ from performance_sanity_support import (
     RefreshSnapshot,
     SourceWorkerCpu,
     command_failure,
+    directory_bytes,
     isolated_env,
     published_file_state,
     require_parallel_source_workers,
@@ -44,6 +45,10 @@ QUERY = "nightly performance sentinel"
 APPEND_QUERY = f"{QUERY} tiny append"
 TOP_PROVIDER_QUERY = "ctxtopproviderperfsentinel"
 SAMPLE_COUNT = 3
+# The checked debug build measures about 23 KiB of immutable Tantivy segment,
+# metadata, and manifest growth for one tiny append. Keep one fixed 32 KiB
+# allowance instead of scaling retained storage with the existing corpus.
+MAX_APPEND_SEGMENT_OVERHEAD_BYTES = 32 * 1024
 
 # Normal CI keeps the small provider/scheduler contracts. Nightly and release
 # add enough independent leaves to require multiple source workers while
@@ -413,8 +418,6 @@ class SourceWorkerParallelismOracleTest(unittest.TestCase):
             elapsed_seconds=2.0,
             cpu_seconds=5.0,
             cpu_per_wall=2.5,
-            baseline_open_fds=10,
-            peak_open_fds=20,
             peak_rss_bytes=128 * 1024 * 1024,
             source_workers=source_workers,
         )
@@ -446,6 +449,25 @@ class SourceWorkerParallelismOracleTest(unittest.TestCase):
             require_parallel_source_workers(sample),
             sample.source_workers[:2],
         )
+
+
+class PhysicalStorageAccountingTest(unittest.TestCase):
+    def test_hard_linked_generation_files_count_once(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="ctx-performance-storage-accounting-"
+        ) as temporary:
+            root = Path(temporary)
+            original = root / "generation-a" / "segment"
+            linked = root / "generation-b" / "segment"
+            copied = root / "generation-c" / "segment"
+            original.parent.mkdir()
+            linked.parent.mkdir()
+            copied.parent.mkdir()
+            original.write_bytes(b"physical-segment")
+            os.link(original, linked)
+            copied.write_bytes(original.read_bytes())
+
+            self.assertEqual(directory_bytes(root), 2 * len(b"physical-segment"))
 
 
 class SmallQueryShowPerformanceTest(unittest.TestCase):
@@ -566,10 +588,13 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
                     len(noop.segments) + 1,
                     "one tiny append exposed more than one additional active segment",
                 )
+                append_storage_delta = appended.index_bytes - noop.index_bytes
+                self.assertGreaterEqual(append_storage_delta, 0)
                 self.assertLessEqual(
-                    appended.index_bytes,
-                    initial.index_bytes * 2,
-                    "one tiny append more than doubled retained lexical storage",
+                    append_storage_delta,
+                    append_bytes + MAX_APPEND_SEGMENT_OVERHEAD_BYTES,
+                    "one tiny append exceeded its payload plus the fixed "
+                    "append-segment storage allowance",
                 )
                 self.assertEqual(
                     len(appended.manifest_names), len(noop.manifest_names) + 1
@@ -690,6 +715,9 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
             f" segments_after={len(appended.segments)}"
             f" index_bytes_before={initial.index_bytes}"
             f" index_bytes_after={appended.index_bytes}"
+            f" append_storage_delta={append_storage_delta}"
+            f" append_segment_overhead_bytes="
+            f"{append_storage_delta - append_bytes}"
             f" search_max_seconds={search_max:.3f}"
             f" show_max_seconds={show_max:.3f}"
             f" peak_rss_bytes={rss_max}"
@@ -726,8 +754,6 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
         self.assertEqual(job["status"], "completed")
         self.assertEqual(job["request_state"], "published")
         self.assertEqual(job["source_count"], TOP_PROVIDER_COUNT)
-        self.assertEqual(job["scanned_routes"], TOP_PROVIDER_COUNT)
-        self.assertEqual(job["unsupported_routes"], 0)
         self.assertEqual(
             job["progress"],
             {

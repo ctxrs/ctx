@@ -12,7 +12,6 @@ use ctx_history_capture::{
 use ctx_history_core::CaptureProvider;
 
 use crate::analytics::{count_bucket, SourcesTelemetry};
-use crate::commands::import::load_explicit_source_catalog_sources;
 use crate::history_source_plugins::discover_history_source_plugins_with_diagnostics;
 use crate::local_usage::{CliUsage, ResultObservationAction};
 use crate::output::print_json;
@@ -38,20 +37,13 @@ pub(crate) fn run_sources(
     ui: &mut Ui,
 ) -> Result<()> {
     let provider_filter = args.provider.map(ProviderArg::capture_provider);
-    let mut discovery_report = match provider_filter {
+    let discovery_report = match provider_filter {
         Some(CaptureProvider::Custom) => DiscoveryReport::default(),
         Some(provider) => discovered_sources_for_provider_report(provider),
         None => discovered_sources_report(),
     };
-    let configured_sources = load_explicit_source_catalog_sources(&data_root)?
-        .into_iter()
-        .filter(|source| provider_filter.is_none_or(|provider| source.provider == provider))
-        .collect::<Vec<_>>();
-    let configured_identities = configured_sources
-        .iter()
-        .map(source_identity)
-        .collect::<BTreeSet<_>>();
-    merge_sources(&mut discovery_report.sources, configured_sources);
+    // Exact imports are request overlays and never become configured discovery roots.
+    let configured_identities = BTreeSet::new();
     let sources = &discovery_report.sources;
     let plugin_discovery = discover_history_source_plugins_with_diagnostics(&data_root, &[])?;
     let (plugin_sources, plugin_failures) = if matches!(provider_filter, Some(provider) if provider != CaptureProvider::Custom)
@@ -157,6 +149,7 @@ fn source_identity(source: &SourceInfo) -> SourceIdentity {
     )
 }
 
+#[cfg(test)]
 fn merge_sources(discovered: &mut Vec<SourceInfo>, configured: Vec<SourceInfo>) {
     let mut seen = BTreeSet::new();
     discovered.retain(|source| seen.insert(source_identity(source)));

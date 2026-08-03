@@ -98,6 +98,43 @@ fn typed_unknown_recovery_requires_request_id_progress() {
     );
 }
 
+#[test]
+fn pre_overlay_periodic_job_does_not_block_restart_on_legacy_catalog_commitment() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+    let mut legacy_authority = authority.to_json();
+    legacy_authority.as_object_mut().unwrap().remove("entries");
+    write_daemon_job_status(
+        &daemon_source_backed_refresh_job_path(&data_root),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "request_id": "legacy-periodic",
+            "request_state": "running",
+            "operation": "refresh",
+            "previous_generation": null,
+            "published_generation": null,
+            "refresh_scope": {"kind": "all"},
+            "requested_explicit_source_catalog": legacy_authority,
+            "daemon_mode": "full",
+            "trigger": "periodic",
+            "trigger_provenance": "daemon_scheduler",
+        }),
+    )
+    .unwrap();
+
+    let coordinator = CoreRefreshEngine::new();
+    assert!(coordinator
+        .recover_interrupted_publication(&data_root)
+        .unwrap());
+    let recovered = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("recovery job");
+    assert_eq!(recovered["request_state"], "queued");
+    assert!(recovered.get("requested_explicit_source_catalog").is_none());
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn old_wait_request_recovers_typed_across_restart_and_returns_exact_generation() {
@@ -228,19 +265,15 @@ fn old_wait_request_recovers_typed_across_restart_and_returns_exact_generation()
                     *execute_generation.lock().unwrap() = Some(commit.generation_id.clone());
                     let mut publication = SourceBackedRefreshPublication {
                         generation_id: commit.generation_id,
-                        published_explicit_source_catalog: execute_authority,
-                        scanned_routes: 0,
+                        published_explicit_source_catalog: Some(execute_authority),
                         unsupported_routes: 0,
                         certified_source_count: 0,
                         certified_source_bytes: 0,
                         current: SourceBackedRefreshCurrent::default(),
                         timings: SourceBackedRefreshTimings::default(),
-                        selected_route_ids: Vec::new(),
-                        successful_route_ids: Vec::new(),
-                        successful_route_changes: Default::default(),
-                        failed_route_outcomes: Vec::new(),
-                        catalog_route_outcomes: Vec::new(),
-                        source_failures: Vec::new(),
+                        route_results: Vec::new(),
+                        catalog_route_bindings: Vec::new(),
+                        verified_index: None,
                     };
                     publication.current.removed_source_count = 0;
                     Ok(publication)
@@ -275,7 +308,7 @@ fn old_wait_request_recovers_typed_across_restart_and_returns_exact_generation()
         observation
             .receipt
             .as_ref()
-            .map(|receipt| &receipt.published_explicit_source_catalog),
+            .and_then(|receipt| receipt.published_explicit_source_catalog.as_ref()),
         Some(&authority)
     );
     drop(service);

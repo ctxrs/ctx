@@ -1,6 +1,8 @@
 use super::super::*;
 use std::collections::BTreeMap;
 
+mod refresh_control_plane;
+
 pub const MAX_RECORDED_SOURCE_BACKED_FAILURES: usize = 64;
 pub const MAX_SOURCE_BACKED_FAILURE_SELECTOR_BYTES: usize = 512;
 pub const MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES: usize = 512;

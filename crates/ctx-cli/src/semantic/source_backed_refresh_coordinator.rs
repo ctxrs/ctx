@@ -16,31 +16,33 @@ use ctx_history_capture::SourceBackedRefreshProgress as CaptureSourceBackedRefre
 use ctx_history_capture::{
     build_automatic_source_backed_registry_from_report,
     discover_provider_sources_with_context_and_work_budget, source_backed_refresh_work_budget,
-    validate_provider_source_roots_outside_data_root, CaptureError, DiscoveryContext,
-    DiscoveryReport, ProviderSourceStatus, SourceBackedAutomaticRegistryIssue,
-    SourceBackedAutomaticUnavailableReason, SourceBackedCoordinatorError,
+    source_backed_route_inventory, validate_provider_source_roots_outside_data_root, CaptureError,
+    DiscoveryContext, DiscoveryReport, ProviderSourceStatus, RouteObservation,
+    SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
+    SourceBackedCoordinatorError,
     SourceBackedCurrentSourceProgress as CaptureSourceBackedCurrentSourceProgress,
     SourceBackedCurrentSourceProgressStage as CaptureSourceBackedCurrentSourceProgressStage,
     SourceBackedDetailedRefreshProgress as CaptureSourceBackedDetailedRefreshProgress,
-    SourceBackedProviderRegistry, SourceBackedRefreshScope, SourceBackedRouteError,
-    SourceBackedRouteErrorKind, SourceBackedRouteResult, SourceBackedSourceFailureClass,
-    SourceBackedSourceFailures, SourceBackedWatchCatalog,
+    SourceBackedFailedRoute, SourceBackedFailedRouteOutcome, SourceBackedLogicalSourceFailures,
+    SourceBackedProviderRegistry, SourceBackedRecordRejections, SourceBackedRefreshScope,
+    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+    SourceBackedSelectorAuthority, SourceBackedSourceFailureClass, SourceBackedSourceFailures,
+    SourceBackedSuccessfulRouteOutcome, SourceBackedWatchCatalog,
 };
 #[cfg(test)]
 use ctx_history_core::CaptureProvider;
 use ctx_history_core::{utc_now, CertifiedSource, ScannedSourceCounts};
 use ctx_history_index::{
-    generation_incompatibility_requires_rebuild, IndexError, SourceRouteIdentity, VerifiedIndex,
-    WriterOptions,
+    generation_incompatibility_requires_rebuild, GenerationManifest, IndexError,
+    PublicationDisposition, SourceRouteIdentity, VerifiedIndex, WriterOptions,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::commands::import::load_explicit_source_catalog_authority;
 use crate::{
-    commands::import::{
-        load_explicit_source_catalog_authority, validate_explicit_source_catalog_roots,
-        ExplicitSourceCatalogAuthority,
-    },
+    commands::import::{ExplicitSourceCatalogAuthority, ExplicitSourceCatalogRouteBinding},
     compact_json,
     config::{AppConfig, DaemonMode},
     identity,
@@ -58,6 +60,7 @@ mod capture_refresh;
 mod client;
 mod coordinator_state;
 mod current_state;
+mod publication_metadata;
 mod request;
 
 use capture_refresh::{
@@ -76,15 +79,18 @@ pub(crate) use client::{
 #[cfg(test)]
 use coordinator_state::CaptureOwnedSourceBackedRefreshExecutor;
 pub(in crate::semantic) use coordinator_state::CoreRefreshEngine;
+#[allow(unused_imports)] // Makes the receipt method's projected result type crate-visible.
+pub(crate) use coordinator_state::SourceBackedRefreshCatalogRouteOutcome;
 use coordinator_state::SourceBackedRefreshProgressUpdate;
 pub(crate) use coordinator_state::{
     PinnedCorePublication, SourceBackedCurrentSourceProgress,
-    SourceBackedCurrentSourceProgressStage, SourceBackedRefreshCatalogRouteOutcome,
-    SourceBackedRefreshExecution, SourceBackedRefreshExecutor, SourceBackedRefreshProgress,
-    SourceBackedRefreshReceipt, SourceBackedRefreshRouteFailure, SourceBackedRefreshSourceFailure,
-    SourceBackedRefreshTimings,
+    SourceBackedCurrentSourceProgressStage, SourceBackedRefreshExecution,
+    SourceBackedRefreshExecutor, SourceBackedRefreshProgress, SourceBackedRefreshReceipt,
+    SourceBackedRefreshRecordRejection, SourceBackedRefreshRouteOutcome,
+    SourceBackedRefreshRouteResult, SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
 };
 pub(crate) use current_state::SourceBackedRefreshCurrent;
+use publication_metadata::SourceBackedPublicationMetadata;
 use request::{SourceBackedRefreshOperation, SourceBackedRefreshRequest};
 
 const SEARCH_DIRECTORY: &str = "search";
@@ -99,7 +105,12 @@ const SOURCE_REFRESH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
 const SOURCE_REFRESH_IPC_TIMEOUT: StdDuration = StdDuration::from_secs(2);
 const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
 const SOURCE_REFRESH_BUILD_ISSUE_LIMIT: usize = 8;
+const SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT: usize = 256;
+const SOURCE_REFRESH_RECOVERY_ROUTE_LIMIT: usize = SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT;
+const SOURCE_REFRESH_RECEIPT_JSON_BUDGET_BYTES: usize = 48 * 1024;
+const SOURCE_REFRESH_STARTUP_OBSERVATION_BUDGET: StdDuration = StdDuration::from_millis(250);
 const TERMINAL_COVERAGE_ERROR_CODE: &str = "all_provider_terminal_coverage_unavailable";
+
 #[cfg(test)]
 thread_local! {
     static VERIFIED_INDEX_OPEN_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
@@ -169,23 +180,32 @@ impl SourceBackedRefreshMode {
 
 /// Provider-neutral publication returned by the capture-owned refresh
 /// executor after it atomically advances the source-backed generation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct SourceBackedRefreshPublication {
     pub(crate) generation_id: String,
-    /// Exact explicit-source catalog snapshot registered into this publication.
-    pub(crate) published_explicit_source_catalog: ExplicitSourceCatalogAuthority,
-    pub(crate) scanned_routes: usize,
+    /// Exact request-scoped explicit-source overlay incorporated into this publication.
+    pub(crate) published_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     pub(crate) unsupported_routes: usize,
     pub(crate) certified_source_count: usize,
     pub(crate) certified_source_bytes: u64,
     pub(crate) current: SourceBackedRefreshCurrent,
     pub(crate) timings: SourceBackedRefreshTimings,
-    pub(crate) selected_route_ids: Vec<String>,
-    pub(crate) successful_route_ids: Vec<String>,
-    pub(crate) successful_route_changes: BTreeMap<String, bool>,
-    pub(crate) failed_route_outcomes: Vec<SourceBackedRefreshRouteFailure>,
-    pub(crate) catalog_route_outcomes: Vec<SourceBackedRefreshCatalogRouteOutcome>,
-    pub(crate) source_failures: Vec<SourceBackedRefreshSourceFailure>,
+    pub(crate) route_results: Vec<SourceBackedRefreshRouteResult>,
+    pub(crate) catalog_route_bindings: Vec<ExplicitSourceCatalogRouteBinding>,
+    /// Exact Core pin returned by the metadata-aware publication primitive.
+    /// Synthetic executor tests may leave this absent.
+    pub(crate) verified_index: Option<Arc<VerifiedIndex>>,
+}
+
+impl fmt::Debug for SourceBackedRefreshPublication {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SourceBackedRefreshPublication")
+            .field("generation_id", &self.generation_id)
+            .field("route_results", &self.route_results)
+            .field("has_verified_index", &self.verified_index.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 pub(super) fn source_backed_watch_catalog(data_root: &Path) -> Result<SourceBackedWatchCatalog> {
@@ -251,6 +271,20 @@ fn verify_source_backed_publication(
         || manifest.indexed_documents != verified_current.indexed_documents
     {
         bail!("Core refresh publication facts do not match its exact verified generation");
+    }
+    let route_rejected_record_total =
+        publication
+            .route_results
+            .iter()
+            .try_fold(0_u64, |total, result| {
+                total
+                    .checked_add(result.rejected_record_total)
+                    .ok_or_else(|| {
+                        anyhow!("Core refresh publication route rejected-record total overflow")
+                    })
+            })?;
+    if route_rejected_record_total > verified_current.rejected_records {
+        bail!("Core refresh publication route rejections exceed its exact verified generation");
     }
     Ok(())
 }
@@ -338,6 +372,13 @@ fn published_refresh_receipt(
     response: &Value,
     pin: &PinnedSourceBackedGeneration,
 ) -> Result<SourceBackedRefreshReceipt> {
+    published_refresh_receipt_for_index(response, &pin.index)
+}
+
+fn published_refresh_receipt_for_index(
+    response: &Value,
+    verified_index: &VerifiedIndex,
+) -> Result<SourceBackedRefreshReceipt> {
     let value = response
         .get("receipt")
         .and_then(Value::as_object)
@@ -355,12 +396,8 @@ fn published_refresh_receipt(
         })?;
     let published_explicit_source_catalog = value
         .get("published_explicit_source_catalog")
-        .ok_or_else(|| {
-            anyhow!(
-                "published daemon source refresh receipt has no explicit source catalog authority"
-            )
-        })
-        .and_then(ExplicitSourceCatalogAuthority::from_json)?;
+        .map(ExplicitSourceCatalogAuthority::from_json)
+        .transpose()?;
     let current_value = value
         .get("current")
         .and_then(Value::as_object)
@@ -380,45 +417,57 @@ fn published_refresh_receipt(
     };
     let selected_route_total = required_usize(value, "selected_route_total")?;
     let successful_route_total = required_usize(value, "successful_route_total")?;
-    let source_failures = required_source_failures(value.get("source_failures"))?;
-    let catalog_route_outcomes =
-        required_catalog_route_outcomes(value.get("catalog_route_outcomes"))?;
-    let catalog_succeeded_routes = catalog_route_outcomes
+    let route_results = required_route_results(value.get("route_results"))?;
+    let catalog_route_bindings =
+        required_catalog_route_bindings(value.get("catalog_route_bindings"), &route_results)?;
+    let expected_catalog_lineages = published_explicit_source_catalog
+        .as_ref()
+        .map(ExplicitSourceCatalogAuthority::route_lineages)
+        .unwrap_or_default();
+    let actual_catalog_lineages = catalog_route_bindings
         .iter()
-        .filter(|outcome| outcome.outcome == "succeeded")
-        .map(|outcome| outcome.route_identity.as_str())
+        .map(|binding| binding.catalog_lineage.clone())
         .collect::<BTreeSet<_>>();
-    let catalog_failed_routes = catalog_route_outcomes
+    let derived_successful_route_total = route_results
         .iter()
-        .filter(|outcome| outcome.outcome == "failed")
-        .map(|outcome| outcome.route_identity.as_str())
-        .collect::<BTreeSet<_>>();
-    let successful_route_changes = catalog_route_outcomes
-        .iter()
-        .filter_map(|outcome| {
-            (outcome.outcome == "succeeded")
-                .then_some(outcome.changed)
-                .flatten()
-                .map(|changed| (outcome.route_identity.clone(), changed))
-        })
-        .collect();
-    let diagnostic_route_ids = source_failures
-        .iter()
-        .map(|failure| failure.route_identity.clone())
-        .collect::<BTreeSet<_>>();
+        .filter(|result| result.outcome.is_success())
+        .count();
+    let derived_source_failure_total =
+        route_results.iter().try_fold(0_usize, |total, result| {
+            total
+                .checked_add(result.source_failure_total)
+                .ok_or_else(|| anyhow!("published daemon source-failure total overflow"))
+        })?;
+    let source_failure_diagnostic_total =
+        route_results.iter().try_fold(0_usize, |total, result| {
+            total
+                .checked_add(result.source_failures.len())
+                .ok_or_else(|| anyhow!("published daemon source-failure diagnostic total overflow"))
+        })?;
+    let derived_rejected_record_total = route_results.iter().try_fold(0_u64, |total, result| {
+        total
+            .checked_add(result.rejected_record_total)
+            .ok_or_else(|| anyhow!("published daemon rejected-record total overflow"))
+    })?;
+    let rejection_diagnostic_total = route_results.iter().try_fold(0_u64, |total, result| {
+        total
+            .checked_add(result.rejection_diagnostics.len() as u64)
+            .ok_or_else(|| anyhow!("published daemon rejection diagnostic total overflow"))
+    })?;
     let source_failure_total = required_usize(value, "source_failure_total")?;
     let source_failures_omitted = required_usize(value, "source_failures_omitted")?;
-    if successful_route_total > selected_route_total
-        || diagnostic_route_ids.len() != source_failures.len()
-        || source_failure_total != selected_route_total.saturating_sub(successful_route_total)
-        || catalog_succeeded_routes.len() > successful_route_total
-        || catalog_failed_routes.len() > source_failure_total
-        || catalog_succeeded_routes
-            .len()
-            .saturating_add(catalog_failed_routes.len())
-            > selected_route_total
-        || source_failures_omitted != source_failure_total.saturating_sub(source_failures.len())
-        || source_failures.len() > source_failure_total
+    let rejected_record_total = required_u64(value, "rejected_record_total")?;
+    let rejection_diagnostics_omitted = required_u64(value, "rejection_diagnostics_omitted")?;
+    if selected_route_total != route_results.len()
+        || successful_route_total != derived_successful_route_total
+        || source_failure_total != derived_source_failure_total
+        || source_failures_omitted
+            != source_failure_total.saturating_sub(source_failure_diagnostic_total)
+        || rejected_record_total != derived_rejected_record_total
+        || rejected_record_total > current.rejected_records
+        || rejection_diagnostics_omitted
+            != rejected_record_total.saturating_sub(rejection_diagnostic_total)
+        || actual_catalog_lineages != expected_catalog_lineages
     {
         bail!("published daemon source refresh has an invalid route-result partition");
     }
@@ -432,25 +481,18 @@ fn published_refresh_receipt(
         .get("generation_changed")
         .and_then(Value::as_bool)
         .ok_or_else(|| anyhow!("published daemon source refresh has no generation_changed fact"))?;
-    let top_published_explicit_source_catalog = response
-        .get("published_explicit_source_catalog")
-        .ok_or_else(|| {
-            anyhow!("published daemon source refresh has no explicit source catalog authority")
-        })
-        .and_then(ExplicitSourceCatalogAuthority::from_json)?;
     let identity_changed = previous_generation.as_deref() != Some(published_generation.as_str());
     if previous_generation != top_previous_generation
         || published_generation != top_published_generation
         || generation_changed != top_generation_changed
         || generation_changed != identity_changed
-        || published_explicit_source_catalog != top_published_explicit_source_catalog
     {
         bail!(
             "published daemon source refresh receipt has inconsistent publication identity facts"
         );
     }
 
-    let manifest = pin.index.manifest();
+    let manifest = verified_index.manifest();
     let verified_current =
         SourceBackedRefreshCurrent::from_sources(&manifest.sources, current.removed_source_count)?;
     if current != verified_current
@@ -476,144 +518,259 @@ fn published_refresh_receipt(
         generation_changed,
         published_explicit_source_catalog,
         current,
-        selected_route_ids: Vec::new(),
-        successful_route_ids: Vec::new(),
-        successful_route_changes,
-        selected_route_total,
-        successful_route_total,
-        failed_route_outcomes: Vec::new(),
-        catalog_route_outcomes,
-        source_failures,
+        route_results,
+        catalog_route_bindings,
     })
 }
 
-fn required_catalog_route_outcomes(
-    value: Option<&Value>,
-) -> Result<Vec<SourceBackedRefreshCatalogRouteOutcome>> {
-    let value = value.ok_or_else(|| {
-        anyhow!("published daemon source refresh receipt has no catalog_route_outcomes")
-    })?;
+pub(crate) fn published_explicit_source_relocation_authority(
+    data_root: &Path,
+    old_path: &Path,
+) -> Result<Option<crate::commands::import::ExplicitSourceRelocationAuthority>> {
+    let verified = open_published_generation(data_root)?
+        .ok_or_else(|| anyhow!("explicit relocation requires an active Core publication"))?;
+    let metadata = SourceBackedPublicationMetadata::decode(&verified)
+        .context("load exact explicit relocation authority from Core publication metadata")?;
+    let receipt = published_refresh_receipt_for_index(&metadata.response_value(), &verified)?;
+    receipt
+        .published_explicit_source_catalog
+        .as_ref()
+        .map(|catalog| catalog.relocation_authority(old_path, &receipt.catalog_route_bindings))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn required_route_results(value: Option<&Value>) -> Result<Vec<SourceBackedRefreshRouteResult>> {
+    let value = value
+        .ok_or_else(|| anyhow!("published daemon source refresh receipt has no route_results"))?;
     let values = value.as_object().ok_or_else(|| {
-        anyhow!("published daemon source refresh receipt catalog_route_outcomes must be an object")
+        anyhow!("published daemon source refresh receipt route_results must be an object")
     })?;
-    let mut route_results = BTreeMap::<String, (String, Option<String>, Option<bool>)>::new();
+    if values.len() > SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT {
+        bail!(
+            "published daemon source refresh exceeds the bounded route-result limit of {SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT}"
+        );
+    }
     values
         .iter()
-        .map(|(catalog_lineage, value)| {
-            if catalog_lineage.len() != 64
-                || !catalog_lineage.bytes().all(|byte| byte.is_ascii_hexdigit())
-            {
-                bail!("published daemon source refresh catalog lineage is invalid");
+        .map(|(route_identity, value)| {
+            if !is_sha256_identity(route_identity) {
+                bail!("published daemon source refresh route identity is invalid");
             }
             let fields = value.as_array().ok_or_else(|| {
-                anyhow!("published daemon source refresh compact catalog outcome must be an array")
+                anyhow!("published daemon source refresh compact route result must be an array")
             })?;
-            if !(2..=3).contains(&fields.len()) {
-                bail!("published daemon source refresh compact catalog outcome has invalid width");
-            }
-            let route_identity = fields[0]
-                .as_str()
-                .filter(|identity| is_sha256_identity(identity))
-                .ok_or_else(|| {
-                    anyhow!("published daemon source refresh catalog route identity is invalid")
-                })?
-                .to_owned();
-            let outcome = match fields[1].as_str() {
-                Some("s") => "succeeded",
-                Some("f") => "failed",
-                Some("n") => "not_selected",
-                _ => bail!("published daemon source refresh catalog route outcome is invalid"),
-            };
-            let (failure_class, changed) = match outcome {
-                "succeeded" if fields.len() == 3 => {
-                    let changed = fields.get(2).and_then(Value::as_bool).ok_or_else(|| {
-                        anyhow!("published daemon successful catalog route outcome has no changed fact")
+            let (
+                outcome,
+                source_failure_total,
+                source_failures,
+                rejected_record_total,
+                rejection_diagnostics,
+            ) = match fields.first().and_then(Value::as_str) {
+                Some("s") if fields.len() == 2 => {
+                    let changed = fields[1].as_bool().ok_or_else(|| {
+                        anyhow!("published daemon successful route result has no changed fact")
                     })?;
-                    (None, Some(changed))
+                    (
+                        SourceBackedRefreshRouteOutcome::Succeeded { changed },
+                        0,
+                        Vec::new(),
+                        0,
+                        Vec::new(),
+                    )
                 }
-                "failed" if fields.len() == 3 => {
-                    let class = match fields.get(2).and_then(Value::as_str) {
-                        Some("u") => "unavailable",
-                        Some("c") => "source_changed",
-                        Some("r") => "unreadable",
-                        Some("i") => "incompatible",
-                        _ => bail!(
-                            "published daemon source refresh catalog failure class is invalid"
-                        ),
-                    };
-                    (Some(class.to_owned()), None)
+                Some("s") if fields.len() == 6 => {
+                    let changed = fields[1].as_bool().ok_or_else(|| {
+                        anyhow!("published daemon successful route result has no changed fact")
+                    })?;
+                    let total =
+                        required_usize_from_value(fields.get(2), "route source_failure_total")?;
+                    let failures = required_route_source_failures(route_identity, fields.get(3))?;
+                    let rejected_record_total =
+                        required_u64_from_value(fields.get(4), "route rejected_record_total")?;
+                    let rejection_diagnostics =
+                        required_route_rejection_diagnostics(route_identity, fields.get(5))?;
+                    (
+                        SourceBackedRefreshRouteOutcome::Succeeded { changed },
+                        total,
+                        failures,
+                        rejected_record_total,
+                        rejection_diagnostics,
+                    )
                 }
-                "not_selected" if fields.len() == 2 => (None, None),
-                _ => bail!(
-                    "published daemon source refresh catalog route outcome has inconsistent fields"
-                ),
+                Some("f") if fields.len() == 5 => {
+                    let class = compact_source_failure_class(fields[1].as_str())?;
+                    let carried_forward = fields[2].as_bool().ok_or_else(|| {
+                        anyhow!("published daemon failed route result has no carried-forward fact")
+                    })?;
+                    let total =
+                        required_usize_from_value(fields.get(3), "route source_failure_total")?;
+                    let failures = required_route_source_failures(route_identity, fields.get(4))?;
+                    (
+                        SourceBackedRefreshRouteOutcome::Failed {
+                            class,
+                            carried_forward,
+                        },
+                        total,
+                        failures,
+                        0,
+                        Vec::new(),
+                    )
+                }
+                _ => bail!("published daemon source refresh route result has inconsistent fields"),
             };
-            let result = (outcome.to_owned(), failure_class.clone(), changed);
-            if route_results
-                .insert(route_identity.clone(), result.clone())
-                .is_some_and(|previous| previous != result)
-            {
-                bail!("published daemon source refresh catalog lineages disagree on a shared route result");
-            }
-            Ok(SourceBackedRefreshCatalogRouteOutcome {
-                catalog_lineage: catalog_lineage.clone(),
-                route_identity,
-                outcome: outcome.to_owned(),
-                failure_class,
-                changed,
+            let result = SourceBackedRefreshRouteResult {
+                route_identity: route_identity.clone(),
+                outcome,
+                source_failure_total,
+                source_failures,
+                rejected_record_total,
+                rejection_diagnostics,
+            };
+            result.validate_source_failures()?;
+            Ok(result)
+        })
+        .collect()
+}
+
+fn required_route_rejection_diagnostics(
+    route_identity: &str,
+    value: Option<&Value>,
+) -> Result<Vec<SourceBackedRefreshRecordRejection>> {
+    let value =
+        value.ok_or_else(|| anyhow!("terminal route result has no rejection diagnostics"))?;
+    value
+        .as_array()
+        .ok_or_else(|| anyhow!("terminal route result rejection diagnostics must be an array"))?
+        .iter()
+        .map(|value| {
+            let fields = value
+                .as_array()
+                .filter(|fields| fields.len() == 7)
+                .ok_or_else(|| {
+                    anyhow!("daemon source refresh compact rejection diagnostic is malformed")
+                })?;
+            let required = |index: usize, field: &'static str| {
+                fields[index]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        anyhow!("daemon source refresh rejection diagnostic has no {field}")
+                    })
+            };
+            Ok(SourceBackedRefreshRecordRejection {
+                route_identity: route_identity.to_owned(),
+                source_identity: required(0, "source_identity")?
+                    .into_sha256_identity("source_identity")?,
+                provider: required(1, "provider")?,
+                source_selector: required(2, "source_selector")?,
+                line: required_u64_from_value(fields.get(3), "rejection line")?,
+                payload_type: required(4, "payload_type")?,
+                class: compact_record_rejection_class(fields[5].as_str())?,
+                detail: required(6, "detail")?,
             })
         })
         .collect()
 }
 
-fn required_source_failures(
+fn compact_record_rejection_class(value: Option<&str>) -> Result<String> {
+    Ok(match value {
+        Some("m") => "malformed_record",
+        Some("u") => "unsupported_record",
+        _ => bail!("published daemon source refresh record rejection class is invalid"),
+    }
+    .to_owned())
+}
+
+fn required_catalog_route_bindings(
     value: Option<&Value>,
-) -> Result<Vec<SourceBackedRefreshSourceFailure>> {
-    let value = value.ok_or_else(|| {
-        anyhow!("published daemon source refresh receipt has no required source_failures array")
-    })?;
-    value
-        .as_array()
+    route_results: &[SourceBackedRefreshRouteResult],
+) -> Result<Vec<ExplicitSourceCatalogRouteBinding>> {
+    let values = value
         .ok_or_else(|| {
-            anyhow!("published daemon source refresh receipt source_failures must be an array")
+            anyhow!("published daemon source refresh receipt has no catalog_route_bindings")
         })?
+        .as_object()
+        .ok_or_else(|| {
+            anyhow!(
+                "published daemon source refresh receipt catalog_route_bindings must be an object"
+            )
+        })?;
+    let selected = route_results
         .iter()
-        .map(|value| {
-            let value = value
-                .as_object()
-                .ok_or_else(|| anyhow!("daemon source refresh source failure is malformed"))?;
-            let required = |field: &'static str| {
-                value
-                    .get(field)
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-                    .ok_or_else(|| anyhow!("daemon source refresh source failure has no {field}"))
-            };
-            Ok(SourceBackedRefreshSourceFailure {
-                route_identity: required("route_identity")?
-                    .into_sha256_identity("route_identity")?,
-                source_identity: required("source_identity")?
-                    .into_sha256_identity("source_identity")?,
-                provider: required("provider")?,
-                class: match required("class")?.as_str() {
-                    "unavailable" => "unavailable".to_owned(),
-                    "source_changed" => "source_changed".to_owned(),
-                    "unreadable" => "unreadable".to_owned(),
-                    "incompatible" => "incompatible".to_owned(),
-                    _ => bail!("daemon source refresh source failure class is malformed"),
-                },
-                carried_forward: value
-                    .get("carried_forward")
-                    .and_then(Value::as_bool)
-                    .ok_or_else(|| {
-                        anyhow!("daemon source refresh source failure has no carried_forward fact")
-                    })?,
-                source_selector: required("source_selector")?,
-                detail: required("detail")?,
+        .map(|result| result.route_identity.as_str())
+        .collect::<BTreeSet<_>>();
+    values
+        .iter()
+        .map(|(catalog_lineage, route_identity)| {
+            if !is_sha256_identity(catalog_lineage) {
+                bail!("published daemon source refresh catalog lineage is invalid");
+            }
+            let route_identity = route_identity
+                .as_str()
+                .filter(|route| selected.contains(*route))
+                .ok_or_else(|| {
+                    anyhow!("published daemon source refresh catalog binding has no selected route result")
+                })?;
+            Ok(ExplicitSourceCatalogRouteBinding {
+                catalog_lineage: catalog_lineage.clone(),
+                route_identity: route_identity.to_owned(),
             })
         })
         .collect()
+}
+
+fn required_route_source_failures(
+    route_identity: &str,
+    value: Option<&Value>,
+) -> Result<Vec<SourceBackedRefreshSourceFailure>> {
+    let value = value.ok_or_else(|| anyhow!("terminal route result has no source diagnostics"))?;
+    value
+        .as_array()
+        .ok_or_else(|| anyhow!("terminal route result source diagnostics must be an array"))?
+        .iter()
+        .map(|value| {
+            let fields = value
+                .as_array()
+                .filter(|fields| fields.len() == 6)
+                .ok_or_else(|| {
+                    anyhow!("daemon source refresh compact source diagnostic is malformed")
+                })?;
+            let required = |index: usize, field: &'static str| {
+                fields[index]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        anyhow!("daemon source refresh source diagnostic has no {field}")
+                    })
+            };
+            Ok(SourceBackedRefreshSourceFailure {
+                route_identity: route_identity.to_owned(),
+                source_identity: required(0, "source_identity")?
+                    .into_sha256_identity("source_identity")?,
+                provider: required(1, "provider")?,
+                class: compact_source_failure_class(fields[2].as_str())?,
+                carried_forward: fields[3].as_bool().ok_or_else(|| {
+                    anyhow!("daemon source refresh source diagnostic has no carried_forward fact")
+                })?,
+                source_selector: required(4, "source_selector")?,
+                detail: required(5, "detail")?,
+            })
+        })
+        .collect()
+}
+
+fn compact_source_failure_class(value: Option<&str>) -> Result<String> {
+    Ok(match value {
+        Some("u") => "unavailable",
+        Some("c") => "source_changed",
+        Some("r") => "unreadable",
+        Some("i") => "incompatible",
+        _ => bail!("published daemon source refresh source failure class is invalid"),
+    }
+    .to_owned())
 }
 
 trait Sha256IdentityString {

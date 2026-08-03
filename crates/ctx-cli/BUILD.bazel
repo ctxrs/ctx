@@ -635,6 +635,7 @@ ctx_cli_integration_test(
     src = "tests/setup_sources_import.rs",
     extra_srcs = [
         "tests/setup_sources_import/import_orchestration.rs",
+        "tests/setup_sources_import/import_orchestration/relocation.rs",
         "tests/setup_sources_import/lifecycle.rs",
         "tests/setup_sources_import/source_inventory.rs",
         "tests/support/setup_sources_import/lifecycle_helpers.rs",

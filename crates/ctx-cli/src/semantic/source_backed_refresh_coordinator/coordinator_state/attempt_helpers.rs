@@ -91,43 +91,15 @@ pub(super) fn aggregate_manual_all_continuation(
     publication: &mut SourceBackedRefreshPublication,
     continuation: &ManualAllContinuation,
 ) {
-    if continuation.covered_route_ids.is_empty() {
+    if continuation.covered_route_results.is_empty() {
         return;
     }
-    let covered = continuation
-        .covered_route_ids
-        .iter()
-        .map(|route| route.as_str().to_owned());
-    publication.selected_route_ids.extend(covered.clone());
-    publication.successful_route_ids.extend(covered);
-    publication.selected_route_ids.sort();
-    publication.selected_route_ids.dedup();
-    publication.successful_route_ids.sort();
-    publication.successful_route_ids.dedup();
-    publication.successful_route_changes.extend(
-        continuation
-            .covered_route_changes
-            .iter()
-            .map(|(route, changed)| (route.as_str().to_owned(), *changed)),
-    );
-    for outcome in &mut publication.catalog_route_outcomes {
-        let Some(changed) =
-            continuation
-                .covered_route_changes
-                .iter()
-                .find_map(|(route, changed)| {
-                    (route.as_str() == outcome.route_identity).then_some(*changed)
-                })
-        else {
-            continue;
-        };
-        outcome.outcome = "succeeded".to_owned();
-        outcome.failure_class = None;
-        outcome.changed = Some(changed);
-    }
-    publication.scanned_routes = publication
-        .scanned_routes
-        .saturating_add(continuation.covered_scanned_routes);
+    publication
+        .route_results
+        .extend(continuation.covered_route_results.values().cloned());
+    publication
+        .route_results
+        .sort_by(|left, right| left.route_identity.cmp(&right.route_identity));
     publication.current.removed_source_count = publication
         .current
         .removed_source_count
@@ -163,7 +135,6 @@ pub(super) fn new_refresh_attempt(
         refresh_scope,
         operation: metadata.operation,
         requested_explicit_source_catalog: requested_catalog,
-        published_explicit_source_catalog: None,
         coalesced_requests: 0,
         progress: SourceBackedRefreshProgress::default(),
         scanned_routes: None,
@@ -178,7 +149,6 @@ pub(super) fn new_refresh_attempt(
         trigger_provenance: metadata.trigger_provenance,
         failure_type: None,
         last_error: None,
-        post_publication_error: None,
     }
 }
 
@@ -209,6 +179,32 @@ pub(super) fn trim_terminal_attempt_history(state: &mut CoreRefreshEngineState) 
     }
 }
 
+pub(super) fn advance_after_terminal_attempt(
+    state: &mut CoreRefreshEngineState,
+    request_id: &str,
+    observed_generation: Option<String>,
+) {
+    if state.active_request_id.as_deref() != Some(request_id) {
+        return;
+    }
+    state.active_request_id = state.pending_request_ids.pop_front();
+    let Some(next_request_id) = state.active_request_id.clone() else {
+        return;
+    };
+    if state
+        .manual_all_continuations
+        .contains_key(&next_request_id)
+    {
+        return;
+    }
+    if let Some(next_attempt) = find_attempt_mut(state, &next_request_id) {
+        if observed_generation.is_some() {
+            next_attempt.previous_generation = observed_generation.clone();
+            next_attempt.published_generation = observed_generation;
+        }
+    }
+}
+
 pub(super) fn source_route_ledger_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -224,42 +220,65 @@ mod tests {
     fn continuation_preserves_route_local_change_in_catalog_outcome() {
         let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
         let mut continuation = ManualAllContinuation::new("predecessor".to_owned());
-        continuation.covered_route_ids.insert(route.clone());
-        continuation
-            .covered_route_changes
-            .insert(route.clone(), false);
+        continuation.covered_route_results.insert(
+            route.clone(),
+            SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), false),
+        );
         let mut publication = SourceBackedRefreshPublication {
             generation_id: "generation".to_owned(),
-            published_explicit_source_catalog: load_explicit_source_catalog_authority(
-                tempfile::tempdir().unwrap().path(),
-            )
-            .unwrap(),
-            scanned_routes: 0,
+            published_explicit_source_catalog: None,
             unsupported_routes: 0,
             certified_source_count: 0,
             certified_source_bytes: 0,
             current: SourceBackedRefreshCurrent::default(),
             timings: SourceBackedRefreshTimings::default(),
-            selected_route_ids: Vec::new(),
-            successful_route_ids: Vec::new(),
-            successful_route_changes: BTreeMap::new(),
-            failed_route_outcomes: Vec::new(),
-            catalog_route_outcomes: vec![SourceBackedRefreshCatalogRouteOutcome {
+            route_results: Vec::new(),
+            catalog_route_bindings: vec![ExplicitSourceCatalogRouteBinding {
                 catalog_lineage: "cd".repeat(32),
                 route_identity: route.as_str().to_owned(),
-                outcome: "not_selected".to_owned(),
-                failure_class: None,
-                changed: None,
             }],
-            source_failures: Vec::new(),
+            verified_index: None,
         };
 
         aggregate_manual_all_continuation(&mut publication, &continuation);
 
-        assert_eq!(publication.selected_route_ids, [route.as_str()]);
-        assert_eq!(publication.successful_route_ids, [route.as_str()]);
-        assert!(!publication.successful_route_changes[route.as_str()]);
-        assert_eq!(publication.catalog_route_outcomes[0].outcome, "succeeded");
-        assert_eq!(publication.catalog_route_outcomes[0].changed, Some(false));
+        assert_eq!(publication.route_results.len(), 1);
+        assert_eq!(publication.route_results[0].route_identity, route.as_str());
+        assert_eq!(publication.route_results[0].outcome.changed(), Some(false));
+    }
+
+    #[test]
+    fn continuation_overlap_remains_visible_to_canonical_duplicate_rejection() {
+        let route = SourceRouteIdentity::from_sha256("ef".repeat(32)).unwrap();
+        let mut continuation = ManualAllContinuation::new("predecessor".to_owned());
+        continuation.covered_route_results.insert(
+            route.clone(),
+            SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), false),
+        );
+        let mut publication = SourceBackedRefreshPublication {
+            generation_id: "generation".to_owned(),
+            published_explicit_source_catalog: None,
+            unsupported_routes: 0,
+            certified_source_count: 0,
+            certified_source_bytes: 0,
+            current: SourceBackedRefreshCurrent::default(),
+            timings: SourceBackedRefreshTimings::default(),
+            route_results: vec![SourceBackedRefreshRouteResult::succeeded(
+                route.as_str().to_owned(),
+                true,
+            )],
+            catalog_route_bindings: Vec::new(),
+            verified_index: None,
+        };
+
+        aggregate_manual_all_continuation(&mut publication, &continuation);
+
+        let error = SourceBackedRefreshReceipt::from_verified_publication(
+            None,
+            publication.generation_id.clone(),
+            &publication,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("duplicate route result"));
     }
 }

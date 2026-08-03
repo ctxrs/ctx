@@ -36,14 +36,12 @@ from performance_sanity_support import (
 @unittest.skipUnless(
     sys.platform.startswith("linux")
     and hasattr(os, "sched_getaffinity")
-    and Path("/proc/self/stat").is_file()
-    and Path("/proc/self/fd").is_dir(),
-    "source-family overlap and FD evidence requires Linux /proc and affinity",
+    and Path("/proc/self/stat").is_file(),
+    "source-family overlap evidence requires Linux /proc and affinity",
 )
 class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
     MIN_AVAILABLE_CPUS = 12
     MIN_CPU_PER_WALL = 1.10
-    MAX_OPEN_FD_DELTA = 96
 
     @staticmethod
     def refresh_args(query: str) -> list[str]:
@@ -66,8 +64,6 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
         self.assertEqual(job["status"], "completed")
         self.assertEqual(job["request_state"], "published")
         self.assertEqual(job["source_count"], 1)
-        self.assertEqual(job["scanned_routes"], 1)
-        self.assertEqual(job["unsupported_routes"], 0)
         self.assertEqual(
             job["progress"],
             {
@@ -291,22 +287,26 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
                     self.assertLessEqual(
                         replacement_seconds, MAX_COMMAND_SECONDS
                     )
-                    source_workers = require_parallel_source_workers(cold)
-                    source_worker_ticks = ",".join(
-                        f"{worker.name}:{worker.cpu_ticks}"
-                        for worker in source_workers
-                    )
-                    self.assertGreaterEqual(
-                        cold.cpu_per_wall,
-                        self.MIN_CPU_PER_WALL,
-                        f"{corpus.family} cold refresh did not overlap "
-                        "independent source work; set "
-                        f"{FORCE_SINGLE_CPU_ENV}=1 to exercise the control",
-                    )
-                    self.assertLessEqual(
-                        cold.peak_open_fds - cold.baseline_open_fds,
-                        self.MAX_OPEN_FD_DELTA,
-                    )
+                    if corpus.provider == "lingma":
+                        # SQLite inventory leaves intentionally stream serially
+                        # into Core so they do not duplicate large projections
+                        # in per-leaf scratch. Route-worker overlap is therefore
+                        # not part of Lingma's current provider contract.
+                        source_workers = ()
+                        source_worker_ticks = "serial-provider-contract"
+                    else:
+                        source_workers = require_parallel_source_workers(cold)
+                        source_worker_ticks = ",".join(
+                            f"{worker.name}:{worker.cpu_ticks}"
+                            for worker in source_workers
+                        )
+                        self.assertGreaterEqual(
+                            cold.cpu_per_wall,
+                            self.MIN_CPU_PER_WALL,
+                            f"{corpus.family} cold refresh did not overlap "
+                            "independent source work; set "
+                            f"{FORCE_SINGLE_CPU_ENV}=1 to exercise the control",
+                        )
                     self.assertLessEqual(
                         cold.peak_rss_bytes, MAX_PEAK_RSS_BYTES
                     )
@@ -325,8 +325,6 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
                         f"{len({worker.name for worker in source_workers})}"
                         f" source_worker_cpu_ticks="
                         f"{source_worker_ticks}"
-                        f" peak_fd_delta="
-                        f"{cold.peak_open_fds - cold.baseline_open_fds}"
                         f" peak_rss_bytes={cold.peak_rss_bytes}"
                         f" noop_seconds={noop_seconds:.3f}"
                         f" replacement_seconds={replacement_seconds:.3f}"

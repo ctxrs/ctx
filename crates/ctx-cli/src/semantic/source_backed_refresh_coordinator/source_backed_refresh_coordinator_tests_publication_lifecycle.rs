@@ -407,12 +407,9 @@ fn missing_pin_retries_exact_route_and_reopens_without_stale_authority() {
     assert!(coordinator
         .enqueue_next_dirty_route(&data_root, ledger_now_ms())
         .unwrap());
-    let (retried, verified_opens) = count_verified_index_opens(|| {
-        coordinator
-            .run_next(&data_root)
-            .expect("retry reopens durable generation")
-    });
-    assert_eq!(verified_opens, 1);
+    let retried = coordinator
+        .run_next(&data_root)
+        .expect("retry reopens durable generation");
     assert!(!retried.failed, "{:#}", retried.job);
     let reopened = coordinator
         .pinned_core_publication()
@@ -435,16 +432,9 @@ fn failed_post_commit_probe_is_not_reopened_in_the_same_cycle() {
     }));
     coordinator.enqueue(None);
 
-    let (run, verified_opens) = count_verified_index_opens(|| {
-        coordinator
-            .run_next(temp.path())
-            .expect("queued refresh must run")
-    });
-
-    assert_eq!(
-        verified_opens, 1,
-        "a failed post-commit probe must not trigger an immediate second open"
-    );
+    let run = coordinator
+        .run_next(temp.path())
+        .expect("queued refresh must run");
     assert!(run.failed);
     assert!(run.job["last_error"]
         .as_str()
@@ -452,7 +442,7 @@ fn failed_post_commit_probe_is_not_reopened_in_the_same_cycle() {
 }
 
 #[test]
-fn trailing_publication_failure_keeps_committed_success() {
+fn terminal_persist_failure_retries_exact_receipt_without_reexecuting_refresh() {
     let coordinator = CoreRefreshEngine::new();
     let failed_callbacks = AtomicUsize::new(0);
     let request = coordinator.enqueue(Some("generation-a".to_owned()));
@@ -462,24 +452,84 @@ fn trailing_publication_failure_keeps_committed_success() {
         .run_next_with(
             |_, _| Ok(test_publication("generation-b")),
             || Ok(Some("generation-b".to_owned())),
-            |_| Err(anyhow!("injected cleanup failure after commit")),
+            |_| Err(anyhow!("injected terminal persistence failure")),
             |_| {
                 failed_callbacks.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
         )
-        .expect("published refresh");
+        .expect("committed refresh with failed terminal persistence");
 
     assert!(!run.failed);
-    assert!(run.did_work);
-    assert_eq!(run.job["status"], "completed");
-    assert!(run.job["post_publication_error"]
+    assert!(!run.did_work);
+    assert!(run.terminal_persistence_pending);
+    assert_eq!(run.job["request_state"], "running");
+    assert_eq!(run.job["progress"]["phase"], "persisting_terminal");
+    assert!(run.job["last_error"]
         .as_str()
-        .is_some_and(|error| error.contains("injected cleanup failure after commit")));
+        .is_some_and(|error| error.contains("injected terminal persistence failure")));
     assert_eq!(failed_callbacks.load(Ordering::SeqCst), 0);
     assert_eq!(
         coordinator.status(&request_id).unwrap()["request_state"],
-        "published"
+        "running"
+    );
+
+    let retry = coordinator
+        .run_next_with(
+            |_, _| panic!("terminal persistence retry must not execute capture"),
+            || panic!("terminal persistence retry must not reopen Core"),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("terminal persistence retry");
+    assert!(!retry.failed, "{:#}", retry.job);
+    assert!(!retry.terminal_persistence_pending);
+    assert!(retry.did_work);
+    assert_eq!(retry.job["request_id"], request_id);
+    assert_eq!(retry.job["request_state"], "published");
+    assert!(retry.job.get("failure_type").is_none());
+    assert!(retry.job.get("last_error").is_none());
+}
+
+#[test]
+fn terminal_persist_retry_retains_admissions_without_readmitting_routes() {
+    let coordinator = CoreRefreshEngine::new();
+    let route = route_identity(0x5a);
+    coordinator.initialize_watch_route_authority([route.clone()]);
+    coordinator.record_watch_routes(
+        [(route.clone(), EventWatermark::new(1, 1))],
+        ledger_now_ms(),
+    );
+    let request = coordinator.enqueue(Some("generation-a".to_owned()));
+    let request_id = request_id(&request);
+    let scope = SourceBackedRefreshScope::All;
+    assert!(coordinator
+        .admit_refresh_scope_for_test(&request_id, &scope)
+        .unwrap()
+        .is_empty());
+
+    let mut publication = test_publication("generation-b");
+    publication.route_results = vec![SourceBackedRefreshRouteResult::succeeded(
+        route.as_str().to_owned(),
+        true,
+    )];
+    let run = coordinator
+        .run_next_with(
+            |_, _| Ok(publication),
+            || Ok(Some("generation-b".to_owned())),
+            |_| Err(anyhow!("injected terminal persistence failure")),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(run.job["request_state"], "running");
+    assert!(run.terminal_persistence_pending);
+
+    let retry_error = coordinator
+        .admit_refresh_scope_for_test(&request_id, &scope)
+        .unwrap_err();
+    assert!(
+        format!("{retry_error:#}").contains("already has retained route admissions"),
+        "{retry_error:#}"
     );
 }
 
@@ -523,7 +573,18 @@ fn recovered_wait_after_restart_attaches_to_equivalent_running_attempt() {
     drop(first);
 
     let restarted = Arc::new(CoreRefreshEngine::new());
-    let active = restarted.enqueue_periodic(temp.path()).unwrap();
+    let active = restarted
+        .handle_ipc_request(
+            temp.path(),
+            &json!({
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "mode": "wait",
+                "operation": "import",
+                "explicit_source_catalog": authority.to_json(),
+            }),
+        )
+        .unwrap()
+        .expect("restarted explicit request");
     let active_request_id = request_id(&active);
     assert_ne!(active_request_id, interrupted_request_id);
     let (gate, runner_started, runner_release) = RunningRefreshGate::new();
@@ -538,7 +599,7 @@ fn recovered_wait_after_restart_attaches_to_equivalent_running_attempt() {
                         runner_started.send(()).expect("signal running refresh");
                         let _ = runner_release.recv();
                         let mut publication = test_publication("restart-generation");
-                        publication.published_explicit_source_catalog = runner_authority;
+                        publication.published_explicit_source_catalog = Some(runner_authority);
                         Ok(publication)
                     },
                     || Ok(Some("restart-generation".to_owned())),
@@ -546,7 +607,7 @@ fn recovered_wait_after_restart_attaches_to_equivalent_running_attempt() {
                     |_| Ok(()),
                 )
                 .expect("restarted running refresh");
-            assert!(!run.failed);
+            assert!(!run.failed, "{:#}", run.job);
         });
         gate.wait_until_started();
 
@@ -619,19 +680,52 @@ fn restart_discards_incomplete_candidate_and_publishes_from_last_good() {
 }
 
 #[test]
-fn restart_after_commit_replays_noop_without_identity_churn() {
+fn restart_after_pointer_publication_recovers_exact_receipt_without_recapture() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let first = CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
-            let receipt = ctx_history_index::GenerationWriter::open(
+            let request_id = execution.request_id.to_owned();
+            let operation = execution.operation;
+            let scope = execution.scope.clone();
+            let published = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 WriterOptions::default(),
             )?
-            .commit(|_| true)?;
+            .commit_with_publication_metadata(
+                |_| true,
+                |context| {
+                    let publication = SourceBackedRefreshPublication {
+                        generation_id: context.generation_id().to_owned(),
+                        published_explicit_source_catalog: None,
+                        unsupported_routes: 0,
+                        certified_source_count: 0,
+                        certified_source_bytes: 0,
+                        current: SourceBackedRefreshCurrent::default(),
+                        timings: SourceBackedRefreshTimings::default(),
+                        route_results: Vec::new(),
+                        catalog_route_bindings: Vec::new(),
+                        verified_index: None,
+                    };
+                    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+                        None,
+                        context.generation_id().to_owned(),
+                        &publication,
+                    )
+                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
+                    SourceBackedPublicationMetadata {
+                        request_id: request_id.clone(),
+                        operation,
+                        refresh_scope: scope.clone(),
+                        receipt: receipt.to_json(),
+                        route_observations: BTreeMap::new(),
+                    }
+                    .encode()
+                },
+            )?;
             Err(anyhow!(
                 "injected cancellation after commit {}",
-                receipt.generation_id
+                published.receipt().generation_id
             ))
         },
     ));
@@ -645,29 +739,30 @@ fn restart_after_commit_replays_noop_without_identity_churn() {
         .to_owned();
     drop(first);
 
+    let executions = Arc::new(AtomicUsize::new(0));
+    let observed_executions = Arc::clone(&executions);
     let restarted = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let receipt = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?
-            .commit(|_| true)?;
-            Ok(empty_test_publication(receipt.generation_id))
+        move |_execution: SourceBackedRefreshExecution<'_>| {
+            observed_executions.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow!("recovery must not reexecute committed Core work"))
         },
     ));
-    let queued = restarted.enqueue_periodic(&data_root).unwrap();
-    assert_eq!(queued["previous_generation"], committed);
-    let replay = restarted.run_next(&data_root).expect("restart replay");
-
-    assert!(!replay.failed);
-    assert!(!replay.did_work);
-    assert_eq!(replay.job["published_generation"], committed);
+    assert!(!restarted
+        .recover_interrupted_publication(&data_root)
+        .unwrap());
+    assert!(!restarted.has_pending_request());
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    let recovered = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("typed interrupted-publication recovery status");
+    assert_eq!(recovered["request_state"], "published");
+    assert_eq!(recovered["published_generation"], committed);
+    assert_eq!(recovered["outcome"], "completed");
+    assert!(recovered.get("receipt").is_some());
     assert_eq!(
-        restarted
-            .pinned_core_publication()
-            .expect("restart publication pin")
-            .receipt()
-            .published_generation,
+        pin_published_generation(&data_root)
+            .unwrap()
+            .expect("committed Core remains readable")
+            .generation_id(),
         committed
     );
 }

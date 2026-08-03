@@ -324,7 +324,7 @@ fn every_capture_provider_emits_without_usage_suppression() {
 #[test]
 fn core_publication_emits_only_global_authoritative_facts() {
     let mut collector = ProviderRefreshCollector::default();
-    collector.record_core_publication(ProviderRefreshTrigger::Import, false);
+    collector.record_core_publication(ProviderRefreshTrigger::Import, false, 0, 0);
     collector.refresh_duration = Duration::from_secs(2);
 
     let events = collector.finish();
@@ -345,4 +345,19 @@ fn core_publication_emits_only_global_authoritative_facts() {
     assert_eq!(refresh.failure_scope, ProviderRefreshFailureScope::None);
     assert_eq!(refresh.failure_type, ProviderRefreshFailureType::None);
     assert_eq!(refresh.counts, None);
+}
+
+#[test]
+fn core_publication_reports_record_rejections_as_partial() {
+    let mut collector = ProviderRefreshCollector::default();
+    collector.record_core_publication(ProviderRefreshTrigger::Import, true, 0, 3);
+
+    let events = collector.finish();
+    let refresh = foreground(&events[0]);
+    assert_eq!(refresh.refresh_result, ProviderRefreshResult::Partial);
+    assert_eq!(refresh.failure_scope, ProviderRefreshFailureScope::Record);
+    assert_eq!(
+        refresh.failure_type,
+        ProviderRefreshFailureType::RecordRejection
+    );
 }

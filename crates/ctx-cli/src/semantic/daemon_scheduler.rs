@@ -270,16 +270,11 @@ fn run_pending_core_refresh(
     let Some(run) = source_refresh.and_then(|coordinator| coordinator.run_next(data_root)) else {
         return Ok(None);
     };
-    debug_assert_eq!(
-        run.failed,
-        run.job.get("status").and_then(Value::as_str) == Some("failed")
-    );
     let job = record_daemon_job_retry(&mut runtime.history_retry, run.job);
-    write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &job)?;
     Ok(Some(DaemonIteration::new(
         run.did_work,
-        run.failed,
-        DaemonCycleStateV1::unknown(),
+        run.failed || run.terminal_persistence_pending,
+        daemon_core_cycle_state(&job),
     )))
 }
 
@@ -322,21 +317,22 @@ fn run_dirty_core_refresh(
             || cold_all_refresh,
         "dirty-route work may become All only for cold startup or when a manual import upgrades the queued exact refresh"
     );
-    write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &run.job)?;
+    let terminal_persistence_pending = run.terminal_persistence_pending;
+    let job = record_daemon_job_retry(&mut runtime.history_retry, run.job);
     let published_generation = (!run.failed
-        && run.job.get("status").and_then(Value::as_str) == Some("completed")
-        && run
-            .job
-            .get("post_publication_error")
-            .is_none_or(Value::is_null))
+        && !terminal_persistence_pending
+        && job.get("status").and_then(Value::as_str) == Some("completed"))
     .then(|| {
-        run.job
-            .get("published_generation")
+        job.get("published_generation")
             .and_then(Value::as_str)
             .map(str::to_owned)
     })
     .flatten();
-    let iteration = DaemonIteration::new(run.did_work, false, daemon_core_cycle_state(&run.job));
+    let iteration = DaemonIteration::new(
+        run.did_work,
+        run.failed || terminal_persistence_pending,
+        daemon_core_cycle_state(&job),
+    );
     if let Some(generation) = published_generation {
         runtime.sidecar_drain.generation = Some(generation);
         // A successor queued behind an exact-route fence must yield to the
@@ -356,26 +352,7 @@ fn run_core_refresh(
     source_refresh: Option<&CoreRefreshEngine>,
     enqueue_periodic: bool,
 ) -> Result<DaemonIteration> {
-    let run = match source_refresh {
-        Some(coordinator) => {
-            if enqueue_periodic {
-                if let Err(error) = coordinator.enqueue_periodic(data_root) {
-                    return finish_core_refresh(
-                        data_root,
-                        runtime,
-                        core_refresh_failed_job(
-                            data_root,
-                            format!("schedule periodic Core refresh: {error:#}"),
-                        ),
-                        false,
-                    );
-                }
-            }
-            coordinator.run_next(data_root)
-        }
-        None => None,
-    };
-    let Some(run) = run else {
+    let Some(coordinator) = source_refresh else {
         return finish_core_refresh(
             data_root,
             runtime,
@@ -386,7 +363,45 @@ fn run_core_refresh(
             false,
         );
     };
-    finish_core_refresh(data_root, runtime, run.job, run.did_work)
+    if enqueue_periodic {
+        if let Err(error) = coordinator.enqueue_periodic(data_root) {
+            return finish_core_refresh(
+                data_root,
+                runtime,
+                core_refresh_failed_job(
+                    data_root,
+                    format!("schedule periodic Core refresh: {error:#}"),
+                ),
+                false,
+            );
+        }
+    }
+    let Some(run) = coordinator.run_next(data_root) else {
+        return finish_core_refresh(
+            data_root,
+            runtime,
+            core_refresh_failed_job(
+                data_root,
+                "daemon Core refresh engine has no admitted request".to_owned(),
+            ),
+            false,
+        );
+    };
+    let terminal_persistence_pending = run.terminal_persistence_pending;
+    let job = record_daemon_job_retry(&mut runtime.history_retry, run.job);
+    let failed = run.failed || terminal_persistence_pending;
+    let state = daemon_core_cycle_state(&job);
+    if !failed && job.get("status").and_then(Value::as_str) == Some("completed") {
+        if let Some(generation) = job.get("published_generation").and_then(Value::as_str) {
+            runtime.sidecar_drain.generation = Some(generation.to_owned());
+        }
+        return Ok(immediate_follow_up(DaemonIteration::new(
+            run.did_work,
+            false,
+            state,
+        )));
+    }
+    Ok(DaemonIteration::new(run.did_work, failed, state))
 }
 
 fn run_pro_catch_up_with_retry(

@@ -229,7 +229,6 @@ fn explicit_codex_source_revision_republishes_source_backed_generation() {
 
     let first = explicit_import(&temp, &source);
     let first_generation = assert_published_codex_source(&first, &source);
-    assert_eq!(first["sources"][0]["catalog_changed"], true, "{first:#}");
     let before = search_codex(&temp, "explicit source revision before");
     assert_eq!(before["retrieval"]["index"], "core", "{before:#}");
     assert_eq!(
@@ -243,19 +242,11 @@ fn explicit_codex_source_revision_republishes_source_backed_generation() {
 
     let unchanged = explicit_import(&temp, &source);
     let unchanged_generation = assert_published_codex_source(&unchanged, &source);
-    assert_eq!(
-        unchanged["sources"][0]["catalog_changed"], false,
-        "{unchanged:#}"
-    );
     assert_eq!(unchanged_generation, first_generation);
 
     write_codex_session(&source, "explicit source revision after!");
     let revised = explicit_import(&temp, &source);
     let revised_generation = assert_published_codex_source(&revised, &source);
-    assert_eq!(
-        revised["sources"][0]["catalog_changed"], false,
-        "{revised:#}"
-    );
     assert_ne!(revised_generation, first_generation);
 
     let after = search_codex(&temp, "explicit source revision after");

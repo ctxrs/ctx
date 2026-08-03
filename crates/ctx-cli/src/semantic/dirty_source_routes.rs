@@ -123,6 +123,11 @@ impl DirtySourceRoutes {
         self.dirty.len()
     }
 
+    #[cfg(test)]
+    pub(super) fn route_ids(&self) -> BTreeSet<SourceRouteIdentity> {
+        self.dirty.keys().cloned().collect()
+    }
+
     pub(super) fn retain_exact_routes(&mut self, routes: &BTreeSet<SourceRouteIdentity>) {
         self.watermarks.retain(|route, _| routes.contains(route));
         self.dirty.retain(|route, _| routes.contains(route));

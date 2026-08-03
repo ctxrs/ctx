@@ -1,8 +1,5 @@
 use std::{path::Path, sync::Arc};
 
-use anyhow::Result;
-use ctx_history_capture::SourceBackedWatchCatalog;
-
 use super::source_route_ledger_now_ms;
 use crate::semantic::{
     daemon_wakeup::{
@@ -12,6 +9,8 @@ use crate::semantic::{
     dirty_source_routes::EventWatermark,
     source_backed_refresh_coordinator::{source_backed_watch_catalog, CoreRefreshEngine},
 };
+use anyhow::Result;
+use ctx_history_capture::SourceBackedWatchCatalog;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum WatchCatalogReconcileTrigger {
@@ -89,28 +88,6 @@ impl DaemonWatchRuntime {
             .unwrap_or_else(|| EventWatermark::new(0, 0));
         let now_ms = source_route_ledger_now_ms();
         let result = refresh.schedule_pending_missing_route_rechecks(data_root, watermark, now_ms);
-        if let Err(error) = result {
-            let _ = write_degraded_wakeup_receipt(data_root, &error);
-        }
-    }
-
-    fn reconcile_route_freshness_frontier(
-        &self,
-        data_root: &Path,
-        refresh: &CoreRefreshEngine,
-        catalog: &SourceBackedWatchCatalog,
-    ) {
-        let watermark = self
-            .file_watcher
-            .as_ref()
-            .map(DaemonFileWatcher::startup_watermark)
-            .unwrap_or_else(|| EventWatermark::new(0, 0));
-        let result = refresh.reconcile_route_freshness_frontier(
-            data_root,
-            catalog,
-            watermark,
-            source_route_ledger_now_ms(),
-        );
         if let Err(error) = result {
             let _ = write_degraded_wakeup_receipt(data_root, &error);
         }
@@ -205,7 +182,18 @@ impl DaemonWatchRuntime {
             if let (Some(catalog), Some(source_refresh)) = (self.catalog.snapshot(), source_refresh)
             {
                 source_refresh.initialize_watch_route_authority(catalog.route_ids().cloned());
-                self.reconcile_route_freshness_frontier(data_root, source_refresh, &catalog);
+                if coordinator_needs_authority || watcher_recreated {
+                    let watermark = self
+                        .file_watcher
+                        .as_ref()
+                        .map(DaemonFileWatcher::startup_watermark)
+                        .unwrap_or_else(|| EventWatermark::new(0, 0));
+                    source_refresh.schedule_startup_route_observation(
+                        &catalog,
+                        watermark,
+                        source_route_ledger_now_ms(),
+                    );
+                }
                 self.schedule_pending_missing_routes(data_root, source_refresh);
             }
         }

@@ -30,7 +30,7 @@ fn ipc_refresh_request_requires_a_typed_operation() {
 }
 
 #[test]
-fn automatic_import_with_implicit_catalog_upgrades_queued_route_work_without_rescan() {
+fn exact_import_overlay_upgrades_queued_route_work_without_rescan() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
@@ -44,25 +44,23 @@ fn automatic_import_with_implicit_catalog_upgrades_queued_route_work_without_res
     let scheduled_request_id = request_id(&scheduled);
     assert_eq!(scheduled["trigger"], "periodic");
 
+    let authority = test_catalog_authority(1, 0xa2);
     let request = SourceBackedRefreshRequest::new(
         SourceBackedRefreshMode::Wait,
         SourceBackedRefreshOperation::Import,
-        None,
+        Some(&authority),
+        true,
     )
     .to_json(&data_root)
     .unwrap();
     assert_eq!(request["operation"], "import");
-    let authority = ExplicitSourceCatalogAuthority::from_json(
-        request
-            .get("explicit_source_catalog")
-            .expect("implicit import pins a catalog snapshot"),
-    )
-    .unwrap();
+    assert_eq!(request["explicit_source_catalog"], authority.to_json());
+    assert_eq!(request["fresh_after_admitted_snapshot"], true);
 
     let upgraded = coordinator
         .handle_ipc_request(&data_root, &request)
         .unwrap()
-        .expect("implicit-catalog import response");
+        .expect("exact-overlay import response");
     let attached = coordinator
         .handle_ipc_request(&data_root, &request)
         .unwrap()
@@ -81,7 +79,7 @@ fn automatic_import_with_implicit_catalog_upgrades_queued_route_work_without_res
             |_, _| {
                 writer_launches.fetch_add(1, Ordering::SeqCst);
                 let mut publication = test_publication("implicit-import-generation");
-                publication.published_explicit_source_catalog = authority;
+                publication.published_explicit_source_catalog = Some(authority);
                 Ok(publication)
             },
             || Ok(Some("implicit-import-generation".to_owned())),
@@ -157,10 +155,10 @@ fn duplicate_concurrent_requests_launch_one_writer() {
     assert_eq!(status["receipt"]["previous_generation"], "generation-1");
     assert_eq!(status["receipt"]["published_generation"], "generation-2");
     assert_eq!(status["receipt"]["generation_changed"], true);
-    assert_eq!(
-        status["receipt"]["published_explicit_source_catalog"],
-        status["published_explicit_source_catalog"]
-    );
+    assert!(status.get("published_explicit_source_catalog").is_none());
+    assert!(status["receipt"]
+        .get("published_explicit_source_catalog")
+        .is_none());
     assert_eq!(status["receipt"]["current"]["current_source_count"], 1);
     assert_eq!(status["receipt"]["current"]["current_indexed_documents"], 2);
     assert_eq!(status["receipt"]["current"]["current_rejected_records"], 1);
@@ -238,8 +236,19 @@ fn wait_request_with_equivalent_catalog_attaches_to_running_refresh() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = Arc::new(CoreRefreshEngine::new());
     let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
-    let first = coordinator.enqueue_periodic(temp.path()).unwrap();
-    assert_eq!(first["trigger"], "periodic");
+    let first = coordinator
+        .handle_ipc_request(
+            temp.path(),
+            &json!({
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "mode": "wait",
+                "operation": "import",
+                "explicit_source_catalog": authority.to_json(),
+            }),
+        )
+        .unwrap()
+        .expect("first exact import request");
+    assert_eq!(first["trigger"], "import");
     let first_request_id = request_id(&first);
     let (gate, runner_started, runner_release) = RunningRefreshGate::new();
     let executor_runs = Arc::new(AtomicUsize::new(0));
@@ -256,7 +265,7 @@ fn wait_request_with_equivalent_catalog_attaches_to_running_refresh() {
                         runner_started.send(()).expect("signal running refresh");
                         let _ = runner_release.recv();
                         let mut publication = test_publication("generation-1");
-                        publication.published_explicit_source_catalog = runner_authority;
+                        publication.published_explicit_source_catalog = Some(runner_authority);
                         Ok(publication)
                     },
                     || Ok(Some("generation-1".to_owned())),
@@ -310,7 +319,18 @@ fn multiple_equivalent_waiters_share_one_request_and_terminal_receipt() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = Arc::new(CoreRefreshEngine::new());
     let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
-    let first = coordinator.enqueue_periodic(temp.path()).unwrap();
+    let first = coordinator
+        .handle_ipc_request(
+            temp.path(),
+            &json!({
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "mode": "wait",
+                "operation": "import",
+                "explicit_source_catalog": authority.to_json(),
+            }),
+        )
+        .unwrap()
+        .expect("first exact import request");
     let first_request_id = request_id(&first);
     let (gate, runner_started, runner_release) = RunningRefreshGate::new();
     let executor_runs = Arc::new(AtomicUsize::new(0));
@@ -327,7 +347,7 @@ fn multiple_equivalent_waiters_share_one_request_and_terminal_receipt() {
                         runner_started.send(()).expect("signal running refresh");
                         let _ = runner_release.recv();
                         let mut publication = test_publication("shared-generation");
-                        publication.published_explicit_source_catalog = runner_authority;
+                        publication.published_explicit_source_catalog = Some(runner_authority);
                         Ok(publication)
                     },
                     || Ok(Some("shared-generation".to_owned())),
@@ -382,7 +402,18 @@ fn equivalent_waiters_share_the_same_terminal_failure_status() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = Arc::new(CoreRefreshEngine::new());
     let authority = load_explicit_source_catalog_authority(temp.path()).unwrap();
-    let first = coordinator.enqueue_periodic(temp.path()).unwrap();
+    let first = coordinator
+        .handle_ipc_request(
+            temp.path(),
+            &json!({
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "mode": "wait",
+                "operation": "import",
+                "explicit_source_catalog": authority.to_json(),
+            }),
+        )
+        .unwrap()
+        .expect("first exact import request");
     let first_request_id = request_id(&first);
     let (gate, runner_started, runner_release) = RunningRefreshGate::new();
 
@@ -476,7 +507,7 @@ fn explicit_fresh_after_admitted_snapshot_queues_one_successor() {
                         runner_started.send(()).expect("signal running refresh");
                         let _ = runner_release.recv();
                         let mut publication = test_publication("generation-1");
-                        publication.published_explicit_source_catalog = runner_authority;
+                        publication.published_explicit_source_catalog = Some(runner_authority);
                         Ok(publication)
                     },
                     || Ok(Some("generation-1".to_owned())),
@@ -516,7 +547,7 @@ fn explicit_fresh_after_admitted_snapshot_queues_one_successor() {
         .run_next_with(
             |_, _| {
                 let mut publication = test_publication("generation-2");
-                publication.published_explicit_source_catalog = authority;
+                publication.published_explicit_source_catalog = Some(authority);
                 Ok(publication)
             },
             || Ok(Some("generation-2".to_owned())),
@@ -524,6 +555,69 @@ fn explicit_fresh_after_admitted_snapshot_queues_one_successor() {
             |_| Ok(()),
         )
         .expect("fresh successor");
+    assert!(!successor_run.failed);
+    assert_eq!(request_id(&successor_run.job), successor_request_id);
+    assert!(!coordinator.has_pending_request());
+}
+
+#[test]
+fn manual_all_fresh_after_running_startup_scan_queues_one_successor() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = Arc::new(CoreRefreshEngine::new());
+    let first = coordinator.enqueue_periodic(temp.path()).unwrap();
+    let first_request_id = request_id(&first);
+    let (gate, runner_started, runner_release) = RunningRefreshGate::new();
+
+    let (successor, replay) = std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        scope.spawn(move || {
+            runner
+                .run_next_with(
+                    |_, _| {
+                        runner_started.send(()).expect("signal startup scan");
+                        let _ = runner_release.recv();
+                        Ok(test_publication("startup-generation"))
+                    },
+                    || Ok(Some("startup-generation".to_owned())),
+                    |_| Ok(()),
+                    |_| Ok(()),
+                )
+                .expect("running startup scan");
+        });
+        gate.wait_until_started();
+
+        let request = || {
+            coordinator
+                .handle_ipc_request(
+                    temp.path(),
+                    &json!({
+                        "op": SOURCE_REFRESH_REQUEST_OP,
+                        "mode": "wait",
+                        "operation": "refresh",
+                        "fresh_after_admitted_snapshot": true,
+                    }),
+                )
+                .unwrap()
+                .expect("fresh manual all response")
+        };
+        let successor = request();
+        let replay = request();
+        gate.release();
+        (successor, replay)
+    });
+
+    let successor_request_id = request_id(&successor);
+    assert_ne!(successor_request_id, first_request_id);
+    assert_eq!(request_id(&replay), successor_request_id);
+    assert_eq!(replay["coalesced_requests"], 1);
+    let successor_run = coordinator
+        .run_next_with(
+            |_, _| Ok(test_publication("manual-generation")),
+            || Ok(Some("manual-generation".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("fresh manual successor");
     assert!(!successor_run.failed);
     assert_eq!(request_id(&successor_run.job), successor_request_id);
     assert!(!coordinator.has_pending_request());

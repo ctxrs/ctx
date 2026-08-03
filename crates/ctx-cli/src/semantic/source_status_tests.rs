@@ -331,78 +331,55 @@ fn refresh_report_uses_typed_pending_ready_stale_and_unavailable_states() {
 }
 
 #[test]
-fn catalog_status_requires_matching_job_and_terminal_receipt_authority() {
-    let temp = tempfile::tempdir().unwrap();
-    let authority = load_explicit_source_catalog_authority(temp.path())
-        .unwrap()
-        .to_json();
-    let ready_job = json!({
-        "request_state": "published",
-        "published_generation": "generation-1",
-        "published_explicit_source_catalog": authority,
-        "receipt": {
-            "published_explicit_source_catalog": authority,
-        },
-    });
-    let ready = catalog_report(temp.path(), Some("generation-1"), Some(&ready_job), None);
-
-    assert_eq!(ready["status"], "ready");
-    assert_eq!(ready["published_authority_present"], true);
-
-    for unverified in [
-        json!({
-            "request_state": "published",
-            "published_generation": "generation-1",
-        }),
-        json!({
-            "request_state": "published",
-            "published_generation": "generation-1",
-            "published_explicit_source_catalog": authority,
-            "receipt": {},
-        }),
-        json!({
-            "request_state": "published",
-            "published_generation": "generation-1",
-            "published_explicit_source_catalog": authority,
-            "receipt": {
-                "published_explicit_source_catalog": {
-                    "schema_version": 1,
-                    "revision": 7,
-                    "integrity": {
-                        "algorithm": "sha256",
-                        "digest": "77".repeat(32),
-                    },
-                },
-            },
-        }),
-        json!({
-            "request_state": "published",
-            "published_generation": "generation-1",
-            "published_explicit_source_catalog": {
-                "schema_version": 99,
-                "revision": 0,
-                "integrity": {
-                    "algorithm": "sha256",
-                    "digest": "00".repeat(32),
-                },
-            },
-            "receipt": {
-                "published_explicit_source_catalog": {
-                    "schema_version": 99,
-                    "revision": 0,
-                    "integrity": {
-                        "algorithm": "sha256",
-                        "digest": "00".repeat(32),
-                    },
-                },
-            },
-        }),
+fn refresh_report_is_partial_when_a_transcript_route_failed_or_rejected_records() {
+    let daemon = json!({"running": true});
+    for outcome in [
+        "completed_with_source_failures",
+        "completed_with_rejections",
+        "completed_with_rejections_and_source_failures",
     ] {
-        let report = catalog_report(temp.path(), Some("generation-1"), Some(&unverified), None);
-        assert_eq!(report["status"], "unavailable");
-        assert_eq!(report["reason"], "catalog_publication_unverified");
-        assert_eq!(report["published_authority_present"], false);
+        let report = refresh_report(
+            Some(&json!({
+                "request_state": "published",
+                "published_generation": "generation-1",
+                "receipt": {
+                    "outcome": outcome,
+                    "source_failure_total": usize::from(outcome.contains("source_failures")),
+                    "rejected_record_total": u64::from(outcome.contains("rejections")),
+                    "current": {
+                        "current_rejected_records": u64::from(outcome.contains("rejections")),
+                    },
+                },
+            })),
+            Some("generation-1"),
+            &daemon,
+        );
+        assert_eq!(report["status"], "partial", "{outcome}: {report:#}");
+        assert_eq!(report["outcome"], outcome);
     }
+}
+
+#[test]
+fn catalog_status_reports_automatic_roots_and_request_scoped_explicit_overlays() {
+    let temp = tempfile::tempdir().unwrap();
+    let index_root = temp.path().join("search/lexical");
+    let generation_id = ctx_history_index::GenerationWriter::open(
+        &index_root,
+        ctx_history_index::WriterOptions::default(),
+    )
+    .unwrap()
+    .commit(|_| true)
+    .unwrap()
+    .generation_id;
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let ready = catalog_report(Some(&generation_id), Some(&index));
+    assert_eq!(ready["status"], "ready");
+    assert_eq!(ready["authority"], "automatic_provider_registry");
+    assert_eq!(ready["explicit_import_authority"], "request_scoped_overlay");
+    assert_eq!(ready["persisted_explicit_roots"], false);
+
+    let pending = catalog_report(None, None);
+    assert_eq!(pending["status"], "pending");
 }
 
 #[test]

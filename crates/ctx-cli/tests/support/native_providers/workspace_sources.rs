@@ -61,7 +61,6 @@ fn trae_cli_imports_explicit_workspace_storage_without_default_discovery() {
     assert_explicit_source_publication(&second, "trae", "trae_state_vscdb");
     assert_eq!(second["totals"]["current_rejected_records"], 0);
     assert_noop_publication(&second);
-    assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
 }
 
 #[test]

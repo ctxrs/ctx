@@ -1068,7 +1068,6 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "--format=json",
     ]));
     assert_explicit_source_publication(&second, "cline", "cline_task_directory_json");
-    assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
 
     let search = json_output(ctx(&temp).args([
         "search",

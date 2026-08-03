@@ -30,13 +30,13 @@ impl SourceBackedRefreshOperation {
     }
 }
 
-/// Typed source-refresh IPC request. Import requests resolve an omitted
-/// catalog to one exact snapshot before serialization so intent and catalog
-/// authority cannot be inferred differently by the client and daemon.
+/// Typed source-refresh IPC request. Exact imports carry their one-shot
+/// request overlay inline; automatic refreshes carry no catalog authority.
 pub(super) struct SourceBackedRefreshRequest<'a> {
     mode: SourceBackedRefreshMode,
     operation: SourceBackedRefreshOperation,
     explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
+    fresh_after_admitted_snapshot: bool,
 }
 
 impl<'a> SourceBackedRefreshRequest<'a> {
@@ -44,33 +44,25 @@ impl<'a> SourceBackedRefreshRequest<'a> {
         mode: SourceBackedRefreshMode,
         operation: SourceBackedRefreshOperation,
         explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
+        fresh_after_admitted_snapshot: bool,
     ) -> Self {
         Self {
             mode,
             operation,
             explicit_source_catalog,
+            fresh_after_admitted_snapshot,
         }
     }
 
-    pub(super) fn to_json(&self, data_root: &Path) -> Result<Value> {
-        let implicit_catalog = if self.operation == SourceBackedRefreshOperation::Import
-            && self.explicit_source_catalog.is_none()
-        {
-            Some(
-                load_explicit_source_catalog_authority(data_root)
-                    .context("load implicit catalog authority for import refresh request")?,
-            )
-        } else {
-            None
-        };
-        let catalog = self.explicit_source_catalog.or(implicit_catalog.as_ref());
+    pub(super) fn to_json(&self, _data_root: &Path) -> Result<Value> {
         Ok(compact_json(json!({
             "schema_version": 1,
             "op": SOURCE_REFRESH_REQUEST_OP,
             "mode": self.mode.as_str(),
             "operation": self.operation.as_str(),
-            "explicit_source_catalog": catalog
+            "explicit_source_catalog": self.explicit_source_catalog
                 .map(ExplicitSourceCatalogAuthority::to_json),
+            "fresh_after_admitted_snapshot": self.fresh_after_admitted_snapshot,
         })))
     }
 }

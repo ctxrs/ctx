@@ -8,7 +8,19 @@ fn assert_source_backed_publication<'a>(
     source_format: &str,
     rejected_records: u64,
 ) -> &'a Value {
-    let source = assert_explicit_source_publication(report, provider, source_format);
+    let source = if rejected_records == 0 {
+        assert_explicit_source_publication(report, provider, source_format)
+    } else {
+        assert_eq!(report["schema_version"], 2, "{report:#}");
+        let sources = report["sources"]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing explicit source receipt in {report:#}"));
+        assert_eq!(sources.len(), 1, "{report:#}");
+        let source = &sources[0];
+        assert_eq!(source["provider"], provider, "{report:#}");
+        assert_eq!(source["source_format"], source_format, "{report:#}");
+        source
+    };
     assert_eq!(
         source["current_rejected_records"], rejected_records,
         "{report:#}"
@@ -17,7 +29,18 @@ fn assert_source_backed_publication<'a>(
         report["totals"]["current_rejected_records"], rejected_records,
         "{report:#}"
     );
-    assert_eq!(source["status"], "published", "{report:#}");
+    if rejected_records == 0 {
+        assert_eq!(source["status"], "published", "{report:#}");
+    } else {
+        assert_eq!(report["outcome"], "completed_with_rejections", "{report:#}");
+        assert_eq!(source["status"], "partial", "{report:#}");
+        assert_eq!(source["failure_scope"], "record", "{report:#}");
+        assert_eq!(source["failure_type"], "record_rejection", "{report:#}");
+        assert_eq!(
+            source["rejected_record_total"], rejected_records,
+            "{report:#}"
+        );
+    }
     source
 }
 

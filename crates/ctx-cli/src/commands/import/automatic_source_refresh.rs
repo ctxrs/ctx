@@ -56,8 +56,6 @@ pub(super) fn run_automatic_source_refresh_import(
     let sources = discover_provider_sources(&home);
     validate_provider_source_roots_outside_data_root(&context.data_root, sources.iter())
         .context("validate provider roots before initializing ctx state")?;
-    super::validate_explicit_source_catalog_roots(&context.data_root)
-        .context("validate explicit provider roots before initializing ctx state")?;
     establish_private_data_root(&context.data_root)
         .context("protect ctx data root before provider refresh")?;
     let refresh = wait_for_import_core_refresh(
@@ -75,13 +73,21 @@ pub(super) fn run_automatic_source_refresh_import(
     let index = refresh.pin.into_index();
     let manifest = index.manifest();
     let current = receipt.current;
+    let sources_completed_with_rejections = receipt
+        .route_results
+        .iter()
+        .filter(|result| result.outcome.is_success() && result.rejected_record_total != 0)
+        .count();
     let totals = ImportTotals {
         // Core receipts describe the committed current generation, not
         // synthetic per-run session/event/file totals.
         per_run_counts_available: false,
+        terminal_route_counts_available: true,
         // Route-result counts are reported separately from per-run import
         // counts because the receipt certifies a whole Core generation.
         failed_sources: receipt.source_failure_total(),
+        sources_completed_with_rejections,
+        failed: usize::try_from(receipt.rejected_record_total()).unwrap_or(usize::MAX),
         current_source_count: Some(current.source_count),
         current_indexed_documents: Some(current.indexed_documents),
         current_complete_records: Some(current.complete_records),
@@ -98,11 +104,21 @@ pub(super) fn run_automatic_source_refresh_import(
         },
         ..ImportTotals::default()
     };
-    context
-        .provider_refreshes
-        .record_core_publication(ProviderRefreshTrigger::Import, receipt.generation_changed);
+    context.provider_refreshes.record_core_publication(
+        ProviderRefreshTrigger::Import,
+        receipt.generation_changed,
+        receipt.source_failure_total(),
+        receipt.rejected_record_total(),
+    );
 
-    let completion = if context.options.progress == crate::progress::ProgressArg::Json {
+    let partial = receipt.source_failure_total() != 0 || receipt.rejected_record_total() != 0;
+    let completion = if partial {
+        format!(
+            "Published valid history with {} source failure(s) and {} rejected record(s).",
+            receipt.source_failure_total(),
+            receipt.rejected_record_total()
+        )
+    } else if context.options.progress == crate::progress::ProgressArg::Json {
         format!(
             "Published Core generation {}.",
             receipt.published_generation
@@ -114,25 +130,59 @@ pub(super) fn run_automatic_source_refresh_import(
     // The receipt exposes retained corpus bytes, not work performed by this
     // invocation. Preserve the unknown per-run total instead of inventing a
     // 100% work-byte result on warm no-op imports.
-    progress.done("published", completion, 0)?;
+    progress.done(if partial { "partial" } else { "published" }, completion, 0)?;
 
     let mut report_sources = vec![compact_json(json!({
-        "status": "published",
-        "outcome": if receipt.source_failures.is_empty() {
-            "completed"
+        "status": if receipt.source_failure_total() != 0 || receipt.rejected_record_total() != 0 {
+            "partial"
         } else {
-            "completed_with_source_failures"
+            "published"
         },
+        "failure_scope": match (
+            receipt.source_failure_total() != 0,
+            receipt.rejected_record_total() != 0,
+        ) {
+            (false, false) => "none",
+            (false, true) => "record",
+            (true, false) => "source",
+            (true, true) => "record_and_source",
+        },
+        "failure_type": match (
+            receipt.source_failure_total() != 0,
+            receipt.rejected_record_total() != 0,
+        ) {
+            (false, false) => "none",
+            (false, true) => "record_rejection",
+            (true, false) => "source_failure",
+            (true, true) => "record_rejection_and_source_failure",
+        },
+        "outcome": receipt.terminal_outcome(),
         "source_format": "provider_authoritative_all",
         "change": if receipt.generation_changed { "changed" } else { "no_op" },
         "previous_generation": receipt.previous_generation,
         "published_generation": receipt.published_generation,
         "generation_changed": receipt.generation_changed,
-        "scanned_routes": receipt.selected_route_total,
-        "successful_routes": receipt.successful_route_total,
+        "scanned_routes": receipt.selected_route_total(),
+        "successful_routes": receipt.successful_route_total(),
         "source_failure_total": receipt.source_failure_total(),
         "source_failures_omitted": receipt.source_failures_omitted()
-            .saturating_add(receipt.source_failures.len().saturating_sub(MAX_REPORTED_SOURCE_FAILURES)),
+            .saturating_add(receipt.source_failure_diagnostic_count()
+                .saturating_sub(MAX_REPORTED_SOURCE_FAILURES)),
+        "rejected_record_total": receipt.rejected_record_total(),
+        "rejected_records": receipt.rejected_record_total(),
+        "sources_completed_with_rejections": sources_completed_with_rejections,
+        "rejections": {
+            "rejected_records": receipt.rejected_record_total(),
+            "sources_completed_with_rejections": sources_completed_with_rejections,
+            "diagnostics_reported": receipt.rejection_diagnostic_count()
+                .min(MAX_REPORTED_SOURCE_FAILURES),
+            "diagnostics_omitted": receipt.rejection_diagnostics_omitted()
+                .saturating_add(receipt.rejection_diagnostic_count()
+                    .saturating_sub(MAX_REPORTED_SOURCE_FAILURES) as u64),
+        },
+        "rejection_diagnostics_omitted": receipt.rejection_diagnostics_omitted()
+            .saturating_add(receipt.rejection_diagnostic_count()
+                .saturating_sub(MAX_REPORTED_SOURCE_FAILURES) as u64),
         "current_source_count": current.source_count,
         "current_indexed_documents": current.indexed_documents,
         "current_complete_records": current.complete_records,
@@ -155,8 +205,7 @@ pub(super) fn run_automatic_source_refresh_import(
     }))];
     report_sources.extend(
         receipt
-            .source_failures
-            .iter()
+            .source_failures()
             .take(MAX_REPORTED_SOURCE_FAILURES)
             .map(|failure| {
                 source_failure_report_row(
@@ -167,6 +216,27 @@ pub(super) fn run_automatic_source_refresh_import(
                     &failure.source_selector,
                     &failure.detail,
                 )
+            }),
+    );
+    report_sources.extend(
+        receipt
+            .rejection_diagnostics()
+            .take(MAX_REPORTED_SOURCE_FAILURES)
+            .map(|rejection| {
+                compact_json(json!({
+                    "status": "rejection",
+                    "failure_scope": "record",
+                    "failure_type": "record_rejection",
+                    "source_identity": rejection.source_identity,
+                    "provider": rejection.provider,
+                    "source_selector": rejection.source_selector,
+                    "line": rejection.line,
+                    "payload_type": rejection.payload_type,
+                    "detail": rejection.detail,
+                    "error": rejection.detail,
+                    "source_files": 0,
+                    "source_bytes": 0,
+                }))
             }),
     );
 
@@ -284,7 +354,7 @@ mod tests {
         assert_eq!(row["source_failure_class"], "source_changed");
         assert_eq!(row["source_selector"], "/tmp/codex-history");
         assert_eq!(row["detail"], row["error"]);
-        for unsupported in ["imported_sessions", "imported_events", "rejections"] {
+        for unsupported in ["imported_sessions", "imported_events"] {
             assert!(row.get(unsupported).is_none(), "{row:#}");
         }
         assert_eq!(MAX_REPORTED_SOURCE_FAILURES, 3);

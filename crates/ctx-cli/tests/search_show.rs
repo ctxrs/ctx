@@ -718,7 +718,6 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
     assert_eq!(second["resume_mode"], "idempotent_rescan");
     assert_eq!(second["totals"]["current_rejected_records"], 0);
     assert_noop_publication(&second);
-    assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
     assert!(!data_root(&temp).join("relational.sqlite").exists());
 }
 
@@ -792,7 +791,6 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
     assert_eq!(second["resume_mode"], "normal_scan");
     assert_eq!(second["totals"]["current_rejected_records"], 0);
     assert_noop_publication(&second);
-    assert_eq!(second["sources"][0]["catalog_changed"], false, "{second:#}");
     assert_eq!(
         second["sources"][0]["published_generation"], first_generation,
         "{second:#}"

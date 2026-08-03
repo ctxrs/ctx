@@ -8,13 +8,38 @@ mod route_content;
 pub use model::assert_carried_route_failure;
 #[cfg(test)]
 use model::SOURCE_RECORD_PROGRESS_INTERVAL;
-use model::{source_level_progress, SourceBackedRefreshPlan, SourceRecordProgress};
+use model::{
+    source_level_progress, SourceBackedRefreshPlan, SourceBackedVerifiedPublication,
+    SourceRecordProgress,
+};
 pub use model::{
     SourceBackedCertifiedRemoval, SourceBackedCurrentSourceProgress,
     SourceBackedCurrentSourceProgressStage, SourceBackedDetailedRefreshProgress,
-    SourceBackedRefreshProgress, SourceBackedRefreshReceipt, SourceBackedSuccessfulRouteOutcome,
+    SourceBackedPublicationMetadataContext, SourceBackedRefreshProgress,
+    SourceBackedRefreshReceipt, SourceBackedSuccessfulRouteOutcome,
 };
 use route_content::source_route_content_fingerprint;
+
+type SourceBackedPublicationMetadataFactory<'factory> =
+    dyn for<'context> FnMut(
+            SourceBackedPublicationMetadataContext<'context>,
+        ) -> ctx_history_index::Result<Vec<u8>>
+        + 'factory;
+
+#[derive(Debug, Clone, Copy)]
+struct SourceBackedRefreshExecutionBudget {
+    discovery_duration: Duration,
+    work_budget: usize,
+}
+
+impl SourceBackedRefreshExecutionBudget {
+    const fn new(discovery_duration: Duration, work_budget: usize) -> Self {
+        Self {
+            discovery_duration,
+            work_budget,
+        }
+    }
+}
 
 #[cfg(test)]
 use ownership::source_owner_covers_base_source;
@@ -96,8 +121,7 @@ impl SourceBackedRefreshExecutor {
             index_root,
             &self.registry,
             self.writer_options.clone(),
-            self.discovery_duration,
-            self.work_budget,
+            SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
             move |update| {
                 if update.current_source_progress.is_some() {
@@ -105,6 +129,7 @@ impl SourceBackedRefreshExecutor {
                 }
                 report_progress(update.into_legacy())
             },
+            None,
         )
     }
 
@@ -117,10 +142,10 @@ impl SourceBackedRefreshExecutor {
             index_root,
             &self.registry,
             self.writer_options.clone(),
-            self.discovery_duration,
-            self.work_budget,
+            SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
             report_progress,
+            None,
         )
     }
 
@@ -135,8 +160,7 @@ impl SourceBackedRefreshExecutor {
             index_root,
             &self.registry,
             self.writer_options.clone(),
-            self.discovery_duration,
-            self.work_budget,
+            SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             SourceBackedRefreshPlan::isolate(scope),
             move |update| {
                 if update.current_source_progress.is_some() {
@@ -144,6 +168,7 @@ impl SourceBackedRefreshExecutor {
                 }
                 report_progress(update.into_legacy())
             },
+            None,
         )
     }
 
@@ -157,10 +182,33 @@ impl SourceBackedRefreshExecutor {
             index_root,
             &self.registry,
             self.writer_options.clone(),
-            self.discovery_duration,
-            self.work_budget,
+            SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             SourceBackedRefreshPlan::isolate(scope),
             report_progress,
+            None,
+        )
+    }
+
+    /// Publishes one scope with control-plane metadata bound into the same
+    /// opaque Core commit payload. The factory runs only for a pointer-
+    /// advancing generation; exact reuse retains the active metadata.
+    pub fn refresh_scope_with_detailed_progress_and_publication_metadata(
+        &self,
+        index_root: impl AsRef<Path>,
+        scope: SourceBackedRefreshScope,
+        report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
+        mut metadata_factory: impl for<'a> FnMut(
+            SourceBackedPublicationMetadataContext<'a>,
+        ) -> ctx_history_index::Result<Vec<u8>>,
+    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+        refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
+            index_root,
+            &self.registry,
+            self.writer_options.clone(),
+            SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
+            SourceBackedRefreshPlan::isolate(scope),
+            report_progress,
+            Some(&mut metadata_factory),
         )
     }
 }
@@ -186,10 +234,10 @@ pub(crate) fn refresh_source_backed_generation_with_work_budget_for_test(
         index_root,
         registry,
         writer_options,
-        Duration::ZERO,
-        work_budget,
+        SourceBackedRefreshExecutionBudget::new(Duration::ZERO, work_budget),
         SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
         |_| Ok(()),
+        None,
     )
 }
 
@@ -206,11 +254,11 @@ pub(crate) fn refresh_source_backed_generation_with_resource_limits_for_test(
         index_root,
         registry,
         writer_options,
-        Duration::ZERO,
-        work_budget,
+        SourceBackedRefreshExecutionBudget::new(Duration::ZERO, work_budget),
         SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All)
             .with_resource_limits(maximum_live_output_bytes, maximum_physical_scratch_bytes),
         |_| Ok(()),
+        None,
     )
 }
 
@@ -226,8 +274,7 @@ pub fn refresh_source_backed_generation_with_progress(
         index_root,
         registry,
         writer_options,
-        Duration::ZERO,
-        work_budget,
+        SourceBackedRefreshExecutionBudget::new(Duration::ZERO, work_budget),
         SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
         move |update| {
             if update.current_source_progress.is_some() {
@@ -235,6 +282,7 @@ pub fn refresh_source_backed_generation_with_progress(
             }
             report_progress(update.into_legacy())
         },
+        None,
     )
 }
 
@@ -249,10 +297,10 @@ pub fn refresh_source_backed_generation_with_detailed_progress(
         index_root,
         registry,
         writer_options,
-        Duration::ZERO,
-        work_budget,
+        SourceBackedRefreshExecutionBudget::new(Duration::ZERO, work_budget),
         SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
         report_progress,
+        None,
     )
 }
 
@@ -267,10 +315,10 @@ pub fn refresh_source_backed_generation_for_routes(
         index_root,
         registry,
         writer_options,
-        Duration::ZERO,
-        work_budget,
+        SourceBackedRefreshExecutionBudget::new(Duration::ZERO, work_budget),
         SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::exact(route_identities)),
         |_| Ok(()),
+        None,
     )
 }
 
@@ -278,11 +326,15 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
     index_root: impl AsRef<Path>,
     registry: &SourceBackedProviderRegistry,
     writer_options: WriterOptions,
-    discovery_duration: Duration,
-    work_budget: usize,
+    execution_budget: SourceBackedRefreshExecutionBudget,
     plan: SourceBackedRefreshPlan,
     mut report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
+    mut metadata_factory: Option<&mut SourceBackedPublicationMetadataFactory<'_>>,
 ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+    let SourceBackedRefreshExecutionBudget {
+        discovery_duration,
+        work_budget,
+    } = execution_budget;
     if matches!(&plan.scope, SourceBackedRefreshScope::All) {
         if let Some(unavailable) = registry.routes.iter().find(|route| {
             route.driver.is_none()
@@ -356,7 +408,7 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
     let mut record_rejections = SourceBackedRecordRejections::default();
     let mut carried_unselected_route_ids = BTreeSet::new();
 
-    let (commit, applied_removals, commit_duration, base_route_content) = {
+    let (commit, applied_removals, commit_duration, base_route_content, verified_publication) = {
         let mut writer = GenerationWriter::open(index_root, writer_options.clone())?;
         let base_route_content = selected_route_ids
             .iter()
@@ -724,43 +776,76 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
 
         let commit_started = Instant::now();
         run_before_source_backed_commit_hook();
-        let commit = writer.commit_with_complete_inventory_revalidation(
-            |target| {
-                let source = match target {
-                    RevalidationTarget::Source(source) => source.observation().source(),
-                    RevalidationTarget::Deletion(deletion) => deletion.source(),
-                };
-                let Some(owner) = owners.get(&source.identity().digest()) else {
-                    return false;
-                };
-                if !owner.source.exact_descriptor_eq(source) {
-                    return false;
-                }
-                matches!(
-                    (&owner.revalidation, target),
-                    (
-                        Some(SourceBackedRouteRevalidation::Source(expected)),
-                        RevalidationTarget::Source(actual)
-                    ) if *expected == *actual
-                ) || matches!(
-                    (&owner.revalidation, target),
-                    (
-                        Some(SourceBackedRouteRevalidation::Deletion(expected)),
-                        RevalidationTarget::Deletion(actual)
-                    ) if *expected == *actual
-                )
-            },
-            |inventory| {
-                complete_inventory_owners
-                    .iter()
-                    .any(|owner| owner.inventory == *inventory)
-            },
-        )?;
+        let mut revalidate_source = |target: RevalidationTarget<'_>| {
+            let source = match target {
+                RevalidationTarget::Source(source) => source.observation().source(),
+                RevalidationTarget::Deletion(deletion) => deletion.source(),
+            };
+            let Some(owner) = owners.get(&source.identity().digest()) else {
+                return false;
+            };
+            if !owner.source.exact_descriptor_eq(source) {
+                return false;
+            }
+            matches!(
+                (&owner.revalidation, target),
+                (
+                    Some(SourceBackedRouteRevalidation::Source(expected)),
+                    RevalidationTarget::Source(actual)
+                ) if *expected == *actual
+            ) || matches!(
+                (&owner.revalidation, target),
+                (
+                    Some(SourceBackedRouteRevalidation::Deletion(expected)),
+                    RevalidationTarget::Deletion(actual)
+                ) if *expected == *actual
+            )
+        };
+        let mut revalidate_inventory = |inventory: &CertifiedSourceInventory| {
+            complete_inventory_owners
+                .iter()
+                .any(|owner| owner.inventory == *inventory)
+        };
+        let (commit, verified_publication) = if let Some(factory) = metadata_factory.as_mut() {
+            let published = writer
+                .commit_with_complete_inventory_revalidation_and_publication_metadata(
+                    &mut revalidate_source,
+                    &mut revalidate_inventory,
+                    |publication| {
+                        factory(SourceBackedPublicationMetadataContext::new(
+                            publication,
+                            &selected_route_ids,
+                            &failed_routes,
+                            &logical_source_failures,
+                            &record_rejections,
+                            &base_route_content,
+                            applied_removals.len(),
+                        ))
+                    },
+                )?;
+            let (commit, disposition, verified) = published.into_parts();
+            (
+                commit,
+                Some(SourceBackedVerifiedPublication {
+                    disposition,
+                    verified_index: verified,
+                }),
+            )
+        } else {
+            (
+                writer.commit_with_complete_inventory_revalidation(
+                    &mut revalidate_source,
+                    &mut revalidate_inventory,
+                )?,
+                None,
+            )
+        };
         (
             commit,
             applied_removals,
             commit_started.elapsed(),
             base_route_content,
+            verified_publication,
         )
     };
 
@@ -838,6 +923,7 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         source_failures,
         logical_source_failures,
         record_rejections,
+        verified_publication,
         failed_routes: failed_routes
             .values()
             .map(SourceBackedFailedRouteOutcome::from)
@@ -859,184 +945,4 @@ fn source_missing_observation_time() -> u64 {
 }
 
 #[cfg(test)]
-mod ownership_tests {
-    use ctx_history_core::{
-        ProjectionContractError, SourceAnchor, SourceInventoryObservation, TypedKey,
-    };
-
-    use super::*;
-
-    fn descriptor(schema_variant: &str, lineage: u8) -> SourceKey {
-        SourceKey::derive(
-            CaptureProvider::Gemini.as_str(),
-            "ownership-test",
-            schema_variant,
-            1,
-            SourceAnchor::CatalogLineage([lineage; 32]),
-        )
-        .unwrap()
-    }
-
-    fn inventory_owner(
-        route_index: usize,
-        authority: u8,
-        sources: Vec<SourceKey>,
-    ) -> CompleteInventoryOwner {
-        let observation = SourceInventoryObservation::new(
-            CaptureProvider::Gemini.as_str(),
-            "ownership-test-root",
-            TypedKey::U64(u64::from(authority)),
-            "ownership-test-revision",
-            vec![authority],
-        )
-        .unwrap();
-        CompleteInventoryOwner {
-            route_index,
-            inventory: CertifiedSourceInventory::certify(
-                observation.clone(),
-                observation,
-                "ownership-test-discovery",
-                sources,
-            )
-            .unwrap(),
-        }
-    }
-
-    #[test]
-    fn base_ownership_accepts_exact_or_one_inventory_certified_descriptor_replacement() {
-        let descriptor_a = descriptor("schema-a", 1);
-        let descriptor_b = descriptor("schema-b", 1);
-        let exact_owner = SourceOwner {
-            route_index: 3,
-            source: descriptor_a.clone(),
-            present: true,
-            revalidation: None,
-        };
-        assert!(source_owner_covers_base_source(
-            &descriptor_a,
-            &exact_owner,
-            &[]
-        ));
-
-        let replacement_owner = SourceOwner {
-            route_index: 3,
-            source: descriptor_b.clone(),
-            present: true,
-            revalidation: None,
-        };
-        let inventory = inventory_owner(3, 1, vec![descriptor_b]);
-        assert!(source_owner_covers_base_source(
-            &descriptor_a,
-            &replacement_owner,
-            &[inventory]
-        ));
-    }
-
-    #[test]
-    fn descriptor_replacement_ownership_rejects_absence_wrong_route_ambiguity_and_lineage() {
-        let descriptor_a = descriptor("schema-a", 1);
-        let descriptor_b = descriptor("schema-b", 1);
-        let replacement_owner = SourceOwner {
-            route_index: 3,
-            source: descriptor_b.clone(),
-            present: true,
-            revalidation: None,
-        };
-
-        assert!(!source_owner_covers_base_source(
-            &descriptor_a,
-            &replacement_owner,
-            &[]
-        ));
-        assert!(!source_owner_covers_base_source(
-            &descriptor_a,
-            &replacement_owner,
-            &[inventory_owner(4, 1, vec![descriptor_b.clone()])]
-        ));
-        assert!(!source_owner_covers_base_source(
-            &descriptor_a,
-            &replacement_owner,
-            &[
-                inventory_owner(3, 1, vec![descriptor_b.clone()]),
-                inventory_owner(3, 2, vec![descriptor_b]),
-            ]
-        ));
-
-        let unrelated_owner = SourceOwner {
-            route_index: 3,
-            source: descriptor("schema-b", 2),
-            present: true,
-            revalidation: None,
-        };
-        assert!(!source_owner_covers_base_source(
-            &descriptor_a,
-            &unrelated_owner,
-            &[inventory_owner(3, 3, vec![unrelated_owner.source.clone()])]
-        ));
-    }
-
-    #[test]
-    fn inventory_rejects_two_descriptors_for_one_canonical_lineage() {
-        let descriptor_a = descriptor("schema-a", 1);
-        let descriptor_b = descriptor("schema-b", 1);
-        let observation = SourceInventoryObservation::new(
-            CaptureProvider::Gemini.as_str(),
-            "ownership-test-root",
-            TypedKey::U64(1),
-            "ownership-test-revision",
-            vec![1],
-        )
-        .unwrap();
-        assert_eq!(
-            CertifiedSourceInventory::certify(
-                observation.clone(),
-                observation,
-                "ownership-test-discovery",
-                vec![descriptor_a, descriptor_b],
-            )
-            .unwrap_err(),
-            ProjectionContractError::DuplicateInventorySource
-        );
-    }
-
-    #[test]
-    fn source_record_progress_is_prompt_throttled_monotonic_and_flushable() {
-        let started = Instant::now();
-        let mut progress = SourceRecordProgress::default();
-        let accepted = SourceBackedRecordProgressDelta {
-            accepted_records: 1,
-            completed_bytes: 0,
-        };
-        let bytes = SourceBackedRecordProgressDelta {
-            accepted_records: 0,
-            completed_bytes: 512,
-        };
-
-        assert_eq!(progress.advanced_at(bytes, started), Some((0, 512)));
-        assert_eq!(
-            progress.advanced_at(accepted, started + Duration::from_millis(500)),
-            None
-        );
-        assert_eq!(
-            progress.advanced_at(bytes, started + SOURCE_RECORD_PROGRESS_INTERVAL),
-            Some((1, 1_024))
-        );
-        assert_eq!(
-            progress.advanced_at(accepted, started + Duration::from_millis(1_100)),
-            None
-        );
-        assert_eq!(
-            progress.flush_at(started + Duration::from_millis(1_100)),
-            Some((2, 1_024))
-        );
-        assert_eq!(
-            progress.flush_at(started + Duration::from_millis(1_100)),
-            None
-        );
-
-        let mut next_source = SourceRecordProgress::default();
-        assert_eq!(next_source.completed_records, 0);
-        assert_eq!(next_source.completed_bytes, 0);
-        assert_eq!(next_source.advanced_at(accepted, started), Some((1, 0)));
-    }
-}
+mod ownership_tests;

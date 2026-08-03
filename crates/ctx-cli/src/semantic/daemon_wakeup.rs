@@ -218,7 +218,6 @@ enum WatchMessage {
 struct WatchCounters {
     raw_events: u64,
     ignored_access_events: u64,
-    ignored_catalog_lock_events: u64,
     ignored_access_time_events: u64,
     ignored_other_events: u64,
     last_ignored_access_path: Option<PathBuf>,
@@ -270,10 +269,7 @@ impl WatchAuthority {
     fn new(data_root: &Path, catalog: DaemonWatchCatalog) -> Self {
         Self {
             catalog,
-            controls: BTreeSet::from([
-                data_root.join(CONFIG_FILE),
-                data_root.join("catalogs").join("explicit-sources"),
-            ]),
+            controls: BTreeSet::from([data_root.join(CONFIG_FILE)]),
         }
     }
 
@@ -575,7 +571,6 @@ impl DaemonFileWatcher {
                 .map_or(0, |catalog| catalog.route_ids().len()),
             "raw_events": counters.raw_events,
             "ignored_access_events": counters.ignored_access_events,
-            "ignored_catalog_lock_events": counters.ignored_catalog_lock_events,
             "ignored_access_time_events": counters.ignored_access_time_events,
             "ignored_other_events": counters.ignored_other_events,
             "last_ignored_access_path": counters.last_ignored_access_path,
@@ -818,11 +813,10 @@ fn watch_event_requires_rearm(event: &Event) -> bool {
 #[derive(Clone, Copy)]
 enum IgnoredWatchEvent {
     Access,
-    CatalogLock,
     AccessTime,
 }
 
-fn ignored_watch_event(data_root: &Path, event: &Event) -> Option<IgnoredWatchEvent> {
+fn ignored_watch_event(_data_root: &Path, event: &Event) -> Option<IgnoredWatchEvent> {
     if matches!(
         event.kind,
         EventKind::Access(kind)
@@ -835,13 +829,6 @@ fn ignored_watch_event(data_root: &Path, event: &Event) -> Option<IgnoredWatchEv
         EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime))
     ) {
         return Some(IgnoredWatchEvent::AccessTime);
-    }
-    let catalog_lock = data_root
-        .join("catalogs")
-        .join("explicit-sources")
-        .join("catalog.lock");
-    if !event.paths.is_empty() && event.paths.iter().all(|path| path == &catalog_lock) {
-        return Some(IgnoredWatchEvent::CatalogLock);
     }
     None
 }
@@ -858,10 +845,6 @@ fn record_ignored_watch_event(
         IgnoredWatchEvent::Access => {
             counters.ignored_access_events = counters.ignored_access_events.saturating_add(1);
             counters.last_ignored_access_path = event.paths.first().cloned();
-        }
-        IgnoredWatchEvent::CatalogLock => {
-            counters.ignored_catalog_lock_events =
-                counters.ignored_catalog_lock_events.saturating_add(1);
         }
         IgnoredWatchEvent::AccessTime => {
             counters.ignored_access_time_events =

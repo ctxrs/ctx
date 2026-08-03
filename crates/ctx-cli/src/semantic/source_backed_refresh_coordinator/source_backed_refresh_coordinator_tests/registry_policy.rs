@@ -36,7 +36,8 @@ fn only_unscopable_registry_safety_issues_block_globally() {
         },
     };
     assert!(reject_blocking_automatic_registry_issues(std::slice::from_ref(&selector_gap)).is_ok());
-    let failures = capture_refresh::automatic_registry_route_failures(&[selector_gap]).unwrap();
+    let failures =
+        capture_refresh::automatic_registry_route_failures(&[selector_gap], None).unwrap();
     assert_eq!(failures.len(), 1);
     assert_eq!(
         failures[0].class,
@@ -97,12 +98,24 @@ fn mixed_valid_and_invalid_registry_routes_publish_with_a_typed_failure() {
     )
     .unwrap();
 
-    assert_eq!(publication.scanned_routes, 1);
+    assert_eq!(publication.route_results.len(), 2);
     assert_eq!(publication.unsupported_routes, 1);
     assert_eq!(publication.certified_source_count, 1);
-    assert_eq!(publication.successful_route_ids.len(), 1);
-    assert_eq!(publication.source_failures.len(), 1);
-    let failure = &publication.source_failures[0];
+    assert_eq!(
+        publication
+            .route_results
+            .iter()
+            .filter(|result| result.outcome.is_success())
+            .count(),
+        1
+    );
+    let failures = publication
+        .route_results
+        .iter()
+        .flat_map(|result| result.source_failures.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 1);
+    let failure = failures[0];
     assert_eq!(failure.provider, "warp");
     assert_eq!(failure.class, "incompatible");
     assert!(!failure.carried_forward);

@@ -5,6 +5,7 @@ use super::SourceStats;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ImportTotals {
     pub(crate) per_run_counts_available: bool,
+    pub(crate) terminal_route_counts_available: bool,
     pub(crate) source_files: usize,
     pub(crate) source_bytes: u64,
     pub(crate) imported_sources: usize,

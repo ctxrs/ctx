@@ -72,6 +72,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
         .and_then(|jobs| jobs.get("semantic_index"));
 
     let rejected_records = rejected_record_count(core_refresh);
+    let source_failures = source_failure_count(core_refresh);
     let history_failed = job_failed(core_refresh);
     let semantic_failed = job_failed(semantic);
     let history_catching_up = job_catching_up(core_refresh);
@@ -101,6 +102,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
         && (history_failed
             || semantic_failed
             || history_catching_up
+            || source_failures > 0
             || rejected_records > 0
             || semantic_fallback.is_some()
             || service_issue)
@@ -123,6 +125,11 @@ pub(in crate::semantic) fn render_daemon_status_human(
             OutcomeState::Warning,
             "Daemon is partially healthy",
             Some("Core refresh rejected one or more records."),
+        ),
+        DaemonPresentation::Partial if source_failures > 0 => (
+            OutcomeState::Warning,
+            "Daemon is partially healthy",
+            Some("One or more history transcript routes could not be refreshed."),
         ),
         DaemonPresentation::Partial if semantic_fallback.is_some() => (
             OutcomeState::Warning,
@@ -235,6 +242,7 @@ pub(in crate::semantic) fn render_daemon_status_human(
         let (history_state, history_token) = core_refresh_state(
             core_refresh,
             enabled || matches!(presentation, DaemonPresentation::Completed),
+            source_failures,
             rejected_records,
         );
         let mut history_fields = vec![state_field("Status", history_state, history_token)];
@@ -357,12 +365,15 @@ pub(in crate::semantic) fn render_daemon_status_human(
 
     if let Some((message, command)) = recovery_action(
         presentation,
-        recoverable,
-        history_failed,
-        rejected_records,
-        semantic_failed,
-        history_catching_up,
-        service_issue,
+        RecoverySignals {
+            recoverable,
+            history_failed,
+            source_failures,
+            rejected_records,
+            semantic_failed,
+            history_catching_up,
+            service_issue,
+        },
     ) {
         document.push_blank();
         document.append(hint(
@@ -622,6 +633,7 @@ fn service_state(
 fn core_refresh_state(
     core_refresh: Option<&Value>,
     enabled: bool,
+    source_failures: usize,
     rejected_records: u64,
 ) -> (&'static str, Token) {
     if !enabled {
@@ -632,6 +644,9 @@ fn core_refresh_state(
     }
     if job_catching_up(core_refresh) {
         return ("catching up", Token::Warning);
+    }
+    if source_failures > 0 {
+        return ("ready with source failures", Token::Warning);
     }
     if rejected_records > 0 {
         return ("ready with rejections", Token::Warning);
@@ -698,15 +713,29 @@ fn push_unique_detail(details: &mut Vec<(&'static str, String)>, label: &'static
     }
 }
 
-fn recovery_action(
-    presentation: DaemonPresentation,
+struct RecoverySignals {
     recoverable: bool,
     history_failed: bool,
+    source_failures: usize,
     rejected_records: u64,
     semantic_failed: bool,
     history_catching_up: bool,
     service_issue: bool,
+}
+
+fn recovery_action(
+    presentation: DaemonPresentation,
+    signals: RecoverySignals,
 ) -> Option<(&'static str, &'static str)> {
+    let RecoverySignals {
+        recoverable,
+        history_failed,
+        source_failures,
+        rejected_records,
+        semantic_failed,
+        history_catching_up,
+        service_issue,
+    } = signals;
     if presentation == DaemonPresentation::Disabled {
         return Some((
             "Enable the daemon to resume automatic history refresh.",
@@ -722,7 +751,7 @@ fn recovery_action(
             "ctx daemon enable",
         ));
     }
-    if history_failed || rejected_records > 0 {
+    if history_failed || source_failures > 0 || rejected_records > 0 {
         return Some((
             "Inspect source-level refresh failures.",
             "ctx import --all --no-daemon",
@@ -779,6 +808,17 @@ fn rejected_record_count(core_refresh: Option<&Value>) -> u64 {
                 })
         })
         .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn source_failure_count(core_refresh: Option<&Value>) -> usize {
+    core_refresh
+        .and_then(|job| {
+            job.get("receipt")
+                .and_then(|receipt| receipt.get("source_failure_total"))
+        })
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
         .unwrap_or(0)
 }
 

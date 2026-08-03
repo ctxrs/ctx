@@ -300,8 +300,6 @@ fn assert_current_generation(
         "source_files",
         "source_bytes",
         "imported_sources",
-        "sources_completed_with_rejections",
-        "failed_sources",
         "imported_sessions",
         "imported_events",
         "imported_edges",
@@ -309,7 +307,6 @@ fn assert_current_generation(
         "skipped_events",
         "skipped_edges",
         "skipped",
-        "rejected_records",
     ] {
         assert!(
             report["totals"].get(key).is_none(),
@@ -320,6 +317,14 @@ fn assert_current_generation(
             "unsupported per-run source fact {key} was synthesized: {report:#}"
         );
     }
+    for key in [
+        "sources_completed_with_rejections",
+        "failed_sources",
+        "rejected_records",
+    ] {
+        assert!(report["totals"][key].is_number(), "{key}: {report:#}");
+    }
+    assert!(report["totals"]["rejections"].is_object(), "{report:#}");
 }
 
 fn latest_source_refresh_properties(temp: &TempDir) -> serde_json::Map<String, Value> {
@@ -444,23 +449,21 @@ fn codex_reimport_rebuilds_from_provider_source() {
     );
     fs::write(&source, with_rejection).unwrap();
     let rejected = import_codex(&temp);
-    assert_eq!(rejected["outcome"], "success", "{rejected:#}");
+    assert_eq!(
+        rejected["outcome"], "completed_with_rejections",
+        "{rejected:#}"
+    );
     assert_current_generation(&rejected, 1, 1, 1);
     let rejected_generation = assert_new_generation(&rejected, &replay_generation);
-    assert!(rejected["totals"].get("rejected_records").is_none());
-    assert!(rejected["totals"]
-        .get("sources_completed_with_rejections")
-        .is_none());
-    assert!(rejected["sources"][0].get("failure_scope").is_none());
-    assert!(rejected["sources"][0].get("failure_type").is_none());
-    assert!(
-        rejected["sources"][0].get("rejections").is_none(),
-        "unavailable per-record details must not be synthesized: {rejected:#}"
-    );
+    assert_eq!(rejected["totals"]["rejected_records"], 1);
+    assert_eq!(rejected["totals"]["sources_completed_with_rejections"], 1);
+    assert_eq!(rejected["sources"][0]["failure_scope"], "record");
+    assert_eq!(rejected["sources"][0]["failure_type"], "record_rejection");
+    assert_eq!(rejected["sources"][0]["rejections"]["rejected_records"], 1);
     let rejection_analytics = latest_source_refresh_properties(&temp);
-    assert_eq!(rejection_analytics["refresh_result"], "complete");
-    assert_eq!(rejection_analytics["failure_scope"], "none");
-    assert_eq!(rejection_analytics["failure_type"], "none");
+    assert_eq!(rejection_analytics["refresh_result"], "partial");
+    assert_eq!(rejection_analytics["failure_scope"], "record");
+    assert_eq!(rejection_analytics["failure_type"], "record_rejection");
     assert!(rejection_analytics.get("source_mode").is_none());
 
     fs::remove_file(&source).unwrap();

@@ -367,6 +367,14 @@ pub(super) fn run_daemon_inner(
         if !runtime.config.daemon.mode.runs_only_source_refresh() {
             resume_completed_installation_daemons(data_root)?;
         }
+        if let Some(source_refresh) = refresh_service
+            .as_ref()
+            .map(|service| service.source_refresh.as_ref())
+        {
+            source_refresh
+                .recover_interrupted_publication(data_root)
+                .context("recover interrupted Core refresh before daemon readiness")?;
+        }
         write_daemon_lifecycle_status_with_runtime(
             data_root,
             &args,
