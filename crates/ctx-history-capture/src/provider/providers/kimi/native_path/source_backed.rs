@@ -57,7 +57,8 @@ const KIMI_NATIVE_SESSION_NAMESPACE: &str = "kimi-code-cli-session-v1";
 const KIMI_NATIVE_EVENT_POSITION_KIND: &str = "kimi-code-cli-wire-ordinal-v1";
 const KIMI_LOGICAL_SESSION_KIND: &str = "agent-session";
 const KIMI_LOGICAL_EVENT_KIND: &str = "wire-event";
-const KIMI_SOURCE_PARSER_REVISION: &str = "kimi-code-cli-source-backed-v2";
+// v3 reclassifies content parts; the bump re-projects transcripts indexed by v2.
+const KIMI_SOURCE_PARSER_REVISION: &str = "kimi-code-cli-source-backed-v3";
 const KIMI_DISCOVERY_MAX_DEPTH: usize = 16;
 const KIMI_DISCOVERY_MAX_ENTRIES: usize = 65_536;
 
