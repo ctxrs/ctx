@@ -1,13 +1,15 @@
 use std::{collections::BTreeSet, path::Path};
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceDeletion,
-    CertifiedSourceInventory, CoreContentPolicyStatus, CoreRecord, EventIdentityInput,
-    NativeItemKey, NativeSessionKey, RepositoryBinding, RepositoryEvidence,
+    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend,
+    CertifiedSourceDeletion, CertifiedSourceInventory, CoreContentPolicyStatus, CoreRecord,
+    EventIdentityInput, NativeItemKey, NativeSessionKey, RepositoryBinding, RepositoryEvidence,
     RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
     RepositoryFileObservationKind, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
-    SourceInventoryObservation, SourceKey, SourceObservation, SubrecordSelector, TypedKey,
+    SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation, SubrecordSelector,
+    TypedKey,
 };
+use tantivy::indexer::NoMergePolicy;
 use tempfile::tempdir;
 
 use super::*;
@@ -89,6 +91,35 @@ fn certificate(source: &SourceKey, revision: u8, documents: usize) -> CertifiedS
     .unwrap()
 }
 
+fn appendable_certificate(source: &SourceKey, revision: u8, documents: usize) -> CertifiedSource {
+    let bytes = documents as u64 * 10;
+    let observation =
+        SourceObservation::new(source.clone(), "regular-file-v1", vec![revision]).unwrap();
+    CertifiedSource::certify_with_frontier(
+        observation.clone(),
+        observation,
+        "event-range-test-parser-v1",
+        [revision; 32],
+        ScannedSourceCounts {
+            complete_records: documents as u64,
+            retained_records: documents as u64,
+            indexed_documents: documents as u64,
+            certified_bytes: bytes,
+            ..ScannedSourceCounts::default()
+        },
+        Some(
+            SourceFrontier::new(
+                "jsonl-byte-offset",
+                TypedKey::U64(bytes),
+                bytes,
+                [revision; 32],
+            )
+            .unwrap(),
+        ),
+    )
+    .unwrap()
+}
+
 fn publish(root: &Path, revision: u8, sources: &[(SourceKey, Vec<CoreRecord>)]) -> String {
     let mut writer = GenerationWriter::open(root, WriterOptions::default()).unwrap();
     for (source, records) in sources {
@@ -144,6 +175,25 @@ fn sorted_ids(records: &[CoreRecord]) -> Vec<uuid::Uuid> {
     coordinates
         .into_iter()
         .map(|coordinate| coordinate.3)
+        .collect()
+}
+
+fn sorted_all_ids(records: &[CoreRecord]) -> Vec<uuid::Uuid> {
+    let mut coordinates = records
+        .iter()
+        .map(|record| {
+            let encoded = record.encode_stored().unwrap();
+            let content = core_content_bytes(&record.content).unwrap();
+            (
+                EventRangeOrderKey::for_core_record(record, encoded.len(), content).unwrap(),
+                record.event_id.as_uuid(),
+            )
+        })
+        .collect::<Vec<_>>();
+    coordinates.sort_unstable_by_key(|(order, _)| *order);
+    coordinates
+        .into_iter()
+        .map(|(_, event_id)| event_id)
         .collect()
 }
 
@@ -262,6 +312,124 @@ fn all_domain_includes_untimestamped_tail_and_descending_is_exact_reverse() {
     let mut reversed = expected;
     reversed.reverse();
     assert_eq!(traverse(&index, &descending, 2), reversed);
+}
+
+#[test]
+fn thirty_two_segment_oracle_covers_heap_directions_boundaries_and_indexed_filter() {
+    const SEGMENTS: usize = 32;
+    const EVENTS_PER_SEGMENT: usize = 2;
+
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "thirty-two-segment-range");
+    let mut records = Vec::with_capacity(SEGMENTS * EVENTS_PER_SEGMENT);
+    for segment in 0..SEGMENTS {
+        let revision = u8::try_from(segment + 1).unwrap();
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        writer
+            .writer_mut()
+            .unwrap()
+            .set_merge_policy(Box::<NoMergePolicy>::default());
+        let append_base = if segment == 0 {
+            writer.begin_source(source.clone()).unwrap();
+            None
+        } else {
+            Some(writer.begin_source_append(source.clone()).unwrap().clone())
+        };
+
+        let mut assistant = record(
+            &source,
+            segment as u64,
+            ((SEGMENTS - segment) % 7) as u64,
+            (segment % 3 != 0).then_some(1_000 + (segment % 4) as i64),
+            &format!("assistant-{segment}"),
+        );
+        assistant.role = Some("assistant".to_owned());
+        let mut user = record(
+            &source,
+            (segment + SEGMENTS) as u64,
+            (segment % 7) as u64,
+            (segment % 5 != 0).then_some(1_000 + ((segment + 1) % 4) as i64),
+            &format!("user-{segment}"),
+        );
+        user.role = Some("user".to_owned());
+
+        // Reverse the local insertion order so neither insertion nor segment
+        // order can accidentally satisfy the global chronology oracle.
+        writer.add_core_record(user.clone()).unwrap();
+        writer.add_core_record(assistant.clone()).unwrap();
+        records.extend([assistant, user]);
+
+        let certified =
+            appendable_certificate(&source, revision, (segment + 1) * EVENTS_PER_SEGMENT);
+        if let Some(base) = append_base {
+            let frontier = base.frontier().unwrap();
+            writer
+                .certify_source_append(
+                    CertifiedSourceAppend::certify(
+                        &base,
+                        certified,
+                        frontier.certified_prefix_bytes(),
+                        *frontier.certified_prefix_digest(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        } else {
+            writer.certify_source(certified).unwrap();
+        }
+        writer.commit(|_| true).unwrap();
+    }
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    assert!(
+        index.searcher.segment_readers().len() >= SEGMENTS,
+        "descending merger test requires at least {SEGMENTS} live segments"
+    );
+    let expected = sorted_all_ids(&records);
+    let assistant_records = records
+        .iter()
+        .filter(|record| record.role.as_deref() == Some("assistant"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let expected_assistants = sorted_all_ids(&assistant_records);
+
+    for limit in [1, 2, 3, 7, 17] {
+        for direction in [
+            CoreEventRangeDirection::Ascending,
+            CoreEventRangeDirection::Descending,
+        ] {
+            let selection = CoreEventRangeSelection::all(CoreEventRangeFilters {
+                direction,
+                ..CoreEventRangeFilters::default()
+            })
+            .unwrap();
+            let mut directional_expected = expected.clone();
+            if direction == CoreEventRangeDirection::Descending {
+                directional_expected.reverse();
+            }
+            assert_eq!(
+                traverse(&index, &selection, limit),
+                directional_expected,
+                "unfiltered direction={direction:?} limit={limit}"
+            );
+
+            let filtered = CoreEventRangeSelection::all(CoreEventRangeFilters {
+                role: Some("assistant".to_owned()),
+                direction,
+                ..CoreEventRangeFilters::default()
+            })
+            .unwrap();
+            let mut filtered_expected = expected_assistants.clone();
+            if direction == CoreEventRangeDirection::Descending {
+                filtered_expected.reverse();
+            }
+            assert_eq!(
+                traverse(&index, &filtered, limit),
+                filtered_expected,
+                "indexed filter direction={direction:?} limit={limit}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -823,6 +991,42 @@ fn valid_oversized_singleton_always_advances() {
     assert!(second.oversized_singleton);
     assert!(second.terminal);
     assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn nonterminal_cursor_reuses_admitted_key_without_reserializing_maximum_record() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "maximum-cursor-record");
+    let maximum_body = format!(
+        "x{}",
+        " ".repeat(ctx_history_core::MAX_CORE_CONTENT_BYTES - 1)
+    );
+    let records = vec![
+        record(&source, 1, 1, Some(10), &maximum_body),
+        record(&source, 2, 2, Some(11), "next"),
+    ];
+    publish(temp.path(), 1, &[(source, records)]);
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::new(10, 12, Vec::<String>::new()).unwrap();
+
+    crate::query::reset_event_range_cursor_record_reserializations();
+    let page = index.core_event_range_page(&selection, None, 1).unwrap();
+    assert!(!page.terminal);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.content_bytes, ctx_history_core::MAX_CORE_CONTENT_BYTES);
+    assert_eq!(
+        crate::query::event_range_cursor_record_reserializations(),
+        0
+    );
+    assert_eq!(
+        page.cursor_after(0).unwrap(),
+        page.next_cursor,
+        "trimmed-page cursor must reuse the same admitted key"
+    );
+    assert_eq!(
+        crate::query::event_range_cursor_record_reserializations(),
+        0
+    );
 }
 
 #[test]

@@ -4,8 +4,9 @@ use tantivy::DocAddress;
 use super::records::stored_core_verification_record;
 use crate::{
     index_document::{
-        SemanticEventOrderKey, SessionEventOrderKey, SourceEventOrderKey,
-        SEMANTIC_EVENT_ORDER_KEY_LEN, SESSION_EVENT_ORDER_KEY_LEN, SOURCE_EVENT_ORDER_KEY_LEN,
+        core_content_bytes, EventRangeOrderKey, SemanticEventOrderKey, SessionEventOrderKey,
+        SourceEventOrderKey, EVENT_RANGE_ORDER_KEY_LEN, SEMANTIC_EVENT_ORDER_KEY_LEN,
+        SESSION_EVENT_ORDER_KEY_LEN, SOURCE_EVENT_ORDER_KEY_LEN,
     },
     source_token, Fields, IndexError, Result, LEXICAL_SCHEMA_VERSION,
 };
@@ -19,6 +20,7 @@ pub(crate) struct VerificationRecord {
     pub(crate) source_event_order: [u8; SOURCE_EVENT_ORDER_KEY_LEN],
     pub(crate) session_event_order: [u8; SESSION_EVENT_ORDER_KEY_LEN],
     pub(crate) semantic_event_order: [u8; SEMANTIC_EVENT_ORDER_KEY_LEN],
+    pub(crate) event_range_order: [u8; EVENT_RANGE_ORDER_KEY_LEN],
     pub(crate) body: Option<String>,
     pub(crate) identities: CompactVerificationIdentities,
     pub(crate) stored_core_bytes: usize,
@@ -85,6 +87,12 @@ pub(crate) fn stored_verification_record(
         SourceEventOrderKey::for_core_record(&core, stored_core_bytes)?.into_bytes();
     let session_event_order = SessionEventOrderKey::for_core_record(&core)?.into_bytes();
     let semantic_event_order = SemanticEventOrderKey::for_event(core.event_id)?.into_bytes();
+    let event_range_order = EventRangeOrderKey::for_core_record(
+        &core,
+        stored_core_bytes,
+        core_content_bytes(&core.content)?,
+    )?
+    .into_bytes();
     let body = core.content.normalized_body.clone();
     let identities = CompactVerificationIdentities {
         event: core.event_id.into(),
@@ -100,6 +108,7 @@ pub(crate) fn stored_verification_record(
         source_event_order,
         session_event_order,
         semantic_event_order,
+        event_range_order,
         body,
         identities,
         stored_core_bytes,

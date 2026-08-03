@@ -24,7 +24,7 @@ pub(crate) use verification::{
 use std::cell::{Cell, RefCell};
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
     ops::Bound,
 };
 
@@ -98,6 +98,7 @@ thread_local! {
     static SESSION_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
     static SEMANTIC_EVENT_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
     static EVENT_RANGE_ORDER_TERM_VISITS: Cell<usize> = const { Cell::new(0) };
+    static EVENT_RANGE_CURSOR_RECORD_RESERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SESSION_EVENT_ORDER_VISITED_SEQUENCES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     static LEXICAL_QUERY_CONSTRUCTIONS: Cell<usize> = const { Cell::new(0) };
     static LEXICAL_QUERY_EXECUTIONS: Cell<usize> = const { Cell::new(0) };
@@ -187,6 +188,16 @@ pub(crate) fn reset_event_range_order_term_visits() {
 #[cfg(test)]
 pub(crate) fn event_range_order_term_visits() -> usize {
     EVENT_RANGE_ORDER_TERM_VISITS.get()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_event_range_cursor_record_reserializations() {
+    EVENT_RANGE_CURSOR_RECORD_RESERIALIZATIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn event_range_cursor_record_reserializations() -> usize {
+    EVENT_RANGE_CURSOR_RECORD_RESERIALIZATIONS.get()
 }
 
 #[cfg(test)]

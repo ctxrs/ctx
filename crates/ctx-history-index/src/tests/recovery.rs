@@ -323,6 +323,7 @@ enum QueryProjectionMutation {
     Text(&'static str, &'static str),
     U64(&'static str, u64),
     I64(&'static str, i64),
+    Bytes(&'static str, &'static [u8]),
 }
 
 impl QueryProjectionMutation {
@@ -331,7 +332,8 @@ impl QueryProjectionMutation {
             Self::Omit(field)
             | Self::Text(field, _)
             | Self::U64(field, _)
-            | Self::I64(field, _) => field,
+            | Self::I64(field, _)
+            | Self::Bytes(field, _) => field,
         }
     }
 }
@@ -424,6 +426,7 @@ fn recommit_candidate_with_query_projection_mutation(
         QueryProjectionMutation::Text(_, value) => forged.add_text(target, value),
         QueryProjectionMutation::U64(_, value) => forged.add_u64(target, value),
         QueryProjectionMutation::I64(_, value) => forged.add_i64(target, value),
+        QueryProjectionMutation::Bytes(_, value) => forged.add_bytes(target, value),
     }
     drop(searcher);
     drop(reader);
@@ -445,6 +448,8 @@ fn recommit_candidate_with_query_projection_mutation(
 
 #[test]
 fn candidate_publication_rejects_every_query_authoritative_projection_mutation() {
+    const CORRUPT_EVENT_RANGE_ORDER: [u8; crate::index_document::EVENT_RANGE_ORDER_KEY_LEN] =
+        [0x5a; crate::index_document::EVENT_RANGE_ORDER_KEY_LEN];
     let cases = [
         ("event_type", QueryProjectionMutation::Omit("event_type")),
         ("role", QueryProjectionMutation::Text("role", "assistant")),
@@ -475,6 +480,14 @@ fn candidate_publication_rejects_every_query_authoritative_projection_mutation()
         (
             "size",
             QueryProjectionMutation::U64("core_content_bytes", 1),
+        ),
+        (
+            "event_range_order_omitted",
+            QueryProjectionMutation::Omit("event_range_order"),
+        ),
+        (
+            "event_range_order_corrupt",
+            QueryProjectionMutation::Bytes("event_range_order", &CORRUPT_EVENT_RANGE_ORDER),
         ),
     ];
 

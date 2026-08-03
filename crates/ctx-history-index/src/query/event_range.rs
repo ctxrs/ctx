@@ -21,15 +21,27 @@ struct EventRangeAddressCandidate {
     address: DocAddress,
 }
 
+#[derive(Debug)]
+struct EventRangeCandidate {
+    order: EventRangeOrderKey,
+    record: CoreEventRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ReverseTermHeapEntry {
+    key: [u8; crate::index_document::EVENT_RANGE_ORDER_KEY_LEN],
+    segment: usize,
+}
+
 enum OrderedTermMerger<'a> {
     Ascending(TermMerger<'a>),
     Descending(ReverseTermMerger<'a>),
 }
 
 impl OrderedTermMerger<'_> {
-    fn advance(&mut self) -> bool {
+    fn advance(&mut self) -> Result<bool> {
         match self {
-            Self::Ascending(merger) => merger.advance(),
+            Self::Ascending(merger) => Ok(merger.advance()),
             Self::Descending(merger) => merger.advance(),
         }
     }
@@ -53,59 +65,60 @@ impl OrderedTermMerger<'_> {
 /// forward-only. This bounded merger retains one cursor per immutable segment.
 struct ReverseTermMerger<'a> {
     streams: Vec<TermStreamer<'a>>,
-    active: Vec<bool>,
+    heap: BinaryHeap<ReverseTermHeapEntry>,
     current_segments: Vec<usize>,
-    current_key: Vec<u8>,
+    current_key: [u8; crate::index_document::EVENT_RANGE_ORDER_KEY_LEN],
     initialized: bool,
 }
 
 impl<'a> ReverseTermMerger<'a> {
     fn new(streams: Vec<TermStreamer<'a>>) -> Self {
-        let active = vec![false; streams.len()];
         Self {
             streams,
-            active,
+            heap: BinaryHeap::new(),
             current_segments: Vec::new(),
-            current_key: Vec::with_capacity(crate::index_document::EVENT_RANGE_ORDER_KEY_LEN),
+            current_key: [0; crate::index_document::EVENT_RANGE_ORDER_KEY_LEN],
             initialized: false,
         }
     }
 
-    fn advance(&mut self) -> bool {
+    fn advance_segment(&mut self, segment: usize) -> Result<()> {
+        if self.streams[segment].advance() {
+            let key = self.streams[segment]
+                .key()
+                .try_into()
+                .map_err(|_| IndexError::InvalidStoredDocumentField(EVENT_RANGE_ORDER_FIELD))?;
+            self.heap.push(ReverseTermHeapEntry { key, segment });
+        }
+        Ok(())
+    }
+
+    fn advance(&mut self) -> Result<bool> {
         if self.initialized {
-            for segment in self.current_segments.drain(..) {
-                self.active[segment] = self.streams[segment].advance();
+            let current_segments = std::mem::take(&mut self.current_segments);
+            for segment in current_segments {
+                self.advance_segment(segment)?;
             }
         } else {
-            for (active, stream) in self.active.iter_mut().zip(&mut self.streams) {
-                *active = stream.advance();
+            for segment in 0..self.streams.len() {
+                self.advance_segment(segment)?;
             }
             self.initialized = true;
         }
 
-        self.current_key.clear();
-        for (segment, stream) in self.streams.iter().enumerate() {
-            if self.active[segment]
-                && (self.current_key.is_empty() || stream.key() > self.current_key.as_slice())
-            {
-                self.current_key.clear();
-                self.current_key.extend_from_slice(stream.key());
-            }
+        let Some(entry) = self.heap.pop() else {
+            return Ok(false);
+        };
+        self.current_key = entry.key;
+        self.current_segments.push(entry.segment);
+        while self
+            .heap
+            .peek()
+            .is_some_and(|candidate| candidate.key == self.current_key)
+        {
+            self.current_segments.push(self.heap.pop().unwrap().segment);
         }
-        if self.current_key.is_empty() {
-            return false;
-        }
-        self.current_segments
-            .extend(
-                self.streams
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(segment, stream)| {
-                        (self.active[segment] && stream.key() == self.current_key)
-                            .then_some(segment)
-                    }),
-            );
-        true
+        Ok(true)
     }
 
     fn key(&self) -> &[u8] {
@@ -315,6 +328,12 @@ impl CoreEventRangeSelection {
         generation_id: &str,
         event: &CoreEventRecord,
     ) -> CoreEventRangeResult<CoreEventRangeCursor> {
+        #[cfg(test)]
+        EVENT_RANGE_CURSOR_RECORD_RESERIALIZATIONS.set(
+            EVENT_RANGE_CURSOR_RECORD_RESERIALIZATIONS
+                .get()
+                .saturating_add(1),
+        );
         let encoded_core_bytes = event
             .core_record
             .encode_stored()
@@ -524,6 +543,26 @@ pub struct CoreEventRangePage {
     pub oversized_singleton: bool,
     pub next_cursor: Option<CoreEventRangeCursor>,
     pub terminal: bool,
+    order_keys: Vec<EventRangeOrderKey>,
+    selection_digest: [u8; 32],
+}
+
+impl CoreEventRangePage {
+    /// Returns a continuation cursor after an item retained from this page.
+    /// This reuses the order key verified during traversal and never
+    /// reserializes the Core record.
+    pub fn cursor_after(
+        &self,
+        item_index: usize,
+    ) -> CoreEventRangeResult<Option<CoreEventRangeCursor>> {
+        self.order_keys
+            .get(item_index)
+            .copied()
+            .map(|order| {
+                CoreEventRangeCursor::new(&self.generation_id, self.selection_digest, order)
+            })
+            .transpose()
+    }
 }
 
 impl VerifiedIndex {
@@ -568,6 +607,8 @@ impl VerifiedIndex {
                 oversized_singleton: false,
                 next_cursor: None,
                 terminal: true,
+                order_keys: Vec::new(),
+                selection_digest: selection.digest,
             });
         }
         let fields = fields_from_schema(self.searcher.schema())?;
@@ -591,15 +632,25 @@ impl VerifiedIndex {
                 fields,
                 source_token.as_deref(),
             )?;
-        let items = candidates;
+        let order_keys = candidates
+            .iter()
+            .map(|candidate| candidate.order)
+            .collect::<Vec<_>>();
+        let items = candidates
+            .into_iter()
+            .map(|candidate| candidate.record)
+            .collect::<Vec<_>>();
 
         let terminal = !has_more;
         let next_cursor = if terminal {
             None
         } else {
-            items
+            order_keys
                 .last()
-                .map(|event| selection.cursor_for(&self.generation_id, event))
+                .copied()
+                .map(|order| {
+                    CoreEventRangeCursor::new(&self.generation_id, selection.digest, order)
+                })
                 .transpose()?
         };
         if !terminal && next_cursor.is_none() {
@@ -616,6 +667,8 @@ impl VerifiedIndex {
             oversized_singleton,
             next_cursor,
             terminal,
+            order_keys,
+            selection_digest: selection.digest,
         })
     }
 
@@ -664,7 +717,7 @@ impl VerifiedIndex {
         budget: CoreEventPageBudget,
         fields: Fields,
         source_token: Option<&str>,
-    ) -> CoreEventRangeResult<(Vec<CoreEventRecord>, bool, usize, usize)> {
+    ) -> CoreEventRangeResult<(Vec<EventRangeCandidate>, bool, usize, usize)> {
         if selection.has_fully_indexed_filter() {
             return self.indexed_event_range_candidates(
                 selection,
@@ -732,7 +785,7 @@ impl VerifiedIndex {
         let mut candidates = Vec::with_capacity(limit);
         let mut encoded_core_bytes = 0_usize;
         let mut content_bytes = 0_usize;
-        while merged.advance() {
+        while merged.advance()? {
             #[cfg(test)]
             EVENT_RANGE_ORDER_TERM_VISITS
                 .set(EVENT_RANGE_ORDER_TERM_VISITS.get().saturating_add(1));
@@ -805,7 +858,7 @@ impl VerifiedIndex {
             content_bytes = content_bytes
                 .checked_add(order.content_bytes())
                 .ok_or(IndexError::CountOverflow)?;
-            candidates.push(record);
+            candidates.push(EventRangeCandidate { order, record });
         }
         Ok((candidates, false, encoded_core_bytes, content_bytes))
     }
@@ -818,7 +871,7 @@ impl VerifiedIndex {
         budget: CoreEventPageBudget,
         fields: Fields,
         source_token: Option<&str>,
-    ) -> CoreEventRangeResult<(Vec<CoreEventRecord>, bool, usize, usize)> {
+    ) -> CoreEventRangeResult<(Vec<EventRangeCandidate>, bool, usize, usize)> {
         let base_query = event_range_filter_query(selection, fields, source_token)?;
         let query: Box<dyn Query> = if let Some(after) = after {
             let range = match selection.filters.direction {
@@ -917,7 +970,10 @@ impl VerifiedIndex {
             content_bytes = content_bytes
                 .checked_add(actual_content_bytes)
                 .ok_or(IndexError::CountOverflow)?;
-            records.push(record);
+            records.push(EventRangeCandidate {
+                order: candidate.order,
+                record,
+            });
         }
         let has_more = records.len() < candidate_count;
         Ok((records, has_more, encoded_core_bytes, content_bytes))
