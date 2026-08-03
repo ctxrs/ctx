@@ -8,7 +8,7 @@ use crate::{ErrorClass, ProtocolError};
 
 mod control;
 mod page_builder;
-mod validation;
+pub(crate) mod validation;
 pub use control::{
     BeginCoreMaterializationRequest, CoreMaterializationBegan,
     CoreMaterializationBeginAcknowledgementIdentity, CoreMaterializationFinished,
@@ -16,13 +16,24 @@ pub use control::{
     FinishCoreMaterializationRequest,
 };
 pub use page_builder::CoreEventDeltaPageBuilder;
-#[cfg(test)]
-use validation::canonical_sha256;
 pub(crate) use validation::encoded_len;
-pub use validation::{core_materialization_id, core_record_sha256, core_source_snapshot_sha256};
+#[cfg(test)]
+use validation::{canonical_sha256, compact_json_encoded_len};
+pub use validation::{
+    core_materialization_id, core_record_digests, core_record_digests_from_encoded,
+    core_record_leaf_sha256, core_record_sha256, core_source_snapshot_sha256, CoreRecordDigests,
+};
 use validation::{
     core_record_content_bytes, core_source_delta_exact_eq, invalid_contract,
     validate_encoded_bound, validate_sha256, validate_source_states,
+};
+
+mod event_delta_pages;
+pub use event_delta_pages::{
+    ApplyCoreEventDeltaPagesRequest, CoreEventDeltaPagesAcknowledgementIdentity,
+    CoreEventDeltaPagesApplied, MAX_CORE_EVENT_DELTA_PAGES,
+    MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES,
+    MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES,
 };
 
 pub const CORE_MATERIALIZATION_CONTRACT_VERSION: u16 = 3;

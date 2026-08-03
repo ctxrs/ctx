@@ -164,6 +164,63 @@ fn record(source: &SourceKey, sequence: u64, body: String, two_repositories: boo
     }
 }
 
+#[test]
+fn added_and_replaced_deltas_expose_exact_record_to_leaf_helper() {
+    let source = source(1);
+    let record = record(
+        &source,
+        1,
+        "exact projection-boundary Core record".to_owned(),
+        true,
+    );
+    let expected = core_record_digests(&record).unwrap();
+    let stored_json = record.encode_stored().unwrap();
+    let decoded = CoreRecord::decode_stored(&stored_json).unwrap();
+    assert_eq!(decoded, record);
+    assert_eq!(decoded.encode_stored().unwrap(), stored_json);
+    assert_eq!(
+        core_record_digests_from_encoded(&decoded, &stored_json).unwrap(),
+        expected
+    );
+    for digest in [
+        &expected.core_record_sha256,
+        &expected.core_record_leaf_sha256,
+    ] {
+        assert_eq!(digest.len(), 64);
+        assert!(digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    }
+    assert_eq!(
+        expected.core_record_sha256,
+        core_record_sha256(&record).unwrap()
+    );
+    assert_eq!(
+        expected.core_record_leaf_sha256,
+        core_record_leaf_sha256(&record).unwrap()
+    );
+    assert_eq!(
+        expected.core_record_leaf_sha256,
+        ctx_history_core::core_record_leaf_sha256(&record).unwrap()
+    );
+
+    for delta in [
+        CoreEventDelta::Added(record.clone()),
+        CoreEventDelta::Replaced(CoreEventReplacement {
+            prior_core_record_sha256: "a".repeat(64),
+            record,
+        }),
+    ] {
+        delta.validate_for_source(&source).unwrap();
+        assert_eq!(
+            core_record_digests(delta.record().unwrap())
+                .unwrap()
+                .core_record_leaf_sha256,
+            expected.core_record_leaf_sha256
+        );
+    }
+}
+
 fn head(sources: &[CoreSourceState]) -> CoreGenerationHead {
     CoreGenerationHead::new(
         "a".repeat(64),
@@ -285,6 +342,157 @@ fn linear_event_delta_pages(
     pages
 }
 
+fn event_delta_pages_request(
+    page_count: usize,
+    final_terminal: bool,
+) -> ApplyCoreEventDeltaPagesRequest {
+    let source = source(7);
+    let source_state = state(source.clone(), 2, page_count as u64);
+    let mut records = (0..page_count)
+        .map(|index| {
+            record(
+                &source,
+                u64::try_from(index + 1).unwrap(),
+                format!("body-{index}"),
+                false,
+            )
+        })
+        .collect::<Vec<_>>();
+    records.sort_by_key(|record| record.event_id.digest());
+    let pages = records
+        .into_iter()
+        .enumerate()
+        .map(|(position, record)| CoreEventDeltaPage {
+            materialization_id: "d".repeat(64),
+            core_generation_id: "a".repeat(64),
+            reconciliation: CoreSourceReconciliation {
+                materialize_index: 0,
+                delta: CoreSourceDelta::Present(source_state.clone()),
+            },
+            page_index: u32::try_from(position + 3).unwrap(),
+            terminal: final_terminal && position + 1 == page_count,
+            deltas: vec![CoreEventDelta::Added(record)],
+        })
+        .collect();
+    ApplyCoreEventDeltaPagesRequest { pages }
+}
+
+fn multi_source_event_delta_pages_request(
+    pages_per_source: &[usize],
+) -> ApplyCoreEventDeltaPagesRequest {
+    let mut sources = pages_per_source
+        .iter()
+        .enumerate()
+        .map(|(index, page_count)| (source(u8::try_from(index + 32).unwrap()), *page_count))
+        .collect::<Vec<_>>();
+    sources.sort_by_key(|(source, _)| source.identity().digest());
+    let mut pages = Vec::new();
+    for (source, page_count) in sources {
+        let source_state = state(source.clone(), 2, u64::try_from(page_count).unwrap());
+        let mut records = (0..page_count)
+            .map(|index| {
+                record(
+                    &source,
+                    u64::try_from(index + 1).unwrap(),
+                    format!("multi-source-body-{index}"),
+                    false,
+                )
+            })
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| record.event_id.digest());
+        pages.extend(
+            records
+                .into_iter()
+                .enumerate()
+                .map(|(index, record)| CoreEventDeltaPage {
+                    materialization_id: "d".repeat(64),
+                    core_generation_id: "a".repeat(64),
+                    reconciliation: CoreSourceReconciliation {
+                        materialize_index: 0,
+                        delta: CoreSourceDelta::Present(source_state.clone()),
+                    },
+                    page_index: u32::try_from(index).unwrap(),
+                    terminal: index + 1 == page_count,
+                    deltas: vec![CoreEventDelta::Added(record)],
+                }),
+        );
+    }
+    ApplyCoreEventDeltaPagesRequest { pages }
+}
+
+fn event_delta_pages_applied(
+    request: &ApplyCoreEventDeltaPagesRequest,
+) -> CoreEventDeltaPagesApplied {
+    let pages = request
+        .pages
+        .iter()
+        .map(|page| CoreEventDeltaPageApplied {
+            materialization_id: page.materialization_id.clone(),
+            core_generation_id: page.core_generation_id.clone(),
+            source: page.reconciliation.delta.source().clone(),
+            page_index: page.page_index,
+            additions: u32::try_from(
+                page.deltas
+                    .iter()
+                    .filter(|delta| matches!(delta, CoreEventDelta::Added(_)))
+                    .count(),
+            )
+            .unwrap(),
+            replacements: u32::try_from(
+                page.deltas
+                    .iter()
+                    .filter(|delta| matches!(delta, CoreEventDelta::Replaced(_)))
+                    .count(),
+            )
+            .unwrap(),
+            tombstones: u32::try_from(
+                page.deltas
+                    .iter()
+                    .filter(|delta| matches!(delta, CoreEventDelta::Tombstoned(_)))
+                    .count(),
+            )
+            .unwrap(),
+            terminal: page.terminal,
+            replayed: false,
+        })
+        .collect();
+    CoreEventDeltaPagesApplied { pages }
+}
+
+fn request_with_encoded_wire_bytes(target: usize) -> ApplyCoreEventDeltaPagesRequest {
+    let source = source(8);
+    let page = CoreEventDeltaPage {
+        materialization_id: "d".repeat(64),
+        core_generation_id: "a".repeat(64),
+        reconciliation: CoreSourceReconciliation {
+            materialize_index: 0,
+            delta: CoreSourceDelta::Present(state(source.clone(), 2, 1)),
+        },
+        page_index: 0,
+        terminal: true,
+        deltas: vec![CoreEventDelta::Added(record(
+            &source,
+            1,
+            String::new(),
+            false,
+        ))],
+    };
+    let mut request = ApplyCoreEventDeltaPagesRequest { pages: vec![page] };
+    let fixed_bytes = serde_json::to_vec(&request).unwrap().len();
+    let variable_bytes = target.checked_sub(fixed_bytes).unwrap();
+    let escaped_bytes = variable_bytes / 6;
+    let plain_bytes = variable_bytes % 6;
+    let mut body = "\0".repeat(escaped_bytes);
+    body.push_str(&"x".repeat(plain_bytes));
+    assert!(body.len() <= MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES);
+    let CoreEventDelta::Added(record) = &mut request.pages[0].deltas[0] else {
+        panic!("expected added Core event");
+    };
+    record.content.normalized_body = Some(body);
+    assert_eq!(compact_json_encoded_len(&request).unwrap(), target);
+    request
+}
+
 #[test]
 fn complete_core_event_delta_page_transports_long_body_and_two_repository_scopes() {
     let source = source(1);
@@ -330,6 +538,352 @@ fn complete_core_event_delta_page_transports_long_body_and_two_repository_scopes
     assert_eq!(
         read_frame::<_, HostEnvelope>(&mut Cursor::new(frame)).unwrap(),
         envelope
+    );
+}
+
+#[test]
+fn event_delta_page_batches_accept_exactly_one_to_sixteen_pages() {
+    assert_eq!(MAX_CORE_EVENT_DELTA_PAGES, 16);
+    assert_eq!(
+        MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES,
+        128 * 1024 * 1024
+    );
+    for page_count in [1, MAX_CORE_EVENT_DELTA_PAGES] {
+        event_delta_pages_request(page_count, true)
+            .validate()
+            .unwrap();
+    }
+    assert_eq!(
+        event_delta_pages_request(0, true)
+            .validate()
+            .unwrap_err()
+            .class,
+        ErrorClass::Bounds
+    );
+    assert_eq!(
+        event_delta_pages_request(MAX_CORE_EVENT_DELTA_PAGES + 1, true)
+            .validate()
+            .unwrap_err()
+            .class,
+        ErrorClass::Bounds
+    );
+}
+
+#[test]
+fn event_delta_page_envelope_accepts_ordered_source_pinned_sub_batches() {
+    let request = multi_source_event_delta_pages_request(&[2, 1, 13]);
+    assert_eq!(request.pages.len(), MAX_CORE_EVENT_DELTA_PAGES);
+    request.validate().unwrap();
+
+    let response = event_delta_pages_applied(&request);
+    response.validate_for(&request).unwrap();
+    assert_eq!(
+        response
+            .pages
+            .windows(2)
+            .filter(|pages| !pages[0].source.exact_descriptor_eq(&pages[1].source))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn event_delta_page_envelope_rejects_invalid_source_sub_batch_boundaries() {
+    let request = multi_source_event_delta_pages_request(&[2, 1]);
+    let first_source = request.pages[0].reconciliation.delta.source();
+    let first_source_end = request
+        .pages
+        .iter()
+        .position(|page| {
+            !page
+                .reconciliation
+                .delta
+                .source()
+                .exact_descriptor_eq(first_source)
+        })
+        .unwrap();
+
+    let mut unterminated = request.clone();
+    unterminated.pages[first_source_end - 1].terminal = false;
+    assert_eq!(
+        unterminated.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let mut nonzero_start = request.clone();
+    nonzero_start.pages[first_source_end].page_index = 1;
+    assert_eq!(
+        nonzero_start.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let mut out_of_order = request.clone();
+    out_of_order.pages.rotate_left(first_source_end);
+    assert_eq!(
+        out_of_order.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let mut mismatched_reconciliation = request;
+    let first_source = mismatched_reconciliation.pages[0]
+        .reconciliation
+        .delta
+        .source()
+        .clone();
+    mismatched_reconciliation.pages[1].reconciliation.delta =
+        CoreSourceDelta::Present(state(first_source, 9, 2));
+    assert_eq!(
+        mismatched_reconciliation.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+}
+
+#[test]
+fn event_delta_page_envelope_acknowledges_each_source_identity() {
+    let request = multi_source_event_delta_pages_request(&[1, 1]);
+    let identity = request.acknowledgement_identity().unwrap();
+    let mut response = event_delta_pages_applied(&request);
+    response.pages[1].source = response.pages[0].source.clone();
+    assert_eq!(
+        response.validate_for_identity(&identity).unwrap_err().class,
+        ErrorClass::Sequence
+    );
+}
+
+#[test]
+fn event_delta_page_batch_enforces_exact_aggregate_encoded_request_bound() {
+    let mut request =
+        request_with_encoded_wire_bytes(MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES);
+    request.validate().unwrap();
+
+    let CoreEventDelta::Added(record) = &mut request.pages[0].deltas[0] else {
+        panic!("expected added Core event");
+    };
+    record.content.normalized_body.as_mut().unwrap().push('x');
+    assert_eq!(
+        compact_json_encoded_len(&request).unwrap(),
+        MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES + 1
+    );
+    request.pages[0].validate().unwrap();
+    assert_eq!(request.validate().unwrap_err().class, ErrorClass::Bounds);
+}
+
+#[test]
+fn encoded_bound_counting_writer_matches_compact_json_bytes_and_errors() {
+    let values = [
+        serde_json::json!(null),
+        serde_json::json!({"plain": "value", "escaped": "\0\n\"\\", "number": 42}),
+        serde_json::json!([true, false, {"nested": [1, 2, 3]}]),
+    ];
+    for value in values {
+        assert_eq!(
+            compact_json_encoded_len(&value).unwrap(),
+            serde_json::to_vec(&value).unwrap().len()
+        );
+    }
+
+    let invalid_json_key = BTreeMap::from([(vec![1_u8], 1_u8)]);
+    let allocated_error = serde_json::to_vec(&invalid_json_key)
+        .unwrap_err()
+        .to_string();
+    let counted_error = compact_json_encoded_len(&invalid_json_key)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(counted_error, allocated_error);
+    assert_eq!(
+        validate_encoded_bound(&invalid_json_key, usize::MAX, "unused bound").unwrap_err(),
+        ProtocolError::new(ErrorClass::Internal, "protocol encoding failed")
+    );
+}
+
+#[test]
+fn event_delta_page_batch_retains_every_constituent_page_bound() {
+    let source = source(10);
+    let request = |bodies: Vec<String>| {
+        let event_count = u64::try_from(bodies.len()).unwrap();
+        let mut records = bodies
+            .into_iter()
+            .enumerate()
+            .map(|(index, body)| record(&source, u64::try_from(index + 1).unwrap(), body, false))
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| record.event_id.digest());
+        ApplyCoreEventDeltaPagesRequest {
+            pages: vec![CoreEventDeltaPage {
+                materialization_id: "d".repeat(64),
+                core_generation_id: "a".repeat(64),
+                reconciliation: CoreSourceReconciliation {
+                    materialize_index: 0,
+                    delta: CoreSourceDelta::Present(state(source.clone(), 2, event_count)),
+                },
+                page_index: 0,
+                terminal: true,
+                deltas: records.into_iter().map(CoreEventDelta::Added).collect(),
+            }],
+        }
+    };
+
+    let too_many_items = request(vec!["x".to_owned(); MAX_CORE_EVENT_DELTA_PAGE_ITEMS + 1]);
+    assert_eq!(
+        too_many_items.validate().unwrap_err().class,
+        ErrorClass::Bounds
+    );
+
+    let too_much_content = request(vec![
+        "x".repeat(MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES / 2 + 1),
+        "y".repeat(MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES / 2),
+    ]);
+    assert!(too_much_content
+        .validate()
+        .unwrap_err()
+        .message
+        .contains("selected-content byte bound"));
+
+    let wire_expansion_bytes = MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES / 6 + 1;
+    assert!(wire_expansion_bytes < MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES);
+    let too_many_wire_bytes = request(vec!["\0".repeat(wire_expansion_bytes)]);
+    assert!(too_many_wire_bytes
+        .validate()
+        .unwrap_err()
+        .message
+        .contains("page exceeds its wire bound"));
+}
+
+#[test]
+fn event_delta_page_batch_rejects_cross_page_identity_mismatches() {
+    let request = event_delta_pages_request(2, true);
+    request.validate().unwrap();
+
+    let mut wrong_materialization = request.clone();
+    wrong_materialization.pages[1].materialization_id = "e".repeat(64);
+    assert_eq!(
+        wrong_materialization.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let mut wrong_generation = request.clone();
+    wrong_generation.pages[1].core_generation_id = "b".repeat(64);
+    assert_eq!(
+        wrong_generation.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let mut wrong_reconciliation = request.clone();
+    let CoreSourceDelta::Present(source_state) =
+        &mut wrong_reconciliation.pages[1].reconciliation.delta
+    else {
+        panic!("expected present source");
+    };
+    source_state.core_record_accumulator = "e".repeat(64);
+    assert_eq!(
+        wrong_reconciliation.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let mut wrong_source = request.clone();
+    let other_source = source(9);
+    wrong_source.pages[1].reconciliation = CoreSourceReconciliation {
+        materialize_index: 0,
+        delta: CoreSourceDelta::Present(state(other_source.clone(), 2, 1)),
+    };
+    wrong_source.pages[1].deltas = vec![CoreEventDelta::Added(record(
+        &other_source,
+        1,
+        "other source".to_owned(),
+        false,
+    ))];
+    assert_eq!(
+        wrong_source.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+}
+
+#[test]
+fn event_delta_page_batch_rejects_gaps_duplicates_order_regressions_and_early_terminal() {
+    let request = event_delta_pages_request(2, true);
+
+    let mut gap = request.clone();
+    gap.pages[1].page_index += 1;
+    assert_eq!(gap.validate().unwrap_err().class, ErrorClass::Sequence);
+
+    let mut duplicate_index = request.clone();
+    duplicate_index.pages[1].page_index = duplicate_index.pages[0].page_index;
+    assert_eq!(
+        duplicate_index.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let mut descending = request.clone();
+    let first_deltas = descending.pages[0].deltas.clone();
+    descending.pages[0].deltas = descending.pages[1].deltas.clone();
+    descending.pages[1].deltas = first_deltas;
+    assert_eq!(
+        descending.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let mut duplicate_event = request.clone();
+    duplicate_event.pages[1].deltas = duplicate_event.pages[0].deltas.clone();
+    assert_eq!(
+        duplicate_event.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let mut page_after_terminal = request.clone();
+    page_after_terminal.pages[0].terminal = true;
+    assert_eq!(
+        page_after_terminal.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    event_delta_pages_request(2, false).validate().unwrap();
+}
+
+#[test]
+fn event_delta_page_batch_acknowledgement_binds_order_identity_and_counts_compactly() {
+    let request = event_delta_pages_request(2, true);
+    let identity = request.acknowledgement_identity().unwrap();
+    let response = event_delta_pages_applied(&request);
+    drop(request);
+    response.validate_for_identity(&identity).unwrap();
+
+    let mut reordered = response.clone();
+    reordered.pages.swap(0, 1);
+    assert_eq!(
+        reordered
+            .validate_for_identity(&identity)
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
+    );
+
+    let mut wrong_count = response.clone();
+    wrong_count.pages[0].additions += 1;
+    assert_eq!(
+        wrong_count
+            .validate_for_identity(&identity)
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
+    );
+
+    let mut missing_page = response.clone();
+    missing_page.pages.pop();
+    assert_eq!(
+        missing_page
+            .validate_for_identity(&identity)
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
+    );
+
+    let mut wrong_identity = response;
+    wrong_identity.pages[0].materialization_id = "e".repeat(64);
+    assert_eq!(
+        wrong_identity
+            .validate_for_identity(&identity)
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
     );
 }
 

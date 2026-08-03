@@ -126,6 +126,7 @@ impl FakeHelper {
                     core_receipt: None,
                     coverage: MaterializedCoverage::NotMaterialized,
                     repository_coverage: Default::default(),
+                    core_preparation_peak_workers: 0,
                     access: ProAccessStatus {
                         entitlement: ProAccessState::Available,
                         graph_key: ProAccessState::Available,
@@ -133,6 +134,7 @@ impl FakeHelper {
                     },
                     supported_operations: BTreeSet::new(),
                     available_operations: BTreeSet::new(),
+                    storage_evidence: None,
                 })
             }
             HostMessage::Blame(request) if self.selected(Capability::Query) => {

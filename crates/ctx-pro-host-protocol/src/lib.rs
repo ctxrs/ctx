@@ -56,8 +56,9 @@ pub use message::{
     apply_core_source_delta_page_request_frame_wire_bytes,
     core_source_delta_page_applied_frame_wire_bytes, Capability, CoreProjectionCurrentness,
     HelloRequest, HelloResult, HelperEnvelope, HelperMessage, HostEnvelope, HostMessage,
-    MaterializedCoverage, ProAccessState, ProAccessStatus, ProOperation, RepositoryCoverage,
-    StatusRequest, StatusResult,
+    JournalFinishActivity, MaterializedCoverage, ProAccessState, ProAccessStatus, ProOperation,
+    ProStorageEvidence, RepositoryCoverage, StatusRequest, StatusResult,
+    MAX_JOURNAL_FINISH_WORKERS,
 };
 mod query;
 pub use query::{
@@ -70,22 +71,26 @@ pub use query::{
 };
 mod core_materialization;
 pub use core_materialization::{
-    core_materialization_id, core_record_sha256, core_source_snapshot_sha256,
-    ApplyCoreEventDeltaPageRequest, ApplyCoreSourceDeltaPageRequest,
-    BeginCoreMaterializationRequest, CoreEventDelta, CoreEventDeltaPage,
-    CoreEventDeltaPageAcknowledgementIdentity, CoreEventDeltaPageApplied,
-    CoreEventDeltaPageBuilder, CoreEventReplacement, CoreEventState, CoreEventStatePage,
+    core_materialization_id, core_record_digests, core_record_digests_from_encoded,
+    core_record_leaf_sha256, core_record_sha256, core_source_snapshot_sha256,
+    ApplyCoreEventDeltaPageRequest, ApplyCoreEventDeltaPagesRequest,
+    ApplyCoreSourceDeltaPageRequest, BeginCoreMaterializationRequest, CoreEventDelta,
+    CoreEventDeltaPage, CoreEventDeltaPageAcknowledgementIdentity, CoreEventDeltaPageApplied,
+    CoreEventDeltaPageBuilder, CoreEventDeltaPagesAcknowledgementIdentity,
+    CoreEventDeltaPagesApplied, CoreEventReplacement, CoreEventState, CoreEventStatePage,
     CoreEventStatePageRequest, CoreEventTombstone, CoreGenerationHead, CoreMaterializationBegan,
     CoreMaterializationBeginAcknowledgementIdentity, CoreMaterializationFinished,
-    CoreMaterializationReceipt, CoreMaterializationReceiptIdentity, CoreSourceDelta,
-    CoreSourceDeltaPage, CoreSourceDeltaPageAcknowledgementIdentity, CoreSourceDeltaPageApplied,
-    CoreSourceReconciliation, CoreSourceRemoval, CoreSourceState, FinishCoreMaterializationRequest,
-    CORE_MATERIALIZATION_CONTRACT_VERSION, MAX_CORE_CONTROL_WIRE_BYTES,
-    MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES, MAX_CORE_EVENT_DELTA_PAGE_ITEMS,
-    MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES, MAX_CORE_EVENT_STATE_PAGE_ITEMS,
-    MAX_CORE_EVENT_STATE_PAGE_WIRE_BYTES, MAX_CORE_MATERIALIZER_REVISION_BYTES,
-    MAX_CORE_SOURCE_DELTA_PAGE_ITEMS, MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES,
-    MAX_CORE_SOURCE_STATES,
+    CoreMaterializationReceipt, CoreMaterializationReceiptIdentity, CoreRecordDigests,
+    CoreSourceDelta, CoreSourceDeltaPage, CoreSourceDeltaPageAcknowledgementIdentity,
+    CoreSourceDeltaPageApplied, CoreSourceReconciliation, CoreSourceRemoval, CoreSourceState,
+    FinishCoreMaterializationRequest, CORE_MATERIALIZATION_CONTRACT_VERSION,
+    MAX_CORE_CONTROL_WIRE_BYTES, MAX_CORE_EVENT_DELTA_PAGES,
+    MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES,
+    MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES, MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
+    MAX_CORE_EVENT_DELTA_PAGE_ITEMS, MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES,
+    MAX_CORE_EVENT_STATE_PAGE_ITEMS, MAX_CORE_EVENT_STATE_PAGE_WIRE_BYTES,
+    MAX_CORE_MATERIALIZER_REVISION_BYTES, MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
+    MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES, MAX_CORE_SOURCE_STATES,
 };
 mod fake;
 pub use fake::{FakeBlameFailure, FakeHelper};

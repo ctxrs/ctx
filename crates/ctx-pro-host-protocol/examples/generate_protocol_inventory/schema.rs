@@ -1,6 +1,7 @@
 use super::*;
 use ctx_history_core::{
     core_record_contract_fingerprint, CORE_BOUNDED_SHELL_SUBSET_REVISION,
+    CORE_RECORD_ACCUMULATOR_IDENTITY, CORE_RECORD_LEAF_DOMAIN,
     CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION, CORE_REPOSITORY_CONTRACT_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
@@ -60,11 +61,17 @@ pub(super) fn inventory() -> Value {
             "core_event_state_page_items": MAX_CORE_EVENT_STATE_PAGE_ITEMS,
             "core_event_delta_page_items": MAX_CORE_EVENT_DELTA_PAGE_ITEMS,
             "core_event_delta_page_content_bytes": MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
+            "core_event_delta_pages": MAX_CORE_EVENT_DELTA_PAGES,
+            "core_event_delta_pages_request_wire_bytes":
+                MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES,
+            "core_event_delta_pages_prepared_output_bytes":
+                MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES,
             "core_source_delta_page_wire_bytes": MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES,
             "core_event_state_page_wire_bytes": MAX_CORE_EVENT_STATE_PAGE_WIRE_BYTES,
             "core_event_delta_page_wire_bytes": MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES,
             "core_control_wire_bytes": MAX_CORE_CONTROL_WIRE_BYTES,
             "core_materializer_revision_bytes": MAX_CORE_MATERIALIZER_REVISION_BYTES,
+            "journal_finish_workers": MAX_JOURNAL_FINISH_WORKERS,
             "blame_results": MAX_BLAME_RESULTS,
             "blame_cursor_bytes": MAX_BLAME_CURSOR_BYTES,
             "blame_evidence": MAX_BLAME_EVIDENCE,
@@ -77,13 +84,14 @@ pub(super) fn inventory() -> Value {
             "confirm_graph_key_deletion", "status",
             "begin_core_materialization", "apply_core_source_delta_page",
             "core_event_state_page", "apply_core_event_delta_page",
-            "finish_core_materialization", "blame"
+            "finish_core_materialization", "blame", "apply_core_event_delta_pages"
         ],
         "helper_message_kinds": [
             "hello", "authorized", "graph_key_deletion_prepared", "graph_key_deleted",
             "status", "core_materialization_began", "core_source_delta_page_applied",
             "core_event_state_page", "core_event_delta_page_applied",
-            "core_materialization_finished", "blame", "error"
+            "core_materialization_finished", "blame", "error",
+            "core_event_delta_pages_applied"
         ],
         "capabilities": wire_names(&capabilities, Capability::wire_name),
         "enums": {
@@ -112,13 +120,22 @@ pub(super) fn inventory() -> Value {
             "StatusRequest": fields(&["requested_core_generation_id"], &[]),
             "StatusResult": fields(&[
                 "currentness", "requested_core_generation_id", "core_receipt", "coverage",
-                "repository_coverage", "access", "supported_operations",
-                "available_operations"
+                "repository_coverage", "core_preparation_peak_workers", "access", "supported_operations",
+                "available_operations", "storage_evidence"
             ], &[]),
             "RepositoryCoverage": fields(&[
                 "repository_candidate_events", "logical_binding_events",
                 "certified_live_root_access_events", "file_evidence_events",
                 "exact_commit_evidence_events", "exact_pull_request_evidence_events"
+            ], &[]),
+            "ProStorageEvidence": fields(&[
+                "graph_manifest_schema", "flat_format_version",
+                "materializer_checkpoint_version", "journal_pack_format_version",
+                "legacy_journals_written", "journal_pages_written", "journal_packs_written",
+                "journal_finish_activity"
+            ], &[]),
+            "JournalFinishActivity": fields(&[
+                "worker_limit", "peak_workers", "started_after_preparation"
             ], &[]),
             "ProAccessStatus": fields(&["entitlement", "graph_key", "local_repository"], &[]),
             "CoreSourceState": fields(
@@ -172,10 +189,12 @@ pub(super) fn inventory() -> Value {
                 "terminal", "deltas"
             ], &[]),
             "ApplyCoreEventDeltaPageRequest": fields(&["page"], &[]),
+            "ApplyCoreEventDeltaPagesRequest": fields(&["pages"], &[]),
             "CoreEventDeltaPageApplied": fields(&[
                 "materialization_id", "core_generation_id", "source", "page_index",
                 "additions", "replacements", "tombstones", "terminal", "replayed"
             ], &[]),
+            "CoreEventDeltaPagesApplied": fields(&["pages"], &[]),
             "FinishCoreMaterializationRequest": fields(&[
                 "materialization_id", "head", "expected_prior_receipt", "source_delta_pages",
                 "changed_sources", "removed_sources", "event_delta_pages", "event_mutations"
@@ -221,6 +240,20 @@ pub(super) fn inventory() -> Value {
         },
         "core_record_contract": {
             "fingerprint": core_record_contract_fingerprint(),
+            "leaf": {
+                "helper": "ctx_pro_host_protocol::core_record_leaf_sha256",
+                "paired_helper": "ctx_pro_host_protocol::core_record_digests",
+                "domain": std::str::from_utf8(CORE_RECORD_LEAF_DOMAIN)
+                    .unwrap_or("<invalid-Core-record-leaf-domain>"),
+                "algorithm": "sha256(domain_then_canonical_event_id_then_u64_be_exact_canonical_core_record_json_length_then_exact_canonical_core_record_json)",
+                "added_path": "CoreEventDelta.added.value",
+                "replaced_path": "CoreEventDelta.replaced.value.record"
+            },
+            "accumulator": {
+                "identity": std::str::from_utf8(CORE_RECORD_ACCUMULATOR_IDENTITY)
+                    .unwrap_or("<invalid-Core-record-accumulator-identity>"),
+                "algorithm": "sum_mod_2^256(sha256(identity_then_u64_be_canonical_event_id_length_then_canonical_event_id_then_core_record_leaf))"
+            },
             "repository_contract_revision": CORE_REPOSITORY_CONTRACT_REVISION,
             "repository_observation_revision": CORE_REPOSITORY_OBSERVATION_REVISION,
             "bounded_shell_subset_revision": CORE_BOUNDED_SHELL_SUBSET_REVISION,
@@ -237,7 +270,7 @@ pub(super) fn inventory() -> Value {
             "contract_version": CORE_MATERIALIZATION_CONTRACT_VERSION,
             "sequence": [
                 "begin_core_materialization", "apply_core_source_delta_page",
-                "core_event_state_page", "apply_core_event_delta_page",
+                "core_event_state_page", "apply_core_event_delta_pages",
                 "finish_core_materialization"
             ],
             "authority": "one_generation_pinned_core_snapshot_delta_feed",
@@ -246,6 +279,12 @@ pub(super) fn inventory() -> Value {
             "source_acknowledgements": "request_and_response_share_an_explicit_acknowledgement_page_index_present_reconciliations_exist_only_on_page_zero_nonterminal_input_source_pages_complete_in_one_acknowledgement_page_each_response_marks_terminal_changed_removed_counts_cover_only_that_page_and_all_source_acknowledgements_finish_before_any_event_page",
             "removal": "source_removal_is_resumable_as_bounded_event_tombstone_pages_and_deletes_source_control_state only_on_its_terminal_page",
             "replacement": "prior_event_removal_and_replacement_record_insertion_are_atomic_in_one_bounded_event_delta_page",
+            "event_delta_batching": {
+                "request": "one_to_sixteen_pages_partitioned_into_strictly_source_ordered_source_pinned_contiguous_sub_batches_with_terminal_source_boundaries_and_strict_per_source_event_order",
+                "aggregate_input": "exact_compact_request_json_is_at_most_sixty_eight_mib_while_every_page_retains_its_existing_bounds",
+                "prepared_output": "helper_prepared_output_accounting_is_at_most_one_hundred_twenty_eight_mib",
+                "acknowledgement": "one_ordered_count_exact_page_acknowledgement_per_requested_page"
+            },
             "records": "complete_core_records_are_read_only_from_the_pinned_core_source_event_page_api_and_only_added_or_replaced_events_cross_the_protocol",
             "repository_data": "repository_bindings_abstentions_file_invocation_evidence_and_file_and_vcs_observations_exist_only_inside_core_records",
             "publication": "explicit_terminal_counts_at_most_one_prior_receipt_cas_and_a_small_final_control_transaction",

@@ -24,11 +24,55 @@ pub fn core_materialization_id(
         .materialization_id(materializer_revision)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreRecordDigests {
+    pub core_record_sha256: String,
+    pub core_record_leaf_sha256: String,
+}
+
 pub fn core_record_sha256(record: &CoreRecord) -> Result<String, ProtocolError> {
+    let encoded = encode_core_record(record)?;
+    Ok(hex_sha256(Sha256::digest(encoded)))
+}
+
+/// Returns the frozen Core-record leaf while the exact `CoreRecord` is still
+/// available at the Added/Replaced projection boundary.
+pub fn core_record_leaf_sha256(record: &CoreRecord) -> Result<String, ProtocolError> {
+    let encoded = encode_core_record(record)?;
+    Ok(hex_sha256(core_record_leaf_digest(record, &encoded)?))
+}
+
+/// Computes the canonical record-state SHA and frozen Core leaf from one exact
+/// `record.encode_stored()` traversal.
+pub fn core_record_digests(record: &CoreRecord) -> Result<CoreRecordDigests, ProtocolError> {
+    let encoded = encode_core_record(record)?;
+    core_record_digests_from_encoded(record, &encoded)
+}
+
+/// Computes both protocol digests from exact validated stored Core JSON.
+///
+/// The caller must retain the decoded record produced from `encoded`. This is
+/// the bounded Core-page seam used to avoid re-serializing a record that the
+/// pinned Core generation already authenticated and decoded.
+pub fn core_record_digests_from_encoded(
+    record: &CoreRecord,
+    encoded: &[u8],
+) -> Result<CoreRecordDigests, ProtocolError> {
+    Ok(CoreRecordDigests {
+        core_record_sha256: hex_sha256(Sha256::digest(encoded)),
+        core_record_leaf_sha256: hex_sha256(core_record_leaf_digest(record, encoded)?),
+    })
+}
+
+fn encode_core_record(record: &CoreRecord) -> Result<Vec<u8>, ProtocolError> {
     record
-        .validate_contract()
-        .map_err(|error| invalid_contract("Core record", error))?;
-    canonical_sha256(record, "Core record state encoding failed")
+        .encode_stored()
+        .map_err(|error| invalid_contract("Core record", error))
+}
+
+fn core_record_leaf_digest(record: &CoreRecord, encoded: &[u8]) -> Result<[u8; 32], ProtocolError> {
+    ctx_history_core::core_record_leaf_digest(record.event_id, encoded)
+        .map_err(|error| invalid_contract("Core record leaf", error))
 }
 
 pub(super) fn validate_source_states(sources: &[CoreSourceState]) -> Result<(), ProtocolError> {
@@ -108,7 +152,7 @@ pub(super) fn validate_identity(value: &str, label: &'static str) -> Result<(), 
     Ok(())
 }
 
-pub(super) fn validate_sha256(value: &str, label: &'static str) -> Result<(), ProtocolError> {
+pub(crate) fn validate_sha256(value: &str, label: &'static str) -> Result<(), ProtocolError> {
     if value.len() != 64
         || !value
             .bytes()
@@ -122,7 +166,34 @@ pub(super) fn validate_sha256(value: &str, label: &'static str) -> Result<(), Pr
     Ok(())
 }
 
-pub(super) fn validate_encoded_bound<T: Serialize>(
+#[derive(Default)]
+struct CountingWriter {
+    encoded_bytes: usize,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.encoded_bytes = self
+            .encoded_bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("encoded byte count overflowed"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(super) fn compact_json_encoded_len<T: Serialize + ?Sized>(
+    value: &T,
+) -> serde_json::Result<usize> {
+    let mut writer = CountingWriter::default();
+    serde_json::to_writer(&mut writer, value)?;
+    Ok(writer.encoded_bytes)
+}
+
+pub(crate) fn validate_encoded_bound<T: Serialize + ?Sized>(
     value: &T,
     maximum: usize,
     message: &'static str,
@@ -134,27 +205,8 @@ pub(super) fn validate_encoded_bound<T: Serialize>(
 }
 
 pub(crate) fn encoded_len<T: Serialize + ?Sized>(value: &T) -> Result<usize, ProtocolError> {
-    #[derive(Default)]
-    struct Counter(usize);
-
-    impl Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0 = self
-                .0
-                .checked_add(bytes.len())
-                .ok_or_else(|| io::Error::other("protocol encoded length overflowed"))?;
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut counter = Counter::default();
-    serde_json::to_writer(&mut counter, value)
-        .map_err(|_| ProtocolError::new(ErrorClass::Internal, "protocol encoding failed"))?;
-    Ok(counter.0)
+    compact_json_encoded_len(value)
+        .map_err(|_| ProtocolError::new(ErrorClass::Internal, "protocol encoding failed"))
 }
 
 pub(super) fn encode_with_bound<T: Serialize>(
@@ -180,11 +232,15 @@ pub(super) fn canonical_sha256<T: Serialize + ?Sized>(
 }
 
 pub(super) fn hex_sha256(digest: impl AsRef<[u8]>) -> String {
-    digest
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let digest = digest.as_ref();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(HEX[usize::from(byte >> 4)] as char);
+        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
 }
 
 pub(super) fn invalid_contract(

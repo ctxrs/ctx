@@ -95,6 +95,10 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
             HostMessage::FinishCoreMaterialization(finish_request()),
         ),
         ("blame", HostMessage::Blame(blame_request())),
+        (
+            "apply_core_event_delta_pages",
+            HostMessage::ApplyCoreEventDeltaPages(event_delta_pages_request()),
+        ),
     ]
 }
 
@@ -158,9 +162,24 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
                 core_receipt: Some(receipt()),
                 coverage: MaterializedCoverage::Complete,
                 repository_coverage: repository_coverage(1),
+                core_preparation_peak_workers: 4,
                 access: access(ProAccessState::Available),
                 supported_operations: operations(),
                 available_operations: operations(),
+                storage_evidence: Some(ProStorageEvidence {
+                    graph_manifest_schema: 3,
+                    flat_format_version: 2,
+                    materializer_checkpoint_version: 3,
+                    journal_pack_format_version: 3,
+                    legacy_journals_written: 0,
+                    journal_pages_written: 2,
+                    journal_packs_written: 1,
+                    journal_finish_activity: JournalFinishActivity {
+                        worker_limit: 1,
+                        peak_workers: 1,
+                        started_after_preparation: true,
+                    },
+                }),
             }),
         ),
         (
@@ -220,6 +239,25 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
                 "golden protocol error",
             )),
         ),
+        {
+            let batch_page = event_delta_page();
+            (
+                "core_event_delta_pages_applied",
+                HelperMessage::CoreEventDeltaPagesApplied(CoreEventDeltaPagesApplied {
+                    pages: vec![CoreEventDeltaPageApplied {
+                        materialization_id: batch_page.materialization_id,
+                        core_generation_id: batch_page.core_generation_id,
+                        source: batch_page.reconciliation.delta.source().clone(),
+                        page_index: batch_page.page_index,
+                        additions: 1,
+                        replacements: 0,
+                        tombstones: 0,
+                        terminal: true,
+                        replayed: false,
+                    }],
+                }),
+            )
+        },
     ]
 }
 
@@ -253,5 +291,14 @@ pub(super) fn golden_vectors(fingerprint: &str) -> Value {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    json!({"host_frames": host, "helper_frames": helper})
+    let core_record_digests = core_record_digests(&record())
+        .unwrap_or_else(|error| panic!("encode golden Core record digests: {error:?}"));
+    json!({
+        "core_record_digests": {
+            "core_record_sha256": core_record_digests.core_record_sha256,
+            "core_record_leaf_sha256": core_record_digests.core_record_leaf_sha256
+        },
+        "host_frames": host,
+        "helper_frames": helper
+    })
 }

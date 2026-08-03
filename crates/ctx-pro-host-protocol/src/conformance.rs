@@ -62,6 +62,7 @@ fn host_kind(message: &HostMessage) -> &'static str {
         HostMessage::ApplyCoreEventDeltaPage(_) => "apply_core_event_delta_page",
         HostMessage::FinishCoreMaterialization(_) => "finish_core_materialization",
         HostMessage::Blame(_) => "blame",
+        HostMessage::ApplyCoreEventDeltaPages(_) => "apply_core_event_delta_pages",
     }
 }
 
@@ -79,7 +80,60 @@ fn helper_kind(message: &HelperMessage) -> &'static str {
         HelperMessage::CoreMaterializationFinished(_) => "core_materialization_finished",
         HelperMessage::Blame(_) => "blame",
         HelperMessage::Error(_) => "error",
+        HelperMessage::CoreEventDeltaPagesApplied(_) => "core_event_delta_pages_applied",
     }
+}
+
+const CURRENT_EVENT_DELTA_REQUEST_KIND: &str = "apply_core_event_delta_pages";
+const CURRENT_EVENT_DELTA_RESPONSE_KIND: &str = "core_event_delta_pages_applied";
+const LEGACY_EVENT_DELTA_REQUEST_KIND: &str = "apply_core_event_delta_page";
+
+fn validate_core_sequence_message_kinds(canonical: &Value) -> Result<(), String> {
+    let sequence = canonical["core_materialization"]["sequence"]
+        .as_array()
+        .ok_or_else(|| "core materialization sequence is not an array".to_owned())?;
+    let host_kinds = canonical["host_message_kinds"]
+        .as_array()
+        .ok_or_else(|| "host message kinds is not an array".to_owned())?;
+    let helper_kinds = canonical["helper_message_kinds"]
+        .as_array()
+        .ok_or_else(|| "helper message kinds is not an array".to_owned())?;
+
+    for operation in sequence {
+        let operation = operation
+            .as_str()
+            .ok_or_else(|| "core materialization operation is not a string".to_owned())?;
+        if !host_kinds.iter().any(|kind| kind == operation) {
+            return Err(format!(
+                "core materialization operation {operation} is not a host message kind"
+            ));
+        }
+    }
+    if !sequence
+        .iter()
+        .any(|kind| kind == CURRENT_EVENT_DELTA_REQUEST_KIND)
+    {
+        return Err(format!(
+            "core materialization sequence does not prescribe {CURRENT_EVENT_DELTA_REQUEST_KIND}"
+        ));
+    }
+    if sequence
+        .iter()
+        .any(|kind| kind == LEGACY_EVENT_DELTA_REQUEST_KIND)
+    {
+        return Err(format!(
+            "core materialization sequence prescribes legacy {LEGACY_EVENT_DELTA_REQUEST_KIND}"
+        ));
+    }
+    if !helper_kinds
+        .iter()
+        .any(|kind| kind == CURRENT_EVENT_DELTA_RESPONSE_KIND)
+    {
+        return Err(format!(
+            "helper message kinds omit current {CURRENT_EVENT_DELTA_RESPONSE_KIND}"
+        ));
+    }
+    Ok(())
 }
 
 #[test]
@@ -98,6 +152,7 @@ fn canonical_inventory_and_exported_fingerprint_are_exact() {
 #[test]
 fn inventory_freezes_core_capability_and_exact_message_sequence() {
     let canonical = &inventory()["canonical_inventory"];
+    validate_core_sequence_message_kinds(canonical).unwrap();
     let capabilities = canonical["capabilities"]
         .as_array()
         .unwrap()
@@ -115,7 +170,7 @@ fn inventory_freezes_core_capability_and_exact_message_sequence() {
             "begin_core_materialization",
             "apply_core_source_delta_page",
             "core_event_state_page",
-            "apply_core_event_delta_page",
+            "apply_core_event_delta_pages",
             "finish_core_materialization"
         ])
     );
@@ -124,6 +179,100 @@ fn inventory_freezes_core_capability_and_exact_message_sequence() {
     assert!(!encoded.contains(&["hydra", "tion"].concat()));
     assert!(!encoded.contains("previous_page_sha256"));
     assert!(!encoded.contains("receipt_sha256"));
+
+    assert_eq!(
+        canonical["host_message_kinds"],
+        serde_json::json!([
+            "hello",
+            "authorize",
+            "prepare_graph_key_deletion",
+            "confirm_graph_key_deletion",
+            "status",
+            "begin_core_materialization",
+            "apply_core_source_delta_page",
+            "core_event_state_page",
+            "apply_core_event_delta_page",
+            "finish_core_materialization",
+            "blame",
+            "apply_core_event_delta_pages"
+        ])
+    );
+    assert_eq!(
+        canonical["helper_message_kinds"],
+        serde_json::json!([
+            "hello",
+            "authorized",
+            "graph_key_deletion_prepared",
+            "graph_key_deleted",
+            "status",
+            "core_materialization_began",
+            "core_source_delta_page_applied",
+            "core_event_state_page",
+            "core_event_delta_page_applied",
+            "core_materialization_finished",
+            "blame",
+            "error",
+            "core_event_delta_pages_applied"
+        ])
+    );
+    assert_eq!(canonical["bounds"]["core_event_delta_pages"], 16);
+    assert_eq!(
+        canonical["bounds"]["core_event_delta_pages_request_wire_bytes"],
+        68 * 1024 * 1024
+    );
+    assert_eq!(
+        canonical["bounds"]["core_event_delta_pages_prepared_output_bytes"],
+        128 * 1024 * 1024
+    );
+    assert_eq!(
+        canonical["dto_fields"]["ApplyCoreEventDeltaPageRequest"]["required"],
+        serde_json::json!(["page"])
+    );
+    assert_eq!(
+        canonical["dto_fields"]["CoreEventDeltaPageApplied"]["required"],
+        serde_json::json!([
+            "materialization_id",
+            "core_generation_id",
+            "source",
+            "page_index",
+            "additions",
+            "replacements",
+            "tombstones",
+            "terminal",
+            "replayed"
+        ])
+    );
+    assert_eq!(
+        canonical["dto_fields"]["ApplyCoreEventDeltaPagesRequest"]["required"],
+        serde_json::json!(["pages"])
+    );
+    assert_eq!(
+        canonical["dto_fields"]["CoreEventDeltaPagesApplied"]["required"],
+        serde_json::json!(["pages"])
+    );
+}
+
+#[test]
+fn core_sequence_message_kind_conformance_rejects_contradictions() {
+    let mut singular_sequence = inventory()["canonical_inventory"].clone();
+    singular_sequence["core_materialization"]["sequence"][3] =
+        serde_json::json!(LEGACY_EVENT_DELTA_REQUEST_KIND);
+    let error = validate_core_sequence_message_kinds(&singular_sequence).unwrap_err();
+    assert!(error.contains(CURRENT_EVENT_DELTA_REQUEST_KIND));
+
+    let mut unknown_operation = inventory()["canonical_inventory"].clone();
+    unknown_operation["core_materialization"]["sequence"][3] =
+        serde_json::json!("apply_unlisted_core_event_delta_pages");
+    let error = validate_core_sequence_message_kinds(&unknown_operation).unwrap_err();
+    assert!(error.contains("not a host message kind"));
+
+    let mut missing_response = inventory()["canonical_inventory"].clone();
+    missing_response["helper_message_kinds"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|kind| kind != CURRENT_EVENT_DELTA_RESPONSE_KIND);
+    let error = validate_core_sequence_message_kinds(&missing_response).unwrap_err();
+    assert!(error.contains(CURRENT_EVENT_DELTA_RESPONSE_KIND));
 }
 
 #[test]
@@ -156,7 +305,19 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     assert_eq!(
         canonical["core_record_contract"],
         serde_json::json!({
-            "fingerprint": "4b98a0de80615ce7742d79622dc5743482d3ed4a8c7b48a002cdb681fd39c7a0",
+            "fingerprint": "674bf76268eb8dd75e265585306738ba8ca40fc4fe8d142e13916112018f6215",
+            "leaf": {
+                "helper": "ctx_pro_host_protocol::core_record_leaf_sha256",
+                "paired_helper": "ctx_pro_host_protocol::core_record_digests",
+                "domain": "ctx-core-record-leaf-v1\0",
+                "algorithm": "sha256(domain_then_canonical_event_id_then_u64_be_exact_canonical_core_record_json_length_then_exact_canonical_core_record_json)",
+                "added_path": "CoreEventDelta.added.value",
+                "replaced_path": "CoreEventDelta.replaced.value.record"
+            },
+            "accumulator": {
+                "identity": "ctx-core-record-event-binding-v1\0",
+                "algorithm": "sum_mod_2^256(sha256(identity_then_u64_be_canonical_event_id_length_then_canonical_event_id_then_core_record_leaf))"
+            },
             "repository_contract_revision": 7,
             "repository_observation_revision": 2,
             "bounded_shell_subset_revision": 1,
@@ -165,6 +326,15 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
             "repository_local_root_authorization_fingerprint_revision": 1,
             "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs",
             "repository_file_invocation_evidence_set": "strictly_sorted_unique_typed_request_intent_bound_to_repository_and_normalized_body"
+        })
+    );
+    assert_eq!(
+        value["golden_vectors"]["core_record_digests"],
+        serde_json::json!({
+            "core_record_sha256":
+                "e94c0e534b6f5c9dca4551b7c035481e7db9ba07848429e03418535e9d24f810",
+            "core_record_leaf_sha256":
+                "99bf3ccba297311dd8c8980ee1d63bc12a0e2ad89ad629ef730366f5ed86e61d"
         })
     );
 
