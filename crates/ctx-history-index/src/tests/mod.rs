@@ -288,6 +288,7 @@ fn publish_unchecked_generation(
         &serde_json::to_string(&CommitPayload {
             version: COMMIT_PAYLOAD_VERSION,
             generation_id: generation_id.clone(),
+            publication_metadata: None,
         })
         .unwrap(),
     );
@@ -308,7 +309,7 @@ fn open_unverified_generation(root: &Path) -> (Searcher, GenerationManifest) {
     let directory = DurableMmapDirectory::open(active_generation_path(root)).unwrap();
     let index = Index::open(directory).unwrap();
     let metas = index.load_metas().unwrap();
-    let manifest = load_manifest_for_metas(root, &metas).unwrap();
+    let manifest = load_publication_for_metas(root, &metas).unwrap().manifest;
     let reader = index
         .reader_builder()
         .reload_policy(ReloadPolicy::Manual)
@@ -420,6 +421,7 @@ fn multisegment_fixture(
 }
 
 mod pinned_generation;
+mod publication_metadata;
 mod query;
 mod recovery;
 mod writer;

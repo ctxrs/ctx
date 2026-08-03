@@ -1,6 +1,32 @@
 use super::*;
 use crate::merge_policy::deletion_density_exceeds_limit;
 
+struct CommitGenerationOutcome {
+    receipt: CommitReceipt,
+    disposition: PublicationDisposition,
+    verified_index: Option<VerifiedIndex>,
+}
+
+impl CommitGenerationOutcome {
+    fn into_receipt(self) -> CommitReceipt {
+        self.receipt
+    }
+
+    fn into_published_generation(self) -> Result<PublishedGeneration> {
+        let verified_index = self.verified_index.ok_or(IndexError::WriterInvariant(
+            "metadata publication completed without its verified index",
+        ))?;
+        PublishedGeneration::new(self.receipt, self.disposition, verified_index)
+    }
+}
+
+struct VerifiedCandidate {
+    slot: GenerationSlot,
+    searcher: Searcher,
+    manifest: std::sync::Arc<GenerationManifest>,
+    publication_metadata: Option<std::sync::Arc<[u8]>>,
+}
+
 impl GenerationWriter {
     pub(super) fn writer_mut(&mut self) -> Result<&mut IndexWriter<IndexDocument>> {
         if self.writer.is_none() {
@@ -62,19 +88,84 @@ impl GenerationWriter {
     where
         F: FnMut(RevalidationTarget<'_>) -> bool,
     {
-        self.commit_with_complete_inventory_revalidation(revalidate, |_| false)
+        Ok(self
+            .commit_generation(revalidate, |_| false, |_| Ok(None), false)?
+            .into_receipt())
+    }
+
+    /// Publishes with refresh-owned opaque metadata constructed from the final
+    /// terminally revalidated logical generation.
+    ///
+    /// Exact no-op/reuse does not invoke `metadata_factory`; callers must use
+    /// [`PublicationDisposition`] to distinguish old generation metadata from
+    /// bytes constructed for the current request.
+    pub fn commit_with_publication_metadata<F, M>(
+        self,
+        revalidate: F,
+        metadata_factory: M,
+    ) -> Result<PublishedGeneration>
+    where
+        F: FnMut(RevalidationTarget<'_>) -> bool,
+        M: FnOnce(PublicationMetadataContext<'_>) -> Result<Vec<u8>>,
+    {
+        self.commit_generation(
+            revalidate,
+            |_| false,
+            |context| metadata_factory(context).map(Some),
+            true,
+        )?
+        .into_published_generation()
     }
 
     /// Publishes one atomic lexical generation with terminal revalidation for
     /// each current complete-inventory certificate registered on the writer.
     pub fn commit_with_complete_inventory_revalidation<F, I>(
-        mut self,
-        mut revalidate: F,
-        mut revalidate_inventory: I,
+        self,
+        revalidate: F,
+        revalidate_inventory: I,
     ) -> Result<CommitReceipt>
     where
         F: FnMut(RevalidationTarget<'_>) -> bool,
         I: FnMut(&CertifiedSourceInventory) -> bool,
+    {
+        Ok(self
+            .commit_generation(revalidate, revalidate_inventory, |_| Ok(None), false)?
+            .into_receipt())
+    }
+
+    /// Publishes with terminal source/inventory revalidation and a final
+    /// refresh-owned opaque metadata factory.
+    pub fn commit_with_complete_inventory_revalidation_and_publication_metadata<F, I, M>(
+        self,
+        revalidate: F,
+        revalidate_inventory: I,
+        metadata_factory: M,
+    ) -> Result<PublishedGeneration>
+    where
+        F: FnMut(RevalidationTarget<'_>) -> bool,
+        I: FnMut(&CertifiedSourceInventory) -> bool,
+        M: FnOnce(PublicationMetadataContext<'_>) -> Result<Vec<u8>>,
+    {
+        self.commit_generation(
+            revalidate,
+            revalidate_inventory,
+            |context| metadata_factory(context).map(Some),
+            true,
+        )?
+        .into_published_generation()
+    }
+
+    fn commit_generation<F, I, M>(
+        mut self,
+        mut revalidate: F,
+        mut revalidate_inventory: I,
+        metadata_factory: M,
+        return_verified_index: bool,
+    ) -> Result<CommitGenerationOutcome>
+    where
+        F: FnMut(RevalidationTarget<'_>) -> bool,
+        I: FnMut(&CertifiedSourceInventory) -> bool,
+        M: FnOnce(PublicationMetadataContext<'_>) -> Result<Option<Vec<u8>>>,
     {
         if self.preflight_lock.is_none() {
             return Err(IndexError::WriterInvariant(
@@ -109,7 +200,8 @@ impl GenerationWriter {
                 }
             }
             self.validate_base_integrity_for_reuse()?;
-            return CommitReceipt::from_manifest(self.base_opstamp, witness.base.clone());
+            let receipt = CommitReceipt::from_manifest(self.base_opstamp, witness.base.clone())?;
+            return self.reused_generation(receipt, return_verified_index);
         }
 
         for pending in self.pending.values() {
@@ -129,10 +221,11 @@ impl GenerationWriter {
         )? {
             self.discard_candidate()?;
             self.validate_base_integrity_for_reuse()?;
-            return Ok(receipt);
+            return self.reused_generation(receipt, return_verified_index);
         }
 
         self.writer_mut()?;
+        let candidate_path = self.candidate_path()?;
         let previous_generation_id = self
             .base_manifest
             .as_ref()
@@ -182,15 +275,31 @@ impl GenerationWriter {
         }
 
         let generation_id = manifest.generation_id()?;
+        let publication_metadata =
+            match metadata_factory(PublicationMetadataContext::new(&generation_id, &manifest)) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    prepared.abort()?;
+                    return Err(error);
+                }
+            };
+        let payload =
+            match canonical_commit_payload(&generation_id, publication_metadata.as_deref()) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    prepared.abort()?;
+                    return Err(error);
+                }
+            };
         if let Err(error) = write_manifest(&root, &generation_id, &manifest) {
             let _ = prepared.abort();
             return Err(error);
         }
-        let payload = serde_json::to_string(&CommitPayload {
-            version: COMMIT_PAYLOAD_VERSION,
-            generation_id: generation_id.clone(),
-        })?;
         prepared.set_payload(&payload);
+        #[cfg(test)]
+        if let Some(hook) = self.before_candidate_commit.take() {
+            hook(&candidate_path);
+        }
         let commit_result = prepared.commit();
         #[cfg(test)]
         let commit_result = if self.return_commit_error_after_visibility {
@@ -202,6 +311,8 @@ impl GenerationWriter {
         } else {
             commit_result
         };
+        drop(payload);
+        drop(publication_metadata);
         let writer = self.writer.take().ok_or(IndexError::WriterInvariant(
             "candidate commit is missing its lazy writer",
         ))?;
@@ -220,7 +331,6 @@ impl GenerationWriter {
             }
         };
 
-        let candidate_path = self.candidate_path()?;
         #[cfg(test)]
         if let Some(hook) = self.after_candidate_commit.take() {
             hook(&candidate_path);
@@ -252,14 +362,19 @@ impl GenerationWriter {
                     },
                 },
             )?;
+        drop(manifest);
         let next_pointer = ActiveGenerationPointer::new(
-            verified,
+            verified.slot,
             self.base_manifest.as_ref().and_then(|_| {
                 self.active_pointer
                     .as_ref()
                     .map(|pointer| pointer.active().clone())
             }),
         )?;
+        #[cfg(test)]
+        if let Some(hook) = self.before_pointer_publication.take() {
+            hook(&candidate_path);
+        }
         if let Err(error) = publish_active_generation_pointer(&root, &next_pointer) {
             return Err(self.classify_pointer_failure(&generation_id, &next_pointer, error));
         }
@@ -279,7 +394,24 @@ impl GenerationWriter {
         let _ = reclaim_inactive_generation_directories(&root, Some(&next_pointer));
         let _ = reclaim_unreferenced_manifests(&root, &retained_generation_ids);
 
-        CommitReceipt::from_manifest(opstamp, manifest)
+        let receipt = CommitReceipt::from_verified_manifest(
+            opstamp,
+            generation_id.clone(),
+            std::sync::Arc::clone(&verified.manifest),
+        );
+        let verified_index = return_verified_index.then(|| {
+            VerifiedIndex::from_verified_publication(
+                verified.searcher,
+                verified.manifest,
+                generation_id,
+                verified.publication_metadata,
+            )
+        });
+        Ok(CommitGenerationOutcome {
+            receipt,
+            disposition: PublicationDisposition::Published,
+            verified_index,
+        })
     }
 
     fn verify_candidate(
@@ -288,7 +420,7 @@ impl GenerationWriter {
         manifest: &GenerationManifest,
         generation_id: &str,
         directory_name: &str,
-    ) -> Result<GenerationSlot> {
+    ) -> Result<VerifiedCandidate> {
         let directory =
             DurableMmapDirectory::open(candidate_path).map_err(tantivy::TantivyError::from)?;
         let index = Index::open(directory)?;
@@ -297,11 +429,8 @@ impl GenerationWriter {
             return Err(IndexError::IndexSettingsMismatch(LEXICAL_SCHEMA_VERSION));
         }
         let metas = index.load_metas()?;
-        if payload_generation_id(&metas)?.as_deref() != Some(generation_id) {
-            return Err(IndexError::ConcurrentGenerationChange);
-        }
-        let loaded_manifest = load_manifest_for_metas(&self.root, &metas)?;
-        if loaded_manifest.generation_id()? != generation_id {
+        let loaded_publication = load_publication_for_metas(&self.root, &metas)?;
+        if loaded_publication.generation_id != generation_id {
             return Err(IndexError::ConcurrentGenerationChange);
         }
         for segment in &metas.segments {
@@ -322,11 +451,45 @@ impl GenerationWriter {
         }
         let physical_integrity_digest = physical_integrity_digest(&index, candidate_path)?;
         verify_searcher(&searcher, manifest)?;
-        GenerationSlot::new(
+        let slot = GenerationSlot::new(
             generation_id.to_owned(),
             directory_name.to_owned(),
             physical_integrity_digest,
-        )
+        )?;
+        Ok(VerifiedCandidate {
+            slot,
+            searcher,
+            manifest: std::sync::Arc::new(loaded_publication.manifest),
+            publication_metadata: loaded_publication.metadata,
+        })
+    }
+
+    fn reused_generation(
+        &self,
+        receipt: CommitReceipt,
+        return_verified_index: bool,
+    ) -> Result<CommitGenerationOutcome> {
+        let verified_index = if return_verified_index {
+            let searcher = self
+                .base_searcher
+                .clone()
+                .ok_or(IndexError::WriterInvariant(
+                    "reused generation is missing its pinned base searcher",
+                ))?;
+            Some(VerifiedIndex::from_verified_publication(
+                searcher,
+                receipt.shared_manifest(),
+                receipt.generation_id.clone(),
+                self.base_publication_metadata.clone(),
+            ))
+        } else {
+            None
+        };
+        Ok(CommitGenerationOutcome {
+            receipt,
+            disposition: PublicationDisposition::Reused,
+            verified_index,
+        })
     }
 
     fn validate_base_integrity_for_reuse(&self) -> Result<()> {

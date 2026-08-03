@@ -23,7 +23,10 @@ mod writer_support;
 
 pub use durable_directory::durable_atomic_replace_file;
 
-pub use commit_contract::{CommitReceipt, RevalidationTarget};
+pub use commit_contract::{
+    CommitReceipt, PublicationDisposition, PublicationMetadataContext, PublishedGeneration,
+    RevalidationTarget,
+};
 
 pub(crate) use contracts::{
     CommitPayload, COMMIT_PAYLOAD_VERSION, INDEX_MEMORY_MIN_PER_THREAD, MANIFEST_DIRECTORY,
@@ -34,6 +37,7 @@ pub use contracts::{
     SourceCoreRecordAggregate, SourceMissingObservationPoint, SourceRouteIdentity,
     SourceRouteMissingState, SourceRouteSnapshot, WriterOptions, GENERATION_MANIFEST_VERSION,
     LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
+    MAX_PUBLICATION_METADATA_BYTES,
 };
 pub use ctx_history_core::CoreRecord;
 pub(crate) use identity::{
@@ -55,11 +59,12 @@ pub use preparation::{CoreRecordPreparer, PreparedCoreRecord};
 #[cfg(test)]
 pub(crate) use publication::manifest_path;
 pub(crate) use publication::{
-    create_candidate_generation, load_active_generation_pointer, load_manifest_for_metas,
-    meta_generation, open_slot_index, payload_generation_id, physical_integrity_digest,
-    publish_active_generation_pointer, reclaim_inactive_generation_directories,
-    reclaim_unreferenced_manifests, reconcile_commit_error, searcher_generation, sync_directory,
-    sync_generation, verify_complete_searcher, verify_physical_integrity, verify_searcher,
+    canonical_commit_payload, create_candidate_generation, load_active_generation_pointer,
+    load_publication_for_metas, meta_generation, open_slot_index, payload_generation_id,
+    physical_integrity_digest, publish_active_generation_pointer,
+    reclaim_inactive_generation_directories, reclaim_unreferenced_manifests,
+    reconcile_commit_error, searcher_generation, sync_directory, sync_generation,
+    verify_complete_searcher, verify_physical_integrity, verify_searcher,
     verify_searcher_structure, write_manifest, ActiveGenerationPointer, GenerationSlot,
     INDEX_GENERATIONS_DIRECTORY,
 };
@@ -213,6 +218,7 @@ pub struct GenerationWriter {
     base_manifest: Option<GenerationManifest>,
     base_opstamp: u64,
     base_searcher: Option<Searcher>,
+    base_publication_metadata: Option<std::sync::Arc<[u8]>>,
     core_record_preparer: CoreRecordPreparer,
     complete_inventories: Vec<CertifiedSourceInventory>,
     pending: HashMap<String, PendingSource>,
@@ -229,11 +235,15 @@ pub struct GenerationWriter {
     #[cfg(test)]
     before_writer_handoff: Option<Box<dyn FnOnce() + Send>>,
     #[cfg(test)]
+    before_candidate_commit: Option<GenerationPathHook>,
+    #[cfg(test)]
     after_candidate_commit: Option<GenerationPathHook>,
     #[cfg(test)]
     return_commit_error_after_visibility: bool,
     #[cfg(test)]
     before_pointer_switch: Option<GenerationPathHook>,
+    #[cfg(test)]
+    before_pointer_publication: Option<GenerationPathHook>,
     #[cfg(test)]
     after_pointer_switch: Option<GenerationPathHook>,
 }
@@ -321,8 +331,9 @@ impl GenerationWriter {
                     validate_schema(&index.schema())?;
                     let fields = fields_from_schema(&index.schema())?;
                     let metas = index.load_metas()?;
-                    let (manifest, searcher) = if metas.payload.is_some() {
-                        let manifest = load_manifest_for_metas(&root, &metas)?;
+                    let (manifest, publication_metadata, searcher) = if metas.payload.is_some() {
+                        let publication = load_publication_for_metas(&root, &metas)?;
+                        let manifest = publication.manifest;
                         if pointer.active().generation_id() != manifest.generation_id()? {
                             return Err(IndexError::InvalidActiveGenerationPointer);
                         }
@@ -335,13 +346,20 @@ impl GenerationWriter {
                             return Err(IndexError::ConcurrentGenerationChange);
                         }
                         verify_searcher_structure(&searcher, &manifest)?;
-                        (Some(manifest), Some(searcher))
+                        (Some(manifest), publication.metadata, Some(searcher))
                     } else if metas.segments.is_empty() {
-                        (None, None)
+                        (None, None, None)
                     } else {
                         return Err(IndexError::UnboundIndexState);
                     };
-                    Ok((index, fields, manifest, metas.opstamp, searcher))
+                    Ok((
+                        index,
+                        fields,
+                        manifest,
+                        metas.opstamp,
+                        searcher,
+                        publication_metadata,
+                    ))
                 })
                 .transpose()
                 .or_else(|error| {
@@ -355,26 +373,44 @@ impl GenerationWriter {
             None
         };
 
-        let (index, candidate_directory_name, fields, base_manifest, base_opstamp, base_searcher) =
-            if let Some((index, fields, manifest, opstamp, searcher)) = reusable_generation {
-                (index, None, fields, manifest, opstamp, searcher)
-            } else {
-                // The active slot is absent, physically rejected, or belongs to
-                // an incompatible disposable generation. Build an empty current
-                // candidate and retain only the pointer as publication authority.
-                let candidate = create_candidate_generation(&root, None)?;
-                validate_schema(&candidate.index.schema())?;
-                let fields = fields_from_schema(&candidate.index.schema())?;
-                let metas = candidate.index.load_metas()?;
-                (
-                    candidate.index,
-                    Some(candidate.directory_name),
-                    fields,
-                    None,
-                    metas.opstamp,
-                    None,
-                )
-            };
+        let (
+            index,
+            candidate_directory_name,
+            fields,
+            base_manifest,
+            base_opstamp,
+            base_searcher,
+            base_publication_metadata,
+        ) = if let Some((index, fields, manifest, opstamp, searcher, publication_metadata)) =
+            reusable_generation
+        {
+            (
+                index,
+                None,
+                fields,
+                manifest,
+                opstamp,
+                searcher,
+                publication_metadata,
+            )
+        } else {
+            // The active slot is absent, physically rejected, or belongs to
+            // an incompatible disposable generation. Build an empty current
+            // candidate and retain only the pointer as publication authority.
+            let candidate = create_candidate_generation(&root, None)?;
+            validate_schema(&candidate.index.schema())?;
+            let fields = fields_from_schema(&candidate.index.schema())?;
+            let metas = candidate.index.load_metas()?;
+            (
+                candidate.index,
+                Some(candidate.directory_name),
+                fields,
+                None,
+                metas.opstamp,
+                None,
+                None,
+            )
+        };
         let preparation_base = active_pointer.as_ref().and_then(|pointer| {
             base_searcher
                 .as_ref()
@@ -414,6 +450,7 @@ impl GenerationWriter {
             base_manifest,
             base_opstamp,
             base_searcher,
+            base_publication_metadata,
             core_record_preparer,
             complete_inventories: Vec::new(),
             pending: HashMap::new(),
@@ -430,11 +467,15 @@ impl GenerationWriter {
             #[cfg(test)]
             before_writer_handoff: None,
             #[cfg(test)]
+            before_candidate_commit: None,
+            #[cfg(test)]
             after_candidate_commit: None,
             #[cfg(test)]
             return_commit_error_after_visibility: false,
             #[cfg(test)]
             before_pointer_switch: None,
+            #[cfg(test)]
+            before_pointer_publication: None,
             #[cfg(test)]
             after_pointer_switch: None,
         })

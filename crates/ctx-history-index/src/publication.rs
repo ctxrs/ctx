@@ -11,7 +11,7 @@ pub(crate) use generation::{
 #[cfg(test)]
 pub(crate) use manifest::manifest_path;
 pub(crate) use manifest::{
-    load_manifest_for_metas, meta_generation, payload_generation_id,
+    canonical_commit_payload, load_publication_for_metas, meta_generation, payload_generation_id,
     reclaim_unreferenced_manifests, reconcile_commit_error, searcher_generation, sync_directory,
     write_manifest,
 };

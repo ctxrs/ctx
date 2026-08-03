@@ -965,11 +965,12 @@ fn stale_schema_manifest_fails_closed_at_generation_boundary() {
         serde_json::to_string(&CommitPayload {
             version: COMMIT_PAYLOAD_VERSION,
             generation_id: stale_generation_id,
+            publication_metadata: None,
         })
         .unwrap(),
     );
 
-    let error = load_manifest_for_metas(temp.path(), &stale_metas).unwrap_err();
+    let error = load_publication_for_metas(temp.path(), &stale_metas).unwrap_err();
     assert!(matches!(
         error,
         IndexError::GenerationContractMismatch {
