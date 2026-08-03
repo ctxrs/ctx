@@ -1,5 +1,12 @@
 use super::*;
 
+#[derive(Serialize)]
+struct BorrowedHostEnvelope<'a> {
+    sequence: u64,
+    request_id: Uuid,
+    message: &'a HostMessage,
+}
+
 pub(crate) struct ProClient {
     pub(super) stdin: Option<ChildStdin>,
     pub(super) stdout: ChildStdout,
@@ -50,6 +57,33 @@ impl ProClient {
         required: &BTreeSet<Capability>,
         authorization: Option<&dyn AuthorizationProvider>,
         bind_status_identity: bool,
+    ) -> Result<Self> {
+        let protocol_fingerprint = execution_guard
+            .as_ref()
+            .map(|executable| protocol_session(executable, data_root))
+            .transpose()?
+            .unwrap_or_else(|| PROTOCOL_FINGERPRINT.to_owned());
+        validate_protocol_session(required, &protocol_fingerprint)?;
+        Self::connect_to_path_with_protocol_session(
+            data_root,
+            path,
+            execution_guard,
+            required,
+            authorization,
+            bind_status_identity,
+            protocol_fingerprint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn connect_to_path_with_protocol_session(
+        data_root: &Path,
+        path: &Path,
+        execution_guard: Option<VerifiedHelperExecutable>,
+        required: &BTreeSet<Capability>,
+        authorization: Option<&dyn AuthorizationProvider>,
+        bind_status_identity: bool,
+        protocol_fingerprint: String,
     ) -> Result<Self> {
         // Commit and PR blame are graph-only Query sessions and never authorize repository
         // access. Do not make those requests depend on the caller's Git installation. Every
@@ -129,20 +163,16 @@ impl ProClient {
             Capability::Query,
             Capability::GitRead,
         ]);
-        let response = client.exchange(
-            HostMessage::Hello(HelloRequest::current(
-                env!("CARGO_PKG_VERSION"),
-                offered.clone(),
-            )),
-            HANDSHAKE_TIMEOUT,
-        )?;
+        let mut hello_request = HelloRequest::current(env!("CARGO_PKG_VERSION"), offered.clone());
+        hello_request.protocol_fingerprint = protocol_fingerprint.clone();
+        let response = client.exchange(HostMessage::Hello(hello_request), HANDSHAKE_TIMEOUT)?;
         let hello = match response {
             HelperMessage::Hello(hello) => hello,
             HelperMessage::Error(error) => return Err(protocol_error(error)),
             _ => bail!("protocol_mismatch: helper did not answer hello negotiation"),
         };
         if hello.protocol_version != PROTOCOL_VERSION
-            || hello.protocol_fingerprint != PROTOCOL_FINGERPRINT
+            || hello.protocol_fingerprint != protocol_fingerprint
         {
             bail!("protocol_mismatch: helper does not implement the exact Protocol V1 inventory");
         }
@@ -216,13 +246,34 @@ impl ProClient {
         message: HostMessage,
         timeout: Duration,
     ) -> Result<HelperMessage> {
+        self.exchange_borrowed(&message, timeout)
+    }
+
+    pub(super) fn exchange_borrowed(
+        &mut self,
+        message: &HostMessage,
+        timeout: Duration,
+    ) -> Result<HelperMessage> {
+        self.exchange_with_frame_writer(timeout, |stdin, sequence, request_id| {
+            let request = BorrowedHostEnvelope {
+                sequence,
+                request_id,
+                message,
+            };
+            write_frame(stdin, &request).context("helper_crashed: write framed request")
+        })
+    }
+
+    pub(super) fn exchange_with_frame_writer<F>(
+        &mut self,
+        timeout: Duration,
+        write_request: F,
+    ) -> Result<HelperMessage>
+    where
+        F: FnOnce(&mut ChildStdin, u64, Uuid) -> Result<()>,
+    {
         let request_id = Uuid::new_v4();
         let sequence = self.sequence;
-        let request = HostEnvelope {
-            sequence,
-            request_id,
-            message,
-        };
         let timed_out = Arc::new(AtomicBool::new(false));
         let (stop_tx, stop_rx) = mpsc::channel();
         let watchdog_child = Arc::clone(&self.child);
@@ -240,7 +291,7 @@ impl ProClient {
                 .stdin
                 .as_mut()
                 .ok_or_else(|| anyhow!("helper_crashed: helper stdin is closed"))?;
-            write_frame(stdin, &request).context("helper_crashed: write framed request")?;
+            write_request(stdin, sequence, request_id)?;
             Ok(read_frame::<_, HelperEnvelope>(&mut self.stdout))
         })();
         let _ = stop_tx.send(());
@@ -282,6 +333,38 @@ impl ProClient {
         self.sequence = self.sequence.saturating_add(1);
         Ok(response.message)
     }
+}
+
+pub(super) fn validate_protocol_session(
+    _required: &BTreeSet<Capability>,
+    protocol_fingerprint: &str,
+) -> Result<()> {
+    if protocol_fingerprint != PROTOCOL_FINGERPRINT {
+        bail!("protocol_mismatch: ctx requires the current Protocol V1 fingerprint");
+    }
+    Ok(())
+}
+
+fn protocol_session(executable: &VerifiedHelperExecutable, data_root: &Path) -> Result<String> {
+    let layout = ctx_pro_host_protocol::ProFilesystemLayout::new(data_root);
+    let fingerprint = if executable.path() == layout.helper_path() {
+        let marker_bytes = executable.read_marker(
+            &layout.helper_marker_path(),
+            crate::pro::lifecycle::lifecycle_manifest::MAX_INSTALL_MARKER_BYTES,
+        )?;
+        let marker: crate::pro::lifecycle::lifecycle_manifest::ProInstallMarker =
+            serde_json::from_slice(&marker_bytes)
+                .context("invalid_response: parse installed Pro marker")?;
+        let trust = crate::pro::commercial_config::CommercialConfig::production()?.release_trust;
+        let manifest = marker.signed_manifest(trust.public_key_pem)?;
+        crate::pro::lifecycle::lifecycle_manifest::validate_manifest_release_trust(
+            &manifest, trust,
+        )?;
+        manifest.protocol_fingerprint
+    } else {
+        PROTOCOL_FINGERPRINT.to_owned()
+    };
+    Ok(fingerprint)
 }
 
 pub(super) fn requires_git_preflight(required: &BTreeSet<Capability>) -> bool {
@@ -385,5 +468,30 @@ impl StderrDrain {
             let _ = thread.join();
         }
         let _ = self.bytes.load(Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_transport_envelope_has_exact_owned_wire_encoding() {
+        let message = HostMessage::Status(StatusRequest {
+            requested_core_generation_id: Some("a".repeat(64)),
+        });
+        let request_id = Uuid::new_v4();
+        let borrowed = BorrowedHostEnvelope {
+            sequence: 17,
+            request_id,
+            message: &message,
+        };
+        let borrowed_bytes = serde_json::to_vec(&borrowed).unwrap();
+        let owned = ctx_pro_host_protocol::HostEnvelope {
+            sequence: 17,
+            request_id,
+            message,
+        };
+        assert_eq!(borrowed_bytes, serde_json::to_vec(&owned).unwrap());
     }
 }

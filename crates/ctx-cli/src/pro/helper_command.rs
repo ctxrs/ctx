@@ -5,6 +5,8 @@ use ctx_pro_host_protocol::{
     ProFilesystemLayout, CTX_PRO_DATA_ROOT_ENV, CTX_PRO_INSTALLATION_ID_ENV,
 };
 
+use super::core_worker_budget::{CoreWorkerLaunchSelection, CORE_PREPARATION_WORKERS_ENV};
+
 const GIT_EXECUTABLE_ENV: &str = "CTX_PRO_GIT_EXECUTABLE";
 
 pub(super) fn new(
@@ -17,8 +19,17 @@ pub(super) fn new(
         .ok_or_else(|| {
             anyhow!("key_store_unavailable: local Pro installation identity is missing")
         })?;
+    new_with_installation_id(helper, data_root, &installation_id, git_executable)
+}
+
+pub(super) fn new_with_installation_id(
+    helper: &Path,
+    data_root: &Path,
+    installation_id: &str,
+    git_executable: Option<&Path>,
+) -> Result<Command> {
     let mut command = Command::new(helper);
-    configure_environment(&mut command, data_root, &installation_id, git_executable)?;
+    configure_environment(&mut command, data_root, installation_id, git_executable)?;
     Ok(command)
 }
 
@@ -28,12 +39,39 @@ fn configure_environment(
     installation_id: &str,
     git_executable: Option<&Path>,
 ) -> Result<()> {
+    let preparation_workers =
+        CoreWorkerLaunchSelection::from_runtime().helper_preparation_workers();
+    configure_environment_with_preparation_workers(
+        command,
+        data_root,
+        installation_id,
+        git_executable,
+        preparation_workers,
+    )
+}
+
+fn configure_environment_with_preparation_workers(
+    command: &mut Command,
+    data_root: &Path,
+    installation_id: &str,
+    git_executable: Option<&Path>,
+    preparation_workers: usize,
+) -> Result<()> {
+    if preparation_workers == 0 {
+        return Err(anyhow!(
+            "invalid_request: Core preparation worker budget must be positive"
+        ));
+    }
     let layout = ProFilesystemLayout::new(data_root);
     command
         .env_clear()
         .env("CTX_DATA_ROOT", data_root)
         .env(CTX_PRO_DATA_ROOT_ENV, layout.pro_root())
-        .env(CTX_PRO_INSTALLATION_ID_ENV, installation_id);
+        .env(CTX_PRO_INSTALLATION_ID_ENV, installation_id)
+        .env(
+            CORE_PREPARATION_WORKERS_ENV,
+            preparation_workers.to_string(),
+        );
     if let Some(git_executable) = git_executable {
         command.env(GIT_EXECUTABLE_ENV, git_executable);
     }

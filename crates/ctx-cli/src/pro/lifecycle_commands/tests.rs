@@ -219,6 +219,15 @@ fn staged_activation_requires_exact_protocol_authorization_and_status() {
         validate_staged_helper(&smoke).unwrap_err().to_string(),
         "protocol_mismatch: staged Pro helper failed the activation smoke contract"
     );
+
+    smoke
+        .capabilities
+        .insert(Capability::EntitlementAuthorization);
+    smoke.protocol_fingerprint = "0".repeat(64);
+    assert_eq!(
+        validate_staged_helper(&smoke).unwrap_err().to_string(),
+        "protocol_mismatch: staged Pro helper failed the activation smoke contract"
+    );
 }
 
 #[test]
@@ -598,6 +607,21 @@ fn pro_status(access_state: &str) -> ProStatus {
             exact_commit_evidence_events: 2,
             exact_pull_request_evidence_events: 1,
         }),
+        core_preparation_peak_workers: Some(4),
+        storage_evidence: Some(ProStorageEvidence {
+            graph_manifest_schema: 3,
+            flat_format_version: 2,
+            materializer_checkpoint_version: 3,
+            journal_pack_format_version: 3,
+            legacy_journals_written: 0,
+            journal_pages_written: 2,
+            journal_packs_written: 1,
+            journal_finish_activity: ctx_pro_host_protocol::JournalFinishActivity {
+                worker_limit: 1,
+                peak_workers: 1,
+                started_after_preparation: true,
+            },
+        }),
         supported_operations: Some(operations.clone()),
         available_operations: Some(operations),
         access_state: Some(access_state.to_owned()),
@@ -716,6 +740,36 @@ fn lifecycle_status_renders_repository_readiness_axes_independently() {
     assert_eq!(
         value["repository_coverage"]["exact_pull_request_evidence_events"],
         1
+    );
+    assert_eq!(value["core_preparation_peak_workers"], 4);
+    assert_eq!(value["storage_evidence"]["graph_manifest_schema"], 3);
+    assert_eq!(value["storage_evidence"]["flat_format_version"], 2);
+    assert_eq!(
+        value["storage_evidence"]["materializer_checkpoint_version"],
+        3
+    );
+    assert_eq!(value["storage_evidence"]["journal_pack_format_version"], 3);
+    assert_eq!(value["storage_evidence"]["legacy_journals_written"], 0);
+    assert_eq!(value["storage_evidence"]["journal_pages_written"], 2);
+    assert_eq!(value["storage_evidence"]["journal_packs_written"], 1);
+    assert_eq!(
+        value["storage_evidence"]["journal_finish_activity"]["worker_limit"],
+        1
+    );
+    assert_eq!(
+        value["storage_evidence"]["journal_finish_activity"]["peak_workers"],
+        1
+    );
+    assert_eq!(
+        value["storage_evidence"]["journal_finish_activity"]["started_after_preparation"],
+        true
+    );
+
+    let mut without_evidence = pro_status("active");
+    without_evidence.storage_evidence = None;
+    assert_eq!(
+        lifecycle_status_value(without_evidence, false)["storage_evidence"],
+        serde_json::Value::Null
     );
 }
 

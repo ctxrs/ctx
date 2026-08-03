@@ -7,7 +7,7 @@ use uuid::Uuid;
 pub(crate) const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 pub(crate) const MAX_SIGNATURE_BYTES: u64 = 16 * 1024;
 pub(crate) const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
-pub(super) const MAX_INSTALL_MARKER_BYTES: u64 = 128 * 1024;
+pub(in crate::pro) const MAX_INSTALL_MARKER_BYTES: u64 = 128 * 1024;
 pub(super) const PRO_RELEASE_STABLE_KEY_ID: &str = "ctx-pro-release-stable-2026-07-27";
 pub(super) const PRO_RELEASE_STABLE_PUBLIC_KEY_PEM: &str = r#"-----BEGIN RSA PUBLIC KEY-----
 MIIBigKCAYEAq2vmUvoGcm0bAJhCdjzqzLF9SAALDA33KQOHWI3JeKFjxHTLs3hP
@@ -99,7 +99,7 @@ pub(crate) struct ProManifest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ProInstallMarker {
+pub(in crate::pro) struct ProInstallMarker {
     schema_version: u32,
     manifest_base64: String,
     signature_base64: String,
@@ -116,7 +116,7 @@ impl ProInstallMarker {
         })
     }
 
-    pub(super) fn signed_manifest(&self, public_key_pem: &str) -> Result<ProManifest> {
+    pub(in crate::pro) fn signed_manifest(&self, public_key_pem: &str) -> Result<ProManifest> {
         if self.schema_version != 1
             || self.manifest_base64.len() as u64 > MAX_INSTALL_MARKER_BYTES
             || self.signature_base64.len() as u64 > MAX_SIGNATURE_BYTES

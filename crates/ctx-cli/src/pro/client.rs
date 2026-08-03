@@ -15,9 +15,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use ctx_pro_host_protocol::{
     decode_base64url, read_frame, write_frame, BlameResult, BlameTarget, Capability,
     ConfirmGraphKeyDeletionRequest, EntitlementAccessState, GraphKeyDeletionPrepared, HelloRequest,
-    HelperEnvelope, HelperMessage, HostEnvelope, HostMessage, PrepareGraphKeyDeletionRequest,
-    StatusRequest, StatusResult, GRAPH_KEY_DELETION_CHALLENGE_BYTES, PROTOCOL_FINGERPRINT,
-    PROTOCOL_VERSION,
+    HelperEnvelope, HelperMessage, HostMessage, PrepareGraphKeyDeletionRequest, StatusRequest,
+    StatusResult, GRAPH_KEY_DELETION_CHALLENGE_BYTES, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -58,8 +57,6 @@ pub(crate) fn preflight_core_materialization(data_root: &Path) -> Result<()> {
 
 #[path = "client_status.rs"]
 mod client_status;
-#[cfg(ctx_pro_qualification)]
-pub(crate) use client_status::smoke_qualification_helper;
 #[cfg(test)]
 pub(crate) use client_status::status_with_helper_resolver;
 pub(crate) use client_status::{
