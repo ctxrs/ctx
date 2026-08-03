@@ -10,15 +10,21 @@ fn verify_searcher_with_options(
     verify_searcher_structure(searcher, manifest)?;
     let fields = fields_from_schema(searcher.schema())?;
     query::validate_verification_projection(fields)?;
-    let segment_count = searcher.segment_readers().len();
-    let worker_budget = requested_worker_budget.max(1).min(segment_count.max(1));
+    let verification_spill = VerificationSpill::create(
+        searcher
+            .segment_readers()
+            .iter()
+            .map(tantivy::SegmentReader::max_doc),
+    )?;
+    let tasks = segment_verification_tasks(searcher, requested_worker_budget.max(1))?;
+    let worker_budget = requested_worker_budget.max(1).min(tasks.len().max(1));
     let executor = if worker_budget == 1 {
         Executor::single_thread()
     } else {
         Executor::multi_thread(worker_budget, "ctx-generation-verify-")?
     };
     let counters = instrument.then(VerificationCounters::default);
-    let first_wave_size = worker_budget.min(segment_count);
+    let first_wave_size = worker_budget.min(tasks.len());
     let rendezvous =
         (synchronize_first_wave && first_wave_size > 1).then(|| Barrier::new(first_wave_size));
     let mut metrics = VerificationRunMetrics {
@@ -41,37 +47,44 @@ fn verify_searcher_with_options(
             ))
         })
         .collect::<Result<HashMap<_, _>>>()?;
-    let verification_spill = VerificationSpill::create(
-        searcher
-            .segment_readers()
-            .iter()
-            .map(tantivy::SegmentReader::max_doc),
-    )?;
     metrics.verification_spill_bytes = verification_spill.logical_bytes();
-    metrics.verification_heap_payload_bound_bytes = verification_spill
+    metrics.verification_tracked_heap_bytes = verification_spill
         .segment_offsets_heap_bytes()?
         .checked_add(
             worker_budget
-                .checked_mul(VERIFICATION_SPILL_BUFFER_BYTES + VERIFICATION_SPILL_RECORD_BYTES)
+                .checked_mul(
+                    VERIFICATION_SPILL_BUFFER_BYTES
+                        .checked_mul(2)
+                        .and_then(|bytes| bytes.checked_add(VERIFICATION_SPILL_RECORD_BYTES))
+                        .ok_or(IndexError::CountOverflow)?,
+                )
                 .ok_or(IndexError::CountOverflow)?,
         )
+        .and_then(|bytes| {
+            tasks
+                .capacity()
+                .checked_mul(std::mem::size_of::<SegmentVerificationTask>())
+                .and_then(|task_bytes| bytes.checked_add(task_bytes))
+        })
         .ok_or(IndexError::CountOverflow)?;
 
-    for wave_start in (0..segment_count).step_by(worker_budget) {
-        let wave_end = (wave_start + worker_budget).min(segment_count);
+    for wave_start in (0..tasks.len()).step_by(worker_budget) {
+        let wave_end = (wave_start + worker_budget).min(tasks.len());
+        let wave = &tasks[wave_start..wave_end];
         let wave_rendezvous = (wave_start == 0).then_some(rendezvous.as_ref()).flatten();
         let segments = executor.map(
-            |segment_ord| {
+            |task_index| {
+                let task = wave[task_index];
                 Ok(verify_segment(
                     searcher,
-                    segment_ord,
+                    task,
                     wave_rendezvous,
                     counters.as_ref(),
                     &verification_spill,
                     &source_ordinals,
                 ))
             },
-            wave_start..wave_end,
+            0..wave.len(),
         )?;
         metrics.max_buffered_segments = metrics.max_buffered_segments.max(segments.len());
         for segment in segments {
@@ -120,8 +133,8 @@ fn verify_searcher_with_options(
         return Err(IndexError::InvalidStoredDocumentField("body_search"));
     }
     let mut projection_deltas = verification_spill.load_projection_deltas()?;
-    metrics.verification_heap_payload_bound_bytes = metrics
-        .verification_heap_payload_bound_bytes
+    metrics.verification_tracked_heap_bytes = metrics
+        .verification_tracked_heap_bytes
         .checked_add(projection_deltas.heap_bytes())
         .ok_or(IndexError::CountOverflow)?;
     verify_event_identities(
@@ -151,7 +164,7 @@ fn verify_searcher_with_options(
 
 fn verify_segment(
     searcher: &Searcher,
-    segment_ord: usize,
+    task: SegmentVerificationTask,
     rendezvous: Option<&Barrier>,
     counters: Option<&VerificationCounters>,
     verification_spill: &VerificationSpill,
@@ -161,7 +174,7 @@ fn verify_segment(
     if let Some(rendezvous) = rendezvous {
         rendezvous.wait();
     }
-    let segment = searcher.segment_reader(segment_ord as u32);
+    let segment = searcher.segment_reader(task.segment_ord as u32);
     let fields = fields_from_schema(searcher.schema())?;
     let body_search = segment.inverted_index(fields.body_search)?;
     let mut body_analyzer = crate::analyzer::body_analyzer();
@@ -170,16 +183,25 @@ fn verify_segment(
     let mut stored_core_bytes = 0_u64;
     let mut body_tokens = 0_u64;
     let mut parent_session_documents = 0_u64;
-    let mut identity_writer = verification_spill.segment_writer(segment_ord, segment.max_doc())?;
-    for doc_id in 0..segment.max_doc() {
+    let mut identity_writer = verification_spill.segment_range_writer(
+        task.segment_ord,
+        task.start_doc_id,
+        task.end_doc_id,
+        segment.max_doc(),
+    )?;
+    let mut document_count = 0_u64;
+    for doc_id in task.start_doc_id..task.end_doc_id {
         if segment.is_deleted(doc_id) {
             identity_writer.write_deleted(doc_id)?;
             continue;
         }
+        document_count = document_count
+            .checked_add(1)
+            .ok_or(IndexError::CountOverflow)?;
         document_decodes += 1;
         let record = query::stored_verification_record(
             searcher,
-            DocAddress::new(segment_ord as u32, doc_id),
+            DocAddress::new(task.segment_ord as u32, doc_id),
             fields,
         )?;
         stored_core_bytes = stored_core_bytes
@@ -225,13 +247,119 @@ fn verify_segment(
     }
     identity_writer.finish()?;
     Ok(SegmentVerification {
-        document_count: u64::from(segment.num_docs()),
+        document_count,
         document_decodes,
         stored_core_bytes,
         body_tokens,
         source_aggregates,
         parent_session_documents,
     })
+}
+
+fn segment_verification_tasks(
+    searcher: &Searcher,
+    worker_budget: usize,
+) -> Result<Vec<SegmentVerificationTask>> {
+    const MAX_VERIFICATION_TASK_HEAP_BYTES: usize = 16 * 1024 * 1024;
+    let total_max_docs = searcher
+        .segment_readers()
+        .iter()
+        .map(tantivy::SegmentReader::max_doc)
+        .try_fold(0_u64, |total, max_doc| {
+            total
+                .checked_add(u64::from(max_doc))
+                .ok_or(IndexError::CountOverflow)
+        })?;
+    let documents_per_task = verification_documents_per_task(total_max_docs, worker_budget)?;
+    let task_count = searcher
+        .segment_readers()
+        .iter()
+        .map(tantivy::SegmentReader::max_doc)
+        .try_fold(0_usize, |count, max_doc| {
+            let segment_tasks = usize::try_from(max_doc.div_ceil(documents_per_task))
+                .map_err(|_| IndexError::CountOverflow)?;
+            count
+                .checked_add(segment_tasks)
+                .ok_or(IndexError::CountOverflow)
+        })?;
+    let task_heap_bytes = task_count
+        .checked_mul(std::mem::size_of::<SegmentVerificationTask>())
+        .ok_or(IndexError::CountOverflow)?;
+    if task_heap_bytes > MAX_VERIFICATION_TASK_HEAP_BYTES {
+        return Err(IndexError::VerificationScratchLimitExceeded {
+            required_bytes: u64::try_from(task_heap_bytes)
+                .map_err(|_| IndexError::CountOverflow)?,
+            maximum_bytes: MAX_VERIFICATION_TASK_HEAP_BYTES as u64,
+        });
+    }
+    let mut tasks = Vec::with_capacity(task_count);
+    append_segment_verification_tasks(
+        &mut tasks,
+        searcher
+            .segment_readers()
+            .iter()
+            .map(tantivy::SegmentReader::max_doc),
+        documents_per_task,
+    );
+    Ok(tasks)
+}
+
+#[cfg(test)]
+fn segment_verification_tasks_for_max_docs(
+    segment_max_docs: &[u32],
+    worker_budget: usize,
+) -> Result<Vec<SegmentVerificationTask>> {
+    let total_max_docs = segment_max_docs.iter().try_fold(0_u64, |total, max_doc| {
+        total
+            .checked_add(u64::from(*max_doc))
+            .ok_or(IndexError::CountOverflow)
+    })?;
+    let documents_per_task = verification_documents_per_task(total_max_docs, worker_budget)?;
+    let mut tasks = Vec::new();
+    append_segment_verification_tasks(
+        &mut tasks,
+        segment_max_docs.iter().copied(),
+        documents_per_task,
+    );
+    Ok(tasks)
+}
+
+fn verification_documents_per_task(total_max_docs: u64, worker_budget: usize) -> Result<u32> {
+    const MIN_DOCUMENTS_PER_TASK: u64 = 16 * 1024;
+    const TASKS_PER_WORKER: u64 = 4;
+
+    let target_tasks = u64::try_from(worker_budget)
+        .map_err(|_| IndexError::CountOverflow)?
+        .checked_mul(TASKS_PER_WORKER)
+        .ok_or(IndexError::CountOverflow)?
+        .max(1);
+    let documents_per_task = total_max_docs
+        .div_ceil(target_tasks)
+        .max(MIN_DOCUMENTS_PER_TASK);
+    let documents_per_task = u32::try_from(documents_per_task.min(u64::from(u32::MAX)))
+        .map_err(|_| IndexError::CountOverflow)?;
+    Ok(documents_per_task)
+}
+
+fn append_segment_verification_tasks(
+    tasks: &mut Vec<SegmentVerificationTask>,
+    segment_max_docs: impl Iterator<Item = u32>,
+    documents_per_task: u32,
+) {
+    for (segment_ord, max_doc) in segment_max_docs.enumerate() {
+        let mut start_doc_id = 0_u32;
+        while start_doc_id < max_doc {
+            let end_doc_id = start_doc_id
+                .saturating_add(documents_per_task)
+                .min(max_doc);
+            tasks.push(SegmentVerificationTask {
+                segment_ord,
+                start_doc_id,
+                end_doc_id,
+            });
+            start_doc_id = end_doc_id;
+        }
+    }
 }
 
 fn expected_query_projection_delta(

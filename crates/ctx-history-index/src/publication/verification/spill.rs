@@ -15,6 +15,7 @@ const QUERY_PROJECTION_ACCUMULATOR_BYTES: usize = 32;
 pub(super) const VERIFICATION_SPILL_RECORD_BYTES: usize =
     IDENTITY_SPILL_RECORD_BYTES + QUERY_PROJECTION_ACCUMULATOR_BYTES;
 pub(super) const MAX_VERIFICATION_SPILL_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_VERIFICATION_LAYOUT_HEAP_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct ProjectionAccumulator([u8; QUERY_PROJECTION_ACCUMULATOR_BYTES]);
@@ -67,7 +68,7 @@ pub(super) struct SegmentVerificationWriter<'a> {
     identity_writer: BufWriter<SpillAtWriter<'a>>,
     projection_writer: BufWriter<SpillAtWriter<'a>>,
     next_doc_id: u32,
-    max_doc: u32,
+    end_doc_id: u32,
 }
 
 pub(super) struct ProjectionDeltas {
@@ -81,29 +82,35 @@ struct SpillAtWriter<'a> {
 }
 
 impl VerificationSpill {
-    pub(super) fn create(segment_max_docs: impl Iterator<Item = u32>) -> Result<Self> {
+    pub(super) fn create<I>(segment_max_docs: I) -> Result<Self>
+    where
+        I: Iterator<Item = u32> + Clone,
+    {
         Self::create_with_limit(segment_max_docs, MAX_VERIFICATION_SPILL_BYTES)
     }
 
-    fn create_with_limit(
-        segment_max_docs: impl Iterator<Item = u32>,
-        maximum_bytes: u64,
-    ) -> Result<Self> {
+    fn create_with_limit<I>(segment_max_docs: I, maximum_bytes: u64) -> Result<Self>
+    where
+        I: Iterator<Item = u32> + Clone,
+    {
         Self::create_with_limit_and_witness(segment_max_docs, maximum_bytes, None)
     }
 
-    fn create_with_limit_and_witness(
-        max_docs: impl Iterator<Item = u32>,
+    fn create_with_limit_and_witness<I>(
+        max_docs: I,
         maximum_bytes: u64,
         cleanup_witness: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    ) -> Result<Self> {
-        let (minimum, maximum) = max_docs.size_hint();
-        let mut segment_offsets = Vec::with_capacity(
-            maximum
-                .filter(|maximum| *maximum == minimum)
-                .unwrap_or(minimum),
-        );
-        let mut segment_max_docs = Vec::with_capacity(segment_offsets.capacity());
+    ) -> Result<Self>
+    where
+        I: Iterator<Item = u32> + Clone,
+    {
+        let (segment_count, expected_logical_bytes) = preflight_spill_layout(
+            max_docs.clone(),
+            maximum_bytes,
+            MAX_VERIFICATION_LAYOUT_HEAP_BYTES,
+        )?;
+        let mut segment_offsets = Vec::with_capacity(segment_count);
+        let mut segment_max_docs = Vec::with_capacity(segment_count);
         let mut logical_bytes = 0_u64;
         for max_doc in max_docs {
             segment_offsets.push(logical_bytes);
@@ -112,12 +119,7 @@ impl VerificationSpill {
                 .checked_add(segment_spill_bytes(max_doc)?)
                 .ok_or(IndexError::CountOverflow)?;
         }
-        if logical_bytes > maximum_bytes {
-            return Err(IndexError::VerificationScratchLimitExceeded {
-                required_bytes: logical_bytes,
-                maximum_bytes,
-            });
-        }
+        debug_assert_eq!(logical_bytes, expected_logical_bytes);
         let file = tempfile::tempfile()?;
         Ok(Self {
             file,
@@ -145,15 +147,32 @@ impl VerificationSpill {
             .ok_or(IndexError::CountOverflow)
     }
 
+    #[cfg(test)]
     pub(super) fn segment_writer(
         &self,
         segment_ord: usize,
+        max_doc: u32,
+    ) -> Result<SegmentVerificationWriter<'_>> {
+        self.segment_range_writer(segment_ord, 0, max_doc, max_doc)
+    }
+
+    pub(super) fn segment_range_writer(
+        &self,
+        segment_ord: usize,
+        start_doc_id: u32,
+        end_doc_id: u32,
         max_doc: u32,
     ) -> Result<SegmentVerificationWriter<'_>> {
         let offset = *self
             .segment_offsets
             .get(segment_ord)
             .ok_or(IndexError::InvalidStoredDocumentField("core_record"))?;
+        if self.segment_max_docs.get(segment_ord).copied() != Some(max_doc)
+            || start_doc_id > end_doc_id
+            || end_doc_id > max_doc
+        {
+            return Err(IndexError::InvalidStoredDocumentField("core_record"));
+        }
         let end = offset
             .checked_add(segment_spill_bytes(max_doc)?)
             .ok_or(IndexError::CountOverflow)?;
@@ -162,13 +181,22 @@ impl VerificationSpill {
         }
         let projection_offset = offset
             .checked_add(identity_segment_bytes(max_doc)?)
+            .and_then(|offset| {
+                u64::from(start_doc_id)
+                    .checked_mul(QUERY_PROJECTION_ACCUMULATOR_BYTES as u64)
+                    .and_then(|start| offset.checked_add(start))
+            })
+            .ok_or(IndexError::CountOverflow)?;
+        let identity_offset = u64::from(start_doc_id)
+            .checked_mul(IDENTITY_SPILL_RECORD_BYTES as u64)
+            .and_then(|start| offset.checked_add(start))
             .ok_or(IndexError::CountOverflow)?;
         Ok(SegmentVerificationWriter {
             identity_writer: BufWriter::with_capacity(
                 VERIFICATION_SPILL_BUFFER_BYTES,
                 SpillAtWriter {
                     file: &self.file,
-                    offset,
+                    offset: identity_offset,
                 },
             ),
             projection_writer: BufWriter::with_capacity(
@@ -178,8 +206,8 @@ impl VerificationSpill {
                     offset: projection_offset,
                 },
             ),
-            next_doc_id: 0,
-            max_doc,
+            next_doc_id: start_doc_id,
+            end_doc_id,
         })
     }
 
@@ -223,6 +251,41 @@ impl VerificationSpill {
             heap_bytes,
         })
     }
+}
+
+fn preflight_spill_layout(
+    max_docs: impl Iterator<Item = u32>,
+    maximum_bytes: u64,
+    maximum_layout_heap_bytes: usize,
+) -> Result<(usize, u64)> {
+    let mut segment_count = 0_usize;
+    let mut logical_bytes = 0_u64;
+    for max_doc in max_docs {
+        segment_count = segment_count
+            .checked_add(1)
+            .ok_or(IndexError::CountOverflow)?;
+        logical_bytes = logical_bytes
+            .checked_add(segment_spill_bytes(max_doc)?)
+            .ok_or(IndexError::CountOverflow)?;
+        if logical_bytes > maximum_bytes {
+            return Err(IndexError::VerificationScratchLimitExceeded {
+                required_bytes: logical_bytes,
+                maximum_bytes,
+            });
+        }
+        let layout_heap_bytes = segment_count
+            .checked_mul(std::mem::size_of::<u64>() + std::mem::size_of::<u32>())
+            .ok_or(IndexError::CountOverflow)?;
+        if layout_heap_bytes > maximum_layout_heap_bytes {
+            return Err(IndexError::VerificationScratchLimitExceeded {
+                required_bytes: u64::try_from(layout_heap_bytes)
+                    .map_err(|_| IndexError::CountOverflow)?,
+                maximum_bytes: u64::try_from(maximum_layout_heap_bytes)
+                    .map_err(|_| IndexError::CountOverflow)?,
+            });
+        }
+    }
+    Ok((segment_count, logical_bytes))
 }
 
 impl ProjectionDeltas {
@@ -305,7 +368,7 @@ impl SegmentVerificationWriter<'_> {
     }
 
     pub(super) fn finish(mut self) -> Result<()> {
-        if self.next_doc_id != self.max_doc {
+        if self.next_doc_id != self.end_doc_id {
             return Err(IndexError::InvalidStoredDocumentField("core_record"));
         }
         self.identity_writer.flush()?;
@@ -314,7 +377,7 @@ impl SegmentVerificationWriter<'_> {
     }
 
     fn check_doc_id(&self, doc_id: u32) -> Result<()> {
-        if doc_id != self.next_doc_id || doc_id >= self.max_doc {
+        if doc_id != self.next_doc_id || doc_id >= self.end_doc_id {
             return Err(IndexError::InvalidStoredDocumentField("core_record"));
         }
         Ok(())
@@ -501,6 +564,25 @@ mod tests {
     }
 
     #[test]
+    fn layout_limit_rejects_segment_metadata_before_allocation() {
+        let one_segment_bytes = std::mem::size_of::<u64>() + std::mem::size_of::<u32>();
+        let error = preflight_spill_layout(
+            [0, 0].into_iter(),
+            MAX_VERIFICATION_SPILL_BYTES,
+            one_segment_bytes,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            IndexError::VerificationScratchLimitExceeded {
+                required_bytes,
+                maximum_bytes,
+            } if required_bytes == (one_segment_bytes * 2) as u64
+                && maximum_bytes == one_segment_bytes as u64
+        ));
+    }
+
+    #[test]
     fn projection_accumulator_preserves_multiset_addition_modulo_256_bits() {
         let first = [0xff; QUERY_PROJECTION_ACCUMULATOR_BYTES];
         let second = [1; QUERY_PROJECTION_ACCUMULATOR_BYTES];
@@ -530,6 +612,48 @@ mod tests {
             .accumulate(DocAddress::new(0, 0), &digest)
             .unwrap();
         assert!(projections.is_complete(DocAddress::new(0, 0)).unwrap());
+    }
+
+    #[test]
+    fn disjoint_segment_ranges_write_exact_positional_records() {
+        let spill = VerificationSpill::create([4].into_iter()).unwrap();
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                let mut writer = spill.segment_range_writer(0, 0, 2, 4).unwrap();
+                writer
+                    .write_record(0, identities(), ProjectionAccumulator::default())
+                    .unwrap();
+                writer.write_deleted(1).unwrap();
+                writer.finish().unwrap();
+            });
+            let second = scope.spawn(|| {
+                let mut writer = spill.segment_range_writer(0, 2, 4, 4).unwrap();
+                writer.write_deleted(2).unwrap();
+                writer
+                    .write_record(3, identities(), ProjectionAccumulator::default())
+                    .unwrap();
+                writer.finish().unwrap();
+            });
+            first.join().unwrap();
+            second.join().unwrap();
+        });
+
+        assert_eq!(
+            spill
+                .record(DocAddress::new(0, 0), "test")
+                .unwrap()
+                .session
+                .digest,
+            [1; 32]
+        );
+        assert_eq!(
+            spill
+                .record(DocAddress::new(0, 3), "test")
+                .unwrap()
+                .root_session
+                .digest,
+            [3; 32]
+        );
     }
 }
 

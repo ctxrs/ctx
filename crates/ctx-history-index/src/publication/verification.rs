@@ -30,7 +30,7 @@ use crate::{
     fields_from_schema, hex,
     query::{self, CompactIdentity, IdentityFieldRole},
     staging::{accumulate_core_record, core_record_accumulator_leaf},
-    GenerationManifest, IndexError, Result, WriterOptions,
+    GenerationManifest, IndexError, Result,
 };
 
 mod spill;
@@ -53,6 +53,13 @@ struct SegmentVerification {
     body_tokens: u64,
     source_aggregates: BTreeMap<String, SourceAggregate>,
     parent_session_documents: u64,
+}
+
+#[derive(Clone, Copy)]
+struct SegmentVerificationTask {
+    segment_ord: usize,
+    start_doc_id: u32,
+    end_doc_id: u32,
 }
 
 #[derive(Default)]
@@ -99,7 +106,7 @@ struct VerificationRunMetrics {
     stored_core_bytes: u64,
     body_tokens: u64,
     verification_spill_bytes: u64,
-    verification_heap_payload_bound_bytes: usize,
+    verification_tracked_heap_bytes: usize,
 }
 
 #[cfg(test)]
@@ -123,13 +130,14 @@ pub(crate) fn verify_searcher_structure(
 }
 
 pub(crate) fn verify_searcher(searcher: &Searcher, manifest: &GenerationManifest) -> Result<()> {
-    let worker_budget = verification_worker_budget(searcher.segment_readers().len());
+    let worker_budget = verification_worker_budget(searcher.num_docs());
     verify_searcher_with_options(searcher, manifest, worker_budget, false, false).map(|_| ())
 }
 
 const PHYSICAL_INTEGRITY_DOMAIN: &[u8] = b"ctx-tantivy-physical-integrity-v1\0";
 const PHYSICAL_HASH_BUFFER_BYTES: usize = 64 * 1024;
 const TANTIVY_META_FILE: &str = "meta.json";
+const MAX_VERIFICATION_WORKERS: usize = 24;
 
 #[derive(Debug)]
 struct PhysicalFileDigest {
@@ -371,14 +379,35 @@ pub(crate) fn verify_complete_searcher(
     verify_searcher(searcher, manifest)
 }
 
-fn verification_worker_budget(segment_count: usize) -> usize {
+fn verification_worker_budget(document_count: u64) -> usize {
     let available = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1);
-    segment_count
+    usize::try_from(document_count)
+        .unwrap_or(usize::MAX)
         .max(1)
         .min(available)
-        .min(WriterOptions::default().indexer_threads.max(1))
+        .min(MAX_VERIFICATION_WORKERS)
+}
+
+#[cfg(test)]
+#[test]
+fn verification_tasks_split_large_segments_into_contiguous_bounded_ranges() {
+    let max_docs = [1_052_077, 976_361, 131_836, 3_341];
+    let tasks = segment_verification_tasks_for_max_docs(&max_docs, 24).unwrap();
+    assert!(tasks.len() > 24);
+
+    for (segment_ord, max_doc) in max_docs.into_iter().enumerate() {
+        let segment_tasks = tasks
+            .iter()
+            .filter(|task| task.segment_ord == segment_ord)
+            .collect::<Vec<_>>();
+        assert_eq!(segment_tasks.first().unwrap().start_doc_id, 0);
+        assert_eq!(segment_tasks.last().unwrap().end_doc_id, max_doc);
+        assert!(segment_tasks
+            .windows(2)
+            .all(|pair| pair[0].end_doc_id == pair[1].start_doc_id));
+    }
 }
 
 include!("verification/logical.rs");
@@ -397,7 +426,7 @@ pub(crate) struct VerificationMetrics {
     pub(crate) stored_core_bytes: u64,
     pub(crate) body_tokens: u64,
     pub(crate) verification_spill_bytes: u64,
-    pub(crate) verification_heap_payload_bound_bytes: usize,
+    pub(crate) verification_tracked_heap_bytes: usize,
 }
 
 #[cfg(test)]
@@ -426,7 +455,7 @@ pub(crate) fn verify_searcher_with_metrics(
         stored_core_bytes: metrics.stored_core_bytes,
         body_tokens: metrics.body_tokens,
         verification_spill_bytes: metrics.verification_spill_bytes,
-        verification_heap_payload_bound_bytes: metrics.verification_heap_payload_bound_bytes,
+        verification_tracked_heap_bytes: metrics.verification_tracked_heap_bytes,
     })
 }
 
