@@ -64,9 +64,9 @@ pub(crate) use publication::{
     physical_integrity_digest, publish_active_generation_pointer,
     reclaim_inactive_generation_directories, reclaim_unreferenced_manifests,
     reconcile_commit_error, searcher_generation, sync_directory, sync_generation,
-    verify_complete_searcher, verify_physical_integrity, verify_searcher,
-    verify_searcher_structure, write_manifest, ActiveGenerationPointer, GenerationSlot,
-    INDEX_GENERATIONS_DIRECTORY,
+    verify_complete_searcher, verify_physical_integrity, verify_publication_candidate,
+    verify_searcher, verify_searcher_structure, write_manifest, ActiveGenerationPointer,
+    GenerationSlot, INDEX_GENERATIONS_DIRECTORY,
 };
 pub use query::{
     AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeDirection,

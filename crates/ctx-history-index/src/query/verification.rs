@@ -1,7 +1,9 @@
-use ctx_history_core::StableEntityId;
-use tantivy::DocAddress;
+use ctx_history_core::{SourceKey, StableEntityId, StableEntityKind};
+use tantivy::{DocAddress, TantivyDocument};
 
-use super::records::stored_core_verification_record;
+use super::records::{
+    stored_core_verification_record, unique_required_bytes, validate_core_record_encoded_bytes,
+};
 use crate::{
     index_document::{
         core_content_bytes, EventRangeOrderKey, SemanticEventOrderKey, SessionEventOrderKey,
@@ -60,6 +62,15 @@ pub(crate) struct CompactVerificationIdentities {
     pub(crate) session_source_owner: [u8; 32],
 }
 
+#[derive(serde::Deserialize)]
+struct CoreIdentityProjection {
+    event_id: StableEntityId,
+    session_id: StableEntityId,
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
+    source: SourceKey,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum IdentityFieldRole {
     Session,
@@ -113,4 +124,60 @@ pub(crate) fn stored_verification_record(
         identities,
         stored_core_bytes,
     })
+}
+
+pub(crate) fn stored_verification_identities(
+    searcher: &tantivy::Searcher,
+    address: DocAddress,
+    fields: Fields,
+) -> Result<CompactVerificationIdentities> {
+    let document: TantivyDocument = searcher.doc(address)?;
+    let encoded = unique_required_bytes(&document, fields.core_record, "core_record")?;
+    validate_core_record_encoded_bytes(searcher, address, encoded.len())?;
+    let projection: CoreIdentityProjection = serde_json::from_slice(encoded)?;
+    projection.source.validate_contract()?;
+    validate_owned_identity(
+        projection.event_id,
+        StableEntityKind::Event,
+        &projection.source,
+    )?;
+    validate_owned_identity(
+        projection.session_id,
+        StableEntityKind::Session,
+        &projection.source,
+    )?;
+    validate_related_session_identity(projection.root_session_id)?;
+    if let Some(parent_session_id) = projection.parent_session_id {
+        validate_related_session_identity(parent_session_id)?;
+    }
+    Ok(CompactVerificationIdentities {
+        event: projection.event_id.into(),
+        session: projection.session_id.into(),
+        parent_session: projection.parent_session_id.map(CompactIdentity::from),
+        root_session: projection.root_session_id.into(),
+        session_source_owner: projection.source.identity().digest(),
+    })
+}
+
+fn validate_owned_identity(
+    identity: StableEntityId,
+    expected_kind: StableEntityKind,
+    source: &SourceKey,
+) -> Result<()> {
+    identity.validate_contract()?;
+    if identity.entity_kind() != expected_kind
+        || identity.source_digest() != source.identity().digest()
+        || identity.source_descriptor_digest() != source.exact_descriptor_digest()
+    {
+        return Err(IndexError::InvalidStoredDocumentField("core_record"));
+    }
+    Ok(())
+}
+
+fn validate_related_session_identity(identity: StableEntityId) -> Result<()> {
+    identity.validate_contract()?;
+    if identity.entity_kind() != StableEntityKind::Session {
+        return Err(IndexError::InvalidStoredDocumentField("core_record"));
+    }
+    Ok(())
 }

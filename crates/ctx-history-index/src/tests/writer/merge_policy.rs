@@ -87,7 +87,7 @@ fn production_merge_policy_bounds_repeated_tiny_appends_amortized() {
 }
 
 #[test]
-fn unreclaimed_delete_density_cannot_replace_the_active_generation() {
+fn postcommit_delete_recommit_cannot_replace_the_active_generation() {
     const REPLACED_DOCUMENTS: u64 = 3;
 
     let temp = tempdir().unwrap();
@@ -148,13 +148,10 @@ fn unreclaimed_delete_density_cannot_replace_the_active_generation() {
     }));
 
     let error = replacement.commit(|_| true).unwrap_err();
-    match error {
-        IndexError::CandidateDeletionDensityExceeded {
-            deleted_documents,
-            max_documents,
-        } => assert!(deleted_documents * 4 > max_documents),
-        other => panic!("unexpected publication failure: {other:?}"),
-    }
+    assert!(
+        matches!(error, IndexError::ConcurrentGenerationChange),
+        "unexpected publication failure: {error:?}"
+    );
     assert_eq!(
         fs::read(temp.path().join("active-generation.json")).unwrap(),
         pointer_before

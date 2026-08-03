@@ -16,8 +16,8 @@ use records::{
 };
 
 pub(crate) use verification::{
-    stored_verification_record, validate_verification_projection, CompactIdentity,
-    IdentityFieldRole, VerificationRecord,
+    stored_verification_identities, stored_verification_record, validate_verification_projection,
+    CompactIdentity, IdentityFieldRole, VerificationRecord,
 };
 
 #[cfg(test)]

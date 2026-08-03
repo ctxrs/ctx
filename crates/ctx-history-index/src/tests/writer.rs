@@ -208,8 +208,8 @@ fn replacement_reuses_missing_prior_repository_certificate_and_deletion_removes_
     replacement.commit(|_| true).unwrap();
     assert_eq!(
         crate::publication::verification_activity(),
-        (2, 1),
-        "multiple reuses add one final candidate checksum and one logical audit"
+        (2, 0),
+        "multiple reuses add one final candidate checksum without a full logical replay"
     );
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
@@ -874,16 +874,25 @@ fn identical_staging_revalidates_active_checksum_after_terminal_callback() {
 }
 
 #[test]
-fn publication_activity_is_one_final_walk_and_one_logical_pass() {
+fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit() {
+    const RETAINED_DOCUMENTS: u64 = 32;
+
     let cold = tempdir().unwrap();
     let cold_source = source("cold-activity.jsonl");
     let mut initial = GenerationWriter::open(cold.path(), WriterOptions::default()).unwrap();
     initial.begin_source(cold_source.clone()).unwrap();
+    for sequence in 1..=RETAINED_DOCUMENTS {
+        initial
+            .add_core_record(document(&cold_source, sequence, "cold body"))
+            .unwrap();
+    }
     initial
-        .add_core_record(document(&cold_source, 1, "cold body"))
-        .unwrap();
-    initial
-        .certify_source(appendable_certificate(&cold_source, 1, 1, 10))
+        .certify_source(appendable_certificate(
+            &cold_source,
+            1,
+            RETAINED_DOCUMENTS,
+            RETAINED_DOCUMENTS * 10,
+        ))
         .unwrap();
     crate::publication::reset_verification_activity();
     initial.commit(|_| true).unwrap();
@@ -907,25 +916,39 @@ fn publication_activity_is_one_final_walk_and_one_logical_pass() {
         .unwrap()
         .clone();
     append
-        .add_core_record(document(&cold_source, 2, "incremental body"))
+        .add_core_record(document(
+            &cold_source,
+            RETAINED_DOCUMENTS + 1,
+            "incremental body",
+        ))
         .unwrap();
     append
         .certify_source_append(
             CertifiedSourceAppend::certify(
                 &base,
-                appendable_certificate(&cold_source, 2, 2, 20),
-                10,
+                appendable_certificate(
+                    &cold_source,
+                    2,
+                    RETAINED_DOCUMENTS + 1,
+                    (RETAINED_DOCUMENTS + 1) * 10,
+                ),
+                RETAINED_DOCUMENTS * 10,
                 [1; 32],
             )
             .unwrap(),
         )
         .unwrap();
     append.commit(|_| true).unwrap();
-    assert_eq!(crate::publication::verification_activity(), (1, 1));
+    assert_eq!(crate::publication::verification_activity(), (1, 0));
+    assert_eq!(
+        crate::publication::candidate_identity_verification_activity(),
+        (2, 5),
+        "one changed identity must sample the retained session without replaying its records"
+    );
 }
 
 #[test]
-fn committed_visible_error_reconciliation_runs_one_complete_audit() {
+fn committed_visible_error_reconciliation_uses_incremental_identity_audit() {
     let temp = tempdir().unwrap();
     let source = source("committed-visible-reconciliation.jsonl");
     let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
@@ -958,7 +981,11 @@ fn committed_visible_error_reconciliation_runs_one_complete_audit() {
 
     crate::publication::reset_verification_activity();
     let receipt = append.commit(|_| true).unwrap();
-    assert_eq!(crate::publication::verification_activity(), (1, 1));
+    assert_eq!(crate::publication::verification_activity(), (1, 0));
+    assert_eq!(
+        crate::publication::candidate_identity_verification_activity(),
+        (2, 5)
+    );
     assert_ne!(receipt.generation_id, baseline.generation_id);
     let pointer = load_active_generation_pointer(temp.path())
         .unwrap()

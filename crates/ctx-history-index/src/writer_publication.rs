@@ -1,5 +1,6 @@
 use super::*;
 use crate::merge_policy::deletion_density_exceeds_limit;
+use std::collections::BTreeMap;
 
 struct CommitGenerationOutcome {
     receipt: CommitReceipt,
@@ -330,6 +331,10 @@ impl GenerationWriter {
                 (opstamp, Some(commit_error))
             }
         };
+        // Merge completion fixes the exact writer-produced segment and delete
+        // topology. Verification may rely on canonical staging only while this
+        // ephemeral fence still matches the bytes it is about to publish.
+        let committed_candidate_generation = meta_generation(&self.index.load_metas()?);
 
         #[cfg(test)]
         if let Some(hook) = self.after_candidate_commit.take() {
@@ -348,7 +353,13 @@ impl GenerationWriter {
                     "verified candidate has no generation directory",
                 ))?;
         let verified = self
-            .verify_candidate(&candidate_path, &manifest, &generation_id, &directory_name)
+            .verify_candidate(
+                &candidate_path,
+                &manifest,
+                &generation_id,
+                &directory_name,
+                &committed_candidate_generation,
+            )
             .map_err(
                 |verification_error| match reconciled_commit_error.as_ref() {
                     None => verification_error,
@@ -420,6 +431,7 @@ impl GenerationWriter {
         manifest: &GenerationManifest,
         generation_id: &str,
         directory_name: &str,
+        committed_candidate_generation: &BTreeMap<String, Option<u64>>,
     ) -> Result<VerifiedCandidate> {
         let directory =
             DurableMmapDirectory::open(candidate_path).map_err(tantivy::TantivyError::from)?;
@@ -431,6 +443,9 @@ impl GenerationWriter {
         let metas = index.load_metas()?;
         let loaded_publication = load_publication_for_metas(&self.root, &metas)?;
         if loaded_publication.generation_id != generation_id {
+            return Err(IndexError::ConcurrentGenerationChange);
+        }
+        if &meta_generation(&metas) != committed_candidate_generation {
             return Err(IndexError::ConcurrentGenerationChange);
         }
         for segment in &metas.segments {
@@ -450,7 +465,7 @@ impl GenerationWriter {
             return Err(IndexError::ConcurrentGenerationChange);
         }
         let physical_integrity_digest = physical_integrity_digest(&index, candidate_path)?;
-        verify_searcher(&searcher, manifest)?;
+        verify_publication_candidate(&searcher, manifest, self.base_searcher.as_ref())?;
         let slot = GenerationSlot::new(
             generation_id.to_owned(),
             directory_name.to_owned(),

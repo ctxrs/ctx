@@ -17,10 +17,11 @@ pub(crate) use manifest::{
 };
 pub(crate) use verification::{
     physical_integrity_digest, verify_complete_searcher, verify_physical_integrity,
-    verify_searcher, verify_searcher_structure,
+    verify_publication_candidate, verify_searcher, verify_searcher_structure,
 };
 
 #[cfg(test)]
 pub(crate) use verification::{
-    reset_verification_activity, verification_activity, verify_searcher_with_metrics,
+    candidate_identity_verification_activity, reset_verification_activity, verification_activity,
+    verify_searcher_with_metrics,
 };
