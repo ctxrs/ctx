@@ -190,6 +190,132 @@ fn legacy_publication_without_source_refresh_metadata_does_not_block_restart() {
         .unwrap());
 }
 
+#[test]
+fn legacy_terminal_publication_recovers_successor_without_pointer_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+    let writer = ctx_history_index::GenerationWriter::open(
+        source_backed_index_root(&data_root),
+        WriterOptions::default(),
+    )
+    .unwrap();
+    let commit = writer.commit(|_| true).unwrap();
+    let successor = CoreRefreshEngine::new().enqueue(Some(commit.generation_id.clone()));
+    let successor_id = successor["request_id"].as_str().unwrap().to_owned();
+
+    write_daemon_job_status(
+        &daemon_source_backed_refresh_job_path(&data_root),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "request_id": "legacy-published-with-successor",
+            "request_state": "published",
+            "operation": "refresh",
+            "previous_generation": commit.generation_id.clone(),
+            "published_generation": commit.generation_id,
+            "refresh_scope": {"kind": "all"},
+            "requested_explicit_source_catalog": authority.to_json(),
+            "daemon_mode": "full",
+            "trigger": "periodic",
+            "trigger_provenance": "daemon_scheduler",
+            "queued_successors": [successor],
+        }),
+    )
+    .unwrap();
+
+    let coordinator = CoreRefreshEngine::new();
+    assert!(coordinator
+        .recover_interrupted_publication(&data_root)
+        .unwrap());
+    assert_eq!(
+        coordinator.status(&successor_id).unwrap()["request_state"],
+        "queued"
+    );
+    assert!(coordinator.has_pending_request());
+}
+
+#[test]
+fn metadata_free_publication_does_not_discard_a_running_refresh() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+    let writer = ctx_history_index::GenerationWriter::open(
+        source_backed_index_root(&data_root),
+        WriterOptions::default(),
+    )
+    .unwrap();
+    let commit = writer.commit(|_| true).unwrap();
+
+    write_daemon_job_status(
+        &daemon_source_backed_refresh_job_path(&data_root),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "request_id": "still-running",
+            "request_state": "running",
+            "operation": "refresh",
+            "previous_generation": null,
+            "published_generation": commit.generation_id,
+            "refresh_scope": {"kind": "all"},
+            "requested_explicit_source_catalog": authority.to_json(),
+            "daemon_mode": "full",
+            "trigger": "periodic",
+            "trigger_provenance": "daemon_scheduler",
+        }),
+    )
+    .unwrap();
+
+    let error = CoreRefreshEngine::new()
+        .recover_interrupted_publication(&data_root)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("recover exact terminal refresh receipt"));
+}
+
+#[test]
+fn metadata_free_publication_requires_the_exact_legacy_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
+    let writer = ctx_history_index::GenerationWriter::open(
+        source_backed_index_root(&data_root),
+        WriterOptions::default(),
+    )
+    .unwrap();
+    let commit = writer.commit(|_| true).unwrap();
+
+    write_daemon_job_status(
+        &daemon_source_backed_refresh_job_path(&data_root),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "request_id": "mismatched-published",
+            "request_state": "published",
+            "operation": "refresh",
+            "previous_generation": commit.generation_id,
+            "published_generation": "different-generation",
+            "refresh_scope": {"kind": "all"},
+            "requested_explicit_source_catalog": authority.to_json(),
+            "daemon_mode": "full",
+            "trigger": "periodic",
+            "trigger_provenance": "daemon_scheduler",
+        }),
+    )
+    .unwrap();
+
+    let error = CoreRefreshEngine::new()
+        .recover_interrupted_publication(&data_root)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("legacy Core refresh job names a different published generation"));
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn old_wait_request_keeps_exact_identity_across_restart_and_returns_exact_generation() {
