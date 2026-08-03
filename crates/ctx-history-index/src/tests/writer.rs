@@ -1078,6 +1078,49 @@ fn exact_replay_omission_fails_with_typed_incomplete_coverage() {
 }
 
 #[test]
+fn exact_replay_accepts_independent_source_coverage_beside_complete_inventory() {
+    let temp = tempdir().unwrap();
+    let inventoried_source = source("inventoried.jsonl");
+    let independent_source = source("independent.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    for (source, body) in [
+        (&inventoried_source, "inventoried source"),
+        (&independent_source, "independent source"),
+    ] {
+        initial.begin_source(source.clone()).unwrap();
+        initial.add_core_record(document(source, 1, body)).unwrap();
+        initial
+            .certify_source(appendable_certificate(source, 1, 1, 10))
+            .unwrap();
+    }
+    let initial_receipt = initial.commit(|_| true).unwrap();
+
+    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let inventoried_certificate = stage_exact_replay(&mut replay, &inventoried_source);
+    let independent_certificate = stage_exact_replay(&mut replay, &independent_source);
+    let inventory = complete_inventory(&inventoried_source, 1, vec![inventoried_source.clone()]);
+    replay
+        .certify_complete_inventory(inventory.clone())
+        .unwrap();
+    let constructions = std::sync::Arc::clone(&replay.index_writer_constructions);
+    let receipt = replay
+        .commit_with_complete_inventory_revalidation(
+            |target| match target {
+                RevalidationTarget::Source(source) => {
+                    source == &inventoried_certificate || source == &independent_certificate
+                }
+                RevalidationTarget::Deletion(_) => false,
+            },
+            |current| current == &inventory,
+        )
+        .unwrap();
+
+    assert_eq!(constructions.load(Ordering::SeqCst), 0);
+    assert_eq!(receipt.generation_id, initial_receipt.generation_id);
+    assert_eq!(receipt.opstamp, initial_receipt.opstamp);
+}
+
+#[test]
 fn exact_replay_witness_covers_retained_sources_and_carried_removals() {
     let temp = tempdir().unwrap();
     let retained = source("retained.jsonl");

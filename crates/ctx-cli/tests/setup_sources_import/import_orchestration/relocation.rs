@@ -182,6 +182,10 @@ fn failed_explicit_replacement_preserves_retained_relocation_witness() {
 fn replaced_explicit_custom_route_cannot_reuse_a_stale_relocation_witness() {
     let temp = tempdir();
     let daemon = start_full_source_refresh_daemon(&temp);
+    write_codex_setup_session(&temp);
+    let automatic =
+        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
+    assert_eq!(automatic["outcome"], "success", "{automatic:#}");
     let first_path = temp.path().join("replaced-first.jsonl");
     let replacement_path = temp.path().join("replacement.jsonl");
     let moved_first_path = temp.path().join("replaced-first-moved.jsonl");

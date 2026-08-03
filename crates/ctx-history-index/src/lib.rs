@@ -608,6 +608,9 @@ impl GenerationWriter {
         }
         if let Some(missing) = base.sources.iter().find(|source| {
             !self.source_is_carried_from_base(source.observation().source())
+                && !self
+                    .pending
+                    .contains_key(&source_token(source.observation().source()))
                 && !covered_sources.contains(&source.observation().source().identity().digest())
         }) {
             return Err(IndexError::IncompleteExactReplayCoverage {
