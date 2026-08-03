@@ -114,6 +114,46 @@ fn register_route(
     registry
 }
 
+#[test]
+fn multi_database_route_watches_every_exact_sqlite_family_and_authority_parent() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let first_parent = temp.path().join("stable-client");
+    let second_parent = temp.path().join("insiders-client");
+    std::fs::create_dir_all(&first_parent).unwrap();
+    std::fs::create_dir_all(&second_parent).unwrap();
+    let first = first_parent.join("local.db");
+    let second = second_parent.join("local.db");
+    drop(create_database(&first));
+    drop(create_database(&second));
+    let registry = register_route(
+        &first,
+        &temp.path().join("data"),
+        vec![
+            (first.clone(), TypedKey::utf8("stable").unwrap()),
+            (second.clone(), TypedKey::utf8("insiders").unwrap()),
+        ],
+    );
+
+    let catalog = registry.watch_catalog();
+    let (route, targets) = catalog.route_targets().next().unwrap();
+    assert_eq!(targets.len(), 10);
+    for database in [&first, &second] {
+        assert!(targets.contains(database));
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut companion = database.as_os_str().to_os_string();
+            companion.push(suffix);
+            assert!(targets.contains(&std::path::PathBuf::from(companion)));
+        }
+    }
+    assert!(targets.contains(&first_parent));
+    assert!(targets.contains(&second_parent));
+    assert!(catalog.certify_route_observation(route).is_none());
+    assert_eq!(
+        catalog.observe_route(route, Some(&"55".repeat(32))),
+        crate::provider::source_backed::RouteObservation::Indeterminate
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn stock_sqlite_snapshot_finish_rejects_leaf_swap_after_open() {

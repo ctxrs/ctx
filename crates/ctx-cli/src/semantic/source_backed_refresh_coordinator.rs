@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -61,6 +61,7 @@ mod client;
 mod coordinator_state;
 mod current_state;
 mod publication_metadata;
+mod publication_observation;
 mod request;
 
 use capture_refresh::{
@@ -69,7 +70,7 @@ use capture_refresh::{
 #[cfg(test)]
 use capture_refresh::{
     execute_capture_owned_refresh_with, refresh_all_provider_sources,
-    reject_blocking_automatic_registry_issues,
+    refresh_all_provider_sources_route_local, reject_blocking_automatic_registry_issues,
 };
 use client::unknown_refresh_request_response;
 pub(crate) use client::{
@@ -91,6 +92,8 @@ pub(crate) use coordinator_state::{
 };
 pub(crate) use current_state::SourceBackedRefreshCurrent;
 use publication_metadata::SourceBackedPublicationMetadata;
+#[cfg(test)]
+use publication_observation::install_after_capture_scan_before_metadata_hook_for_test;
 use request::{SourceBackedRefreshOperation, SourceBackedRefreshRequest};
 
 const SEARCH_DIRECTORY: &str = "search";
@@ -107,7 +110,11 @@ const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
 const SOURCE_REFRESH_BUILD_ISSUE_LIMIT: usize = 8;
 const SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT: usize = 256;
 const SOURCE_REFRESH_RECOVERY_ROUTE_LIMIT: usize = SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT;
-const SOURCE_REFRESH_RECEIPT_JSON_BUDGET_BYTES: usize = 48 * 1024;
+// Reserve half of Core's opaque metadata ceiling for the versioned envelope,
+// exact request/scope, and bounded route-observation vector. Receipt
+// diagnostics fill only the remaining half and are explicitly counted when
+// omitted, so malformed peers cannot crowd out publication of valid routes.
+const SOURCE_REFRESH_RECEIPT_JSON_BUDGET_BYTES: usize = 24 * 1024;
 const SOURCE_REFRESH_STARTUP_OBSERVATION_BUDGET: StdDuration = StdDuration::from_millis(250);
 const TERMINAL_COVERAGE_ERROR_CODE: &str = "all_provider_terminal_coverage_unavailable";
 
@@ -195,6 +202,52 @@ pub(crate) struct SourceBackedRefreshPublication {
     /// Exact Core pin returned by the metadata-aware publication primitive.
     /// Synthetic executor tests may leave this absent.
     pub(crate) verified_index: Option<Arc<VerifiedIndex>>,
+}
+
+/// Immutable request facts already certified by the exact predecessor of a
+/// manual all-route continuation. These facts must join the request receipt
+/// before Core advances its pointer so crash recovery sees the same result as
+/// the live coordinator.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SourceBackedRefreshCoveredPublication {
+    pub(crate) route_results: Vec<SourceBackedRefreshRouteResult>,
+    pub(crate) removed_source_count: usize,
+    pub(crate) timings: SourceBackedRefreshTimings,
+}
+
+impl SourceBackedRefreshCoveredPublication {
+    fn apply_receipt(&self, publication: &mut SourceBackedRefreshPublication) {
+        publication
+            .route_results
+            .extend(self.route_results.iter().cloned());
+        publication
+            .route_results
+            .sort_by(|left, right| left.route_identity.cmp(&right.route_identity));
+        publication.current.removed_source_count = publication
+            .current
+            .removed_source_count
+            .saturating_add(self.removed_source_count);
+    }
+
+    fn apply_timings(&self, publication: &mut SourceBackedRefreshPublication) {
+        publication.timings.discovery_us = publication
+            .timings
+            .discovery_us
+            .saturating_add(self.timings.discovery_us);
+        publication.timings.scan_stage_us = publication
+            .timings
+            .scan_stage_us
+            .saturating_add(self.timings.scan_stage_us);
+        publication.timings.commit_us = publication
+            .timings
+            .commit_us
+            .saturating_add(self.timings.commit_us);
+    }
+
+    fn apply(&self, publication: &mut SourceBackedRefreshPublication) {
+        self.apply_receipt(publication);
+        self.apply_timings(publication);
+    }
 }
 
 impl fmt::Debug for SourceBackedRefreshPublication {
@@ -286,7 +339,61 @@ fn verify_source_backed_publication(
     if route_rejected_record_total > verified_current.rejected_records {
         bail!("Core refresh publication route rejections exceed its exact verified generation");
     }
+    let witness_lineages = publication
+        .published_explicit_source_catalog
+        .as_ref()
+        .map(ExplicitSourceCatalogAuthority::route_lineages)
+        .unwrap_or_default();
+    if publication.catalog_route_bindings.iter().any(|binding| {
+        if witness_lineages.contains(&binding.catalog_lineage) {
+            return SourceRouteIdentity::from_sha256(binding.route_identity.clone())
+                .ok()
+                .is_none_or(|route| manifest.source_route(&route).is_none());
+        }
+        !publication.route_results.iter().any(|result| {
+            result.route_identity == binding.route_identity
+                && matches!(
+                    result.outcome,
+                    SourceBackedRefreshRouteOutcome::Failed {
+                        carried_forward: false,
+                        ..
+                    }
+                )
+        })
+    }) {
+        bail!("Core refresh publication catalog binding has no generation-bound authority or cold request failure");
+    }
     Ok(())
+}
+
+fn explicit_catalog_request_is_accounted_for(
+    requested: &ExplicitSourceCatalogAuthority,
+    published: Option<&ExplicitSourceCatalogAuthority>,
+    bindings: &[ExplicitSourceCatalogRouteBinding],
+    route_results: &[SourceBackedRefreshRouteResult],
+) -> bool {
+    if published.is_some_and(|catalog| catalog.carries_request(requested)) {
+        return true;
+    }
+    let lineages = requested.route_lineages();
+    !lineages.is_empty()
+        && lineages.iter().all(|lineage| {
+            bindings
+                .iter()
+                .find(|binding| binding.catalog_lineage == *lineage)
+                .is_some_and(|binding| {
+                    route_results.iter().any(|result| {
+                        result.route_identity == binding.route_identity
+                            && matches!(
+                                result.outcome,
+                                SourceBackedRefreshRouteOutcome::Failed {
+                                    carried_forward: false,
+                                    ..
+                                }
+                            )
+                    })
+                })
+        })
 }
 
 fn published_generation_receipt(data_root: &Path) -> Result<Option<String>> {
@@ -418,12 +525,16 @@ fn published_refresh_receipt_for_index(
     let selected_route_total = required_usize(value, "selected_route_total")?;
     let successful_route_total = required_usize(value, "successful_route_total")?;
     let route_results = required_route_results(value.get("route_results"))?;
-    let catalog_route_bindings =
-        required_catalog_route_bindings(value.get("catalog_route_bindings"), &route_results)?;
     let expected_catalog_lineages = published_explicit_source_catalog
         .as_ref()
         .map(ExplicitSourceCatalogAuthority::route_lineages)
         .unwrap_or_default();
+    let catalog_route_bindings = required_catalog_route_bindings(
+        value.get("catalog_route_bindings"),
+        verified_index.manifest(),
+        &route_results,
+        &expected_catalog_lineages,
+    )?;
     let actual_catalog_lineages = catalog_route_bindings
         .iter()
         .map(|binding| binding.catalog_lineage.clone())
@@ -467,7 +578,7 @@ fn published_refresh_receipt_for_index(
         || rejected_record_total > current.rejected_records
         || rejection_diagnostics_omitted
             != rejected_record_total.saturating_sub(rejection_diagnostic_total)
-        || actual_catalog_lineages != expected_catalog_lineages
+        || !expected_catalog_lineages.is_subset(&actual_catalog_lineages)
     {
         bail!("published daemon source refresh has an invalid route-result partition");
     }
@@ -482,10 +593,11 @@ fn published_refresh_receipt_for_index(
         .and_then(Value::as_bool)
         .ok_or_else(|| anyhow!("published daemon source refresh has no generation_changed fact"))?;
     let identity_changed = previous_generation.as_deref() != Some(published_generation.as_str());
-    if previous_generation != top_previous_generation
-        || published_generation != top_published_generation
-        || generation_changed != top_generation_changed
+    let request_identity_changed =
+        top_previous_generation.as_deref() != Some(top_published_generation.as_str());
+    if published_generation != top_published_generation
         || generation_changed != identity_changed
+        || top_generation_changed != request_identity_changed
     {
         bail!(
             "published daemon source refresh receipt has inconsistent publication identity facts"
@@ -685,7 +797,9 @@ fn compact_record_rejection_class(value: Option<&str>) -> Result<String> {
 
 fn required_catalog_route_bindings(
     value: Option<&Value>,
+    manifest: &GenerationManifest,
     route_results: &[SourceBackedRefreshRouteResult],
+    expected_catalog_lineages: &BTreeSet<String>,
 ) -> Result<Vec<ExplicitSourceCatalogRouteBinding>> {
     let values = value
         .ok_or_else(|| {
@@ -697,9 +811,10 @@ fn required_catalog_route_bindings(
                 "published daemon source refresh receipt catalog_route_bindings must be an object"
             )
         })?;
-    let selected = route_results
+    let retained = manifest
+        .source_routes()
         .iter()
-        .map(|result| result.route_identity.as_str())
+        .map(|route| route.route_identity().as_str())
         .collect::<BTreeSet<_>>();
     values
         .iter()
@@ -707,12 +822,25 @@ fn required_catalog_route_bindings(
             if !is_sha256_identity(catalog_lineage) {
                 bail!("published daemon source refresh catalog lineage is invalid");
             }
-            let route_identity = route_identity
-                .as_str()
-                .filter(|route| selected.contains(*route))
-                .ok_or_else(|| {
-                    anyhow!("published daemon source refresh catalog binding has no selected route result")
-                })?;
+            let route_identity = route_identity.as_str().ok_or_else(|| {
+                anyhow!("published daemon source refresh catalog binding route is invalid")
+            })?;
+            let retained_witness = expected_catalog_lineages.contains(catalog_lineage)
+                && retained.contains(route_identity);
+            let cold_request_failure = !expected_catalog_lineages.contains(catalog_lineage)
+                && route_results.iter().any(|result| {
+                    result.route_identity == route_identity
+                        && matches!(
+                            result.outcome,
+                            SourceBackedRefreshRouteOutcome::Failed {
+                                carried_forward: false,
+                                ..
+                            }
+                        )
+                });
+            if !retained_witness && !cold_request_failure {
+                bail!("published daemon source refresh catalog binding is neither a retained witness nor a cold request failure");
+            }
             Ok(ExplicitSourceCatalogRouteBinding {
                 catalog_lineage: catalog_lineage.clone(),
                 route_identity: route_identity.to_owned(),

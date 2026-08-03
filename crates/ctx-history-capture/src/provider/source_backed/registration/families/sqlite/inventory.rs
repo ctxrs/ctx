@@ -20,6 +20,19 @@ use shared::{
     SqliteInventoryDocumentAdapter, SqliteInventoryProvider,
 };
 
+fn sqlite_inventory_watch_targets<'a>(
+    databases: impl IntoIterator<Item = &'a Path>,
+) -> SourceBackedRouteWatchTargets {
+    let mut targets = SourceBackedRouteWatchTargets::default();
+    for database in databases {
+        targets.sqlite_databases.insert(database.to_path_buf());
+        if let Some(parent) = database.parent() {
+            targets.authority_paths.insert(parent.to_path_buf());
+        }
+    }
+    targets
+}
+
 /// Registers AstrBot's complete selected/launcher inventory from the same
 /// bounded discovery context used by provider selection.
 pub fn register_astrbot_source_backed_route(
@@ -29,6 +42,9 @@ pub fn register_astrbot_source_backed_route(
     data_root: &Path,
     discovery: DiscoveryContext,
 ) -> SourceBackedCoordinatorResult<()> {
+    let watch_source = source.clone();
+    let watch_primary = source.path.clone();
+    let watch_discovery = discovery.clone();
     SqliteInventoryDocumentAdapter::register_replacement_document_tree_route(
         registry,
         source,
@@ -37,7 +53,34 @@ pub fn register_astrbot_source_backed_route(
         CaptureProvider::AstrBot,
         "astrbot_data_v4_sqlite",
         AstrBotInventoryProvider { discovery },
-    )
+    )?;
+    registry.attach_route_watch_targets(&watch_source, move || {
+        let mut targets = AstrBotSourceBackedInventoryV0::discover(&watch_discovery)
+            .ok()
+            .map(|inventory| {
+                sqlite_inventory_watch_targets(
+                    inventory
+                        .sources()
+                        .iter()
+                        .map(AstrBotSourceBackedSourceV0::path),
+                )
+            })
+            .unwrap_or_default();
+        // Retain exact provider authority roots even when an inventory probe
+        // fails. That keeps warm observation indeterminate while ensuring a
+        // healthy watcher still dirties the route for selected-root changes,
+        // launcher-instance changes, and newly created finite leaves.
+        if let Some(parent) = watch_primary.parent() {
+            targets.authority_paths.insert(parent.to_path_buf());
+        }
+        targets.authority_paths.insert(
+            watch_discovery
+                .home()
+                .join(".astrbot_launcher")
+                .join("instances"),
+        );
+        Some(targets)
+    })
 }
 
 struct AstrBotInventoryProvider {
@@ -262,6 +305,8 @@ pub(in crate::provider::source_backed) fn register_lingma_inventory_source(
     data_root: &Path,
     inventory_source: Arc<dyn LingmaInventorySource>,
 ) -> SourceBackedCoordinatorResult<()> {
+    let watch_source = source.clone();
+    let watch_inventory = Arc::clone(&inventory_source);
     SqliteInventoryDocumentAdapter::register_replacement_document_tree_route(
         registry,
         source,
@@ -270,7 +315,16 @@ pub(in crate::provider::source_backed) fn register_lingma_inventory_source(
         CaptureProvider::Lingma,
         "lingma_sqlite",
         LingmaInventoryProvider { inventory_source },
-    )
+    )?;
+    registry.attach_route_watch_targets(&watch_source, move || {
+        let inventory = watch_inventory.observe().ok()?;
+        Some(sqlite_inventory_watch_targets(
+            inventory
+                .databases()
+                .iter()
+                .map(LingmaDatabaseSourceV0::path),
+        ))
+    })
 }
 
 struct LingmaInventoryProvider {

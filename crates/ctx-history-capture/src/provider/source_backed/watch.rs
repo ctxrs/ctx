@@ -113,6 +113,36 @@ impl SourceBackedWatchCatalog {
 }
 
 impl SourceBackedProviderRegistry {
+    pub(in crate::provider::source_backed) fn attach_route_watch_targets(
+        &mut self,
+        source: &ProviderSource,
+        observe: impl Fn() -> Option<SourceBackedRouteWatchTargets> + Send + Sync + 'static,
+    ) -> SourceBackedCoordinatorResult<()> {
+        let route = self
+            .routes
+            .iter_mut()
+            .find(|route| {
+                route.metadata.source.provider == source.provider
+                    && route.metadata.source.path == source.path
+                    && route.metadata.source.source_format == source.source_format
+            })
+            .ok_or_else(|| SourceBackedCoordinatorError::InvalidRoute {
+                provider: source.provider,
+                detail: "registered route is unavailable for exact watch-target attachment"
+                    .to_owned(),
+            })?;
+        let driver =
+            route
+                .driver
+                .as_mut()
+                .ok_or_else(|| SourceBackedCoordinatorError::InvalidRoute {
+                    provider: source.provider,
+                    detail: "registered route has no executable watch authority".to_owned(),
+                })?;
+        driver.watch_targets = Some(Arc::new(observe));
+        Ok(())
+    }
+
     /// Derives watcher authority from this exact executable registry snapshot.
     pub fn watch_catalog(&self) -> SourceBackedWatchCatalog {
         let mut catalog = SourceBackedWatchCatalog::default();
@@ -147,6 +177,28 @@ impl SourceBackedProviderRegistry {
                     missing,
                     route.metadata.watch_target_kind,
                 );
+            }
+            if let Some(observe_targets) = route
+                .driver
+                .as_ref()
+                .and_then(|driver| driver.watch_targets.as_ref())
+            {
+                // A finite inventory is watched across every exact admitted
+                // database and its authority parent. Directory metadata is
+                // deliberately not a certified warm-skip token, so these
+                // routes remain Indeterminate while still receiving complete
+                // live invalidation coverage.
+                targets.kind = None;
+                if let Some(observed) = observe_targets() {
+                    for database in observed.sqlite_databases {
+                        insert_route_watch_targets(
+                            &mut targets.targets,
+                            &database,
+                            SourceBackedWatchTargetKind::SqliteDatabase,
+                        );
+                    }
+                    targets.targets.extend(observed.authority_paths);
+                }
             }
         }
         catalog

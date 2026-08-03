@@ -218,14 +218,15 @@ impl SourceBackedRefreshReceipt {
 }
 
 /// Final capture-owned route facts made available to the control plane's
-/// opaque metadata factory after terminal revalidation and before commit.
+/// opaque metadata factory immediately before terminal revalidation. Core
+/// binds the resulting bytes only when that complete source fence succeeds.
 pub struct SourceBackedPublicationMetadataContext<'a> {
     publication: PublicationMetadataContext<'a>,
     selected_route_ids: &'a BTreeSet<SourceRouteIdentity>,
     failed_routes: &'a BTreeMap<SourceRouteIdentity, SourceBackedFailedRoute>,
     logical_source_failures: &'a SourceBackedLogicalSourceFailures,
     record_rejections: &'a SourceBackedRecordRejections,
-    base_route_content: &'a BTreeMap<SourceRouteIdentity, [u8; 32]>,
+    successful_route_outcomes: &'a [SourceBackedSuccessfulRouteOutcome],
     removed_source_count: usize,
 }
 
@@ -236,7 +237,7 @@ impl<'a> SourceBackedPublicationMetadataContext<'a> {
         failed_routes: &'a BTreeMap<SourceRouteIdentity, SourceBackedFailedRoute>,
         logical_source_failures: &'a SourceBackedLogicalSourceFailures,
         record_rejections: &'a SourceBackedRecordRejections,
-        base_route_content: &'a BTreeMap<SourceRouteIdentity, [u8; 32]>,
+        successful_route_outcomes: &'a [SourceBackedSuccessfulRouteOutcome],
         removed_source_count: usize,
     ) -> Self {
         Self {
@@ -245,7 +246,7 @@ impl<'a> SourceBackedPublicationMetadataContext<'a> {
             failed_routes,
             logical_source_failures,
             record_rejections,
-            base_route_content,
+            successful_route_outcomes,
             removed_source_count,
         }
     }
@@ -262,23 +263,8 @@ impl<'a> SourceBackedPublicationMetadataContext<'a> {
         self.selected_route_ids.iter()
     }
 
-    pub fn successful_route_outcomes(&self) -> Vec<SourceBackedSuccessfulRouteOutcome> {
-        self.selected_route_ids
-            .iter()
-            .filter(|identity| !self.failed_routes.contains_key(*identity))
-            .cloned()
-            .map(|route_identity| SourceBackedSuccessfulRouteOutcome {
-                logical_source_failure_total: self
-                    .logical_source_failures
-                    .route_total(&route_identity),
-                changed: self.base_route_content.get(&route_identity)
-                    != Some(&source_route_content_fingerprint(
-                        Some(self.manifest()),
-                        &route_identity,
-                    )),
-                route_identity,
-            })
-            .collect()
+    pub fn successful_route_outcomes(&self) -> &[SourceBackedSuccessfulRouteOutcome] {
+        self.successful_route_outcomes
     }
 
     pub fn failed_routes(&self) -> impl ExactSizeIterator<Item = &SourceBackedFailedRoute> {
@@ -316,20 +302,18 @@ impl SourceBackedRefreshReceipt {
     /// refreshes consider only successfully selected route members, not
     /// carried history belonging to routes outside the requested scope.
     pub fn record_completion(&self) -> SourceBackedRecordCompletion {
+        let rejected_sources = self
+            .sources
+            .iter()
+            .filter(|source| source.counts().rejected_records != 0)
+            .map(|source| source.observation().source().identity().digest())
+            .collect::<HashSet<_>>();
         let successful_source_has_rejections = self
             .successful_route_ids
             .iter()
             .filter_map(|route_id| self.commit.manifest().source_route(route_id))
             .flat_map(|route| route.sources())
-            .any(|route_source| {
-                self.sources.iter().any(|source| {
-                    source
-                        .observation()
-                        .source()
-                        .exact_descriptor_eq(route_source)
-                        && source.counts().rejected_records != 0
-                })
-            });
+            .any(|route_source| rejected_sources.contains(&route_source.identity().digest()));
         if successful_source_has_rejections || !self.record_rejections.is_empty() {
             SourceBackedRecordCompletion::CompletedWithRejections
         } else {

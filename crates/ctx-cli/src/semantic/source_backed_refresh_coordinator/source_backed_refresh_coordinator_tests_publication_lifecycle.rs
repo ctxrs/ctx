@@ -403,6 +403,9 @@ fn missing_pin_retries_exact_route_and_reopens_without_stale_authority() {
         .expect("committed generation survives missing pin");
     assert_ne!(durable.generation_id(), retained.generation_id());
     assert!(coordinator.has_scheduled_route_work());
+    coordinator
+        .persist_retry_status(&data_root, failed.job.clone())
+        .expect("complete failed-root scheduler status handoff");
 
     assert!(coordinator
         .enqueue_next_dirty_route(&data_root, ledger_now_ms())
@@ -489,6 +492,62 @@ fn terminal_persist_failure_retries_exact_receipt_without_reexecuting_refresh() 
     assert_eq!(retry.job["request_state"], "published");
     assert!(retry.job.get("failure_type").is_none());
     assert!(retry.job.get("last_error").is_none());
+}
+
+#[test]
+fn failed_terminal_persistence_retries_and_survives_restart_without_recapture() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let coordinator = CoreRefreshEngine::new();
+    coordinator.enqueue(None);
+
+    let first = coordinator
+        .run_next_with(
+            |_, _| Err(anyhow!("typed provider refresh failure")),
+            || Ok(None),
+            |_| Err(anyhow!("injected failed-status persistence failure")),
+            |_| Ok(()),
+        )
+        .expect("failed refresh terminal");
+    assert!(first.failed);
+    assert!(first.terminal_persistence_pending);
+    assert!(coordinator.has_pending_request());
+
+    let status_path = daemon_source_backed_refresh_job_path(&data_root);
+    let retry = coordinator
+        .run_next_with(
+            |_, _| panic!("failed terminal retry must not execute capture"),
+            || panic!("failed terminal retry must not reopen Core"),
+            |job| write_daemon_job_status(&status_path, job),
+            |_| panic!("failed terminal retry must not recapture failure"),
+        )
+        .expect("failed terminal persistence retry");
+    assert!(retry.failed);
+    assert!(!retry.terminal_persistence_pending);
+    assert!(!coordinator.has_pending_request());
+    assert_eq!(retry.job["request_state"], "failed");
+    assert!(retry.job["last_error"]
+        .as_str()
+        .is_some_and(|error| error.contains("typed provider refresh failure")));
+    drop(coordinator);
+
+    let executions = Arc::new(AtomicUsize::new(0));
+    let observed_executions = Arc::clone(&executions);
+    let restarted = CoreRefreshEngine::with_executor(Arc::new(
+        move |_execution: SourceBackedRefreshExecution<'_>| {
+            observed_executions.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow!("durable failed terminal must not be recaptured"))
+        },
+    ));
+    assert!(!restarted
+        .recover_interrupted_publication(&data_root)
+        .unwrap());
+    assert!(!restarted.has_pending_request());
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        read_daemon_job_status(&status_path).unwrap()["request_state"],
+        "failed"
+    );
 }
 
 #[test]

@@ -194,8 +194,8 @@ impl GenerationWriter {
                     });
                 }
             }
-            for (route, revalidate_missing) in &self.missing_route_revalidations {
-                if !revalidate_missing() {
+            for (route, revalidate_route) in &self.route_publication_revalidations {
+                if !revalidate_route() {
                     return Err(IndexError::SourceInvalidated(route.as_str().to_owned()));
                 }
             }
@@ -223,6 +223,15 @@ impl GenerationWriter {
             self.validate_base_integrity_for_reuse()?;
             return self.reused_generation(receipt, return_verified_index);
         }
+
+        // Build opaque owner metadata from the complete staged manifest before
+        // the terminal source fence. The bytes are bound only if every source
+        // and inventory revalidation below succeeds, so observations sampled
+        // by the owner cannot describe state newer than the Core projection
+        // that the fence accepts.
+        let generation_id = manifest.generation_id()?;
+        let publication_metadata =
+            metadata_factory(PublicationMetadataContext::new(&generation_id, &manifest))?;
 
         self.writer_mut()?;
         let candidate_path = self.candidate_path()?;
@@ -256,8 +265,8 @@ impl GenerationWriter {
                 return Err(IndexError::SourceInvalidated(source));
             }
         }
-        for (route, revalidate_missing) in &self.missing_route_revalidations {
-            if !revalidate_missing() {
+        for (route, revalidate_route) in &self.route_publication_revalidations {
+            if !revalidate_route() {
                 let route = route.as_str().to_owned();
                 prepared.abort()?;
                 return Err(IndexError::SourceInvalidated(route));
@@ -274,15 +283,6 @@ impl GenerationWriter {
             }
         }
 
-        let generation_id = manifest.generation_id()?;
-        let publication_metadata =
-            match metadata_factory(PublicationMetadataContext::new(&generation_id, &manifest)) {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    prepared.abort()?;
-                    return Err(error);
-                }
-            };
         let payload =
             match canonical_commit_payload(&generation_id, publication_metadata.as_deref()) {
                 Ok(payload) => payload,

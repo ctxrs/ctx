@@ -326,3 +326,18 @@ fn kiro_bounded_scratch_enospc_is_typed_and_preserves_provider() {
         0
     );
 }
+
+#[test]
+fn kiro_terminal_revalidation_resource_exhaustion_stays_systemic() {
+    let error =
+        KiroSourceBackedErrorV0::SqliteSource(SqliteSourceAccessError::ResourceUnavailable {
+            operation: "revalidating Kiro SQLite authority",
+            path: Path::new("provider.sqlite").to_path_buf(),
+            source: std::io::Error::from(std::io::ErrorKind::OutOfMemory),
+        });
+
+    assert_eq!(
+        super::super::registration::kiro_scan_error(error).kind,
+        crate::provider::source_backed::SourceBackedRouteErrorKind::ResourceUnavailable
+    );
+}

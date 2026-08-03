@@ -72,6 +72,8 @@ pub(crate) fn run_explicit_source_catalog_import(
         .receipt
         .as_ref()
         .context("explicit source refresh has no authoritative terminal receipt")?;
+    let request_previous_generation = refresh.request_previous_generation.clone();
+    let request_generation_changed = refresh.request_generation_changed;
     let published_generation = refresh.pin.generation_id().to_owned();
     let catalog_lineage = upsert.catalog_lineage_hex();
     let requested_outcome = receipt
@@ -103,7 +105,7 @@ pub(crate) fn run_explicit_source_catalog_import(
             })
         })
         .collect::<Vec<_>>();
-    let requested_changed = if requested_succeeded {
+    let requested_changed = if requested_succeeded && request_generation_changed {
         requested_outcome
             .changed
             .context("successful explicit source route has no change result")?
@@ -162,7 +164,7 @@ pub(crate) fn run_explicit_source_catalog_import(
     };
     context.provider_refreshes.record_core_publication(
         ProviderRefreshTrigger::Import,
-        receipt.generation_changed,
+        request_generation_changed,
         receipt.source_failure_total(),
         receipt.rejected_record_total(),
     );
@@ -259,9 +261,9 @@ pub(crate) fn run_explicit_source_catalog_import(
         "source_bytes": stats.bytes,
         "catalog_lineage": catalog_lineage,
         "request_overlay": upsert.authority.to_json(),
-        "previous_generation": receipt.previous_generation,
+        "previous_generation": request_previous_generation,
         "published_generation": published_generation,
-        "generation_changed": receipt.generation_changed,
+        "generation_changed": request_generation_changed,
         "scanned_routes": receipt.selected_route_total(),
         "successful_routes": receipt.successful_route_total(),
         "source_failure_total": receipt.source_failure_total(),

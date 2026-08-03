@@ -1,17 +1,30 @@
+use super::publication_observation::{
+    admitted_route_observations, run_after_capture_scan_before_metadata_hook,
+};
 use super::*;
 use sha2::{Digest as _, Sha256};
+
+#[path = "capture_refresh/catalog_witness.rs"]
+mod catalog_witness;
+use catalog_witness::{reconcile_published_catalog_witness, retained_catalog_witness};
+
 pub(super) struct SourceBackedRefreshPlan<'a> {
     pub(super) explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
     pub(super) operation: SourceBackedRefreshOperation,
     pub(super) scope: SourceBackedRefreshScope,
     pub(super) covered_route_ids: BTreeSet<SourceRouteIdentity>,
+    pub(super) covered_publication: SourceBackedRefreshCoveredPublication,
 }
 
 struct MergedSourceBackedRegistry {
     build: ctx_history_capture::SourceBackedAutomaticRegistryBuild,
-    published_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
+    previous_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
+    previous_catalog_route_bindings:
+        Vec<crate::commands::import::ExplicitSourceCatalogRouteBinding>,
+    requested_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     retained_generation: Option<VerifiedIndex>,
-    catalog_route_bindings: Vec<crate::commands::import::ExplicitSourceCatalogRouteBinding>,
+    requested_catalog_route_bindings:
+        Vec<crate::commands::import::ExplicitSourceCatalogRouteBinding>,
 }
 
 pub(super) fn execute_source_backed_refresh(
@@ -33,6 +46,7 @@ pub(super) fn execute_source_backed_refresh(
         explicit_source_catalog: plan.explicit_source_catalog,
         scope: plan.scope,
         covered_route_ids: plan.covered_route_ids,
+        covered_publication: plan.covered_publication,
         report_progress: &report_progress,
     })
 }
@@ -54,6 +68,7 @@ pub(super) fn execute_capture_owned_refresh(
               explicit_source_catalog,
               scope,
               covered_route_ids,
+              covered_publication,
               report_progress| {
             refresh_all_provider_sources_route_local(
                 discovery,
@@ -66,6 +81,7 @@ pub(super) fn execute_capture_owned_refresh(
                 explicit_source_catalog,
                 scope,
                 covered_route_ids,
+                covered_publication,
                 report_progress,
             )
         },
@@ -89,6 +105,7 @@ where
         Option<&ExplicitSourceCatalogAuthority>,
         SourceBackedRefreshScope,
         &BTreeSet<SourceRouteIdentity>,
+        &SourceBackedRefreshCoveredPublication,
         &mut dyn FnMut(CaptureSourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
     ) -> Result<SourceBackedRefreshPublication>,
 {
@@ -139,6 +156,7 @@ where
         execution.explicit_source_catalog,
         execution.scope.clone(),
         &execution.covered_route_ids,
+        &execution.covered_publication,
         &mut report_progress,
     )
 }
@@ -171,12 +189,13 @@ pub(super) fn refresh_all_provider_sources(
         explicit_source_catalog,
         scope,
         covered_route_ids,
+        &SourceBackedRefreshCoveredPublication::default(),
         report_progress,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn refresh_all_provider_sources_route_local(
+pub(super) fn refresh_all_provider_sources_route_local(
     discovery: &DiscoveryContext,
     report: DiscoveryReport,
     discovery_duration: StdDuration,
@@ -187,15 +206,18 @@ fn refresh_all_provider_sources_route_local(
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     scope: SourceBackedRefreshScope,
     covered_route_ids: &BTreeSet<SourceRouteIdentity>,
+    covered_publication: &SourceBackedRefreshCoveredPublication,
     report_progress: &mut dyn FnMut(
         CaptureSourceBackedDetailedRefreshProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> Result<SourceBackedRefreshPublication> {
     let MergedSourceBackedRegistry {
         build,
-        published_explicit_source_catalog,
+        previous_explicit_source_catalog,
+        previous_catalog_route_bindings,
+        requested_explicit_source_catalog,
         retained_generation,
-        catalog_route_bindings,
+        requested_catalog_route_bindings,
     } = build_merged_source_backed_registry(
         discovery,
         report,
@@ -249,10 +271,15 @@ fn refresh_all_provider_sources_route_local(
         }
         .into());
     }
-    let watch_catalog = build.registry.watch_catalog();
     let previous_generation = retained_generation
         .as_ref()
         .map(|index| index.generation_id().to_owned());
+    // Observation certificates are sampled before parsing. Terminal source
+    // revalidation may legitimately accept same-file JSONL growth after the
+    // scanned prefix, so sampling later could certify bytes absent from this
+    // generation and make restart skip them. A pre-scan token is either bound
+    // to the captured state or conservatively forces the next warm refresh.
+    let admitted_route_observations = admitted_route_observations(&build.registry, &physical_scope);
     let (executor, _issues) = build.into_refresh_executor(WriterOptions::default());
     let mut receipt = executor
         .refresh_scope_with_detailed_progress_and_publication_metadata(
@@ -260,6 +287,7 @@ fn refresh_all_provider_sources_route_local(
             physical_scope,
             report_progress,
             |context| {
+                run_after_capture_scan_before_metadata_hook();
                 let successful_route_outcomes = context.successful_route_outcomes();
                 let failed_routes = context.failed_route_outcomes();
                 let source_failures = context.source_failures();
@@ -269,7 +297,7 @@ fn refresh_all_provider_sources_route_local(
                             .selected_route_ids()
                             .cloned()
                             .collect::<Vec<_>>(),
-                        successful_route_outcomes: &successful_route_outcomes,
+                        successful_route_outcomes,
                         failed_routes: &failed_routes,
                         source_failures: &source_failures,
                         logical_source_failures: context.logical_source_failures(),
@@ -285,9 +313,19 @@ fn refresh_all_provider_sources_route_local(
                     context.removed_source_count(),
                 )
                 .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-                let publication = SourceBackedRefreshPublication {
+                let (published_explicit_source_catalog, catalog_route_bindings) =
+                    reconcile_published_catalog_witness(
+                        previous_explicit_source_catalog.as_ref(),
+                        &previous_catalog_route_bindings,
+                        requested_explicit_source_catalog.as_ref(),
+                        &requested_catalog_route_bindings,
+                        context.manifest(),
+                        &route_results,
+                    )
+                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
+                let mut publication = SourceBackedRefreshPublication {
                     generation_id: context.generation_id().to_owned(),
-                    published_explicit_source_catalog: published_explicit_source_catalog.clone(),
+                    published_explicit_source_catalog,
                     unsupported_routes: route_results
                         .iter()
                         .filter(|result| result.outcome.failure_class() == Some("incompatible"))
@@ -296,10 +334,11 @@ fn refresh_all_provider_sources_route_local(
                     certified_source_bytes: current.certified_source_bytes,
                     current,
                     route_results,
-                    catalog_route_bindings: catalog_route_bindings.clone(),
+                    catalog_route_bindings,
                     timings: SourceBackedRefreshTimings::default(),
                     verified_index: None,
                 };
+                covered_publication.apply_receipt(&mut publication);
                 let terminal = SourceBackedRefreshReceipt::from_verified_publication(
                     previous_generation.clone(),
                     context.generation_id().to_owned(),
@@ -316,8 +355,9 @@ fn refresh_all_provider_sources_route_local(
                             .is_some_and(|route| route.missing_state().is_none())
                     })
                     .filter_map(|outcome| {
-                        watch_catalog
-                            .certify_route_observation(&outcome.route_identity)
+                        admitted_route_observations
+                            .get(&outcome.route_identity)
+                            .cloned()
                             .map(|observation| (outcome.route_identity.clone(), observation))
                     })
                     .collect();
@@ -332,9 +372,32 @@ fn refresh_all_provider_sources_route_local(
             },
         )
         .context("run capture-owned source-backed refresh")?;
+    let unsupported_routes = receipt.unsupported_routes.len();
     let (disposition, verified_index) = receipt.take_verified_publication().ok_or_else(|| {
         anyhow!("capture-owned metadata publication returned no exact verified generation")
     })?;
+    let timings = SourceBackedRefreshTimings {
+        discovery_us: nonzero_duration_micros(receipt.discovery_duration),
+        scan_stage_us: nonzero_duration_micros(receipt.scan_stage_duration),
+        commit_us: nonzero_duration_micros(receipt.commit_duration),
+    };
+    if disposition == PublicationDisposition::Published {
+        let verified_index = Arc::new(verified_index);
+        let metadata = SourceBackedPublicationMetadata::decode(&verified_index)?;
+        if metadata.request_id != request_id
+            || metadata.operation != operation
+            || metadata.refresh_scope != scope
+        {
+            bail!("published Core source-refresh metadata does not match its exact request");
+        }
+        let durable =
+            published_refresh_receipt_for_index(&metadata.response_value(), &verified_index)?;
+        let mut publication =
+            publication_from_terminal_receipt(durable, timings, Some(verified_index));
+        covered_publication.apply_timings(&mut publication);
+        publication.unsupported_routes = unsupported_routes;
+        return Ok(publication);
+    }
     let current =
         SourceBackedRefreshCurrent::from_sources(&receipt.sources, receipt.removals.len())?;
     if current.source_count != receipt.certified_source_count
@@ -358,60 +421,28 @@ fn refresh_all_provider_sources_route_local(
         &registry_failures,
         &expected_selected_route_ids,
     )?;
-    let selected_route_ids = route_results
-        .iter()
-        .map(|result| result.route_identity.clone())
-        .collect::<BTreeSet<_>>();
-    if catalog_route_bindings
-        .iter()
-        .any(|binding| !selected_route_ids.contains(&binding.route_identity))
-    {
-        bail!("explicit catalog lineage has no selected terminal route result");
-    }
+    let (published_explicit_source_catalog, catalog_route_bindings) =
+        reconcile_published_catalog_witness(
+            previous_explicit_source_catalog.as_ref(),
+            &previous_catalog_route_bindings,
+            requested_explicit_source_catalog.as_ref(),
+            &requested_catalog_route_bindings,
+            receipt.commit.manifest(),
+            &route_results,
+        )?;
     let mut publication = SourceBackedRefreshPublication {
         generation_id: receipt.commit.generation_id,
         published_explicit_source_catalog,
-        unsupported_routes: receipt.unsupported_routes.len(),
+        unsupported_routes,
         certified_source_count: receipt.certified_source_count,
         certified_source_bytes: receipt.certified_source_bytes,
         current,
         route_results,
         catalog_route_bindings,
-        timings: SourceBackedRefreshTimings {
-            discovery_us: nonzero_duration_micros(receipt.discovery_duration),
-            scan_stage_us: nonzero_duration_micros(receipt.scan_stage_duration),
-            commit_us: nonzero_duration_micros(receipt.commit_duration),
-        },
+        timings,
         verified_index: Some(Arc::new(verified_index)),
     };
-    if disposition == PublicationDisposition::Published {
-        let unsupported_routes = publication.unsupported_routes;
-        let metadata = SourceBackedPublicationMetadata::decode(
-            publication
-                .verified_index
-                .as_deref()
-                .ok_or_else(|| anyhow!("published Core generation lost its exact verified pin"))?,
-        )?;
-        if metadata.request_id != request_id
-            || metadata.operation != operation
-            || metadata.refresh_scope != scope
-        {
-            bail!("published Core source-refresh metadata does not match its exact request");
-        }
-        let durable = published_refresh_receipt_for_index(
-            &metadata.response_value(),
-            publication
-                .verified_index
-                .as_deref()
-                .ok_or_else(|| anyhow!("published Core generation lost its exact verified pin"))?,
-        )?;
-        publication = publication_from_terminal_receipt(
-            durable,
-            publication.timings,
-            publication.verified_index.take(),
-        );
-        publication.unsupported_routes = unsupported_routes;
-    }
+    covered_publication.apply(&mut publication);
     Ok(publication)
 }
 
@@ -527,16 +558,20 @@ fn provider_route_results(
     {
         bail!("capture-owned source refresh receipt has an incomplete or overlapping terminal route-result partition");
     }
+    let committed_rejections = committed_route_rejected_records(facts.manifest)?;
     let successful_route_rejections = facts
         .successful_route_outcomes
         .iter()
         .map(|outcome| {
-            Ok((
+            (
                 outcome.route_identity.as_str().to_owned(),
-                committed_route_rejected_records(facts.manifest, &outcome.route_identity)?,
-            ))
+                committed_rejections
+                    .get(&outcome.route_identity)
+                    .copied()
+                    .unwrap_or_default(),
+            )
         })
-        .collect::<Result<BTreeMap<_, _>>>()?;
+        .collect::<BTreeMap<_, _>>();
     let mut diagnostics_by_route = BTreeMap::<String, Vec<_>>::new();
     for failure in source_failures.failures() {
         diagnostics_by_route
@@ -642,30 +677,35 @@ fn source_key_identity(source: &ctx_history_core::SourceKey) -> String {
 
 fn committed_route_rejected_records(
     manifest: &GenerationManifest,
-    route_identity: &SourceRouteIdentity,
-) -> Result<u64> {
-    let Some(route) = manifest.source_route(route_identity) else {
-        return Ok(0);
-    };
-    route.sources().iter().try_fold(0_u64, |total, source| {
-        let certificate = manifest
-            .sources
-            .binary_search_by_key(&source.identity().digest(), |candidate| {
-                candidate.observation().source().identity().digest()
-            })
-            .ok()
-            .and_then(|index| manifest.sources.get(index))
-            .filter(|candidate| candidate.observation().source().exact_descriptor_eq(source))
-            .ok_or_else(|| {
-                anyhow!(
-                    "committed route {} names a source without an exact certificate",
-                    route_identity.as_str()
-                )
+) -> Result<HashMap<SourceRouteIdentity, u64>> {
+    let certificates = manifest
+        .sources
+        .iter()
+        .map(|source| (source.observation().source().identity().digest(), source))
+        .collect::<HashMap<_, _>>();
+    manifest
+        .source_routes()
+        .iter()
+        .map(|route| {
+            let total = route.sources().iter().try_fold(0_u64, |total, source| {
+                let certificate = certificates
+                    .get(&source.identity().digest())
+                    .filter(|candidate| {
+                        candidate.observation().source().exact_descriptor_eq(source)
+                    })
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "committed route {} names a source without an exact certificate",
+                            route.route_identity().as_str()
+                        )
+                    })?;
+                total
+                    .checked_add(certificate.counts().rejected_records)
+                    .ok_or_else(|| anyhow!("committed route rejected-record total overflow"))
             })?;
-        total
-            .checked_add(certificate.counts().rejected_records)
-            .ok_or_else(|| anyhow!("committed route rejected-record total overflow"))
-    })
+            Ok((route.route_identity().clone(), total))
+        })
+        .collect()
 }
 
 fn daemon_current_source_progress(
@@ -723,7 +763,9 @@ fn build_merged_source_backed_registry(
         build_automatic_source_backed_registry_from_report(discovery, data_root, report);
     build.discovery_duration = discovery_duration;
     let retained_generation = open_published_generation(data_root)?;
-    let catalog_route_bindings = explicit_source_catalog
+    let (previous_explicit_source_catalog, previous_catalog_route_bindings) =
+        retained_catalog_witness(retained_generation.as_ref())?;
+    let requested_catalog_route_bindings = explicit_source_catalog
         .map(|catalog| {
             catalog.register_routes_after_discovery_merge(
                 data_root,
@@ -735,9 +777,11 @@ fn build_merged_source_backed_registry(
         .unwrap_or_default();
     Ok(MergedSourceBackedRegistry {
         build,
-        published_explicit_source_catalog: explicit_source_catalog.cloned(),
+        previous_explicit_source_catalog,
+        previous_catalog_route_bindings,
+        requested_explicit_source_catalog: explicit_source_catalog.cloned(),
         retained_generation,
-        catalog_route_bindings,
+        requested_catalog_route_bindings,
     })
 }
 
@@ -808,10 +852,11 @@ pub(super) fn automatic_registry_route_failures(
                 .source_route(&route_identity)
                 .is_some_and(|route| !route.sources().is_empty())
         });
+        let source_identity = automatic_registry_issue_source_identity(source)?;
         failures.entry(route_identity.clone()).or_insert_with(|| {
             ctx_history_capture::SourceBackedFailedRoute::new(
                 route_identity,
-                automatic_registry_issue_source_identity(source),
+                source_identity,
                 source.provider,
                 class,
                 carried_forward,
@@ -852,19 +897,7 @@ fn automatic_registry_issue_failure_class(
 fn automatic_registry_issue_route_identity(
     source: &ctx_history_capture::ProviderSource,
 ) -> Result<SourceRouteIdentity> {
-    let metadata = source_backed_route_inventory()
-        .iter()
-        .find(|route| {
-            route.provider == source.provider && route.source_format == source.source_format
-        })
-        .filter(|route| route.automatic)
-        .ok_or_else(|| {
-            anyhow!(
-                "automatic registry issue for {}/{} has no prior executable route contract",
-                source.provider.as_str(),
-                source.source_format,
-            )
-        })?;
+    let metadata = automatic_registry_issue_metadata(source)?;
     let mut digest = Sha256::new();
     digest.update(b"ctx.source-route-identity-v1\0");
     digest.update(source.provider.as_str().as_bytes());
@@ -886,26 +919,38 @@ fn automatic_registry_issue_route_identity(
     SourceRouteIdentity::from_sha256(format!("{:x}", digest.finalize())).map_err(Into::into)
 }
 
-fn automatic_registry_issue_source_identity(
+fn automatic_registry_issue_metadata(
     source: &ctx_history_capture::ProviderSource,
-) -> String {
-    automatic_registry_issue_identity(b"ctx.source-failure-identity-v1\0", source)
+) -> Result<&'static ctx_history_capture::SourceBackedProviderRouteMetadata> {
+    source_backed_route_inventory()
+        .iter()
+        .find(|route| {
+            route.provider == source.provider && route.source_format == source.source_format
+        })
+        .filter(|route| route.automatic)
+        .ok_or_else(|| {
+            anyhow!(
+                "automatic registry issue for {}/{} has no prior executable route contract",
+                source.provider.as_str(),
+                source.source_format,
+            )
+        })
 }
 
-fn automatic_registry_issue_identity(
-    domain: &[u8],
+fn automatic_registry_issue_source_identity(
     source: &ctx_history_capture::ProviderSource,
-) -> String {
+) -> Result<String> {
+    let metadata = automatic_registry_issue_metadata(source)?;
     let mut digest = Sha256::new();
-    digest.update(domain);
+    digest.update(b"ctx.source-failure-identity-v1\0");
     digest.update(source.provider.as_str().as_bytes());
     digest.update([0]);
-    digest.update(source.source_format.as_bytes());
+    digest.update(metadata.certified_source_format.as_bytes());
     digest.update([0]);
     let path = source.path.as_os_str().as_encoded_bytes();
     digest.update((path.len() as u64).to_be_bytes());
     digest.update(path);
-    format!("{:x}", digest.finalize())
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn selected_registry_route_count(
@@ -945,8 +990,5 @@ fn record_source_backed_refresh_progress(
     request_id: &str,
     update: SourceBackedRefreshProgressUpdate,
 ) -> Result<()> {
-    if let Some(job) = coordinator.set_progress(request_id, update) {
-        coordinator.write_status(data_root, &job)?;
-    }
-    Ok(())
+    coordinator.persist_progress(data_root, request_id, update)
 }

@@ -418,6 +418,8 @@ class SourceWorkerParallelismOracleTest(unittest.TestCase):
             elapsed_seconds=2.0,
             cpu_seconds=5.0,
             cpu_per_wall=2.5,
+            baseline_open_fds=10,
+            peak_open_fds=20,
             peak_rss_bytes=128 * 1024 * 1024,
             source_workers=source_workers,
         )

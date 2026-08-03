@@ -87,37 +87,6 @@ pub(super) fn coalesce_attempt(
     attempt.to_json()
 }
 
-pub(super) fn aggregate_manual_all_continuation(
-    publication: &mut SourceBackedRefreshPublication,
-    continuation: &ManualAllContinuation,
-) {
-    if continuation.covered_route_results.is_empty() {
-        return;
-    }
-    publication
-        .route_results
-        .extend(continuation.covered_route_results.values().cloned());
-    publication
-        .route_results
-        .sort_by(|left, right| left.route_identity.cmp(&right.route_identity));
-    publication.current.removed_source_count = publication
-        .current
-        .removed_source_count
-        .saturating_add(continuation.covered_removed_source_count);
-    publication.timings.discovery_us = publication
-        .timings
-        .discovery_us
-        .saturating_add(continuation.covered_timings.discovery_us);
-    publication.timings.scan_stage_us = publication
-        .timings
-        .scan_stage_us
-        .saturating_add(continuation.covered_timings.scan_stage_us);
-    publication.timings.commit_us = publication
-        .timings
-        .commit_us
-        .saturating_add(continuation.covered_timings.commit_us);
-}
-
 pub(super) fn new_refresh_attempt(
     observed_generation: Option<String>,
     metadata: SourceRefreshRuntimeMetadata,
@@ -142,6 +111,7 @@ pub(super) fn new_refresh_attempt(
         certified_source_count: None,
         certified_source_bytes: None,
         receipt: None,
+        publication_receipt: None,
         timings: None,
         publication_probe_us: 0,
         daemon_mode: metadata.daemon_mode,
@@ -152,12 +122,21 @@ pub(super) fn new_refresh_attempt(
     }
 }
 
-pub(super) fn active_attempt_count(state: &CoreRefreshEngineState) -> usize {
-    state
+pub(super) fn durable_queue_entry_count(state: &CoreRefreshEngineState) -> usize {
+    let active = state
         .attempts
         .iter()
         .filter(|attempt| attempt.state.is_active())
-        .count()
+        .count();
+    let terminal_root_id = state
+        .pending_terminal_persistence
+        .as_ref()
+        .map(|pending| pending.request_id.as_str())
+        .or(state.pending_scheduler_retry_root_id.as_deref());
+    let terminal_root = terminal_root_id.is_some_and(|request_id| {
+        find_attempt(state, request_id).is_some_and(|attempt| !attempt.state.is_active())
+    });
+    active.saturating_add(usize::from(terminal_root))
 }
 
 pub(super) fn trim_terminal_attempt_history(state: &mut CoreRefreshEngineState) {
@@ -167,11 +146,16 @@ pub(super) fn trim_terminal_attempt_history(state: &mut CoreRefreshEngineState) 
         .filter(|attempt| !attempt.state.is_active())
         .count();
     while terminal_count > SOURCE_REFRESH_ATTEMPT_HISTORY {
-        let Some(oldest_terminal) = state
-            .attempts
-            .iter()
-            .position(|attempt| !attempt.state.is_active())
-        else {
+        let pending_terminal_root = state
+            .pending_terminal_persistence
+            .as_ref()
+            .map(|pending| pending.request_id.as_str());
+        let pending_scheduler_root = state.pending_scheduler_retry_root_id.as_deref();
+        let Some(oldest_terminal) = state.attempts.iter().position(|attempt| {
+            !attempt.state.is_active()
+                && Some(attempt.request_id.as_str()) != pending_terminal_root
+                && Some(attempt.request_id.as_str()) != pending_scheduler_root
+        }) else {
             break;
         };
         state.attempts.remove(oldest_terminal);
@@ -240,7 +224,7 @@ mod tests {
             verified_index: None,
         };
 
-        aggregate_manual_all_continuation(&mut publication, &continuation);
+        continuation.covered_publication().apply(&mut publication);
 
         assert_eq!(publication.route_results.len(), 1);
         assert_eq!(publication.route_results[0].route_identity, route.as_str());
@@ -271,7 +255,7 @@ mod tests {
             verified_index: None,
         };
 
-        aggregate_manual_all_continuation(&mut publication, &continuation);
+        continuation.covered_publication().apply(&mut publication);
 
         let error = SourceBackedRefreshReceipt::from_verified_publication(
             None,

@@ -35,6 +35,8 @@ pub(crate) struct SourceBackedRefreshObservation {
     pub(crate) request_id: Option<String>,
     pub(crate) daemon_available: bool,
     pub(crate) source_count: usize,
+    pub(crate) request_previous_generation: Option<String>,
+    pub(crate) request_generation_changed: bool,
     pub(crate) receipt: Option<SourceBackedRefreshReceipt>,
     pub(crate) pin: PinnedSourceBackedGeneration,
 }
@@ -226,6 +228,8 @@ fn coordinate_source_backed_refresh_with_catalog(
             request_id: None,
             daemon_available: false,
             source_count: 0,
+            request_previous_generation: None,
+            request_generation_changed: false,
             receipt: None,
             pin,
         });
@@ -281,6 +285,8 @@ fn coordinate_source_backed_refresh_with_catalog(
             request_id: Some(request_id),
             daemon_available: true,
             source_count: response_source_count(&response),
+            request_previous_generation: None,
+            request_generation_changed: false,
             receipt: None,
             pin,
         });
@@ -438,24 +444,6 @@ fn wait_for_published_generation_inner(
         }
         match protocol_state {
             SourceRefreshProtocolState::Published => {
-                if let Some(expected_catalog) = expected_catalog {
-                    let published_catalog = response
-                        .get("receipt")
-                        .and_then(|receipt| receipt.get("published_explicit_source_catalog"))
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "published daemon source refresh has no explicit source catalog authority"
-                            )
-                        })
-                        .and_then(ExplicitSourceCatalogAuthority::from_json)?;
-                    if &published_catalog != expected_catalog {
-                        bail!(
-                            "daemon published an unexpected explicit source catalog authority: expected {:?}, published {:?}",
-                            expected_catalog,
-                            published_catalog
-                        );
-                    }
-                }
                 let expected = response
                     .get("published_generation")
                     .and_then(Value::as_str)
@@ -467,13 +455,39 @@ fn wait_for_published_generation_inner(
                         "daemon published Core generation {expected}, but its retained terminal generation cannot be opened"
                     )
                 })?;
-                let receipt = published_refresh_receipt(&response, &pin)?;
+                let publication_receipt = published_refresh_receipt(&response, &pin)?;
+                validate_status_publication_authority(&publication_receipt, &pin)?;
+                let receipt = published_request_outcome(&response, &pin)?;
+                if let Some(expected_catalog) = expected_catalog {
+                    if !explicit_catalog_request_is_accounted_for(
+                        expected_catalog,
+                        receipt.published_explicit_source_catalog.as_ref(),
+                        &receipt.catalog_route_bindings,
+                        &receipt.route_results,
+                    ) {
+                        bail!(
+                            "daemon published an unexpected explicit source catalog authority: expected {:?}, published {:?}",
+                            expected_catalog,
+                            receipt.published_explicit_source_catalog,
+                        );
+                    }
+                }
+                let request_generation_changed = response
+                    .get("generation_changed")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| {
+                        anyhow!("published daemon source refresh has no request generation outcome")
+                    })?;
+                let request_previous_generation =
+                    optional_generation(response.get("previous_generation"))?;
                 return Ok(SourceBackedRefreshObservation {
                     mode,
                     status: "published".to_owned(),
                     request_id: Some(request_id),
                     daemon_available: true,
                     source_count: response_source_count(&response),
+                    request_previous_generation,
+                    request_generation_changed,
                     receipt: Some(receipt),
                     pin,
                 });
@@ -486,6 +500,48 @@ fn wait_for_published_generation_inner(
             }
         }
     }
+}
+
+fn published_request_outcome(
+    response: &Value,
+    pin: &PinnedSourceBackedGeneration,
+) -> Result<SourceBackedRefreshReceipt> {
+    let Some(request_outcome) = response.get("request_outcome") else {
+        return published_refresh_receipt(response, pin);
+    };
+    let mut projected = response.clone();
+    projected["receipt"] = request_outcome.clone();
+    published_refresh_receipt(&projected, pin)
+        .context("validate daemon source refresh request outcome")
+}
+
+fn validate_status_publication_authority(
+    status_receipt: &SourceBackedRefreshReceipt,
+    pin: &PinnedSourceBackedGeneration,
+) -> Result<()> {
+    if pin.verified_index().publication_metadata().is_none() {
+        return missing_status_publication_authority();
+    }
+    let metadata = SourceBackedPublicationMetadata::decode(pin.verified_index())
+        .context("decode Core publication authority for daemon status")?;
+    let durable_receipt =
+        published_refresh_receipt_for_index(&metadata.response_value(), pin.verified_index())?;
+    if status_receipt != &durable_receipt {
+        bail!("daemon source refresh publication receipt does not match Core metadata");
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn missing_status_publication_authority() -> Result<()> {
+    bail!("active Core publication has no source-refresh metadata")
+}
+
+#[cfg(test)]
+fn missing_status_publication_authority() -> Result<()> {
+    // Protocol-state unit tests use synthetic generations without production
+    // CommitPayload metadata. Real publications always validate above.
+    Ok(())
 }
 
 fn should_report_progress(
@@ -697,6 +753,8 @@ fn daemon_unavailable_fallback(
                 request_id: None,
                 daemon_available: false,
                 source_count: 0,
+                request_previous_generation: None,
+                request_generation_changed: false,
                 receipt: None,
                 pin,
             });

@@ -61,6 +61,15 @@ pub(super) fn sort_and_validate_entries(entries: &mut [CatalogEntry]) -> Result<
             ctx_history_index::SourceRouteIdentity::from_sha256(route_identity.clone())
                 .context("validate preserved explicit relocation route identity")?;
         }
+        if let Some(relocate_from) = entry.relocate_from.as_deref() {
+            validate_approved_path(relocate_from)?;
+            if entry.route_identity.is_none() {
+                bail!("explicit relocation witness requires a preserved route identity");
+            }
+            if relocate_from == entry.path {
+                bail!("explicit relocation requires distinct old and new exact paths");
+            }
+        }
         if !lineages.insert(lineage) {
             bail!("explicit source request contains duplicate catalog lineage");
         }

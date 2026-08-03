@@ -69,6 +69,8 @@ pub(super) fn run_automatic_source_refresh_import(
         .receipt
         .clone()
         .context("daemon source refresh published without an authoritative terminal receipt")?;
+    let request_previous_generation = refresh.request_previous_generation.clone();
+    let request_generation_changed = refresh.request_generation_changed;
     let request_id = refresh.request_id.clone();
     let index = refresh.pin.into_index();
     let manifest = index.manifest();
@@ -97,7 +99,7 @@ pub(super) fn run_automatic_source_refresh_import(
         current_certified_source_bytes: Some(current.certified_source_bytes),
         current_sources_with_rejections: Some(current.sources_with_rejections),
         removed_source_count: Some(current.removed_source_count),
-        work_result: if receipt.generation_changed {
+        work_result: if request_generation_changed {
             ProviderImportWorkResult::Changed
         } else {
             ProviderImportWorkResult::NoOp
@@ -106,7 +108,7 @@ pub(super) fn run_automatic_source_refresh_import(
     };
     context.provider_refreshes.record_core_publication(
         ProviderRefreshTrigger::Import,
-        receipt.generation_changed,
+        request_generation_changed,
         receipt.source_failure_total(),
         receipt.rejected_record_total(),
     );
@@ -158,10 +160,10 @@ pub(super) fn run_automatic_source_refresh_import(
         },
         "outcome": receipt.terminal_outcome(),
         "source_format": "provider_authoritative_all",
-        "change": if receipt.generation_changed { "changed" } else { "no_op" },
-        "previous_generation": receipt.previous_generation,
+        "change": if request_generation_changed { "changed" } else { "no_op" },
+        "previous_generation": request_previous_generation,
         "published_generation": receipt.published_generation,
-        "generation_changed": receipt.generation_changed,
+        "generation_changed": request_generation_changed,
         "scanned_routes": receipt.selected_route_total(),
         "successful_routes": receipt.successful_route_total(),
         "source_failure_total": receipt.source_failure_total(),

@@ -24,6 +24,9 @@ use super::*;
 #[path = "source_backed_refresh_coordinator_tests/registry_policy.rs"]
 mod registry_policy;
 
+#[path = "source_backed_refresh_coordinator_tests/observation_fence.rs"]
+mod observation_fence;
+
 struct TestExecutor {
     calls: Arc<AtomicUsize>,
     generation_id: String,
@@ -210,6 +213,7 @@ fn publish_selected_routes(
             detail: "fixture failure".to_owned(),
         }];
     }
+    execution.covered_publication.apply(&mut publication);
     Ok(publication)
 }
 
@@ -249,6 +253,7 @@ fn publish_selected_routes_with_rejection(
         class: "unsupported_record".to_owned(),
         detail: "fixture record rejection".to_owned(),
     }];
+    execution.covered_publication.apply(&mut publication);
     Ok(publication)
 }
 
@@ -487,6 +492,72 @@ fn queued_startup_exact_is_upgraded_to_one_manual_all_scan() {
 }
 
 #[test]
+fn warm_dirty_route_burst_uses_one_bounded_refresh_and_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    ctx_history_index::GenerationWriter::open(
+        source_backed_index_root(&data_root),
+        WriterOptions::default(),
+    )
+    .unwrap()
+    .commit(|_| true)
+    .unwrap();
+    let routes = BTreeSet::from([
+        route_identity(0x17),
+        route_identity(0x18),
+        route_identity(0x19),
+    ]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let expected_routes = routes.clone();
+    let executor_calls = Arc::clone(&calls);
+    let executor_scans = Arc::clone(&scans);
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            executor_calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                execution.scope,
+                SourceBackedRefreshScope::Exact(expected_routes.clone())
+            );
+            for route in &expected_routes {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            publish_selected_routes(&execution, &expected_routes, None)
+        },
+    ));
+    coordinator.reconcile_watch_routes(
+        routes.clone(),
+        EventWatermark::new(1, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let run = coordinator.run_next(&data_root).expect("batched dirty run");
+    assert!(!run.failed, "{:#}", run.job);
+    assert_eq!(run.scope, SourceBackedRefreshScope::Exact(routes.clone()));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *scans.lock().unwrap(),
+        routes
+            .iter()
+            .cloned()
+            .map(|route| (route, 1))
+            .collect::<BTreeMap<_, _>>()
+    );
+    assert!(!coordinator.has_scheduled_route_work());
+    assert!(!coordinator
+        .enqueue_next_dirty_route(&data_root, u64::MAX)
+        .unwrap());
+}
+
+#[test]
 fn running_startup_exact_continues_manual_all_without_rescanning() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
@@ -526,7 +597,7 @@ fn running_startup_exact_continues_manual_all_without_rescanning() {
                 executor_release.wait();
             } else {
                 assert_eq!(execution.scope, SourceBackedRefreshScope::All);
-                assert_eq!(execution.covered_route_ids.len(), 1);
+                assert_eq!(execution.covered_route_ids, executor_routes);
             }
             let mut publication = if first {
                 let rejected_route = selected.iter().next().expect("selected exact route");
@@ -638,7 +709,14 @@ fn failed_running_exact_remains_in_manual_all_successor_work() {
                 executor_entered.wait();
                 executor_release.wait();
             } else {
-                assert!(execution.covered_route_ids.is_empty());
+                assert_eq!(
+                    execution.covered_route_ids,
+                    executor_routes
+                        .iter()
+                        .filter(|route| *route != &executor_first_route)
+                        .cloned()
+                        .collect()
+                );
             }
             publish_selected_routes(
                 &execution,
@@ -693,6 +771,7 @@ fn event_during_running_exact_invalidates_manual_all_coverage() {
     let executor_calls = Arc::clone(&calls);
     let executor_entered = Arc::clone(&entered);
     let executor_release = Arc::clone(&release);
+    let executor_first_route = first_route.clone();
     let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
             let selected = physically_selected_routes(&execution, &executor_routes);
@@ -707,7 +786,14 @@ fn event_during_running_exact_invalidates_manual_all_coverage() {
                 executor_entered.wait();
                 executor_release.wait();
             } else {
-                assert!(execution.covered_route_ids.is_empty());
+                assert_eq!(
+                    execution.covered_route_ids,
+                    executor_routes
+                        .iter()
+                        .filter(|route| *route != &executor_first_route)
+                        .cloned()
+                        .collect()
+                );
             }
             publish_selected_routes(&execution, &selected, None)
         },
@@ -1199,6 +1285,7 @@ fn default_executor_without_overlay_keeps_automatic_discovery_and_maps_progress(
         explicit_source_catalog: None,
         scope: SourceBackedRefreshScope::All,
         covered_route_ids: BTreeSet::new(),
+        covered_publication: SourceBackedRefreshCoveredPublication::default(),
         report_progress: &report_progress,
     };
     let mut provider_wide_calls = 0;
@@ -1216,6 +1303,7 @@ fn default_executor_without_overlay_keeps_automatic_discovery_and_maps_progress(
          observed_explicit_source_catalog,
          observed_scope,
          observed_covered_route_ids,
+         observed_covered_publication,
          progress| {
             provider_wide_calls += 1;
             assert_eq!(observed_discovery.home(), discovery.home());
@@ -1234,6 +1322,7 @@ fn default_executor_without_overlay_keeps_automatic_discovery_and_maps_progress(
             assert!(observed_explicit_source_catalog.is_none());
             assert_eq!(observed_scope, SourceBackedRefreshScope::All);
             assert!(observed_covered_route_ids.is_empty());
+            assert!(observed_covered_publication.route_results.is_empty());
             progress(CaptureSourceBackedDetailedRefreshProgress {
                 progress: CaptureSourceBackedRefreshProgress {
                     phase: "discovering",
@@ -1410,3 +1499,6 @@ mod request_coalescing_tests;
 
 #[path = "source_backed_refresh_coordinator_tests_publication_lifecycle.rs"]
 mod publication_lifecycle_tests;
+
+#[path = "source_backed_refresh_coordinator_tests_durable_receipt.rs"]
+mod durable_receipt_tests;

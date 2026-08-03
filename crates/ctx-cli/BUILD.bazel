@@ -573,6 +573,9 @@ ctx_cli_integration_test(
     name = "search_refresh_tests",
     src = "tests/search_refresh.rs",
     extra_deps = ["//crates/ctx-history-core:lib"],
+    extra_env = {
+        "RUST_TEST_THREADS": "1",
+    },
     extra_srcs = [
         "tests/support/search_refresh/core_behaviors.rs",
         "tests/support/search_refresh/generation_lifecycle.rs",

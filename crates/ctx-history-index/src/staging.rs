@@ -256,8 +256,8 @@ where
             ));
         }
     }
-    for (route, revalidate_missing) in &generation.missing_route_revalidations {
-        if !revalidate_missing() {
+    for (route, revalidate_route) in &generation.route_publication_revalidations {
+        if !revalidate_route() {
             return Err(IndexError::SourceInvalidated(route.as_str().to_owned()));
         }
     }

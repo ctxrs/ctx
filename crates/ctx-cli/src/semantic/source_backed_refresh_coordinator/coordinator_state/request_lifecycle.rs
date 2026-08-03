@@ -27,7 +27,7 @@ impl CoreRefreshEngine {
                 let operation = coordinator
                     .operation(request_id)
                     .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
-                let covered_route_ids =
+                let (covered_route_ids, covered_publication) =
                     coordinator.admit_refresh_scope(request_id, &refresh_scope)?;
                 coordinator.persist_job_status(data_root, request_id)?;
                 let mut publication = execute_source_backed_refresh(
@@ -40,6 +40,7 @@ impl CoreRefreshEngine {
                         operation,
                         scope: refresh_scope,
                         covered_route_ids,
+                        covered_publication,
                     },
                 )?;
                 let probe_started = StdInstant::now();
@@ -128,18 +129,48 @@ impl CoreRefreshEngine {
         let active_generation = verified
             .as_ref()
             .map(|verified| verified.generation_id().to_owned());
+        let queued_successors = recover_queued_successors(&job, active_generation.clone())?;
         if job.get("request_state").and_then(Value::as_str) == Some("published") {
             if let Some(verified) = verified.as_ref() {
-                if let Ok(receipt) = published_refresh_receipt_for_index(&job, verified) {
-                    if receipt.published_generation != verified.generation_id() {
-                        // Fall through to deterministic replay below.
-                    } else {
-                        let terminal =
-                            CoreRefreshTerminalSuccess::bind(receipt, Arc::clone(verified))?;
-                        let mut state = self.lock_state();
-                        terminal.install(&mut state);
-                        state.current_published_generation = active_generation;
-                        return Ok(false);
+                if let Ok(status_receipt) = published_refresh_receipt_for_index(&job, verified) {
+                    if let Ok(metadata) = SourceBackedPublicationMetadata::decode(verified) {
+                        if let Ok(durable_receipt) = published_refresh_receipt_for_index(
+                            &metadata.response_value(),
+                            verified,
+                        ) {
+                            if status_receipt.published_generation == verified.generation_id()
+                                && durable_receipt == status_receipt
+                            {
+                                let attempt = SourceBackedRefreshAttempt::recovered_published(
+                                    &job,
+                                    &metadata,
+                                    durable_receipt.clone(),
+                                );
+                                let terminal = CoreRefreshTerminalSuccess::bind(
+                                    durable_receipt,
+                                    Arc::clone(verified),
+                                )?;
+                                let has_successors = !queued_successors.is_empty();
+                                let durable_request_id = {
+                                    let mut state = self.lock_state();
+                                    terminal.install(&mut state);
+                                    state.attempts.push_back(attempt);
+                                    install_recovered_successors(
+                                        &mut state,
+                                        queued_successors.clone(),
+                                    )?;
+                                    state.current_published_generation = active_generation.clone();
+                                    trim_terminal_attempt_history(&mut state);
+                                    state
+                                        .active_request_id
+                                        .as_deref()
+                                        .unwrap_or(metadata.request_id.as_str())
+                                        .to_owned()
+                                };
+                                self.persist_job_status(data_root, &durable_request_id)?;
+                                return Ok(has_successors);
+                            }
+                        }
                     }
                 }
             }
@@ -180,12 +211,36 @@ impl CoreRefreshEngine {
             let attempt =
                 SourceBackedRefreshAttempt::recovered_published(&job, &metadata, receipt.clone());
             let terminal = CoreRefreshTerminalSuccess::bind(receipt, Arc::clone(&verified))?;
-            self.write_status(data_root, &attempt.job_json())?;
-            let mut state = self.lock_state();
-            terminal.install(&mut state);
-            state.attempts.push_back(attempt);
-            state.current_published_generation = Some(active_generation);
-            return Ok(false);
+            let has_successors = !queued_successors.is_empty();
+            let durable_request_id = {
+                let mut state = self.lock_state();
+                terminal.install(&mut state);
+                state.attempts.push_back(attempt);
+                install_recovered_successors(&mut state, queued_successors.clone())?;
+                state.current_published_generation = Some(active_generation);
+                trim_terminal_attempt_history(&mut state);
+                state
+                    .active_request_id
+                    .as_deref()
+                    .unwrap_or(metadata.request_id.as_str())
+                    .to_owned()
+            };
+            self.persist_job_status(data_root, &durable_request_id)?;
+            return Ok(has_successors);
+        }
+        if request_state == "failed" && !queued_successors.is_empty() {
+            let durable_request_id = {
+                let mut state = self.lock_state();
+                install_recovered_successors(&mut state, queued_successors)?;
+                state.current_published_generation = active_generation;
+                state
+                    .active_request_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("recovered source refresh successor is unavailable"))?
+                    .to_owned()
+            };
+            self.persist_job_status(data_root, &durable_request_id)?;
+            return Ok(true);
         }
         let needs_recovery = matches!(request_state, "queued" | "running");
         if !needs_recovery {
@@ -196,39 +251,19 @@ impl CoreRefreshEngine {
             return Ok(false);
         }
 
-        let operation = SourceBackedRefreshOperation::from_request_json(&job)
-            .context("recover interrupted source refresh operation")?;
-        let requested_catalog = if operation == SourceBackedRefreshOperation::Import {
-            job.get("requested_explicit_source_catalog")
-                .filter(|value| !value.is_null())
-                .map(ExplicitSourceCatalogAuthority::from_json)
-                .transpose()
-                .context("recover interrupted explicit source request overlay")?
-        } else {
-            None
-        };
-        if operation == SourceBackedRefreshOperation::Import && requested_catalog.is_none() {
-            bail!("interrupted import recovery has no request-scoped explicit source overlay");
-        }
-        let refresh_scope = refresh_scope_from_json(job.get("refresh_scope"))?;
-        let metadata = match operation {
-            SourceBackedRefreshOperation::Refresh => source_refresh_runtime_metadata(data_root),
-            SourceBackedRefreshOperation::Import => {
-                source_catalog_refresh_runtime_metadata(data_root)
+        let root = recover_queued_root(&job, active_generation.clone())?;
+        let request_id = root.request_id.clone();
+        {
+            let mut state = self.lock_state();
+            if state.active_request_id.is_some() || !state.pending_request_ids.is_empty() {
+                bail!("interrupted source refresh recovery conflicts with an active queue");
             }
-        };
-        let response = self.enqueue_with_catalog_metadata(
-            active_generation,
-            metadata,
-            requested_catalog,
-            refresh_scope,
-            SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot,
-        )?;
-        let request_id = response
-            .get("request_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("interrupted source refresh recovery has no request ID"))?;
-        self.persist_job_status(data_root, request_id)?;
+            state.active_request_id = Some(request_id.clone());
+            state.attempts.push_back(root);
+            install_recovered_successors(&mut state, queued_successors)?;
+            state.current_published_generation = active_generation;
+        }
+        self.persist_job_status(data_root, &request_id)?;
         Ok(true)
     }
 
@@ -288,10 +323,7 @@ impl CoreRefreshEngine {
                     }
                     let automatic_exact = active.trigger == "periodic"
                         && active.trigger_provenance == "daemon_scheduler"
-                        && matches!(
-                            &active.refresh_scope,
-                            SourceBackedRefreshScope::Exact(routes) if routes.len() == 1
-                        );
+                        && matches!(&active.refresh_scope, SourceBackedRefreshScope::Exact(_));
                     if is_manual_all && automatic_exact {
                         if active.state == SourceBackedRefreshState::Queued {
                             active.refresh_scope = SourceBackedRefreshScope::All;
@@ -336,7 +368,7 @@ impl CoreRefreshEngine {
             }
         }
 
-        let active_pending_requests = active_attempt_count(&state);
+        let active_pending_requests = durable_queue_entry_count(&state);
         if active_pending_requests >= SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
             return Err(SourceBackedRefreshQueueFull {
                 active_pending_requests,
@@ -352,12 +384,13 @@ impl CoreRefreshEngine {
         );
         let response = attempt.to_json();
         let request_id = attempt.request_id.clone();
-        if state
+        let terminal_persistence_owns_root = state.pending_terminal_persistence.is_some();
+        let active_attempt_owns_root = state
             .active_request_id
             .as_deref()
             .and_then(|request_id| find_attempt(&state, request_id))
-            .is_some_and(|attempt| attempt.state.is_active())
-        {
+            .is_some_and(|attempt| attempt.state.is_active());
+        if terminal_persistence_owns_root || active_attempt_owns_root {
             state.pending_request_ids.push_back(request_id.clone());
         } else {
             state.active_request_id = Some(request_id.clone());
@@ -411,7 +444,10 @@ impl CoreRefreshEngine {
         &self,
         request_id: &str,
         scope: &SourceBackedRefreshScope,
-    ) -> Result<BTreeSet<SourceRouteIdentity>> {
+    ) -> Result<(
+        BTreeSet<SourceRouteIdentity>,
+        SourceBackedRefreshCoveredPublication,
+    )> {
         let now_ms = source_route_ledger_now_ms();
         let mut state = self.lock_state();
         if state.route_admissions.contains_key(request_id) {
@@ -470,28 +506,28 @@ impl CoreRefreshEngine {
                 admissions
             }
             SourceBackedRefreshScope::Exact(routes) => {
-                if routes.len() != 1 {
-                    bail!("daemon exact source refresh must admit exactly one route");
+                if routes.is_empty() || routes.len() > SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT {
+                    bail!(
+                        "daemon exact source refresh must admit between one and {SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT} routes"
+                    );
                 }
-                let route = routes
-                    .iter()
-                    .next()
-                    .ok_or_else(|| anyhow!("daemon exact source refresh has no route"))?;
-                vec![state
+                state
                     .dirty_routes
-                    .admit_exact(route, now_ms)
+                    .admit_exact_routes(routes, now_ms)
                     .ok_or_else(|| {
-                        anyhow!(
-                            "exact source route {} is no longer due for admission",
-                            route.as_str()
-                        )
-                    })?]
+                        anyhow!("one or more exact source routes are no longer due for admission")
+                    })?
             }
         };
         state
             .route_admissions
             .insert(request_id.to_owned(), admissions);
-        Ok(covered_route_ids)
+        let covered_publication = state
+            .manual_all_continuations
+            .get(request_id)
+            .map(ManualAllContinuation::covered_publication)
+            .unwrap_or_default();
+        Ok((covered_route_ids, covered_publication))
     }
 
     #[cfg(test)]
@@ -501,43 +537,9 @@ impl CoreRefreshEngine {
         scope: &SourceBackedRefreshScope,
     ) -> Result<BTreeSet<SourceRouteIdentity>> {
         self.admit_refresh_scope(request_id, scope)
+            .map(|(routes, _)| routes)
     }
 
-    pub(super) fn persist_job_status(&self, data_root: &Path, request_id: &str) -> Result<()> {
-        let state = self.lock_state();
-        let job = find_attempt(&state, request_id)
-            .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?
-            .job_json();
-        // Keep the state lock through publication so an admission snapshot
-        // cannot overwrite a later terminal snapshot during waiter races.
-        self.write_status(data_root, &job)
-    }
-
-    pub(in super::super) fn write_status(&self, data_root: &Path, job: &Value) -> Result<()> {
-        (self.status_writer)(&daemon_source_backed_refresh_job_path(data_root), job)
-    }
-
-    pub(in super::super) fn set_progress(
-        &self,
-        request_id: &str,
-        update: SourceBackedRefreshProgressUpdate,
-    ) -> Option<Value> {
-        let mut state = self.lock_state();
-        let attempt = find_attempt_mut(&mut state, request_id)?;
-        if attempt.state != SourceBackedRefreshState::Running {
-            return None;
-        }
-        attempt.progress = SourceBackedRefreshProgress {
-            phase: update.phase,
-            completed_sources: update.completed_sources,
-            total_sources: update.total_sources,
-            current_source: update.current_source,
-            completed_records: update.completed_records,
-            completed_bytes: update.completed_bytes,
-            current_source_progress: update.current_source_progress,
-        };
-        Some(attempt.job_json())
-    }
     fn run_next_with_terminal_success<Execute, Probe, Terminal, Published, Failed>(
         &self,
         execute: Execute,
@@ -553,64 +555,102 @@ impl CoreRefreshEngine {
         Published: FnOnce(&Value) -> Result<()>,
         Failed: FnOnce(&str) -> Result<()>,
     {
-        let pending_retry = {
-            let state = self.lock_state();
-            state
-                .pending_terminal_persistence
-                .as_ref()
-                .and_then(|pending| {
-                    find_attempt(&state, &pending.request_id).map(|attempt| {
-                        (
-                            pending.request_id.clone(),
-                            pending.terminal_job.clone(),
-                            pending.did_work,
-                            attempt.refresh_scope.clone(),
-                        )
-                    })
+        let mut state = self.lock_state();
+        let pending_retry = state
+            .pending_terminal_persistence
+            .as_ref()
+            .and_then(|pending| {
+                find_attempt(&state, &pending.request_id).map(|attempt| {
+                    (
+                        pending.request_id.clone(),
+                        job_with_queued_successors(&state, pending.terminal_job.clone()),
+                        pending.did_work(),
+                        pending.failed(),
+                        attempt.refresh_scope.clone(),
+                    )
                 })
-        };
-        if let Some((request_id, terminal_job, did_work, refresh_scope)) = pending_retry {
+            });
+        if let Some((request_id, terminal_job, did_work, failed_run, refresh_scope)) = pending_retry
+        {
+            // Keep terminal retry publication under the admission lock. An
+            // acknowledged successor must never be followed by an older
+            // root snapshot reaching the same durable status path.
             let persistence = published(&terminal_job);
-            let mut state = self.lock_state();
             if let Err(error) = persistence {
-                let attempt = find_attempt_mut(&mut state, &request_id)?;
-                attempt.state = SourceBackedRefreshState::Running;
-                attempt.progress.phase = "persisting_terminal".to_owned();
-                attempt.failure_type = None;
-                attempt.last_error = Some(format!(
-                    "persist exact terminal Core publication before acknowledgement: {error:#}"
-                ));
-                let job = attempt.job_json();
+                let terminal_error = terminal_job
+                    .get("last_error")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                {
+                    let attempt = find_attempt_mut(&mut state, &request_id)?;
+                    if failed_run {
+                        attempt.state = SourceBackedRefreshState::Failed;
+                        attempt.progress.phase = "failed".to_owned();
+                        attempt.last_error = Some(format!(
+                            "{terminal_error}; persist exact terminal refresh failure before acknowledgement: {error:#}"
+                        ));
+                    } else {
+                        attempt.state = SourceBackedRefreshState::Running;
+                        attempt.progress.phase = "persisting_terminal".to_owned();
+                        attempt.failure_type = None;
+                        attempt.last_error = Some(format!(
+                            "persist exact terminal Core publication before acknowledgement: {error:#}"
+                        ));
+                    }
+                }
+                let job = durable_job_json(&state, &request_id)?;
                 return Some(SourceBackedRefreshRun {
                     job,
                     did_work: false,
-                    failed: false,
+                    failed: failed_run,
                     terminal_persistence_pending: true,
                     scope: refresh_scope,
                 });
             }
 
             let pending = state.pending_terminal_persistence.take()?;
-            let receipt = pending.terminal.install(&mut state);
-            let published_generation = receipt.published_generation.clone();
-            let attempt = find_attempt_mut(&mut state, &request_id)?;
-            attempt.state = SourceBackedRefreshState::Published;
-            attempt.progress.phase = "published".to_owned();
-            attempt.failure_type = None;
-            attempt.last_error = None;
-            state.current_published_generation = Some(published_generation.clone());
-            advance_after_terminal_attempt(&mut state, &request_id, Some(published_generation));
+            let published_generation = match pending.outcome {
+                PendingTerminalOutcome::Published { terminal, .. } => {
+                    let receipt = terminal.install(&mut state);
+                    let published_generation = receipt.published_generation.clone();
+                    let attempt = find_attempt_mut(&mut state, &request_id)?;
+                    attempt.state = SourceBackedRefreshState::Published;
+                    attempt.progress.phase = "published".to_owned();
+                    attempt.failure_type = None;
+                    attempt.last_error = None;
+                    state.current_published_generation = Some(published_generation.clone());
+                    Some(published_generation)
+                }
+                PendingTerminalOutcome::Failed => {
+                    let attempt = find_attempt_mut(&mut state, &request_id)?;
+                    attempt.state = SourceBackedRefreshState::Failed;
+                    attempt.progress.phase = "failed".to_owned();
+                    attempt.last_error = pending
+                        .terminal_job
+                        .get("last_error")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    attempt.published_generation.clone()
+                }
+            };
+            if failed_run {
+                // The daemon still has to add its durable retry deadline to
+                // this terminal root. Reserve the root's queue slot until
+                // that lock-serialized write completes.
+                state.pending_scheduler_retry_root_id = Some(request_id.clone());
+            }
+            advance_after_terminal_attempt(&mut state, &request_id, published_generation);
             trim_terminal_attempt_history(&mut state);
-            let job = find_attempt(&state, &request_id)?.job_json();
             drop(state);
             return Some(SourceBackedRefreshRun {
-                job,
+                job: terminal_job,
                 did_work,
-                failed: false,
+                failed: failed_run,
                 terminal_persistence_pending: false,
                 scope: refresh_scope,
             });
         }
+        drop(state);
 
         let (request_id, previous_generation, requested_catalog, refresh_scope) = {
             let mut state = self.lock_state();
@@ -645,8 +685,14 @@ impl CoreRefreshEngine {
         let observed_generation = probe();
         let (verified, observed_for_status) = match (execution, observed_generation) {
             (Ok(publication), Ok(Some(observed))) if publication.generation_id == observed => {
-                let catalog_matches_request =
-                    requested_catalog == publication.published_explicit_source_catalog;
+                let catalog_matches_request = requested_catalog.as_ref().is_none_or(|requested| {
+                    explicit_catalog_request_is_accounted_for(
+                        requested,
+                        publication.published_explicit_source_catalog.as_ref(),
+                        &publication.catalog_route_bindings,
+                        &publication.route_results,
+                    )
+                });
                 let verified = if !catalog_matches_request {
                     Err(format!(
                         "source-backed refresh published generation {observed} with an explicit source catalog authority different from the requested authority"
@@ -675,16 +721,8 @@ impl CoreRefreshEngine {
                 source_backed_refresh_error_summary(&error)
             )), None),
         };
-        let continuation = self
-            .lock_state()
-            .manual_all_continuations
-            .get(&request_id)
-            .cloned();
         let verified = match verified {
-            Ok((observed, mut publication)) => {
-                if let Some(continuation) = continuation.as_ref() {
-                    aggregate_manual_all_continuation(&mut publication, continuation);
-                }
+            Ok((observed, publication)) => {
                 let exact_scope_matches = match &refresh_scope {
                     SourceBackedRefreshScope::All => true,
                     SourceBackedRefreshScope::Exact(routes) => {
@@ -708,9 +746,9 @@ impl CoreRefreshEngine {
                         &publication,
                     )
                     .map_err(|error| format!("validate terminal Core publication: {error:#}"))
-                    .and_then(|receipt| {
-                        terminal(receipt.clone())
-                            .map(|terminal| (observed, publication, receipt, terminal))
+                    .and_then(|request_receipt| {
+                        terminal(request_receipt.clone())
+                            .map(|terminal| (observed, publication, request_receipt, terminal))
                             .map_err(|error| {
                                 format!("finalize verified Core publication: {error:#}")
                             })
@@ -734,26 +772,31 @@ impl CoreRefreshEngine {
         let mut terminal_persistence_pending = false;
         let (failed_run, did_work) = match verified {
             Ok((observed, publication, receipt, terminal)) => {
-                let attempt = find_attempt_mut(&mut state, &request_id)?;
-                attempt.finished_at_ms = Some(utc_now().timestamp_millis());
-                attempt.progress.current_source = None;
-                attempt.progress.completed_records = None;
-                attempt.progress.completed_bytes = None;
-                attempt.state = SourceBackedRefreshState::Published;
-                attempt.published_generation = Some(observed.clone());
-                attempt.progress.phase = "published".to_owned();
-                attempt.progress.completed_sources = attempt.progress.total_sources;
-                attempt.scanned_routes = Some(publication.route_results.len());
-                attempt.unsupported_routes = Some(publication.unsupported_routes);
-                attempt.certified_source_count = Some(publication.certified_source_count);
-                attempt.certified_source_bytes = Some(publication.certified_source_bytes);
-                attempt.receipt = Some(receipt.clone());
-                attempt.timings = Some(publication.timings);
-                attempt.failure_type = None;
-                attempt.last_error = None;
-                let did_work = attempt.published_generation != previous_generation;
-                let terminal_job = attempt.job_json();
+                let publication_receipt = terminal.publication_receipt().cloned();
+                let did_work = {
+                    let attempt = find_attempt_mut(&mut state, &request_id)?;
+                    attempt.finished_at_ms = Some(utc_now().timestamp_millis());
+                    attempt.progress.current_source = None;
+                    attempt.progress.completed_records = None;
+                    attempt.progress.completed_bytes = None;
+                    attempt.state = SourceBackedRefreshState::Published;
+                    attempt.published_generation = Some(observed.clone());
+                    attempt.progress.phase = "published".to_owned();
+                    attempt.progress.completed_sources = attempt.progress.total_sources;
+                    attempt.scanned_routes = Some(publication.route_results.len());
+                    attempt.unsupported_routes = Some(publication.unsupported_routes);
+                    attempt.certified_source_count = Some(publication.certified_source_count);
+                    attempt.certified_source_bytes = Some(publication.certified_source_bytes);
+                    attempt.receipt = Some(receipt.clone());
+                    attempt.publication_receipt = publication_receipt;
+                    attempt.timings = Some(publication.timings);
+                    attempt.failure_type = None;
+                    attempt.last_error = None;
+                    attempt.published_generation != previous_generation
+                };
+                let terminal_job = durable_job_json(&state, &request_id)?;
                 if let Err(error) = published(&terminal_job) {
+                    let attempt = find_attempt_mut(&mut state, &request_id)?;
                     attempt.state = SourceBackedRefreshState::Running;
                     attempt.progress.phase = "persisting_terminal".to_owned();
                     attempt.failure_type = None;
@@ -762,9 +805,8 @@ impl CoreRefreshEngine {
                     ));
                     state.pending_terminal_persistence = Some(PendingTerminalPersistence {
                         request_id: request_id.clone(),
-                        terminal,
                         terminal_job,
-                        did_work,
+                        outcome: PendingTerminalOutcome::Published { terminal, did_work },
                     });
                     terminal_persistence_pending = true;
                 } else {
@@ -774,24 +816,38 @@ impl CoreRefreshEngine {
                 (false, did_work)
             }
             Err(error) => {
-                let attempt = find_attempt_mut(&mut state, &request_id)?;
-                attempt.finished_at_ms = Some(utc_now().timestamp_millis());
-                attempt.progress.current_source = None;
-                attempt.progress.completed_records = None;
-                attempt.progress.completed_bytes = None;
-                if observed_for_status.is_some() {
-                    attempt.published_generation = observed_for_status.clone();
+                {
+                    let attempt = find_attempt_mut(&mut state, &request_id)?;
+                    attempt.finished_at_ms = Some(utc_now().timestamp_millis());
+                    attempt.progress.current_source = None;
+                    attempt.progress.completed_records = None;
+                    attempt.progress.completed_bytes = None;
+                    if observed_for_status.is_some() {
+                        attempt.published_generation = observed_for_status.clone();
+                    }
+                    attempt.state = SourceBackedRefreshState::Failed;
+                    attempt.progress.phase = "failed".to_owned();
+                    attempt.failure_type = execution_failure_type;
+                    attempt.last_error = Some(error);
                 }
-                attempt.state = SourceBackedRefreshState::Failed;
-                attempt.progress.phase = "failed".to_owned();
-                attempt.failure_type = execution_failure_type;
-                attempt.last_error = Some(error);
-                let failure_job = attempt.job_json();
+                let failure_job = durable_job_json(&state, &request_id)?;
                 if let Err(persist_error) = published(&failure_job) {
+                    let attempt = find_attempt_mut(&mut state, &request_id)?;
                     let original = attempt.last_error.take().unwrap_or_default();
                     attempt.last_error = Some(format!(
-                        "{original}; persist terminal refresh failure: {persist_error:#}"
+                        "{original}; persist exact terminal refresh failure before acknowledgement: {persist_error:#}"
                     ));
+                    state.pending_terminal_persistence = Some(PendingTerminalPersistence {
+                        request_id: request_id.clone(),
+                        terminal_job: failure_job,
+                        outcome: PendingTerminalOutcome::Failed,
+                    });
+                    terminal_persistence_pending = true;
+                } else {
+                    // The scheduler adds retry timing in a second durable
+                    // write. Keep this failed root inside the shared queue
+                    // bound until that write has completed.
+                    state.pending_scheduler_retry_root_id = Some(request_id.clone());
                 }
                 (true, false)
             }

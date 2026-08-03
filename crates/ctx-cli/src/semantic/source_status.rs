@@ -165,8 +165,8 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
     let request_state = job.get("request_state").and_then(Value::as_str);
     let published_generation = job.get("published_generation").and_then(Value::as_str);
     let generation_matches = generation_id.is_some() && generation_id == published_generation;
-    let outcome = job
-        .get("receipt")
+    let request_outcome = job.get("request_outcome").or_else(|| job.get("receipt"));
+    let outcome = request_outcome
         .and_then(|receipt| receipt.get("outcome"))
         .or_else(|| job.get("outcome"))
         .and_then(Value::as_str);
@@ -213,12 +213,10 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
         "trigger": job.get("trigger"),
         "trigger_provenance": job.get("trigger_provenance"),
         "last_error": job.get("last_error"),
-        "current": job.get("receipt").and_then(|receipt| receipt.get("current")),
-        "source_failure_total": job
-            .get("receipt")
+        "current": request_outcome.and_then(|receipt| receipt.get("current")),
+        "source_failure_total": request_outcome
             .and_then(|receipt| receipt.get("source_failure_total")),
-        "rejected_record_total": job
-            .get("receipt")
+        "rejected_record_total": request_outcome
             .and_then(|receipt| receipt.get("rejected_record_total")),
     }))
 }

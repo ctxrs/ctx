@@ -66,9 +66,10 @@ pub enum PublicationDisposition {
 
 /// Final logical publication facts available to an opaque metadata factory.
 ///
-/// The manifest and its generation ID are complete, deterministic, and already
-/// terminally revalidated. The factory owns the meaning and encoding of the
-/// bytes it returns; Core only binds those bytes to a pointer-advancing commit.
+/// The manifest and its generation ID are complete and deterministic. Core
+/// invokes the factory inside the publication fence, then terminally
+/// revalidates every source and inventory before binding the returned bytes to
+/// a pointer-advancing commit.
 #[derive(Debug, Clone, Copy)]
 pub struct PublicationMetadataContext<'a> {
     generation_id: &'a str,

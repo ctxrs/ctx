@@ -39,11 +39,12 @@ use crate::{
 use super::{
     daemon_consumer_retry_due, daemon_core_refresh_job_path, daemon_job_should_backoff,
     daemon_mode_runs_core_pro_catch_up, daemon_mode_runs_core_semantic_projection,
-    daemon_semantic_job_path, persist_pro_status, prepare_pro_retry_for_generation,
-    read_daemon_job_status, read_pro_status, record_daemon_job_retry,
-    restore_daemon_consumer_retries, run_daemon_scheduler_cycle_with_activity,
-    run_pending_core_pro_catch_up, run_pending_core_refresh, run_pro_catch_up_with_retry,
-    write_daemon_job_status, DaemonRetryBackoff, DaemonRuntime, SourceBackedProCoreAuthority,
+    daemon_semantic_job_path, install_before_core_scheduler_status_hook_for_test,
+    persist_pro_status, prepare_pro_retry_for_generation, read_daemon_job_status, read_pro_status,
+    record_daemon_job_retry, record_source_refresh_retry, restore_daemon_consumer_retries,
+    run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
+    run_pending_core_refresh, run_pro_catch_up_with_retry, write_daemon_job_status,
+    DaemonRetryBackoff, DaemonRuntime, SourceBackedProCoreAuthority,
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";

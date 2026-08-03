@@ -502,6 +502,65 @@ fn safety_reconciliation_recreates_a_failed_startup_watcher_without_healthy_cata
     Ok(())
 }
 
+#[test]
+fn persistent_watcher_failure_polls_healthy_routes_on_every_safety_pass() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let fixture = ProviderObservationFixture::new(temp.path())?;
+    let coordinator = fixture.restarted_coordinator();
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let mut watch_runtime = DaemonWatchRuntime::new(wakeup);
+
+    let startup_missing_scans = watch_runtime.reconcile_catalog_and_route_authority_with(
+        &fixture.data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::Startup,
+        false,
+        |_| Ok(fixture.catalog.clone()),
+        |_, _, _| Err(anyhow!("injected persistent watcher failure")),
+    );
+    assert_eq!(startup_missing_scans, 1);
+    assert!(watch_runtime.file_watcher.is_none());
+    assert!(
+        coordinator.has_scheduled_route_work(),
+        "an unchanged observation is unsafe when no watcher fenced it"
+    );
+    // Normalize the test's synthetic scheduler clock without sleeping through
+    // the production debounce window.
+    coordinator.schedule_startup_route_reconciliation(
+        [fixture.route.clone()],
+        EventWatermark::new(0, 0),
+        0,
+    );
+    assert!(coordinator.enqueue_next_dirty_route(&fixture.data_root, u64::MAX)?);
+    let fallback = coordinator
+        .run_next(&fixture.data_root)
+        .expect("fallback refresh");
+    assert!(!fallback.failed, "{:#}", fallback.job);
+    assert!(!coordinator.has_scheduled_route_work());
+
+    fs::write(
+        &fixture.provider_file,
+        b"changed while watcher unavailable\n",
+    )?;
+    let safety_missing_scans = watch_runtime.reconcile_catalog_and_route_authority_with(
+        &fixture.data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::SafetyTimeout,
+        false,
+        |_| Ok(fixture.catalog.clone()),
+        |_, _, _| Err(anyhow!("injected persistent watcher failure")),
+    );
+    assert_eq!(
+        safety_missing_scans, 1,
+        "one safety timeout must run one pending-missing scan"
+    );
+    assert!(
+        coordinator.has_scheduled_route_work(),
+        "safety polling must keep healthy routes live during watcher failure"
+    );
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn forced_watcher_recovery_adds_no_scans_after_startup_reconciliation() -> Result<()> {

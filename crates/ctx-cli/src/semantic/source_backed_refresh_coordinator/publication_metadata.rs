@@ -35,6 +35,28 @@ impl SourceBackedPublicationMetadata {
                     .map_or(Value::Null, |observation| json!(observation))
             })
             .collect::<Vec<_>>();
+        let encoded = self.encode_with_observations(route_observations)?;
+        if encoded.len() <= MAX_PUBLICATION_METADATA_BYTES {
+            return Ok(encoded);
+        }
+        // Observations are a performance certificate, never publication
+        // authority. Drop them as one deterministic unit before rejecting a
+        // legitimate exact receipt; startup then performs the normal
+        // fail-closed refresh for every route.
+        let encoded = self.encode_with_observations(vec![Value::Null; route_ids.len()])?;
+        if encoded.len() > MAX_PUBLICATION_METADATA_BYTES {
+            return Err(IndexError::PublicationMetadataTooLarge {
+                actual: encoded.len(),
+                maximum: MAX_PUBLICATION_METADATA_BYTES,
+            });
+        }
+        Ok(encoded)
+    }
+
+    fn encode_with_observations(
+        &self,
+        route_observations: Vec<Value>,
+    ) -> ctx_history_index::Result<Vec<u8>> {
         let value = compact_json(json!({
             "version": SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
             "request_id": self.request_id,
@@ -43,15 +65,8 @@ impl SourceBackedPublicationMetadata {
             "receipt": self.receipt,
             "route_observations": route_observations,
         }));
-        let encoded = serde_json::to_vec(&value)
-            .map_err(|error| IndexError::PublicationMetadata(error.to_string()))?;
-        if encoded.len() > MAX_PUBLICATION_METADATA_BYTES {
-            return Err(IndexError::PublicationMetadataTooLarge {
-                actual: encoded.len(),
-                maximum: MAX_PUBLICATION_METADATA_BYTES,
-            });
-        }
-        Ok(encoded)
+        serde_json::to_vec(&value)
+            .map_err(|error| IndexError::PublicationMetadata(error.to_string()))
     }
 
     pub(super) fn decode(index: &VerifiedIndex) -> Result<Self> {
@@ -209,6 +224,38 @@ mod tests {
             Err(IndexError::PublicationMetadataTooLarge { maximum, .. })
                 if maximum == MAX_PUBLICATION_METADATA_BYTES
         ));
+    }
+
+    #[test]
+    fn exact_scope_reserves_envelope_capacity_by_dropping_optional_observations() {
+        let route_ids = (0_u16..=255)
+            .map(|index| {
+                SourceRouteIdentity::from_sha256(format!("{index:064x}"))
+                    .expect("bounded route identity")
+            })
+            .collect::<Vec<_>>();
+        let routes = route_ids
+            .iter()
+            .map(|route| (route.as_str().to_owned(), json!(["s", false, [], 0, 0, []])))
+            .collect::<serde_json::Map<_, _>>();
+        let mut value = metadata(json!({
+            "route_results": routes,
+        }));
+        value.refresh_scope = SourceBackedRefreshScope::exact(route_ids.clone());
+        value.route_observations = route_ids
+            .into_iter()
+            .map(|route| (route, "55".repeat(32)))
+            .collect();
+
+        let encoded = value.encode().expect("required metadata envelope fits");
+        assert!(encoded.len() <= MAX_PUBLICATION_METADATA_BYTES);
+        let decoded: Value = serde_json::from_slice(&encoded).unwrap();
+        let observations = decoded["route_observations"].as_array().unwrap();
+        assert_eq!(observations.len(), SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT);
+        assert!(
+            observations.iter().all(Value::is_null),
+            "optional observation certificates must yield to durable authority"
+        );
     }
 
     #[test]

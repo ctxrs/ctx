@@ -1,4 +1,5 @@
 mod codex_union;
+mod generation_witness;
 mod source_helpers;
 mod storage;
 
@@ -188,6 +189,8 @@ struct CatalogEntry {
     catalog_lineage: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     route_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relocate_from: Option<PathBuf>,
     enabled: bool,
 }
 
@@ -295,6 +298,7 @@ pub(crate) fn upsert_explicit_source(
         path: source.path.clone(),
         catalog_lineage: encode_hex(&catalog_lineage),
         route_identity: None,
+        relocate_from: None,
         enabled: true,
     }];
     sort_and_validate_entries(&mut entries)?;
@@ -348,6 +352,7 @@ pub(crate) fn relocate_explicit_source(
         path: source.path.clone(),
         catalog_lineage: encode_hex(&relocation.catalog_lineage),
         route_identity: Some(relocation.route_identity.as_str().to_owned()),
+        relocate_from: Some(relocation.path.clone()),
         enabled: true,
     }];
     sort_and_validate_entries(&mut entries)?;
@@ -563,6 +568,9 @@ fn register_explicit_source_catalog_snapshot_routes(
             build.registry.preserve_explicit_route_identity(
                 constructed,
                 ctx_history_index::SourceRouteIdentity::from_sha256(preserved.clone())?,
+                entry.relocate_from.as_deref().ok_or_else(|| {
+                    anyhow!("preserved relocation route has no exact old-path witness")
+                })?,
             )?;
         }
         let added = build

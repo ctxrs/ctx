@@ -36,12 +36,14 @@ from performance_sanity_support import (
 @unittest.skipUnless(
     sys.platform.startswith("linux")
     and hasattr(os, "sched_getaffinity")
-    and Path("/proc/self/stat").is_file(),
-    "source-family overlap evidence requires Linux /proc and affinity",
+    and Path("/proc/self/stat").is_file()
+    and Path("/proc/self/fd").is_dir(),
+    "source-family overlap and FD evidence requires Linux /proc and affinity",
 )
 class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
     MIN_AVAILABLE_CPUS = 12
     MIN_CPU_PER_WALL = 1.10
+    MAX_OPEN_FD_DELTA = 96
 
     @staticmethod
     def refresh_args(query: str) -> list[str]:
@@ -308,6 +310,14 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
                             f"{FORCE_SINGLE_CPU_ENV}=1 to exercise the control",
                         )
                     self.assertLessEqual(
+                        cold.peak_open_fds - cold.baseline_open_fds,
+                        self.MAX_OPEN_FD_DELTA,
+                        "source-family refresh exceeded its open-FD budget: "
+                        f"baseline={cold.baseline_open_fds} "
+                        f"peak={cold.peak_open_fds} "
+                        f"summary={cold.peak_open_fd_summary}",
+                    )
+                    self.assertLessEqual(
                         cold.peak_rss_bytes, MAX_PEAK_RSS_BYTES
                     )
                     print(
@@ -325,6 +335,8 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
                         f"{len({worker.name for worker in source_workers})}"
                         f" source_worker_cpu_ticks="
                         f"{source_worker_ticks}"
+                        f" peak_fd_delta="
+                        f"{cold.peak_open_fds - cold.baseline_open_fds}"
                         f" peak_rss_bytes={cold.peak_rss_bytes}"
                         f" noop_seconds={noop_seconds:.3f}"
                         f" replacement_seconds={replacement_seconds:.3f}"

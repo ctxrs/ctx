@@ -246,6 +246,7 @@ impl DirtySourceRoutes {
             .min()
     }
 
+    #[cfg(test)]
     pub(super) fn next_due_route(&self, now_ms: u64) -> Option<SourceRouteIdentity> {
         self.dirty
             .iter()
@@ -256,6 +257,24 @@ impl DirtySourceRoutes {
             })
             .min_by_key(|(route, state)| (state.first_event_at_ms, state.dirty_order, *route))
             .map(|(route, _)| route.clone())
+    }
+
+    /// Returns a deterministic bounded batch of routes that are ready now.
+    ///
+    /// The scheduler consumes the batch in one provider discovery/open/commit
+    /// cycle. Iterating the route map directly keeps selection linear and the
+    /// bound prevents one wakeup from creating unbounded terminal metadata.
+    pub(super) fn due_routes(&self, now_ms: u64, limit: usize) -> BTreeSet<SourceRouteIdentity> {
+        self.dirty
+            .iter()
+            .filter(|(_, state)| {
+                !state.permanently_blocked
+                    && state.in_flight.is_none()
+                    && state.due_at_ms() <= now_ms
+            })
+            .map(|(route, _)| route.clone())
+            .take(limit)
+            .collect()
     }
 
     /// Admits one eligible route, preferring the oldest dirty route first.
@@ -290,6 +309,31 @@ impl DirtySourceRoutes {
             dirty_revision,
             admission_id,
         })
+    }
+
+    /// Atomically admits one bounded exact-route batch.
+    pub(super) fn admit_exact_routes(
+        &mut self,
+        routes: &BTreeSet<SourceRouteIdentity>,
+        now_ms: u64,
+    ) -> Option<Vec<DirtySourceRouteAdmission>> {
+        if routes.is_empty()
+            || routes.iter().any(|route| {
+                !self.watermarks.contains_key(route)
+                    || self.dirty.get(route).is_none_or(|state| {
+                        state.permanently_blocked
+                            || state.in_flight.is_some()
+                            || state.due_at_ms() > now_ms
+                    })
+            })
+        {
+            return None;
+        }
+        let mut admissions = Vec::with_capacity(routes.len());
+        for route in routes {
+            admissions.push(self.admit_exact(route, now_ms)?);
+        }
+        Some(admissions)
     }
 
     /// Admits every dirty route for an explicit all-route authority request.
@@ -575,6 +619,27 @@ mod tests {
         assert_eq!(ledger.admit_next(1_000).unwrap().route(), &middle);
         assert_eq!(ledger.admit_next(1_000).unwrap().route(), &newest);
         assert!(ledger.admit_next(1_000).is_none());
+    }
+
+    #[test]
+    fn due_route_batch_is_bounded_and_admitted_atomically() {
+        let mut ledger = DirtySourceRoutes::default();
+        let routes = BTreeSet::from([route(20), route(21), route(22)]);
+        for route in &routes {
+            ledger.record_event(route.clone(), watermark(1, 1), 0);
+        }
+
+        let batch = ledger.due_routes(250, 2);
+        assert_eq!(batch.len(), 2);
+        let admissions = ledger
+            .admit_exact_routes(&batch, 250)
+            .expect("bounded batch admission");
+        assert_eq!(admissions.len(), 2);
+        assert_eq!(ledger.due_routes(250, 2).len(), 1);
+
+        let invalid = BTreeSet::from([route(22), route(23)]);
+        assert!(ledger.admit_exact_routes(&invalid, 250).is_none());
+        assert_eq!(ledger.due_routes(250, 2), BTreeSet::from([route(22)]));
     }
 
     #[test]

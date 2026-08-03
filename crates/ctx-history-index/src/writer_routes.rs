@@ -1,6 +1,73 @@
 use super::*;
 
 impl GenerationWriter {
+    /// Defines every route conclusively present in the candidate snapshot.
+    /// Missing routes are added separately by `observe_certified_missing_route`.
+    pub fn set_present_source_routes(&mut self, routes: Vec<SourceRouteSnapshot>) -> Result<()> {
+        if routes.iter().any(|route| route.missing_state().is_some()) {
+            return Err(IndexError::WriterInvariant(
+                "present source routes cannot carry missing state",
+            ));
+        }
+        let mut canonical = routes;
+        if let Some(plan) = &self.source_route_plan {
+            if let Some(route) = canonical.iter().find(|route| {
+                !plan.completed.contains(route.route_identity())
+                    || plan.carried_from_base.contains(route.route_identity())
+            }) {
+                return Err(IndexError::InvalidSourceRoutePlan(format!(
+                    "present route {} is not a completed selected route",
+                    route.route_identity().as_str()
+                )));
+            }
+            if let Some(base) = &self.base_manifest {
+                canonical.extend(
+                    base.source_routes()
+                        .iter()
+                        .filter(|route| plan.carried_from_base.contains(route.route_identity()))
+                        .cloned(),
+                );
+            }
+        }
+        canonical.sort_by(|left, right| left.route_identity().cmp(right.route_identity()));
+        if canonical
+            .windows(2)
+            .any(|pair| pair[0].route_identity() == pair[1].route_identity())
+        {
+            return Err(IndexError::NonCanonicalSourceRoutes);
+        }
+        self.present_source_routes = Some(canonical);
+        Ok(())
+    }
+
+    /// Registers one route-level witness that must still hold at Core's final
+    /// publication fence, including exact-generation reuse.
+    pub fn register_source_route_publication_revalidation<F>(
+        &mut self,
+        route_identity: SourceRouteIdentity,
+        revalidate: F,
+    ) -> Result<()>
+    where
+        F: Fn() -> bool + Send + 'static,
+    {
+        if self.source_route_plan.is_some() {
+            self.require_active_source_route(&route_identity)?;
+        }
+        if self
+            .route_publication_revalidations
+            .iter()
+            .any(|(candidate, _)| candidate == &route_identity)
+        {
+            return Err(IndexError::InvalidSourceRoutePlan(format!(
+                "route {} has duplicate publication revalidation",
+                route_identity.as_str()
+            )));
+        }
+        self.route_publication_revalidations
+            .push((route_identity, Box::new(revalidate)));
+        Ok(())
+    }
+
     /// Binds this writer to one exact route selection against its locked base.
     ///
     /// `carried_from_base` routes are authenticated by the immutable base
@@ -86,7 +153,7 @@ impl GenerationWriter {
             deletions: self.deletions.clone(),
             route_deletions: self.route_deletions.clone(),
             observed_missing_routes: self.observed_missing_routes.clone(),
-            missing_route_revalidation_len: self.missing_route_revalidations.len(),
+            route_publication_revalidation_len: self.route_publication_revalidations.len(),
             source_identities: self.source_identities.clone(),
         };
         self.active_source_route_stage = Some(checkpoint);
@@ -170,8 +237,8 @@ impl GenerationWriter {
         self.deletions = checkpoint.deletions;
         self.route_deletions = checkpoint.route_deletions;
         self.observed_missing_routes = checkpoint.observed_missing_routes;
-        self.missing_route_revalidations
-            .truncate(checkpoint.missing_route_revalidation_len);
+        self.route_publication_revalidations
+            .truncate(checkpoint.route_publication_revalidation_len);
         self.source_identities = checkpoint.source_identities;
         Ok(())
     }

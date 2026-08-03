@@ -93,6 +93,17 @@ pub(crate) enum OpenedProviderSourcePath {
     Directory(ProviderSourceDirectory),
 }
 
+impl OpenedProviderSourcePath {
+    /// Fixed-width identity for comparing two no-follow opens of one named
+    /// selector entry without retaining every child capability concurrently.
+    pub(crate) fn authority_fingerprint(&self) -> [u8; 32] {
+        match self {
+            Self::File(file) => platform::object_fingerprint(&file.opened),
+            Self::Directory(directory) => directory.authority_fingerprint(),
+        }
+    }
+}
+
 /// An ordinary provider file bound to the handle that was actually opened.
 ///
 /// The route is retained only for final same-object revalidation. Reads always

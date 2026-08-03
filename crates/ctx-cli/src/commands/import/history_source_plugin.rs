@@ -81,6 +81,8 @@ pub(crate) fn run_history_source_plugin_import(
         .receipt
         .as_ref()
         .context("history source plugin refresh has no authoritative terminal receipt")?;
+    let request_previous_generation = refresh.request_previous_generation.clone();
+    let request_generation_changed = refresh.request_generation_changed;
     let published_generation = refresh.pin.generation_id().to_owned();
     let catalog_lineage = upsert.catalog_lineage_hex();
     let requested_outcome = receipt
@@ -89,9 +91,10 @@ pub(crate) fn run_history_source_plugin_import(
     if requested_outcome.changed.is_none() {
         bail!("history source plugin refresh did not publish its exact catalog route");
     }
-    let route_changed = requested_outcome
-        .changed
-        .context("successful history source plugin route has no change result")?;
+    let route_changed = request_generation_changed
+        && requested_outcome
+            .changed
+            .context("successful history source plugin route has no change result")?;
     let rejected_record_total = requested_outcome.rejected_record_total;
     let rejection_diagnostics = receipt
         .rejection_diagnostics()
@@ -123,7 +126,7 @@ pub(crate) fn run_history_source_plugin_import(
     );
     context.provider_refreshes.record_core_publication(
         ProviderRefreshTrigger::Import,
-        receipt.generation_changed,
+        request_generation_changed,
         receipt.source_failure_total(),
         receipt.rejected_record_total(),
     );
@@ -208,9 +211,9 @@ pub(crate) fn run_history_source_plugin_import(
             "source_bytes": stats.bytes,
             "catalog_lineage": catalog_lineage,
             "catalog_authority": upsert.authority.to_json(),
-            "previous_generation": receipt.previous_generation,
+            "previous_generation": request_previous_generation,
             "published_generation": published_generation,
-            "generation_changed": receipt.generation_changed,
+            "generation_changed": request_generation_changed,
             "rejected_record_total": rejected_record_total,
             "rejection_diagnostics": rejection_diagnostics,
             "daemon_request_id": refresh.request_id,

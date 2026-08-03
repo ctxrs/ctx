@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 fn registry_policy_warp_source(path: PathBuf, exists: bool) -> ProviderSource {
     ProviderSource {
@@ -53,6 +54,41 @@ fn only_unscopable_registry_safety_issues_block_globally() {
     };
     let error = reject_blocking_automatic_registry_issues(&[unsafe_overlap]).unwrap_err();
     assert!(format!("{error:#}").contains("injected unsafe root overlap"));
+}
+
+#[test]
+fn registry_failure_identity_uses_the_canonical_certified_format() {
+    let path = PathBuf::from("/detected/codex-sessions");
+    let source = ProviderSource {
+        provider: CaptureProvider::Codex,
+        path: path.clone(),
+        exists: true,
+        source_format: "codex_session_jsonl_tree",
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::Native,
+        status: ProviderSourceStatus::Available,
+        unsupported_reason: None,
+    };
+    let issue = SourceBackedAutomaticRegistryIssue::Unavailable {
+        source,
+        reason: SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+            detail: "injected selector gap",
+        },
+    };
+    let failures = capture_refresh::automatic_registry_route_failures(&[issue], None).unwrap();
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.source-failure-identity-v1\0");
+    digest.update(b"codex\0codex_session_jsonl\0");
+    let encoded_path = path.as_os_str().as_encoded_bytes();
+    digest.update((encoded_path.len() as u64).to_be_bytes());
+    digest.update(encoded_path);
+
+    assert_eq!(failures.len(), 1);
+    assert_eq!(
+        failures[0].source_identity,
+        format!("{:x}", digest.finalize())
+    );
 }
 
 #[test]

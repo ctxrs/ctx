@@ -18,7 +18,7 @@ pub use model::{
     SourceBackedPublicationMetadataContext, SourceBackedRefreshProgress,
     SourceBackedRefreshReceipt, SourceBackedSuccessfulRouteOutcome,
 };
-use route_content::source_route_content_fingerprint;
+use route_content::{empty_source_route_content_fingerprint, source_route_content_fingerprints};
 
 type SourceBackedPublicationMetadataFactory<'factory> =
     dyn for<'context> FnMut(
@@ -408,17 +408,10 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
     let mut record_rejections = SourceBackedRecordRejections::default();
     let mut carried_unselected_route_ids = BTreeSet::new();
 
+    let mut prepared_successful_route_outcomes = None;
     let (commit, applied_removals, commit_duration, base_route_content, verified_publication) = {
         let mut writer = GenerationWriter::open(index_root, writer_options.clone())?;
-        let base_route_content = selected_route_ids
-            .iter()
-            .map(|route_identity| {
-                (
-                    route_identity.clone(),
-                    source_route_content_fingerprint(writer.base_manifest(), route_identity),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
+        let base_route_content = source_route_content_fingerprints(writer.base_manifest());
         let base_route_ids = writer
             .base_manifest()
             .map(|manifest| {
@@ -471,6 +464,13 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             }))
             .map_err(SourceBackedCoordinatorError::Progress)?;
             writer.begin_source_route_stage(route_identity.clone())?;
+            if let Some(revalidate) = driver.revalidate_at_publication.as_ref() {
+                let revalidate = Arc::clone(revalidate);
+                writer.register_source_route_publication_revalidation(
+                    route_identity.clone(),
+                    move || revalidate(),
+                )?;
+            }
             let removal_checkpoint = applied_removals.len();
             let logical_failure_checkpoint =
                 logical_source_failures.checkpoint(route_identity.clone());
@@ -812,13 +812,21 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                     &mut revalidate_source,
                     &mut revalidate_inventory,
                     |publication| {
+                        let outcomes = successful_route_outcomes_for_manifest(
+                            &selected_route_ids,
+                            &failed_routes,
+                            &logical_source_failures,
+                            &base_route_content,
+                            publication.manifest(),
+                        );
+                        prepared_successful_route_outcomes = Some(outcomes.clone());
                         factory(SourceBackedPublicationMetadataContext::new(
                             publication,
                             &selected_route_ids,
                             &failed_routes,
                             &logical_source_failures,
                             &record_rejections,
-                            &base_route_content,
+                            &outcomes,
                             applied_removals.len(),
                         ))
                     },
@@ -853,20 +861,16 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         .iter()
         .filter(|identity| !failed_routes.contains_key(*identity))
         .cloned()
-        .collect::<Vec<_>>();
-    let successful_route_outcomes = successful_route_ids
-        .iter()
-        .cloned()
-        .map(|route_identity| SourceBackedSuccessfulRouteOutcome {
-            logical_source_failure_total: logical_source_failures.route_total(&route_identity),
-            changed: base_route_content.get(&route_identity)
-                != Some(&source_route_content_fingerprint(
-                    Some(commit.manifest()),
-                    &route_identity,
-                )),
-            route_identity,
-        })
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
+    let successful_route_outcomes = prepared_successful_route_outcomes.unwrap_or_else(|| {
+        successful_route_outcomes_for_manifest(
+            &selected_route_ids,
+            &failed_routes,
+            &logical_source_failures,
+            &base_route_content,
+            commit.manifest(),
+        )
+    });
     for route in &registry.routes {
         if route
             .metadata
@@ -912,7 +916,7 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         certified_source_count,
         certified_source_bytes,
         selected_route_ids: selected_route_ids.into_iter().collect(),
-        successful_route_ids,
+        successful_route_ids: successful_route_ids.into_iter().collect(),
         successful_route_outcomes,
         carried_unselected_route_ids: carried_unselected_route_ids.into_iter().collect(),
         carried_failed_route_ids: failed_routes
@@ -929,6 +933,32 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             .map(SourceBackedFailedRouteOutcome::from)
             .collect(),
     })
+}
+
+fn successful_route_outcomes_for_manifest(
+    selected_route_ids: &BTreeSet<SourceRouteIdentity>,
+    failed_routes: &BTreeMap<SourceRouteIdentity, SourceBackedFailedRoute>,
+    logical_source_failures: &SourceBackedLogicalSourceFailures,
+    base_route_content: &HashMap<SourceRouteIdentity, [u8; 32]>,
+    manifest: &GenerationManifest,
+) -> Vec<SourceBackedSuccessfulRouteOutcome> {
+    let current_route_content = source_route_content_fingerprints(Some(manifest));
+    let empty_route_content = empty_source_route_content_fingerprint();
+    selected_route_ids
+        .iter()
+        .filter(|identity| !failed_routes.contains_key(*identity))
+        .cloned()
+        .map(|route_identity| SourceBackedSuccessfulRouteOutcome {
+            logical_source_failure_total: logical_source_failures.route_total(&route_identity),
+            changed: base_route_content
+                .get(&route_identity)
+                .unwrap_or(&empty_route_content)
+                != current_route_content
+                    .get(&route_identity)
+                    .unwrap_or(&empty_route_content),
+            route_identity,
+        })
+        .collect()
 }
 
 fn bounded_source_failures<'a>(

@@ -4,6 +4,7 @@ use crate::semantic::dirty_source_routes::{
 };
 
 mod attempt_helpers;
+mod durable_queue;
 mod generation_authority;
 mod generation_observation;
 mod progress_model;
@@ -12,6 +13,10 @@ mod request_lifecycle;
 mod runtime_metadata;
 mod startup_observation;
 use attempt_helpers::*;
+use durable_queue::{
+    durable_job_json, install_recovered_successors, job_with_queued_successors,
+    recover_queued_root, recover_queued_successors,
+};
 use generation_authority::CoreRefreshTerminalSuccess;
 pub(crate) use generation_authority::PinnedCorePublication;
 use progress_model::SourceBackedRefreshState;
@@ -56,6 +61,7 @@ pub(crate) struct SourceBackedRefreshExecution<'a> {
     pub(crate) explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
     pub(crate) scope: SourceBackedRefreshScope,
     pub(crate) covered_route_ids: BTreeSet<SourceRouteIdentity>,
+    pub(crate) covered_publication: SourceBackedRefreshCoveredPublication,
     pub(super) report_progress: &'a dyn Fn(SourceBackedRefreshProgressUpdate) -> Result<()>,
 }
 
@@ -153,14 +159,35 @@ pub(super) struct CoreRefreshEngineState {
     route_admissions: BTreeMap<String, Vec<DirtySourceRouteAdmission>>,
     manual_all_continuations: BTreeMap<String, ManualAllContinuation>,
     pending_terminal_persistence: Option<PendingTerminalPersistence>,
+    pending_scheduler_retry_root_id: Option<String>,
     watch_routes_initialized: bool,
 }
 
 struct PendingTerminalPersistence {
     request_id: String,
-    terminal: CoreRefreshTerminalSuccess,
     terminal_job: Value,
-    did_work: bool,
+    outcome: PendingTerminalOutcome,
+}
+
+enum PendingTerminalOutcome {
+    Published {
+        terminal: CoreRefreshTerminalSuccess,
+        did_work: bool,
+    },
+    Failed,
+}
+
+impl PendingTerminalPersistence {
+    fn did_work(&self) -> bool {
+        matches!(
+            self.outcome,
+            PendingTerminalOutcome::Published { did_work: true, .. }
+        )
+    }
+
+    fn failed(&self) -> bool {
+        matches!(self.outcome, PendingTerminalOutcome::Failed)
+    }
 }
 
 impl fmt::Debug for PendingTerminalPersistence {
@@ -168,7 +195,8 @@ impl fmt::Debug for PendingTerminalPersistence {
         formatter
             .debug_struct("PendingTerminalPersistence")
             .field("request_id", &self.request_id)
-            .field("did_work", &self.did_work)
+            .field("did_work", &self.did_work())
+            .field("failed", &self.failed())
             .finish_non_exhaustive()
     }
 }
@@ -199,6 +227,14 @@ impl ManualAllContinuation {
         {
             self.covered_removed_source_count = 0;
             self.covered_timings = SourceBackedRefreshTimings::default();
+        }
+    }
+
+    fn covered_publication(&self) -> SourceBackedRefreshCoveredPublication {
+        SourceBackedRefreshCoveredPublication {
+            route_results: self.covered_route_results.values().cloned().collect(),
+            removed_source_count: self.covered_removed_source_count,
+            timings: self.covered_timings,
         }
     }
 }
@@ -295,6 +331,7 @@ impl CoreRefreshEngine {
                 route_admissions: BTreeMap::new(),
                 manual_all_continuations: BTreeMap::new(),
                 pending_terminal_persistence: None,
+                pending_scheduler_retry_root_id: None,
                 watch_routes_initialized: false,
             }),
             executor,
@@ -312,11 +349,12 @@ impl CoreRefreshEngine {
 
     pub(in crate::semantic) fn has_pending_request(&self) -> bool {
         let state = self.lock_state();
-        state
-            .active_request_id
-            .as_deref()
-            .and_then(|request_id| find_attempt(&state, request_id))
-            .is_some_and(|attempt| attempt.state.is_active())
+        state.pending_terminal_persistence.is_some()
+            || state
+                .active_request_id
+                .as_deref()
+                .and_then(|request_id| find_attempt(&state, request_id))
+                .is_some_and(|attempt| attempt.state.is_active())
             || state.pending_request_ids.iter().any(|request_id| {
                 find_attempt(&state, request_id).is_some_and(|attempt| attempt.state.is_active())
             })
@@ -350,7 +388,6 @@ impl CoreRefreshEngine {
         self.schedule_startup_route_reconciliation(routes, watermark, observed_at_ms);
     }
 
-    #[cfg(test)]
     pub(in crate::semantic) fn schedule_startup_route_reconciliation(
         &self,
         routes: impl IntoIterator<Item = SourceRouteIdentity>,
@@ -539,19 +576,22 @@ impl CoreRefreshEngine {
         let observed_generation = self.observed_published_generation(data_root)?;
         let request_id = {
             let mut state = self.lock_state();
-            if active_attempt_count(&state) != 0 {
+            if durable_queue_entry_count(&state) != 0 {
                 return Ok(false);
             }
-            let Some(route) = state.dirty_routes.next_due_route(now_ms) else {
+            let routes = state
+                .dirty_routes
+                .due_routes(now_ms, SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT);
+            if routes.is_empty() {
                 return Ok(false);
-            };
+            }
             let refresh_scope = if cold_all && observed_generation.is_none() {
                 // A cold generation has no retained routes to carry. Publish
                 // the complete startup inventory atomically instead of one
                 // transient partial generation per initially dirty route.
                 SourceBackedRefreshScope::All
             } else {
-                SourceBackedRefreshScope::exact([route])
+                SourceBackedRefreshScope::Exact(routes)
             };
             let attempt = new_refresh_attempt(
                 observed_generation,

@@ -109,6 +109,8 @@ pub fn register_crush_source_backed_route<I>(
 where
     I: CrushProjectInventorySourceV0 + Send + Sync + 'static,
 {
+    let watch_source = source.clone();
+    let watch_inventory = Arc::clone(&inventory);
     SqliteInventoryDocumentAdapter::register_replacement_document_tree_route_with_authority(
         registry,
         source,
@@ -121,7 +123,16 @@ where
             data_root: data_root.to_path_buf(),
             inventory,
         },
-    )
+    )?;
+    registry.attach_route_watch_targets(&watch_source, move || {
+        let inventory = watch_inventory.observe().ok()?;
+        Some(sqlite_inventory_watch_targets(
+            inventory
+                .databases()
+                .iter()
+                .map(CrushProjectDatabaseV0::path),
+        ))
+    })
 }
 
 #[cfg(test)]

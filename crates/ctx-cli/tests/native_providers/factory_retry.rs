@@ -48,7 +48,7 @@ fn write_jsonl(path: &Path, records: &[Value]) {
     fs::write(path, encoded).unwrap();
 }
 
-fn import_factory(temp: &TempDir, path: &str) -> Value {
+fn import_factory_result(temp: &TempDir, path: &str) -> Value {
     let imported = json_output(ctx(temp).args([
         "import",
         "--provider",
@@ -60,12 +60,17 @@ fn import_factory(temp: &TempDir, path: &str) -> Value {
         "--progress",
         "none",
     ]));
+    wait_for_imported_core(temp, &imported);
+    imported
+}
+
+fn import_factory(temp: &TempDir, path: &str) -> Value {
+    let imported = import_factory_result(temp, path);
     assert_explicit_source_publication(
         &imported,
         "factory_ai_droid",
         "factory_ai_droid_sessions_jsonl",
     );
-    wait_for_imported_core(temp, &imported);
     imported
 }
 
@@ -283,7 +288,12 @@ fn factory_droid_retry_ambiguity_and_invalid_evidence_fail_closed() {
     );
     let path = root.parent().unwrap().display().to_string();
     let _daemon = start_isolated_provider_daemon(&temp);
-    let imported = import_factory(&temp, &path);
+    let imported = import_factory_result(&temp, &path);
+    assert_eq!(
+        imported["outcome"], "completed_with_rejections",
+        "{imported:#}"
+    );
+    assert_eq!(imported["sources"][0]["status"], "partial", "{imported:#}");
     assert_eq!(imported["totals"]["current_rejected_records"], 1);
     assert_eq!(factory_event_ids(&temp).len(), 2);
 }

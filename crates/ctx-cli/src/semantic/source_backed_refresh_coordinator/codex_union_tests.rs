@@ -147,9 +147,12 @@ fn registered_codex_parent_and_exact_subdir_keep_the_parent_and_fail_the_unscope
             .class,
         "incompatible"
     );
-    let exact_route = &first.catalog_route_bindings[0].route_identity;
+    assert!(first.published_explicit_source_catalog.is_none());
+    let [failed_binding] = first.catalog_route_bindings.as_slice() else {
+        panic!("failed explicit request should retain one diagnostic route binding");
+    };
     assert!(first.route_results.iter().any(|result| {
-        result.route_identity == *exact_route
+        result.route_identity == failed_binding.route_identity
             && matches!(
                 result.outcome,
                 SourceBackedRefreshRouteOutcome::Failed {
@@ -194,6 +197,8 @@ fn registered_codex_parent_and_exact_subdir_keep_the_parent_and_fail_the_unscope
     .unwrap();
     assert_eq!(replay.generation_id, first.generation_id);
     assert_eq!(replay.route_results.len(), 2);
+    assert!(replay.published_explicit_source_catalog.is_none());
+    assert_eq!(replay.catalog_route_bindings.len(), 1);
     assert!(replay.certified_source_count >= 1);
     assert_eq!(
         replay

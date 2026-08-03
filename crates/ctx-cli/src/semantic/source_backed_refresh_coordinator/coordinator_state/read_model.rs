@@ -78,11 +78,24 @@ impl SourceBackedRefreshReceipt {
             .map(|binding| binding.catalog_lineage.clone())
             .collect::<BTreeSet<_>>();
         if actual_lineages.len() != publication.catalog_route_bindings.len()
-            || actual_lineages != expected_lineages
-            || publication
-                .catalog_route_bindings
-                .iter()
-                .any(|binding| !routes.contains_key(binding.route_identity.as_str()))
+            || !expected_lineages.is_subset(&actual_lineages)
+            || publication.catalog_route_bindings.iter().any(|binding| {
+                SourceRouteIdentity::from_sha256(binding.route_identity.clone()).is_err()
+            })
+            || publication.catalog_route_bindings.iter().any(|binding| {
+                !expected_lineages.contains(&binding.catalog_lineage)
+                    && !routes
+                        .get(binding.route_identity.as_str())
+                        .is_some_and(|result| {
+                            matches!(
+                                result.outcome,
+                                SourceBackedRefreshRouteOutcome::Failed {
+                                    carried_forward: false,
+                                    ..
+                                }
+                            )
+                        })
+            })
         {
             bail!(
                 "terminal Core publication has incomplete or inconsistent catalog lineage bindings"
@@ -647,7 +660,11 @@ pub(super) struct SourceBackedRefreshAttempt {
     pub(super) unsupported_routes: Option<usize>,
     pub(super) certified_source_count: Option<usize>,
     pub(super) certified_source_bytes: Option<u64>,
+    /// Request-scoped route/result/rejection facts. This is mutable daemon
+    /// status, never publication authority.
     pub(super) receipt: Option<SourceBackedRefreshReceipt>,
+    /// The sole publication receipt, decoded from Core CommitPayload metadata.
+    pub(super) publication_receipt: Option<SourceBackedRefreshReceipt>,
     pub(super) timings: Option<SourceBackedRefreshTimings>,
     pub(super) publication_probe_us: u64,
     pub(super) daemon_mode: DaemonMode,
@@ -698,7 +715,8 @@ impl SourceBackedRefreshAttempt {
             unsupported_routes: Some(unsupported_routes),
             certified_source_count: Some(receipt.current.source_count),
             certified_source_bytes: Some(receipt.current.certified_source_bytes),
-            receipt: Some(receipt),
+            receipt: Some(receipt.clone()),
+            publication_receipt: Some(receipt),
             timings: Some(SourceBackedRefreshTimings::default()),
             publication_probe_us: 0,
             daemon_mode: DaemonMode::default(),
@@ -721,7 +739,22 @@ impl SourceBackedRefreshAttempt {
             .map(|_| "provider_terminal_coverage_unavailable")
     }
 
+    fn request_generation_changed(&self) -> Option<bool> {
+        self.receipt
+            .as_ref()
+            .map(|_| self.published_generation != self.previous_generation)
+    }
+
+    fn request_outcome_receipt(&self) -> Option<&SourceBackedRefreshReceipt> {
+        let request = self.receipt.as_ref()?;
+        self.publication_receipt
+            .as_ref()
+            .filter(|publication| *publication != request)
+            .map(|_| request)
+    }
+
     pub(super) fn to_json(&self) -> Value {
+        let publication_receipt = self.publication_receipt.as_ref().or(self.receipt.as_ref());
         compact_json(json!({
             "ok": true,
             "schema_version": 1,
@@ -740,8 +773,10 @@ impl SourceBackedRefreshAttempt {
                     .as_ref()
                     .map(ExplicitSourceCatalogAuthority::to_json)
             }).flatten(),
-            "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
-            "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
+            "generation_changed": self.request_generation_changed(),
+            "receipt": publication_receipt.map(SourceBackedRefreshReceipt::to_json),
+            "request_outcome": self.request_outcome_receipt()
+                .map(SourceBackedRefreshReceipt::to_json),
             "outcome": self.receipt.as_ref().map(SourceBackedRefreshReceipt::terminal_outcome),
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
@@ -766,6 +801,7 @@ impl SourceBackedRefreshAttempt {
             SourceBackedRefreshState::Failed => "failed",
             SourceBackedRefreshState::Queued | SourceBackedRefreshState::Running => "running",
         };
+        let publication_receipt = self.publication_receipt.as_ref().or(self.receipt.as_ref());
         compact_json(json!({
             "mode": SourceBackedRefreshMode::Background.as_str(),
             "owner": "daemon",
@@ -784,8 +820,10 @@ impl SourceBackedRefreshAttempt {
                     .as_ref()
                     .map(ExplicitSourceCatalogAuthority::to_json)
             }).flatten(),
-            "generation_changed": self.receipt.as_ref().map(|receipt| receipt.generation_changed),
-            "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
+            "generation_changed": self.request_generation_changed(),
+            "receipt": publication_receipt.map(SourceBackedRefreshReceipt::to_json),
+            "request_outcome": self.request_outcome_receipt()
+                .map(SourceBackedRefreshReceipt::to_json),
             "outcome": self.receipt.as_ref().map(SourceBackedRefreshReceipt::terminal_outcome),
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json(),
