@@ -349,9 +349,7 @@ fn append_segment_verification_tasks(
     for (segment_ord, max_doc) in segment_max_docs.enumerate() {
         let mut start_doc_id = 0_u32;
         while start_doc_id < max_doc {
-            let end_doc_id = start_doc_id
-                .saturating_add(documents_per_task)
-                .min(max_doc);
+            let end_doc_id = start_doc_id.saturating_add(documents_per_task).min(max_doc);
             tasks.push(SegmentVerificationTask {
                 segment_ord,
                 start_doc_id,

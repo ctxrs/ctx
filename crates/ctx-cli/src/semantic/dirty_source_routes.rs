@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use ctx_history_index::SourceRouteIdentity;
 
@@ -255,25 +258,30 @@ impl DirtySourceRoutes {
                     && state.in_flight.is_none()
                     && state.due_at_ms() <= now_ms
             })
-            .min_by_key(|(route, state)| (state.first_event_at_ms, state.dirty_order, *route))
+            .min_by(|left, right| compare_dirty_route_priority(*left, *right))
             .map(|(route, _)| route.clone())
     }
 
     /// Returns a deterministic bounded batch of routes that are ready now.
     ///
     /// The scheduler consumes the batch in one provider discovery/open/commit
-    /// cycle. Iterating the route map directly keeps selection linear and the
-    /// bound prevents one wakeup from creating unbounded terminal metadata.
+    /// cycle. Sorting by the same dirty-age priority as single-route selection
+    /// prevents a route's identity from starving older work at the batch cap;
+    /// the bound prevents one wakeup from creating unbounded terminal metadata.
     pub(super) fn due_routes(&self, now_ms: u64, limit: usize) -> BTreeSet<SourceRouteIdentity> {
-        self.dirty
+        let mut due = self
+            .dirty
             .iter()
             .filter(|(_, state)| {
                 !state.permanently_blocked
                     && state.in_flight.is_none()
                     && state.due_at_ms() <= now_ms
             })
-            .map(|(route, _)| route.clone())
+            .collect::<Vec<_>>();
+        due.sort_unstable_by(|left, right| compare_dirty_route_priority(*left, *right));
+        due.into_iter()
             .take(limit)
+            .map(|(route, _)| route.clone())
             .collect()
     }
 
@@ -485,6 +493,17 @@ impl DirtySourceRoutes {
     }
 }
 
+fn compare_dirty_route_priority(
+    (left_route, left_state): (&SourceRouteIdentity, &DirtyRouteState),
+    (right_route, right_state): (&SourceRouteIdentity, &DirtyRouteState),
+) -> Ordering {
+    left_state
+        .first_event_at_ms
+        .cmp(&right_state.first_event_at_ms)
+        .then_with(|| left_state.dirty_order.cmp(&right_state.dirty_order))
+        .then_with(|| left_route.cmp(right_route))
+}
+
 fn admission_matches(state: &DirtyRouteState, admission: &DirtySourceRouteAdmission) -> bool {
     state.in_flight.as_ref().is_some_and(|in_flight| {
         in_flight.dirty_revision == admission.dirty_revision
@@ -640,6 +659,34 @@ mod tests {
         let invalid = BTreeSet::from([route(22), route(23)]);
         assert!(ledger.admit_exact_routes(&invalid, 250).is_none());
         assert_eq!(ledger.due_routes(250, 2), BTreeSet::from([route(22)]));
+    }
+
+    #[test]
+    fn due_route_batch_matches_oldest_first_single_route_priority() {
+        let mut ledger = DirtySourceRoutes::default();
+        let oldest = route(40);
+        let equal_time_older = route(30);
+        let equal_time_newer = route(20);
+        let newest = route(10);
+
+        ledger.record_event(oldest.clone(), watermark(1, 1), 0);
+        ledger.record_event(equal_time_older.clone(), watermark(1, 2), 10);
+        ledger.record_event(equal_time_newer.clone(), watermark(1, 3), 10);
+        ledger.record_event(newest.clone(), watermark(1, 4), 20);
+
+        assert_eq!(ledger.next_due_route(270), Some(oldest.clone()));
+        let batch = ledger.due_routes(270, 2);
+        assert_eq!(
+            batch,
+            BTreeSet::from([oldest.clone(), equal_time_older.clone()])
+        );
+        ledger
+            .admit_exact_routes(&batch, 270)
+            .expect("oldest-first batch admission");
+        assert_eq!(
+            ledger.due_routes(270, 2),
+            BTreeSet::from([equal_time_newer, newest])
+        );
     }
 
     #[test]

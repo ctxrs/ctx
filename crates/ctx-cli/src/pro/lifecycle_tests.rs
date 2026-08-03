@@ -273,6 +273,20 @@ fn assert_no_transaction_files(data_root: &Path) {
     }
 }
 
+fn pending_recheck_target(data_root: &Path) -> Option<String> {
+    let path = data_root.join("daemon/jobs/pro-catch-up-recheck.json");
+    let value: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    value["target_helper_sha256"].as_str().map(str::to_owned)
+}
+
+fn boundary_position(boundaries: &[&str], name: &str) -> usize {
+    boundaries
+        .iter()
+        .position(|boundary| *boundary == name)
+        .map(|index| index + 1)
+        .unwrap_or_else(|| panic!("missing {name} in {boundaries:?}"))
+}
+
 fn assert_secure_permissions(_data_root: &Path) {
     #[cfg(unix)]
     {
@@ -706,6 +720,138 @@ fn update_rejects_rollback_and_preserves_current_helper_on_failure() {
 }
 
 #[test]
+fn target_intent_precedes_visibility_and_survives_interrupted_update() {
+    let discovery = TempDir::new().unwrap();
+    let first = write_bundle(
+        discovery.path(),
+        "first",
+        b"first helper",
+        manifest(b"first helper", "1.0.0"),
+    );
+    let second = write_bundle(
+        discovery.path(),
+        "second",
+        b"second helper",
+        manifest(b"second helper", "2.0.0"),
+    );
+    install_bundle(&first, discovery.path(), false).unwrap();
+    let mut recording = Persistence::default();
+    install_bundle_with_persistence(&second, discovery.path(), true, &mut recording).unwrap();
+    let crash_after = boundary_position(&recording.boundaries, "after_publish_pro_recheck_intent");
+
+    let temp = TempDir::new().unwrap();
+    let first = write_bundle(
+        temp.path(),
+        "first",
+        b"first helper",
+        manifest(b"first helper", "1.0.0"),
+    );
+    let second = write_bundle(
+        temp.path(),
+        "second",
+        b"second helper",
+        manifest(b"second helper", "2.0.0"),
+    );
+    install_bundle(&first, temp.path(), false).unwrap();
+    let mut interrupted = Persistence {
+        crash_after: Some(crash_after),
+        ..Persistence::default()
+    };
+    let error =
+        install_bundle_with_persistence(&second, temp.path(), true, &mut interrupted).unwrap_err();
+    assert!(error.to_string().contains("simulated_termination"));
+    assert_eq!(target_bytes(temp.path()), b"first helper");
+    assert_eq!(
+        pending_recheck_target(temp.path()).unwrap(),
+        format!("{:x}", Sha256::digest(b"second helper"))
+    );
+
+    install_bundle(&second, temp.path(), true).unwrap();
+    assert_eq!(target_bytes(temp.path()), b"second helper");
+    assert_eq!(
+        pending_recheck_target(temp.path()).unwrap(),
+        format!("{:x}", Sha256::digest(b"second helper"))
+    );
+}
+
+#[test]
+fn installed_target_with_unwoken_intent_is_recoverable_on_setup_retry() {
+    let discovery = TempDir::new().unwrap();
+    let first = write_bundle(
+        discovery.path(),
+        "first",
+        b"first helper",
+        manifest(b"first helper", "1.0.0"),
+    );
+    let second = write_bundle(
+        discovery.path(),
+        "second",
+        b"second helper",
+        manifest(b"second helper", "2.0.0"),
+    );
+    install_bundle(&first, discovery.path(), false).unwrap();
+    let mut recording = Persistence::default();
+    install_bundle_with_persistence(&second, discovery.path(), true, &mut recording).unwrap();
+    let crash_after = boundary_position(
+        &recording.boundaries,
+        "after_install_before_pro_recheck_wake",
+    );
+
+    let retry = TempDir::new().unwrap();
+    let first = write_bundle(
+        retry.path(),
+        "first",
+        b"first helper",
+        manifest(b"first helper", "1.0.0"),
+    );
+    let second = write_bundle(
+        retry.path(),
+        "second",
+        b"second helper",
+        manifest(b"second helper", "2.0.0"),
+    );
+    install_bundle(&first, retry.path(), false).unwrap();
+    let mut interrupted = Persistence {
+        crash_after: Some(crash_after),
+        ..Persistence::default()
+    };
+    install_bundle_with_persistence(&second, retry.path(), true, &mut interrupted).unwrap_err();
+    assert_eq!(target_bytes(retry.path()), b"second helper");
+    assert_eq!(
+        pending_recheck_target(retry.path()).unwrap(),
+        format!("{:x}", Sha256::digest(b"second helper"))
+    );
+
+    install_bundle(&second, retry.path(), true).unwrap();
+    assert_eq!(target_bytes(retry.path()), b"second helper");
+}
+
+#[test]
+fn recheck_intent_write_failure_leaves_visibility_unchanged_and_setup_retryable() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("daemon"), b"blocks daemon jobs directory").unwrap();
+    let bundle = write_bundle(
+        temp.path(),
+        "initial",
+        b"initial helper",
+        manifest(b"initial helper", "1.0.0"),
+    );
+
+    let error = install_bundle(&bundle, temp.path(), false).unwrap_err();
+    assert!(error.to_string().contains("daemon"), "{error:#}");
+    assert!(!default_helper_path(temp.path()).exists());
+    assert!(pending_recheck_target(temp.path()).is_none());
+
+    fs::remove_file(temp.path().join("daemon")).unwrap();
+    install_bundle(&bundle, temp.path(), false).unwrap();
+    assert_eq!(target_bytes(temp.path()), b"initial helper");
+    assert_eq!(
+        pending_recheck_target(temp.path()).unwrap(),
+        format!("{:x}", Sha256::digest(b"initial helper"))
+    );
+}
+
+#[test]
 fn every_initial_install_persistence_boundary_recovers_in_a_fresh_manager() {
     let discovery = TempDir::new().unwrap();
     let discovery_bundle = write_bundle(
@@ -719,9 +865,9 @@ fn every_initial_install_persistence_boundary_recovers_in_a_fresh_manager() {
         .unwrap();
     let boundaries = recording.boundaries;
     #[cfg(unix)]
-    assert_eq!(boundaries.len(), 36);
+    assert_eq!(boundaries.len(), 40);
     #[cfg(windows)]
-    assert_eq!(boundaries.len(), 29);
+    assert_eq!(boundaries.len(), 33);
     assert_boundary_classes(&boundaries);
 
     for crash_after in 1..=boundaries.len() {
@@ -770,9 +916,9 @@ fn every_update_persistence_boundary_recovers_old_or_new_signed_pair() {
     install_bundle_with_persistence(&second, discovery.path(), true, &mut recording).unwrap();
     let boundaries = recording.boundaries;
     #[cfg(unix)]
-    assert_eq!(boundaries.len(), 49);
+    assert_eq!(boundaries.len(), 53);
     #[cfg(windows)]
-    assert_eq!(boundaries.len(), 40);
+    assert_eq!(boundaries.len(), 44);
     assert_boundary_classes(&boundaries);
 
     for crash_after in 1..=boundaries.len() {

@@ -33,12 +33,16 @@ mod tests {
         fs::write(&first, b"\n").unwrap();
         fs::write(&second, b"\n").unwrap();
 
-        let first_request = upsert_explicit_source(&data_root, &custom_source(first.clone())).unwrap();
+        let first_request =
+            upsert_explicit_source(&data_root, &custom_source(first.clone())).unwrap();
         let repeated = upsert_explicit_source(&data_root, &custom_source(first)).unwrap();
         let second_request = upsert_explicit_source(&data_root, &custom_source(second)).unwrap();
 
         assert_eq!(first_request.catalog_lineage, repeated.catalog_lineage);
-        assert_ne!(first_request.catalog_lineage, second_request.catalog_lineage);
+        assert_ne!(
+            first_request.catalog_lineage,
+            second_request.catalog_lineage
+        );
     }
 
     #[test]
@@ -46,11 +50,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history.jsonl");
         fs::write(&path, b"\n").unwrap();
-        let request = upsert_explicit_source(&temp.path().join("data"), &custom_source(path)).unwrap();
+        let request =
+            upsert_explicit_source(&temp.path().join("data"), &custom_source(path)).unwrap();
         let mut entries = request.authority.entries.clone();
         entries[0].enabled = false;
         let error = sort_and_validate_entries(&mut entries).unwrap_err();
         assert!(format!("{error:#}").contains("cannot authorize deletion"));
     }
-
 }

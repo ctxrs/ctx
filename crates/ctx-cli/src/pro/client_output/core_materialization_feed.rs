@@ -69,6 +69,7 @@ enum CoreFeedMode {
 #[derive(Debug, Clone)]
 pub(super) struct CoreMaterializationSyncReport {
     pub(super) receipt: CoreMaterializationReceipt,
+    pub(super) helper_artifact_sha256: String,
     #[cfg(test)]
     pub(super) changed_sources: u64,
     #[cfg(test)]
@@ -209,21 +210,23 @@ pub(super) fn sync_generation_pinned_core(
 ) -> Result<CoreMaterializationSyncReport> {
     let selection = CoreWorkerLaunchSelection::from_runtime();
     let required = BTreeSet::from([Capability::Status, Capability::CoreMaterialization]);
-    let mut consumer = ProtocolCoreMaterializationConsumer {
-        client: ProClient::connect(data_root, &required)?,
-    };
+    let client = ProClient::connect(data_root, &required)?;
+    let helper_artifact_sha256 = client.helper_artifact_sha256()?.to_owned();
+    let mut consumer = ProtocolCoreMaterializationConsumer { client };
     let status = consumer.status(StatusRequest {
         requested_core_generation_id: Some(index.generation_id().to_owned()),
     })?;
     status
         .validate()
         .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-    sync_core_feed_with_launch(
+    let mut report = sync_core_feed_with_launch(
         index,
         status.core_receipt.as_ref(),
         &mut consumer,
         selection,
-    )
+    )?;
+    report.helper_artifact_sha256 = helper_artifact_sha256;
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -465,6 +468,7 @@ fn sync_core_feed_with_launch<C: CoreMaterializationConsumer>(
 
     Ok(CoreMaterializationSyncReport {
         receipt: finished.receipt,
+        helper_artifact_sha256: String::new(),
         #[cfg(test)]
         changed_sources: u64::from(changed_sources),
         #[cfg(test)]

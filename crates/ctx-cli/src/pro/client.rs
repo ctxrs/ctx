@@ -55,6 +55,14 @@ pub(crate) fn preflight_core_materialization(data_root: &Path) -> Result<()> {
     helper_path(data_root).map(drop)
 }
 
+pub(crate) fn selected_helper_artifact_sha256(data_root: &Path) -> Result<Option<String>> {
+    match helper_executable(data_root) {
+        Ok(helper) => Ok(Some(helper.artifact_sha256().to_owned())),
+        Err(error) if stable_error_code(&error) == Some("pro_not_installed") => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 #[path = "client_status.rs"]
 mod client_status;
 #[cfg(test)]
@@ -93,6 +101,15 @@ pub(super) use operations::delete_graph_key;
 #[cfg(test)]
 use operations::*;
 pub(crate) use transport::ProClient;
+
+impl ProClient {
+    pub(super) fn helper_artifact_sha256(&self) -> Result<&str> {
+        self._execution_guard
+            .as_ref()
+            .map(VerifiedHelperExecutable::artifact_sha256)
+            .ok_or_else(|| anyhow!("invalid_response: Pro helper execution identity is missing"))
+    }
+}
 
 #[cfg(test)]
 #[path = "client_tests.rs"]

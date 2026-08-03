@@ -94,6 +94,19 @@ enum ProCommand {
     Manage(ProManageArgs),
     #[command(about = "Remove Pro and choose whether to delete or preserve local Pro data")]
     Uninstall(ProUninstallArgs),
+    #[cfg(ctx_pro_test_helper)]
+    #[command(name = "_test-publish-helper-recheck", hide = true)]
+    TestPublishHelperRecheck(TestPublishHelperRecheckArgs),
+    #[cfg(ctx_pro_test_helper)]
+    #[command(name = "_test-wake-helper-recheck", hide = true)]
+    TestWakeHelperRecheck,
+}
+
+#[cfg(ctx_pro_test_helper)]
+#[derive(Debug, Args)]
+struct TestPublishHelperRecheckArgs {
+    #[arg(long)]
+    target_helper_sha256: String,
 }
 
 #[derive(Debug, Args)]
@@ -161,6 +174,10 @@ impl ProArgs {
                 Some(ProCommand::Setup(args)) => args.format.is_json(),
                 Some(ProCommand::Manage(args)) => args.format.is_json(),
                 Some(ProCommand::Uninstall(args)) => args.format.is_json(),
+                #[cfg(ctx_pro_test_helper)]
+                Some(
+                    ProCommand::TestPublishHelperRecheck(_) | ProCommand::TestWakeHelperRecheck,
+                ) => false,
                 None => false,
             }
     }
@@ -169,6 +186,10 @@ impl ProArgs {
         match &self.command {
             Some(ProCommand::Manage(_)) => ProLifecycleOperationV1::Manage,
             Some(ProCommand::Uninstall(_)) => ProLifecycleOperationV1::Uninstall,
+            #[cfg(ctx_pro_test_helper)]
+            Some(ProCommand::TestPublishHelperRecheck(_) | ProCommand::TestWakeHelperRecheck) => {
+                ProLifecycleOperationV1::Setup
+            }
             None | Some(ProCommand::Setup(_)) => ProLifecycleOperationV1::Setup,
         }
     }
@@ -177,6 +198,10 @@ impl ProArgs {
         match &self.command {
             Some(ProCommand::Manage(_)) => "pro_manage",
             Some(ProCommand::Uninstall(_)) => "pro_uninstall",
+            #[cfg(ctx_pro_test_helper)]
+            Some(ProCommand::TestPublishHelperRecheck(_) | ProCommand::TestWakeHelperRecheck) => {
+                "pro_setup"
+            }
             None | Some(ProCommand::Setup(_)) => "pro_setup",
         }
     }
@@ -282,6 +307,18 @@ fn run_lifecycle_inner(
         command, referral, ..
     } = args;
     match command {
+        #[cfg(ctx_pro_test_helper)]
+        Some(ProCommand::TestPublishHelperRecheck(args)) => {
+            crate::semantic::publish_source_backed_pro_recheck(
+                data_root,
+                &args.target_helper_sha256,
+            )
+        }
+        #[cfg(ctx_pro_test_helper)]
+        Some(ProCommand::TestWakeHelperRecheck) => {
+            crate::semantic::wake_source_backed_pro_recheck(data_root);
+            Ok(())
+        }
         None | Some(ProCommand::Setup(_)) => {
             crate::identity::installation_id(data_root)
                 .context("key_store_unavailable: initialize local Pro installation identity")?;

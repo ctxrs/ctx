@@ -98,6 +98,191 @@ pub(crate) fn initialize_current_query_store(data_root: &Path) {
     unix,
     any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
 ))]
+pub(crate) fn initialize_empty_current_query_store(data_root: &Path) -> String {
+    initialize_pro_installation_identity(data_root);
+    let index_root = data_root.join("search").join("lexical");
+    let receipt = GenerationWriter::open(
+        &index_root,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 32 * 1024 * 1024,
+        },
+    )
+    .unwrap()
+    .commit(|_| true)
+    .unwrap();
+    let verified = VerifiedIndex::open(index_root).unwrap();
+    assert_eq!(verified.generation_id(), receipt.generation_id);
+    receipt.generation_id
+}
+
+#[cfg(unix)]
+pub(crate) fn write_core_materialization_helper(
+    path: &Path,
+    materializer_revision: &str,
+    state_path: &Path,
+    log_path: &Path,
+) {
+    const HELPER: &str = r#"#!/usr/bin/python3
+import hashlib, json, pathlib, struct, sys
+
+REVISION = __REVISION__
+STATE = pathlib.Path(__STATE_PATH__)
+LOG = pathlib.Path(__LOG_PATH__)
+
+def receive():
+    header = sys.stdin.buffer.read(12)
+    if not header:
+        return None
+    if len(header) != 12 or header[:6] != b'CTXPRO':
+        sys.exit(20)
+    size = struct.unpack('>I', header[8:12])[0]
+    return json.loads(sys.stdin.buffer.read(size))
+
+def send(request, kind, body):
+    value = {
+      'sequence': request['sequence'],
+      'request_id': request['request_id'],
+      'message': {'kind': kind, 'body': body}
+    }
+    payload = json.dumps(value, separators=(',', ':')).encode()
+    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 1) + struct.pack('>I', len(payload)) + payload)
+    sys.stdout.buffer.flush()
+
+def stored_receipt():
+    try:
+        return json.loads(STATE.read_text())
+    except FileNotFoundError:
+        return None
+
+def status_body(requested_generation):
+    receipt = stored_receipt()
+    current = receipt is not None and receipt['core_generation_id'] == requested_generation and receipt['materializer_revision'] == REVISION
+    return {
+      'currentness': 'current' if current else 'not_materialized',
+      'requested_core_generation_id': requested_generation,
+      'core_receipt': receipt if current else None,
+      'coverage': 'empty' if current else 'not_materialized',
+      'repository_coverage': {
+        'repository_candidate_events': 0,
+        'logical_binding_events': 0,
+        'certified_live_root_access_events': 0,
+        'file_evidence_events': 0,
+        'exact_commit_evidence_events': 0,
+        'exact_pull_request_evidence_events': 0
+      },
+      'core_preparation_peak_workers': 0,
+      'access': {
+        'entitlement': 'available',
+        'graph_key': 'available',
+        'local_repository': 'unavailable'
+      },
+      'supported_operations': [],
+      'available_operations': [],
+      'storage_evidence': {
+        'graph_manifest_schema': 3,
+        'flat_format_version': 2,
+        'materializer_checkpoint_version': 3,
+        'journal_pack_format_version': 3,
+        'legacy_journals_written': 0,
+        'journal_pages_written': 1,
+        'journal_packs_written': 1,
+        'journal_finish_activity': {
+          'worker_limit': 1,
+          'peak_workers': 1,
+          'started_after_preparation': True
+        }
+      } if current else None
+    }
+
+hello = receive()
+if hello is None or hello['message']['kind'] != 'hello':
+    sys.exit(21)
+with LOG.open('a') as stream:
+    stream.write('start:' + REVISION + '\n')
+send(hello, 'hello', {
+  'protocol_version': 1,
+  'protocol_fingerprint': '__PROTOCOL_FINGERPRINT__',
+  'helper_version': 'same-generation-fixture-' + REVISION,
+  'authorization_challenge_base64url': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'capabilities': ['status', 'core_materialization']
+})
+
+while True:
+    request = receive()
+    if request is None:
+        break
+    kind = request['message']['kind']
+    body = request['message']['body']
+    with LOG.open('a') as stream:
+        stream.write('request:' + REVISION + ':' + kind + '\n')
+    if kind == 'status':
+        send(request, 'status', status_body(body.get('requested_core_generation_id')))
+    elif kind == 'begin_core_materialization':
+        encoded = json.dumps(body, separators=(',', ':')).encode()
+        encoded_revision = json.dumps(REVISION, separators=(',', ':')).encode()
+        materialization_id = hashlib.sha256(b'[' + encoded + b',' + encoded_revision + b']').hexdigest()
+        send(request, 'core_materialization_began', {
+          'materialization_id': materialization_id,
+          'core_generation_id': body['head']['core_generation_id'],
+          'materializer_revision': REVISION,
+          'expected_prior_receipt': body['expected_prior_receipt'],
+          'replayed': False
+        })
+    elif kind == 'apply_core_source_delta_page':
+        page = body['page']
+        send(request, 'core_source_delta_page_applied', {
+          'materialization_id': page['materialization_id'],
+          'core_generation_id': page['core_generation_id'],
+          'page_index': page['page_index'],
+          'acknowledgement_page_index': body['acknowledgement_page_index'],
+          'acknowledgement_terminal': True,
+          'changed_sources': 0,
+          'removed_sources': 0,
+          'reconcile_sources': [],
+          'replayed': False
+        })
+    elif kind == 'finish_core_materialization':
+        head = body['head']
+        receipt = {
+          'core_generation_id': head['core_generation_id'],
+          'core_record_contract_fingerprint': head['core_record_contract_fingerprint'],
+          'source_snapshot_sha256': head['source_snapshot_sha256'],
+          'materializer_revision': REVISION,
+          'source_count': head['source_count'],
+          'event_count': head['event_count']
+        }
+        STATE.write_text(json.dumps(receipt, separators=(',', ':')))
+        with LOG.open('a') as stream:
+            stream.write('finish:' + REVISION + '\n')
+        send(request, 'core_materialization_finished', {'receipt': receipt, 'replayed': False})
+    else:
+        sys.exit(22)
+"#;
+    let helper = HELPER
+        .replace(
+            "__REVISION__",
+            &serde_json::to_string(materializer_revision).unwrap(),
+        )
+        .replace(
+            "__STATE_PATH__",
+            &serde_json::to_string(&state_path.to_string_lossy()).unwrap(),
+        )
+        .replace(
+            "__LOG_PATH__",
+            &serde_json::to_string(&log_path.to_string_lossy()).unwrap(),
+        )
+        .replace(
+            "__PROTOCOL_FINGERPRINT__",
+            ctx_pro_host_protocol::PROTOCOL_FINGERPRINT,
+        );
+    write_python_helper(path, &helper);
+}
+
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
+))]
 fn initialize_provider_neutral_core_projection(data_root: &Path) -> String {
     let source_digest = [
         175, 208, 244, 36, 180, 188, 63, 218, 129, 170, 29, 64, 65, 216, 117, 181, 87, 2, 144, 20,

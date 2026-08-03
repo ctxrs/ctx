@@ -8,15 +8,24 @@ use std::{
         raw::{c_char, c_int, c_void},
         unix::fs::PermissionsExt,
     },
-    process::{ExitStatus, Stdio},
+    path::Path,
+    process::{Child, ExitStatus, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use tempfile::tempdir;
 
 mod support;
-use support::{initialize_current_query_store, write_blame_helper};
+use support::{
+    copied_ctx_binary, ctx, ctx_from_binary, daemon_test_root, data_root,
+    initialize_current_query_store, initialize_empty_current_query_store, write_blame_helper,
+    write_core_materialization_helper,
+};
 
 #[repr(C)]
 struct TestWinsize {
@@ -114,6 +123,195 @@ fn run_with_stdout_pty(args: &[String], columns: u16) -> (ExitStatus, Vec<u8>, V
         Err(error) => panic!("read stdout PTY: {error}"),
     }
     (status, stdout_bytes, stderr_bytes)
+}
+
+struct LiveProDaemon {
+    child: Child,
+}
+
+impl LiveProDaemon {
+    fn is_running(&mut self) -> bool {
+        self.child.try_wait().unwrap().is_none()
+    }
+}
+
+impl Drop for LiveProDaemon {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+fn start_live_pro_daemon(temp: &tempfile::TempDir, helper: &Path) -> LiveProDaemon {
+    let binary = copied_ctx_binary(temp);
+    let prepared = ctx_from_binary(temp, &binary);
+    let mut command = std::process::Command::new(prepared.get_program());
+    for (name, value) in prepared.get_envs() {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    let child = command
+        .args([
+            "daemon",
+            "run",
+            "--force",
+            "--idle-exit-seconds",
+            "600",
+            "--loop-interval-seconds",
+            "600",
+        ])
+        .env("CTX_PRO_HELPER", helper)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    LiveProDaemon { child }
+}
+
+fn daemon_pid(temp: &tempfile::TempDir) -> Option<u64> {
+    let output = ctx(temp)
+        .args(["daemon", "status", "--format=json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&output.stdout).ok()?;
+    (value["daemon"]["running"] == true)
+        .then(|| value["daemon"]["pid"].as_u64())
+        .flatten()
+}
+
+fn wait_until(mut condition: impl FnMut() -> bool, detail: &str) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !condition() {
+        assert!(Instant::now() < deadline, "timed out waiting for {detail}");
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn live_daemon_rebuilds_replaced_helper_without_a_new_core_generation() {
+    let temp = daemon_test_root();
+    let data_root = data_root(&temp);
+    fs::create_dir_all(&data_root).unwrap();
+    fs::write(
+        data_root.join("config.toml"),
+        "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
+    )
+    .unwrap();
+    let generation = initialize_empty_current_query_store(&data_root);
+    let helper = temp.path().join("ctx-pro-materializer");
+    let helper_state = temp.path().join("materializer-state.json");
+    let helper_log = temp.path().join("materializer-log.txt");
+    write_core_materialization_helper(&helper, "revision-v1", &helper_state, &helper_log);
+
+    let mut daemon = start_live_pro_daemon(&temp, &helper);
+    wait_until(|| daemon_pid(&temp).is_some(), "live Pro daemon");
+    let original_pid = daemon_pid(&temp).unwrap();
+    wait_until(
+        || fs::read_to_string(&helper_log).is_ok_and(|log| log.contains("finish:revision-v1")),
+        "initial helper materialization",
+    );
+    assert!(daemon.is_running());
+
+    let staged_helper = temp.path().join("ctx-pro-materializer.next");
+    write_core_materialization_helper(&staged_helper, "revision-v2", &helper_state, &helper_log);
+    let target_helper_sha256 = format!("{:x}", Sha256::digest(fs::read(&staged_helper).unwrap()));
+    let output = ctx(&temp)
+        .args([
+            "pro",
+            "_test-publish-helper-recheck",
+            "--target-helper-sha256",
+            &target_helper_sha256,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}\nhelper log:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&helper_log).unwrap_or_default()
+    );
+    let recheck_path = data_root.join("daemon/jobs/pro-catch-up-recheck.json");
+    let recheck: Value = serde_json::from_slice(&fs::read(&recheck_path).unwrap()).unwrap();
+    assert_eq!(recheck["target_helper_sha256"], target_helper_sha256);
+
+    // Mirror the production transaction: the intent is durable while the old
+    // helper is still visible, then the exact target becomes visible, then the
+    // daemon is woken. An early wake must not let the old helper clear it.
+    ctx(&temp)
+        .args(["pro", "_test-wake-helper-recheck"])
+        .assert()
+        .success();
+    assert!(recheck_path.exists());
+    assert!(!fs::read_to_string(&helper_log)
+        .unwrap()
+        .contains("finish:revision-v2"));
+    fs::rename(&staged_helper, &helper).unwrap();
+    ctx(&temp)
+        .args(["pro", "_test-wake-helper-recheck"])
+        .assert()
+        .success();
+    wait_until(
+        || fs::read_to_string(&helper_log).is_ok_and(|log| log.contains("finish:revision-v2")),
+        "replacement helper materialization",
+    );
+    let catch_up_path = data_root.join("daemon/jobs/pro-catch-up.json");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let catch_up_bytes = fs::read(&catch_up_path).unwrap_or_default();
+        let catch_up = serde_json::from_slice::<Value>(&catch_up_bytes).ok();
+        if catch_up.as_ref().is_some_and(|status| {
+            status["status"] == "completed" && status["receipt_core_generation_id"] == generation
+        }) && !recheck_path.exists()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for replacement catch-up receipt; status={}; recheck={}; log={}",
+            String::from_utf8_lossy(&catch_up_bytes),
+            fs::read_to_string(&recheck_path).unwrap_or_default(),
+            fs::read_to_string(&helper_log).unwrap_or_default(),
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    assert_eq!(daemon_pid(&temp), Some(original_pid));
+    assert!(daemon.is_running());
+    let final_state: Value = serde_json::from_slice(&fs::read(&helper_state).unwrap()).unwrap();
+    assert_eq!(
+        final_state["core_generation_id"], generation,
+        "unexpected helper state: {final_state}"
+    );
+    assert_eq!(final_state["materializer_revision"], "revision-v2");
+    let catch_up: Value =
+        serde_json::from_slice(&fs::read(data_root.join("daemon/jobs/pro-catch-up.json")).unwrap())
+            .unwrap();
+    assert_eq!(catch_up["core_generation_id"], generation);
+    assert_eq!(catch_up["receipt_core_generation_id"], generation);
+    assert_eq!(catch_up["status"], "completed");
+    assert!(!data_root
+        .join("daemon/jobs/pro-catch-up-recheck.json")
+        .exists());
+    assert_eq!(
+        fs::read_to_string(&helper_log)
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("finish:"))
+            .collect::<Vec<_>>(),
+        vec!["finish:revision-v1", "finish:revision-v2"]
+    );
 }
 
 #[test]
