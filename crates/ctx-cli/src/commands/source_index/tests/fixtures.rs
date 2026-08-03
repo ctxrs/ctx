@@ -120,6 +120,25 @@ fn fixture_core_event(event: &EventRecord, body: impl Into<String>) -> CoreEvent
     }
 }
 
+fn fixture_search_presentation<'event>(
+    event: &'event SearchEventMetadata,
+    record: CoreEventRecord,
+    snippet_truncated: bool,
+) -> SearchPresentation<'event> {
+    let snippet = record
+        .core_record
+        .content
+        .normalized_body
+        .as_ref()
+        .expect("search fixture needs normalized body")
+        .clone();
+    SearchPresentation {
+        event,
+        snippet,
+        snippet_truncated,
+    }
+}
+
 fn request(refresh: RefreshArg) -> SourceSearchRequest {
     SourceSearchRequest {
         query: TEST_QUERY.to_owned(),

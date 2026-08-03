@@ -5,7 +5,6 @@ mod tests {
 
     use std::{
         cell::Cell,
-        collections::HashMap,
         fs,
         io::{self, Write},
         sync::{Arc, Mutex},
@@ -18,8 +17,11 @@ mod tests {
     };
     use ctx_history_core::{
         derive_event_id, derive_session_id, CertifiedSource, CoreContentPolicyStatus, CoreRecord,
-        EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
+        EventIdentityInput, NativeItemKey, NativeSessionKey, RepositoryBinding,
+        RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
+        RepositoryFileObservation, RepositoryFileObservationKind, ScannedSourceCounts,
         SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
+        MAX_CORE_CONTENT_BYTES,
     };
     use ctx_history_index::{
         EventSearchFilters, GenerationWriter, IndexError, SessionRecord, WriterOptions,
@@ -38,13 +40,16 @@ mod tests {
 
     use super::*;
     use super::{
-        render::{render_show_document, search_json, SearchCorePresentation},
+        render::{
+            render_show_document, search_json, SEARCH_SNIPPET_MAX_BYTES, SEARCH_SNIPPET_MAX_CHARS,
+        },
         search::{
-            core_records_for_search_hits_with_budget, NormalizedSearchQuery, SearchCollection,
-            SearchCoreHydrationBudget, SearchCoreHydrationBudgetExceeded,
-            SearchCoreHydrationBudgetStage, SearchHit, SearchResultWindow,
-            SEARCH_CORE_BODY_PREFIX_CHARS, SEARCH_CORE_HYDRATION_BUDGET,
-            SEARCH_CORE_MAX_RETAINED_BODY_BYTES,
+            presentations_for_search_hits_with_budget, NormalizedSearchQuery, SearchCollection,
+            SearchEventMetadata, SearchHit, SearchPresentation,
+            SearchPresentationHydrationBudget, SearchPresentationRetentionBudgetExceeded,
+            SearchResultWindow,
+            SEARCH_PRESENTATION_HYDRATION_BUDGET,
+            SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
         },
         show::{
             canonical_show_output_bytes, core_events_by_ids_with_presentation_limits, event_window,
@@ -158,7 +163,6 @@ mod tests {
         write_test_generation(temp.path());
         let index = open_index(temp.path()).unwrap();
         let event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 31, 1);
-        let event_id = event.event_id.as_uuid();
         let core_event = fixture_core_event(&event, "Core-owned search snippet");
         let mut source_request = request(RefreshArg::Off);
         source_request.query = "  primary query ".to_owned();
@@ -168,7 +172,7 @@ mod tests {
             result_window: SearchResultWindow {
                 limit: 1,
                 hits: vec![SearchHit {
-                    event,
+                    event: SearchEventMetadata::from(&event),
                     score: 1.0,
                     more_matches_in_session: 0,
                 }],
@@ -190,13 +194,11 @@ mod tests {
             &index,
             &collection,
             &EventSearchFilters::default(),
-            &HashMap::from([(
-                event_id,
-                SearchCorePresentation {
-                    record: core_event,
-                    snippet_truncated: false,
-                },
-            )]),
+            &[fixture_search_presentation(
+                &collection.result_window.hits[0].event,
+                core_event,
+                false,
+            )],
             "existing_generation",
             1,
             std::time::Duration::ZERO,
@@ -279,12 +281,12 @@ mod tests {
                 limit: 2,
                 hits: vec![
                     SearchHit {
-                        event: first,
+                        event: SearchEventMetadata::from(&first),
                         score: 0.25,
                         more_matches_in_session: 0,
                     },
                     SearchHit {
-                        event: second,
+                        event: SearchEventMetadata::from(&second),
                         score: 9.5,
                         more_matches_in_session: 0,
                     },
@@ -300,28 +302,25 @@ mod tests {
             semantic_fallback: None,
             semantic_diagnostics: None,
         };
+        let mut presentations = [
+            fixture_search_presentation(
+                &collection.result_window.hits[0].event,
+                first_core,
+                false,
+            ),
+            fixture_search_presentation(
+                &collection.result_window.hits[1].event,
+                second_core,
+                false,
+            ),
+        ];
         let value = search_json(
             &source_request,
             temp.path(),
             &index,
             &collection,
             &EventSearchFilters::default(),
-            &HashMap::from([
-                (
-                    first_id,
-                    SearchCorePresentation {
-                        record: first_core,
-                        snippet_truncated: false,
-                    },
-                ),
-                (
-                    second_id,
-                    SearchCorePresentation {
-                        record: second_core,
-                        snippet_truncated: false,
-                    },
-                ),
-            ]),
+            &presentations,
             "existing_generation",
             1,
             std::time::Duration::ZERO,
@@ -335,6 +334,23 @@ mod tests {
         assert_eq!(results[1]["rank"], 2);
         assert_eq!(results[0]["retrieval_score"], 0.25);
         assert_eq!(results[1]["retrieval_score"], 9.5);
+
+        presentations.swap(0, 1);
+        let error = search_json(
+            &source_request,
+            temp.path(),
+            &index,
+            &collection,
+            &EventSearchFilters::default(),
+            &presentations,
+            "existing_generation",
+            1,
+            std::time::Duration::ZERO,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("out-of-order search presentation"));
     }
 
     #[test]
@@ -415,6 +431,15 @@ mod tests {
             })
         );
         assert_eq!(event_value["event"]["provider_session_id"], TEST_SESSION_ID);
+        assert_eq!(
+            event_value["event"]["text"],
+            selected
+                .core_record
+                .content
+                .normalized_body
+                .as_deref()
+                .unwrap()
+        );
         assert!(event_value["event"].get("source").is_none());
         assert!(event_value["event"].get("cursor").is_none());
     }
@@ -544,6 +569,25 @@ mod tests {
     }
 
     #[test]
+    fn result_window_discards_non_render_event_metadata() {
+        let (event_id, expected, window) = {
+            let mut event =
+                fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 90, 1);
+            event.touched_files = vec!["x".repeat(1024 * 1024)];
+            let event_id = event.event_id.as_uuid();
+            let expected = SearchEventMetadata::from(&event);
+            let candidate = EventSearchCandidate { event, score: 1.0 };
+            let window = shape_search_result_window(std::iter::once(&candidate), 1, true);
+            assert_eq!(window.hits[0].event, expected);
+            (event_id, expected, window)
+        };
+
+        assert_eq!(window.hits.len(), 1);
+        assert_eq!(window.hits[0].event, expected);
+        assert_eq!(window.hits[0].event.event_id, event_id);
+    }
+
+    #[test]
     fn show_provider_session_resolution_is_ambiguous_until_provider_qualified() {
         let temp = tempdir().unwrap();
         write_test_generation(temp.path());
@@ -657,10 +701,11 @@ mod tests {
     }
 
     #[test]
-    fn limit_200_search_retains_compact_query_centered_core_projections() {
+    fn limit_200_search_reduces_each_large_core_body_before_retaining_presentations() {
         let temp = tempdir().unwrap();
-        let body = format!("{} {TEST_QUERY}", "🦀".repeat(4_100));
+        let body = format!("{} {TEST_QUERY}", "x".repeat(96 * 1024));
         let body_bytes = body.len();
+        assert!(body_bytes * crate::MAX_SEARCH_LIMIT > MAX_CORE_CONTENT_BYTES);
         let events = (1..=crate::MAX_SEARCH_LIMIT)
             .map(|sequence| {
                 let event = fixture_event(
@@ -691,52 +736,23 @@ mod tests {
         assert!(!collection.result_window.more_available);
         let normalized_query = NormalizedSearchQuery::from_request(&source_request);
 
-        let core_records = core_records_for_search_hits_with_budget(
+        let presentations = presentations_for_search_hits_with_budget(
             &index,
             &collection.result_window.hits,
             &normalized_query,
-            SEARCH_CORE_HYDRATION_BUDGET,
+            SEARCH_PRESENTATION_HYDRATION_BUDGET,
         )
         .unwrap();
-        let retained_body_bytes = core_records
-            .values()
-            .map(|record| {
-                record
-                    .record
-                    .core_record
-                    .content
-                    .normalized_body
-                    .as_ref()
-                    .map_or(0, String::len)
-            })
+        let retained_snippet_bytes = presentations
+            .iter()
+            .map(|presentation| presentation.snippet.len())
             .sum::<usize>();
-        assert!(retained_body_bytes <= SEARCH_CORE_MAX_RETAINED_BODY_BYTES);
-        assert!(core_records.values().all(|record| {
-            let projected = record.record.core_record.content.normalized_body.as_deref();
-            record.snippet_truncated
-                && projected.is_some_and(|projected| {
-                    projected.chars().count() == SEARCH_CORE_BODY_PREFIX_CHARS
-                        && projected.contains(TEST_QUERY)
-                        && projected.len() < body_bytes
-                })
-                && record
-                    .record
-                    .core_record
-                    .content
-                    .structured_content
-                    .is_none()
-                && record.record.core_record.metadata.is_empty()
-                && record.record.core_record.repository_bindings.is_empty()
-                && record
-                    .record
-                    .core_record
-                    .repository_file_observations
-                    .is_empty()
-                && record
-                    .record
-                    .core_record
-                    .repository_vcs_observations
-                    .is_empty()
+        assert!(retained_snippet_bytes <= SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES);
+        assert!(presentations.iter().all(|presentation| {
+            presentation.snippet_truncated
+                && presentation.snippet.chars().count() == SEARCH_SNIPPET_MAX_CHARS
+                && presentation.snippet.contains(TEST_QUERY)
+                && presentation.snippet.len() < body_bytes
         }));
 
         let value = search_json(
@@ -745,7 +761,7 @@ mod tests {
             &index,
             &collection,
             &filters,
-            &core_records,
+            &presentations,
             "existing_generation",
             1,
             std::time::Duration::ZERO,
@@ -754,50 +770,165 @@ mod tests {
         let results = value["results"].as_array().unwrap();
         assert_eq!(results.len(), crate::MAX_SEARCH_LIMIT);
         assert!(results.iter().all(|result| {
-            result["snippet"].as_str().unwrap().chars().count() == SEARCH_CORE_BODY_PREFIX_CHARS
+            result["snippet"].as_str().unwrap().chars().count() == SEARCH_SNIPPET_MAX_CHARS
                 && result["snippet"].as_str().unwrap().contains(TEST_QUERY)
                 && result["snippet_truncated"] == true
-                && result["snippet_max_chars"] == SEARCH_CORE_BODY_PREFIX_CHARS
+                && result["snippet_max_chars"] == SEARCH_SNIPPET_MAX_CHARS
         }));
         assert_eq!(value["result_window"]["returned"], crate::MAX_SEARCH_LIMIT);
         assert_eq!(value["result_window"]["more_available"], false);
 
-        let decode_error = core_records_for_search_hits_with_budget(
+        let retention_error = presentations_for_search_hits_with_budget(
             &index,
             &collection.result_window.hits,
             &normalized_query,
-            SearchCoreHydrationBudget {
-                maximum_encoded_core_bytes: SEARCH_CORE_HYDRATION_BUDGET.maximum_encoded_core_bytes,
-                maximum_content_bytes: body_bytes.checked_mul(crate::MAX_SEARCH_LIMIT).unwrap() - 1,
-                maximum_retained_body_bytes: SEARCH_CORE_HYDRATION_BUDGET
-                    .maximum_retained_body_bytes,
-            },
-        )
-        .unwrap_err();
-        let typed = decode_error
-            .downcast_ref::<SearchCoreHydrationBudgetExceeded>()
-            .expect("aggregate decode failure must stay typed");
-        assert_eq!(typed.stage, SearchCoreHydrationBudgetStage::Decode);
-        assert_eq!(
-            typed.maximum_content_bytes,
-            body_bytes * crate::MAX_SEARCH_LIMIT - 1
-        );
-
-        let retention_error = core_records_for_search_hits_with_budget(
-            &index,
-            &collection.result_window.hits,
-            &normalized_query,
-            SearchCoreHydrationBudget {
-                maximum_retained_body_bytes: retained_body_bytes - 1,
-                ..SEARCH_CORE_HYDRATION_BUDGET
+            SearchPresentationHydrationBudget {
+                maximum_retained_snippet_bytes: retained_snippet_bytes - 1,
+                ..SEARCH_PRESENTATION_HYDRATION_BUDGET
             },
         )
         .unwrap_err();
         let typed = retention_error
-            .downcast_ref::<SearchCoreHydrationBudgetExceeded>()
-            .expect("aggregate retention failure must stay typed");
-        assert_eq!(typed.stage, SearchCoreHydrationBudgetStage::Retention);
-        assert_eq!(typed.retained_body_bytes, retained_body_bytes);
+            .downcast_ref::<SearchPresentationRetentionBudgetExceeded>()
+            .expect("snippet retention failure must stay typed");
+        assert_eq!(typed.retained_snippet_bytes, retained_snippet_bytes);
+    }
+
+    #[test]
+    fn file_only_search_keeps_an_oversized_grapheme_body_without_requiring_a_body_match() {
+        let temp = tempdir().unwrap();
+        let event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 94, 1);
+        let oversized_cluster = format!("x{}", "\u{301}".repeat(SEARCH_SNIPPET_MAX_BYTES));
+        let mut stored = fixture_core_event(&event, oversized_cluster);
+        stored.core_record.repository_bindings.push(RepositoryBinding {
+            binding_id: "binding-1".to_owned(),
+            logical_repository_id: "repo-1".to_owned(),
+            checkout_id: None,
+            worktree_id: None,
+            aliases: Vec::new(),
+            git_object_format: None,
+            local_root_authorization: None,
+            evidence: vec![RepositoryEvidence {
+                kind: RepositoryEvidenceKind::FileActivity,
+                confidence: RepositoryEvidenceConfidence::Explicit,
+            }],
+            association_policy_revision:
+                ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+        });
+        stored.core_record.repository_file_observations = vec![RepositoryFileObservation {
+            repository_binding_id: "binding-1".to_owned(),
+            relative_path: "src/huge.rs".to_owned(),
+            kind: RepositoryFileObservationKind::Modified,
+            prior_relative_path: None,
+        }];
+        stored.core_record.validate_contract().unwrap();
+        append_fixture_session(temp.path(), std::slice::from_ref(&stored), 94);
+
+        let mut source_request = request(RefreshArg::Off);
+        source_request.query.clear();
+        source_request.file = Some(PathBuf::from("src/huge.rs"));
+        source_request.events = true;
+        source_request.limit = 1;
+        let (value, collection, _) = search_existing_generation(
+            &source_request,
+            open_index(temp.path()).unwrap(),
+            temp.path(),
+            source_request.semantic_weight,
+            "existing_generation",
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(collection.result_window.hits.len(), 1);
+        assert_eq!(
+            value["results"][0]["ctx_event_id"],
+            json!(event.event_id.as_uuid())
+        );
+        assert_eq!(value["results"][0]["snippet"], "");
+        assert_eq!(value["results"][0]["snippet_truncated"], true);
+
+        let (mcp, _) = mcp_search(source_request, temp.path()).unwrap();
+        assert_eq!(
+            mcp["results"][0]["ctx_event_id"],
+            json!(event.event_id.as_uuid())
+        );
+        assert_eq!(mcp["results"][0]["snippet"], "");
+        assert_eq!(mcp["results"][0]["snippet_truncated"], true);
+    }
+
+    #[test]
+    fn search_presentation_hydration_rejects_missing_duplicate_and_misaligned_hits() {
+        let temp = tempdir().unwrap();
+        let event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 92, 1);
+        let stored = fixture_core_event(&event, format!("stored {TEST_QUERY} body"));
+        append_fixture_session(temp.path(), std::slice::from_ref(&stored), 92);
+        let index = open_index(temp.path()).unwrap();
+        let query = NormalizedSearchQuery::from_request(&request(RefreshArg::Off));
+        let expected_event = SearchEventMetadata::from(&event);
+        let hit = SearchHit {
+            event: expected_event.clone(),
+            score: 1.0,
+            more_matches_in_session: 0,
+        };
+
+        let presentations = presentations_for_search_hits_with_budget(
+            &index,
+            std::slice::from_ref(&hit),
+            &query,
+            SEARCH_PRESENTATION_HYDRATION_BUDGET,
+        )
+        .unwrap();
+        assert_eq!(presentations.len(), 1);
+        assert_eq!(presentations[0].event, &expected_event);
+
+        let duplicate_error = presentations_for_search_hits_with_budget(
+            &index,
+            &[hit.clone(), hit.clone()],
+            &query,
+            SEARCH_PRESENTATION_HYDRATION_BUDGET,
+        )
+        .unwrap_err();
+        assert!(duplicate_error
+            .to_string()
+            .contains("search result duplicated Core event"));
+
+        let missing_event = fixture_event(
+            CaptureProvider::Codex,
+            "codex_session_jsonl",
+            93,
+            1,
+        );
+        let missing_error = presentations_for_search_hits_with_budget(
+            &index,
+            &[SearchHit {
+                event: SearchEventMetadata::from(&missing_event),
+                score: 1.0,
+                more_matches_in_session: 0,
+            }],
+            &query,
+            SEARCH_PRESENTATION_HYDRATION_BUDGET,
+        )
+        .unwrap_err();
+        assert_eq!(
+            missing_error.to_string(),
+            format!(
+                "pinned Core lookup omitted search event {}",
+                missing_event.event_id
+            )
+        );
+
+        let mut misaligned = hit;
+        misaligned.event.event_sequence += 1;
+        let misaligned_error = presentations_for_search_hits_with_budget(
+            &index,
+            &[misaligned],
+            &query,
+            SEARCH_PRESENTATION_HYDRATION_BUDGET,
+        )
+        .unwrap_err();
+        assert!(misaligned_error
+            .to_string()
+            .contains("misaligned metadata"));
     }
 
     #[test]
@@ -820,7 +951,7 @@ mod tests {
             .iter()
             .map(|result| result["snippet"].as_str().unwrap().len())
             .sum::<usize>();
-        let session_id = collection.result_window.hits[0].event.session_id.as_uuid();
+        let session_id = collection.result_window.hits[0].event.session_id;
         let complete_bytes = index
             .core_events_for_session(session_id)
             .unwrap()

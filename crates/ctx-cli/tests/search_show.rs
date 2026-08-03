@@ -129,6 +129,90 @@ fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
 }
 
 #[test]
+fn search_keeps_huge_matching_grapheme_hits_in_json_and_human_output() {
+    const SNIPPET_MAX_BYTES: usize = 16 * 1024;
+    const SESSION_ID: &str = "019c0000-0000-7000-8000-000000000001";
+
+    let temp = tempdir();
+    let oversized_cluster = format!("x{}", "\u{301}".repeat(SNIPPET_MAX_BYTES));
+    let fixture = write_codex_message_fixture(
+        &temp.path().join("huge-grapheme-fixture"),
+        SESSION_ID,
+        &oversized_cluster,
+    );
+    let _daemon = start_mcp_source_refresh_daemon(&temp);
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        fixture.to_str().unwrap(),
+        "--format=json",
+        "--progress=none",
+        "--no-daemon",
+    ]));
+
+    let search_json = || {
+        json_output(ctx(&temp).args([
+            "search",
+            "x",
+            "--provider",
+            "codex",
+            "--events",
+            "--include-current-session",
+            "--refresh=off",
+            "--format=json",
+        ]))
+    };
+    let first = search_json();
+    let second = search_json();
+    let first_result = &first["results"][0];
+    let second_result = &second["results"][0];
+    assert_eq!(
+        first["results"].as_array().map(Vec::len),
+        Some(1),
+        "{first:#}"
+    );
+    assert_eq!(first_result["snippet"], "", "{first:#}");
+    assert_eq!(first_result["snippet_truncated"], true, "{first:#}");
+    assert!(
+        first_result["snippet"].as_str().unwrap().len() <= SNIPPET_MAX_BYTES,
+        "{first:#}"
+    );
+    assert_eq!(first_result["snippet"], second_result["snippet"]);
+    assert_eq!(
+        first_result["snippet_truncated"],
+        second_result["snippet_truncated"]
+    );
+    assert_eq!(first_result["ctx_event_id"], second_result["ctx_event_id"]);
+
+    let render_human = || {
+        let output = ctx(&temp)
+            .args([
+                "search",
+                "x",
+                "--provider",
+                "codex",
+                "--events",
+                "--include-current-session",
+                "--refresh=off",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(output).unwrap()
+    };
+    let first_human = render_human();
+    let second_human = render_human();
+    assert_eq!(first_human, second_human);
+    assert!(first_human.contains("1 result"), "{first_human}");
+    assert!(first_human.contains("codex user message"), "{first_human}");
+    assert!(!first_human.contains('\u{301}'), "{first_human}");
+}
+
+#[test]
 fn search_result_window_is_truthful_in_json_and_human_output() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-sessions");
