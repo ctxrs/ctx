@@ -36,7 +36,7 @@ use crate::{
     common::io::OpenedProviderSourceFile,
     provider::source_backed::family::jsonl::{
         JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-        JsonlFamilyProjector, JsonlRecordRef,
+        JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlRecordRef,
     },
     CaptureError, Result, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -214,7 +214,14 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
         source_file: Arc<OpenedProviderSourceFile>,
         imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
-        self.projector_with_provider_checkpoint(leaf, source_file, imported_at, None, None)
+        self.projector_with_provider_checkpoint(
+            leaf,
+            source_file,
+            imported_at,
+            None,
+            None,
+            JsonlFamilyProjectionMode::Cold,
+        )
     }
 
     fn projector_with_provider_checkpoint(
@@ -224,6 +231,7 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
         _imported_at: DateTime<Utc>,
         checkpoint: Option<&TypedKey>,
         base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         let binding = decode_binding(leaf)?;
         validate_binding(leaf, &binding, source_file.as_ref())?;
@@ -242,7 +250,11 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
             repository_attributor: crate::repository_attribution::RepositoryAttributor::default(),
             tool_contexts,
             linkage_capacity_exceeded,
-            event_identities: CursorEventIdentityState::new(base_event_lookup),
+            event_identities: CursorEventIdentityState::new(
+                (mode == JsonlFamilyProjectionMode::CertifiedAppend)
+                    .then_some(base_event_lookup)
+                    .flatten(),
+            ),
         }))
     }
 }

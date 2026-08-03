@@ -15,19 +15,23 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
-    EventIdentityInput, EventType, NativeItemKey, NativeSessionKey, PositionStability,
-    ProjectionContractError, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId,
-    TypedKey,
+    EventIdentityInput, EventType, NativeSessionKey, ProjectionContractError, SessionIdentityInput,
+    SourceAnchor, SourceKey, StableEntityId, TypedKey,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
-    provider::source_backed::family::jsonl::{
-        JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-        JsonlFamilyProjector, JsonlRecordRef,
+    provider::source_backed::{
+        family::jsonl::{
+            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
+            JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlRecordRef,
+        },
+        FallbackEventIdentityState,
     },
     provider::{
         file_touches::{
@@ -41,8 +45,8 @@ use crate::{
 
 use super::super::{
     event::{
-        kimi_event_role, kimi_event_text, kimi_event_type, kimi_legacy_provider_event_hash,
-        kimi_output_content, kimi_record_timestamp,
+        kimi_event_role, kimi_event_text, kimi_event_type, kimi_output_content,
+        kimi_record_timestamp,
     },
     layout::{
         auxiliary_paths, canonical_source_root_for_wire, KimiWireRoute,
@@ -54,11 +58,13 @@ use super::super::{
 const KIMI_SOURCE_SCHEMA_VARIANT: &str = "compound-wire-tree-v1";
 const KIMI_SOURCE_ANCHOR_NAMESPACE: &str = "kimi-code-cli-wire-lineage-v1";
 const KIMI_NATIVE_SESSION_NAMESPACE: &str = "kimi-code-cli-session-v1";
-const KIMI_NATIVE_EVENT_POSITION_KIND: &str = "kimi-code-cli-wire-ordinal-v1";
 const KIMI_LOGICAL_SESSION_KIND: &str = "agent-session";
 const KIMI_LOGICAL_EVENT_KIND: &str = "wire-event";
 // v3 reclassifies content parts and normalizes toolCallId; the bump re-projects v2.
 const KIMI_SOURCE_PARSER_REVISION: &str = "kimi-code-cli-source-backed-v3";
+const KIMI_EVENT_IDENTITY_REVISION: &str = "kimi-code-cli-content-occurrence-v1";
+const KIMI_FALLBACK_FINGERPRINT_DOMAIN: &[u8] =
+    b"ctx.kimi-code-cli.fallback-event-fingerprint.v1\0";
 const KIMI_DISCOVERY_MAX_DEPTH: usize = 16;
 const KIMI_DISCOVERY_MAX_ENTRIES: usize = 65_536;
 
@@ -84,8 +90,6 @@ pub(crate) enum KimiSourceBackedError {
     SourceChanged,
     #[error("duplicate Kimi provider session lineage {0}")]
     DuplicateLineage(String),
-    #[error("Kimi source-backed accounting overflowed")]
-    CountOverflow,
 }
 
 pub(crate) type KimiSourceBackedResult<T> = std::result::Result<T, KimiSourceBackedError>;
@@ -158,6 +162,10 @@ impl JsonlFamilyAdapter for KimiJsonlAdapter {
         KIMI_SOURCE_PARSER_REVISION
     }
 
+    fn event_identity_revision(&self) -> &'static str {
+        KIMI_EVENT_IDENTITY_REVISION
+    }
+
     fn append_mode(&self) -> JsonlFamilyAppendMode {
         JsonlFamilyAppendMode::Replacement
     }
@@ -187,8 +195,32 @@ impl JsonlFamilyAdapter for KimiJsonlAdapter {
         &self,
         leaf: &JsonlFamilyLeaf,
         source_file: Arc<OpenedProviderSourceFile>,
-        _imported_at: DateTime<Utc>,
+        imported_at: DateTime<Utc>,
     ) -> crate::Result<Box<dyn JsonlFamilyProjector>> {
+        self.projector_with_provider_checkpoint(
+            leaf,
+            source_file,
+            imported_at,
+            None,
+            None,
+            JsonlFamilyProjectionMode::Cold,
+        )
+    }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
+    ) -> crate::Result<Box<dyn JsonlFamilyProjector>> {
+        if checkpoint.is_some() {
+            return Err(CaptureError::InvalidPayload(
+                "Kimi adapter does not accept provider checkpoint state".to_owned(),
+            ));
+        }
         let binding = decode_family_leaf(leaf)?;
         let admitted = admit_compound_leaf_from_opened(
             leaf.authority(),
@@ -211,6 +243,16 @@ impl JsonlFamilyAdapter for KimiJsonlAdapter {
             .session
             .started_at
             .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+        let fallback_identities = FallbackEventIdentityState::new(
+            compound.source.clone(),
+            session_id,
+            KIMI_LOGICAL_EVENT_KIND,
+            "kimi-code-cli.wire-event.fallback",
+            KIMI_EVENT_IDENTITY_REVISION,
+            mode.into(),
+            base_event_lookup,
+        )
+        .map_err(capture_error)?;
         Ok(Box::new(KimiProjector {
             compound,
             session_id,
@@ -218,6 +260,7 @@ impl JsonlFamilyAdapter for KimiJsonlAdapter {
             authority: Arc::clone(leaf.authority()),
             state,
             index,
+            fallback_identities,
         }))
     }
 }
@@ -229,6 +272,7 @@ struct KimiProjector {
     authority: Arc<ProviderSourceRoot>,
     state: Option<OpenedProviderSourceFile>,
     index: Option<OpenedProviderSourceFile>,
+    fallback_identities: FallbackEventIdentityState,
 }
 
 impl JsonlFamilyProjector for KimiProjector {
@@ -251,6 +295,8 @@ impl JsonlFamilyProjector for KimiProjector {
         if let Some(document) = core_record(
             &self.compound,
             self.session_id,
+            &mut self.fallback_identities,
+            bytes,
             evidence.physical_ordinal(),
             &value,
             self.fallback_timestamp,
@@ -269,8 +315,17 @@ impl JsonlFamilyProjector for KimiProjector {
         if let Some(index) = &self.index {
             index.revalidate()?;
         }
-        self.authority.revalidate()
+        self.authority.revalidate()?;
+        self.fallback_identities.finish()
     }
+}
+
+fn fallback_fingerprint(bytes: &[u8]) -> KimiSourceBackedResult<TypedKey> {
+    let mut digest = Sha256::new();
+    digest.update(KIMI_FALLBACK_FINGERPRINT_DOMAIN);
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
+    Ok(TypedKey::bytes(digest.finalize().to_vec())?)
 }
 
 fn decode_family_leaf(leaf: &JsonlFamilyLeaf) -> crate::Result<KimiSourceLeaf> {

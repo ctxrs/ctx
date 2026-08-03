@@ -10,9 +10,10 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, EventIdentityInput,
-    EventType, NativeItemKey, NativeSessionKey, PositionStability, SessionIdentityInput,
-    SourceAnchor, SourceKey, StableEntityId, TypedKey,
+    EventType, NativeItemKey, NativeSessionKey, SessionIdentityInput, SourceAnchor, SourceKey,
+    StableEntityId, TypedKey,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -22,10 +23,14 @@ use crate::{
     provider::{
         file_touches::visit_provider_file_touch_drafts_with_limit,
         providers::native_jsonl::visit_native_jsonl_files,
-        source_backed::family::jsonl::{
-            observe_opened_file, probe_records_until, JsonlFamilyAdapter, JsonlFamilyAppendMode,
-            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation,
-            JsonlRecordRef,
+        source_backed::{
+            family::jsonl::{
+                observe_opened_file, probe_records_until, JsonlFamilyAdapter,
+                JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
+                JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFileObservation,
+                JsonlRecordRef,
+            },
+            FallbackEventIdentityState,
         },
     },
     CaptureError, Result,
@@ -40,11 +45,12 @@ use super::super::{
 const SOURCE_ANCHOR_NAMESPACE: &str = "pi.session";
 const NATIVE_SESSION_NAMESPACE: &str = "pi.session";
 const NATIVE_EVENT_NAMESPACE: &str = "pi.entry";
-const NATIVE_EVENT_POSITION_KIND: &str = "pi.jsonl.record-ordinal";
 const LOGICAL_SESSION_KIND: &str = "pi-session";
 const LOGICAL_EVENT_KIND: &str = "pi-event";
 const SOURCE_SCHEMA_VARIANT: &str = "pi-nativepath-jsonl-v1";
 const PARSER_REVISION: &str = "pi-shared-jsonl-v2";
+const EVENT_IDENTITY_REVISION: &str = "pi-content-occurrence-v1";
+const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.pi.fallback-event-fingerprint.v1\0";
 const MAX_TOUCHES_PER_RECORD: usize = 63;
 const MAX_HEADER_PROBE_RECORDS: usize = 64;
 
@@ -115,6 +121,10 @@ impl JsonlFamilyAdapter for PiJsonlAdapter {
 
     fn parser_revision(&self) -> &'static str {
         PARSER_REVISION
+    }
+
+    fn event_identity_revision(&self) -> &'static str {
+        EVENT_IDENTITY_REVISION
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
@@ -240,9 +250,33 @@ impl JsonlFamilyAdapter for PiJsonlAdapter {
     fn projector(
         &self,
         leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        self.projector_with_provider_checkpoint(
+            leaf,
+            source_file,
+            imported_at,
+            None,
+            None,
+            JsonlFamilyProjectionMode::Cold,
+        )
+    }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
         _source_file: Arc<OpenedProviderSourceFile>,
         _imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        if checkpoint.is_some() {
+            return Err(CaptureError::InvalidPayload(
+                "Pi adapter does not accept provider checkpoint state".to_owned(),
+            ));
+        }
         let binding = decode_binding(leaf)?;
         let session_id = session_identity(leaf.source(), &binding.native_session_id)?;
         let parent_session_id = binding
@@ -256,6 +290,15 @@ impl JsonlFamilyAdapter for PiJsonlAdapter {
             parent_session_id,
             session_id,
             binding,
+            fallback_identities: FallbackEventIdentityState::new(
+                leaf.source().clone(),
+                session_id,
+                LOGICAL_EVENT_KIND,
+                "pi.entry.fallback",
+                EVENT_IDENTITY_REVISION,
+                mode.into(),
+                base_event_lookup,
+            )?,
             rejected_records: 0,
         }))
     }
@@ -267,6 +310,7 @@ struct PiProjector {
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
     root_session_id: StableEntityId,
+    fallback_identities: FallbackEventIdentityState,
     rejected_records: u64,
 }
 
@@ -317,18 +361,24 @@ impl JsonlFamilyProjector for PiProjector {
             .get("id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty());
-        let native_item_key = match native_id {
-            Some(id) => NativeItemKey::native_id(
-                NATIVE_EVENT_NAMESPACE,
-                TypedKey::utf8(id).map_err(contract)?,
-            )
-            .map_err(contract)?,
-            None => NativeItemKey::certified_position(
-                NATIVE_EVENT_POSITION_KIND,
-                TypedKey::U64(ordinal),
-                PositionStability::AppendStable,
-            )
-            .map_err(contract)?,
+        let (native_item_key, native_event_id) = match native_id {
+            Some(id) => {
+                let native_event_id = TypedKey::utf8(id).map_err(contract)?;
+                (
+                    NativeItemKey::native_id(NATIVE_EVENT_NAMESPACE, native_event_id.clone())
+                        .map_err(contract)?,
+                    native_event_id,
+                )
+            }
+            None => {
+                let assignment = self
+                    .fallback_identities
+                    .assign(fallback_fingerprint(bytes)?, None)?;
+                (
+                    assignment.native_item_key().clone(),
+                    assignment.native_event_id().clone(),
+                )
+            }
         };
         let event_id = derive_event_id(EventIdentityInput {
             source: &self.source,
@@ -338,11 +388,6 @@ impl JsonlFamilyProjector for PiProjector {
             subrecord_selector: None,
         })
         .map_err(contract)?;
-        let native_event_id = native_id
-            .map(TypedKey::utf8)
-            .transpose()
-            .map_err(contract)?
-            .unwrap_or(TypedKey::U64(ordinal));
         let is_primary = self.binding.parent_session_id.is_none();
         let message = value.get("message").unwrap_or(&value);
         let tool_name = message
@@ -400,6 +445,18 @@ impl JsonlFamilyProjector for PiProjector {
     fn rejected_records(&self) -> u64 {
         self.rejected_records
     }
+
+    fn finish(&mut self) -> Result<()> {
+        self.fallback_identities.finish()
+    }
+}
+
+fn fallback_fingerprint(bytes: &[u8]) -> Result<TypedKey> {
+    let mut digest = Sha256::new();
+    digest.update(FALLBACK_FINGERPRINT_DOMAIN);
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
+    TypedKey::bytes(digest.finalize().to_vec()).map_err(contract)
 }
 
 fn parse_header_binding(record: JsonlRecordRef<'_>) -> Result<Option<Binding>> {

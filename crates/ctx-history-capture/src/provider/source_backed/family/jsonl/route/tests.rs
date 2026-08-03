@@ -209,6 +209,70 @@ impl JsonlFamilyAdapter for ParallelTestAdapter {
     }
 }
 
+struct IdentityRevisionTestAdapter {
+    revision: &'static str,
+    expected_mode: JsonlFamilyProjectionMode,
+}
+
+impl JsonlFamilyAdapter for IdentityRevisionTestAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Pi
+    }
+
+    fn source_format(&self) -> &'static str {
+        TEST_SOURCE_FORMAT
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        TEST_SCHEMA
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        "identity-revision-test-parser-v1"
+    }
+
+    fn event_identity_revision(&self) -> &'static str {
+        self.revision
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::CertifiedSuffix
+    }
+
+    fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
+        TestAdapter.discover(root)
+    }
+
+    fn projector(
+        &self,
+        _leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        Ok(Box::new(ParallelTestProjector))
+    }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        if checkpoint.is_some()
+            || mode != self.expected_mode
+            || base_event_lookup.is_some() != (mode != JsonlFamilyProjectionMode::Cold)
+        {
+            return Err(CaptureError::InvalidPayload(
+                "identity revision test received inconsistent projection context".to_owned(),
+            ));
+        }
+        self.projector(leaf, source_file, imported_at)
+    }
+}
+
 struct EmissionTestAdapter;
 
 struct EmissionTestProjector {
@@ -377,16 +441,22 @@ impl JsonlFamilyAdapter for CheckpointTestAdapter {
         imported_at: DateTime<Utc>,
         checkpoint: Option<&TypedKey>,
         base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         let Some(checkpoint) = checkpoint else {
-            if base_event_lookup.is_some() {
+            if mode == JsonlFamilyProjectionMode::Cold && base_event_lookup.is_some() {
                 return Err(CaptureError::InvalidPayload(
                     "cold checkpoint test unexpectedly received a base lookup".to_owned(),
                 ));
             }
+            if mode == JsonlFamilyProjectionMode::Replacement && base_event_lookup.is_none() {
+                return Err(CaptureError::InvalidPayload(
+                    "replacement checkpoint test did not receive a base lookup".to_owned(),
+                ));
+            }
             return self.projector(leaf, source_file, imported_at);
         };
-        if base_event_lookup.is_none() {
+        if mode != JsonlFamilyProjectionMode::CertifiedAppend || base_event_lookup.is_none() {
             return Err(CaptureError::InvalidPayload(
                 "resumed checkpoint test did not receive a base lookup".to_owned(),
             ));
@@ -404,7 +474,7 @@ impl JsonlFamilyAdapter for CheckpointTestAdapter {
 }
 
 fn capture_parallel_test_generation(
-    adapter: &ParallelTestAdapter,
+    adapter: &dyn JsonlFamilyAdapter,
     root: &Path,
     index_root: &Path,
     workers: usize,
@@ -628,6 +698,42 @@ fn opaque_provider_checkpoint_and_base_lookup_resume_only_the_certified_suffix()
             .iter()
             .all(|source| source.counts().complete_records == 2));
     }
+}
+
+#[test]
+fn event_identity_revision_forces_replacement_with_core_base_authority() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("identity.jsonl"), b"{\"message\":\"stable\"}\n").unwrap();
+
+    let cold = IdentityRevisionTestAdapter {
+        revision: "content-occurrence-v1",
+        expected_mode: JsonlFamilyProjectionMode::Cold,
+    };
+    let (cold_receipt, _) = capture_parallel_test_generation(&cold, &root, &index, 1);
+
+    let upgraded = IdentityRevisionTestAdapter {
+        revision: "content-occurrence-v2",
+        expected_mode: JsonlFamilyProjectionMode::Replacement,
+    };
+    let (upgraded_receipt, _) = capture_parallel_test_generation(&upgraded, &root, &index, 1);
+
+    assert_ne!(cold_receipt.generation_id, upgraded_receipt.generation_id);
+    let checkpoint = upgraded_receipt.manifest().sources[0]
+        .frontier()
+        .unwrap()
+        .checkpoint();
+    let TypedKey::Bytes(bytes) = checkpoint else {
+        panic!("family checkpoint was not bytes");
+    };
+    assert_eq!(
+        serde_json::from_slice::<FamilyCheckpoint>(bytes)
+            .unwrap()
+            .event_identity_revision,
+        "content-occurrence-v2"
+    );
 }
 
 #[test]

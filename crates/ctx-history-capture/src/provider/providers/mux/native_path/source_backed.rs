@@ -12,6 +12,7 @@ use ctx_history_core::{
     derive_session_id, CaptureProvider, NativeSessionKey, SessionIdentityInput, SourceAnchor,
     SourceKey, StableEntityId, TypedKey,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -24,7 +25,7 @@ use crate::{
         },
         source_backed::family::jsonl::{
             observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
-            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation,
+            JsonlFamilyLeaf, JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFileObservation,
         },
     },
     CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES, MUX_SOURCE_FORMAT,
@@ -40,6 +41,7 @@ const LOGICAL_SESSION_KIND: &str = "mux-session";
 const LOGICAL_EVENT_KIND: &str = "mux-event";
 const SOURCE_SCHEMA_VARIANT: &str = "mux-session-tree-source-backed-v2";
 const PARSER_REVISION: &str = "mux-source-backed-v4";
+const EVENT_IDENTITY_REVISION: &str = "mux-content-occurrence-v1";
 const COMPOUND_REVISION_DOMAIN: &[u8] = b"ctx.mux.compound-source.v3\0";
 const PARTIAL_EVENT_SEQUENCE_BASE: u64 = 1_u64 << 62;
 const MAX_EVENT_SEQUENCE_ORDINAL: u64 = (1_u64 << 47) - 1;
@@ -100,6 +102,10 @@ impl JsonlFamilyAdapter for MuxJsonlAdapter {
 
     fn parser_revision(&self) -> &'static str {
         PARSER_REVISION
+    }
+
+    fn event_identity_revision(&self) -> &'static str {
+        EVENT_IDENTITY_REVISION
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
@@ -177,14 +183,40 @@ impl JsonlFamilyAdapter for MuxJsonlAdapter {
     fn projector(
         &self,
         leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        self.projector_with_provider_checkpoint(
+            leaf,
+            source_file,
+            imported_at,
+            None,
+            None,
+            JsonlFamilyProjectionMode::Cold,
+        )
+    }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
         _source_file: Arc<OpenedProviderSourceFile>,
         _imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        if checkpoint.is_some() {
+            return Err(CaptureError::InvalidPayload(
+                "Mux adapter does not accept provider checkpoint state".to_owned(),
+            ));
+        }
         Ok(Box::new(MuxProjector::new(
             leaf.source().clone(),
             Arc::clone(leaf.authority()),
             decode_binding(leaf)?,
-        )))
+            mode,
+            base_event_lookup,
+        )?))
     }
 }
 

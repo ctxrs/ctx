@@ -226,12 +226,7 @@ fn mux_value_preview(value: &Value) -> String {
     provider_local_preview(&raw, PROVIDER_MAX_PREVIEW_CHARS).0
 }
 
-pub(crate) fn mux_event_id(
-    value: &Value,
-    line_number: usize,
-    role: &str,
-    is_partial: bool,
-) -> String {
+pub(crate) fn mux_provider_event_id(value: &Value, is_partial: bool) -> Option<String> {
     let prefix = if is_partial { "partial:" } else { "" };
     value
         .get("id")
@@ -242,7 +237,6 @@ pub(crate) fn mux_event_id(
             mux_history_sequence(value)
                 .map(|sequence| format!("{prefix}historySequence:{sequence}"))
         })
-        .unwrap_or_else(|| format!("{prefix}{role}:line-{line_number}"))
 }
 
 /// Exact normalized result body for a Mux dynamic-tool record.

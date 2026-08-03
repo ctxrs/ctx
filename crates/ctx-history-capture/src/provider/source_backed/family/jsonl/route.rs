@@ -168,6 +168,13 @@ pub(crate) enum JsonlFamilyAppendMode {
     Replacement,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonlFamilyProjectionMode {
+    Cold,
+    CertifiedAppend,
+    Replacement,
+}
+
 pub(crate) trait JsonlFamilyProjector: Send {
     fn project(
         &mut self,
@@ -199,6 +206,12 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
     fn source_format(&self) -> &'static str;
     fn schema_variant(&self) -> &'static str;
     fn parser_revision(&self) -> &'static str;
+    /// Projection-local identity scheme revision. Changing this invalidates
+    /// the family checkpoint and forces a replacement scan without changing
+    /// the provider parser revision recorded by Core.
+    fn event_identity_revision(&self) -> &'static str {
+        ""
+    }
     fn append_mode(&self) -> JsonlFamilyAppendMode;
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory>;
@@ -215,9 +228,10 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
     ) -> Result<Box<dyn JsonlFamilyProjector>>;
 
     /// Constructs a projector for a cold/replacement scan or from the opaque
-    /// provider state persisted at the validated prefix frontier. Certified
-    /// suffix scans also receive an exact event-identity lookup pinned to the
-    /// writer base; cold and replacement scans receive no lookup.
+    /// provider state persisted at the validated prefix frontier. Any scan with
+    /// an exact prior source receives an event-identity lookup pinned to the
+    /// writer base. `mode` distinguishes append continuation from replacement
+    /// reconciliation; cold scans receive no lookup.
     fn projector_with_provider_checkpoint(
         &self,
         leaf: &JsonlFamilyLeaf,
@@ -225,6 +239,7 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
         imported_at: DateTime<Utc>,
         checkpoint: Option<&TypedKey>,
         _base_event_lookup: Option<BaseEventIdentityLookup>,
+        _mode: JsonlFamilyProjectionMode,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         if checkpoint.is_some() {
             return Err(CaptureError::InvalidPayload(
@@ -575,6 +590,8 @@ impl JsonlFamilyInventory {
 struct FamilyCheckpoint {
     version: u32,
     provider_parser_revision: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    event_identity_revision: String,
     binding_digest: [u8; 32],
     physical: JsonlCheckpoint,
     represented_physical_records: u64,
@@ -589,6 +606,7 @@ impl FamilyCheckpoint {
     fn valid_for(&self, adapter: &dyn JsonlFamilyAdapter, leaf: &JsonlFamilyLeaf) -> bool {
         self.version == Self::VERSION
             && self.provider_parser_revision == adapter.parser_revision()
+            && self.event_identity_revision == adapter.event_identity_revision()
             && binding_digest(leaf).is_ok_and(|digest| self.binding_digest == digest)
             && self.physical.is_internally_consistent()
             && self.physical.identity() == &physical_identity(adapter, leaf)

@@ -5,7 +5,9 @@ use ctx_history_core::{
     derive_event_id, CoreContentPolicyStatus, CoreRecord, EventIdentityInput, NativeItemKey,
     SourceKey, TypedKey,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
     common::io::ProviderSourceRoot,
@@ -16,29 +18,34 @@ use crate::{
         },
         normalization::provider_value_text,
         providers::mux::normalization::{
-            apply_mux_core_output_diagnostic, mux_core_event, mux_event_id, mux_event_text,
-            mux_event_type, mux_message_timestamp_opt, mux_output_projection,
-            mux_partial_event_index, mux_result_content, MuxMessageRow, MuxOutputProjection,
+            apply_mux_core_output_diagnostic, mux_core_event, mux_event_text, mux_event_type,
+            mux_message_timestamp_opt, mux_output_projection, mux_partial_event_index,
+            mux_provider_event_id, mux_result_content, MuxMessageRow, MuxOutputProjection,
         },
         source_backed::family::jsonl::{
-            JsonlFamilyProjector, JsonlReader, JsonlRecordRef, JsonlSourceIdentity,
+            JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlReader, JsonlRecordRef,
+            JsonlSourceIdentity,
         },
+        source_backed::FallbackEventIdentityState,
     },
     CaptureError, Result,
 };
 
 use super::{
-    open_verified, MuxBinding, MuxStreamKind, LOGICAL_EVENT_KIND, MAX_EVENT_SEQUENCE_ORDINAL,
-    PARSER_REVISION, PARTIAL_EVENT_SEQUENCE_BASE,
+    open_verified, MuxBinding, MuxStreamKind, EVENT_IDENTITY_REVISION, LOGICAL_EVENT_KIND,
+    MAX_EVENT_SEQUENCE_ORDINAL, PARSER_REVISION, PARTIAL_EVENT_SEQUENCE_BASE,
 };
 
 const NATIVE_ITEM_NAMESPACE: &str = "mux.record";
+const FALLBACK_ITEM_NAMESPACE: &str = "mux.record.fallback";
+const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.mux.fallback-event-fingerprint.v1\0";
 const MAX_FILE_TOUCHES: usize = 448;
 
 pub(super) struct MuxProjector {
     source: SourceKey,
     authority: Arc<ProviderSourceRoot>,
     binding: MuxBinding,
+    fallback_identities: FallbackEventIdentityState,
 }
 
 impl MuxProjector {
@@ -46,16 +53,28 @@ impl MuxProjector {
         source: SourceKey,
         authority: Arc<ProviderSourceRoot>,
         binding: MuxBinding,
-    ) -> Self {
-        Self {
+        mode: JsonlFamilyProjectionMode,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+    ) -> Result<Self> {
+        let fallback_identities = FallbackEventIdentityState::new(
+            source.clone(),
+            binding.session_id,
+            LOGICAL_EVENT_KIND,
+            FALLBACK_ITEM_NAMESPACE,
+            EVENT_IDENTITY_REVISION,
+            mode.into(),
+            base_event_lookup,
+        )?;
+        Ok(Self {
             source,
             authority,
             binding,
-        }
+            fallback_identities,
+        })
     }
 
     fn project_record(
-        &self,
+        &mut self,
         stream: MuxStreamKind,
         record: JsonlRecordRef<'_>,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
@@ -95,22 +114,26 @@ impl MuxProjector {
         } else {
             ordinal
         };
-        let line_number = usize::try_from(ordinal)
-            .ok()
-            .and_then(|value| value.checked_add(1))
-            .ok_or(CaptureError::SystemInvariant(
-                "Mux source ordinal exceeds platform limits",
-            ))?;
-        let role = value
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let native_record_id = mux_event_id(&value, line_number, role, stream.is_partial());
-        let native_item_key = NativeItemKey::native_id(
-            NATIVE_ITEM_NAMESPACE,
-            TypedKey::utf8(&native_record_id).map_err(contract)?,
-        )
-        .map_err(contract)?;
+        let native_record_id = mux_provider_event_id(&value, stream.is_partial());
+        let (native_item_key, native_event_id) = match native_record_id {
+            Some(native_record_id) => {
+                let native_event_id = TypedKey::utf8(native_record_id).map_err(contract)?;
+                (
+                    NativeItemKey::native_id(NATIVE_ITEM_NAMESPACE, native_event_id.clone())
+                        .map_err(contract)?,
+                    native_event_id,
+                )
+            }
+            None => {
+                let assignment = self
+                    .fallback_identities
+                    .assign(fallback_fingerprint(stream, bytes)?, None)?;
+                (
+                    assignment.native_item_key().clone(),
+                    assignment.native_event_id().clone(),
+                )
+            }
+        };
         let event_id = derive_event_id(EventIdentityInput {
             source: &self.source,
             session_id: self.binding.session_id,
@@ -192,7 +215,7 @@ impl MuxProjector {
         .map_err(contract)?;
         record.parent_session_id = self.binding.parent_session_id;
         record.provider_session_id = Some(self.binding.metadata.provider_session_id.clone());
-        record.native_event_id = Some(TypedKey::utf8(native_record_id).map_err(contract)?);
+        record.native_event_id = Some(native_event_id);
         record.occurred_at_unix_ms = Some(event.occurred_at.timestamp_millis());
         record.role = event.role.map(|role| role.as_str().to_owned());
         record.cwd = self.binding.metadata.cwd.clone();
@@ -247,36 +270,45 @@ impl JsonlFamilyProjector for MuxProjector {
     }
 
     fn finish_projecting(&mut self, emit: &mut dyn FnMut(CoreRecord) -> Result<()>) -> Result<()> {
-        if self.binding.primary_stream.is_partial() {
-            return Ok(());
+        if !self.binding.primary_stream.is_partial() {
+            if let Some(partial) = self.binding.partial.clone() {
+                let source_file = open_verified(&self.authority, &partial)?;
+                let path = self.authority.named_path().join(&partial.relative_path);
+                let mut reader = JsonlReader::open_whole_record(
+                    JsonlSourceIdentity::new(
+                        "mux",
+                        PARSER_REVISION,
+                        "mux-bounded-partial-snapshot-v1",
+                        self.source.exact_descriptor_digest(),
+                        path,
+                    ),
+                    source_file,
+                    None,
+                )?;
+                while reader
+                    .visit_page(&mut |record| {
+                        self.project_record(MuxStreamKind::Partial, record, emit)
+                    })?
+                    .is_some()
+                {}
+                if reader.outcome().is_none() {
+                    return Err(CaptureError::SystemInvariant(
+                        "Mux partial snapshot scan has no terminal evidence",
+                    ));
+                }
+            }
         }
-        let Some(partial) = self.binding.partial.as_ref() else {
-            return Ok(());
-        };
-        let source_file = open_verified(&self.authority, partial)?;
-        let path = self.authority.named_path().join(&partial.relative_path);
-        let mut reader = JsonlReader::open_whole_record(
-            JsonlSourceIdentity::new(
-                "mux",
-                PARSER_REVISION,
-                "mux-bounded-partial-snapshot-v1",
-                self.source.exact_descriptor_digest(),
-                path,
-            ),
-            source_file,
-            None,
-        )?;
-        while reader
-            .visit_page(&mut |record| self.project_record(MuxStreamKind::Partial, record, emit))?
-            .is_some()
-        {}
-        if reader.outcome().is_none() {
-            return Err(CaptureError::SystemInvariant(
-                "Mux partial snapshot scan has no terminal evidence",
-            ));
-        }
-        Ok(())
+        self.fallback_identities.finish()
     }
+}
+
+fn fallback_fingerprint(stream: MuxStreamKind, bytes: &[u8]) -> Result<TypedKey> {
+    let mut digest = Sha256::new();
+    digest.update(FALLBACK_FINGERPRINT_DOMAIN);
+    digest.update([u8::from(stream.is_partial())]);
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
+    TypedKey::bytes(digest.finalize().to_vec()).map_err(contract)
 }
 
 fn mux_exact_logical_content(value: &Value) -> Result<String> {

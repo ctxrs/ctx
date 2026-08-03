@@ -8,22 +8,6 @@ use crate::provider::normalization::{
     provider_value_text,
 };
 
-pub(super) fn kimi_legacy_provider_event_hash(
-    record_type: &str,
-    value: &Value,
-    line_number: usize,
-) -> String {
-    format!(
-        "{}:{}",
-        record_type,
-        value
-            .get("time")
-            .and_then(Value::as_i64)
-            .map(|time| time.to_string())
-            .unwrap_or_else(|| line_number.to_string())
-    )
-}
-
 pub(crate) fn kimi_event_type(record_type: &str, value: &Value) -> EventType {
     match record_type {
         "turn.prompt" | "turn.steer" | "context.append_message" => EventType::Message,

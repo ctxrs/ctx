@@ -39,7 +39,8 @@ use crate::{
         providers::native_jsonl::visit_native_jsonl_files,
         source_backed::family::jsonl::{
             observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
-            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation, JsonlRecordRef,
+            JsonlFamilyLeaf, JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFileObservation,
+            JsonlRecordRef,
         },
     },
     CaptureError, Result, CLAUDE_PROJECTS_SOURCE_FORMAT,
@@ -165,7 +166,14 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
         source_file: Arc<OpenedProviderSourceFile>,
         imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
-        self.projector_with_provider_checkpoint(leaf, source_file, imported_at, None, None)
+        self.projector_with_provider_checkpoint(
+            leaf,
+            source_file,
+            imported_at,
+            None,
+            None,
+            JsonlFamilyProjectionMode::Cold,
+        )
     }
 
     fn projector_with_provider_checkpoint(
@@ -175,6 +183,7 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
         _imported_at: DateTime<Utc>,
         checkpoint: Option<&TypedKey>,
         base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         let binding = decode_binding(leaf)?;
         let identities = identities(&binding)?;
@@ -207,7 +216,11 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
             pending_calls,
             linkage_capacity_exceeded,
             rejected_records: 0,
-            fallback_identities: FallbackEventIdentityState::new(base_event_lookup),
+            fallback_identities: FallbackEventIdentityState::new(
+                (mode == JsonlFamilyProjectionMode::CertifiedAppend)
+                    .then_some(base_event_lookup)
+                    .flatten(),
+            ),
         }))
     }
 }

@@ -13,8 +13,9 @@ use super::super::{
 };
 use super::{
     binding_digest, contract_error, route_internal, route_invalid, FamilyCheckpoint,
-    JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyLeaf, TerminalSourceEvidence,
-    FAMILY_FRONTIER_KIND, FAMILY_POLICY_REVISION, FAMILY_SOURCE_REVISION_KIND,
+    JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyLeaf, JsonlFamilyProjectionMode,
+    TerminalSourceEvidence, FAMILY_FRONTIER_KIND, FAMILY_POLICY_REVISION,
+    FAMILY_SOURCE_REVISION_KIND,
 };
 #[cfg(test)]
 use super::{jsonl_family_scanner_probe, record_jsonl_family_scanner_activity};
@@ -379,12 +380,20 @@ fn prepare_leaf(
     } else {
         None
     };
+    let projection_mode = if is_append {
+        JsonlFamilyProjectionMode::CertifiedAppend
+    } else if base.is_some() {
+        JsonlFamilyProjectionMode::Replacement
+    } else {
+        JsonlFamilyProjectionMode::Cold
+    };
     let mut projector = adapter.projector_with_provider_checkpoint(
         &leaf,
         opened,
         DateTime::<Utc>::UNIX_EPOCH,
         resumed.and_then(|checkpoint| checkpoint.provider_checkpoint.as_ref()),
-        is_append.then(|| base_event_lookup.clone()),
+        base.is_some().then(|| base_event_lookup.clone()),
+        projection_mode,
     )?;
     let mut physical_records = resumed.map_or_else(
         || {
@@ -463,6 +472,7 @@ fn prepare_leaf(
     let checkpoint = FamilyCheckpoint {
         version: FamilyCheckpoint::VERSION,
         provider_parser_revision: adapter.parser_revision().to_owned(),
+        event_identity_revision: adapter.event_identity_revision().to_owned(),
         binding_digest: binding_digest(&leaf)?,
         physical: outcome.checkpoint().clone(),
         represented_physical_records: represented_records,

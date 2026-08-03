@@ -30,7 +30,7 @@ use crate::{
         normalization::{provider_explicit_result_value_text, provider_timestamp_value},
         source_backed::family::jsonl::{
             JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-            JsonlFamilyProjector, JsonlRecordRef,
+            JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlRecordRef,
         },
     },
     provider_sources::{provider_source_for_path, ProviderSourceStatus},
@@ -171,7 +171,14 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
         source_file: Arc<OpenedProviderSourceFile>,
         imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
-        self.projector_with_provider_checkpoint(leaf, source_file, imported_at, None, None)
+        self.projector_with_provider_checkpoint(
+            leaf,
+            source_file,
+            imported_at,
+            None,
+            None,
+            JsonlFamilyProjectionMode::Cold,
+        )
     }
 
     fn projector_with_provider_checkpoint(
@@ -181,6 +188,7 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
         imported_at: DateTime<Utc>,
         checkpoint: Option<&TypedKey>,
         base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         let binding = decode_binding(leaf)?;
         let compound = admit_compound(
@@ -230,7 +238,11 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
             pending_calls,
             running_processes,
             linkage_capacity_exceeded,
-            fallback_identities: FallbackEventIdentityState::new(base_event_lookup),
+            fallback_identities: FallbackEventIdentityState::new(
+                (mode == JsonlFamilyProjectionMode::CertifiedAppend)
+                    .then_some(base_event_lookup)
+                    .flatten(),
+            ),
         }))
     }
 }

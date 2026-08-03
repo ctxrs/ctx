@@ -7,6 +7,8 @@ struct KimiOutputClassification {
 pub(super) fn core_record(
     compound: &KimiCompoundObservation,
     session_id: StableEntityId,
+    fallback_identities: &mut FallbackEventIdentityState,
+    bytes: &[u8],
     ordinal: u64,
     value: &Value,
     fallback_timestamp: DateTime<Utc>,
@@ -23,21 +25,12 @@ pub(super) fn core_record(
     let role = kimi_event_role(record_type, value, event_type);
     let occurred_at =
         kimi_record_timestamp(value, fallback_timestamp).unwrap_or(fallback_timestamp);
-    let line_number = usize::try_from(ordinal)
-        .ok()
-        .and_then(|value| value.checked_add(1))
-        .ok_or(KimiSourceBackedError::CountOverflow)?;
-    let native_event_id = kimi_legacy_provider_event_hash(record_type, value, line_number);
-    let event_key = NativeItemKey::certified_position(
-        KIMI_NATIVE_EVENT_POSITION_KIND,
-        TypedKey::U64(ordinal),
-        PositionStability::AppendStable,
-    )?;
+    let assignment = fallback_identities.assign(fallback_fingerprint(bytes)?, None)?;
     let event_id = derive_event_id(EventIdentityInput {
         source: &compound.source,
         session_id,
         logical_item_kind: KIMI_LOGICAL_EVENT_KIND,
-        native_item_key: &event_key,
+        native_item_key: assignment.native_item_key(),
         subrecord_selector: None,
     })?;
     let touched_files = kimi_touched_paths(
@@ -82,7 +75,7 @@ pub(super) fn core_record(
     )?;
     record.parent_session_id = parent_session_id;
     record.provider_session_id = Some(compound.native.session.provider_session_id.clone());
-    record.native_event_id = Some(TypedKey::utf8(native_event_id)?);
+    record.native_event_id = Some(assignment.native_event_id().clone());
     record.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());
     record.role = Some(role.as_str().to_owned());
     record.workspace = workspace;
