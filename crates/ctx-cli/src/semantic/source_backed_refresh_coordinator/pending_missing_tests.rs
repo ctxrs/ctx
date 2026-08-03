@@ -192,31 +192,20 @@ fn missing_fixture_executor(
         )?;
         Ok(SourceBackedRefreshPublication {
             generation_id: commit.generation_id,
-            published_explicit_source_catalog: execution
-                .explicit_source_catalog
-                .cloned()
-                .expect("fixture catalog authority"),
-            scanned_routes: selected.len(),
+            published_explicit_source_catalog: execution.explicit_source_catalog.cloned(),
             unsupported_routes: 0,
             certified_source_count: current.source_count,
             certified_source_bytes: current.certified_source_bytes,
             current,
             timings: SourceBackedRefreshTimings::default(),
-            selected_route_ids: selected
+            route_results: selected
                 .iter()
-                .map(|route| route.as_str().to_owned())
+                .map(|route| {
+                    SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true)
+                })
                 .collect(),
-            successful_route_ids: selected
-                .iter()
-                .map(|route| route.as_str().to_owned())
-                .collect(),
-            successful_route_changes: selected
-                .iter()
-                .map(|route| (route.as_str().to_owned(), true))
-                .collect(),
-            failed_route_outcomes: Vec::new(),
-            catalog_route_outcomes: Vec::new(),
-            source_failures: Vec::new(),
+            catalog_route_bindings: Vec::new(),
+            verified_index: None,
         })
     })
 }

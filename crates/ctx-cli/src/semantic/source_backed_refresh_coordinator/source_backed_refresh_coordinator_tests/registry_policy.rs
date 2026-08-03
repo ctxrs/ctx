@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 fn registry_policy_warp_source(path: PathBuf, exists: bool) -> ProviderSource {
     ProviderSource {
@@ -36,7 +37,8 @@ fn only_unscopable_registry_safety_issues_block_globally() {
         },
     };
     assert!(reject_blocking_automatic_registry_issues(std::slice::from_ref(&selector_gap)).is_ok());
-    let failures = capture_refresh::automatic_registry_route_failures(&[selector_gap]).unwrap();
+    let failures =
+        capture_refresh::automatic_registry_route_failures(&[selector_gap], None).unwrap();
     assert_eq!(failures.len(), 1);
     assert_eq!(
         failures[0].class,
@@ -52,6 +54,41 @@ fn only_unscopable_registry_safety_issues_block_globally() {
     };
     let error = reject_blocking_automatic_registry_issues(&[unsafe_overlap]).unwrap_err();
     assert!(format!("{error:#}").contains("injected unsafe root overlap"));
+}
+
+#[test]
+fn registry_failure_identity_uses_the_canonical_certified_format() {
+    let path = PathBuf::from("/detected/codex-sessions");
+    let source = ProviderSource {
+        provider: CaptureProvider::Codex,
+        path: path.clone(),
+        exists: true,
+        source_format: "codex_session_jsonl_tree",
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::Native,
+        status: ProviderSourceStatus::Available,
+        unsupported_reason: None,
+    };
+    let issue = SourceBackedAutomaticRegistryIssue::Unavailable {
+        source,
+        reason: SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
+            detail: "injected selector gap",
+        },
+    };
+    let failures = capture_refresh::automatic_registry_route_failures(&[issue], None).unwrap();
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.source-failure-identity-v1\0");
+    digest.update(b"codex\0codex_session_jsonl\0");
+    let encoded_path = path.as_os_str().as_encoded_bytes();
+    digest.update((encoded_path.len() as u64).to_be_bytes());
+    digest.update(encoded_path);
+
+    assert_eq!(failures.len(), 1);
+    assert_eq!(
+        failures[0].source_identity,
+        format!("{:x}", digest.finalize())
+    );
 }
 
 #[test]
@@ -97,12 +134,24 @@ fn mixed_valid_and_invalid_registry_routes_publish_with_a_typed_failure() {
     )
     .unwrap();
 
-    assert_eq!(publication.scanned_routes, 1);
+    assert_eq!(publication.route_results.len(), 2);
     assert_eq!(publication.unsupported_routes, 1);
     assert_eq!(publication.certified_source_count, 1);
-    assert_eq!(publication.successful_route_ids.len(), 1);
-    assert_eq!(publication.source_failures.len(), 1);
-    let failure = &publication.source_failures[0];
+    assert_eq!(
+        publication
+            .route_results
+            .iter()
+            .filter(|result| result.outcome.is_success())
+            .count(),
+        1
+    );
+    let failures = publication
+        .route_results
+        .iter()
+        .flat_map(|result| result.source_failures.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 1);
+    let failure = failures[0];
     assert_eq!(failure.provider, "warp");
     assert_eq!(failure.class, "incompatible");
     assert!(!failure.carried_forward);

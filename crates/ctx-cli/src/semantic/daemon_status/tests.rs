@@ -479,6 +479,29 @@ fn source_rejections_are_visible_without_internal_provenance() {
 }
 
 #[test]
+fn failed_transcript_route_prevents_a_misleading_healthy_daemon_status() {
+    let mut report = running_report();
+    report["jobs"]["core_refresh"] = json!({
+        "status": "completed",
+        "request_state": "published",
+        "receipt": {
+            "outcome": "completed_with_source_failures",
+            "source_failure_total": 1,
+            "current": {"current_rejected_records": 0},
+        },
+    });
+    let rendered = render_status(&context(80), &report).render_plain();
+
+    assert!(rendered.starts_with("! Daemon is partially healthy\n"));
+    assert!(
+        rendered.contains("ready with source failures"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("transcript routes could not be refreshed"));
+    assert!(!rendered.contains("Daemon is healthy"));
+}
+
+#[test]
 fn failed_source_refresh_is_bounded_actionable_and_never_leaks_backend_details() {
     let backend_error = "all_provider_terminal_coverage_unavailable at /tmp/private/source";
     let report = json!({

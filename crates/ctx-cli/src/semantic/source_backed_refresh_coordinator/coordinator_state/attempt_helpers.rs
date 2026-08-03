@@ -87,65 +87,6 @@ pub(super) fn coalesce_attempt(
     attempt.to_json()
 }
 
-pub(super) fn aggregate_manual_all_continuation(
-    publication: &mut SourceBackedRefreshPublication,
-    continuation: &ManualAllContinuation,
-) {
-    if continuation.covered_route_ids.is_empty() {
-        return;
-    }
-    let covered = continuation
-        .covered_route_ids
-        .iter()
-        .map(|route| route.as_str().to_owned());
-    publication.selected_route_ids.extend(covered.clone());
-    publication.successful_route_ids.extend(covered);
-    publication.selected_route_ids.sort();
-    publication.selected_route_ids.dedup();
-    publication.successful_route_ids.sort();
-    publication.successful_route_ids.dedup();
-    publication.successful_route_changes.extend(
-        continuation
-            .covered_route_changes
-            .iter()
-            .map(|(route, changed)| (route.as_str().to_owned(), *changed)),
-    );
-    for outcome in &mut publication.catalog_route_outcomes {
-        let Some(changed) =
-            continuation
-                .covered_route_changes
-                .iter()
-                .find_map(|(route, changed)| {
-                    (route.as_str() == outcome.route_identity).then_some(*changed)
-                })
-        else {
-            continue;
-        };
-        outcome.outcome = "succeeded".to_owned();
-        outcome.failure_class = None;
-        outcome.changed = Some(changed);
-    }
-    publication.scanned_routes = publication
-        .scanned_routes
-        .saturating_add(continuation.covered_scanned_routes);
-    publication.current.removed_source_count = publication
-        .current
-        .removed_source_count
-        .saturating_add(continuation.covered_removed_source_count);
-    publication.timings.discovery_us = publication
-        .timings
-        .discovery_us
-        .saturating_add(continuation.covered_timings.discovery_us);
-    publication.timings.scan_stage_us = publication
-        .timings
-        .scan_stage_us
-        .saturating_add(continuation.covered_timings.scan_stage_us);
-    publication.timings.commit_us = publication
-        .timings
-        .commit_us
-        .saturating_add(continuation.covered_timings.commit_us);
-}
-
 pub(super) fn new_refresh_attempt(
     observed_generation: Option<String>,
     metadata: SourceRefreshRuntimeMetadata,
@@ -163,7 +104,6 @@ pub(super) fn new_refresh_attempt(
         refresh_scope,
         operation: metadata.operation,
         requested_explicit_source_catalog: requested_catalog,
-        published_explicit_source_catalog: None,
         coalesced_requests: 0,
         progress: SourceBackedRefreshProgress::default(),
         scanned_routes: None,
@@ -171,6 +111,7 @@ pub(super) fn new_refresh_attempt(
         certified_source_count: None,
         certified_source_bytes: None,
         receipt: None,
+        publication_receipt: None,
         timings: None,
         publication_probe_us: 0,
         daemon_mode: metadata.daemon_mode,
@@ -178,16 +119,24 @@ pub(super) fn new_refresh_attempt(
         trigger_provenance: metadata.trigger_provenance,
         failure_type: None,
         last_error: None,
-        post_publication_error: None,
     }
 }
 
-pub(super) fn active_attempt_count(state: &CoreRefreshEngineState) -> usize {
-    state
+pub(super) fn durable_queue_entry_count(state: &CoreRefreshEngineState) -> usize {
+    let active = state
         .attempts
         .iter()
         .filter(|attempt| attempt.state.is_active())
-        .count()
+        .count();
+    let terminal_root_id = state
+        .pending_terminal_persistence
+        .as_ref()
+        .map(|pending| pending.request_id.as_str())
+        .or(state.pending_scheduler_retry_root_id.as_deref());
+    let terminal_root = terminal_root_id.is_some_and(|request_id| {
+        find_attempt(state, request_id).is_some_and(|attempt| !attempt.state.is_active())
+    });
+    active.saturating_add(usize::from(terminal_root))
 }
 
 pub(super) fn trim_terminal_attempt_history(state: &mut CoreRefreshEngineState) {
@@ -197,15 +146,46 @@ pub(super) fn trim_terminal_attempt_history(state: &mut CoreRefreshEngineState) 
         .filter(|attempt| !attempt.state.is_active())
         .count();
     while terminal_count > SOURCE_REFRESH_ATTEMPT_HISTORY {
-        let Some(oldest_terminal) = state
-            .attempts
-            .iter()
-            .position(|attempt| !attempt.state.is_active())
-        else {
+        let pending_terminal_root = state
+            .pending_terminal_persistence
+            .as_ref()
+            .map(|pending| pending.request_id.as_str());
+        let pending_scheduler_root = state.pending_scheduler_retry_root_id.as_deref();
+        let Some(oldest_terminal) = state.attempts.iter().position(|attempt| {
+            !attempt.state.is_active()
+                && Some(attempt.request_id.as_str()) != pending_terminal_root
+                && Some(attempt.request_id.as_str()) != pending_scheduler_root
+        }) else {
             break;
         };
         state.attempts.remove(oldest_terminal);
         terminal_count = terminal_count.saturating_sub(1);
+    }
+}
+
+pub(super) fn advance_after_terminal_attempt(
+    state: &mut CoreRefreshEngineState,
+    request_id: &str,
+    observed_generation: Option<String>,
+) {
+    if state.active_request_id.as_deref() != Some(request_id) {
+        return;
+    }
+    state.active_request_id = state.pending_request_ids.pop_front();
+    let Some(next_request_id) = state.active_request_id.clone() else {
+        return;
+    };
+    if state
+        .manual_all_continuations
+        .contains_key(&next_request_id)
+    {
+        return;
+    }
+    if let Some(next_attempt) = find_attempt_mut(state, &next_request_id) {
+        if observed_generation.is_some() {
+            next_attempt.previous_generation = observed_generation.clone();
+            next_attempt.published_generation = observed_generation;
+        }
     }
 }
 
@@ -224,42 +204,65 @@ mod tests {
     fn continuation_preserves_route_local_change_in_catalog_outcome() {
         let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
         let mut continuation = ManualAllContinuation::new("predecessor".to_owned());
-        continuation.covered_route_ids.insert(route.clone());
-        continuation
-            .covered_route_changes
-            .insert(route.clone(), false);
+        continuation.covered_route_results.insert(
+            route.clone(),
+            SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), false),
+        );
         let mut publication = SourceBackedRefreshPublication {
             generation_id: "generation".to_owned(),
-            published_explicit_source_catalog: load_explicit_source_catalog_authority(
-                tempfile::tempdir().unwrap().path(),
-            )
-            .unwrap(),
-            scanned_routes: 0,
+            published_explicit_source_catalog: None,
             unsupported_routes: 0,
             certified_source_count: 0,
             certified_source_bytes: 0,
             current: SourceBackedRefreshCurrent::default(),
             timings: SourceBackedRefreshTimings::default(),
-            selected_route_ids: Vec::new(),
-            successful_route_ids: Vec::new(),
-            successful_route_changes: BTreeMap::new(),
-            failed_route_outcomes: Vec::new(),
-            catalog_route_outcomes: vec![SourceBackedRefreshCatalogRouteOutcome {
+            route_results: Vec::new(),
+            catalog_route_bindings: vec![ExplicitSourceCatalogRouteBinding {
                 catalog_lineage: "cd".repeat(32),
                 route_identity: route.as_str().to_owned(),
-                outcome: "not_selected".to_owned(),
-                failure_class: None,
-                changed: None,
             }],
-            source_failures: Vec::new(),
+            verified_index: None,
         };
 
-        aggregate_manual_all_continuation(&mut publication, &continuation);
+        continuation.covered_publication().apply(&mut publication);
 
-        assert_eq!(publication.selected_route_ids, [route.as_str()]);
-        assert_eq!(publication.successful_route_ids, [route.as_str()]);
-        assert!(!publication.successful_route_changes[route.as_str()]);
-        assert_eq!(publication.catalog_route_outcomes[0].outcome, "succeeded");
-        assert_eq!(publication.catalog_route_outcomes[0].changed, Some(false));
+        assert_eq!(publication.route_results.len(), 1);
+        assert_eq!(publication.route_results[0].route_identity, route.as_str());
+        assert_eq!(publication.route_results[0].outcome.changed(), Some(false));
+    }
+
+    #[test]
+    fn continuation_overlap_remains_visible_to_canonical_duplicate_rejection() {
+        let route = SourceRouteIdentity::from_sha256("ef".repeat(32)).unwrap();
+        let mut continuation = ManualAllContinuation::new("predecessor".to_owned());
+        continuation.covered_route_results.insert(
+            route.clone(),
+            SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), false),
+        );
+        let mut publication = SourceBackedRefreshPublication {
+            generation_id: "generation".to_owned(),
+            published_explicit_source_catalog: None,
+            unsupported_routes: 0,
+            certified_source_count: 0,
+            certified_source_bytes: 0,
+            current: SourceBackedRefreshCurrent::default(),
+            timings: SourceBackedRefreshTimings::default(),
+            route_results: vec![SourceBackedRefreshRouteResult::succeeded(
+                route.as_str().to_owned(),
+                true,
+            )],
+            catalog_route_bindings: Vec::new(),
+            verified_index: None,
+        };
+
+        continuation.covered_publication().apply(&mut publication);
+
+        let error = SourceBackedRefreshReceipt::from_verified_publication(
+            None,
+            publication.generation_id.clone(),
+            &publication,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("duplicate route result"));
     }
 }

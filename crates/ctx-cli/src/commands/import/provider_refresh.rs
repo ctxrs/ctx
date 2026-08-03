@@ -25,6 +25,8 @@ pub(crate) struct ProviderRefreshCollector {
 struct CoreRefreshAnalyticsFacts {
     trigger: ProviderRefreshTrigger,
     generation_changed: bool,
+    source_failure_total: usize,
+    rejected_record_total: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -137,10 +139,14 @@ impl ProviderRefreshCollector {
         &mut self,
         trigger: ProviderRefreshTrigger,
         generation_changed: bool,
+        source_failure_total: usize,
+        rejected_record_total: u64,
     ) {
         self.core_publication = Some(CoreRefreshAnalyticsFacts {
             trigger,
             generation_changed,
+            source_failure_total,
+            rejected_record_total,
         });
     }
 
@@ -258,6 +264,9 @@ impl ProviderRefreshCollector {
             })
             .collect::<Vec<_>>();
         if let Some(facts) = self.core_publication {
+            let has_source_failures = facts.source_failure_total != 0;
+            let has_rejections = facts.rejected_record_total != 0;
+            let partial = has_source_failures || has_rejections;
             let mut event = ProviderRefreshCompletedV1::foreground_bucketed(
                 Outcome::Success,
                 duration_bucket(single_provider_fallback_duration),
@@ -272,7 +281,11 @@ impl ProviderRefreshCollector {
                     },
                     content_evidence: ProviderRefreshContentEvidence::Unknown,
                     work_kind: (!facts.generation_changed).then_some(ProviderRefreshWorkKind::NoOp),
-                    refresh_result: ProviderRefreshResult::Complete,
+                    refresh_result: if partial {
+                        ProviderRefreshResult::Partial
+                    } else {
+                        ProviderRefreshResult::Complete
+                    },
                     core_result: if facts.generation_changed {
                         ProviderCoreResult::Complete
                     } else {
@@ -280,8 +293,18 @@ impl ProviderRefreshCollector {
                     },
                     canonical_pro_result: ProviderProResult::Unknown,
                     output_pro_result: ProviderProResult::Unknown,
-                    failure_scope: ProviderRefreshFailureScope::None,
-                    failure_type: ProviderRefreshFailureType::None,
+                    failure_scope: match (has_source_failures, has_rejections) {
+                        (false, false) => ProviderRefreshFailureScope::None,
+                        (false, true) => ProviderRefreshFailureScope::Record,
+                        (true, false) => ProviderRefreshFailureScope::Unknown,
+                        (true, true) => ProviderRefreshFailureScope::Mixed,
+                    },
+                    failure_type: match (has_source_failures, has_rejections) {
+                        (false, false) => ProviderRefreshFailureType::None,
+                        (false, true) => ProviderRefreshFailureType::RecordRejection,
+                        (true, false) => ProviderRefreshFailureType::Unknown,
+                        (true, true) => ProviderRefreshFailureType::Mixed,
+                    },
                     work_remaining: false,
                     retired_records: None,
                     counts: None,

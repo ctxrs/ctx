@@ -189,6 +189,110 @@ pub struct SourceBackedRefreshReceipt {
     pub record_rejections: SourceBackedRecordRejections,
     pub carried_unselected_route_ids: Vec<SourceRouteIdentity>,
     pub carried_failed_route_ids: Vec<SourceRouteIdentity>,
+    pub(super) verified_publication: Option<SourceBackedVerifiedPublication>,
+}
+
+pub(super) struct SourceBackedVerifiedPublication {
+    pub(super) disposition: PublicationDisposition,
+    pub(super) verified_index: VerifiedIndex,
+}
+
+impl fmt::Debug for SourceBackedVerifiedPublication {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SourceBackedVerifiedPublication")
+            .field("disposition", &self.disposition)
+            .field("generation_id", &self.verified_index.generation_id())
+            .finish()
+    }
+}
+
+impl SourceBackedRefreshReceipt {
+    /// Takes the already-open verified pin returned by an opaque-metadata
+    /// publication. Legacy publication entry points intentionally return none.
+    pub fn take_verified_publication(&mut self) -> Option<(PublicationDisposition, VerifiedIndex)> {
+        self.verified_publication
+            .take()
+            .map(|publication| (publication.disposition, publication.verified_index))
+    }
+}
+
+/// Final capture-owned route facts made available to the control plane's
+/// opaque metadata factory immediately before terminal revalidation. Core
+/// binds the resulting bytes only when that complete source fence succeeds.
+pub struct SourceBackedPublicationMetadataContext<'a> {
+    publication: PublicationMetadataContext<'a>,
+    selected_route_ids: &'a BTreeSet<SourceRouteIdentity>,
+    failed_routes: &'a BTreeMap<SourceRouteIdentity, SourceBackedFailedRoute>,
+    logical_source_failures: &'a SourceBackedLogicalSourceFailures,
+    record_rejections: &'a SourceBackedRecordRejections,
+    successful_route_outcomes: &'a [SourceBackedSuccessfulRouteOutcome],
+    removed_source_count: usize,
+}
+
+impl<'a> SourceBackedPublicationMetadataContext<'a> {
+    pub(super) fn new(
+        publication: PublicationMetadataContext<'a>,
+        selected_route_ids: &'a BTreeSet<SourceRouteIdentity>,
+        failed_routes: &'a BTreeMap<SourceRouteIdentity, SourceBackedFailedRoute>,
+        logical_source_failures: &'a SourceBackedLogicalSourceFailures,
+        record_rejections: &'a SourceBackedRecordRejections,
+        successful_route_outcomes: &'a [SourceBackedSuccessfulRouteOutcome],
+        removed_source_count: usize,
+    ) -> Self {
+        Self {
+            publication,
+            selected_route_ids,
+            failed_routes,
+            logical_source_failures,
+            record_rejections,
+            successful_route_outcomes,
+            removed_source_count,
+        }
+    }
+
+    pub fn generation_id(&self) -> &str {
+        self.publication.generation_id()
+    }
+
+    pub fn manifest(&self) -> &GenerationManifest {
+        self.publication.manifest()
+    }
+
+    pub fn selected_route_ids(&self) -> impl ExactSizeIterator<Item = &SourceRouteIdentity> {
+        self.selected_route_ids.iter()
+    }
+
+    pub fn successful_route_outcomes(&self) -> &[SourceBackedSuccessfulRouteOutcome] {
+        self.successful_route_outcomes
+    }
+
+    pub fn failed_routes(&self) -> impl ExactSizeIterator<Item = &SourceBackedFailedRoute> {
+        self.failed_routes.values()
+    }
+
+    pub fn failed_route_outcomes(&self) -> Vec<SourceBackedFailedRouteOutcome> {
+        self.failed_routes
+            .values()
+            .map(SourceBackedFailedRouteOutcome::from)
+            .collect()
+    }
+
+    pub fn source_failures(&self) -> SourceBackedSourceFailures {
+        bounded_source_failures(self.failed_routes.values())
+    }
+
+    pub fn logical_source_failures(&self) -> &SourceBackedLogicalSourceFailures {
+        self.logical_source_failures
+    }
+
+    pub fn record_rejections(&self) -> &SourceBackedRecordRejections {
+        self.record_rejections
+    }
+
+    pub fn removed_source_count(&self) -> usize {
+        self.removed_source_count
+    }
 }
 
 impl SourceBackedRefreshReceipt {
@@ -198,20 +302,18 @@ impl SourceBackedRefreshReceipt {
     /// refreshes consider only successfully selected route members, not
     /// carried history belonging to routes outside the requested scope.
     pub fn record_completion(&self) -> SourceBackedRecordCompletion {
+        let rejected_sources = self
+            .sources
+            .iter()
+            .filter(|source| source.counts().rejected_records != 0)
+            .map(|source| source.observation().source().identity().digest())
+            .collect::<HashSet<_>>();
         let successful_source_has_rejections = self
             .successful_route_ids
             .iter()
             .filter_map(|route_id| self.commit.manifest().source_route(route_id))
             .flat_map(|route| route.sources())
-            .any(|route_source| {
-                self.sources.iter().any(|source| {
-                    source
-                        .observation()
-                        .source()
-                        .exact_descriptor_eq(route_source)
-                        && source.counts().rejected_records != 0
-                })
-            });
+            .any(|route_source| rejected_sources.contains(&route_source.identity().digest()));
         if successful_source_has_rejections || !self.record_rejections.is_empty() {
             SourceBackedRecordCompletion::CompletedWithRejections
         } else {

@@ -77,7 +77,7 @@ fn raw_term_count(root: &Path, term_text: &str) -> usize {
 }
 
 #[test]
-fn metadata_factory_sees_terminal_manifest_and_returned_pin_without_reopen() {
+fn metadata_factory_runs_inside_the_terminal_authority_fence_without_reopen() {
     let temp = tempdir().unwrap();
     let source = source("publication-metadata-ordering.jsonl");
     let inventory = complete_inventory(&source, 1, vec![source.clone()]);
@@ -87,6 +87,7 @@ fn metadata_factory_sees_terminal_manifest_and_returned_pin_without_reopen() {
         .unwrap();
     let source_revalidated = Cell::new(false);
     let inventory_revalidated = Cell::new(false);
+    let metadata_built = Cell::new(false);
     let metadata = b"{not-domain-json:\xff\x00wrong-generation}".to_vec();
 
     crate::publication::reset_verification_activity();
@@ -95,27 +96,33 @@ fn metadata_factory_sees_terminal_manifest_and_returned_pin_without_reopen() {
     let published = writer
         .commit_with_complete_inventory_revalidation_and_publication_metadata(
             |target| {
+                assert!(metadata_built.get());
                 assert!(matches!(target, RevalidationTarget::Source(_)));
                 source_revalidated.set(true);
                 true
             },
             |current| {
+                assert!(metadata_built.get());
                 assert!(source_revalidated.get());
                 assert_eq!(current, &inventory);
                 inventory_revalidated.set(true);
                 true
             },
             |context| {
-                assert!(source_revalidated.get());
-                assert!(inventory_revalidated.get());
+                assert!(!source_revalidated.get());
+                assert!(!inventory_revalidated.get());
                 assert_eq!(context.generation_id(), context.manifest().generation_id()?);
                 assert_eq!(context.manifest().sources.len(), 1);
+                metadata_built.set(true);
                 Ok(metadata.clone())
             },
         )
         .unwrap();
 
     assert_eq!(published.disposition(), PublicationDisposition::Published);
+    assert!(metadata_built.get());
+    assert!(source_revalidated.get());
+    assert!(inventory_revalidated.get());
     assert_eq!(
         published.receipt().generation_id,
         published.verified_index().generation_id()
@@ -471,7 +478,10 @@ fn payload_v1_refresh_rebuilds_and_failed_rebuild_preserves_old_data() {
         )
         .unwrap_err();
     assert!(matches!(failed, IndexError::SourceInvalidated(_)));
-    assert!(!factory_called.get());
+    assert!(
+        factory_called.get(),
+        "owner observation must precede the rejecting terminal fence"
+    );
     assert_eq!(fs::read(&pointer_path).unwrap(), pointer_before);
     assert!(old_generation_path.is_dir());
     assert_eq!(raw_term_count(temp.path(), "old"), 1);

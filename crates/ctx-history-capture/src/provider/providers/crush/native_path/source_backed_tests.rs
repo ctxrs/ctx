@@ -61,6 +61,60 @@ impl CrushProjectInventorySourceV0 for TestInventory {
 }
 
 #[test]
+fn multi_project_route_watches_every_exact_sqlite_family_and_authority_parent() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let first_parent = temp.path().join("project-a");
+    let second_parent = temp.path().join("project-b");
+    std::fs::create_dir_all(&first_parent).unwrap();
+    std::fs::create_dir_all(&second_parent).unwrap();
+    let first = first_parent.join("crush.db");
+    let second = second_parent.join("crush.db");
+    write_database(&first, "session-a", "message-a", "alpha");
+    write_database(&second, "session-b", "message-b", "beta");
+    let inventory = Arc::new(TestInventory::new(inventory(
+        b"watch-inventory",
+        vec![
+            database("project-a", &first),
+            database("project-b", &second),
+        ],
+    )));
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_crush_source_backed_route(
+        &mut registry,
+        ProviderSource {
+            provider: CaptureProvider::Crush,
+            path: first.clone(),
+            exists: true,
+            source_format: CRUSH_SQLITE_SOURCE_FORMAT,
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Explicit,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Available,
+            unsupported_reason: None,
+        },
+        SourceBackedRouteSelection::ExplicitManual,
+        crate::test_provider_sqlite_data_root(),
+        inventory,
+    )
+    .unwrap();
+
+    let catalog = registry.watch_catalog();
+    let (route, targets) = catalog.route_targets().next().unwrap();
+    assert_eq!(targets.len(), 10);
+    for database in [&first, &second] {
+        assert!(targets.contains(database));
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut companion = database.as_os_str().to_os_string();
+            companion.push(suffix);
+            assert!(targets.contains(&std::path::PathBuf::from(companion)));
+        }
+    }
+    assert!(targets.contains(&first_parent));
+    assert!(targets.contains(&second_parent));
+    assert!(catalog.certify_route_observation(route).is_none());
+}
+
+#[test]
 fn inventory_route_projects_each_logical_leaf_and_deletes_safely() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let first = temp.path().join("route-first.db");

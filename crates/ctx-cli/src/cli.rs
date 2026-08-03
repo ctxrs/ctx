@@ -238,13 +238,20 @@ pub(crate) struct ImportArgs {
     )]
     pub(crate) path: Option<PathBuf>,
     #[arg(
+        long = "relocate-from",
+        requires = "path",
+        conflicts_with_all = ["all", "history_source", "history_source_manifest"],
+        help = "Relocate one active exact source from this unavailable path to --path"
+    )]
+    pub(crate) relocate_from: Option<PathBuf>,
+    #[arg(
         long = "history-source",
-        conflicts_with_all = ["provider", "path", "input_format", "all"]
+        conflicts_with_all = ["provider", "path", "relocate_from", "input_format", "all"]
     )]
     pub(crate) history_source: Option<String>,
     #[arg(
         long = "history-source-manifest",
-        conflicts_with_all = ["provider", "path", "input_format"]
+        conflicts_with_all = ["provider", "path", "relocate_from", "input_format"]
     )]
     pub(crate) history_source_manifest: Vec<PathBuf>,
     #[arg(long = "reset-cursor")]

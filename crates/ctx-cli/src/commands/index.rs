@@ -419,6 +419,9 @@ fn refresh_converged(status: &Value) -> bool {
     let refresh_status = string_at(status, &["refresh", "status"], "unknown");
     let refresh_reason = string_at(status, &["refresh", "reason"], "");
     refresh_status == "ready"
+        || (refresh_status == "partial"
+            && string_at(status, &["refresh", "request_state"], "unknown") == "published"
+            && bool_at(status, &["refresh", "generation_matches"]))
         || (refresh_status == "unavailable"
             && matches!(
                 refresh_reason.as_str(),

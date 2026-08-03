@@ -447,6 +447,46 @@ fn multi_instance_inventory_certifies_and_preserves_stable_ids() {
 }
 
 #[test]
+fn multi_instance_watch_catalog_covers_every_sqlite_family() {
+    let temp = tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("core");
+    let data_root = temp.path().join("data-root");
+    let selected = cwd.join("data/data_v4.db");
+    let secondary = home.join(
+        ".astrbot_launcher/instances/123e4567-e89b-12d3-a456-426614174000/core/data/data_v4.db",
+    );
+    create_database(&selected, "selected-session", "selected prompt");
+    create_database(&secondary, "launcher-session", "launcher prompt");
+
+    let registry = register_route(&selected, &data_root, context(&home, &cwd));
+    let catalog = registry.watch_catalog();
+    let routes = catalog.route_targets().collect::<Vec<_>>();
+    assert_eq!(routes.len(), 1);
+    let (route, targets) = routes[0];
+    let sqlite_component = |database: &Path, suffix: &str| {
+        let mut component = database.as_os_str().to_os_string();
+        component.push(suffix);
+        PathBuf::from(component)
+    };
+    let expected = [
+        secondary.clone(),
+        sqlite_component(&secondary, "-wal"),
+        sqlite_component(&secondary, "-shm"),
+        sqlite_component(&secondary, "-journal"),
+    ];
+    for target in expected {
+        assert!(targets.contains(&target), "missing {}", target.display());
+        assert_eq!(
+            catalog.routes_overlapping_path(&target),
+            std::collections::BTreeSet::from([route.clone()])
+        );
+    }
+    assert!(targets.contains(secondary.parent().unwrap()));
+    assert!(targets.contains(&home.join(".astrbot_launcher/instances")));
+}
+
+#[test]
 fn tantivy_round_trip_is_complete_locator_free_and_replacement_lifecycle_is_exact() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");

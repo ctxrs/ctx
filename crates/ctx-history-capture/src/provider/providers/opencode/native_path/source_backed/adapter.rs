@@ -551,6 +551,9 @@ pub(super) fn route_error(error: OpenCodeSourceBackedError) -> SourceBackedRoute
                 SqliteSourceAccessError::SnapshotUnavailable { .. }
                 | SqliteSourceAccessError::UnsupportedSidecarIdentity { .. },
             ) => SourceBackedRouteErrorKind::Unavailable,
+            OpenCodeSourceBackedError::SqliteSource(
+                SqliteSourceAccessError::ResourceUnavailable { .. },
+            ) => SourceBackedRouteErrorKind::ResourceUnavailable,
             OpenCodeSourceBackedError::SqliteSource(error)
                 if error.is_retryable_resource_unavailable() =>
             {

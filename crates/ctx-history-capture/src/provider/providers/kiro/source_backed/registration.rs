@@ -375,6 +375,12 @@ fn invalid_database_leaf(path: &Path) -> CaptureError {
 pub(super) fn kiro_scan_error(error: KiroSourceBackedErrorV0) -> SourceBackedRouteError {
     match error {
         KiroSourceBackedErrorV0::Route(error) => error,
+        KiroSourceBackedErrorV0::SqliteSource(SqliteSourceAccessError::ResourceUnavailable {
+            ..
+        }) => SourceBackedRouteError::new(
+            SourceBackedRouteErrorKind::ResourceUnavailable,
+            error.to_string(),
+        ),
         KiroSourceBackedErrorV0::SqliteSource(error)
             if error.is_retryable_resource_unavailable() =>
         {

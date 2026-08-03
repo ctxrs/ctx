@@ -31,6 +31,8 @@ thread_local! {
         std::cell::RefCell::new(None);
     static DIRECT_ENTRIES_ROOT_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+    static DIRECT_ENTRIES_FIRST_PASS_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,20 +545,41 @@ pub(super) fn direct_entries(path: &Path) -> Result<Vec<PathBuf>, SelectorReadEr
         return Err(SelectorReadError::DirectoryLimit);
     }
 
-    let mut opened_children = Vec::with_capacity(names.len());
-    for name in names {
-        let child = directory.open_child(&name).map_err(selector_open_error)?;
-        opened_children.push((path.join(name), child));
-    }
-    for (_, child) in &opened_children {
-        revalidate_opened_path(child).map_err(selector_open_error)?;
+    let mut fingerprints = Vec::with_capacity(names.len());
+    for name in &names {
+        let child = directory.open_child(name).map_err(selector_open_error)?;
+        revalidate_opened_path(&child).map_err(selector_open_error)?;
+        fingerprints.push(child.authority_fingerprint());
     }
     directory.revalidate().map_err(selector_open_error)?;
     authority.revalidate().map_err(selector_open_error)?;
 
-    let mut paths = opened_children
+    #[cfg(test)]
+    DIRECT_ENTRIES_FIRST_PASS_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+
+    let closing_names = directory
+        .entries(MAX_DIRECT_DIRECTORY_ENTRIES.saturating_add(1))
+        .map_err(selector_open_error)?;
+    if closing_names != names {
+        return Err(SelectorReadError::Unavailable);
+    }
+    for (name, fingerprint) in names.iter().zip(fingerprints) {
+        let child = directory.open_child(name).map_err(selector_open_error)?;
+        if child.authority_fingerprint() != fingerprint {
+            return Err(SelectorReadError::Unavailable);
+        }
+        revalidate_opened_path(&child).map_err(selector_open_error)?;
+    }
+    directory.revalidate().map_err(selector_open_error)?;
+    authority.revalidate().map_err(selector_open_error)?;
+
+    let mut paths = names
         .into_iter()
-        .map(|(path, _)| path)
+        .map(|name| path.join(name))
         .collect::<Vec<_>>();
     sort_paths(&mut paths);
     Ok(paths)
@@ -832,6 +855,30 @@ mod tests {
             Err(SelectorReadError::UnsupportedRoot)
         );
         assert!(moved.join("opened.json").is_file());
+    }
+
+    #[test]
+    fn direct_entries_rejects_same_name_child_replacement_between_bounded_passes() {
+        let temp = tempdir();
+        let root = temp.path().join("root");
+        let child = root.join("child");
+        let moved = root.join("opened-child");
+        let replacement = root.join("replacement");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&replacement).unwrap();
+
+        let child_for_hook = child.clone();
+        let moved_for_hook = moved.clone();
+        let replacement_for_hook = replacement.clone();
+        DIRECT_ENTRIES_FIRST_PASS_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&child_for_hook, &moved_for_hook).unwrap();
+                fs::rename(&replacement_for_hook, &child_for_hook).unwrap();
+            }));
+        });
+
+        assert_eq!(direct_entries(&root), Err(SelectorReadError::Unavailable));
+        assert!(moved.is_dir());
     }
 
     #[cfg(unix)]

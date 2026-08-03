@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import json
 import os
@@ -76,6 +77,7 @@ class RefreshPerformanceSample:
     peak_open_fds: int
     peak_rss_bytes: int
     source_workers: tuple[SourceWorkerCpu, ...]
+    peak_open_fd_summary: tuple[tuple[str, int], ...] = ()
 
 
 def isolated_env(root: Path, home: Path) -> dict[str, str]:
@@ -177,6 +179,25 @@ def linux_open_fd_count(pid: int) -> int:
     return len(tuple((Path("/proc") / str(pid) / "fd").iterdir()))
 
 
+def linux_open_fd_summary(pid: int) -> tuple[tuple[str, int], ...]:
+    counts: Counter[str] = Counter()
+    for descriptor in (Path("/proc") / str(pid) / "fd").iterdir():
+        try:
+            target = os.readlink(descriptor)
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        if target.startswith("socket:"):
+            key = "socket"
+        elif target.startswith("pipe:"):
+            key = "pipe"
+        elif target.startswith("anon_inode:"):
+            key = target
+        else:
+            key = Path(target.removesuffix(" (deleted)")).name or target
+        counts[key] += 1
+    return tuple(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
 def linux_source_worker_cpu_ticks(pid: int) -> dict[tuple[int, str], int]:
     workers: dict[tuple[int, str], int] = {}
     task_root = Path("/proc") / str(pid) / "task"
@@ -252,12 +273,16 @@ def run_refresh_measured(
     initial_worker_ticks = linux_source_worker_cpu_ticks(daemon_pid)
     baseline_open_fds = linux_open_fd_count(daemon_pid)
     peak_open_fds = baseline_open_fds
+    peak_open_fd_summary = linux_open_fd_summary(daemon_pid)
     peak_rss_bytes = linux_peak_rss_bytes(daemon_pid)
     worker_cpu_deltas: dict[tuple[int, str], int] = {}
 
     def sample_daemon() -> None:
-        nonlocal peak_open_fds, peak_rss_bytes
-        peak_open_fds = max(peak_open_fds, linux_open_fd_count(daemon_pid))
+        nonlocal peak_open_fds, peak_open_fd_summary, peak_rss_bytes
+        open_fds = linux_open_fd_count(daemon_pid)
+        if open_fds > peak_open_fds:
+            peak_open_fds = open_fds
+            peak_open_fd_summary = linux_open_fd_summary(daemon_pid)
         peak_rss_bytes = max(peak_rss_bytes, linux_peak_rss_bytes(daemon_pid))
         for worker, ticks in linux_source_worker_cpu_ticks(daemon_pid).items():
             delta = max(0, ticks - initial_worker_ticks.get(worker, 0))
@@ -318,6 +343,7 @@ def run_refresh_measured(
         cpu_per_wall=cpu_seconds / elapsed_seconds,
         baseline_open_fds=baseline_open_fds,
         peak_open_fds=peak_open_fds,
+        peak_open_fd_summary=peak_open_fd_summary,
         peak_rss_bytes=peak_rss_bytes,
         source_workers=source_workers,
     )
@@ -333,7 +359,15 @@ def published_file_state(path: Path) -> PublishedFileState:
 
 
 def directory_bytes(path: Path) -> int:
-    return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
+    physical_files: dict[tuple[int, int], int] = {}
+    for entry in path.rglob("*"):
+        if not entry.is_file():
+            continue
+        metadata = entry.stat()
+        physical_files.setdefault(
+            (metadata.st_dev, metadata.st_ino), metadata.st_size
+        )
+    return sum(physical_files.values())
 
 
 def active_generation_meta_path(index_root: Path, expected_generation: str) -> Path:
@@ -361,7 +395,7 @@ def refresh_snapshot(
     while True:
         status = run_json(["status", "--format=json"], env, root)
         daemon = status["daemon"]
-        job = daemon["jobs"]["source_backed_refresh"]
+        job = daemon["jobs"]["core_refresh"]
         if (
             daemon["mode"] == "source-refresh-only"
             and job["owner"] == "daemon"
@@ -477,7 +511,7 @@ def start_daemon(
             continue
         daemon = status.get("daemon", {})
         endpoint = (
-            daemon.get("source_refresh_endpoint", {})
+            daemon.get("core_refresh_endpoint", {})
             if isinstance(daemon, dict)
             else {}
         )

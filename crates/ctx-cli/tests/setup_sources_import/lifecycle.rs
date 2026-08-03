@@ -889,7 +889,7 @@ fn foreground_import_rejections_complete_and_preserve_diagnostics() {
     let source = &import["sources"][0];
     let generation = source["published_generation"].as_str().unwrap();
 
-    assert_eq!(import["outcome"], "success", "{import:#}");
+    assert_eq!(import["outcome"], "completed_with_rejections", "{import:#}");
     assert_eq!(
         import["totals"]["current_rejected_records"], 1,
         "{import:#}"
@@ -898,7 +898,7 @@ fn foreground_import_rejections_complete_and_preserve_diagnostics() {
         import["totals"]["current_sources_with_rejections"], 1,
         "{import:#}"
     );
-    assert_eq!(source["status"], "published", "{import:#}");
+    assert_eq!(source["status"], "partial", "{import:#}");
 
     let status = wait_for_core_generation(&temp, generation);
     assert_eq!(status["lexical"]["generation_id"], generation, "{status:#}");
@@ -907,7 +907,7 @@ fn foreground_import_rejections_complete_and_preserve_diagnostics() {
 
     let status = json_output(ctx_from_binary(&temp, &binary).args(["status", "--format=json"]));
     assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
-    assert_eq!(status["refresh"]["status"], "ready", "{status:#}");
+    assert_eq!(status["refresh"]["status"], "partial", "{status:#}");
     ctx_from_binary(&temp, &binary)
         .args([
             "index",

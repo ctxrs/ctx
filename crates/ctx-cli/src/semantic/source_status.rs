@@ -6,11 +6,9 @@ use ctx_history_index::{
 };
 use serde_json::{json, Value};
 
-use crate::{
-    commands::import::{load_explicit_source_catalog_authority, ExplicitSourceCatalogAuthority},
-    compact_json,
-    config::AppConfig,
-};
+#[cfg(test)]
+use crate::commands::import::load_explicit_source_catalog_authority;
+use crate::{compact_json, config::AppConfig};
 
 use super::{
     paths_status::{
@@ -90,12 +88,7 @@ fn source_epoch_status_report_with_pro_query(
         index.is_some() && lexical.get("status").and_then(Value::as_str) != Some("unavailable");
     let generation_id = index.as_ref().map(|index| index.generation_id().to_owned());
     let daemon = source_daemon_report(data_root);
-    let catalog = catalog_report(
-        data_root,
-        generation_id.as_deref(),
-        refresh_job.as_ref(),
-        index.as_ref(),
-    );
+    let catalog = catalog_report(generation_id.as_deref(), index.as_ref());
     let mut semantic = semantic_report(data_root, config, index.as_ref());
     attach_catch_up_status(
         &mut semantic,
@@ -172,7 +165,28 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
     let request_state = job.get("request_state").and_then(Value::as_str);
     let published_generation = job.get("published_generation").and_then(Value::as_str);
     let generation_matches = generation_id.is_some() && generation_id == published_generation;
+    let request_outcome = job.get("request_outcome").or_else(|| job.get("receipt"));
+    let outcome = request_outcome
+        .and_then(|receipt| receipt.get("outcome"))
+        .or_else(|| job.get("outcome"))
+        .and_then(Value::as_str);
     let (status, reason) = match request_state {
+        Some("published")
+            if generation_matches
+                && matches!(
+                    outcome,
+                    Some(
+                        "completed_with_rejections"
+                            | "completed_with_source_failures"
+                            | "completed_with_rejections_and_source_failures"
+                    )
+                ) =>
+        {
+            (
+                "partial",
+                Some(outcome.unwrap_or("refresh_completed_partially")),
+            )
+        }
         Some("published") if generation_matches => ("ready", None),
         Some("queued" | "running") => ("pending", Some("core_refresh_pending")),
         Some("failed") => ("unavailable", Some("core_refresh_failed")),
@@ -188,6 +202,7 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
         "published_generation": published_generation,
         "generation_id": generation_id,
         "generation_matches": generation_matches,
+        "outcome": outcome,
         "source_count": job.get("source_count"),
         "certified_source_count": job.get("certified_source_count"),
         "certified_source_bytes": job.get("certified_source_bytes"),
@@ -198,6 +213,11 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
         "trigger": job.get("trigger"),
         "trigger_provenance": job.get("trigger_provenance"),
         "last_error": job.get("last_error"),
+        "current": request_outcome.and_then(|receipt| receipt.get("current")),
+        "source_failure_total": request_outcome
+            .and_then(|receipt| receipt.get("source_failure_total")),
+        "rejected_record_total": request_outcome
+            .and_then(|receipt| receipt.get("rejected_record_total")),
     }))
 }
 
@@ -321,78 +341,14 @@ fn lexical_state(policy_matches: bool) -> (&'static str, Option<&'static str>) {
     ("ready", None)
 }
 
-fn catalog_report(
-    data_root: &Path,
-    generation_id: Option<&str>,
-    refresh_job: Option<&Value>,
-    index: Option<&VerifiedIndex>,
-) -> Value {
-    let authority = match load_explicit_source_catalog_authority(data_root) {
-        Ok(authority) => authority.to_json(),
-        Err(error) => {
-            return compact_json(json!({
-                "status": "unavailable",
-                "reason": "catalog_invalid",
-                "last_error": format!("{error:#}"),
-            }))
-        }
-    };
-    let job_published_authority = refresh_job
-        .and_then(|job| job.get("published_explicit_source_catalog"))
-        .cloned();
-    let receipt_published_authority = refresh_job
-        .and_then(|job| job.get("receipt"))
-        .and_then(|receipt| receipt.get("published_explicit_source_catalog"))
-        .cloned();
-    let publication_verified = job_published_authority
-        .as_ref()
-        .zip(receipt_published_authority.as_ref())
-        .and_then(|(job, receipt)| {
-            ExplicitSourceCatalogAuthority::from_json(job)
-                .ok()
-                .zip(ExplicitSourceCatalogAuthority::from_json(receipt).ok())
-        })
-        .is_some_and(|(job, receipt)| job == receipt);
-    let published_authority = publication_verified
-        .then_some(job_published_authority)
-        .flatten();
-    let published_generation = refresh_job
-        .and_then(|job| job.get("published_generation"))
-        .and_then(Value::as_str);
-    let active_request = refresh_job
-        .and_then(|job| job.get("request_state"))
-        .and_then(Value::as_str)
-        .is_some_and(|state| matches!(state, "queued" | "running"));
-    let ready = generation_id.is_some()
-        && published_generation == generation_id
-        && published_authority.as_ref() == Some(&authority);
-    let generation_mismatch = generation_id.is_some()
-        && published_generation.is_some()
-        && published_generation != generation_id;
-    let authority_mismatch =
-        published_authority.is_some() && published_authority.as_ref() != Some(&authority);
-    let (status, reason) = if ready {
-        ("ready", None)
-    } else if active_request || generation_id.is_none() {
-        ("pending", Some("catalog_publication_pending"))
-    } else if !publication_verified {
-        ("unavailable", Some("catalog_publication_unverified"))
-    } else if generation_mismatch {
-        ("stale", Some("catalog_generation_mismatch"))
-    } else if authority_mismatch {
-        ("stale", Some("catalog_authority_mismatch"))
-    } else {
-        ("unavailable", Some("catalog_publication_unverified"))
-    };
+fn catalog_report(generation_id: Option<&str>, index: Option<&VerifiedIndex>) -> Value {
     compact_json(json!({
-        "status": status,
-        "reason": reason,
-        "authority": authority,
-        "published_authority": published_authority,
-        "published_authority_present": publication_verified,
-        "published_generation": published_generation,
+        "status": if generation_id.is_some() { "ready" } else { "pending" },
+        "reason": if generation_id.is_some() { None } else { Some("core_generation_pending") },
+        "authority": "automatic_provider_registry",
+        "explicit_import_authority": "request_scoped_overlay",
+        "persisted_explicit_roots": false,
         "generation_id": generation_id,
-        "generation_matches": ready,
         "certified_sources": index.map(|index| index.manifest().sources.len()),
     }))
 }

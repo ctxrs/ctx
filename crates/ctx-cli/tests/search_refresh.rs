@@ -204,7 +204,10 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
         status["history_epoch"]["status"] == "ready"
             && status["lexical"]["generation_id"] == expected_generation
             && status["lexical"]["request_state"] == "published"
-            && status["refresh"]["status"] == "ready"
+            && matches!(
+                status["refresh"]["status"].as_str(),
+                Some("ready" | "partial")
+            )
             && status["refresh"]["published_generation"] == expected_generation
             && status["daemon"]["jobs"]["core_refresh"]["request_state"] == "published"
             && status["daemon"]["jobs"]["core_refresh"]["published_generation"]
@@ -225,7 +228,23 @@ fn assert_source_generation_ready(temp: &TempDir, expected_generation: &str) -> 
         "{status:#}"
     );
     assert_eq!(status["lexical"]["generation_matches"], true, "{status:#}");
-    assert_eq!(status["refresh"]["status"], "ready", "{status:#}");
+    let expected_refresh_status = if status["refresh"]["source_failure_total"]
+        .as_u64()
+        .unwrap_or_default()
+        != 0
+        || status["refresh"]["rejected_record_total"]
+            .as_u64()
+            .unwrap_or_default()
+            != 0
+    {
+        "partial"
+    } else {
+        "ready"
+    };
+    assert_eq!(
+        status["refresh"]["status"], expected_refresh_status,
+        "{status:#}"
+    );
     assert_eq!(
         status["refresh"]["published_generation"], expected_generation,
         "{status:#}"

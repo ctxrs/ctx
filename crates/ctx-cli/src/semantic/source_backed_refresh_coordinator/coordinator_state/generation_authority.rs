@@ -82,6 +82,14 @@ impl CoreRefreshTerminalSuccess {
         Self::StateOnly(Box::new(receipt))
     }
 
+    pub(super) fn publication_receipt(&self) -> Option<&SourceBackedRefreshReceipt> {
+        match self {
+            Self::Verified(authority) => Some(&authority.receipt),
+            #[cfg(test)]
+            Self::StateOnly(_) => None,
+        }
+    }
+
     /// Installs retained authority before returning the receipt that may be
     /// exposed as Published/current under the same state lock.
     pub(super) fn install(self, state: &mut CoreRefreshEngineState) -> SourceBackedRefreshReceipt {

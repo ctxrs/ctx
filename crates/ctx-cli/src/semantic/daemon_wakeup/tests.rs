@@ -49,109 +49,62 @@ fn watch_authority(data_root: &Path, catalog: SourceBackedWatchCatalog) -> Watch
 
 #[cfg(target_os = "linux")]
 #[test]
-fn catalog_lock_query_churn_stays_idle_but_provider_append_wakes() {
+fn request_overlay_is_not_watched_but_provider_append_wakes() {
     use std::{fs::OpenOptions, io::Write};
 
     let temp = tempfile::tempdir().expect("create watcher fixture");
     let data_root = temp.path().join("data");
-    let catalog_root = data_root.join("catalogs").join("explicit-sources");
     let provider_root = temp.path().join("provider");
     let provider_file = provider_root.join("session.jsonl");
-    fs::create_dir_all(&catalog_root).expect("create catalog root");
+    let explicit_root = temp.path().join("request-overlay");
+    let explicit_file = explicit_root.join("one-shot.jsonl");
+    fs::create_dir_all(&data_root).expect("create data root");
     fs::create_dir_all(&provider_root).expect("create provider root");
-    fs::write(
-        catalog_root.join("catalog-00000000000000000001.json"),
-        b"{\"revision\":1}\n",
-    )
-    .expect("write catalog");
-    fs::write(catalog_root.join("catalog.lock"), b"").expect("write catalog lock");
+    fs::create_dir_all(&explicit_root).expect("create request overlay root");
     fs::write(&provider_file, b"{\"event\":1}\n").expect("write provider fixture");
+    fs::write(&explicit_file, b"{\"event\":1}\n").expect("write request overlay fixture");
 
-    let targets = Arc::new(RwLock::new(watch_authority(
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let watcher = DaemonFileWatcher::start(
         &data_root,
-        watch_catalog([catalog_route(
+        Arc::clone(&wakeup),
+        catalog_owner(watch_catalog([catalog_route(
             CaptureProvider::Codex,
             provider_file.clone(),
             "codex_history_jsonl",
-        )]),
-    )));
-    let counters = Arc::new(Mutex::new(WatchCounters::default()));
-    let wakeup = Arc::new(DaemonWakeup::default());
-    let (sender, receiver) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
-    let accepting_events = Arc::new(AtomicBool::new(true));
-    let sequence = Arc::new(AtomicU64::new(0));
-    let callback_sender = sender.clone();
-    let callback_counters = Arc::clone(&counters);
-    let callback_wakeup = Arc::clone(&wakeup);
-    let callback_accepting_events = Arc::clone(&accepting_events);
-    let callback_sequence = Arc::clone(&sequence);
-    let callback_data_root = data_root.clone();
-    let mut watcher = RecommendedWatcher::new(
-        move |event: notify::Result<Event>| {
-            forward_watch_event(
-                &callback_data_root,
-                &callback_counters,
-                &callback_sender,
-                &callback_wakeup,
-                &callback_accepting_events,
-                1,
-                &callback_sequence,
-                event,
-            );
-        },
-        Config::default(),
+        )])),
     )
-    .expect("start fixture watcher");
-    watcher
-        .watch(&catalog_root, RecursiveMode::Recursive)
-        .expect("watch catalog");
-    watcher
-        .watch(&provider_root, RecursiveMode::Recursive)
-        .expect("watch provider");
+    .expect("start daemon watcher");
+    let targets = watcher
+        .authority
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .target_paths();
+    assert!(targets.contains(&provider_file));
+    assert!(!targets.contains(&explicit_file));
+    assert!(!targets
+        .iter()
+        .any(|path| path.starts_with(data_root.join("catalogs/explicit-sources"))));
 
-    let thread_targets = Arc::clone(&targets);
-    let thread_counters = Arc::clone(&counters);
-    let thread_wakeup = Arc::clone(&wakeup);
-    let thread_data_root = data_root.clone();
-    let thread_daemon_root = daemon_root_path(&data_root);
-    let watch_thread = thread::spawn(move || {
-        watch_event_loop(
-            receiver,
-            thread_targets,
-            thread_counters,
-            thread_wakeup,
-            thread_data_root,
-            thread_daemon_root,
-        );
-    });
-
-    for _ in 0..128 {
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(catalog_root.join("catalog.lock"))
-            .expect("open catalog lock like a query");
-        fs::read_to_string(catalog_root.join("catalog-00000000000000000001.json"))
-            .expect("query catalog");
-        drop(lock);
-    }
+    let mut explicit = OpenOptions::new()
+        .append(true)
+        .open(&explicit_file)
+        .expect("open request overlay fixture for append");
+    explicit
+        .write_all(b"{\"event\":2}\n")
+        .expect("append request overlay event");
+    explicit.flush().expect("flush request overlay append");
+    drop(explicit);
     thread::sleep(WATCH_DEBOUNCE_QUIET * 3);
 
     let idle = wakeup.snapshot();
     assert_eq!(idle["filesystem_signals"], 0, "{idle:#}");
     assert_eq!(idle["work_cycles"], 0, "{idle:#}");
     assert_eq!(idle["no_work_cycles"], 0, "{idle:#}");
-    let counters_after_churn = counters
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(counters_after_churn.coalesced_wakeups, 0);
-    assert_eq!(counters_after_churn.reconciliations, 0);
-    assert!(counters_after_churn.ignored_catalog_lock_events > 0);
-    drop(counters_after_churn);
 
     let mut file = OpenOptions::new()
         .append(true)
-        .open(provider_file)
+        .open(&provider_file)
         .expect("open provider fixture for append");
     file.write_all(b"{\"event\":2}\n")
         .expect("append provider event");
@@ -163,8 +116,6 @@ fn catalog_lock_query_churn_stays_idle_but_provider_append_wakes() {
     assert_eq!(wake.source_watch.routes.len(), 1);
     assert!(wake.source_watch.reconcile.is_none());
 
-    sender.send(WatchMessage::Stop).expect("stop watch thread");
-    watch_thread.join().expect("join watch thread");
     drop(watcher);
 }
 
@@ -448,7 +399,6 @@ fn rescan_and_backend_errors_require_catalog_reconciliation_and_rearm() {
     let counters = counters.lock().unwrap();
     assert_eq!(counters.rescan_notifications, 1);
     assert_eq!(counters.backend_errors, 1);
-    assert_eq!(counters.ignored_catalog_lock_events, 0);
 }
 
 #[test]
@@ -567,19 +517,18 @@ fn core_owned_writes_do_not_retrigger_provider_refresh_or_increment_work_counter
         EventWatermark::new(1, 4),
     )
     .is_empty());
-    let mut catalog_lock = event(
+    let request_overlay = event(
         &data_root
             .join("catalogs")
             .join("explicit-sources")
             .join("catalog.lock"),
     );
-    catalog_lock.kind = EventKind::Access(AccessKind::Close(AccessMode::Write));
     assert!(record_watch_event(
         &targets,
         &counters,
         data_root,
         &daemon_root,
-        Ok(catalog_lock),
+        Ok(request_overlay),
         EventWatermark::new(1, 5),
     )
     .is_empty());
@@ -655,7 +604,7 @@ fn authoritative_changes_and_dynamic_discovery_remain_relevant() {
         EventKind::Access(AccessKind::Close(AccessMode::Write)),
         &[&data_root.join("config.toml")],
     ));
-    assert!(relevant(
+    assert!(!relevant(
         EventKind::Create(CreateKind::File),
         &[&catalog_root.join("catalog-00000000000000000002.json")],
     ));

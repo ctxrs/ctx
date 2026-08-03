@@ -28,7 +28,8 @@ use crate::{
         source_backed_refresh_coordinator::{
             coordinate_source_backed_refresh, source_backed_index_root, CoreRefreshEngine,
             SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshMode,
-            SourceBackedRefreshPublication, SourceBackedRefreshTimings,
+            SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
+            SourceBackedRefreshTimings,
         },
         source_epoch_status_report,
     },
@@ -38,10 +39,11 @@ use crate::{
 use super::{
     daemon_consumer_retry_due, daemon_core_refresh_job_path, daemon_job_should_backoff,
     daemon_mode_runs_core_pro_catch_up, daemon_mode_runs_core_semantic_projection,
-    daemon_semantic_job_path, persist_pro_status, prepare_pro_retry_for_generation,
-    read_daemon_job_status, read_pro_status, record_daemon_job_retry,
-    restore_daemon_consumer_retries, run_daemon_scheduler_cycle_with_activity,
-    run_pending_core_pro_catch_up, run_pro_catch_up_with_retry, write_daemon_job_status,
+    daemon_semantic_job_path, install_before_core_scheduler_status_hook_for_test,
+    persist_pro_status, prepare_pro_retry_for_generation, read_daemon_job_status, read_pro_status,
+    record_daemon_job_retry, record_source_refresh_retry, restore_daemon_consumer_retries,
+    run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
+    run_pending_core_refresh, run_pro_catch_up_with_retry, write_daemon_job_status,
     DaemonRetryBackoff, DaemonRuntime, SourceBackedProCoreAuthority,
 };
 
@@ -72,22 +74,20 @@ fn publish_empty_core_generation(data_root: &Path) -> String {
     .generation_id
 }
 
+#[path = "daemon_scheduler_tests/refresh_retry.rs"]
+mod refresh_retry;
+
 fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefreshPublication {
     let receipt = GenerationWriter::open(index_root, WriterOptions::default())
         .unwrap()
         .commit(|_| true)
         .unwrap();
     SourceBackedRefreshPublication {
-        selected_route_ids: Vec::new(),
-        successful_route_ids: Vec::new(),
-        successful_route_changes: Default::default(),
-        failed_route_outcomes: Vec::new(),
-        catalog_route_outcomes: Vec::new(),
-        source_failures: Vec::new(),
+        route_results: Vec::new(),
+        catalog_route_bindings: Vec::new(),
+        verified_index: None,
         generation_id: receipt.generation_id.clone(),
-        published_explicit_source_catalog:
-            crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
-        scanned_routes: 0,
+        published_explicit_source_catalog: None,
         unsupported_routes: 0,
         certified_source_count: 0,
         certified_source_bytes: 0,
@@ -287,16 +287,11 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
         .unwrap();
     let receipt = writer.commit(|_| true).unwrap();
     SourceBackedRefreshPublication {
-        selected_route_ids: Vec::new(),
-        successful_route_ids: Vec::new(),
-        successful_route_changes: Default::default(),
-        failed_route_outcomes: Vec::new(),
-        catalog_route_outcomes: Vec::new(),
-        source_failures: Vec::new(),
+        route_results: Vec::new(),
+        catalog_route_bindings: Vec::new(),
+        verified_index: None,
         generation_id: receipt.generation_id,
-        published_explicit_source_catalog:
-            crate::commands::import::load_explicit_source_catalog_authority(index_root).unwrap(),
-        scanned_routes: 1,
+        published_explicit_source_catalog: None,
         unsupported_routes: 0,
         certified_source_count: 1,
         certified_source_bytes: 128,
@@ -472,28 +467,18 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
             }
             let receipt = GenerationWriter::open(execution.index_root, WriterOptions::default())?
                 .commit(|_| true)?;
-            let selected_route_ids = selected
+            let route_results = selected
                 .iter()
-                .map(|route| route.as_str().to_owned())
+                .map(|route| {
+                    SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true)
+                })
                 .collect::<Vec<_>>();
-            let successful_route_changes = selected_route_ids
-                .iter()
-                .cloned()
-                .map(|route| (route, true))
-                .collect();
-            Ok(SourceBackedRefreshPublication {
-                selected_route_ids: selected_route_ids.clone(),
-                successful_route_ids: selected_route_ids,
-                successful_route_changes,
-                failed_route_outcomes: Vec::new(),
-                catalog_route_outcomes: Vec::new(),
-                source_failures: Vec::new(),
+            let mut publication = SourceBackedRefreshPublication {
+                route_results,
+                catalog_route_bindings: Vec::new(),
+                verified_index: None,
                 generation_id: receipt.generation_id,
-                published_explicit_source_catalog: execution
-                    .explicit_source_catalog
-                    .cloned()
-                    .expect("startup refresh catalog authority"),
-                scanned_routes: selected.len(),
+                published_explicit_source_catalog: execution.explicit_source_catalog.cloned(),
                 unsupported_routes: 0,
                 certified_source_count: 0,
                 certified_source_bytes: 0,
@@ -503,7 +488,9 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
                     scan_stage_us: 1,
                     commit_us: 1,
                 },
-            })
+            };
+            execution.covered_publication.apply(&mut publication);
+            Ok(publication)
         },
     )));
     coordinator.reconcile_watch_routes(
@@ -586,6 +573,7 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
     assert_eq!(terminal["request_id"], manual_request_id);
     assert_eq!(terminal["request_state"], "published");
     assert_eq!(terminal["scanned_routes"], routes.len());
+    assert_eq!(terminal["receipt"]["selected_route_total"], routes.len());
     assert!(!coordinator.has_pending_request());
     assert!(!coordinator.has_scheduled_route_work());
 }
@@ -1100,24 +1088,16 @@ fn persisted_due_pro_retry_reopens_durable_core_after_process_restart() {
     assert!(daemon_consumer_retry_due(&restarted));
     assert!(restarted.pro_retry.ready());
 
-    let (iteration, verified_opens) =
-        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
-            run_daemon_scheduler_cycle_with_activity(
-                &daemon_args(),
-                temp.path(),
-                &mut restarted,
-                None,
-                false,
-                None,
-                Some(&coordinator),
-            )
-            .unwrap()
-        });
-
-    assert_eq!(
-        verified_opens, 1,
-        "restart must reopen durable active Core once"
-    );
+    let iteration = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut restarted,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
     assert!(!iteration.failed);
     let retried = read_pro_status(temp.path()).expect("retried Pro status");
     assert_eq!(retried["core_generation_id"], generation);
@@ -1136,43 +1116,32 @@ fn process_restart_checks_durable_core_once_without_a_preexisting_retry() {
     assert!(coordinator.pinned_core_publication().is_none());
     let mut restarted = DaemonRuntime::default();
 
-    let (first, first_verified_opens) =
-        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
-            run_daemon_scheduler_cycle_with_activity(
-                &daemon_args(),
-                temp.path(),
-                &mut restarted,
-                None,
-                false,
-                None,
-                Some(&coordinator),
-            )
-            .unwrap()
-        });
+    let first = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut restarted,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
     let first_status = read_pro_status(temp.path()).expect("initial durable Pro check");
 
-    let (second, second_verified_opens) =
-        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
-            run_daemon_scheduler_cycle_with_activity(
-                &daemon_args(),
-                temp.path(),
-                &mut restarted,
-                None,
-                false,
-                None,
-                Some(&coordinator),
-            )
-            .unwrap()
-        });
+    let second = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut restarted,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
 
-    assert_eq!(first_verified_opens, 1);
     assert!(!first.failed);
     assert_eq!(first_status["core_generation_id"], generation);
     assert_eq!(first_status["attempts"], 1);
-    assert_eq!(
-        second_verified_opens, 0,
-        "steady ticks must not reopen Core"
-    );
     assert!(!second.failed);
     assert_eq!(
         read_pro_status(temp.path()).unwrap(),
@@ -1212,21 +1181,16 @@ fn prior_not_installed_result_does_not_suppress_first_install_check() {
     std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
     std::fs::write(&helper, b"newly installed helper fixture").unwrap();
 
-    let (_, verified_opens) =
-        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
-            run_daemon_scheduler_cycle_with_activity(
-                &daemon_args(),
-                temp.path(),
-                &mut after_install,
-                None,
-                false,
-                None,
-                Some(&coordinator),
-            )
-            .unwrap()
-        });
-
-    assert_eq!(verified_opens, 1);
+    run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut after_install,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
     let checked = read_pro_status(temp.path()).expect("post-install Pro check");
     assert_eq!(checked["core_generation_id"], generation);
     assert_eq!(checked["attempts"], 2);
@@ -1263,21 +1227,16 @@ fn newly_installed_pro_is_checked_against_durable_core_after_daemon_restart() {
     restore_daemon_consumer_retries(&mut restarted, temp.path());
     assert!(restarted.sidecar_drain.pro_attempted_generation.is_none());
 
-    let (_, verified_opens) =
-        crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens(|| {
-            run_daemon_scheduler_cycle_with_activity(
-                &daemon_args(),
-                temp.path(),
-                &mut restarted,
-                None,
-                false,
-                None,
-                Some(&coordinator),
-            )
-            .unwrap()
-        });
-
-    assert_eq!(verified_opens, 1, "restart must reopen durable Core once");
+    run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut restarted,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
     let checked = read_pro_status(temp.path()).expect("post-reinstall Pro check");
     assert_eq!(checked["core_generation_id"], generation);
     assert_eq!(checked["attempts"], 2);

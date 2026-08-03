@@ -52,7 +52,7 @@ pub(super) fn wait_for_import_core_refresh(
                 data_root,
                 SourceBackedRefreshMode::Wait,
                 Some(authority),
-                false,
+                !no_daemon,
                 &mut report_progress,
             )
         }

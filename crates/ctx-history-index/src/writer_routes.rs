@@ -1,6 +1,73 @@
 use super::*;
 
 impl GenerationWriter {
+    /// Defines every route conclusively present in the candidate snapshot.
+    /// Missing routes are added separately by `observe_certified_missing_route`.
+    pub fn set_present_source_routes(&mut self, routes: Vec<SourceRouteSnapshot>) -> Result<()> {
+        if routes.iter().any(|route| route.missing_state().is_some()) {
+            return Err(IndexError::WriterInvariant(
+                "present source routes cannot carry missing state",
+            ));
+        }
+        let mut canonical = routes;
+        if let Some(plan) = &self.source_route_plan {
+            if let Some(route) = canonical.iter().find(|route| {
+                !plan.completed.contains(route.route_identity())
+                    || plan.carried_from_base.contains(route.route_identity())
+            }) {
+                return Err(IndexError::InvalidSourceRoutePlan(format!(
+                    "present route {} is not a completed selected route",
+                    route.route_identity().as_str()
+                )));
+            }
+            if let Some(base) = &self.base_manifest {
+                canonical.extend(
+                    base.source_routes()
+                        .iter()
+                        .filter(|route| plan.carried_from_base.contains(route.route_identity()))
+                        .cloned(),
+                );
+            }
+        }
+        canonical.sort_by(|left, right| left.route_identity().cmp(right.route_identity()));
+        if canonical
+            .windows(2)
+            .any(|pair| pair[0].route_identity() == pair[1].route_identity())
+        {
+            return Err(IndexError::NonCanonicalSourceRoutes);
+        }
+        self.present_source_routes = Some(canonical);
+        Ok(())
+    }
+
+    /// Registers one route-level witness that must still hold at Core's final
+    /// publication fence, including exact-generation reuse.
+    pub fn register_source_route_publication_revalidation<F>(
+        &mut self,
+        route_identity: SourceRouteIdentity,
+        revalidate: F,
+    ) -> Result<()>
+    where
+        F: Fn() -> bool + Send + 'static,
+    {
+        if self.source_route_plan.is_some() {
+            self.require_active_source_route(&route_identity)?;
+        }
+        if self
+            .route_publication_revalidations
+            .iter()
+            .any(|(candidate, _)| candidate == &route_identity)
+        {
+            return Err(IndexError::InvalidSourceRoutePlan(format!(
+                "route {} has duplicate publication revalidation",
+                route_identity.as_str()
+            )));
+        }
+        self.route_publication_revalidations
+            .push((route_identity, Box::new(revalidate)));
+        Ok(())
+    }
+
     /// Binds this writer to one exact route selection against its locked base.
     ///
     /// `carried_from_base` routes are authenticated by the immutable base
@@ -81,12 +148,13 @@ impl GenerationWriter {
         }
         let checkpoint = SourceRouteStageCheckpoint {
             route_identity: route_identity.clone(),
+            source_route_plan: plan.clone(),
             complete_inventories: self.complete_inventories.clone(),
             pending: self.pending.clone(),
             deletions: self.deletions.clone(),
             route_deletions: self.route_deletions.clone(),
             observed_missing_routes: self.observed_missing_routes.clone(),
-            missing_route_revalidation_len: self.missing_route_revalidations.len(),
+            route_publication_revalidation_len: self.route_publication_revalidations.len(),
             source_identities: self.source_identities.clone(),
         };
         self.active_source_route_stage = Some(checkpoint);
@@ -166,14 +234,92 @@ impl GenerationWriter {
             writer.set_merge_policy(Box::new(LexicalMergePolicy::default()));
         }
         self.complete_inventories = checkpoint.complete_inventories;
+        self.source_route_plan = Some(checkpoint.source_route_plan);
         self.pending = checkpoint.pending;
         self.deletions = checkpoint.deletions;
         self.route_deletions = checkpoint.route_deletions;
         self.observed_missing_routes = checkpoint.observed_missing_routes;
-        self.missing_route_revalidations
-            .truncate(checkpoint.missing_route_revalidation_len);
+        self.route_publication_revalidations
+            .truncate(checkpoint.route_publication_revalidation_len);
         self.source_identities = checkpoint.source_identities;
         Ok(())
+    }
+
+    /// Atomically retires one exact base route after the active replacement
+    /// route has scanned and terminally revalidated successfully.
+    ///
+    /// The retired route must already be authenticated as carried from this
+    /// writer's locked base. Its sources must not be shared with another base
+    /// route. The mutation remains inside the active route savepoint, so a
+    /// failed replacement rolls back without changing the retained route.
+    pub fn retire_carried_source_route(
+        &mut self,
+        replacement_route: &SourceRouteIdentity,
+        retired_route: &SourceRouteIdentity,
+    ) -> Result<Vec<SourceKey>> {
+        self.require_active_source_route(replacement_route)?;
+        if replacement_route == retired_route {
+            return Err(IndexError::InvalidSourceRoutePlan(
+                "a source route cannot retire itself".to_owned(),
+            ));
+        }
+        let plan = self.source_route_plan.as_ref().ok_or_else(|| {
+            IndexError::InvalidSourceRoutePlan("route retirement requires a route plan".to_owned())
+        })?;
+        if !plan.carried_from_base.contains(retired_route) {
+            return Err(IndexError::InvalidSourceRoutePlan(format!(
+                "retired route {} is not carried from the locked base",
+                retired_route.as_str()
+            )));
+        }
+        let base = self.base_manifest.as_ref().ok_or_else(|| {
+            IndexError::InvalidSourceRoutePlan(
+                "route retirement requires a locked base generation".to_owned(),
+            )
+        })?;
+        let retired = base.source_route(retired_route).ok_or_else(|| {
+            IndexError::InvalidSourceRoutePlan(format!(
+                "retired route {} is absent from the locked base",
+                retired_route.as_str()
+            ))
+        })?;
+        for source in retired.sources() {
+            if let Some(other) = base.source_routes().iter().find(|candidate| {
+                candidate.route_identity() != retired_route
+                    && candidate
+                        .sources()
+                        .iter()
+                        .any(|member| member.exact_descriptor_eq(source))
+            }) {
+                return Err(IndexError::InvalidSourceRoutePlan(format!(
+                    "retired route {} shares source {} with route {}",
+                    retired_route.as_str(),
+                    source.identity(),
+                    other.route_identity().as_str()
+                )));
+            }
+        }
+        let retired_sources = retired.sources().to_vec();
+        let source_key_field = self.fields.source_key;
+        for source in &retired_sources {
+            let token = source_token(source);
+            if self.pending.contains_key(&token) || self.deletions.contains_key(source) {
+                return Err(IndexError::InvalidSourceRoutePlan(format!(
+                    "retired route {} source {} is already mutated",
+                    retired_route.as_str(),
+                    source.identity()
+                )));
+            }
+            self.writer_mut()?
+                .delete_term(Term::from_field_text(source_key_field, &token));
+            self.route_deletions.insert(source.clone());
+        }
+        self.source_route_plan
+            .as_mut()
+            .expect("route plan checked above")
+            .carried_from_base
+            .remove(retired_route);
+        Ok(retired_sources)
     }
 
     /// Converts a failed selected route into exact base carry-forward. Cold

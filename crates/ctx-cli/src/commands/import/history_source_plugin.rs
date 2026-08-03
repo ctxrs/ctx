@@ -81,19 +81,35 @@ pub(crate) fn run_history_source_plugin_import(
         .receipt
         .as_ref()
         .context("history source plugin refresh has no authoritative terminal receipt")?;
+    let request_previous_generation = refresh.request_previous_generation.clone();
+    let request_generation_changed = refresh.request_generation_changed;
     let published_generation = refresh.pin.generation_id().to_owned();
     let catalog_lineage = upsert.catalog_lineage_hex();
     let requested_outcome = receipt
-        .catalog_route_outcomes
-        .iter()
-        .find(|outcome| outcome.catalog_lineage == catalog_lineage)
+        .catalog_route_outcome(&catalog_lineage)
         .context("history source plugin refresh has no exact catalog-lineage result")?;
-    if requested_outcome.outcome != "succeeded" {
+    if requested_outcome.changed.is_none() {
         bail!("history source plugin refresh did not publish its exact catalog route");
     }
-    let route_changed = requested_outcome
-        .changed
-        .context("successful history source plugin route has no change result")?;
+    let route_changed = request_generation_changed
+        && requested_outcome
+            .changed
+            .context("successful history source plugin route has no change result")?;
+    let rejected_record_total = requested_outcome.rejected_record_total;
+    let rejection_diagnostics = receipt
+        .rejection_diagnostics()
+        .filter(|rejection| rejection.route_identity == requested_outcome.route_identity)
+        .map(|rejection| {
+            json!({
+                "source_identity": rejection.source_identity,
+                "provider": rejection.provider,
+                "path": rejection.source_selector,
+                "line": rejection.line,
+                "payload_type": rejection.payload_type,
+                "detail": rejection.detail,
+            })
+        })
+        .collect::<Vec<_>>();
 
     let summary = ProviderImportSummary {
         imported: usize::from(route_changed),
@@ -108,12 +124,18 @@ pub(crate) fn run_history_source_plugin_import(
         &stats,
         ProviderRefreshRuntimeFacts::observed_success(started.elapsed(), &summary),
     );
-    context
-        .provider_refreshes
-        .record_core_publication(ProviderRefreshTrigger::Import, receipt.generation_changed);
+    context.provider_refreshes.record_core_publication(
+        ProviderRefreshTrigger::Import,
+        request_generation_changed,
+        receipt.source_failure_total(),
+        receipt.rejected_record_total(),
+    );
 
     let current = &receipt.current;
     let totals = ImportTotals {
+        terminal_route_counts_available: true,
+        failed: usize::try_from(rejected_record_total).unwrap_or(usize::MAX),
+        sources_completed_with_rejections: usize::from(rejected_record_total != 0),
         current_source_count: Some(current.source_count),
         current_indexed_documents: Some(current.indexed_documents),
         current_complete_records: Some(current.complete_records),
@@ -141,7 +163,12 @@ pub(crate) fn run_history_source_plugin_import(
     context.telemetry.skipped = None;
     context.telemetry.rejected_records = None;
 
-    let completion = if context.options.progress == crate::progress::ProgressArg::Json {
+    let completion = if rejected_record_total != 0 {
+        format!(
+            "Published history source plugin {} with {rejected_record_total} rejected record(s).",
+            prepared.source().label()
+        )
+    } else if context.options.progress == crate::progress::ProgressArg::Json {
         format!(
             "Published history source plugin {} in Core generation {published_generation}.",
             prepared.source().label()
@@ -153,15 +180,23 @@ pub(crate) fn run_history_source_plugin_import(
         )
     };
     progress.finish_line()?;
-    progress.done("published", completion, stats.bytes)?;
+    progress.done(
+        if rejected_record_total == 0 {
+            "published"
+        } else {
+            "partial"
+        },
+        completion,
+        stats.bytes,
+    )?;
 
     Ok(ImportReport {
         resume: context.args.resume,
         totals,
         sources: vec![crate::compact_json(json!({
-            "status": "published",
-            "failure_scope": "none",
-            "failure_type": "none",
+            "status": if rejected_record_total == 0 { "published" } else { "partial" },
+            "failure_scope": if rejected_record_total == 0 { "none" } else { "record" },
+            "failure_type": if rejected_record_total == 0 { "none" } else { "record_rejection" },
             "provider": CaptureProvider::Custom.as_str(),
             "kind": "history_source_plugin",
             "plugin": prepared.source().plugin_name,
@@ -174,12 +209,13 @@ pub(crate) fn run_history_source_plugin_import(
             "path": prepared.source_path(),
             "source_files": stats.files,
             "source_bytes": stats.bytes,
-            "catalog_changed": upsert.changed,
             "catalog_lineage": catalog_lineage,
             "catalog_authority": upsert.authority.to_json(),
-            "previous_generation": receipt.previous_generation,
+            "previous_generation": request_previous_generation,
             "published_generation": published_generation,
-            "generation_changed": receipt.generation_changed,
+            "generation_changed": request_generation_changed,
+            "rejected_record_total": rejected_record_total,
+            "rejection_diagnostics": rejection_diagnostics,
             "daemon_request_id": refresh.request_id,
             "daemon_request_metadata": {
                 "owner": "daemon",

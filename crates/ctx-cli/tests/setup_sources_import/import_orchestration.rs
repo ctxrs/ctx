@@ -7,6 +7,9 @@ use std::{
     process::{Child, Command as StdCommand, Stdio},
 };
 
+#[path = "import_orchestration/relocation.rs"]
+mod relocation;
+
 struct SourceRefreshDaemon {
     child: Option<Child>,
 }
@@ -284,6 +287,39 @@ fn machine_readable_native_import_recovers_daemon_without_polluting_json() {
     assert_eq!(import["sources"][0]["status"], "published");
     let running = wait_for_daemon_status(&temp, "running", true, "import");
     assert_eq!(running["daemon"]["start_mode"], "auto");
+}
+
+#[test]
+fn explicit_import_reuses_running_daemon_when_autostart_is_disabled() {
+    let temp = tempdir();
+    let _daemon = start_full_source_refresh_daemon(&temp);
+    let fixture = temp.path().join("autostart-disabled-explicit.jsonl");
+    write_valid_explicit_custom_source(&fixture, "running daemon explicit overlay oracle");
+
+    let imported = json_output(
+        ctx(&temp)
+            .args([
+                "import",
+                "--input-format",
+                "ctx-history-jsonl-v1",
+                "--path",
+                fixture.to_str().unwrap(),
+                "--format=json",
+                "--progress",
+                "none",
+            ])
+            .env("CTX_DAEMON_AUTOSTART_OFF", "1"),
+    );
+
+    assert_eq!(imported["outcome"], "success", "{imported:#}");
+    assert_eq!(
+        imported["sources"][0]["status"], "published",
+        "{imported:#}"
+    );
+    assert_eq!(
+        imported["sources"][0]["daemon_request_metadata"]["owner"], "daemon",
+        "{imported:#}"
+    );
 }
 
 #[test]
@@ -565,7 +601,6 @@ fn one_event_native_and_explicit_imports_publish_core_generations() {
     ]));
     let explicit_generation = published_generation(&explicit_import);
     assert_eq!(explicit_import["sources"][0]["status"], "published");
-    assert_eq!(explicit_import["sources"][0]["catalog_changed"], true);
     assert_eq!(
         explicit_import["sources"][0]["daemon_request_metadata"]["owner"],
         "daemon"
@@ -717,7 +752,10 @@ fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
         "--progress",
         "none",
     ]));
-    assert_eq!(recovered["outcome"], "success", "{recovered:#}");
+    assert_eq!(
+        recovered["outcome"], "completed_with_rejections",
+        "{recovered:#}"
+    );
     assert_eq!(
         recovered["totals"]["current_indexed_documents"], 1,
         "{recovered:#}"
@@ -901,8 +939,7 @@ fn all_invalid_custom_source_publishes_empty_then_refreshes_after_fix() {
         "--progress",
         "none",
     ]));
-    assert_eq!(empty["outcome"], "success", "{empty:#}");
-    assert_eq!(empty["sources"][0]["catalog_changed"], true, "{empty:#}");
+    assert_eq!(empty["outcome"], "completed_with_rejections", "{empty:#}");
     assert_eq!(
         empty["sources"][0]["current_indexed_documents"], 0,
         "{empty:#}"
@@ -928,7 +965,6 @@ fn all_invalid_custom_source_publishes_empty_then_refreshes_after_fix() {
         "none",
     ]));
     assert_eq!(retry["outcome"], "success", "{retry:#}");
-    assert_eq!(retry["sources"][0]["catalog_changed"], false, "{retry:#}");
     let generation = published_generation(&retry);
     assert_ne!(generation, empty_generation);
     let status = wait_for_core_generation(&temp, &generation);
@@ -1049,7 +1085,7 @@ fn import_all_discovers_sources_when_home_unset_and_userprofile_set() {
     assert!(imported["totals"]["current_source_count"]
         .as_u64()
         .is_some_and(|count| count >= 1));
-    assert!(imported["totals"].get("failed_sources").is_none());
+    assert_eq!(imported["totals"]["failed_sources"], 0);
     assert_eq!(
         imported["sources"][0]["source_format"],
         "provider_authoritative_all"
@@ -1081,7 +1117,7 @@ fn import_all_skips_empty_gemini_source() {
     assert!(imported["totals"]["current_source_count"]
         .as_u64()
         .is_some_and(|count| count >= 1));
-    assert!(imported["totals"].get("failed_sources").is_none());
+    assert_eq!(imported["totals"]["failed_sources"], 0);
 }
 
 #[test]

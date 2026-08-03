@@ -514,6 +514,21 @@ fn fallback_scratch_enospc_is_typed_and_preserves_the_provider() {
 }
 
 #[test]
+fn terminal_revalidation_resource_exhaustion_stays_systemic() {
+    let error =
+        OpenCodeSourceBackedError::SqliteSource(SqliteSourceAccessError::ResourceUnavailable {
+            operation: "revalidating OpenCode SQLite authority",
+            path: Path::new("provider.sqlite").to_path_buf(),
+            source: std::io::Error::from(std::io::ErrorKind::OutOfMemory),
+        });
+
+    assert_eq!(
+        super::super::adapter::route_error(error).kind,
+        crate::provider::source_backed::SourceBackedRouteErrorKind::ResourceUnavailable
+    );
+}
+
+#[test]
 fn unwritable_fallback_scratch_root_is_typed_and_preserves_the_provider() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let provider = temp.path().join("provider");

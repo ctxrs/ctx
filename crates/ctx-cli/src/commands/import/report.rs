@@ -78,6 +78,23 @@ fn import_totals_json(totals: &ImportTotals) -> Value {
             unreachable!("per-run import totals are always an object")
         };
         output.extend(per_run);
+    } else if totals.terminal_route_counts_available {
+        let Value::Object(output) = &mut value else {
+            unreachable!("import totals are always an object")
+        };
+        output.insert(
+            "sources_completed_with_rejections".to_owned(),
+            json!(totals.sources_completed_with_rejections),
+        );
+        output.insert("failed_sources".to_owned(), json!(totals.failed_sources));
+        output.insert("rejected_records".to_owned(), json!(totals.failed));
+        output.insert(
+            "rejections".to_owned(),
+            json!({
+                "rejected_records": totals.failed,
+                "sources_completed_with_rejections": totals.sources_completed_with_rejections,
+            }),
+        );
     } else if totals.reported_source_failures() > 0 {
         let Value::Object(output) = &mut value else {
             unreachable!("import totals are always an object")

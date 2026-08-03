@@ -100,8 +100,6 @@ mod dirty_source_routes;
 #[cfg(test)]
 use daemon_retry::*;
 mod source_status;
-#[cfg(test)]
-pub(crate) use source_status::count_public_status_snapshot_reads;
 pub(crate) use source_status::source_epoch_status_report;
 mod source_backed_pro_catch_up;
 pub(crate) use source_backed_pro_catch_up::wait_for_completed_generation as wait_for_source_backed_pro_generation;
@@ -109,11 +107,11 @@ mod source_backed_refresh_coordinator;
 #[allow(unused_imports)] // Provider-neutral executor types are the capture coordinator seam.
 pub(crate) use source_backed_refresh_coordinator::{
     coordinate_import_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
-    pin_active_verified_generation, PinnedSourceBackedGeneration,
-    SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
-    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshExecution,
-    SourceBackedRefreshExecutor, SourceBackedRefreshMode, SourceBackedRefreshObservation,
-    SourceBackedRefreshProgress, SourceBackedRefreshPublication,
+    pin_active_verified_generation, published_explicit_source_relocation_authority,
+    PinnedSourceBackedGeneration, SourceBackedCurrentSourceProgress,
+    SourceBackedCurrentSourceProgressStage, SourceBackedRefreshDaemonUnavailable,
+    SourceBackedRefreshExecution, SourceBackedRefreshExecutor, SourceBackedRefreshMode,
+    SourceBackedRefreshObservation, SourceBackedRefreshProgress, SourceBackedRefreshPublication,
 };
 mod daemon_scheduler;
 #[cfg(test)]

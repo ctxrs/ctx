@@ -119,7 +119,7 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
     }
     if !runtime.history_retry.ready() {
         let job = core_refresh_retry_backoff_job(data_root, &runtime.history_retry);
-        write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &job)?;
+        let job = persist_core_scheduler_status(data_root, source_refresh, job)?;
         let state = daemon_core_cycle_state(&job);
         return Ok(DaemonIteration::new(false, false, state));
     }
@@ -267,19 +267,18 @@ fn run_pending_core_refresh(
     runtime: &mut DaemonRuntime,
     source_refresh: Option<&CoreRefreshEngine>,
 ) -> Result<Option<DaemonIteration>> {
-    let Some(run) = source_refresh.and_then(|coordinator| coordinator.run_next(data_root)) else {
+    let Some(coordinator) = source_refresh else {
         return Ok(None);
     };
-    debug_assert_eq!(
-        run.failed,
-        run.job.get("status").and_then(Value::as_str) == Some("failed")
-    );
-    let job = record_daemon_job_retry(&mut runtime.history_retry, run.job);
-    write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &job)?;
+    let Some(run) = coordinator.run_next(data_root) else {
+        return Ok(None);
+    };
+    let job =
+        record_source_refresh_retry(data_root, &mut runtime.history_retry, coordinator, run.job)?;
     Ok(Some(DaemonIteration::new(
         run.did_work,
-        run.failed,
-        DaemonCycleStateV1::unknown(),
+        run.failed || run.terminal_persistence_pending,
+        daemon_core_cycle_state(&job),
     )))
 }
 
@@ -322,21 +321,27 @@ fn run_dirty_core_refresh(
             || cold_all_refresh,
         "dirty-route work may become All only for cold startup or when a manual import upgrades the queued exact refresh"
     );
-    write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &run.job)?;
+    let terminal_persistence_pending = run.terminal_persistence_pending;
+    let job = record_source_refresh_retry(
+        data_root,
+        &mut runtime.history_retry,
+        source_refresh,
+        run.job,
+    )?;
     let published_generation = (!run.failed
-        && run.job.get("status").and_then(Value::as_str) == Some("completed")
-        && run
-            .job
-            .get("post_publication_error")
-            .is_none_or(Value::is_null))
+        && !terminal_persistence_pending
+        && job.get("status").and_then(Value::as_str) == Some("completed"))
     .then(|| {
-        run.job
-            .get("published_generation")
+        job.get("published_generation")
             .and_then(Value::as_str)
             .map(str::to_owned)
     })
     .flatten();
-    let iteration = DaemonIteration::new(run.did_work, false, daemon_core_cycle_state(&run.job));
+    let iteration = DaemonIteration::new(
+        run.did_work,
+        run.failed || terminal_persistence_pending,
+        daemon_core_cycle_state(&job),
+    );
     if let Some(generation) = published_generation {
         runtime.sidecar_drain.generation = Some(generation);
         // A successor queued behind an exact-route fence must yield to the
@@ -356,29 +361,11 @@ fn run_core_refresh(
     source_refresh: Option<&CoreRefreshEngine>,
     enqueue_periodic: bool,
 ) -> Result<DaemonIteration> {
-    let run = match source_refresh {
-        Some(coordinator) => {
-            if enqueue_periodic {
-                if let Err(error) = coordinator.enqueue_periodic(data_root) {
-                    return finish_core_refresh(
-                        data_root,
-                        runtime,
-                        core_refresh_failed_job(
-                            data_root,
-                            format!("schedule periodic Core refresh: {error:#}"),
-                        ),
-                        false,
-                    );
-                }
-            }
-            coordinator.run_next(data_root)
-        }
-        None => None,
-    };
-    let Some(run) = run else {
+    let Some(coordinator) = source_refresh else {
         return finish_core_refresh(
             data_root,
             runtime,
+            None,
             core_refresh_failed_job(
                 data_root,
                 "daemon Core refresh engine is unavailable".to_owned(),
@@ -386,7 +373,48 @@ fn run_core_refresh(
             false,
         );
     };
-    finish_core_refresh(data_root, runtime, run.job, run.did_work)
+    if enqueue_periodic {
+        if let Err(error) = coordinator.enqueue_periodic(data_root) {
+            return finish_core_refresh(
+                data_root,
+                runtime,
+                Some(coordinator),
+                core_refresh_failed_job(
+                    data_root,
+                    format!("schedule periodic Core refresh: {error:#}"),
+                ),
+                false,
+            );
+        }
+    }
+    let Some(run) = coordinator.run_next(data_root) else {
+        return finish_core_refresh(
+            data_root,
+            runtime,
+            Some(coordinator),
+            core_refresh_failed_job(
+                data_root,
+                "daemon Core refresh engine has no admitted request".to_owned(),
+            ),
+            false,
+        );
+    };
+    let terminal_persistence_pending = run.terminal_persistence_pending;
+    let job =
+        record_source_refresh_retry(data_root, &mut runtime.history_retry, coordinator, run.job)?;
+    let failed = run.failed || terminal_persistence_pending;
+    let state = daemon_core_cycle_state(&job);
+    if !failed && job.get("status").and_then(Value::as_str) == Some("completed") {
+        if let Some(generation) = job.get("published_generation").and_then(Value::as_str) {
+            runtime.sidecar_drain.generation = Some(generation.to_owned());
+        }
+        return Ok(immediate_follow_up(DaemonIteration::new(
+            run.did_work,
+            false,
+            state,
+        )));
+    }
+    Ok(DaemonIteration::new(run.did_work, failed, state))
 }
 
 fn run_pro_catch_up_with_retry(
@@ -445,11 +473,12 @@ fn daemon_mode_runs_core_semantic_projection(mode: crate::config::DaemonMode) ->
 fn finish_core_refresh(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
+    coordinator: Option<&CoreRefreshEngine>,
     job: Value,
     did_work: bool,
 ) -> Result<DaemonIteration> {
     let job = record_daemon_job_retry(&mut runtime.history_retry, job);
-    write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &job)?;
+    let job = persist_core_scheduler_status(data_root, coordinator, job)?;
     let failed = daemon_job_failed(&job);
     let state = daemon_core_cycle_state(&job);
     let published_generation = (!failed
@@ -469,6 +498,48 @@ fn finish_core_refresh(
         Ok(DaemonIteration::new(did_work, failed, state))
     }
 }
+
+fn persist_core_scheduler_status(
+    data_root: &Path,
+    coordinator: Option<&CoreRefreshEngine>,
+    job: Value,
+) -> Result<Value> {
+    run_before_core_scheduler_status_hook();
+    let Some(coordinator) = coordinator else {
+        write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &job)?;
+        return Ok(job);
+    };
+    coordinator.persist_scheduler_status(data_root, job)
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_CORE_SCHEDULER_STATUS_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn install_before_core_scheduler_status_hook_for_test(hook: impl FnOnce() + 'static) {
+    BEFORE_CORE_SCHEDULER_STATUS_HOOK.with(|slot| {
+        let previous = slot.replace(Some(Box::new(hook)));
+        assert!(
+            previous.is_none(),
+            "scheduler status test hooks must not nest"
+        );
+    });
+}
+
+#[cfg(test)]
+fn run_before_core_scheduler_status_hook() {
+    BEFORE_CORE_SCHEDULER_STATUS_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_before_core_scheduler_status_hook() {}
 
 fn daemon_core_cycle_state(job: &Value) -> DaemonCycleStateV1 {
     let history_backoff = daemon_job_in_retry_backoff(job);
@@ -694,6 +765,20 @@ pub(super) fn record_daemon_job_retry(backoff: &mut DaemonRetryBackoff, mut job:
         backoff.reset();
     }
     job
+}
+
+fn record_source_refresh_retry(
+    data_root: &Path,
+    backoff: &mut DaemonRetryBackoff,
+    coordinator: &CoreRefreshEngine,
+    job: Value,
+) -> Result<Value> {
+    let persist_retry = daemon_job_should_backoff(&job);
+    let job = record_daemon_job_retry(backoff, job);
+    if persist_retry {
+        return coordinator.persist_retry_status(data_root, job);
+    }
+    Ok(job)
 }
 
 pub(super) fn daemon_job_should_backoff(job: &Value) -> bool {

@@ -132,6 +132,29 @@ fn fail_route_before_scan(
     route
 }
 
+fn empty_route(mut route: SourceBackedRoute) -> SourceBackedRoute {
+    let original = route.driver.take().unwrap();
+    let owns = Arc::clone(&original.owns_source);
+    let revalidate = Arc::clone(&original.revalidate);
+    route.driver = Some(SourceBackedRouteDriver::new(
+        |_| Ok(()),
+        move |source| owns(source),
+        move |target| revalidate(target),
+    ));
+    route
+}
+
+fn explicit_route_at(mut route: SourceBackedRoute, path: PathBuf) -> SourceBackedRoute {
+    let mut source = route.metadata.source.clone();
+    source.path = path;
+    SourceBackedRoute::explicit_manual(
+        source,
+        SourceBackedSelectorAuthority::ExplicitPath,
+        route.driver.take().unwrap(),
+    )
+    .unwrap()
+}
+
 fn fail_route_at_final_revalidation(mut route: SourceBackedRoute) -> SourceBackedRoute {
     let mut driver = route.driver.take().unwrap();
     driver.revalidate = Arc::new(|_| false);
@@ -794,6 +817,101 @@ fn selected_route_refresh_carries_unselected_route_and_reports_exact_noop_succes
 }
 
 #[test]
+fn successful_replacement_does_not_report_the_retired_route_as_carried() {
+    let temp = tempdir().unwrap();
+    let retired = explicit_route_at(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 71),
+        temp.path().join("retired.jsonl"),
+    );
+    let retired_id = retired.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(retired);
+    refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+        .unwrap();
+
+    let replacement = empty_route(explicit_route_at(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 72),
+        temp.path().join("replacement.jsonl"),
+    ));
+    let replacement_id = replacement.metadata.route_identity.clone().unwrap();
+    let mut replacement_registry = SourceBackedProviderRegistry::new();
+    replacement_registry.register(replacement);
+    replacement_registry
+        .retire_routes_after_success(&replacement_id, [retired_id.clone()])
+        .unwrap();
+
+    let receipt = refresh_source_backed_generation_for_routes(
+        temp.path(),
+        &replacement_registry,
+        WriterOptions::default(),
+        [replacement_id.clone()],
+    )
+    .unwrap();
+
+    assert!(receipt.carried_unselected_route_ids.is_empty());
+    assert!(receipt
+        .commit
+        .manifest()
+        .source_route(&retired_id)
+        .is_none());
+    assert!(receipt
+        .commit
+        .manifest()
+        .source_route(&replacement_id)
+        .is_some());
+}
+
+#[test]
+fn empty_replacement_cannot_hide_a_cold_route_failure_behind_retired_content() {
+    let temp = tempdir().unwrap();
+    let retired = explicit_route_at(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 73),
+        temp.path().join("retired.jsonl"),
+    );
+    let retired_id = retired.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(retired);
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+
+    let replacement = empty_route(explicit_route_at(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 74),
+        temp.path().join("replacement.jsonl"),
+    ));
+    let replacement_id = replacement.metadata.route_identity.clone().unwrap();
+    let failed = fail_route_before_scan(
+        fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 75),
+        SourceBackedRouteErrorKind::SourceChanged,
+    );
+    let failed_id = failed.metadata.route_identity.clone().unwrap();
+    let mut replacement_registry = SourceBackedProviderRegistry::new();
+    replacement_registry.register(replacement);
+    replacement_registry.register(failed);
+    replacement_registry
+        .retire_routes_after_success(&replacement_id, [retired_id])
+        .unwrap();
+
+    let error = refresh_source_backed_generation_for_routes(
+        temp.path(),
+        &replacement_registry,
+        WriterOptions::default(),
+        [replacement_id, failed_id.clone()],
+    )
+    .expect_err("retired content is not usable carried content");
+
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes }
+            if failed_routes.len() == 1 && failed_routes[0].route_identity == failed_id
+    ));
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        initial.commit.generation_id
+    );
+}
+
+#[test]
 fn selected_clean_route_completion_ignores_carried_unselected_rejections() {
     let clean = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 61);
     let rejected = fixture_route_with_body_and_rejections(
@@ -1066,6 +1184,63 @@ fn certified_missing_route_reappearance_at_precommit_cannot_delete_the_route() {
     let retained = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(retained.generation_id(), retained_generation);
     assert!(retained.manifest().source_route(&route_id).is_some());
+    assert_eq!(retained.document_count(), 1);
+}
+
+#[test]
+fn relocated_route_rechecks_old_path_absence_at_terminal_publication() {
+    let temp = tempdir().unwrap();
+    let old_path = temp.path().join("relocation-old.jsonl");
+    let new_path = temp.path().join("relocation-new.jsonl");
+    let fixture = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 63);
+    let mut old_source = fixture.metadata.source.clone();
+    old_source.path = old_path.clone();
+    let old_route = SourceBackedRoute::explicit_manual(
+        old_source,
+        SourceBackedSelectorAuthority::ExplicitPath,
+        fixture.driver.clone().unwrap(),
+    )
+    .unwrap();
+    let preserved = old_route.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(old_route);
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+
+    let mut relocated_source = fixture.metadata.source.clone();
+    relocated_source.path = new_path;
+    let relocated_route = SourceBackedRoute::explicit_manual(
+        relocated_source,
+        SourceBackedSelectorAuthority::ExplicitPath,
+        fixture.driver.unwrap(),
+    )
+    .unwrap();
+    let constructed = relocated_route.metadata.route_identity.clone().unwrap();
+    let mut relocated_registry = SourceBackedProviderRegistry::new();
+    relocated_registry.register(relocated_route);
+    relocated_registry
+        .preserve_explicit_route_identity(&constructed, preserved.clone(), &old_path)
+        .unwrap();
+
+    let reappearing = old_path.clone();
+    install_before_source_backed_commit_hook_for_test(move || {
+        fs::write(reappearing, b"old authority reappeared\n").unwrap();
+    });
+    let error = refresh_source_backed_generation(
+        temp.path(),
+        &relocated_registry,
+        WriterOptions::default(),
+    )
+    .expect_err("terminal relocation fence must reject old-path reappearance");
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::Index(IndexError::SourceInvalidated(ref invalidated))
+            if invalidated == preserved.as_str()
+    ));
+    let retained = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(retained.generation_id(), initial.commit.generation_id);
+    assert!(retained.manifest().source_route(&preserved).is_some());
     assert_eq!(retained.document_count(), 1);
 }
 

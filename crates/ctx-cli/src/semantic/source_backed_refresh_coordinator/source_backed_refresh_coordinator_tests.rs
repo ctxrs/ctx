@@ -24,6 +24,9 @@ use super::*;
 #[path = "source_backed_refresh_coordinator_tests/registry_policy.rs"]
 mod registry_policy;
 
+#[path = "source_backed_refresh_coordinator_tests/observation_fence.rs"]
+mod observation_fence;
+
 struct TestExecutor {
     calls: Arc<AtomicUsize>,
     generation_id: String,
@@ -59,18 +62,11 @@ impl SourceBackedRefreshExecutor for TestExecutor {
 
 fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
     SourceBackedRefreshPublication {
-        selected_route_ids: Vec::new(),
-        successful_route_ids: Vec::new(),
-        successful_route_changes: BTreeMap::new(),
-        failed_route_outcomes: Vec::new(),
-        catalog_route_outcomes: Vec::new(),
-        source_failures: Vec::new(),
+        route_results: Vec::new(),
+        catalog_route_bindings: Vec::new(),
+        verified_index: None,
         generation_id: generation_id.into(),
-        published_explicit_source_catalog: load_explicit_source_catalog_authority(
-            tempfile::tempdir().unwrap().path(),
-        )
-        .unwrap(),
-        scanned_routes: 1,
+        published_explicit_source_catalog: None,
         unsupported_routes: 0,
         certified_source_count: 1,
         certified_source_bytes: 128,
@@ -154,15 +150,8 @@ impl RunningRefreshGate {
 }
 
 fn test_catalog_authority(revision: u64, digest_byte: u8) -> ExplicitSourceCatalogAuthority {
-    ExplicitSourceCatalogAuthority::from_json(&json!({
-        "schema_version": 1,
-        "revision": revision,
-        "integrity": {
-            "algorithm": "sha256",
-            "digest": format!("{digest_byte:02x}").repeat(32),
-        },
-    }))
-    .unwrap()
+    let _ = digest_byte;
+    crate::commands::import::explicit_source_catalog_authority_for_test(revision)
 }
 
 fn physically_selected_routes(
@@ -183,27 +172,40 @@ fn publish_selected_routes(
     selected: &BTreeSet<SourceRouteIdentity>,
     failed_route: Option<(&SourceRouteIdentity, &'static str)>,
 ) -> Result<SourceBackedRefreshPublication> {
-    let commit =
-        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
-            .commit(|_| true)?;
-    let mut publication = empty_test_publication(commit.generation_id);
-    publication.published_explicit_source_catalog = execution
-        .explicit_source_catalog
-        .cloned()
-        .expect("refresh catalog authority");
-    publication.scanned_routes = selected.len();
-    publication.selected_route_ids = selected
+    let retain_rejection_fixture = open_verified_index(execution.index_root)
+        .is_ok_and(|index| !index.manifest().sources.is_empty());
+    let mut writer =
+        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?;
+    if retain_rejection_fixture {
+        let source = publication_pin_source_with_anchor(0x93);
+        writer.begin_source(source.clone())?;
+        writer.add_core_record(publication_pin_record(&source))?;
+        writer.certify_source(publication_rejection_certificate(&source))?;
+    }
+    let commit = writer.commit(|_| true)?;
+    let mut publication = empty_test_publication(commit.generation_id.clone());
+    publication.current = SourceBackedRefreshCurrent::from_sources(&commit.manifest().sources, 0)?;
+    publication.certified_source_count = publication.current.source_count;
+    publication.certified_source_bytes = publication.current.certified_source_bytes;
+    publication.published_explicit_source_catalog = execution.explicit_source_catalog.cloned();
+    publication.route_results = selected
         .iter()
-        .map(|route| route.as_str().to_owned())
+        .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
         .collect();
-    publication.successful_route_ids = publication.selected_route_ids.clone();
     if let Some((route, class)) = failed_route {
-        publication
-            .successful_route_ids
-            .retain(|selected| selected != route.as_str());
-        publication.source_failures = vec![SourceBackedRefreshSourceFailure {
+        let result = publication
+            .route_results
+            .iter_mut()
+            .find(|result| result.route_identity == route.as_str())
+            .expect("failed selected route");
+        *result = SourceBackedRefreshRouteResult::failed(
+            route.as_str().to_owned(),
+            class.to_owned(),
+            true,
+        );
+        result.source_failures = vec![SourceBackedRefreshSourceFailure {
             route_identity: route.as_str().to_owned(),
-            source_identity: "content-free-source".to_owned(),
+            source_identity: "cd".repeat(32),
             provider: "fixture".to_owned(),
             class: class.to_owned(),
             carried_forward: true,
@@ -211,13 +213,67 @@ fn publish_selected_routes(
             detail: "fixture failure".to_owned(),
         }];
     }
-    publication.successful_route_changes = publication
-        .successful_route_ids
-        .iter()
-        .cloned()
-        .map(|route| (route, true))
-        .collect();
+    execution.covered_publication.apply(&mut publication);
     Ok(publication)
+}
+
+fn publish_selected_routes_with_rejection(
+    execution: &SourceBackedRefreshExecution<'_>,
+    selected: &BTreeSet<SourceRouteIdentity>,
+    rejected_route: &SourceRouteIdentity,
+) -> Result<SourceBackedRefreshPublication> {
+    let source = publication_pin_source_with_anchor(0x93);
+    let mut writer =
+        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?;
+    writer.begin_source(source.clone())?;
+    writer.add_core_record(publication_pin_record(&source))?;
+    writer.certify_source(publication_rejection_certificate(&source))?;
+    let commit = writer.commit(|_| true)?;
+    let mut publication = empty_test_publication(commit.generation_id.clone());
+    publication.current = SourceBackedRefreshCurrent::from_sources(&commit.manifest().sources, 0)?;
+    publication.certified_source_count = publication.current.source_count;
+    publication.certified_source_bytes = publication.current.certified_source_bytes;
+    publication.route_results = selected
+        .iter()
+        .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
+        .collect();
+    let result = publication
+        .route_results
+        .iter_mut()
+        .find(|result| result.route_identity == rejected_route.as_str())
+        .expect("rejected route is selected");
+    result.rejected_record_total = 1;
+    result.rejection_diagnostics = vec![SourceBackedRefreshRecordRejection {
+        route_identity: rejected_route.as_str().to_owned(),
+        source_identity: "95".repeat(32),
+        provider: "codex".to_owned(),
+        source_selector: "/fixture/rejected.jsonl".to_owned(),
+        line: 7,
+        payload_type: "unsupported_fixture".to_owned(),
+        class: "unsupported_record".to_owned(),
+        detail: "fixture record rejection".to_owned(),
+    }];
+    execution.covered_publication.apply(&mut publication);
+    Ok(publication)
+}
+
+fn publication_rejection_certificate(source: &SourceKey) -> CertifiedSource {
+    let observation = SourceObservation::new(source.clone(), "regular-file-v1", vec![1]).unwrap();
+    CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        "publication-pin-test-v1",
+        [0x94; 32],
+        ScannedSourceCounts {
+            complete_records: 2,
+            retained_records: 1,
+            rejected_records: 1,
+            indexed_documents: 1,
+            certified_bytes: 128,
+            ..ScannedSourceCounts::default()
+        },
+    )
+    .unwrap()
 }
 
 fn publication_pin_source() -> SourceKey {
@@ -336,19 +392,15 @@ fn publish_pin_fixture(
             ..SourceBackedRefreshCurrent::default()
         };
     }
-    publication.published_explicit_source_catalog = execution
-        .explicit_source_catalog
-        .cloned()
-        .expect("publication pin catalog authority");
-    publication.selected_route_ids = match &execution.scope {
-        SourceBackedRefreshScope::All => Vec::new(),
-        SourceBackedRefreshScope::Exact(routes) => routes
-            .iter()
-            .map(|route| route.as_str().to_owned())
-            .collect(),
+    publication.published_explicit_source_catalog = execution.explicit_source_catalog.cloned();
+    let selected = match &execution.scope {
+        SourceBackedRefreshScope::All => BTreeSet::new(),
+        SourceBackedRefreshScope::Exact(routes) => routes.iter().cloned().collect(),
     };
-    publication.successful_route_ids = publication.selected_route_ids.clone();
-    publication.scanned_routes = publication.selected_route_ids.len();
+    publication.route_results = selected
+        .iter()
+        .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
+        .collect();
     Ok(publication)
 }
 
@@ -440,6 +492,72 @@ fn queued_startup_exact_is_upgraded_to_one_manual_all_scan() {
 }
 
 #[test]
+fn warm_dirty_route_burst_uses_one_bounded_refresh_and_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    ctx_history_index::GenerationWriter::open(
+        source_backed_index_root(&data_root),
+        WriterOptions::default(),
+    )
+    .unwrap()
+    .commit(|_| true)
+    .unwrap();
+    let routes = BTreeSet::from([
+        route_identity(0x17),
+        route_identity(0x18),
+        route_identity(0x19),
+    ]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
+    let expected_routes = routes.clone();
+    let executor_calls = Arc::clone(&calls);
+    let executor_scans = Arc::clone(&scans);
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            executor_calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                execution.scope,
+                SourceBackedRefreshScope::Exact(expected_routes.clone())
+            );
+            for route in &expected_routes {
+                *executor_scans
+                    .lock()
+                    .unwrap()
+                    .entry(route.clone())
+                    .or_default() += 1;
+            }
+            publish_selected_routes(&execution, &expected_routes, None)
+        },
+    ));
+    coordinator.reconcile_watch_routes(
+        routes.clone(),
+        EventWatermark::new(1, 0),
+        ledger_now_ms().saturating_sub(1_000),
+    );
+
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let run = coordinator.run_next(&data_root).expect("batched dirty run");
+    assert!(!run.failed, "{:#}", run.job);
+    assert_eq!(run.scope, SourceBackedRefreshScope::Exact(routes.clone()));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *scans.lock().unwrap(),
+        routes
+            .iter()
+            .cloned()
+            .map(|route| (route, 1))
+            .collect::<BTreeMap<_, _>>()
+    );
+    assert!(!coordinator.has_scheduled_route_work());
+    assert!(!coordinator
+        .enqueue_next_dirty_route(&data_root, u64::MAX)
+        .unwrap());
+}
+
+#[test]
 fn running_startup_exact_continues_manual_all_without_rescanning() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
@@ -479,9 +597,14 @@ fn running_startup_exact_continues_manual_all_without_rescanning() {
                 executor_release.wait();
             } else {
                 assert_eq!(execution.scope, SourceBackedRefreshScope::All);
-                assert_eq!(execution.covered_route_ids.len(), 1);
+                assert_eq!(execution.covered_route_ids, executor_routes);
             }
-            let mut publication = publish_selected_routes(&execution, &selected, None)?;
+            let mut publication = if first {
+                let rejected_route = selected.iter().next().expect("selected exact route");
+                publish_selected_routes_with_rejection(&execution, &selected, rejected_route)?
+            } else {
+                publish_selected_routes(&execution, &selected, None)?
+            };
             if first {
                 publication.current.removed_source_count = 1;
             }
@@ -505,7 +628,7 @@ fn running_startup_exact_continues_manual_all_without_rescanning() {
             let run = runner
                 .run_next(&runner_root)
                 .expect("running startup exact");
-            assert!(!run.failed);
+            assert!(!run.failed, "{:#}", run.job);
         });
         entered.wait();
         let manual = manual_all_request(&coordinator, &data_root, &authority);
@@ -517,7 +640,7 @@ fn running_startup_exact_continues_manual_all_without_rescanning() {
     let successor = coordinator
         .run_next(&data_root)
         .expect("manual all continuation");
-    assert!(!successor.failed);
+    assert!(!successor.failed, "{:#}", successor.job);
     assert_eq!(request_id(&successor.job), manual_request_id);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(
@@ -530,6 +653,7 @@ fn running_startup_exact_continues_manual_all_without_rescanning() {
     );
     let terminal = coordinator.status(&manual_request_id).unwrap();
     assert_eq!(terminal["request_state"], "published");
+    assert_eq!(terminal["outcome"], "completed_with_rejections");
     assert_eq!(terminal["generation_changed"], true);
     assert_eq!(terminal["scanned_routes"], routes.len());
     assert_eq!(terminal["receipt"]["current"]["removed_source_count"], 1);
@@ -538,6 +662,17 @@ fn running_startup_exact_continues_manual_all_without_rescanning() {
             .as_u64()
             .unwrap() as usize,
         routes.len()
+    );
+    assert_eq!(terminal["receipt"]["rejected_record_total"], 1);
+    assert_eq!(
+        terminal["receipt"]["route_results"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter_map(|result| result.as_array())
+            .map(|result| result.get(4).and_then(Value::as_u64).unwrap_or(0))
+            .sum::<u64>(),
+        1
     );
     assert!(!coordinator.has_scheduled_route_work());
 }
@@ -574,7 +709,14 @@ fn failed_running_exact_remains_in_manual_all_successor_work() {
                 executor_entered.wait();
                 executor_release.wait();
             } else {
-                assert!(execution.covered_route_ids.is_empty());
+                assert_eq!(
+                    execution.covered_route_ids,
+                    executor_routes
+                        .iter()
+                        .filter(|route| *route != &executor_first_route)
+                        .cloned()
+                        .collect()
+                );
             }
             publish_selected_routes(
                 &execution,
@@ -629,6 +771,7 @@ fn event_during_running_exact_invalidates_manual_all_coverage() {
     let executor_calls = Arc::clone(&calls);
     let executor_entered = Arc::clone(&entered);
     let executor_release = Arc::clone(&release);
+    let executor_first_route = first_route.clone();
     let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
             let selected = physically_selected_routes(&execution, &executor_routes);
@@ -643,7 +786,14 @@ fn event_during_running_exact_invalidates_manual_all_coverage() {
                 executor_entered.wait();
                 executor_release.wait();
             } else {
-                assert!(execution.covered_route_ids.is_empty());
+                assert_eq!(
+                    execution.covered_route_ids,
+                    executor_routes
+                        .iter()
+                        .filter(|route| *route != &executor_first_route)
+                        .cloned()
+                        .collect()
+                );
             }
             publish_selected_routes(&execution, &selected, None)
         },
@@ -757,13 +907,12 @@ fn exact_route_event_during_execution_creates_one_successor_and_noop_ack_cleans_
             )?
             .commit(|_| true)?;
             let mut publication = empty_test_publication(commit.generation_id);
-            publication.published_explicit_source_catalog = execution
-                .explicit_source_catalog
-                .cloned()
-                .expect("exact refresh catalog authority");
-            publication.scanned_routes = 1;
-            publication.selected_route_ids = vec![executor_route.as_str().to_owned()];
-            publication.successful_route_ids = vec![executor_route.as_str().to_owned()];
+            publication.published_explicit_source_catalog =
+                execution.explicit_source_catalog.cloned();
+            publication.route_results = vec![SourceBackedRefreshRouteResult::succeeded(
+                executor_route.as_str().to_owned(),
+                true,
+            )];
             Ok(publication)
         });
     let coordinator = Arc::new(CoreRefreshEngine::with_executor(executor));
@@ -815,28 +964,22 @@ fn route_failure_executor(
         )?
         .commit(|_| true)?;
         let mut publication = empty_test_publication(commit.generation_id);
-        publication.published_explicit_source_catalog = execution
-            .explicit_source_catalog
-            .cloned()
-            .expect("exact refresh catalog authority");
-        publication.scanned_routes = 1;
-        publication.selected_route_ids = vec![route.as_str().to_owned()];
-        publication.failed_route_outcomes = vec![SourceBackedRefreshRouteFailure {
+        publication.published_explicit_source_catalog = execution.explicit_source_catalog.cloned();
+        let mut result = SourceBackedRefreshRouteResult::failed(
+            route.as_str().to_owned(),
+            class.to_owned(),
+            true,
+        );
+        result.source_failures = vec![SourceBackedRefreshSourceFailure {
             route_identity: route.as_str().to_owned(),
-            source_identity: "content-free-source".to_owned(),
-            provider: "fixture".to_owned(),
-            class: class.to_owned(),
-            carried_forward: true,
-        }];
-        publication.source_failures = vec![SourceBackedRefreshSourceFailure {
-            route_identity: route.as_str().to_owned(),
-            source_identity: "content-free-source".to_owned(),
+            source_identity: "cd".repeat(32),
             provider: "fixture".to_owned(),
             class: class.to_owned(),
             carried_forward: true,
             source_selector: "fixture source".to_owned(),
             detail: "fixture failure".to_owned(),
         }];
+        publication.route_results = vec![result];
         Ok(publication)
     })
 }
@@ -946,7 +1089,7 @@ fn differing_catalog_authority_queues_one_successor_behind_a_running_refresh() {
                         runner_started.send(()).expect("signal running refresh");
                         let _ = runner_release.recv();
                         let mut publication = test_publication("catalog-generation-1");
-                        publication.published_explicit_source_catalog = runner_authority;
+                        publication.published_explicit_source_catalog = Some(runner_authority);
                         Ok(publication)
                     },
                     || Ok(Some("catalog-generation-1".to_owned())),
@@ -982,7 +1125,7 @@ fn differing_catalog_authority_queues_one_successor_behind_a_running_refresh() {
             |request_id, _| {
                 assert_eq!(request_id, second_request_id);
                 let mut publication = test_publication("catalog-generation-2");
-                publication.published_explicit_source_catalog = second_authority.clone();
+                publication.published_explicit_source_catalog = Some(second_authority.clone());
                 Ok(publication)
             },
             || Ok(Some("catalog-generation-2".to_owned())),
@@ -996,7 +1139,7 @@ fn differing_catalog_authority_queues_one_successor_behind_a_running_refresh() {
     assert_eq!(published_second["request_state"], "published");
     assert_eq!(
         ExplicitSourceCatalogAuthority::from_json(
-            &published_second["published_explicit_source_catalog"]
+            &published_second["receipt"]["published_explicit_source_catalog"]
         )
         .unwrap(),
         second_authority
@@ -1090,7 +1233,7 @@ fn terminal_history_is_trimmed_independently_from_inflight_capacity() {
 }
 
 #[test]
-fn default_executor_with_implicit_import_catalog_keeps_automatic_discovery_and_maps_progress() {
+fn default_executor_without_overlay_keeps_automatic_discovery_and_maps_progress() {
     let coordinator = CoreRefreshEngine::new();
     assert_eq!(
         coordinator.executor.implementation_name(),
@@ -1134,14 +1277,15 @@ fn default_executor_with_implicit_import_catalog_keeps_automatic_discovery_and_m
         ));
         Ok(())
     };
-    let implicit_catalog = load_explicit_source_catalog_authority(&data_root).unwrap();
     let execution = SourceBackedRefreshExecution {
         data_root: &data_root,
         index_root: &index_root,
         request_id: "all-provider-request",
-        explicit_source_catalog: Some(&implicit_catalog),
+        operation: SourceBackedRefreshOperation::Refresh,
+        explicit_source_catalog: None,
         scope: SourceBackedRefreshScope::All,
         covered_route_ids: BTreeSet::new(),
+        covered_publication: SourceBackedRefreshCoveredPublication::default(),
         report_progress: &report_progress,
     };
     let mut provider_wide_calls = 0;
@@ -1152,11 +1296,14 @@ fn default_executor_with_implicit_import_catalog_keeps_automatic_discovery_and_m
         |observed_discovery,
          observed_report,
          observed_discovery_duration,
+         observed_request_id,
+         observed_operation,
          observed_data_root,
          observed_index_root,
          observed_explicit_source_catalog,
          observed_scope,
          observed_covered_route_ids,
+         observed_covered_publication,
          progress| {
             provider_wide_calls += 1;
             assert_eq!(observed_discovery.home(), discovery.home());
@@ -1168,15 +1315,14 @@ fn default_executor_with_implicit_import_catalog_keeps_automatic_discovery_and_m
                     && source.status == ProviderSourceStatus::Available
             }));
             assert_ne!(observed_discovery_duration, StdDuration::ZERO);
+            assert_eq!(observed_request_id, "all-provider-request");
+            assert_eq!(observed_operation, SourceBackedRefreshOperation::Refresh);
             assert_eq!(observed_data_root, data_root);
             assert_eq!(observed_index_root, index_root);
-            assert_eq!(
-                observed_explicit_source_catalog,
-                Some(&implicit_catalog),
-                "an implicit import catalog must not replace automatic discovery"
-            );
+            assert!(observed_explicit_source_catalog.is_none());
             assert_eq!(observed_scope, SourceBackedRefreshScope::All);
             assert!(observed_covered_route_ids.is_empty());
+            assert!(observed_covered_publication.route_results.is_empty());
             progress(CaptureSourceBackedDetailedRefreshProgress {
                 progress: CaptureSourceBackedRefreshProgress {
                     phase: "discovering",
@@ -1293,11 +1439,10 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
         &mut progress,
     )
     .unwrap();
-    assert_eq!(first.scanned_routes, 0);
+    assert!(first.route_results.is_empty());
     assert_eq!(first.unsupported_routes, 1);
     assert_eq!(first.certified_source_count, 0);
-    let empty_catalog = load_explicit_source_catalog_authority(&data_root).unwrap();
-    assert_eq!(first.published_explicit_source_catalog, empty_catalog);
+    assert_eq!(first.published_explicit_source_catalog, None);
     let verified = VerifiedIndex::open(&index_root).unwrap();
     assert!(verified.manifest().sources.is_empty());
     assert!(verified.manifest().source_routes().is_empty());
@@ -1316,9 +1461,9 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
     )
     .unwrap();
     assert_eq!(replay.generation_id, first.generation_id);
-    assert_eq!(replay.scanned_routes, 0);
+    assert!(replay.route_results.is_empty());
     assert_eq!(replay.unsupported_routes, 1);
-    assert_eq!(replay.published_explicit_source_catalog, empty_catalog);
+    assert_eq!(replay.published_explicit_source_catalog, None);
 
     let coordinator = CoreRefreshEngine::new();
     let request = coordinator.enqueue_periodic(&data_root).unwrap();
@@ -1333,123 +1478,18 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
         )
         .unwrap();
     assert!(!run.failed);
-    assert_eq!(
-        run.job["published_explicit_source_catalog"],
-        empty_catalog.to_json()
-    );
-    assert_eq!(
-        run.job["receipt"]["published_explicit_source_catalog"],
-        empty_catalog.to_json()
-    );
+    assert!(run.job.get("published_explicit_source_catalog").is_none());
+    assert!(run.job["receipt"]
+        .get("published_explicit_source_catalog")
+        .is_none());
     assert_eq!(
         coordinator.status(&request_id).unwrap()["request_state"],
         "published"
     );
 }
 
-#[test]
-fn automatic_refresh_replaces_a_zstd_settings_generation() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let index_root = source_backed_index_root(&data_root);
-    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
-    let home = temp.path().join("home");
-    let cwd = temp.path().join("cwd");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(&cwd).unwrap();
-    let discovery = DiscoveryContext::new(
-        &home,
-        &cwd,
-        DiscoveryPlatform::Linux,
-        DiscoveryPlatformDirs::default(),
-    );
-    let report = DiscoveryReport {
-        sources: vec![ProviderSource {
-            provider: CaptureProvider::Warp,
-            path: temp.path().join("missing-unsupported.sqlite"),
-            exists: false,
-            source_format: "warp_sqlite",
-            source_kind: ProviderSourceKind::DetectionOnly,
-            import_support: ProviderImportSupport::Unsupported,
-            catalog_support: ProviderCatalogSupport::None,
-            status: ProviderSourceStatus::Unsupported,
-            unsupported_reason: Some("fixture has no executable source-backed route"),
-        }],
-        issues: Vec::new(),
-    };
-    let mut progress =
-        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
-    let baseline = refresh_all_provider_sources(
-        &discovery,
-        report.clone(),
-        StdDuration::ZERO,
-        &data_root,
-        &index_root,
-        None,
-        SourceBackedRefreshScope::All,
-        &BTreeSet::new(),
-        &mut progress,
-    )
-    .unwrap();
-    let pointer_path = index_root.join("active-generation.json");
-    let pointer_before = std::fs::read(&pointer_path).unwrap();
-    let pointer: Value = serde_json::from_slice(&pointer_before).unwrap();
-    let old_directory = pointer["active"]["directory"].as_str().unwrap();
-    let old_generation_path = index_root.join("index-generations").join(old_directory);
-    let meta_path = old_generation_path.join("meta.json");
-    let mut meta: Value = serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
-    meta["index_settings"]["docstore_compression"] =
-        Value::String("zstd(compression_level=1)".to_owned());
-    meta["index_settings"]["docstore_blocksize"] = Value::from(64 * 1024);
-    std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
-    assert!(matches!(
-        VerifiedIndex::open(&index_root),
-        Err(IndexError::IndexSettingsMismatch(_))
-    ));
-    assert!(open_published_generation(&data_root).unwrap().is_none());
-
-    let coordinator = CoreRefreshEngine::new();
-    let queued = coordinator.enqueue_periodic(&data_root).unwrap();
-    assert!(queued["previous_generation"].is_null());
-    let run = coordinator
-        .run_next_with(
-            |_, _| {
-                let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| {
-                    Ok::<(), SourceBackedRouteError>(())
-                };
-                refresh_all_provider_sources(
-                    &discovery,
-                    report,
-                    StdDuration::ZERO,
-                    &data_root,
-                    &index_root,
-                    None,
-                    SourceBackedRefreshScope::All,
-                    &BTreeSet::new(),
-                    &mut progress,
-                )
-            },
-            || {
-                Ok(open_published_generation(&data_root)?
-                    .map(|index| index.generation_id().to_owned()))
-            },
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .expect("queued automatic rebuild");
-
-    assert!(!run.failed);
-    assert!(run.did_work);
-    assert_eq!(run.job["published_generation"], baseline.generation_id);
-    assert_ne!(std::fs::read(&pointer_path).unwrap(), pointer_before);
-    assert!(!old_generation_path.exists());
-    assert_eq!(
-        pin_active_verified_generation(&data_root)
-            .unwrap()
-            .generation_id(),
-        baseline.generation_id
-    );
-}
+#[path = "source_backed_refresh_coordinator_tests/settings_upgrade.rs"]
+mod settings_upgrade;
 
 #[path = "codex_union_tests.rs"]
 mod codex_union_tests;
@@ -1459,3 +1499,6 @@ mod request_coalescing_tests;
 
 #[path = "source_backed_refresh_coordinator_tests_publication_lifecycle.rs"]
 mod publication_lifecycle_tests;
+
+#[path = "source_backed_refresh_coordinator_tests_durable_receipt.rs"]
+mod durable_receipt_tests;

@@ -6,8 +6,8 @@ use std::{
 use serde_json::json;
 
 use super::{
-    index_readiness_snapshot, index_ready, index_terminal_error, index_wait_json,
-    index_watch_output, IndexSelection, IndexWaitArgs, IndexWaitHumanOutput, IndexWatchOutput,
+    index_ready, index_terminal_error, index_wait_json, index_watch_output, IndexSelection,
+    IndexWaitArgs, IndexWaitHumanOutput, IndexWatchOutput,
 };
 use crate::output::JsonOutputFormat;
 use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext, Ui};
@@ -113,18 +113,6 @@ fn first_publication_pending_is_not_collapsed_to_missing() {
 }
 
 #[test]
-fn public_index_snapshot_pins_core_once_and_queries_pro_once() {
-    let temp = tempfile::tempdir().unwrap();
-    let (status, counts) = crate::semantic::count_public_status_snapshot_reads(|| {
-        index_readiness_snapshot(temp.path())
-    });
-
-    status.unwrap();
-    assert_eq!(counts.core_pins, 1);
-    assert_eq!(counts.pro_queries, 1);
-}
-
-#[test]
 fn machine_snapshot_contains_only_authoritative_readiness_units() {
     let status = first_publication_pending();
     let mut output = IndexWatchOutput::for_test(Vec::new(), false, 32);
@@ -185,6 +173,21 @@ fn default_and_all_waits_preserve_refresh_convergence() {
     let all = wait_selection(false, false, true);
     assert!(!index_ready(&pending, all));
     assert!(index_ready(&ready, all));
+}
+
+#[test]
+fn completed_with_rejections_is_converged_for_valid_published_peers() {
+    let mut partial = readiness("ready", 12, true);
+    partial["refresh"] = json!({
+        "status": "partial",
+        "reason": "completed_with_rejections",
+        "request_state": "published",
+        "generation_matches": true,
+    });
+
+    let selection = IndexSelection::default_for(&partial);
+    assert!(index_ready(&partial, selection));
+    assert!(index_terminal_error(&partial, selection).is_none());
 }
 
 #[test]

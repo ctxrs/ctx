@@ -4,12 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import os
 from pathlib import Path
 import sqlite3
-import subprocess
-import tempfile
-import time
 from typing import Callable
 import unittest
 
@@ -113,105 +109,6 @@ class FamilyCorpus:
 
     def close(self) -> None:
         self._close()
-
-
-@dataclass(frozen=True)
-class FamilyRefreshSample:
-    packet: dict[str, object]
-    elapsed_seconds: float
-    cpu_seconds: float
-    cpu_per_wall: float
-    baseline_open_fds: int
-    peak_open_fds: int
-    peak_rss_bytes: int
-
-
-def linux_process_cpu_seconds(pid: int) -> float:
-    stat = (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
-    fields = stat.rsplit(")", 1)[1].split()
-    clock_ticks = os.sysconf("SC_CLK_TCK")
-    return (int(fields[11]) + int(fields[12])) / clock_ticks
-
-
-def linux_peak_rss_bytes(pid: int) -> int:
-    status_path = Path("/proc") / str(pid) / "status"
-    values: dict[str, int] = {}
-    for line in status_path.read_text(encoding="ascii").splitlines():
-        name, separator, raw = line.partition(":")
-        if separator and name in {"VmHWM", "VmRSS"}:
-            parts = raw.split()
-            if len(parts) == 2 and parts[1] == "kB":
-                values[name] = int(parts[0]) * 1024
-    return values.get("VmHWM", values.get("VmRSS", 0))
-
-
-def linux_open_fd_count(pid: int) -> int:
-    return len(tuple((Path("/proc") / str(pid) / "fd").iterdir()))
-
-
-def run_family_refresh_measured(
-    args: list[str],
-    env: dict[str, str],
-    cwd: Path,
-    daemon_pid: int,
-    timeout_seconds: float,
-) -> FamilyRefreshSample:
-    started = time.monotonic()
-    initial_cpu = linux_process_cpu_seconds(daemon_pid)
-    baseline_open_fds = linux_open_fd_count(daemon_pid)
-    peak_open_fds = baseline_open_fds
-    peak_rss_bytes = linux_peak_rss_bytes(daemon_pid)
-    with tempfile.TemporaryFile(mode="w+b", dir=cwd) as stdout_file, (
-        tempfile.TemporaryFile(mode="w+b", dir=cwd)
-    ) as stderr_file:
-        process = subprocess.Popen(
-            [env["CTX_PERFORMANCE_TASK_BINARY"], *args],
-            cwd=cwd,
-            env=env,
-            stdout=stdout_file,
-            stderr=stderr_file,
-        )
-        deadline = started + timeout_seconds
-        while process.poll() is None:
-            peak_open_fds = max(peak_open_fds, linux_open_fd_count(daemon_pid))
-            peak_rss_bytes = max(
-                peak_rss_bytes, linux_peak_rss_bytes(daemon_pid)
-            )
-            if time.monotonic() >= deadline:
-                process.kill()
-                process.wait()
-                stdout_file.seek(0)
-                stderr_file.seek(0)
-                raise TimeoutError(
-                    f"{' '.join(args)} exceeded {timeout_seconds}s\n"
-                    f"stdout:\n{stdout_file.read().decode(errors='replace')}\n"
-                    f"stderr:\n{stderr_file.read().decode(errors='replace')}"
-                )
-            time.sleep(0.002)
-        stdout_file.seek(0)
-        stderr_file.seek(0)
-        stdout = stdout_file.read()
-        stderr = stderr_file.read()
-    if process.returncode != 0:
-        raise RuntimeError(
-            f"{' '.join(args)} exited {process.returncode}\n"
-            f"stdout:\n{stdout.decode(errors='replace')}\n"
-            f"stderr:\n{stderr.decode(errors='replace')}"
-        )
-    packet = json.loads(stdout)
-    if not isinstance(packet, dict):
-        raise RuntimeError(f"{' '.join(args)} did not return a JSON object")
-    elapsed_seconds = time.monotonic() - started
-    cpu_seconds = linux_process_cpu_seconds(daemon_pid) - initial_cpu
-    return FamilyRefreshSample(
-        packet=packet,
-        elapsed_seconds=elapsed_seconds,
-        cpu_seconds=cpu_seconds,
-        cpu_per_wall=cpu_seconds / elapsed_seconds,
-        baseline_open_fds=baseline_open_fds,
-        peak_open_fds=peak_open_fds,
-        peak_rss_bytes=peak_rss_bytes,
-    )
 
 
 class SourceFamilyTaxonomyTest(unittest.TestCase):

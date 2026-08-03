@@ -219,9 +219,7 @@ fn ordered_prefetch_is_byte_exact_and_bounded_across_workers_and_skew() {
                         CORE_PREFETCH_ENCODED_BYTE_BUDGET
                     );
                     assert!(prefetch.hashed_records >= record_count);
-                    assert!(
-                        prefetch.hashed_records <= record_count + prefetch.workers_launched - 1
-                    );
+                    assert!(prefetch.hashed_records < record_count + prefetch.workers_launched);
                     assert!(prefetch.maximum_active_workers <= prefetch.workers_launched);
                 }
                 PrefetchFixture::ManyTiny | PrefetchFixture::Balanced => {

@@ -157,12 +157,13 @@ struct SourceRoutePlan {
 #[derive(Clone)]
 struct SourceRouteStageCheckpoint {
     route_identity: SourceRouteIdentity,
+    source_route_plan: SourceRoutePlan,
     complete_inventories: Vec<CertifiedSourceInventory>,
     pending: HashMap<String, PendingSource>,
     deletions: HashMap<SourceKey, PendingDeletion>,
     route_deletions: HashSet<SourceKey>,
     observed_missing_routes: HashMap<SourceRouteIdentity, SourceRouteSnapshot>,
-    missing_route_revalidation_len: usize,
+    route_publication_revalidation_len: usize,
     source_identities: HashMap<Uuid, [u8; 32]>,
 }
 
@@ -228,7 +229,8 @@ pub struct GenerationWriter {
     route_deletions: HashSet<SourceKey>,
     present_source_routes: Option<Vec<SourceRouteSnapshot>>,
     observed_missing_routes: HashMap<SourceRouteIdentity, SourceRouteSnapshot>,
-    missing_route_revalidations: Vec<(SourceRouteIdentity, Box<dyn Fn() -> bool + Send + 'static>)>,
+    route_publication_revalidations:
+        Vec<(SourceRouteIdentity, Box<dyn Fn() -> bool + Send + 'static>)>,
     source_identities: HashMap<Uuid, [u8; 32]>,
     source_route_plan: Option<SourceRoutePlan>,
     active_source_route_stage: Option<SourceRouteStageCheckpoint>,
@@ -460,7 +462,7 @@ impl GenerationWriter {
             route_deletions: HashSet::new(),
             present_source_routes: None,
             observed_missing_routes: HashMap::new(),
-            missing_route_revalidations: Vec::new(),
+            route_publication_revalidations: Vec::new(),
             source_identities,
             source_route_plan: None,
             active_source_route_stage: None,
@@ -607,6 +609,9 @@ impl GenerationWriter {
         }
         if let Some(missing) = base.sources.iter().find(|source| {
             !self.source_is_carried_from_base(source.observation().source())
+                && !self
+                    .pending
+                    .contains_key(&source_token(source.observation().source()))
                 && !covered_sources.contains(&source.observation().source().identity().digest())
         }) {
             return Err(IndexError::IncompleteExactReplayCoverage {
@@ -858,45 +863,6 @@ impl GenerationWriter {
         Ok(())
     }
 
-    /// Defines every route conclusively present in the candidate snapshot.
-    /// Missing routes are added separately by `observe_certified_missing_route`.
-    pub fn set_present_source_routes(&mut self, routes: Vec<SourceRouteSnapshot>) -> Result<()> {
-        if routes.iter().any(|route| route.missing_state().is_some()) {
-            return Err(IndexError::WriterInvariant(
-                "present source routes cannot carry missing state",
-            ));
-        }
-        let mut canonical = routes;
-        if let Some(plan) = &self.source_route_plan {
-            if let Some(route) = canonical.iter().find(|route| {
-                !plan.completed.contains(route.route_identity())
-                    || plan.carried_from_base.contains(route.route_identity())
-            }) {
-                return Err(IndexError::InvalidSourceRoutePlan(format!(
-                    "present route {} is not a completed selected route",
-                    route.route_identity().as_str()
-                )));
-            }
-            if let Some(base) = &self.base_manifest {
-                canonical.extend(
-                    base.source_routes()
-                        .iter()
-                        .filter(|route| plan.carried_from_base.contains(route.route_identity()))
-                        .cloned(),
-                );
-            }
-        }
-        canonical.sort_by(|left, right| left.route_identity().cmp(right.route_identity()));
-        if canonical
-            .windows(2)
-            .any(|pair| pair[0].route_identity() == pair[1].route_identity())
-        {
-            return Err(IndexError::NonCanonicalSourceRoutes);
-        }
-        self.present_source_routes = Some(canonical);
-        Ok(())
-    }
-
     /// Advances durable grace for one whole route whose absence is
     /// conclusive and can be revalidated immediately before publication.
     pub fn observe_certified_missing_route<F>(
@@ -917,7 +883,7 @@ impl GenerationWriter {
         }
         if self.observed_missing_routes.contains_key(&route_identity)
             || self
-                .missing_route_revalidations
+                .route_publication_revalidations
                 .iter()
                 .any(|(candidate, _)| candidate == &route_identity)
         {
@@ -950,7 +916,7 @@ impl GenerationWriter {
             None => SourceRouteMissingState::first(observation),
         };
         let retained_sources = base_route.sources().to_vec();
-        self.missing_route_revalidations
+        self.route_publication_revalidations
             .push((route_identity.clone(), Box::new(revalidate_missing)));
         if state.consecutive_missing().get() >= delete_after_consecutive_observations {
             let source_key_field = self.fields.source_key;

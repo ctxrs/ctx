@@ -68,7 +68,7 @@ fn sources_default_hides_unsupported_missing_locations() {
 }
 
 #[test]
-fn sources_keep_absolute_json_paths_and_abbreviate_human_home_paths() {
+fn request_scoped_import_paths_do_not_enter_the_automatic_source_inventory() {
     let temp = tempdir();
     let explicit_root = temp.path().join("external-codex-history");
     copy_dir_all(
@@ -104,13 +104,7 @@ fn sources_keep_absolute_json_paths_and_abbreviate_human_home_paths() {
         .iter()
         .filter(|source| source["path"] == explicit_path)
         .collect::<Vec<_>>();
-    assert_eq!(matches.len(), 1, "configured source was not deduplicated");
-    assert_eq!(matches[0]["provider"], "codex");
-    assert_eq!(matches[0]["status"], "available");
-    assert_eq!(matches[0]["source_format"], "codex_session_jsonl_tree");
-    assert_eq!(matches[0]["importable"], true);
-    assert_eq!(matches[0]["path"], explicit_path);
-    assert!(Path::new(matches[0]["path"].as_str().unwrap()).is_absolute());
+    assert!(matches.is_empty(), "request overlay leaked into {after:#}");
 
     let human = ctx(&temp)
         .args(["sources", "--provider", "codex"])
@@ -121,10 +115,9 @@ fn sources_keep_absolute_json_paths_and_abbreviate_human_home_paths() {
         .clone();
     let human = String::from_utf8(human).unwrap();
     let concise_path = Path::new("~").join("external-codex-history");
-    assert_eq!(
-        human.matches(&concise_path.display().to_string()).count(),
-        1,
-        "human source inventory did not abbreviate HOME: {human}"
+    assert!(
+        !human.contains(&concise_path.display().to_string()),
+        "{human}"
     );
     assert!(!human.contains(explicit_path), "{human}");
     assert!(!human.contains(temp.path().to_str().unwrap()), "{human}");

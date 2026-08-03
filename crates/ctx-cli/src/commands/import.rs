@@ -23,11 +23,14 @@ use automatic_source_refresh::{
 };
 pub(crate) use entry::{import_report_analytics_outcome, import_report_failure_type, run_import};
 use explicit::{run_explicit_source_catalog_import, ExplicitSourceCatalogImportContext};
+#[cfg(test)]
 pub(crate) use explicit_source_catalog::{
-    explicit_source_for_import, load_explicit_source_catalog_authority,
-    load_explicit_source_catalog_sources, upsert_explicit_source,
-    validate_explicit_source_catalog_roots, ExplicitSourceCatalogAuthority,
-    ExplicitSourceCatalogRouteBinding,
+    explicit_source_catalog_authority_for_test, load_explicit_source_catalog_authority,
+};
+pub(crate) use explicit_source_catalog::{
+    explicit_source_for_import, relocate_explicit_source, relocation_authority_for_import,
+    upsert_explicit_source, ExplicitSourceCatalogAuthority, ExplicitSourceCatalogRouteBinding,
+    ExplicitSourceRelocationAuthority,
 };
 use history_source_plugin::{run_history_source_plugin_import, HistorySourcePluginImportContext};
 pub(crate) use provider_refresh::{ProviderRefreshCollector, ProviderRefreshRuntimeFacts};

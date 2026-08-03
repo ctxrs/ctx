@@ -668,6 +668,8 @@ mod tests {
                     request_id: None,
                     daemon_available: false,
                     source_count: 0,
+                    request_previous_generation: None,
+                    request_generation_changed: false,
                     receipt: None,
                     pin: PinnedSourceBackedGeneration::from_index(open_index(data_root)?),
                 })

@@ -164,6 +164,7 @@ impl ImportTelemetry {
         let mut telemetry = Self::from_args(&crate::ImportArgs {
             provider: None,
             path: None,
+            relocate_from: None,
             history_source: None,
             history_source_manifest: Vec::new(),
             reset_cursor: false,

@@ -59,16 +59,16 @@ pub(crate) fn assert_explicit_source_publication<'a>(
         );
         assert_eq!(packet["totals"][key], source[key], "{packet:#}");
     }
+    assert_eq!(packet["totals"]["failed_sources"], 0, "{packet:#}");
+    assert_eq!(packet["totals"]["rejected_records"], 0, "{packet:#}");
+    assert_eq!(
+        packet["totals"]["sources_completed_with_rejections"], 0,
+        "{packet:#}"
+    );
+    assert!(packet["totals"]["rejections"].is_object(), "{packet:#}");
     assert_omits_keys(
         packet,
-        &[
-            "failed_sources",
-            "imported_sessions",
-            "imported_events",
-            "skipped_events",
-            "rejected_records",
-            "rejections",
-        ],
+        &["imported_sessions", "imported_events", "skipped_events"],
     );
     source
 }
@@ -108,13 +108,15 @@ pub(crate) fn assert_authoritative_provider_publication(packet: &Value) -> &Valu
     }
     assert_omits_keys(
         packet,
-        &[
-            "failed_sources",
-            "imported_sessions",
-            "imported_events",
-            "skipped_events",
-        ],
+        &["imported_sessions", "imported_events", "skipped_events"],
     );
+    assert_eq!(packet["totals"]["failed_sources"], 0, "{packet:#}");
+    assert_eq!(packet["totals"]["rejected_records"], 0, "{packet:#}");
+    assert_eq!(
+        packet["totals"]["sources_completed_with_rejections"], 0,
+        "{packet:#}"
+    );
+    assert!(packet["totals"]["rejections"].is_object(), "{packet:#}");
     source
 }
 
