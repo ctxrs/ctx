@@ -460,6 +460,46 @@ fn junie_official_root_uses_junie_home_and_ignores_retired_sessions_override() {
 }
 
 #[test]
+fn factory_official_root_is_the_fixed_sessions_directory_on_supported_platforms() {
+    let temp = tempdir();
+    let base = context(&temp, DiscoveryPlatform::Linux);
+    let sessions = base.home().join(".factory/sessions");
+
+    let missing = resolve_provider(&base, CaptureProvider::FactoryAiDroid);
+    assert_eq!(paths(&missing), std::slice::from_ref(&sessions));
+    assert_eq!(missing.sources[0].status, ProviderSourceStatus::Missing);
+    assert_eq!(
+        missing.sources[0].source_format,
+        "factory_ai_droid_sessions_jsonl"
+    );
+    assert!(missing.issues.is_empty());
+
+    fs::create_dir_all(sessions.join("-Users-example-project")).unwrap();
+    fs::write(
+        sessions.join("-Users-example-project/session.jsonl"),
+        "{}\n",
+    )
+    .unwrap();
+    let available = resolve_provider(&base, CaptureProvider::FactoryAiDroid);
+    assert_eq!(paths(&available), std::slice::from_ref(&sessions));
+    assert_eq!(available.sources[0].status, ProviderSourceStatus::Available);
+
+    fs::remove_file(sessions.join("-Users-example-project/session.jsonl")).unwrap();
+    let empty = resolve_provider(&base, CaptureProvider::FactoryAiDroid);
+    assert_eq!(empty.sources[0].status, ProviderSourceStatus::Empty);
+
+    let unsupported = resolve_provider(
+        &context(&temp, DiscoveryPlatform::OtherUnix),
+        CaptureProvider::FactoryAiDroid,
+    );
+    assert!(unsupported.sources.is_empty());
+    assert_eq!(
+        unsupported.issues[0].kind,
+        DiscoveryIssueKind::SelectorUnreconstructible
+    );
+}
+
+#[test]
 fn forgecode_official_root_preserves_raw_cwd_semantics_and_exists_winner() {
     let temp = tempdir();
     let base = context(&temp, DiscoveryPlatform::Linux);

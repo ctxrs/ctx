@@ -50,6 +50,7 @@ pub(super) fn resolve(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> 
         CaptureProvider::Cursor => resolve_cursor(context, spec),
         CaptureProvider::KimiCodeCli => resolve_kimi(context, spec),
         CaptureProvider::Junie => resolve_junie(context, spec),
+        CaptureProvider::FactoryAiDroid => resolve_factory(context, spec),
         CaptureProvider::ForgeCode => resolve_forgecode(context, spec),
         _ => DiscoveryReport::default(),
     }
@@ -373,6 +374,17 @@ fn resolve_junie(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Disco
         spec,
         home.join("sessions"),
         "junie_session_events_jsonl_tree",
+    )
+}
+
+fn resolve_factory(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
+    if let Err(report) = supported_default(context, spec) {
+        return report;
+    }
+    one_source(
+        spec,
+        context.home().join(".factory").join("sessions"),
+        "factory_ai_droid_sessions_jsonl",
     )
 }
 

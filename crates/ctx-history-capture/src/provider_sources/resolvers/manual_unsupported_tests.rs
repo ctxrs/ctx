@@ -100,11 +100,9 @@ fn qoder_probe_is_shallow_bounded_and_deterministic() {
 }
 
 #[test]
-fn factory_and_firebender_emit_only_insufficient_evidence_issues() {
+fn firebender_emits_only_insufficient_evidence_issues() {
     let temp = tempdir();
     let context = context(temp.path(), DiscoveryPlatform::Linux);
-    let factory_path = context.home().join(".factory/sessions");
-    write(&factory_path.join("session.jsonl"), b"{}\n");
     write(
         &context
             .cwd()
@@ -112,24 +110,13 @@ fn factory_and_firebender_emit_only_insufficient_evidence_issues() {
             .join(".idea/firebender/chat_history.db"),
         b"not consulted",
     );
-    for provider in [CaptureProvider::FactoryAiDroid, CaptureProvider::Firebender] {
-        let report = resolve(&context, spec(provider));
-        assert!(report.sources.is_empty());
-        assert_eq!(
-            (report.issues.len(), report.issues[0].kind),
-            (1, DiscoveryIssueKind::InsufficientOfficialEvidence)
-        );
-    }
+    let report = resolve(&context, spec(CaptureProvider::Firebender));
+    assert!(report.sources.is_empty());
     assert_eq!(
-        resolve(&context, spec(CaptureProvider::FactoryAiDroid)).issues[0]
-            .path
-            .as_deref(),
-        Some(factory_path.as_path())
+        (report.issues.len(), report.issues[0].kind),
+        (1, DiscoveryIssueKind::InsufficientOfficialEvidence)
     );
-    assert_eq!(
-        resolve(&context, spec(CaptureProvider::Firebender)).issues[0].path,
-        None
-    );
+    assert_eq!(report.issues[0].path, None);
 }
 
 #[test]

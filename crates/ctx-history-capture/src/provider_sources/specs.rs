@@ -172,7 +172,11 @@ const COPILOT_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
-const FACTORY_DROID_DEFAULTS: &[ProviderDefaultLocation] = &[];
+const FACTORY_DROID_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".factory", "sessions"],
+    source_format: "factory_ai_droid_sessions_jsonl",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
 
 const QWEN_CODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".qwen", "projects"],

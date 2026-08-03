@@ -32,7 +32,6 @@ const UNSAFE_SELECTED_PATH_REASON: &str =
 pub(super) fn resolve(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
     match spec.provider {
         CaptureProvider::Qoder => resolve_qoder(context, spec),
-        CaptureProvider::FactoryAiDroid => resolve_factory(context, spec),
         CaptureProvider::Firebender => resolve_firebender(spec),
         CaptureProvider::Auggie => resolve_auggie(context, spec),
         CaptureProvider::DeepAgents => resolve_deepagents(context, spec),
@@ -220,18 +219,6 @@ fn inspect_qoder_projects(projects: &Path) -> (ProbeState, bool) {
         },
         direct,
     )
-}
-
-fn resolve_factory(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
-    DiscoveryReport {
-        sources: Vec::new(),
-        issues: vec![issue(
-            spec.provider,
-            bounded_issue_path(context.home().join(".factory").join("sessions")),
-            DiscoveryIssueKind::InsufficientOfficialEvidence,
-            "no official automatic Factory history location is established; use an exact user-authorized --path",
-        )],
-    }
 }
 
 fn resolve_firebender(spec: &ProviderSourceSpec) -> DiscoveryReport {
