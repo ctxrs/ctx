@@ -32,7 +32,7 @@ pub(super) fn bound_query_events_mcp_response(
         return response;
     }
 
-    let message = "query_events response exceeds the MCP output limit; lower max_bytes or retry with content=text or content=none";
+    let message = "query_events response exceeds the MCP output limit; retry with content=text or content=none";
     let result = json!({
         "isError": true,
         "content": [{ "type": "text", "text": message }],
@@ -42,7 +42,7 @@ pub(super) fn bound_query_events_mcp_response(
             "actual_bytes": actual_bytes,
             "maximum_bytes": output_limit_bytes,
             "retryable": true,
-            "recommendation": "lower max_bytes or retry with content=text or content=none",
+            "recommendation": "retry with content=text or content=none",
         },
     });
     let bounded = success_response(response_id, result);

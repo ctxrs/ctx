@@ -31,44 +31,32 @@ fn parse_events(arguments: &[&str]) -> ShowEventsArgs {
     let ShowTarget::Events(events) = show.target else {
         panic!("expected events target");
     };
-    events
+    *events
 }
 
 #[test]
 fn all_domain_is_explicit_and_defaults_when_omitted() {
-    assert!(parse_events(&["ctx", "show", "events", "--all"]).all);
     let defaulted = parse_events(&["ctx", "show", "events"]);
-    assert!(!defaulted.all);
     assert!(defaulted.since.is_none() && defaulted.until.is_none());
     assert_eq!(defaulted.limit, DEFAULT_EVENT_QUERY_LIMIT);
 }
 
 #[test]
-fn all_conflicts_with_timestamp_range() {
-    let error = Cli::try_parse_from([
-        "ctx",
-        "show",
-        "events",
+fn unreleased_aliases_and_page_budget_flags_are_rejected() {
+    for flag in [
         "--all",
-        "--since",
-        "2026-08-01T00:00:00Z",
-        "--until",
-        "2026-08-02T00:00:00Z",
-    ])
-    .unwrap_err();
-    assert!(error.to_string().contains("cannot be used with"));
-}
-
-#[test]
-fn max_items_is_canonical_and_page_items_remains_an_alias() {
-    assert_eq!(
-        parse_events(&["ctx", "show", "events", "--max-items", "7"]).max_items,
-        7
-    );
-    assert_eq!(
-        parse_events(&["ctx", "show", "events", "--page-items", "8"]).max_items,
-        8
-    );
+        "--parent",
+        "--root",
+        "--max-items",
+        "--page-items",
+        "--max-bytes",
+        "--byte-budget",
+    ] {
+        assert!(
+            Cli::try_parse_from(["ctx", "show", "events", flag]).is_err(),
+            "unexpectedly accepted {flag}"
+        );
+    }
 }
 
 #[test]
@@ -148,7 +136,7 @@ fn wire_cap_covers_worst_case_core_json_expansion() {
         MAX_EVENT_QUERY_WIRE_RECORD_BYTES,
         MAX_ENCODED_CORE_RECORD_BYTES * 6 + 1024 * 1024
     );
-    assert!(MAX_EVENT_QUERY_WIRE_RECORD_BYTES < 512 * 1024 * 1024);
+    const { assert!(MAX_EVENT_QUERY_WIRE_RECORD_BYTES < 512 * 1024 * 1024) };
 }
 
 #[test]
@@ -168,7 +156,7 @@ fn machine_errors_are_typed_for_ranges_cursors_and_resource_limits() {
         event_query_error_value(&range)["error_code"],
         "invalid_range"
     );
-    let resource = validated_limits(1, 1, MIN_EVENT_QUERY_BYTE_BUDGET - 1).unwrap_err();
+    let resource = validated_limit(0).unwrap_err();
     assert_eq!(
         event_query_error_value(&resource)["error_code"],
         "resource_limit"
@@ -184,18 +172,20 @@ fn help_exposes_only_the_compact_show_events_route() {
     let help = Cli::try_parse_from(["ctx", "show", "events", "--help"])
         .unwrap_err()
         .to_string();
-    for expected in [
-        "--all",
-        "--since",
-        "--until",
-        "--max-items",
-        "--max-bytes",
-        "--parent-session",
-        "--root-session",
-    ] {
+    for expected in ["--since", "--until", "--parent-session", "--root-session"] {
         assert!(help.contains(expected), "missing {expected} from help");
     }
-    assert!(!help.contains("--page-items"));
+    for removed in [
+        "--all",
+        "--parent ",
+        "--root ",
+        "--max-items",
+        "--page-items",
+        "--max-bytes",
+        "--byte-budget",
+    ] {
+        assert!(!help.contains(removed), "unexpected {removed} in help");
+    }
 }
 
 fn test_source() -> SourceKey {
@@ -305,8 +295,6 @@ fn all_selection(direction: CoreEventRangeDirection) -> CoreEventRangeSelection 
 fn request(
     direction: CoreEventRangeDirection,
     limit: usize,
-    max_items: usize,
-    max_bytes: usize,
     content: EventContentProjection,
 ) -> EventQueryWireRequest {
     EventQueryWireRequest::new(
@@ -314,11 +302,7 @@ fn request(
         json!({}),
         direction,
         content,
-        EventQueryLimits {
-            limit,
-            max_items,
-            max_bytes,
-        },
+        limit,
     )
 }
 
@@ -328,16 +312,14 @@ fn page(
     cursor: Option<&CoreEventRangeCursor>,
     request: &EventQueryWireRequest,
 ) -> Value {
-    event_range_page_value(data_root, selection, cursor, request).unwrap()
+    event_range_page_value(data_root, selection, cursor, request, None).unwrap()
 }
 
 #[test]
 fn json_page_has_protocol_receipt_and_correct_truncation_semantics() {
     let temp = tempfile::tempdir().unwrap();
-    publish_fixture(
-        temp.path(),
-        &["zero".to_owned(), "one".to_owned(), "two".to_owned()],
-    );
+    let bodies = (0..101).map(|index| index.to_string()).collect::<Vec<_>>();
+    publish_fixture(temp.path(), &bodies);
     let selection = all_selection(CoreEventRangeDirection::Ascending);
 
     let normal = page(
@@ -346,23 +328,24 @@ fn json_page_has_protocol_receipt_and_correct_truncation_semantics() {
         None,
         &request(
             CoreEventRangeDirection::Ascending,
-            10,
-            2,
-            DEFAULT_EVENT_QUERY_BYTE_BUDGET as usize,
+            1_000,
             EventContentProjection::Full,
         ),
     );
     assert_eq!(normal["payload_type"], "event_range_page");
-    assert_eq!(normal["events"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        normal["events"].as_array().unwrap().len(),
+        EVENT_QUERY_PAGE_ITEMS
+    );
     assert_eq!(normal["terminal"], false);
     assert_eq!(normal["truncated"], false);
     assert!(normal["next_cursor"].is_string());
     assert_eq!(normal["domain"], json!({ "kind": "all" }));
     assert_eq!(normal["direction"], "ascending");
     assert_eq!(normal["content"], "full");
-    assert_eq!(normal["limit"], 10);
-    assert_eq!(normal["limits"]["max_items"], 2);
-    assert_eq!(normal["usage"]["items"], 2);
+    assert_eq!(normal["limit"], 1_000);
+    assert!(normal.get("limits").is_none());
+    assert_eq!(normal["usage"]["items"], EVENT_QUERY_PAGE_ITEMS);
     assert_eq!(normal["usage"]["pages"], 1);
     assert_eq!(normal["usage"]["oversized_singleton"], false);
     assert_eq!(
@@ -379,8 +362,6 @@ fn json_page_has_protocol_receipt_and_correct_truncation_semantics() {
         &request(
             CoreEventRangeDirection::Ascending,
             1,
-            2,
-            DEFAULT_EVENT_QUERY_BYTE_BUDGET as usize,
             EventContentProjection::Full,
         ),
     );
@@ -397,8 +378,6 @@ fn json_page_has_protocol_receipt_and_correct_truncation_semantics() {
         &request(
             CoreEventRangeDirection::Ascending,
             10,
-            2,
-            DEFAULT_EVENT_QUERY_BYTE_BUDGET as usize,
             EventContentProjection::Full,
         ),
     );
@@ -419,8 +398,6 @@ fn event_projection_is_canonical_complete_and_not_duplicated() {
         &request(
             CoreEventRangeDirection::Ascending,
             10,
-            10,
-            DEFAULT_EVENT_QUERY_BYTE_BUDGET as usize,
             EventContentProjection::Full,
         ),
     );
@@ -458,8 +435,6 @@ fn event_projection_is_canonical_complete_and_not_duplicated() {
         &request(
             CoreEventRangeDirection::Ascending,
             10,
-            10,
-            DEFAULT_EVENT_QUERY_BYTE_BUDGET as usize,
             EventContentProjection::None,
         ),
     );
@@ -494,17 +469,13 @@ impl Write for TrackingWriter {
 #[test]
 fn jsonl_flushes_each_event_before_fetching_the_next_page_and_completes_once() {
     let temp = tempfile::tempdir().unwrap();
-    publish_fixture(
-        temp.path(),
-        &["zero".to_owned(), "one".to_owned(), "two".to_owned()],
-    );
+    let bodies = (0..101).map(|index| index.to_string()).collect::<Vec<_>>();
+    publish_fixture(temp.path(), &bodies);
     let selection = all_selection(CoreEventRangeDirection::Ascending);
     let index = open_event_range_index(temp.path(), None).unwrap();
     let request = request(
         CoreEventRangeDirection::Ascending,
-        10,
-        1,
-        DEFAULT_EVENT_QUERY_BYTE_BUDGET as usize,
+        1_000,
         EventContentProjection::Full,
     );
     let mut writer = TrackingWriter::default();
@@ -514,8 +485,8 @@ fn jsonl_flushes_each_event_before_fetching_the_next_page_and_completes_once() {
         page_flush_counts.push(observed.borrow().flush_offsets.len())
     })
     .unwrap();
-    assert_eq!(count, 3);
-    assert_eq!(page_flush_counts, [1, 2, 3]);
+    assert_eq!(count, 101);
+    assert_eq!(page_flush_counts, [100, 101]);
 
     let state = writer.0.borrow();
     let lines = state
@@ -524,22 +495,22 @@ fn jsonl_flushes_each_event_before_fetching_the_next_page_and_completes_once() {
         .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_slice::<Value>(line).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(lines.len(), 4);
-    for (ordinal, line) in lines[..3].iter().enumerate() {
+    assert_eq!(lines.len(), 102);
+    for (ordinal, line) in lines[..101].iter().enumerate() {
         assert_eq!(line["record_type"], "event_range_event");
         assert_eq!(line["ordinal"], ordinal);
     }
-    let completion = &lines[3];
+    let completion = &lines[101];
     assert_eq!(completion["record_type"], "event_range_completion");
     assert_eq!(completion["terminal"], true);
     assert_eq!(completion["truncated"], false);
-    assert_eq!(completion["usage"]["items"], 3);
-    assert_eq!(completion["usage"]["pages"], 3);
+    assert_eq!(completion["usage"]["items"], 101);
+    assert_eq!(completion["usage"]["pages"], 2);
     assert_eq!(completion["usage"]["bytes"], state.bytes.len());
     assert_eq!(completion["usage"]["oversized_singleton_pages"], 0);
-    assert_eq!(completion["limits"]["max_items"], 1);
+    assert!(completion.get("limits").is_none());
     assert_eq!(completion["domain"], json!({ "kind": "all" }));
-    assert_eq!(state.flush_offsets.len(), 4);
+    assert_eq!(state.flush_offsets.len(), 102);
     let json_page = page(temp.path(), &selection, None, &request);
     assert_eq!(lines[0]["event"], json_page["events"][0]);
 }
@@ -555,8 +526,6 @@ fn cursor_direction_filters_and_mcp_page_share_one_wire_shape() {
     let descending_request = request(
         CoreEventRangeDirection::Descending,
         DEFAULT_EVENT_QUERY_LIMIT as usize,
-        DEFAULT_EVENT_QUERY_PAGE_ITEMS as usize,
-        DEFAULT_EVENT_QUERY_BYTE_BUDGET as usize,
         EventContentProjection::Text,
     );
     let cli_page = page(temp.path(), &selection, None, &descending_request);
@@ -573,8 +542,6 @@ fn cursor_direction_filters_and_mcp_page_share_one_wire_shape() {
             "direction": "descending",
             "content": "text",
             "limit": DEFAULT_EVENT_QUERY_LIMIT,
-            "max_items": DEFAULT_EVENT_QUERY_PAGE_ITEMS,
-            "max_bytes": DEFAULT_EVENT_QUERY_BYTE_BUDGET,
         }),
         temp.path(),
     )
@@ -583,9 +550,7 @@ fn cursor_direction_filters_and_mcp_page_share_one_wire_shape() {
 
     let first_request = request(
         CoreEventRangeDirection::Ascending,
-        10,
         1,
-        DEFAULT_EVENT_QUERY_BYTE_BUDGET as usize,
         EventContentProjection::None,
     );
     let ascending = all_selection(CoreEventRangeDirection::Ascending);
@@ -602,7 +567,13 @@ fn cursor_direction_filters_and_mcp_page_share_one_wire_shape() {
     })
     .unwrap();
     assert!(matches!(
-        event_range_page_value(temp.path(), &mismatched, Some(&cursor), &first_request),
+        event_range_page_value(
+            temp.path(),
+            &mismatched,
+            Some(&cursor),
+            &first_request,
+            None
+        ),
         Err(EventQueryError::Range(
             CoreEventRangeError::CursorSelectionMismatch
         ))
@@ -612,7 +583,7 @@ fn cursor_direction_filters_and_mcp_page_share_one_wire_shape() {
 #[test]
 fn full_projection_admits_a_valid_oversized_singleton_under_the_wire_cap() {
     let temp = tempfile::tempdir().unwrap();
-    let body = "\0".repeat(4096);
+    let body = "\0".repeat(200_000);
     publish_fixture(temp.path(), std::slice::from_ref(&body));
     let value = page(
         temp.path(),
@@ -621,18 +592,40 @@ fn full_projection_admits_a_valid_oversized_singleton_under_the_wire_cap() {
         &request(
             CoreEventRangeDirection::Ascending,
             10,
-            10,
-            MIN_EVENT_QUERY_BYTE_BUDGET as usize,
             EventContentProjection::Full,
         ),
     );
     assert_eq!(value["events"][0]["text"], body);
     assert_eq!(value["usage"]["oversized_singleton"], true);
-    assert!(
-        value["usage"]["bytes"].as_u64().unwrap() as usize > MIN_EVENT_QUERY_BYTE_BUDGET as usize
-    );
+    assert!(value["usage"]["bytes"].as_u64().unwrap() as usize > EVENT_QUERY_PAGE_BYTES);
     assert!(
         value["usage"]["bytes"].as_u64().unwrap() as usize <= MAX_EVENT_QUERY_WIRE_RECORD_BYTES
+    );
+}
+
+#[test]
+fn mcp_rejects_near_limit_escape_heavy_record_with_typed_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let hard_cap = mcp_event_query_core_record_bytes(
+        crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+    );
+    let body = "\0".repeat(hard_cap / 6);
+    let encoded_core_bytes = test_record(&test_source(), 0, &body)
+        .encode_stored()
+        .unwrap()
+        .len();
+    assert!(encoded_core_bytes > hard_cap);
+    assert!(encoded_core_bytes < hard_cap + 4_096);
+    publish_fixture(temp.path(), std::slice::from_ref(&body));
+
+    let error = crate::mcp::query_events_for_test(&json!({}), temp.path()).unwrap_err();
+    let error = error.downcast_ref::<EventQueryError>().unwrap();
+    let value = event_query_error_value(error);
+    assert_eq!(value["error_code"], "output_limit_exceeded");
+    assert_eq!(value["retryable"], true);
+    assert_eq!(
+        value["recommendation"],
+        "use CLI JSONL with ctx show events"
     );
 }
 

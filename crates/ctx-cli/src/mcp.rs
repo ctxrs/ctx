@@ -89,6 +89,16 @@ pub(crate) fn run(args: McpArgs, data_root: PathBuf) -> Result<()> {
 }
 
 fn serve_stdio(data_root: PathBuf) -> Result<()> {
+    let daemon_config = config::AppConfig::load(&data_root)?;
+    if daemon_config.daemon.enabled
+        && crate::semantic::daemon_autostart_suppression_reason().is_none()
+    {
+        let _ = crate::semantic::autostart_daemon_and_wait(
+            &data_root,
+            &daemon_config,
+            crate::DaemonTriggerCommandArg::Search,
+        );
+    }
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut stdin = stdin.lock();
@@ -97,14 +107,12 @@ fn serve_stdio(data_root: PathBuf) -> Result<()> {
     let mut usage_recorder = McpUsageRecorder::start(data_root.clone());
     let started = Instant::now();
     let mut initialized = false;
-    let mut startup_recovery_attempted = false;
 
     let result = serve_stdio_loop(
         &data_root,
         &mut stdin,
         &mut stdout,
         &mut initialized,
-        &mut startup_recovery_attempted,
         &mut telemetry,
         &mut usage_recorder,
     );
@@ -126,7 +134,6 @@ fn serve_stdio_loop(
     stdin: &mut impl BufRead,
     stdout: &mut impl Write,
     initialized: &mut bool,
-    startup_recovery_attempted: &mut bool,
     telemetry: &mut McpTelemetry,
     usage_recorder: &mut McpUsageRecorder,
 ) -> std::result::Result<(), McpServeFailure> {
@@ -148,12 +155,8 @@ fn serve_stdio_loop(
                 match serde_json::from_str::<Value>(line) {
                     Ok(message) => {
                         let descriptor = RequestDescriptor::from_message(&message);
-                        let (handled, usage_invocation) = handle_message_with_recovery(
-                            message,
-                            data_root,
-                            initialized,
-                            startup_recovery_attempted,
-                        );
+                        let (handled, usage_invocation) =
+                            handle_message(message, data_root, initialized);
                         (handled, descriptor, usage_invocation)
                     }
                     Err(err) => (
@@ -251,20 +254,10 @@ fn serve_stdio_loop(
     }
 }
 
-#[cfg(test)]
 fn handle_message(
     message: Value,
     data_root: &Path,
     initialized: &mut bool,
-) -> (McpHandled<Option<Value>>, Option<McpInvocation>) {
-    handle_message_with_recovery(message, data_root, initialized, &mut false)
-}
-
-fn handle_message_with_recovery(
-    message: Value,
-    data_root: &Path,
-    initialized: &mut bool,
-    startup_recovery_attempted: &mut bool,
 ) -> (McpHandled<Option<Value>>, Option<McpInvocation>) {
     let Some(object) = message.as_object() else {
         return (
@@ -344,9 +337,7 @@ fn handle_message_with_recovery(
             Ok(McpHandled::plain(json!({ "tools": tool_definitions() }))),
             None,
         ),
-        "tools/call" => {
-            handle_tools_call_with_recovery(params, data_root, startup_recovery_attempted)
-        }
+        "tools/call" => handle_tools_call(params, data_root),
         _ => (Err(json_rpc_error(-32601, "Method not found", None)), None),
     };
     let response_id = id.clone();
@@ -421,18 +412,9 @@ fn negotiate_protocol_version(params: &Value) -> &'static str {
         .unwrap_or(MCP_PROTOCOL_VERSION)
 }
 
-#[cfg(test)]
 fn handle_tools_call(
     params: Value,
     data_root: &Path,
-) -> (Result<McpHandled<Value>, Value>, Option<McpInvocation>) {
-    handle_tools_call_with_recovery(params, data_root, &mut false)
-}
-
-fn handle_tools_call_with_recovery(
-    params: Value,
-    data_root: &Path,
-    startup_recovery_attempted: &mut bool,
 ) -> (Result<McpHandled<Value>, Value>, Option<McpInvocation>) {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return (
@@ -484,14 +466,6 @@ fn handle_tools_call_with_recovery(
                 usage_invocation,
             );
         }
-    }
-
-    // The stdio server cannot know its first tool before reading JSON-RPC.
-    // Preserve historical recovery for ordinary tools, but keep a
-    // query_events-only process strictly read-only and daemon-silent.
-    if name != "query_events" && !*startup_recovery_attempted {
-        recover_enabled_daemon_before_search(data_root);
-        *startup_recovery_attempted = true;
     }
 
     let handled = match name {
@@ -747,7 +721,7 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "query_events",
             "title": "Query Events",
-            "description": "Return one bounded deterministic page from the pinned normalized Core event corpus without refreshing history or waking the daemon.",
+            "description": "Return one bounded deterministic page from the pinned normalized Core event corpus.",
             "inputSchema": object_schema(json!({
                 "since": { "type": "string", "description": "Inclusive millisecond-aligned absolute RFC3339 lower bound; requires until." },
                 "until": { "type": "string", "description": "Exclusive millisecond-aligned absolute RFC3339 upper bound; requires since." },
@@ -775,18 +749,6 @@ fn tool_definitions() -> Vec<Value> {
                     "minimum": 1,
                     "maximum": crate::commands::show::events::MAX_EVENT_QUERY_LIMIT,
                     "default": crate::commands::show::events::DEFAULT_EVENT_QUERY_LIMIT
-                },
-                "max_items": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": ctx_history_index::MAX_CORE_EVENT_RANGE_PAGE_ITEMS,
-                    "default": crate::commands::show::events::DEFAULT_EVENT_QUERY_PAGE_ITEMS
-                },
-                "max_bytes": {
-                    "type": "integer",
-                    "minimum": crate::commands::show::events::MIN_EVENT_QUERY_BYTE_BUDGET,
-                    "maximum": crate::commands::show::events::MAX_EVENT_QUERY_BYTE_BUDGET,
-                    "default": crate::commands::show::events::DEFAULT_EVENT_QUERY_BYTE_BUDGET
                 },
                 "content": { "type": "string", "enum": ["full", "text", "none"], "default": "full" }
             }), vec![]),

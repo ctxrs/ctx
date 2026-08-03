@@ -1,4 +1,4 @@
-use std::{fmt, io::Write, path::Path, path::PathBuf};
+use std::{io::Write, path::Path, path::PathBuf};
 
 use anyhow::Result;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -10,8 +10,9 @@ use ctx_history_core::{
 use ctx_history_index::{
     CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeDirection, CoreEventRangeError,
     CoreEventRangeFilters, CoreEventRangePage, CoreEventRangeScope, CoreEventRangeSelection,
-    CoreEventRecord, IndexError, VerifiedIndex, MAX_CORE_EVENT_RANGE_PAGE_ITEMS,
+    CoreEventRecord, IndexError, VerifiedIndex,
 };
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
@@ -24,10 +25,8 @@ use crate::{
 
 pub(crate) const EVENT_QUERY_SCHEMA_VERSION: u8 = 1;
 pub(crate) const DEFAULT_EVENT_QUERY_LIMIT: u64 = 10_000;
-pub(crate) const DEFAULT_EVENT_QUERY_PAGE_ITEMS: u64 = 100;
-pub(crate) const DEFAULT_EVENT_QUERY_BYTE_BUDGET: u64 = 1024 * 1024;
-pub(crate) const MIN_EVENT_QUERY_BYTE_BUDGET: u64 = 512;
-pub(crate) const MAX_EVENT_QUERY_BYTE_BUDGET: u64 = MAX_ENCODED_CORE_RECORD_BYTES as u64;
+const EVENT_QUERY_PAGE_ITEMS: usize = 100;
+const EVENT_QUERY_PAGE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_EVENT_QUERY_LIMIT: u64 = 10_000_000;
 pub(crate) const MAX_EVENT_QUERY_CURSOR_CHARS: usize = 512;
 /// JSON string escaping can expand each admitted Core byte to six wire bytes.
@@ -35,14 +34,15 @@ pub(crate) const MAX_EVENT_QUERY_CURSOR_CHARS: usize = 512;
 pub(crate) const MAX_EVENT_QUERY_WIRE_RECORD_BYTES: usize =
     MAX_ENCODED_CORE_RECORD_BYTES * 6 + 1024 * 1024;
 
+/// Stored Core is already JSON escaped. Reserving seven eighths of the MCP
+/// envelope covers event projection, receipt fields, and JSON-RPC framing
+/// before a record is materialized.
+pub(crate) const fn mcp_event_query_core_record_bytes(response_cap: usize) -> usize {
+    response_cap / 8
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct ShowEventsArgs {
-    #[arg(
-        long,
-        conflicts_with_all = ["since", "until"],
-        help = "Select all stored events (also the default when no range is supplied)"
-    )]
-    pub(crate) all: bool,
     #[arg(
         long,
         requires = "until",
@@ -82,13 +82,11 @@ pub(crate) struct ShowEventsArgs {
     pub(crate) session: Option<String>,
     #[arg(
         long = "parent-session",
-        alias = "parent",
         help = "Filter by exact public parent ctx session UUID"
     )]
     pub(crate) parent_session: Option<String>,
     #[arg(
         long = "root-session",
-        alias = "root",
         help = "Filter by exact public root ctx session UUID"
     )]
     pub(crate) root_session: Option<String>,
@@ -119,20 +117,6 @@ pub(crate) struct ShowEventsArgs {
         help = "Maximum events returned across the complete invocation"
     )]
     pub(crate) limit: u64,
-    #[arg(
-        long = "max-items",
-        alias = "page-items",
-        default_value_t = DEFAULT_EVENT_QUERY_PAGE_ITEMS,
-        help = "Maximum events fetched from Core per demand-driven page"
-    )]
-    pub(crate) max_items: u64,
-    #[arg(
-        long = "max-bytes",
-        alias = "byte-budget",
-        default_value_t = DEFAULT_EVENT_QUERY_BYTE_BUDGET,
-        help = "Soft Core and serialized page byte budget; an oversized singleton still advances"
-    )]
-    pub(crate) max_bytes: u64,
     #[arg(long, value_enum, default_value_t = EventContentProjection::Full)]
     pub(crate) content: EventContentProjection,
     #[arg(long, value_enum, default_value_t = EventQueryFormat::Json)]
@@ -297,11 +281,11 @@ fn execute(
         cursor.validate_selection(&selection)?;
     }
     let index = open_event_range_index(data_root, cursor.as_ref())?;
-    let limits = validated_limits(args.limit, args.max_items, args.max_bytes)?;
-    let request = EventQueryWireRequest::from_cli(&args, limits);
+    let limit = validated_limit(args.limit)?;
+    let request = EventQueryWireRequest::from_cli(&args, limit);
     match args.format {
         EventQueryFormat::Json => {
-            let page = bounded_page(&index, &selection, cursor.as_ref(), &request)?;
+            let page = bounded_page(&index, &selection, cursor.as_ref(), &request, None)?;
             writer.write_all(&page.encoded)?;
             writer.flush()?;
             Ok(page.items)
@@ -312,54 +296,13 @@ fn execute(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct EventQueryLimits {
-    pub(crate) limit: usize,
-    pub(crate) max_items: usize,
-    pub(crate) max_bytes: usize,
-}
-
-pub(crate) fn validated_limits(
-    limit: u64,
-    max_items: u64,
-    max_bytes: u64,
-) -> std::result::Result<EventQueryLimits, EventQueryError> {
+pub(crate) fn validated_limit(limit: u64) -> std::result::Result<usize, EventQueryError> {
     validate_resource_limit("limit", limit, 1, MAX_EVENT_QUERY_LIMIT)?;
-    validate_resource_limit(
-        "max_items",
-        max_items,
-        1,
-        MAX_CORE_EVENT_RANGE_PAGE_ITEMS as u64,
-    )?;
-    validate_resource_limit(
-        "max_bytes",
-        max_bytes,
-        MIN_EVENT_QUERY_BYTE_BUDGET,
-        MAX_EVENT_QUERY_BYTE_BUDGET,
-    )?;
-    Ok(EventQueryLimits {
-        limit: usize::try_from(limit).map_err(|_| EventQueryError::InvalidResourceLimit {
-            field: "limit",
-            requested: limit,
-            minimum: 1,
-            maximum: MAX_EVENT_QUERY_LIMIT,
-        })?,
-        max_items: usize::try_from(max_items).map_err(|_| {
-            EventQueryError::InvalidResourceLimit {
-                field: "max_items",
-                requested: max_items,
-                minimum: 1,
-                maximum: MAX_CORE_EVENT_RANGE_PAGE_ITEMS as u64,
-            }
-        })?,
-        max_bytes: usize::try_from(max_bytes).map_err(|_| {
-            EventQueryError::InvalidResourceLimit {
-                field: "max_bytes",
-                requested: max_bytes,
-                minimum: MIN_EVENT_QUERY_BYTE_BUDGET,
-                maximum: MAX_EVENT_QUERY_BYTE_BUDGET,
-            }
-        })?,
+    usize::try_from(limit).map_err(|_| EventQueryError::InvalidResourceLimit {
+        field: "limit",
+        requested: limit,
+        minimum: 1,
+        maximum: MAX_EVENT_QUERY_LIMIT,
     })
 }
 
@@ -386,11 +329,11 @@ pub(crate) struct EventQueryWireRequest {
     pub(crate) filters: Value,
     pub(crate) direction: &'static str,
     pub(crate) content: EventContentProjection,
-    pub(crate) limits: EventQueryLimits,
+    pub(crate) limit: usize,
 }
 
 impl EventQueryWireRequest {
-    fn from_cli(args: &ShowEventsArgs, limits: EventQueryLimits) -> Self {
+    fn from_cli(args: &ShowEventsArgs, limit: usize) -> Self {
         let mut filters = Map::new();
         if !args.provider.is_empty() {
             filters.insert("providers".to_owned(), json!(args.provider));
@@ -430,7 +373,7 @@ impl EventQueryWireRequest {
             filters: Value::Object(filters),
             direction: args.direction.as_str(),
             content: args.content,
-            limits,
+            limit,
         }
     }
 
@@ -439,7 +382,7 @@ impl EventQueryWireRequest {
         filters: Value,
         direction: CoreEventRangeDirection,
         content: EventContentProjection,
-        limits: EventQueryLimits,
+        limit: usize,
     ) -> Self {
         Self {
             domain,
@@ -449,12 +392,12 @@ impl EventQueryWireRequest {
                 CoreEventRangeDirection::Descending => "descending",
             },
             content,
-            limits,
+            limit,
         }
     }
 
     fn page_items(&self) -> usize {
-        self.limits.limit.min(self.limits.max_items)
+        self.limit.min(EVENT_QUERY_PAGE_ITEMS)
     }
 }
 
@@ -539,15 +482,20 @@ fn read_page(
     cursor: Option<&CoreEventRangeCursor>,
     page_items: usize,
     byte_budget: usize,
+    strict_budget: Option<CoreEventPageBudget>,
 ) -> std::result::Result<CoreEventRangePage, EventQueryError> {
-    index
-        .core_event_range_page_with_budget(
+    let budget = CoreEventPageBudget::new(byte_budget, byte_budget.min(MAX_CORE_CONTENT_BYTES));
+    match strict_budget {
+        Some(strict_budget) => index.core_event_range_page_with_strict_budget(
             selection,
             cursor,
             page_items,
-            CoreEventPageBudget::new(byte_budget, byte_budget.min(MAX_CORE_CONTENT_BYTES)),
-        )
-        .map_err(Into::into)
+            budget,
+            strict_budget,
+        ),
+        None => index.core_event_range_page_with_budget(selection, cursor, page_items, budget),
+    }
+    .map_err(Into::into)
 }
 
 struct EncodedPage {
@@ -560,13 +508,15 @@ fn bounded_page(
     selection: &CoreEventRangeSelection,
     cursor: Option<&CoreEventRangeCursor>,
     request: &EventQueryWireRequest,
+    strict_budget: Option<CoreEventPageBudget>,
 ) -> std::result::Result<EncodedPage, EventQueryError> {
     let page = read_page(
         index,
         selection,
         cursor,
         request.page_items(),
-        request.limits.max_bytes,
+        EVENT_QUERY_PAGE_BYTES,
+        strict_budget,
     )?;
     encode_bounded_page(index, &page, request)
 }
@@ -576,12 +526,13 @@ pub(crate) fn event_range_page_value(
     selection: &CoreEventRangeSelection,
     cursor: Option<&CoreEventRangeCursor>,
     request: &EventQueryWireRequest,
+    strict_budget: Option<CoreEventPageBudget>,
 ) -> std::result::Result<Value, EventQueryError> {
     if let Some(cursor) = cursor {
         cursor.validate_selection(selection)?;
     }
     let index = open_event_range_index(data_root, cursor)?;
-    let page = bounded_page(&index, selection, cursor, request)?;
+    let page = bounded_page(&index, selection, cursor, request, strict_budget)?;
     Ok(serde_json::from_slice(&page.encoded)?)
 }
 
@@ -608,7 +559,7 @@ fn encode_bounded_page(
         page.content_bytes,
         page.oversized_singleton,
     )?;
-    if full.len() <= request.limits.max_bytes {
+    if full.len() <= EVENT_QUERY_PAGE_BYTES {
         return Ok(EncodedPage {
             encoded: full,
             items: rendered.len(),
@@ -617,7 +568,7 @@ fn encode_bounded_page(
     if rendered.is_empty() {
         return Err(EventQueryError::WireRecordTooLarge {
             actual: full.len(),
-            maximum: request.limits.max_bytes,
+            maximum: EVENT_QUERY_PAGE_BYTES,
         });
     }
     if rendered.len() == 1 {
@@ -661,7 +612,7 @@ fn encode_bounded_page(
             content_bytes,
             false,
         )?;
-        if encoded.len() <= request.limits.max_bytes {
+        if encoded.len() <= EVENT_QUERY_PAGE_BYTES {
             accepted = Some(EncodedPage {
                 encoded,
                 items: middle,
@@ -698,6 +649,59 @@ fn encode_bounded_page(
     Ok(EncodedPage { encoded, items: 1 })
 }
 
+#[derive(Serialize)]
+struct EventQueryReceipt<'a> {
+    schema_version: u8,
+    generation_id: &'a str,
+    domain: &'a Value,
+    filters: &'a Value,
+    direction: &'static str,
+    content: &'static str,
+    limit: usize,
+    terminal: bool,
+    truncated: bool,
+    next_cursor: Option<&'a str>,
+    freshness: EventQueryFreshness,
+    frontier: EventQueryFrontier<'a>,
+}
+
+#[derive(Serialize)]
+struct EventQueryFreshness {
+    mode: &'static str,
+    status: &'static str,
+    source_count: usize,
+    read_only: bool,
+}
+
+#[derive(Serialize)]
+struct EventQueryFrontier<'a> {
+    generation_id: &'a str,
+    cursor: Option<&'a str>,
+    status: &'static str,
+    certified_sources: usize,
+    sources_with_frontier: usize,
+    certified_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct EventQueryPageUsage {
+    items: usize,
+    pages: usize,
+    bytes: usize,
+    encoded_core_bytes: usize,
+    content_bytes: usize,
+    oversized_singleton: bool,
+}
+
+#[derive(Serialize)]
+struct EventQueryPage<'a> {
+    #[serde(flatten)]
+    receipt: EventQueryReceipt<'a>,
+    payload_type: &'static str,
+    events: &'a [Value],
+    usage: EventQueryPageUsage,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_page(
     index: &VerifiedIndex,
@@ -711,37 +715,28 @@ fn encode_page(
     content_bytes: usize,
     oversized_singleton: bool,
 ) -> std::result::Result<Vec<u8>, EventQueryError> {
-    let consistency = consistency_value(index, generation_id, next_cursor);
     let mut bytes = 0_usize;
     loop {
-        let mut encoded = serde_json::to_vec(&json!({
-            "schema_version": EVENT_QUERY_SCHEMA_VERSION,
-            "payload_type": "event_range_page",
-            "generation_id": generation_id,
-            "domain": request.domain,
-            "filters": request.filters,
-            "direction": request.direction,
-            "content": request.content.as_str(),
-            "limit": request.limits.limit,
-            "limits": {
-                "max_items": request.limits.max_items,
-                "max_bytes": request.limits.max_bytes,
+        let mut encoded = serde_json::to_vec(&EventQueryPage {
+            receipt: event_query_receipt(
+                index,
+                request,
+                generation_id,
+                next_cursor,
+                terminal,
+                truncated,
+            ),
+            payload_type: "event_range_page",
+            events,
+            usage: EventQueryPageUsage {
+                items: events.len(),
+                pages: 1,
+                bytes,
+                encoded_core_bytes,
+                content_bytes,
+                oversized_singleton,
             },
-            "events": events,
-            "terminal": terminal,
-            "truncated": truncated,
-            "next_cursor": next_cursor,
-            "usage": {
-                "items": events.len(),
-                "pages": 1,
-                "bytes": bytes,
-                "encoded_core_bytes": encoded_core_bytes,
-                "content_bytes": content_bytes,
-                "oversized_singleton": oversized_singleton,
-            },
-            "freshness": &consistency["freshness"],
-            "frontier": &consistency["frontier"],
-        }))?;
+        })?;
         let observed = encoded.len().saturating_add(1);
         if observed == bytes {
             encoded.push(b'\n');
@@ -752,7 +747,7 @@ fn encode_page(
 }
 
 fn global_limit_truncated(request: &EventQueryWireRequest, items: usize, terminal: bool) -> bool {
-    !terminal && items == request.limits.limit
+    !terminal && items == request.limit
 }
 
 fn write_jsonl_pages<F>(
@@ -773,13 +768,14 @@ where
     let mut encoded_core_bytes = 0_usize;
     let mut content_bytes = 0_usize;
     loop {
-        let remaining = request.limits.limit.saturating_sub(events);
+        let remaining = request.limit.saturating_sub(events);
         let page = read_page(
             index,
             selection,
             cursor.as_ref(),
-            request.limits.max_items.min(remaining),
-            request.limits.max_bytes,
+            EVENT_QUERY_PAGE_ITEMS.min(remaining),
+            EVENT_QUERY_PAGE_BYTES,
+            None,
         )?;
         pages = pages.checked_add(1).ok_or(IndexError::CountOverflow)?;
         oversized_singleton_pages = oversized_singleton_pages
@@ -814,7 +810,7 @@ where
 
         let terminal = page.terminal;
         let next_cursor = page.next_cursor;
-        let limit_reached = events >= request.limits.limit;
+        let limit_reached = events >= request.limit;
         if terminal || limit_reached {
             let next_cursor = next_cursor.as_ref().map(encode_cursor);
             let completion = encode_completion(
@@ -839,6 +835,24 @@ where
     }
 }
 
+#[derive(Serialize)]
+struct EventQueryCompletionUsage {
+    items: usize,
+    pages: usize,
+    bytes: usize,
+    encoded_core_bytes: usize,
+    content_bytes: usize,
+    oversized_singleton_pages: usize,
+}
+
+#[derive(Serialize)]
+struct EventQueryCompletion<'a> {
+    #[serde(flatten)]
+    receipt: EventQueryReceipt<'a>,
+    record_type: &'static str,
+    usage: EventQueryCompletionUsage,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_completion(
     index: &VerifiedIndex,
@@ -854,36 +868,27 @@ fn encode_completion(
     oversized_singleton_pages: usize,
     request: &EventQueryWireRequest,
 ) -> std::result::Result<Vec<u8>, EventQueryError> {
-    let consistency = consistency_value(index, generation_id, next_cursor);
     let mut bytes = prior_output_bytes;
     loop {
-        let mut encoded = serde_json::to_vec(&json!({
-            "schema_version": EVENT_QUERY_SCHEMA_VERSION,
-            "record_type": "event_range_completion",
-            "generation_id": generation_id,
-            "domain": request.domain,
-            "filters": request.filters,
-            "direction": request.direction,
-            "content": request.content.as_str(),
-            "limit": request.limits.limit,
-            "limits": {
-                "max_items": request.limits.max_items,
-                "max_bytes": request.limits.max_bytes,
+        let mut encoded = serde_json::to_vec(&EventQueryCompletion {
+            receipt: event_query_receipt(
+                index,
+                request,
+                generation_id,
+                next_cursor,
+                terminal,
+                truncated,
+            ),
+            record_type: "event_range_completion",
+            usage: EventQueryCompletionUsage {
+                items: events,
+                pages,
+                bytes,
+                encoded_core_bytes,
+                content_bytes,
+                oversized_singleton_pages,
             },
-            "terminal": terminal,
-            "truncated": truncated,
-            "next_cursor": next_cursor,
-            "usage": {
-                "items": events,
-                "pages": pages,
-                "bytes": bytes,
-                "encoded_core_bytes": encoded_core_bytes,
-                "content_bytes": content_bytes,
-                "oversized_singleton_pages": oversized_singleton_pages,
-            },
-            "freshness": &consistency["freshness"],
-            "frontier": &consistency["frontier"],
-        }))?;
+        })?;
         let observed = prior_output_bytes
             .saturating_add(encoded.len())
             .saturating_add(1);
@@ -996,11 +1001,14 @@ pub(crate) fn render_event(
     }))
 }
 
-fn consistency_value(
+fn event_query_receipt<'a>(
     index: &VerifiedIndex,
-    generation_id: &str,
-    next_cursor: Option<&str>,
-) -> Value {
+    request: &'a EventQueryWireRequest,
+    generation_id: &'a str,
+    next_cursor: Option<&'a str>,
+    terminal: bool,
+    truncated: bool,
+) -> EventQueryReceipt<'a> {
     let sources = &index.manifest().sources;
     let sources_with_frontier = sources
         .iter()
@@ -1013,22 +1021,32 @@ fn consistency_value(
     } else {
         "partial"
     };
-    json!({
-        "freshness": {
-            "mode": "pinned",
-            "status": "not_checked",
-            "source_count": sources.len(),
-            "read_only": true,
+    EventQueryReceipt {
+        schema_version: EVENT_QUERY_SCHEMA_VERSION,
+        generation_id,
+        domain: &request.domain,
+        filters: &request.filters,
+        direction: request.direction,
+        content: request.content.as_str(),
+        limit: request.limit,
+        terminal,
+        truncated,
+        next_cursor,
+        freshness: EventQueryFreshness {
+            mode: "pinned",
+            status: "not_checked",
+            source_count: sources.len(),
+            read_only: true,
         },
-        "frontier": {
-            "generation_id": generation_id,
-            "cursor": next_cursor,
-            "status": frontier_status,
-            "certified_sources": sources.len(),
-            "sources_with_frontier": sources_with_frontier,
-            "certified_bytes": index.manifest().certified_source_bytes,
+        frontier: EventQueryFrontier {
+            generation_id,
+            cursor: next_cursor,
+            status: frontier_status,
+            certified_sources: sources.len(),
+            sources_with_frontier,
+            certified_bytes: index.manifest().certified_source_bytes,
         },
-    })
+    }
 }
 
 fn enforce_wire_record_cap(actual: usize) -> std::result::Result<(), EventQueryError> {
@@ -1102,6 +1120,10 @@ fn format_timestamp(value: Option<i64>) -> Option<String> {
 }
 
 pub(crate) fn event_query_error_value(error: &EventQueryError) -> Value {
+    let output_limit_exceeded = matches!(
+        error,
+        EventQueryError::Range(CoreEventRangeError::RecordExceedsStrictBudget { .. })
+    );
     let error_code = match error {
         EventQueryError::Range(CoreEventRangeError::Index(
             IndexError::PinnedGenerationNotRetained { .. },
@@ -1124,6 +1146,9 @@ pub(crate) fn event_query_error_value(error: &EventQueryError) -> Value {
         | EventQueryError::InvalidTimestampPrecision { .. }
         | EventQueryError::IncompleteTimestampRange
         | EventQueryError::InvalidUuid { .. } => "invalid_range",
+        EventQueryError::Range(CoreEventRangeError::RecordExceedsStrictBudget { .. }) => {
+            "output_limit_exceeded"
+        }
         EventQueryError::InvalidResourceLimit { .. }
         | EventQueryError::WireRecordTooLarge { .. }
         | EventQueryError::Range(CoreEventRangeError::InvalidPageSize { .. })
@@ -1140,26 +1165,21 @@ pub(crate) fn event_query_error_value(error: &EventQueryError) -> Value {
         "schema_version": EVENT_QUERY_SCHEMA_VERSION,
         "error_code": error_code,
         "detail": error.to_string(),
-        "retryable": false,
+        "retryable": output_limit_exceeded,
         "restart_required": error_code == "generation_not_retained",
-        "recommendation": matches!(error, EventQueryError::WireRecordTooLarge { .. })
-            .then_some("retry with --content text or --content none"),
+        "recommendation": if output_limit_exceeded {
+            Some("use CLI JSONL with ctx show events")
+        } else if matches!(error, EventQueryError::WireRecordTooLarge { .. }) {
+            Some("retry with --content text or --content none")
+        } else {
+            None
+        },
     })
 }
 
 impl From<IndexError> for EventQueryError {
     fn from(value: IndexError) -> Self {
         Self::Range(CoreEventRangeError::Index(value))
-    }
-}
-
-impl fmt::Display for EventQueryLimits {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "limit={}, max_items={}, max_bytes={}",
-            self.limit, self.max_items, self.max_bytes
-        )
     }
 }
 

@@ -1,16 +1,20 @@
 use std::path::Path;
 
 use anyhow::Result;
-use ctx_history_index::{CoreEventRangeDirection, CoreEventRangeFilters, CoreEventRangeScope};
+use ctx_history_core::MAX_CORE_CONTENT_BYTES;
+use ctx_history_index::{
+    CoreEventPageBudget, CoreEventRangeDirection, CoreEventRangeFilters, CoreEventRangeScope,
+};
 use serde_json::Value;
 use uuid::Uuid;
 
 use super::{invalid_tool_request, optional_string, optional_usize};
 use crate::commands::show::events::{
-    decode_cursor, event_range_page_value, selection, validated_limits, wire_domain,
-    EventContentProjection, EventQueryWireRequest, DEFAULT_EVENT_QUERY_BYTE_BUDGET,
-    DEFAULT_EVENT_QUERY_LIMIT, DEFAULT_EVENT_QUERY_PAGE_ITEMS,
+    decode_cursor, event_range_page_value, mcp_event_query_core_record_bytes, selection,
+    validated_limit, wire_domain, EventContentProjection, EventQueryWireRequest,
+    DEFAULT_EVENT_QUERY_LIMIT,
 };
+use crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES;
 
 pub(super) fn tool_query_events(arguments: &Value, data_root: &Path) -> Result<Value> {
     let providers = optional_strings(arguments, "providers")?;
@@ -21,8 +25,8 @@ pub(super) fn tool_query_events(arguments: &Value, data_root: &Path) -> Result<V
     let source_format = optional_string(arguments, "source_format")?;
     let provider_session = optional_string(arguments, "provider_session")?;
     let session = optional_string(arguments, "session")?;
-    let parent_session = optional_alias_string(arguments, "parent_session", "parent")?;
-    let root_session = optional_alias_string(arguments, "root_session", "root")?;
+    let parent_session = optional_string(arguments, "parent_session")?;
+    let root_session = optional_string(arguments, "root_session")?;
     let branch = optional_string(arguments, "branch")?;
     let workspace = optional_string(arguments, "workspace")?;
     let event_type = optional_string(arguments, "event_type")?;
@@ -62,15 +66,7 @@ pub(super) fn tool_query_events(arguments: &Value, data_root: &Path) -> Result<V
         .map(usize_to_u64)
         .transpose()?
         .unwrap_or(DEFAULT_EVENT_QUERY_LIMIT);
-    let max_items = optional_alias_usize(arguments, "max_items", "page_items")?
-        .map(usize_to_u64)
-        .transpose()?
-        .unwrap_or(DEFAULT_EVENT_QUERY_PAGE_ITEMS);
-    let max_bytes = optional_alias_usize(arguments, "max_bytes", "byte_budget")?
-        .map(usize_to_u64)
-        .transpose()?
-        .unwrap_or(DEFAULT_EVENT_QUERY_BYTE_BUDGET);
-    let limits = validated_limits(limit, max_items, max_bytes)?;
+    let limit = validated_limit(limit)?;
     let content = optional_content_projection(arguments)?;
     let wire_filters = compact_filters(
         &providers,
@@ -98,9 +94,19 @@ pub(super) fn tool_query_events(arguments: &Value, data_root: &Path) -> Result<V
         wire_filters,
         direction,
         content,
-        limits,
+        limit,
     );
-    event_range_page_value(data_root, &selection, cursor.as_ref(), &request).map_err(Into::into)
+    let record_bytes = mcp_event_query_core_record_bytes(MCP_PRESENTATION_MAX_OUTPUT_BYTES);
+    let strict_budget =
+        CoreEventPageBudget::new(record_bytes, record_bytes.min(MAX_CORE_CONTENT_BYTES));
+    event_range_page_value(
+        data_root,
+        &selection,
+        cursor.as_ref(),
+        &request,
+        Some(strict_budget),
+    )
+    .map_err(Into::into)
 }
 
 fn usize_to_u64(value: usize) -> Result<u64> {
@@ -130,34 +136,6 @@ fn parse_optional_uuid(key: &'static str, value: Option<&str>) -> Result<Option<
                 .map_err(|_| invalid_tool_request(format!("{key} must be a full UUID")))
         })
         .transpose()
-}
-
-fn optional_alias_string(
-    arguments: &Value,
-    canonical: &str,
-    alias: &str,
-) -> Result<Option<String>> {
-    let canonical_value = optional_string(arguments, canonical)?;
-    let alias_value = optional_string(arguments, alias)?;
-    match (canonical_value, alias_value) {
-        (Some(_), Some(_)) => Err(invalid_tool_request(format!(
-            "{canonical} and its alias {alias} cannot be supplied together"
-        ))),
-        (Some(value), None) | (None, Some(value)) => Ok(Some(value)),
-        (None, None) => Ok(None),
-    }
-}
-
-fn optional_alias_usize(arguments: &Value, canonical: &str, alias: &str) -> Result<Option<usize>> {
-    let canonical_value = optional_usize(arguments, canonical)?;
-    let alias_value = optional_usize(arguments, alias)?;
-    match (canonical_value, alias_value) {
-        (Some(_), Some(_)) => Err(invalid_tool_request(format!(
-            "{canonical} and its alias {alias} cannot be supplied together"
-        ))),
-        (Some(value), None) | (None, Some(value)) => Ok(Some(value)),
-        (None, None) => Ok(None),
-    }
 }
 
 fn compact_filters<const N: usize>(

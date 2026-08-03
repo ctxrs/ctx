@@ -41,11 +41,10 @@ query runs.
 ## Bounded pages and cursors
 
 JSON returns one bounded page. JSONL reads a sequence of bounded internal pages
-and writes each event as it becomes available. `--max-items` and
-`--max-bytes` bound internal work; `--limit` bounds the complete command
-result. The defaults are 100 events and 1 MiB per internal page, with a 10,000
-event global limit; callers can choose lower bounds. A valid event larger than
-a soft internal page budget is admitted as a
+and writes each event as it becomes available. `--limit` bounds the complete
+command result and defaults to 10,000 events. Core hydration uses fixed bounded
+pages of at most 100 events and a 1 MiB soft byte budget. A valid event larger
+than that soft internal page budget is admitted as a
 single item so pagination can always advance. A machine response that cannot
 represent that singleton fails intact with a typed resource-limit error; it is
 never clipped.

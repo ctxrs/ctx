@@ -27,6 +27,12 @@ struct EventRangeCandidate {
     record: CoreEventRecord,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EventRangePageBudgets {
+    aggregate: CoreEventPageBudget,
+    strict: Option<CoreEventPageBudget>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ReverseTermHeapEntry {
     key: [u8; crate::index_document::EVENT_RANGE_ORDER_KEY_LEN],
@@ -148,6 +154,15 @@ pub enum CoreEventRangeError {
     InvalidFilter { field: &'static str },
     #[error("event range page size {requested} is outside 1..={maximum}")]
     InvalidPageSize { requested: usize, maximum: usize },
+    #[error(
+        "event range record requires {encoded_core_bytes} encoded Core bytes and {content_bytes} content bytes, exceeding strict limits {maximum_encoded_core_bytes} and {maximum_content_bytes}"
+    )]
+    RecordExceedsStrictBudget {
+        encoded_core_bytes: usize,
+        content_bytes: usize,
+        maximum_encoded_core_bytes: usize,
+        maximum_content_bytes: usize,
+    },
     #[error("invalid event range cursor encoding or integrity")]
     InvalidCursor,
     #[error("event range cursor selection does not match this request")]
@@ -609,6 +624,37 @@ impl VerifiedIndex {
         limit: usize,
         budget: CoreEventPageBudget,
     ) -> CoreEventRangeResult<CoreEventRangePage> {
+        self.core_event_range_page_with_budgets(selection, cursor, limit, budget, None)
+    }
+
+    /// Returns a page while rejecting any record that exceeds `strict_budget`
+    /// before reading its stored Core bytes. The ordinary aggregate budget
+    /// retains oversized-singleton progress semantics.
+    pub fn core_event_range_page_with_strict_budget(
+        &self,
+        selection: &CoreEventRangeSelection,
+        cursor: Option<&CoreEventRangeCursor>,
+        limit: usize,
+        budget: CoreEventPageBudget,
+        strict_budget: CoreEventPageBudget,
+    ) -> CoreEventRangeResult<CoreEventRangePage> {
+        self.core_event_range_page_with_budgets(
+            selection,
+            cursor,
+            limit,
+            budget,
+            Some(strict_budget),
+        )
+    }
+
+    fn core_event_range_page_with_budgets(
+        &self,
+        selection: &CoreEventRangeSelection,
+        cursor: Option<&CoreEventRangeCursor>,
+        limit: usize,
+        budget: CoreEventPageBudget,
+        strict_budget: Option<CoreEventPageBudget>,
+    ) -> CoreEventRangeResult<CoreEventRangePage> {
         if !(1..=MAX_CORE_EVENT_RANGE_PAGE_ITEMS).contains(&limit) {
             return Err(CoreEventRangeError::InvalidPageSize {
                 requested: limit,
@@ -616,6 +662,9 @@ impl VerifiedIndex {
             });
         }
         super::execution::validate_core_event_page_budget(budget)?;
+        if let Some(strict_budget) = strict_budget {
+            super::execution::validate_core_event_page_budget(strict_budget)?;
+        }
         let source_token = self.event_range_source_token(selection);
         if selection.filters.source_identity.is_some() && source_token.is_none() {
             if cursor.is_some() {
@@ -645,12 +694,16 @@ impl VerifiedIndex {
             self.validate_event_range_cursor(selection, cursor, fields, source_token.as_deref())?;
         }
 
+        let budgets = EventRangePageBudgets {
+            aggregate: budget,
+            strict: strict_budget,
+        };
         let (candidates, has_more, encoded_core_bytes, content_bytes) = self
             .event_range_candidates(
                 selection,
                 cursor.map(|cursor| cursor.after),
                 limit,
-                budget,
+                budgets,
                 fields,
                 source_token.as_deref(),
             )?;
@@ -736,7 +789,7 @@ impl VerifiedIndex {
         selection: &CoreEventRangeSelection,
         after: Option<EventRangeOrderKey>,
         limit: usize,
-        budget: CoreEventPageBudget,
+        budgets: EventRangePageBudgets,
         fields: Fields,
         source_token: Option<&str>,
     ) -> CoreEventRangeResult<(Vec<EventRangeCandidate>, bool, usize, usize)> {
@@ -745,7 +798,7 @@ impl VerifiedIndex {
                 selection,
                 after,
                 limit,
-                budget,
+                budgets,
                 fields,
                 source_token,
             );
@@ -847,6 +900,21 @@ impl VerifiedIndex {
             let Some(address) = address else {
                 continue;
             };
+            if candidates.len() >= limit {
+                return Ok((candidates, true, encoded_core_bytes, content_bytes));
+            }
+            enforce_strict_budget(order, budgets.strict)?;
+            let admitted = candidates.is_empty()
+                || super::execution::core_event_page_budget_admits(
+                    budgets.aggregate,
+                    encoded_core_bytes,
+                    content_bytes,
+                    order.encoded_core_bytes(),
+                    order.content_bytes(),
+                );
+            if !admitted {
+                return Ok((candidates, true, encoded_core_bytes, content_bytes));
+            }
             let (record, actual_encoded_bytes) =
                 stored_core_event_record_with_size(&self.searcher, address, fields)?;
             let actual_content_bytes = core_content_bytes(&record.core_record.content)?;
@@ -862,17 +930,6 @@ impl VerifiedIndex {
             }
             if !selection.accepts_record(&record) {
                 continue;
-            }
-            let admitted = candidates.is_empty()
-                || super::execution::core_event_page_budget_admits(
-                    budget,
-                    encoded_core_bytes,
-                    content_bytes,
-                    order.encoded_core_bytes(),
-                    order.content_bytes(),
-                );
-            if candidates.len() >= limit || !admitted {
-                return Ok((candidates, true, encoded_core_bytes, content_bytes));
             }
             encoded_core_bytes = encoded_core_bytes
                 .checked_add(order.encoded_core_bytes())
@@ -890,7 +947,7 @@ impl VerifiedIndex {
         selection: &CoreEventRangeSelection,
         after: Option<EventRangeOrderKey>,
         limit: usize,
-        budget: CoreEventPageBudget,
+        budgets: EventRangePageBudgets,
         fields: Fields,
         source_token: Option<&str>,
     ) -> CoreEventRangeResult<(Vec<EventRangeCandidate>, bool, usize, usize)> {
@@ -961,9 +1018,10 @@ impl VerifiedIndex {
         for candidate in candidates.iter().take(limit) {
             let candidate_encoded_bytes = candidate.order.encoded_core_bytes();
             let candidate_content_bytes = candidate.order.content_bytes();
+            enforce_strict_budget(candidate.order, budgets.strict)?;
             let admitted = records.is_empty()
                 || super::execution::core_event_page_budget_admits(
-                    budget,
+                    budgets.aggregate,
                     encoded_core_bytes,
                     content_bytes,
                     candidate_encoded_bytes,
@@ -1000,6 +1058,30 @@ impl VerifiedIndex {
         let has_more = records.len() < candidate_count;
         Ok((records, has_more, encoded_core_bytes, content_bytes))
     }
+}
+
+fn enforce_strict_budget(
+    order: EventRangeOrderKey,
+    strict_budget: Option<CoreEventPageBudget>,
+) -> CoreEventRangeResult<()> {
+    let Some(strict_budget) = strict_budget else {
+        return Ok(());
+    };
+    if super::execution::core_event_page_budget_admits(
+        strict_budget,
+        0,
+        0,
+        order.encoded_core_bytes(),
+        order.content_bytes(),
+    ) {
+        return Ok(());
+    }
+    Err(CoreEventRangeError::RecordExceedsStrictBudget {
+        encoded_core_bytes: order.encoded_core_bytes(),
+        content_bytes: order.content_bytes(),
+        maximum_encoded_core_bytes: strict_budget.maximum_encoded_core_bytes,
+        maximum_content_bytes: strict_budget.maximum_content_bytes,
+    })
 }
 
 impl CoreEventRangeSelection {

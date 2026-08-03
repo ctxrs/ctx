@@ -278,7 +278,7 @@ fn assert_valid_recommit_without_projection_is_rejected(field_name: &'static str
         .next()
         .unwrap();
     let complete = indexed_document(decoded_stored_core(&searcher, address));
-    let omitted = required_field(&searcher.schema(), field_name).unwrap();
+    let omitted = required_field(searcher.schema(), field_name).unwrap();
     let mut forged = TantivyDocument::default();
     for (field, value) in complete.field_values() {
         if field != omitted {

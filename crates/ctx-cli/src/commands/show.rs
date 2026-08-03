@@ -69,7 +69,9 @@ pub(crate) fn run_show(
     ui: &mut Ui,
 ) -> Result<()> {
     match args.target {
-        crate::ShowTarget::Events(args) => events::run(args, data_root, telemetry, local_usage, ui),
+        crate::ShowTarget::Events(args) => {
+            events::run(*args, data_root, telemetry, local_usage, ui)
+        }
         target => crate::commands::source_index::run_show(
             ShowArgs { target },
             data_root,

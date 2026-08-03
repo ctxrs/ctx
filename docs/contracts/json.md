@@ -470,7 +470,7 @@ Event JSON remains one `event_window` object with `target: "event"`, `format`,
 Event-range JSON from `ctx show events --format json` is one
 `event_range_page` with `schema_version: 1`, the pinned `generation_id`, the
 normalized request domain/filters/direction, `content`, bounded
-`events[]`, page limits and usage, `terminal`, `truncated`, `next_cursor`, and
+`events[]`, the requested limit and page usage, `terminal`, `truncated`, `next_cursor`, and
 explicit freshness/frontier metadata. The cursor is present exactly when the
 page can continue. It is opaque and bound to the complete selection and pinned
 generation.
@@ -479,7 +479,7 @@ Event-range JSONL emits zero or more `event_range_event` records followed by
 exactly one `event_range_completion`. Each event record includes
 `schema_version`, `record_type`, `generation_id`, a contiguous zero-based
 `ordinal`, and one normalized `event`. The completion echoes the normalized
-selection, content projection and requested limits, reports aggregate usage,
+selection, content projection and requested limit, reports aggregate usage,
 and records terminal/truncated/cursor and freshness/frontier state. A consumer
 must reject EOF, a second completion, an event after completion, mixed
 generations, or noncontiguous ordinals. Diagnostics and typed failures are on

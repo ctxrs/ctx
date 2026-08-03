@@ -726,8 +726,8 @@ accepts exact provider/source/session and parent/root-session filters,
 provider-session and source-format filters, event type, role, agent type,
 scope, branch, indexed workspace/file filters, and a paired half-open
 `--since`/`--until` range. `--direction` controls the complete deterministic
-order. `--content full|text|none`, `--max-items`, `--max-bytes`, and the global
-`--limit` keep output and internal hydration bounded. JSON returns one page;
+order. `--content full|text|none` projects payload fields and `--limit` bounds
+the result. JSON returns one internally bounded page;
 JSONL streams bounded pages and ends with exactly one completion record. Opaque
 cursors are bound to the exact selection and immutable Core generation. See
 [`event-queries.md`](event-queries.md) for the wire contract and jq examples.

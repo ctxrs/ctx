@@ -285,7 +285,7 @@ pub(crate) enum ShowTarget {
     #[command(about = "Show one event or a surrounding event window")]
     Event(ShowEventArgs),
     #[command(about = "Query deterministic Core event pages")]
-    Events(ShowEventsArgs),
+    Events(Box<ShowEventsArgs>),
 }
 
 #[derive(Debug, Args)]

@@ -257,7 +257,6 @@ fn response_flush_precedes_one_local_blame_increment_and_remote_submissions() {
         trace: Arc::clone(&trace),
     };
     let mut initialized = true;
-    let mut startup_recovery_attempted = false;
     let mut usage_recorder = crate::local_usage::McpUsageRecorder::start(temp.path().to_path_buf());
     usage_recorder.set_test_trace(Arc::clone(&trace));
 
@@ -266,7 +265,6 @@ fn response_flush_precedes_one_local_blame_increment_and_remote_submissions() {
         &mut stdin,
         &mut stdout,
         &mut initialized,
-        &mut startup_recovery_attempted,
         &mut telemetry,
         &mut usage_recorder,
     );
@@ -322,7 +320,6 @@ fn failed_response_flush_does_not_record_local_usage() {
     let mut stdin = Cursor::new(format!("{request}\n").into_bytes());
     let mut stdout = FailingFlushWriter;
     let mut initialized = true;
-    let mut startup_recovery_attempted = false;
     let mut telemetry = McpTelemetry::start(temp.path().to_path_buf());
     let mut usage_recorder = crate::local_usage::McpUsageRecorder::start(temp.path().to_path_buf());
 
@@ -331,7 +328,6 @@ fn failed_response_flush_does_not_record_local_usage() {
         &mut stdin,
         &mut stdout,
         &mut initialized,
-        &mut startup_recovery_attempted,
         &mut telemetry,
         &mut usage_recorder,
     )

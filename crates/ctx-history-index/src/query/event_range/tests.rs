@@ -994,6 +994,42 @@ fn valid_oversized_singleton_always_advances() {
 }
 
 #[test]
+fn strict_budget_rejects_escape_heavy_record_before_core_materialization() {
+    let temp = tempdir().unwrap();
+    let source = test_source("codex", "strict-budget");
+    let large = record(&source, 1, 1, Some(10), &"\0\"\\\n".repeat(4_096));
+    let encoded_core_bytes = large.encode_stored().unwrap().len();
+    let content_bytes = core_content_bytes(&large.content).unwrap();
+    publish(temp.path(), 1, &[(source, vec![large])]);
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let selection = CoreEventRangeSelection::new(10, 11, Vec::<String>::new()).unwrap();
+    let strict_budget = CoreEventPageBudget::new(encoded_core_bytes - 1, content_bytes.max(1));
+
+    crate::query::reset_stored_core_event_record_materializations();
+    crate::query::reset_core_record_decodes();
+    let error = index
+        .core_event_range_page_with_strict_budget(
+            &selection,
+            None,
+            1,
+            DEFAULT_CORE_EVENT_PAGE_BUDGET,
+            strict_budget,
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CoreEventRangeError::RecordExceedsStrictBudget {
+            encoded_core_bytes: actual,
+            maximum_encoded_core_bytes,
+            ..
+        } if actual == encoded_core_bytes && maximum_encoded_core_bytes == encoded_core_bytes - 1
+    ));
+    assert_eq!(crate::query::stored_core_event_record_materializations(), 0);
+    assert_eq!(crate::query::core_record_decodes(), 0);
+}
+
+#[test]
 fn nonterminal_cursor_reuses_admitted_key_without_reserializing_maximum_record() {
     let temp = tempdir().unwrap();
     let source = test_source("codex", "maximum-cursor-record");
