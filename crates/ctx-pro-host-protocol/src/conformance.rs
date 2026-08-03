@@ -321,7 +321,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
             "repository_contract_revision": 8,
             "repository_observation_revision": 3,
             "bounded_shell_subset_revision": 1,
-            "repository_association_policy_revision": 5,
+            "repository_association_policy_revision": 6,
             "repository_pull_request_association_capture_revision": 3,
             "repository_outcome_capture_revision": 2,
             "repository_local_root_authorization_fingerprint_revision": 1,
@@ -348,7 +348,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     let evidence =
         &envelope["message"]["body"]["page"]["deltas"][0]["value"]["repository_candidate_evidence"];
     assert_eq!(evidence["repository_observation_revision"], 3);
-    assert_eq!(evidence["association_policy_revision"], 5);
+    assert_eq!(evidence["association_policy_revision"], 6);
     assert_eq!(evidence["outcome_capture_revision"], 2);
     assert_eq!(
         evidence["candidates"],

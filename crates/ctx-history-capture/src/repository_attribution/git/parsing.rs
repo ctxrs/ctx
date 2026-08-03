@@ -10,6 +10,7 @@ use url::Url;
 use super::{
     ProbeFailure, ResolvedCommitFile, MAX_GIT_OUTPUT_BYTES, MAX_REMOTES, MAX_RESOLVED_COMMIT_FILES,
 };
+use crate::repository_attribution::identity::canonical_url_authority;
 
 pub(super) fn metadata_is_link_like(metadata: &fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
@@ -297,11 +298,8 @@ fn normalize_remote(remote: &str) -> Result<Option<RepositoryAlias>, ProbeFailur
         {
             return Err(ProbeFailure::Unsafe("credential_bearing_remote"));
         }
-        let host = url
-            .host_str()
-            .ok_or(ProbeFailure::Failed("remote_host_missing"))?;
         (
-            host.to_ascii_lowercase(),
+            canonical_url_authority(&url).ok_or(ProbeFailure::Failed("remote_host_missing"))?,
             url.path().trim_matches('/').to_owned(),
         )
     } else if let Some((authority, path)) = remote.split_once(':') {

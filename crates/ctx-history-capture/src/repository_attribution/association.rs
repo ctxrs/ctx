@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::{collections::HashSet, fmt};
 use url::Url;
 
-use super::shell::bounded_pull_request_association_query;
+use super::{identity::canonical_url_authority, shell::bounded_pull_request_association_query};
 
 const MAX_ASSOCIATION_OUTPUT_BYTES: usize = 1024 * 1024;
 
@@ -218,16 +218,12 @@ fn canonical_pull_request(value: &str) -> Option<RepositoryPullRequestIdentity> 
     if url.scheme() != "https"
         || !url.username().is_empty()
         || url.password().is_some()
-        || url.port().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
     {
         return None;
     }
-    let host = url.host_str()?.to_ascii_lowercase();
-    if host.is_empty() || host.contains(':') {
-        return None;
-    }
+    let host = canonical_url_authority(&url)?;
     let segments = url.path_segments()?.collect::<Vec<_>>();
     if segments.len() < 4
         || segments[segments.len() - 2] != "pull"
@@ -316,6 +312,28 @@ mod tests {
         assert_eq!(
             association.merged_as.hex,
             "103c0105645cc02c730f98eba2831fba854d3569"
+        );
+    }
+
+    #[test]
+    fn custom_port_is_part_of_pull_request_repository_authority() {
+        let output = json!({
+            "mergeCommit": {"oid": "103c0105645cc02c730f98eba2831fba854d3569"},
+            "mergedAt": "2026-07-29T17:11:30Z",
+            "state": "MERGED",
+            "url": "https://forge.example.test:8443/acme/repo/pull/203"
+        })
+        .to_string();
+        let association = exact_pull_request_association(
+            "gh pr view 203 --repo forge.example.test:8443/acme/repo --json state,mergedAt,mergeCommit,url",
+            "/repo",
+            &Value::String(output),
+            linkage(),
+        )
+        .expect("custom-port association");
+        assert_eq!(
+            association.pull_request.forge_repository.host,
+            "forge.example.test:8443"
         );
     }
 

@@ -4,6 +4,7 @@ use ctx_history_core::{RepositoryAlias, RepositoryAliasKind};
 use url::Url;
 
 use super::{strip_comments_and_bound_heredocs, tokenize, MAX_COMMAND_BYTES};
+use crate::repository_attribution::identity::canonical_url_authority;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoundedPullRequestAssociationQuery {
@@ -161,13 +162,12 @@ fn exact_pull_request_target(value: &str) -> Option<(u64, Option<RepositoryAlias
     if url.scheme() != "https"
         || !url.username().is_empty()
         || url.password().is_some()
-        || url.port().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
     {
         return None;
     }
-    let host = url.host_str()?.to_ascii_lowercase();
+    let host = canonical_url_authority(&url)?;
     let segments = url.path_segments()?.collect::<Vec<_>>();
     if segments.len() < 4 || segments[segments.len() - 2] != "pull" {
         return None;
@@ -181,9 +181,9 @@ fn exact_pull_request_target(value: &str) -> Option<(u64, Option<RepositoryAlias
 
 fn parse_forge_repository(value: &str) -> Option<RepositoryAlias> {
     if value.contains("//")
-        || value.bytes().any(|byte| {
-            byte.is_ascii_control() || matches!(byte, b'@' | b':' | b'\\' | b'?' | b'#')
-        })
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || matches!(byte, b'@' | b'\\' | b'?' | b'#'))
     {
         return None;
     }
@@ -196,18 +196,35 @@ fn parse_forge_repository(value: &str) -> Option<RepositoryAlias> {
         return None;
     }
     let (host, path) = if parts.len() == 2 {
-        ("github.com", parts.as_slice())
+        ("github.com".to_owned(), parts.as_slice())
     } else {
-        (parts[0], &parts[1..])
+        let authority = Url::parse(&format!("https://{}/", parts[0])).ok()?;
+        let host = canonical_url_authority(&authority)?;
+        if authority.path() != "/" || authority.query().is_some() || authority.fragment().is_some()
+        {
+            return None;
+        }
+        (host, &parts[1..])
     };
+    if path.iter().any(|part| path_component_is_unsafe(part)) {
+        return None;
+    }
     let (name, namespace) = path.split_last()?;
     Some(RepositoryAlias {
         kind: RepositoryAliasKind::Forge,
-        host: host.to_ascii_lowercase(),
+        host,
         namespace: namespace.iter().map(|part| (*part).to_owned()).collect(),
         name: (*name).to_owned(),
         remote_name: None,
     })
+}
+
+fn path_component_is_unsafe(value: &str) -> bool {
+    value.is_empty()
+        || matches!(value, "." | "..")
+        || value.bytes().any(|byte| {
+            byte.is_ascii_control() || matches!(byte, b'@' | b':' | b'\\' | b'?' | b'#')
+        })
 }
 
 fn alias_identity_matches(left: &RepositoryAlias, right: &RepositoryAlias) -> bool {

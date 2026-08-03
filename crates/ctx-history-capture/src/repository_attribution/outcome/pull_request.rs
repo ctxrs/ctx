@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 use url::Url;
 
 use super::{exact_json_object, keys_are_subset, object_id, BoundedOutcomePlan};
+use crate::repository_attribution::identity::canonical_url_authority;
 
 pub(super) fn exact_pr_create_result(output: &Value) -> Option<RepositoryPullRequestIdentity> {
     if let Some(url) = output.as_str() {
@@ -58,13 +59,12 @@ fn pull_request_from_url(value: &str) -> Option<RepositoryPullRequestIdentity> {
     if url.scheme() != "https"
         || !url.username().is_empty()
         || url.password().is_some()
-        || url.port().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
     {
         return None;
     }
-    let host = url.host_str()?.to_ascii_lowercase();
+    let host = canonical_url_authority(&url)?;
     let segments = url.path_segments()?.collect::<Vec<_>>();
     if segments.len() < 4 || segments[segments.len() - 2] != "pull" {
         return None;
