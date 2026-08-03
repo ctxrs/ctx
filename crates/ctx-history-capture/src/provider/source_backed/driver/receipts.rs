@@ -594,6 +594,7 @@ pub struct SourceBackedRoute {
     pub(in super::super) metadata: SourceBackedRouteMetadata,
     pub(in super::super) driver: Option<SourceBackedRouteDriver>,
     pub(in super::super) certified_missing_paths: Vec<PathBuf>,
+    pub(in super::super) retire_after_success: Vec<SourceRouteIdentity>,
 }
 
 impl SourceBackedRoute {
@@ -625,6 +626,7 @@ impl SourceBackedRoute {
             },
             driver: Some(driver),
             certified_missing_paths: Vec::new(),
+            retire_after_success: Vec::new(),
         })
     }
 
@@ -656,6 +658,7 @@ impl SourceBackedRoute {
             },
             driver: Some(driver),
             certified_missing_paths: Vec::new(),
+            retire_after_success: Vec::new(),
         })
     }
 
@@ -687,6 +690,7 @@ impl SourceBackedRoute {
             },
             driver: None,
             certified_missing_paths: vec![path],
+            retire_after_success: Vec::new(),
         })
     }
 
@@ -705,6 +709,7 @@ impl SourceBackedRoute {
             },
             driver: None,
             certified_missing_paths: Vec::new(),
+            retire_after_success: Vec::new(),
         }
     }
 
@@ -746,6 +751,41 @@ impl SourceBackedProviderRegistry {
             }
         }
         self.routes.push(route);
+    }
+
+    /// Binds exact carried base routes to an executable replacement route.
+    /// Retirement is applied only after that replacement scans and terminally
+    /// revalidates successfully; failed replacements retain the base routes.
+    pub fn retire_routes_after_success(
+        &mut self,
+        replacement: &SourceRouteIdentity,
+        retired: impl IntoIterator<Item = SourceRouteIdentity>,
+    ) -> SourceBackedCoordinatorResult<()> {
+        let route = self
+            .routes
+            .iter_mut()
+            .find(|route| route.metadata.route_identity.as_ref() == Some(replacement))
+            .ok_or_else(|| SourceBackedCoordinatorError::InvalidRefreshScope {
+                route_id: replacement.as_str().to_owned(),
+            })?;
+        if route.driver.is_none() {
+            return Err(SourceBackedCoordinatorError::InvalidRefreshScope {
+                route_id: replacement.as_str().to_owned(),
+            });
+        }
+        route.retire_after_success.extend(retired);
+        route.retire_after_success.sort();
+        route.retire_after_success.dedup();
+        if route
+            .retire_after_success
+            .binary_search(replacement)
+            .is_ok()
+        {
+            return Err(SourceBackedCoordinatorError::InvalidRefreshScope {
+                route_id: replacement.as_str().to_owned(),
+            });
+        }
+        Ok(())
     }
 
     pub fn routes(&self) -> impl ExactSizeIterator<Item = &SourceBackedRouteMetadata> {

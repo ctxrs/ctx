@@ -79,6 +79,76 @@ impl ExplicitSourceCatalogAuthority {
             .collect()
     }
 
+    pub(crate) fn replacement_route_retirements(
+        previous: Option<(&Self, &[ExplicitSourceCatalogRouteBinding])>,
+        requested: Option<(&Self, &[ExplicitSourceCatalogRouteBinding])>,
+    ) -> Result<
+        BTreeMap<
+            ctx_history_index::SourceRouteIdentity,
+            Vec<ctx_history_index::SourceRouteIdentity>,
+        >,
+    > {
+        let Some((previous_catalog, previous_bindings)) = previous else {
+            return Ok(BTreeMap::new());
+        };
+        let Some((requested_catalog, requested_bindings)) = requested else {
+            return Ok(BTreeMap::new());
+        };
+        let previous_routes = previous_catalog.bound_routes(previous_bindings)?;
+        let requested_routes = requested_catalog.bound_routes(requested_bindings)?;
+        let mut retirements = BTreeMap::<_, Vec<_>>::new();
+        for (requested_entry, requested_route) in requested_routes {
+            let authority = (
+                requested_entry.provider()?.as_str().to_owned(),
+                requested_entry.certified_source_format()?.to_owned(),
+            );
+            let mut retired = Vec::new();
+            for (previous_entry, previous_route) in &previous_routes {
+                let previous_authority = (
+                    previous_entry.provider()?.as_str().to_owned(),
+                    previous_entry.certified_source_format()?.to_owned(),
+                );
+                if previous_authority == authority && previous_route != &requested_route {
+                    retired.push(previous_route.clone());
+                }
+            }
+            if !retired.is_empty() && retirements.insert(requested_route, retired).is_some() {
+                bail!("explicit request contains duplicate replacement authority");
+            }
+        }
+        Ok(retirements)
+    }
+
+    fn bound_routes<'a>(
+        &'a self,
+        bindings: &[ExplicitSourceCatalogRouteBinding],
+    ) -> Result<Vec<(&'a CatalogEntry, ctx_history_index::SourceRouteIdentity)>> {
+        let mut bindings_by_lineage = BTreeMap::new();
+        for binding in bindings {
+            decode_digest(&binding.catalog_lineage)
+                .context("validate explicit catalog binding lineage")?;
+            let route =
+                ctx_history_index::SourceRouteIdentity::from_sha256(binding.route_identity.clone())
+                    .context("validate explicit catalog binding route")?;
+            if bindings_by_lineage
+                .insert(binding.catalog_lineage.as_str(), route)
+                .is_some()
+            {
+                bail!("explicit catalog contains duplicate lineage bindings");
+            }
+        }
+        self.entries
+            .iter()
+            .map(|entry| {
+                let route = bindings_by_lineage
+                    .get(entry.catalog_lineage.as_str())
+                    .cloned()
+                    .ok_or_else(|| anyhow!("explicit catalog has incomplete lineage bindings"))?;
+                Ok((entry, route))
+            })
+            .collect()
+    }
+
     fn collect_generation_witness(
         &self,
         bindings: &[ExplicitSourceCatalogRouteBinding],
@@ -206,17 +276,28 @@ mod tests {
                 &replacement.authority,
                 std::slice::from_ref(&replacement_binding),
             )),
-            &BTreeSet::from([old_route, replacement_route.clone()]),
-            &BTreeSet::from([replacement_route]),
+            &BTreeSet::from([old_route.clone(), replacement_route.clone()]),
+            &BTreeSet::from([replacement_route.clone()]),
         )
         .unwrap();
         let catalog = catalog.unwrap();
         assert!(catalog.carries_request(&replacement.authority));
-        assert_eq!(bindings, vec![replacement_binding]);
+        assert_eq!(bindings, vec![replacement_binding.clone()]);
         assert!(catalog
             .relocation_authority(&old_path, &bindings)
             .unwrap()
             .is_none());
+        assert_eq!(
+            ExplicitSourceCatalogAuthority::replacement_route_retirements(
+                Some((&old.authority, std::slice::from_ref(&old_binding))),
+                Some((
+                    &replacement.authority,
+                    std::slice::from_ref(&replacement_binding),
+                )),
+            )
+            .unwrap(),
+            BTreeMap::from([(replacement_route, vec![old_route])]),
+        );
     }
 
     #[test]

@@ -244,7 +244,7 @@ impl SourceBackedRefreshCoveredPublication {
             .saturating_add(self.timings.commit_us);
     }
 
-    fn apply(&self, publication: &mut SourceBackedRefreshPublication) {
+    pub(crate) fn apply(&self, publication: &mut SourceBackedRefreshPublication) {
         self.apply_receipt(publication);
         self.apply_timings(publication);
     }

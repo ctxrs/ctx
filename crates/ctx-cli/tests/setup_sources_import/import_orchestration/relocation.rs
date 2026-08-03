@@ -181,7 +181,7 @@ fn failed_explicit_replacement_preserves_retained_relocation_witness() {
 #[test]
 fn replaced_explicit_custom_route_cannot_reuse_a_stale_relocation_witness() {
     let temp = tempdir();
-    let _daemon = start_full_source_refresh_daemon(&temp);
+    let daemon = start_full_source_refresh_daemon(&temp);
     let first_path = temp.path().join("replaced-first.jsonl");
     let replacement_path = temp.path().join("replacement.jsonl");
     let moved_first_path = temp.path().join("replaced-first-moved.jsonl");
@@ -190,9 +190,32 @@ fn replaced_explicit_custom_route_cannot_reuse_a_stale_relocation_witness() {
 
     let first = import_explicit_custom_source(&temp, &first_path);
     assert_eq!(first["outcome"], "success", "{first:#}");
+    let first_route = first["sources"][0]["route_identity"].clone();
     let replacement = import_explicit_custom_source(&temp, &replacement_path);
     assert_eq!(replacement["outcome"], "success", "{replacement:#}");
     let replacement_generation = published_generation(&replacement);
+    let replacement_route = replacement["sources"][0]["route_identity"].clone();
+    let replaced =
+        ctx_history_index::VerifiedIndex::open(data_root(&temp).join("search").join("lexical"))
+            .unwrap();
+    assert!(!replaced
+        .manifest()
+        .source_routes()
+        .iter()
+        .any(|route| route.route_identity().as_str() == first_route.as_str().unwrap()));
+    assert!(replaced
+        .manifest()
+        .source_routes()
+        .iter()
+        .any(|route| route.route_identity().as_str() == replacement_route.as_str().unwrap()));
+    drop(replaced);
+
+    drop(daemon);
+    let _restarted_daemon = start_full_source_refresh_daemon(&temp);
+    let replay = import_explicit_custom_source(&temp, &replacement_path);
+    assert_eq!(replay["outcome"], "success", "{replay:#}");
+    assert_eq!(published_generation(&replay), replacement_generation);
+
     fs::rename(&first_path, &moved_first_path).unwrap();
 
     let stderr = failure_stderr(ctx(&temp).args([

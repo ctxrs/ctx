@@ -156,6 +156,7 @@ struct SourceRoutePlan {
 #[derive(Clone)]
 struct SourceRouteStageCheckpoint {
     route_identity: SourceRouteIdentity,
+    source_route_plan: SourceRoutePlan,
     complete_inventories: Vec<CertifiedSourceInventory>,
     pending: HashMap<String, PendingSource>,
     deletions: HashMap<SourceKey, PendingDeletion>,

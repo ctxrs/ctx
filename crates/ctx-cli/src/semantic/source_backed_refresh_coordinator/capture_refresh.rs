@@ -775,6 +775,18 @@ fn build_merged_source_backed_registry(
         })
         .transpose()?
         .unwrap_or_default();
+    let route_retirements = ExplicitSourceCatalogAuthority::replacement_route_retirements(
+        previous_explicit_source_catalog
+            .as_ref()
+            .map(|catalog| (catalog, previous_catalog_route_bindings.as_slice())),
+        explicit_source_catalog
+            .map(|catalog| (catalog, requested_catalog_route_bindings.as_slice())),
+    )?;
+    for (replacement, retired) in route_retirements {
+        build
+            .registry
+            .retire_routes_after_success(&replacement, retired)?;
+    }
     Ok(MergedSourceBackedRegistry {
         build,
         previous_explicit_source_catalog,

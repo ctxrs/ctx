@@ -132,6 +132,29 @@ fn fail_route_before_scan(
     route
 }
 
+fn empty_route(mut route: SourceBackedRoute) -> SourceBackedRoute {
+    let original = route.driver.take().unwrap();
+    let owns = Arc::clone(&original.owns_source);
+    let revalidate = Arc::clone(&original.revalidate);
+    route.driver = Some(SourceBackedRouteDriver::new(
+        |_| Ok(()),
+        move |source| owns(source),
+        move |target| revalidate(target),
+    ));
+    route
+}
+
+fn explicit_route_at(mut route: SourceBackedRoute, path: PathBuf) -> SourceBackedRoute {
+    let mut source = route.metadata.source.clone();
+    source.path = path;
+    SourceBackedRoute::explicit_manual(
+        source,
+        SourceBackedSelectorAuthority::ExplicitPath,
+        route.driver.take().unwrap(),
+    )
+    .unwrap()
+}
+
 fn fail_route_at_final_revalidation(mut route: SourceBackedRoute) -> SourceBackedRoute {
     let mut driver = route.driver.take().unwrap();
     driver.revalidate = Arc::new(|_| false);
@@ -791,6 +814,101 @@ fn selected_route_refresh_carries_unselected_route_and_reports_exact_noop_succes
         Some(&retained_second)
     );
     assert_eq!(second_scans.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn successful_replacement_does_not_report_the_retired_route_as_carried() {
+    let temp = tempdir().unwrap();
+    let retired = explicit_route_at(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 71),
+        temp.path().join("retired.jsonl"),
+    );
+    let retired_id = retired.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(retired);
+    refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+        .unwrap();
+
+    let replacement = empty_route(explicit_route_at(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 72),
+        temp.path().join("replacement.jsonl"),
+    ));
+    let replacement_id = replacement.metadata.route_identity.clone().unwrap();
+    let mut replacement_registry = SourceBackedProviderRegistry::new();
+    replacement_registry.register(replacement);
+    replacement_registry
+        .retire_routes_after_success(&replacement_id, [retired_id.clone()])
+        .unwrap();
+
+    let receipt = refresh_source_backed_generation_for_routes(
+        temp.path(),
+        &replacement_registry,
+        WriterOptions::default(),
+        [replacement_id.clone()],
+    )
+    .unwrap();
+
+    assert!(receipt.carried_unselected_route_ids.is_empty());
+    assert!(receipt
+        .commit
+        .manifest()
+        .source_route(&retired_id)
+        .is_none());
+    assert!(receipt
+        .commit
+        .manifest()
+        .source_route(&replacement_id)
+        .is_some());
+}
+
+#[test]
+fn empty_replacement_cannot_hide_a_cold_route_failure_behind_retired_content() {
+    let temp = tempdir().unwrap();
+    let retired = explicit_route_at(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 73),
+        temp.path().join("retired.jsonl"),
+    );
+    let retired_id = retired.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(retired);
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+
+    let replacement = empty_route(explicit_route_at(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 74),
+        temp.path().join("replacement.jsonl"),
+    ));
+    let replacement_id = replacement.metadata.route_identity.clone().unwrap();
+    let failed = fail_route_before_scan(
+        fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 75),
+        SourceBackedRouteErrorKind::SourceChanged,
+    );
+    let failed_id = failed.metadata.route_identity.clone().unwrap();
+    let mut replacement_registry = SourceBackedProviderRegistry::new();
+    replacement_registry.register(replacement);
+    replacement_registry.register(failed);
+    replacement_registry
+        .retire_routes_after_success(&replacement_id, [retired_id])
+        .unwrap();
+
+    let error = refresh_source_backed_generation_for_routes(
+        temp.path(),
+        &replacement_registry,
+        WriterOptions::default(),
+        [replacement_id, failed_id.clone()],
+    )
+    .expect_err("retired content is not usable carried content");
+
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes }
+            if failed_routes.len() == 1 && failed_routes[0].route_identity == failed_id
+    ));
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        initial.commit.generation_id
+    );
 }
 
 #[test]

@@ -473,7 +473,7 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
                     SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true)
                 })
                 .collect::<Vec<_>>();
-            Ok(SourceBackedRefreshPublication {
+            let mut publication = SourceBackedRefreshPublication {
                 route_results,
                 catalog_route_bindings: Vec::new(),
                 verified_index: None,
@@ -488,7 +488,9 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
                     scan_stage_us: 1,
                     commit_us: 1,
                 },
-            })
+            };
+            execution.covered_publication.apply(&mut publication);
+            Ok(publication)
         },
     )));
     coordinator.reconcile_watch_routes(
@@ -571,6 +573,7 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
     assert_eq!(terminal["request_id"], manual_request_id);
     assert_eq!(terminal["request_state"], "published");
     assert_eq!(terminal["scanned_routes"], routes.len());
+    assert_eq!(terminal["receipt"]["selected_route_total"], routes.len());
     assert!(!coordinator.has_pending_request());
     assert!(!coordinator.has_scheduled_route_work());
 }

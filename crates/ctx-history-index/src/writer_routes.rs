@@ -148,6 +148,7 @@ impl GenerationWriter {
         }
         let checkpoint = SourceRouteStageCheckpoint {
             route_identity: route_identity.clone(),
+            source_route_plan: plan.clone(),
             complete_inventories: self.complete_inventories.clone(),
             pending: self.pending.clone(),
             deletions: self.deletions.clone(),
@@ -233,6 +234,7 @@ impl GenerationWriter {
             writer.set_merge_policy(Box::new(LexicalMergePolicy::default()));
         }
         self.complete_inventories = checkpoint.complete_inventories;
+        self.source_route_plan = Some(checkpoint.source_route_plan);
         self.pending = checkpoint.pending;
         self.deletions = checkpoint.deletions;
         self.route_deletions = checkpoint.route_deletions;
@@ -241,6 +243,83 @@ impl GenerationWriter {
             .truncate(checkpoint.route_publication_revalidation_len);
         self.source_identities = checkpoint.source_identities;
         Ok(())
+    }
+
+    /// Atomically retires one exact base route after the active replacement
+    /// route has scanned and terminally revalidated successfully.
+    ///
+    /// The retired route must already be authenticated as carried from this
+    /// writer's locked base. Its sources must not be shared with another base
+    /// route. The mutation remains inside the active route savepoint, so a
+    /// failed replacement rolls back without changing the retained route.
+    pub fn retire_carried_source_route(
+        &mut self,
+        replacement_route: &SourceRouteIdentity,
+        retired_route: &SourceRouteIdentity,
+    ) -> Result<Vec<SourceKey>> {
+        self.require_active_source_route(replacement_route)?;
+        if replacement_route == retired_route {
+            return Err(IndexError::InvalidSourceRoutePlan(
+                "a source route cannot retire itself".to_owned(),
+            ));
+        }
+        let plan = self.source_route_plan.as_ref().ok_or_else(|| {
+            IndexError::InvalidSourceRoutePlan("route retirement requires a route plan".to_owned())
+        })?;
+        if !plan.carried_from_base.contains(retired_route) {
+            return Err(IndexError::InvalidSourceRoutePlan(format!(
+                "retired route {} is not carried from the locked base",
+                retired_route.as_str()
+            )));
+        }
+        let base = self.base_manifest.as_ref().ok_or_else(|| {
+            IndexError::InvalidSourceRoutePlan(
+                "route retirement requires a locked base generation".to_owned(),
+            )
+        })?;
+        let retired = base.source_route(retired_route).ok_or_else(|| {
+            IndexError::InvalidSourceRoutePlan(format!(
+                "retired route {} is absent from the locked base",
+                retired_route.as_str()
+            ))
+        })?;
+        for source in retired.sources() {
+            if let Some(other) = base.source_routes().iter().find(|candidate| {
+                candidate.route_identity() != retired_route
+                    && candidate
+                        .sources()
+                        .iter()
+                        .any(|member| member.exact_descriptor_eq(source))
+            }) {
+                return Err(IndexError::InvalidSourceRoutePlan(format!(
+                    "retired route {} shares source {} with route {}",
+                    retired_route.as_str(),
+                    source.identity(),
+                    other.route_identity().as_str()
+                )));
+            }
+        }
+        let retired_sources = retired.sources().to_vec();
+        let source_key_field = self.fields.source_key;
+        for source in &retired_sources {
+            let token = source_token(source);
+            if self.pending.contains_key(&token) || self.deletions.contains_key(source) {
+                return Err(IndexError::InvalidSourceRoutePlan(format!(
+                    "retired route {} source {} is already mutated",
+                    retired_route.as_str(),
+                    source.identity()
+                )));
+            }
+            self.writer_mut()?
+                .delete_term(Term::from_field_text(source_key_field, &token));
+            self.route_deletions.insert(source.clone());
+        }
+        self.source_route_plan
+            .as_mut()
+            .expect("route plan checked above")
+            .carried_from_base
+            .remove(retired_route);
+        Ok(retired_sources)
     }
 
     /// Converts a failed selected route into exact base carry-forward. Cold

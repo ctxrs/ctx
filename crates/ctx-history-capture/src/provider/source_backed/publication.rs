@@ -601,6 +601,33 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                         &owners,
                         &complete_inventory_owners,
                     )? {
+                        for retired_route in &route.retire_after_success {
+                            let retired_sources = writer
+                                .retire_carried_source_route(route_identity, retired_route)?;
+                            attempt_carried.remove(retired_route);
+                            carried_unselected_route_ids.remove(retired_route);
+                            for source in retired_sources {
+                                let digest = source.identity().digest();
+                                if owners
+                                    .insert(
+                                        digest,
+                                        SourceOwner {
+                                            route_index,
+                                            source: source.clone(),
+                                            present: false,
+                                            revalidation: None,
+                                        },
+                                    )
+                                    .is_some()
+                                {
+                                    return Err(
+                                        SourceBackedCoordinatorError::DuplicateSourceOwner {
+                                            source_id: source.identity().to_string(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
                         writer.finish_source_route_stage(route_identity)?;
                         successful_this_attempt.insert(route_identity.clone());
                     } else {
