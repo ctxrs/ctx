@@ -664,7 +664,6 @@ for required in \
   'CTX_LOCAL_MACOS_SIGNING_LIVE_TEST' \
   'F1:6C:D3:C5:4C:7F:83:CE:A4:BF:1A:3E:6A:08:19:C8:AA:A8:E4:A1:52:8F:D1:44:71:5F:35:06:43:D2:DF:3A' \
   '--codesign-authority' \
-  'SJSNARH4TG' \
   '-no-CApath' \
   '-no-CAstore' \
   '-ignore_critical' \

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXPECTED_TEAM_ID="SJSNARH4TG"
 EXPECTED_CA_SHA256="F1:6C:D3:C5:4C:7F:83:CE:A4:BF:1A:3E:6A:08:19:C8:AA:A8:E4:A1:52:8F:D1:44:71:5F:35:06:43:D2:DF:3A"
 
 usage() {
@@ -20,9 +19,11 @@ die() {
   exit 1
 }
 
-authority_matches_expected_team() {
-  case "$1" in
-    "Developer ID Application: "*" (${EXPECTED_TEAM_ID})") return 0 ;;
+authority_matches_team() {
+  local authority="$1"
+  local team_id="$2"
+  case "${authority}" in
+    "Developer ID Application: "*" (${team_id})") return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -31,6 +32,13 @@ subject_authority() {
   local subject="$1"
   [[ "${subject}" == *",CN="* ]] || return 1
   subject="${subject#*,CN=}"
+  printf '%s\n' "${subject%%,*}"
+}
+
+subject_organizational_unit() {
+  local subject="$1"
+  [[ "${subject}" == *",OU="* ]] || return 1
+  subject="${subject#*,OU=}"
   printf '%s\n' "${subject%%,*}"
 }
 
@@ -78,6 +86,7 @@ for flag in -no-CApath -no-CAstore -ignore_critical; do
 done
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${root_dir}/scripts/macos-release-publisher-policy.sh"
 ca_file="${root_dir}/scripts/apple-developer-id-g2-ca.pem"
 ca_fingerprint="$(openssl x509 -in "${ca_file}" -noout -fingerprint -sha256 2>/dev/null \
   | sed 's/^.*Fingerprint=//')"
@@ -109,10 +118,14 @@ subject="$(openssl x509 \
 subject=",${subject#subject=},"
 signer_authority="$(subject_authority "${subject}")" || \
   die "macOS attestation actual signer is missing a Developer ID common name"
-authority_matches_expected_team "${signer_authority}" || \
-  die "macOS attestation actual signer does not have the pinned ctx Apple authority"
-[[ "${subject}" == *",OU=${EXPECTED_TEAM_ID},"* ]] || \
-  die "macOS attestation actual signer does not have the pinned ctx Apple Team ID"
+signer_team_id="$(subject_organizational_unit "${subject}")" || \
+  die "macOS attestation actual signer is missing an Apple Team ID"
+[[ "${signer_team_id}" =~ ^[A-Z0-9]{10}$ ]] || \
+  die "macOS attestation actual signer has an invalid Apple Team ID"
+authority_matches_team "${signer_authority}" "${signer_team_id}" || \
+  die "macOS attestation signer authority and Team ID disagree"
+ctx_macos_release_team_id_matches_policy "${signer_team_id}" || \
+  die "macOS attestation signer does not match the pinned project release publisher"
 eku="$(openssl x509 -in "${signer_cert}" -noout -ext extendedKeyUsage 2>/dev/null || true)"
 grep -Eq '(^|[ ,])(Code Signing|1\.3\.6\.1\.5\.5\.7\.3\.3)(,|$)' <<<"${eku}" || \
   die "macOS attestation actual signer certificate lacks the Code Signing EKU"

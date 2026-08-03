@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXPECTED_TEAM_ID="SJSNARH4TG"
-
 usage() {
   cat >&2 <<'USAGE'
 Usage: scripts/check-macos-release-signing.sh PLATFORM KIND ARTIFACT [EVIDENCE]
@@ -18,9 +16,11 @@ die() {
   exit 1
 }
 
-authority_matches_expected_team() {
-  case "$1" in
-    "Developer ID Application: "*" (${EXPECTED_TEAM_ID})") return 0 ;;
+authority_matches_team() {
+  local authority="$1"
+  local team_id="$2"
+  case "${authority}" in
+    "Developer ID Application: "*" (${team_id})") return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -70,23 +70,36 @@ fi
 [[ -s "${evidence}" ]] || die "macOS signing evidence missing: ${evidence}"
 [[ -s "${artifact}.sha256" ]] || die "macOS release checksum missing: ${artifact}.sha256"
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${root_dir}/scripts/macos-release-publisher-policy.sh"
 require_command codesign
 require_command python3
-evidence_authority="$(python3 - "${evidence}" <<'PY'
+mapfile -t evidence_identity < <(python3 - "${evidence}" <<'PY'
 import json
 import sys
 
 try:
     with open(sys.argv[1], encoding="utf-8") as source:
-        value = json.load(source)["codesign"]["authority"]
+        signing = json.load(source)["codesign"]
+    authority = signing["authority"]
+    team_identifier = signing["team_identifier"]
 except (OSError, KeyError, TypeError, json.JSONDecodeError):
-    value = ""
-if isinstance(value, str):
-    print(value, end="")
+    authority = ""
+    team_identifier = ""
+if isinstance(authority, str) and isinstance(team_identifier, str):
+    print(authority)
+    print(team_identifier)
 PY
-)"
-authority_matches_expected_team "${evidence_authority}" || \
-  die "macOS signing evidence does not contain the pinned ctx Apple authority"
+)
+[[ "${#evidence_identity[@]}" == "2" ]] || \
+  die "macOS signing evidence does not contain one complete Apple identity"
+evidence_authority="${evidence_identity[0]}"
+evidence_team_id="${evidence_identity[1]}"
+[[ "${evidence_team_id}" =~ ^[A-Z0-9]{10}$ ]] || \
+  die "macOS signing evidence contains an invalid Apple Team ID"
+authority_matches_team "${evidence_authority}" "${evidence_team_id}" || \
+  die "macOS signing evidence authority and Team ID disagree"
+ctx_macos_release_team_id_matches_policy "${evidence_team_id}" || \
+  die "macOS signing evidence does not match the pinned project release publisher"
 evidence_dir="$(cd "$(dirname "${evidence}")" && pwd)"
 attestation_json="${evidence_dir}/${evidence_prefix}.attestation.json"
 attestation_cms="${evidence_dir}/${evidence_prefix}.attestation.cms"
@@ -105,11 +118,11 @@ verify_macho() {
   fi
   grep -Fqx "Authority=${evidence_authority}" "${details}" || {
     rm -f "${details}"
-    die "artifact does not have the pinned ctx Apple authority: ${path}"
+    die "artifact does not match the attested Apple authority: ${path}"
   }
-  grep -Fqx "TeamIdentifier=${EXPECTED_TEAM_ID}" "${details}" || {
+  grep -Fqx "TeamIdentifier=${evidence_team_id}" "${details}" || {
     rm -f "${details}"
-    die "artifact does not have the pinned ctx Apple Team ID: ${path}"
+    die "artifact does not match the attested Apple Team ID: ${path}"
   }
   codesign_details_have_runtime "${details}" || {
     rm -f "${details}"

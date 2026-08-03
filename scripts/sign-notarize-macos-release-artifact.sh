@@ -4,8 +4,6 @@ case "$-" in
   *x*) set +x ;;
 esac
 
-EXPECTED_TEAM_ID="SJSNARH4TG"
-
 usage() {
   cat >&2 <<'USAGE'
 Usage: scripts/sign-notarize-macos-release-artifact.sh PLATFORM KIND ARTIFACT [EVIDENCE_DIR]
@@ -21,9 +19,11 @@ die() {
   exit 1
 }
 
-authority_matches_expected_team() {
-  case "$1" in
-    "Developer ID Application: "*" (${EXPECTED_TEAM_ID})") return 0 ;;
+authority_matches_team() {
+  local authority="$1"
+  local team_id="$2"
+  case "${authority}" in
+    "Developer ID Application: "*" (${team_id})") return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -32,6 +32,13 @@ subject_authority() {
   local subject="$1"
   [[ "${subject}" == *",CN="* ]] || return 1
   subject="${subject#*,CN=}"
+  printf '%s\n' "${subject%%,*}"
+}
+
+subject_organizational_unit() {
+  local subject="$1"
+  [[ "${subject}" == *",OU="* ]] || return 1
+  subject="${subject#*,OU=}"
   printf '%s\n' "${subject%%,*}"
 }
 
@@ -205,6 +212,7 @@ esac
 [[ "${CTX_MACOS_SIGNING_LAUNCHED:-0}" == "1" ]] || \
   die "macOS signer must be invoked through the trusted narrow launcher"
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${root_dir}/scripts/macos-release-publisher-policy.sh"
 "${root_dir}/scripts/check-macos-signing-trusted-ref.sh" >/dev/null
 if [[ "${CTX_TEST_ONLY_MACOS_HOST:-}" == "Darwin" ]]; then
   [[ "${CTX_LOCAL_MACOS_SIGNING_LIVE_TEST:-0}" == "1" ]] || \
@@ -291,10 +299,14 @@ certificate_subject="$(openssl x509 \
 certificate_subject=",${certificate_subject#subject=},"
 certificate_authority="$(subject_authority "${certificate_subject}")" || \
   die "APPLE_CODESIGN_CERT_P12_B64 is missing a Developer ID common name"
-authority_matches_expected_team "${certificate_authority}" || \
-  die "APPLE_CODESIGN_CERT_P12_B64 is not the pinned ctx Developer ID identity"
-[[ "${certificate_subject}" == *",OU=${EXPECTED_TEAM_ID},"* ]] || \
-  die "APPLE_CODESIGN_CERT_P12_B64 does not have the pinned ctx Apple Team ID"
+certificate_team_id="$(subject_organizational_unit "${certificate_subject}")" || \
+  die "APPLE_CODESIGN_CERT_P12_B64 is missing an Apple Team ID"
+[[ "${certificate_team_id}" =~ ^[A-Z0-9]{10}$ ]] || \
+  die "APPLE_CODESIGN_CERT_P12_B64 has an invalid Apple Team ID"
+authority_matches_team "${certificate_authority}" "${certificate_team_id}" || \
+  die "APPLE_CODESIGN_CERT_P12_B64 authority and Team ID disagree"
+ctx_macos_release_team_id_matches_policy "${certificate_team_id}" || \
+  die "APPLE_CODESIGN_CERT_P12_B64 does not match the pinned project release publisher"
 certificate_eku="$(openssl x509 \
   -in "${cert_pem_path}" -noout -ext extendedKeyUsage 2>/dev/null || true)"
 grep -Eq '(^|[ ,])(Code Signing|1\.3\.6\.1\.5\.5\.7\.3\.3)(,|$)' \
@@ -333,8 +345,8 @@ codesign -d --verbose=4 "${artifact}" >"${codesign_details}" 2>&1 || \
 chmod 0644 "${codesign_details}"
 grep -Fqx "Authority=${certificate_authority}" "${codesign_details}" || \
   die "signed ${platform} ${kind} does not have the pinned ctx Apple authority"
-grep -Fqx "TeamIdentifier=${EXPECTED_TEAM_ID}" "${codesign_details}" || \
-  die "signed ${platform} ${kind} does not have the pinned ctx Apple Team ID"
+grep -Fqx "TeamIdentifier=${certificate_team_id}" "${codesign_details}" || \
+  die "signed ${platform} ${kind} does not match the verified certificate Team ID"
 codesign_details_have_runtime "${codesign_details}" || \
   die "signed ${platform} ${kind} is missing hardened runtime flags"
 grep -Eq '^Timestamp=.+$' "${codesign_details}" || \
