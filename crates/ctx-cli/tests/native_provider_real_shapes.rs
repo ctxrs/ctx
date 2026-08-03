@@ -252,3 +252,54 @@ fn nanoclaw_import_preserves_text_timestamp_millis_and_integer_trigger() {
         "{search:#}"
     );
 }
+
+#[test]
+fn kimi_code_cli_wire_indexes_streamed_assistant_output_through_public_cli() {
+    let temp = finite_daemon_test_root();
+    let query = "streamedassistantwireoracle";
+    let path = write_native_kimi_code_cli_wire_fixture(&temp, query);
+
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "kimi-code-cli",
+        "--path",
+        &path,
+        "--format=json",
+    ]));
+    let source = assert_explicit_source_publication(
+        &imported,
+        "kimi_code_cli",
+        "kimi_code_cli_wire_jsonl_tree",
+    );
+    assert_eq!(source["current_source_count"], 1, "{imported:#}");
+    assert!(
+        source["current_indexed_documents"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "{imported:#}"
+    );
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "kimi-code-cli",
+        "--events",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_event_search_provider_oracle(&search, "kimi_code_cli", query, 1, "message");
+    let assistant_reply = &search["results"][0];
+    assert_eq!(
+        assistant_reply["title"], "kimi_code_cli assistant message",
+        "{search:#}"
+    );
+    assert!(
+        assistant_reply["snippet"]
+            .as_str()
+            .is_some_and(|snippet| snippet.contains(query)),
+        "{search:#}"
+    );
+}

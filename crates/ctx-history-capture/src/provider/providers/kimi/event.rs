@@ -36,7 +36,9 @@ pub(crate) fn kimi_event_type(record_type: &str, value: &Value) -> EventType {
                 Some(kind) if kind.contains("tool.result") || kind.contains("tool.finish") => {
                     EventType::ToolOutput
                 }
-                Some(kind) if kind.contains("message") => EventType::Message,
+                Some(kind) if kind.contains("content.part") || kind.contains("message") => {
+                    EventType::Message
+                }
                 _ if value.pointer("/event/toolName").is_some()
                     || value.pointer("/event/tool_name").is_some() =>
                 {
@@ -68,6 +70,10 @@ pub(crate) fn kimi_event_role(
         {
             EventRole::Tool
         }
+        // Content parts are streamed model output, so they carry no role field.
+        "context.append_loop_event" if kimi_loop_event_is_content_part(value) => {
+            EventRole::Assistant
+        }
         "context.append_loop_event" => provider_role(
             value
                 .pointer("/event/role")
@@ -89,17 +95,22 @@ pub(crate) fn kimi_event_text(record_type: &str, value: &Value, event_type: Even
             .or_else(|| value.get("message"))
             .and_then(provider_value_text)
             .unwrap_or_default(),
-        "context.append_loop_event" => value
-            .pointer("/event/content")
-            .or_else(|| value.pointer("/event/text"))
-            .or_else(|| value.pointer("/event/output"))
-            .or_else(|| value.pointer("/event/result"))
-            .or_else(|| value.pointer("/event/message"))
-            .and_then(provider_value_text)
+        "context.append_loop_event" => kimi_content_part_text(value)
+            .or_else(|| {
+                value
+                    .pointer("/event/content")
+                    .or_else(|| value.pointer("/event/text"))
+                    .or_else(|| value.pointer("/event/output"))
+                    .or_else(|| value.pointer("/event/result/output"))
+                    .or_else(|| value.pointer("/event/result"))
+                    .or_else(|| value.pointer("/event/message"))
+                    .and_then(provider_value_text)
+            })
             .or_else(|| {
                 value
                     .pointer("/event/toolName")
                     .or_else(|| value.pointer("/event/tool_name"))
+                    .or_else(|| value.pointer("/event/name"))
                     .and_then(Value::as_str)
                     .map(|tool| match event_type {
                         EventType::ToolOutput => format!("tool result: {tool}"),
@@ -141,9 +152,33 @@ pub(super) fn kimi_output_content(value: &Value) -> Option<String> {
         .pointer("/event/content")
         .or_else(|| value.pointer("/event/text"))
         .or_else(|| value.pointer("/event/output"))
+        .or_else(|| value.pointer("/event/result/output"))
         .or_else(|| value.pointer("/event/result"))
         .or_else(|| value.pointer("/event/message"))
         .and_then(provider_explicit_result_value_text)
+}
+
+fn kimi_loop_event_is_content_part(value: &Value) -> bool {
+    value
+        .pointer("/event/type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.contains("content.part"))
+}
+
+/// Extracts assistant output from a Kimi `content.part` loop event. Kimi never
+/// journals assistant messages as `context.append_message`; replies and
+/// reasoning are only persisted as text and think parts.
+fn kimi_content_part_text(value: &Value) -> Option<String> {
+    if !kimi_loop_event_is_content_part(value) {
+        return None;
+    }
+    let part = value.pointer("/event/part")?;
+    part.get("text")
+        .or_else(|| part.get("think"))
+        .or_else(|| part.get("thinking"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| provider_value_text(part))
 }
 
 pub(crate) fn kimi_record_timestamp(
@@ -172,6 +207,97 @@ pub(crate) fn kimi_record_timestamp(
                 .and_then(DateTime::<Utc>::from_timestamp_millis)
         })
         .or(Some(fallback))
+}
+
+#[cfg(test)]
+mod loop_event_tests {
+    use ctx_history_core::{EventRole, EventType};
+    use serde_json::json;
+
+    use super::{kimi_event_role, kimi_event_text, kimi_event_type, kimi_output_content};
+
+    fn classify(value: &serde_json::Value) -> (EventType, EventRole, String) {
+        let record_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        let event_type = kimi_event_type(record_type, value);
+        (
+            event_type,
+            kimi_event_role(record_type, value, event_type),
+            kimi_event_text(record_type, value, event_type),
+        )
+    }
+
+    #[test]
+    fn content_parts_carry_assistant_reply_and_reasoning() {
+        let reply = json!({
+            "type": "context.append_loop_event",
+            "event": {
+                "type": "content.part",
+                "turnId": "0",
+                "step": 1,
+                "stepUuid": "8d666b5f",
+                "part": {"type": "text", "text": "reticulate them counter-clockwise"}
+            }
+        });
+        assert_eq!(
+            classify(&reply),
+            (
+                EventType::Message,
+                EventRole::Assistant,
+                "reticulate them counter-clockwise".to_owned()
+            )
+        );
+
+        let think = json!({
+            "type": "context.append_loop_event",
+            "event": {
+                "type": "content.part",
+                "stepUuid": "8d666b5f",
+                "part": {"type": "think", "think": "Simple probe request."}
+            }
+        });
+        assert_eq!(
+            classify(&think),
+            (
+                EventType::Message,
+                EventRole::Assistant,
+                "Simple probe request.".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn wire_tool_exchange_keeps_name_and_output() {
+        let call = json!({
+            "type": "context.append_loop_event",
+            "event": {
+                "type": "tool.call",
+                "toolCallId": "call_1",
+                "name": "Read",
+                "args": {"path": "/tmp/splines.txt"}
+            }
+        });
+        assert_eq!(
+            classify(&call),
+            (
+                EventType::ToolCall,
+                EventRole::Tool,
+                "tool call: Read".to_owned()
+            )
+        );
+
+        let result = json!({
+            "type": "context.append_loop_event",
+            "event": {
+                "type": "tool.result",
+                "toolCallId": "call_1",
+                "result": {"output": "spline data", "isError": false}
+            }
+        });
+        assert_eq!(kimi_output_content(&result).as_deref(), Some("spline data"));
+    }
 }
 
 #[cfg(test)]
