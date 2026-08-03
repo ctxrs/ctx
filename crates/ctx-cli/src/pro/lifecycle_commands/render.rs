@@ -20,6 +20,8 @@ pub(super) fn human_retry_command(args: &ProArgs) -> &'static str {
     match &args.command {
         Some(ProCommand::Manage(ProManageArgs { no_open: true, .. })) => "ctx pro manage --no-open",
         Some(ProCommand::Manage(_)) => "ctx pro manage",
+        #[cfg(ctx_pro_test_helper)]
+        Some(ProCommand::TestRequestHelperRecheck) => "ctx pro",
         None | Some(ProCommand::Setup(_)) | Some(ProCommand::Uninstall(_)) => "ctx pro",
     }
 }

@@ -94,6 +94,9 @@ enum ProCommand {
     Manage(ProManageArgs),
     #[command(about = "Remove Pro and choose whether to delete or preserve local Pro data")]
     Uninstall(ProUninstallArgs),
+    #[cfg(ctx_pro_test_helper)]
+    #[command(name = "_test-request-helper-recheck", hide = true)]
+    TestRequestHelperRecheck,
 }
 
 #[derive(Debug, Args)]
@@ -161,6 +164,8 @@ impl ProArgs {
                 Some(ProCommand::Setup(args)) => args.format.is_json(),
                 Some(ProCommand::Manage(args)) => args.format.is_json(),
                 Some(ProCommand::Uninstall(args)) => args.format.is_json(),
+                #[cfg(ctx_pro_test_helper)]
+                Some(ProCommand::TestRequestHelperRecheck) => false,
                 None => false,
             }
     }
@@ -169,6 +174,8 @@ impl ProArgs {
         match &self.command {
             Some(ProCommand::Manage(_)) => ProLifecycleOperationV1::Manage,
             Some(ProCommand::Uninstall(_)) => ProLifecycleOperationV1::Uninstall,
+            #[cfg(ctx_pro_test_helper)]
+            Some(ProCommand::TestRequestHelperRecheck) => ProLifecycleOperationV1::Setup,
             None | Some(ProCommand::Setup(_)) => ProLifecycleOperationV1::Setup,
         }
     }
@@ -177,6 +184,8 @@ impl ProArgs {
         match &self.command {
             Some(ProCommand::Manage(_)) => "pro_manage",
             Some(ProCommand::Uninstall(_)) => "pro_uninstall",
+            #[cfg(ctx_pro_test_helper)]
+            Some(ProCommand::TestRequestHelperRecheck) => "pro_setup",
             None | Some(ProCommand::Setup(_)) => "pro_setup",
         }
     }
@@ -282,6 +291,10 @@ fn run_lifecycle_inner(
         command, referral, ..
     } = args;
     match command {
+        #[cfg(ctx_pro_test_helper)]
+        Some(ProCommand::TestRequestHelperRecheck) => {
+            crate::semantic::request_source_backed_pro_recheck(data_root)
+        }
         None | Some(ProCommand::Setup(_)) => {
             crate::identity::installation_id(data_root)
                 .context("key_store_unavailable: initialize local Pro installation identity")?;
@@ -577,6 +590,9 @@ fn run_setup(
     } else {
         false
     };
+    if helper_updated {
+        crate::semantic::request_source_backed_pro_recheck(data_root)?;
+    }
     if defer_materialization {
         return pending_materialization::defer_setup(
             data_root,
