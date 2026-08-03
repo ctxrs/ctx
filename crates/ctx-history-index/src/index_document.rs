@@ -108,16 +108,16 @@ impl EventRangeOrderKey {
             || key.encoded_core_bytes() > MAX_ENCODED_CORE_RECORD_BYTES
             || key.content_bytes() > MAX_CORE_CONTENT_BYTES
         {
-            return Err(IndexError::InvalidStoredDocumentField(EVENT_RANGE_ORDER_FIELD));
+            return Err(IndexError::InvalidStoredDocumentField(
+                EVENT_RANGE_ORDER_FIELD,
+            ));
         }
         Ok(key)
     }
 
     pub(crate) fn timestamp_prefix(occurred_at_unix_ms: i64) -> [u8; 9] {
         let mut prefix = [0_u8; 9];
-        prefix[1..].copy_from_slice(
-            &((occurred_at_unix_ms as u64) ^ (1_u64 << 63)).to_be_bytes(),
-        );
+        prefix[1..].copy_from_slice(&((occurred_at_unix_ms as u64) ^ (1_u64 << 63)).to_be_bytes());
         prefix
     }
 

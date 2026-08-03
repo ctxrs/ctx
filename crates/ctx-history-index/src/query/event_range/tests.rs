@@ -696,9 +696,7 @@ fn descending_keyset_pages_reverse_the_same_total_order() {
         ascending_ids.into_iter().rev().collect::<Vec<_>>()
     );
 
-    let page = index
-        .core_event_range_page(&descending, None, 1)
-        .unwrap();
+    let page = index.core_event_range_page(&descending, None, 1).unwrap();
     assert!(matches!(
         page.next_cursor.unwrap().validate_selection(&ascending),
         Err(CoreEventRangeError::CursorSelectionMismatch)

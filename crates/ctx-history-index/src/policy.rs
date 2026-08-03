@@ -283,10 +283,10 @@ mod tests {
             .as_object()
             .unwrap()
             .contains_key("core_repository_association_policy_revision"));
-        assert_eq!(first.lexical.schema_revision, 16);
+        assert_eq!(first.lexical.schema_revision, 17);
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "7bcd30632200f8731a03ca71014fc826a7e7170f8b4c8b7222814c426ac43529"
+            "922a3606cae33c5efd426c7351356ae67ba0fca40de716d034757e5b234f9b68"
         );
     }
 

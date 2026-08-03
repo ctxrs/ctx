@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256};
 use crate::{index_document::EventRangeOrderKey, is_generation_id};
 
 const EVENT_RANGE_CURSOR_VERSION: u8 = 2;
-const EVENT_RANGE_CURSOR_BYTES: usize = 1 + 64 + 32 + crate::index_document::EVENT_RANGE_ORDER_KEY_LEN + 32;
+const EVENT_RANGE_CURSOR_BYTES: usize =
+    1 + 64 + 32 + crate::index_document::EVENT_RANGE_ORDER_KEY_LEN + 32;
 pub const MAX_CORE_EVENT_RANGE_PAGE_ITEMS: usize = 4_096;
 const MAX_EVENT_RANGE_PROVIDERS: usize = 64;
 const MAX_PROVIDER_FILTER_BYTES: usize = 256;
@@ -40,13 +41,9 @@ impl OrderedTermMerger<'_> {
         }
     }
 
-    fn current_segment_ords_and_term_infos(
-        &self,
-    ) -> Vec<(usize, tantivy::postings::TermInfo)> {
+    fn current_segment_ords_and_term_infos(&self) -> Vec<(usize, tantivy::postings::TermInfo)> {
         match self {
-            Self::Ascending(merger) => merger
-                .current_segment_ords_and_term_infos()
-                .collect(),
+            Self::Ascending(merger) => merger.current_segment_ords_and_term_infos().collect(),
             Self::Descending(merger) => merger.current_segment_ords_and_term_infos(),
         }
     }
@@ -98,14 +95,16 @@ impl<'a> ReverseTermMerger<'a> {
         if self.current_key.is_empty() {
             return false;
         }
-        self.current_segments.extend(
-            self.streams
-                .iter()
-                .enumerate()
-                .filter_map(|(segment, stream)| {
-                    (self.active[segment] && stream.key() == self.current_key).then_some(segment)
-                }),
-        );
+        self.current_segments
+            .extend(
+                self.streams
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(segment, stream)| {
+                        (self.active[segment] && stream.key() == self.current_key)
+                            .then_some(segment)
+                    }),
+            );
         true
     }
 
@@ -113,9 +112,7 @@ impl<'a> ReverseTermMerger<'a> {
         &self.current_key
     }
 
-    fn current_segment_ords_and_term_infos(
-        &self,
-    ) -> Vec<(usize, tantivy::postings::TermInfo)> {
+    fn current_segment_ords_and_term_infos(&self) -> Vec<(usize, tantivy::postings::TermInfo)> {
         self.current_segments
             .iter()
             .map(|segment| (*segment, self.streams[*segment].value().clone()))
@@ -597,11 +594,7 @@ impl CoreEventRangeCursor {
         selection_digest.copy_from_slice(&encoded[65..97]);
         let after = EventRangeOrderKey::decode(&encoded[97..CURSOR_PAYLOAD_BYTES])
             .map_err(|_| CoreEventRangeError::InvalidCursor)?;
-        Self::new(
-            generation_id,
-            selection_digest,
-            after,
-        )
+        Self::new(generation_id, selection_digest, after)
     }
 }
 
@@ -727,7 +720,12 @@ impl VerifiedIndex {
                 event_range_filter_query(selection, fields, source_token)?,
             ),
         ]);
-        if self.searcher.search(&query, &Count).map_err(IndexError::from)? != 1 {
+        if self
+            .searcher
+            .search(&query, &Count)
+            .map_err(IndexError::from)?
+            != 1
+        {
             return Err(CoreEventRangeError::InvalidCursorCoordinate);
         }
         Ok(())
@@ -1019,21 +1017,21 @@ impl CoreEventRangeSelection {
     fn has_fully_indexed_filter(&self) -> bool {
         self.filters.source_identity.is_some()
             || !self.filters.providers.is_empty()
-                || self.filters.history_source.is_some()
-                || self.filters.provider_key.is_some()
-                || self.filters.source_id.is_some()
-                || self.filters.source_format.is_some()
-                || self.filters.provider_session_id.is_some()
-                || self.filters.session_id.is_some()
-                || self.filters.parent_session_id.is_some()
-                || self.filters.root_session_id.is_some()
-                || self.filters.branch.is_some()
-                || self.filters.workspace.is_some()
-                || self.filters.event_type.is_some()
-                || self.filters.role.is_some()
-                || self.filters.agent_type.is_some()
-                || self.filters.scope != CoreEventRangeScope::All
-                || self.filters.file.is_some()
+            || self.filters.history_source.is_some()
+            || self.filters.provider_key.is_some()
+            || self.filters.source_id.is_some()
+            || self.filters.source_format.is_some()
+            || self.filters.provider_session_id.is_some()
+            || self.filters.session_id.is_some()
+            || self.filters.parent_session_id.is_some()
+            || self.filters.root_session_id.is_some()
+            || self.filters.branch.is_some()
+            || self.filters.workspace.is_some()
+            || self.filters.event_type.is_some()
+            || self.filters.role.is_some()
+            || self.filters.agent_type.is_some()
+            || self.filters.scope != CoreEventRangeScope::All
+            || self.filters.file.is_some()
     }
 }
 
@@ -1247,10 +1245,7 @@ fn indexed_term_matches(
     Ok(postings.seek(doc) == doc)
 }
 
-fn selection_digest(
-    domain: CoreEventRangeDomain,
-    filters: &CoreEventRangeFilters,
-) -> [u8; 32] {
+fn selection_digest(domain: CoreEventRangeDomain, filters: &CoreEventRangeFilters) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(SELECTION_DOMAIN);
     match domain {
