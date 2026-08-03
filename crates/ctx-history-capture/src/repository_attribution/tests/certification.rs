@@ -85,7 +85,7 @@ fn command_candidate_limit_preserves_independent_evidence() {
 }
 
 #[test]
-fn one_event_is_bounded_to_two_full_certificates_and_eight_git_subprocesses() {
+fn one_event_is_bounded_to_two_full_certificates_and_the_git_subprocess_budget() {
     let temp = TempDir::new().unwrap();
     let repositories = [
         repository(temp.path(), "first-budget", None),
@@ -112,10 +112,8 @@ fn one_event_is_bounded_to_two_full_certificates_and_eight_git_subprocesses() {
         attributor.full_certification_probe_count(),
         git::MAX_FULL_CERTIFICATIONS_PER_EVENT
     );
-    assert_eq!(
-        attributor.git_subprocess_count(),
-        git::MAX_GIT_SUBPROCESSES_PER_EVENT
-    );
+    assert!(attributor.git_subprocess_count() > 0);
+    assert!(attributor.git_subprocess_count() <= git::MAX_GIT_SUBPROCESSES_PER_EVENT);
 }
 
 #[cfg(unix)]

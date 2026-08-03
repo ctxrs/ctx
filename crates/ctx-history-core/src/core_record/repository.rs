@@ -11,14 +11,15 @@ use super::{
     CORE_MISSING_ACTIVITY_TIME_UNIX_MS, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
-    MAX_GIT_REF_BYTES, MAX_OUTCOME_LINKAGE_ITEMS, MAX_REPOSITORY_ALIASES, MAX_REPOSITORY_EVIDENCE,
+    CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION, MAX_GIT_REF_BYTES,
+    MAX_OUTCOME_LINKAGE_ITEMS, MAX_REPOSITORY_ALIASES, MAX_REPOSITORY_EVIDENCE,
     MAX_REPOSITORY_ITEMS, MAX_REPOSITORY_NAMESPACE_PARTS, MAX_REPOSITORY_RELATIVE_PATH_BYTES,
     MAX_TEXT_METADATA_BYTES,
 };
 
 const MAX_REPOSITORY_TOOL_NAME_BYTES: usize = 512;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GitObjectFormat {
     Sha1,
@@ -120,7 +121,7 @@ impl RepositoryBinding {
 ///
 /// The structured shape intentionally has no URL, userinfo, token, or
 /// credential-bearing field.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryAlias {
     pub kind: RepositoryAliasKind,
@@ -160,7 +161,7 @@ impl RepositoryAlias {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryAliasKind {
     Forge,
@@ -564,17 +565,29 @@ impl RepositoryVcsObservation {
         if let Some(path) = &self.relative_path {
             validate_repository_relative_path(path)?;
         }
-        if let RepositoryVcsObservationKind::Outcome(outcome) = &self.kind {
-            if self.object_id.is_some()
-                || !self.parent_object_ids.is_empty()
-                || self.reference.is_some()
-                || self.relative_path.is_some()
-            {
-                return Err(CoreRecordError::InvalidRepositoryOutcome);
+        match &self.kind {
+            RepositoryVcsObservationKind::Outcome(outcome) => {
+                if self.has_outer_object_fields() {
+                    return Err(CoreRecordError::InvalidRepositoryOutcome);
+                }
+                outcome.validate_contract()?;
             }
-            outcome.validate_contract()?;
+            RepositoryVcsObservationKind::PullRequestAssociation(association) => {
+                if self.has_outer_object_fields() {
+                    return Err(CoreRecordError::InvalidRepositoryPullRequestAssociation);
+                }
+                association.validate_contract()?;
+            }
+            _ => {}
         }
         Ok(())
+    }
+
+    fn has_outer_object_fields(&self) -> bool {
+        self.object_id.is_some()
+            || !self.parent_object_ids.is_empty()
+            || self.reference.is_some()
+            || self.relative_path.is_some()
     }
 }
 
@@ -588,6 +601,7 @@ pub enum RepositoryVcsObservationKind {
     Change,
     Reference,
     Outcome(Box<RepositoryOutcomeObservation>),
+    PullRequestAssociation(Box<RepositoryPullRequestAssociationObservation>),
 }
 
 /// One exact repository outcome observed prospectively at provider event time.
@@ -724,6 +738,64 @@ pub struct RepositoryPullRequestIdentity {
     pub provider_id: Option<String>,
 }
 
+/// An inspected pull request's exact merge and membership association.
+///
+/// This observation never asserts that the enclosing session produced a
+/// commit or performed the merge. Its contained object IDs are certified from
+/// the exact two-parent merge object's `merge^1..merge^2` Git-DAG range.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryPullRequestAssociationObservation {
+    pub pull_request: RepositoryPullRequestIdentity,
+    pub merged_as: GitObjectId,
+    pub contains_commits: Vec<GitObjectId>,
+    pub linkage: RepositoryOutcomeLinkage,
+    pub association_capture_revision: u32,
+}
+
+impl RepositoryPullRequestAssociationObservation {
+    pub fn validate_contract(&self) -> CoreRecordResult<()> {
+        if self.association_capture_revision
+            != CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION
+        {
+            return Err(CoreRecordError::InvalidRepositoryRevisions);
+        }
+        self.pull_request
+            .validate_contract()
+            .map_err(|_| CoreRecordError::InvalidRepositoryPullRequestAssociation)?;
+        self.merged_as
+            .validate_contract()
+            .map_err(|_| CoreRecordError::InvalidRepositoryPullRequestAssociation)?;
+        validate_count(
+            "repository_pull_request_contains_commits",
+            self.contains_commits.len(),
+            MAX_REPOSITORY_ITEMS,
+        )?;
+        if self
+            .contains_commits
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(CoreRecordError::InvalidRepositoryPullRequestAssociation);
+        }
+        for object_id in &self.contains_commits {
+            object_id
+                .validate_contract()
+                .map_err(|_| CoreRecordError::InvalidRepositoryPullRequestAssociation)?;
+            if object_id.format != self.merged_as.format || object_id == &self.merged_as {
+                return Err(CoreRecordError::InvalidRepositoryPullRequestAssociation);
+            }
+        }
+        self.linkage
+            .validate_contract()
+            .map_err(|_| CoreRecordError::InvalidRepositoryPullRequestAssociation)
+    }
+
+    pub fn object_ids(&self) -> impl Iterator<Item = &GitObjectId> {
+        std::iter::once(&self.merged_as).chain(self.contains_commits.iter())
+    }
+}
+
 impl RepositoryPullRequestIdentity {
     fn validate_contract(&self) -> CoreRecordResult<()> {
         self.forge_repository.validate_contract()?;
@@ -759,7 +831,7 @@ fn forge_logical_identity_matches(logical: &str, repository: &RepositoryAlias) -
 
 /// Bounded native linkage proving which structured result belongs to which
 /// command. Output bodies are represented only by the exact record digest.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryOutcomeLinkage {
     pub provider: String,
@@ -807,7 +879,7 @@ impl RepositoryOutcomeLinkage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitObjectId {
     pub format: GitObjectFormat,

@@ -5,6 +5,7 @@ use ctx_history_core::{
     CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION, CORE_REPOSITORY_CONTRACT_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION,
 };
 
 fn wire_names<T: Copy>(values: &[T], name: impl Fn(T) -> &'static str) -> Vec<&'static str> {
@@ -236,7 +237,24 @@ pub(super) fn inventory() -> Value {
                 "operation_ordinal", "repository_binding_id", "relative_path",
                 "prior_relative_path", "kind", "tool_name", "normalized_text_range"
             ], &[]),
-            "RepositoryFileInvocationTextRange": fields(&["start", "end"], &[])
+            "RepositoryFileInvocationTextRange": fields(&["start", "end"], &[]),
+            "RepositoryVcsObservation": fields(&[
+                "repository_binding_id", "kind", "object_id", "parent_object_ids",
+                "reference", "relative_path"
+            ], &[]),
+            "RepositoryVcsObservationKind.pull_request_association": fields(
+                &["pull_request_association"], &[]),
+            "RepositoryPullRequestAssociationObservation": fields(&[
+                "pull_request", "merged_as", "contains_commits", "linkage",
+                "association_capture_revision"
+            ], &[]),
+            "RepositoryPullRequestIdentity": fields(
+                &["forge_repository", "number", "provider_id"], &[]),
+            "GitObjectId": fields(&["format", "hex"], &[]),
+            "RepositoryOutcomeLinkage": fields(&[
+                "provider", "origin_call_id", "result_call_id", "origin_event_sequence",
+                "continuation_call_id_sha256", "result_record_sha256"
+            ], &[])
         },
         "core_record_contract": {
             "fingerprint": core_record_contract_fingerprint(),
@@ -259,6 +277,8 @@ pub(super) fn inventory() -> Value {
             "bounded_shell_subset_revision": CORE_BOUNDED_SHELL_SUBSET_REVISION,
             "repository_association_policy_revision":
                 CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+            "repository_pull_request_association_capture_revision":
+                CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION,
             "repository_outcome_capture_revision": CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
             "repository_local_root_authorization_fingerprint_revision":
                 CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,

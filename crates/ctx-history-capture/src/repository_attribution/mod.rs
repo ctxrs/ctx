@@ -1,3 +1,4 @@
+mod association;
 mod attributor;
 mod engine;
 mod git;
@@ -13,6 +14,9 @@ use ctx_history_core::{
 };
 use serde_json::Value;
 
+pub(crate) use association::{
+    exact_pull_request_association, UnscopedPullRequestAssociationObservation,
+};
 pub(crate) use attributor::RepositoryAttributor;
 #[cfg(test)]
 pub(crate) use engine::attribute;
@@ -24,9 +28,9 @@ pub(crate) use outcome::{
     linked_outcome_evidence, LinkedOutcomeEvidence, LinkedOutcomeInput, UnscopedOutcomeObservation,
 };
 pub(crate) use shell::{
-    bounded_outcome_evidence_relevant, bounded_outcome_plan, lexical_absolute,
-    BoundedCommitProducer, BoundedOutcomeOperation, BoundedOutcomePlan,
-    BoundedOutcomePlanDisposition, MAX_COMMAND_BYTES,
+    bounded_outcome_evidence_relevant, bounded_outcome_plan,
+    bounded_pull_request_association_query, lexical_absolute, BoundedCommitProducer,
+    BoundedOutcomeOperation, BoundedOutcomePlan, BoundedOutcomePlanDisposition, MAX_COMMAND_BYTES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +79,7 @@ pub(crate) struct AttributionInput {
     pub(crate) outcome_operation_repository_path: Option<String>,
     pub(crate) outcome_output_repository_path: Option<String>,
     pub(crate) outcome_observations: Vec<UnscopedOutcomeObservation>,
+    pub(crate) pull_request_associations: Vec<UnscopedPullRequestAssociationObservation>,
     pub(crate) outcome_abstentions: Vec<(RepositoryAbstentionReason, &'static str)>,
 }
 

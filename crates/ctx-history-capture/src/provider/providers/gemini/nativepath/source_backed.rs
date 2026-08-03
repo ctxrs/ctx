@@ -48,7 +48,7 @@ const GEMINI_LOGICAL_SESSION_KIND: &str = "gemini-session";
 const GEMINI_LOGICAL_EVENT_KIND: &str = "gemini-event";
 const GEMINI_SOURCE_SCHEMA_VARIANT: &str = "gemini-nativepath-jsonl-v0";
 const GEMINI_SOURCE_BACKED_PARSER_REVISION: &str =
-    "gemini-nativepath-source-backed-v0-p8-p6-core-result-linkage";
+    "gemini-nativepath-source-backed-v0-p9-pull-request-association";
 const MAX_GEMINI_LEXICAL_METADATA_CHARS: usize = 8 * 1024;
 const MAX_GEMINI_REPOSITORY_FIELD_CHARS: usize = 64 * 1024;
 const MAX_GEMINI_TOOL_CONTEXTS: usize = 256;
@@ -570,6 +570,7 @@ fn gemini_attribution_for_event(
                         input.outcome_output_repository_path =
                             linked.outcome_output_repository_path;
                         input.outcome_observations = linked.outcomes;
+                        input.pull_request_associations = linked.pull_request_associations;
                         input.outcome_abstentions = linked.abstentions;
                     }
                 }

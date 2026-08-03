@@ -129,7 +129,8 @@ pub use core_record::{
     RepositoryFileInvocationEvidence, RepositoryFileInvocationKind,
     RepositoryFileInvocationTextRange, RepositoryFileObservation, RepositoryFileObservationKind,
     RepositoryLocalRootAuthorization, RepositoryObjectReplacement, RepositoryOutcomeKind,
-    RepositoryOutcomeLinkage, RepositoryOutcomeObservation, RepositoryPullRequestIdentity,
+    RepositoryOutcomeLinkage, RepositoryOutcomeObservation,
+    RepositoryPullRequestAssociationObservation, RepositoryPullRequestIdentity,
     RepositoryVcsObservation, RepositoryVcsObservationKind, CORE_BOUNDED_SHELL_SUBSET_REVISION,
     CORE_CONTENT_POLICY_REVISION, CORE_MISSING_ACTIVITY_TIME_UNIX_MS, CORE_NORMALIZATION_REVISION,
     CORE_RECORD_ACCUMULATOR_IDENTITY, CORE_RECORD_LEAF_DOMAIN, CORE_RECORD_VERSION,
@@ -137,7 +138,8 @@ pub use core_record::{
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
-    MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
+    CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION, MAX_CORE_CONTENT_BYTES,
+    MAX_ENCODED_CORE_RECORD_BYTES,
 };
 pub use dtos::{
     AgentType, ArtifactKind, Confidence, EventRole, EventType, Fidelity, FileChangeKind,

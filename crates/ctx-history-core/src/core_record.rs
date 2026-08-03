@@ -17,7 +17,8 @@ pub use repository::{
     RepositoryFileInvocationKind, RepositoryFileInvocationTextRange, RepositoryFileObservation,
     RepositoryFileObservationKind, RepositoryLocalRootAuthorization, RepositoryObjectReplacement,
     RepositoryOutcomeKind, RepositoryOutcomeLinkage, RepositoryOutcomeObservation,
-    RepositoryPullRequestIdentity, RepositoryVcsObservation, RepositoryVcsObservationKind,
+    RepositoryPullRequestAssociationObservation, RepositoryPullRequestIdentity,
+    RepositoryVcsObservation, RepositoryVcsObservationKind,
 };
 use validation::{
     validate_count, validate_json_map, validate_optional_text, validate_owned_identity,
@@ -34,10 +35,11 @@ pub const CORE_RECORD_LEAF_DOMAIN: &[u8] = b"ctx-core-record-leaf-v1\0";
 /// This identity is part of the Core record contract fingerprint so a change
 /// to the accumulator cannot be interpreted under older generation semantics.
 pub const CORE_RECORD_ACCUMULATOR_IDENTITY: &[u8] = b"ctx-core-record-event-binding-v1\0";
-pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 7;
-pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 2;
+pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 8;
+pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 3;
 pub const CORE_BOUNDED_SHELL_SUBSET_REVISION: u32 = 1;
-pub const CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION: u32 = 4;
+pub const CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION: u32 = 5;
+pub const CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION: u32 = 3;
 pub const CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION: u32 = 2;
 pub const CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION: u32 = 1;
 pub const CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN: &[u8] =
@@ -83,6 +85,7 @@ struct CoreContractRevisions {
     repository_observation: u32,
     bounded_shell_subset: u32,
     repository_association_policy: u32,
+    repository_pull_request_association_capture: u32,
     repository_outcome_capture: u32,
     repository_local_root_authorization_fingerprint: u32,
 }
@@ -98,6 +101,8 @@ impl CoreContractRevisions {
             repository_observation: CORE_REPOSITORY_OBSERVATION_REVISION,
             bounded_shell_subset: CORE_BOUNDED_SHELL_SUBSET_REVISION,
             repository_association_policy: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+            repository_pull_request_association_capture:
+                CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION,
             repository_outcome_capture: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
             repository_local_root_authorization_fingerprint:
                 CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
@@ -115,6 +120,11 @@ fn core_record_contract_fingerprint_for(revisions: CoreContractRevisions) -> Str
     digest.update(revisions.repository_observation.to_be_bytes());
     digest.update(revisions.bounded_shell_subset.to_be_bytes());
     digest.update(revisions.repository_association_policy.to_be_bytes());
+    digest.update(
+        revisions
+            .repository_pull_request_association_capture
+            .to_be_bytes(),
+    );
     digest.update(revisions.repository_outcome_capture.to_be_bytes());
     digest.update(
         revisions
@@ -233,6 +243,8 @@ pub enum CoreRecordError {
     NonCanonicalRepositoryFileInvocationEvidence,
     #[error("repository file invocation evidence has an invalid shape or text range")]
     InvalidRepositoryFileInvocationEvidence,
+    #[error("pull-request association observation is not exact or locally certified")]
+    InvalidRepositoryPullRequestAssociation,
 }
 
 /// Complete normalized content retained under one explicit product policy.
@@ -655,19 +667,34 @@ impl CoreRecord {
                     return Err(CoreRecordError::InvalidGitObjectId);
                 }
             }
-            if let RepositoryVcsObservationKind::Outcome(outcome) = &observation.kind {
-                if outcome
-                    .pull_request
-                    .as_ref()
-                    .is_some_and(|pull_request| !binding.accepts_pull_request(pull_request))
-                {
-                    return Err(CoreRecordError::InvalidRepositoryOutcome);
-                }
-                for object_id in outcome.object_ids() {
-                    if format.is_none_or(|format| object_id.format != format) {
-                        return Err(CoreRecordError::InvalidGitObjectId);
+            match &observation.kind {
+                RepositoryVcsObservationKind::Outcome(outcome) => {
+                    if outcome
+                        .pull_request
+                        .as_ref()
+                        .is_some_and(|pull_request| !binding.accepts_pull_request(pull_request))
+                    {
+                        return Err(CoreRecordError::InvalidRepositoryOutcome);
+                    }
+                    for object_id in outcome.object_ids() {
+                        if format.is_none_or(|format| object_id.format != format) {
+                            return Err(CoreRecordError::InvalidGitObjectId);
+                        }
                     }
                 }
+                RepositoryVcsObservationKind::PullRequestAssociation(association)
+                    if !binding.accepts_pull_request(&association.pull_request)
+                        || format.is_none_or(|format| {
+                            association.merged_as.format != format
+                                || association
+                                    .contains_commits
+                                    .iter()
+                                    .any(|object_id| object_id.format != format)
+                        }) =>
+                {
+                    return Err(CoreRecordError::InvalidRepositoryPullRequestAssociation);
+                }
+                _ => {}
             }
         }
         Ok(())
