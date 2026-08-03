@@ -838,6 +838,7 @@ dependencies = [
 name = "ctx-history-index"
 version = "0.26.0"
 dependencies = [
+ "base64 0.22.1",
  "crc32fast",
  "ctx-history-core",
  "serde",

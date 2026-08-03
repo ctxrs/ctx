@@ -2,9 +2,12 @@ use std::{
     collections::BTreeMap,
     fs::{self, File},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use ctx_history_core::{core_record_contract_fingerprint, CORE_RECORD_VERSION, IDENTITY_VERSION};
+use serde::{Deserialize, Serialize};
 use tantivy::{directory::Directory, IndexMeta, Searcher};
 use uuid::Uuid;
 
@@ -14,24 +17,46 @@ use crate::{
     identity::{is_generation_id, sha256_hex},
     CommitPayload, GenerationManifest, IndexError, Result, COMMIT_PAYLOAD_VERSION,
     GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
-    MANIFEST_DIRECTORY,
+    MANIFEST_DIRECTORY, MAX_PUBLICATION_METADATA_BYTES,
 };
 
-pub(crate) fn load_manifest_for_metas(
+const MAX_PUBLICATION_METADATA_ENCODED_BYTES: usize =
+    MAX_PUBLICATION_METADATA_BYTES.div_ceil(3) * 4;
+const MAX_COMMIT_PAYLOAD_BYTES: usize = MAX_PUBLICATION_METADATA_ENCODED_BYTES + 256;
+
+#[derive(Debug)]
+pub(crate) struct LoadedPublication {
+    pub(crate) generation_id: String,
+    pub(crate) manifest: GenerationManifest,
+    pub(crate) metadata: Option<Arc<[u8]>>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BorrowedCommitPayload<'a> {
+    version: u32,
+    #[serde(borrow)]
+    generation_id: &'a str,
+    #[serde(borrow)]
+    publication_metadata: Option<&'a str>,
+}
+
+#[derive(Debug)]
+struct DecodedCommitPayload {
+    generation_id: String,
+    publication_metadata: Option<Vec<u8>>,
+}
+
+pub(crate) fn load_publication_for_metas(
     root: &Path,
     metas: &IndexMeta,
-) -> Result<GenerationManifest> {
-    let payload = metas
-        .payload
-        .as_ref()
-        .ok_or(IndexError::MissingCommitPayload)?;
-    let payload: CommitPayload = serde_json::from_str(payload)?;
-    if payload.version != COMMIT_PAYLOAD_VERSION {
-        return Err(IndexError::UnsupportedCommitPayload(payload.version));
-    }
-    if !is_generation_id(&payload.generation_id) {
-        return Err(IndexError::InvalidGenerationId);
-    }
+) -> Result<LoadedPublication> {
+    let payload = decode_commit_payload(
+        metas
+            .payload
+            .as_deref()
+            .ok_or(IndexError::MissingCommitPayload)?,
+    )?;
     let path = manifest_path(root, &payload.generation_id);
     let bytes = fs::read(&path).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => IndexError::MissingManifest(payload.generation_id.clone()),
@@ -78,7 +103,101 @@ pub(crate) fn load_manifest_for_metas(
         });
     }
     manifest.validate_contract()?;
-    Ok(manifest)
+    Ok(LoadedPublication {
+        generation_id: payload.generation_id,
+        manifest,
+        metadata: payload
+            .publication_metadata
+            .map(|metadata| Arc::from(metadata.into_boxed_slice())),
+    })
+}
+
+pub(crate) fn canonical_commit_payload(
+    generation_id: &str,
+    publication_metadata: Option<&[u8]>,
+) -> Result<String> {
+    if !is_generation_id(generation_id) {
+        return Err(IndexError::InvalidGenerationId);
+    }
+    let publication_metadata = publication_metadata
+        .map(|metadata| {
+            if metadata.len() > MAX_PUBLICATION_METADATA_BYTES {
+                return Err(IndexError::PublicationMetadataTooLarge {
+                    actual: metadata.len(),
+                    maximum: MAX_PUBLICATION_METADATA_BYTES,
+                });
+            }
+            Ok(STANDARD_NO_PAD.encode(metadata))
+        })
+        .transpose()?;
+    Ok(serde_json::to_string(&CommitPayload {
+        version: COMMIT_PAYLOAD_VERSION,
+        generation_id: generation_id.to_owned(),
+        publication_metadata,
+    })?)
+}
+
+fn decode_commit_payload(encoded: &str) -> Result<DecodedCommitPayload> {
+    if encoded.len() > MAX_COMMIT_PAYLOAD_BYTES {
+        return Err(IndexError::CommitPayloadTooLarge {
+            actual: encoded.len(),
+            maximum: MAX_COMMIT_PAYLOAD_BYTES,
+        });
+    }
+    let payload: BorrowedCommitPayload<'_> = serde_json::from_str(encoded)?;
+    if payload.version != COMMIT_PAYLOAD_VERSION {
+        return Err(IndexError::UnsupportedCommitPayload(payload.version));
+    }
+    if !is_generation_id(payload.generation_id) {
+        return Err(IndexError::InvalidGenerationId);
+    }
+    let publication_metadata_decoded_len = payload
+        .publication_metadata
+        .map(|metadata| {
+            let decoded_len = unpadded_base64_decoded_len(metadata.len())?;
+            if decoded_len > MAX_PUBLICATION_METADATA_BYTES {
+                return Err(IndexError::PublicationMetadataTooLarge {
+                    actual: decoded_len,
+                    maximum: MAX_PUBLICATION_METADATA_BYTES,
+                });
+            }
+            Ok(decoded_len)
+        })
+        .transpose()?;
+    if serde_json::to_string(&payload)? != encoded {
+        return Err(IndexError::NonCanonicalCommitPayload);
+    }
+    let publication_metadata = payload
+        .publication_metadata
+        .zip(publication_metadata_decoded_len)
+        .map(|(metadata, decoded_len)| {
+            let decoded = STANDARD_NO_PAD
+                .decode(metadata)
+                .map_err(|_| IndexError::InvalidPublicationMetadataEncoding)?;
+            if decoded.len() != decoded_len {
+                return Err(IndexError::InvalidPublicationMetadataEncoding);
+            }
+            Ok(decoded)
+        })
+        .transpose()?;
+    Ok(DecodedCommitPayload {
+        generation_id: payload.generation_id.to_owned(),
+        publication_metadata,
+    })
+}
+
+fn unpadded_base64_decoded_len(encoded_len: usize) -> Result<usize> {
+    let trailing = match encoded_len % 4 {
+        0 => 0,
+        2 => 1,
+        3 => 2,
+        _ => return Err(IndexError::InvalidPublicationMetadataEncoding),
+    };
+    encoded_len
+        .checked_div(4)
+        .and_then(|groups| groups.checked_mul(3))
+        .and_then(|prefix| prefix.checked_add(trailing))
+        .ok_or(IndexError::CountOverflow)
 }
 
 pub(crate) fn reconcile_commit_error(
@@ -125,14 +244,7 @@ pub(crate) fn payload_generation_id(metas: &IndexMeta) -> Result<Option<String>>
     let Some(payload) = metas.payload.as_deref() else {
         return Ok(None);
     };
-    let payload: CommitPayload = serde_json::from_str(payload)?;
-    if payload.version != COMMIT_PAYLOAD_VERSION {
-        return Err(IndexError::UnsupportedCommitPayload(payload.version));
-    }
-    if !is_generation_id(&payload.generation_id) {
-        return Err(IndexError::InvalidGenerationId);
-    }
-    Ok(Some(payload.generation_id))
+    Ok(Some(decode_commit_payload(payload)?.generation_id))
 }
 
 pub(crate) fn write_manifest(

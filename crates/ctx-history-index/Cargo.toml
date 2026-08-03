@@ -10,6 +10,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+base64.workspace = true
 crc32fast = "1.5"
 ctx-history-core = { path = "../ctx-history-core" }
 serde.workspace = true

@@ -24,9 +24,10 @@ pub use writer_options::WriterOptions;
 pub const GENERATION_MANIFEST_VERSION: u32 = 8;
 pub const LEXICAL_SCHEMA_VERSION: u32 = LEXICAL_SCHEMA_REVISION;
 pub const LEXICAL_ANALYZER_VERSION: u32 = LEXICAL_TOKENIZER_REVISION;
+pub const MAX_PUBLICATION_METADATA_BYTES: usize = 48 * 1024;
 
 pub(crate) const MANIFEST_DIRECTORY: &str = "ctx-generations";
-pub(crate) const COMMIT_PAYLOAD_VERSION: u32 = 1;
+pub(crate) const COMMIT_PAYLOAD_VERSION: u32 = 2;
 pub(crate) const INDEX_MEMORY_MIN_PER_THREAD: usize = 15_000_000;
 pub(crate) const MAX_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
 
@@ -71,6 +72,16 @@ pub enum IndexError {
     InvalidActiveGenerationPointer,
     #[error("unsupported commit payload version {0}")]
     UnsupportedCommitPayload(u32),
+    #[error("the lexical commit payload is not in canonical ctx JSON encoding")]
+    NonCanonicalCommitPayload,
+    #[error("lexical commit payload is too large: {actual} bytes, maximum {maximum}")]
+    CommitPayloadTooLarge { actual: usize, maximum: usize },
+    #[error("opaque publication metadata is not canonical unpadded base64")]
+    InvalidPublicationMetadataEncoding,
+    #[error("opaque publication metadata is too large: {actual} bytes, maximum {maximum}")]
+    PublicationMetadataTooLarge { actual: usize, maximum: usize },
+    #[error("opaque publication metadata construction failed: {0}")]
+    PublicationMetadata(String),
     #[error("unsupported generation manifest version {0}")]
     UnsupportedManifest(u32),
     #[error(
@@ -925,8 +936,9 @@ pub(crate) fn implicit_source_routes(
         .collect()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct CommitPayload {
     pub(crate) version: u32,
     pub(crate) generation_id: String,
+    pub(crate) publication_metadata: Option<String>,
 }

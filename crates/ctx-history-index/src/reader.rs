@@ -1,23 +1,30 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 use crate::{
     analyzer::register_body_analyzer, durable_directory::DurableMmapDirectory, is_generation_id,
-    load_active_generation_pointer, load_manifest_for_metas, meta_generation, open_slot_index,
+    load_active_generation_pointer, load_publication_for_metas, meta_generation, open_slot_index,
     payload_generation_id, searcher_generation, validate_schema, verify_complete_searcher,
     verify_physical_integrity, verify_searcher_structure, ActiveGenerationPointer,
     GenerationManifest, GenerationSlot, IndexError, Result,
 };
 use tantivy::{ReloadPolicy, Searcher};
 
+#[cfg(test)]
+thread_local! {
+    static VERIFIED_INDEX_REOPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static VERIFIED_INDEX_PUBLICATION_CONSTRUCTION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A verified reader pinned to one immutable lexical generation.
 pub struct VerifiedIndex {
     pub(crate) searcher: Searcher,
-    pub(crate) manifest: GenerationManifest,
+    pub(crate) manifest: Arc<GenerationManifest>,
     pub(crate) generation_id: String,
+    pub(crate) publication_metadata: Option<Arc<[u8]>>,
     pub(crate) semantic_eligibility_postings: OnceLock<crate::query::SemanticEligibilityPostings>,
 }
 
@@ -188,12 +195,15 @@ impl VerifiedIndex {
     where
         F: FnOnce(String) -> IndexError,
     {
+        #[cfg(test)]
+        VERIFIED_INDEX_REOPEN_COUNT.with(|count| count.set(count.get().saturating_add(1)));
         let index = open_slot_index(root, slot)?;
         register_body_analyzer(&index);
         validate_schema(&index.schema())?;
         let metas = index.load_metas()?;
-        let manifest = load_manifest_for_metas(root, &metas)?;
-        let generation_id = manifest.generation_id()?;
+        let publication = load_publication_for_metas(root, &metas)?;
+        let generation_id = publication.generation_id;
+        let manifest = publication.manifest;
         if slot.generation_id() != generation_id {
             return Err(generation_mismatch(generation_id));
         }
@@ -222,10 +232,29 @@ impl VerifiedIndex {
         }
         Ok(Self {
             searcher,
-            manifest,
+            manifest: Arc::new(manifest),
             generation_id,
+            publication_metadata: publication.metadata,
             semantic_eligibility_postings: OnceLock::new(),
         })
+    }
+
+    pub(crate) fn from_verified_publication(
+        searcher: Searcher,
+        manifest: Arc<GenerationManifest>,
+        generation_id: String,
+        publication_metadata: Option<Arc<[u8]>>,
+    ) -> Self {
+        #[cfg(test)]
+        VERIFIED_INDEX_PUBLICATION_CONSTRUCTION_COUNT
+            .with(|count| count.set(count.get().saturating_add(1)));
+        Self {
+            searcher,
+            manifest,
+            generation_id,
+            publication_metadata,
+            semantic_eligibility_postings: OnceLock::new(),
+        }
     }
 
     pub fn generation_id(&self) -> &str {
@@ -234,6 +263,12 @@ impl VerifiedIndex {
 
     pub fn manifest(&self) -> &GenerationManifest {
         &self.manifest
+    }
+
+    /// Returns refresh-owned opaque bytes bound to this exact generation's
+    /// canonical Tantivy commit payload.
+    pub fn publication_metadata(&self) -> Option<&[u8]> {
+        self.publication_metadata.as_deref()
     }
 
     pub fn document_count(&self) -> u64 {
@@ -255,4 +290,24 @@ impl VerifiedIndex {
         );
         Ok(self.searcher.search(&query, &Count)?)
     }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_verified_index_reopen_count() {
+    VERIFIED_INDEX_REOPEN_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn verified_index_reopen_count() -> usize {
+    VERIFIED_INDEX_REOPEN_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_verified_index_publication_construction_count() {
+    VERIFIED_INDEX_PUBLICATION_CONSTRUCTION_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn verified_index_publication_construction_count() -> usize {
+    VERIFIED_INDEX_PUBLICATION_CONSTRUCTION_COUNT.with(std::cell::Cell::get)
 }
