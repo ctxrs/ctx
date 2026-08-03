@@ -182,13 +182,52 @@ impl CoreRefreshEngine {
             .unwrap_or("unknown");
         let previous_generation = job.get("previous_generation").and_then(Value::as_str);
         let pointer_advanced = active_generation.as_deref() != previous_generation;
-        if pointer_advanced {
+        // A terminal job must always recover or reject its exact publication,
+        // even when the persisted previous-generation pointer already equals
+        // the active generation. Otherwise malformed terminal authority can
+        // be ignored and queued successors can be lost on restart.
+        if pointer_advanced || request_state == "published" {
             let active_generation = active_generation.ok_or_else(|| {
                 anyhow!("interrupted source refresh advanced Core without an active generation")
             })?;
             let verified = verified.ok_or_else(|| {
                 anyhow!("interrupted source refresh advanced Core without a verified generation")
             })?;
+            if verified.publication_metadata().is_none() && request_state == "published" {
+                // Publications written before the refresh control plane carry
+                // no source-refresh receipt, so there is nothing exact to
+                // recover. Accept the verified generation as terminal-complete
+                // only when the legacy job names that exact publication, then
+                // install any queued successors; the next scheduled refresh
+                // publishes with metadata again. Non-terminal jobs, mismatched
+                // generations, and present-but-malformed metadata keep failing
+                // closed below.
+                let job_generation = required_generation(
+                    job.get("published_generation"),
+                    "legacy published refresh generation",
+                )?;
+                if job_generation != active_generation {
+                    bail!("legacy Core refresh job names a different published generation");
+                }
+                if !queued_successors.is_empty() {
+                    let durable_request_id = {
+                        let mut state = self.lock_state();
+                        install_recovered_successors(&mut state, queued_successors)?;
+                        state.current_published_generation = Some(active_generation);
+                        state
+                            .active_request_id
+                            .as_deref()
+                            .ok_or_else(|| {
+                                anyhow!("recovered source refresh successor is unavailable")
+                            })?
+                            .to_owned()
+                    };
+                    self.persist_job_status(data_root, &durable_request_id)?;
+                    return Ok(true);
+                }
+                self.lock_state().current_published_generation = Some(active_generation);
+                return Ok(false);
+            }
             let metadata = SourceBackedPublicationMetadata::decode(&verified)
                 .context("recover exact terminal refresh receipt from Core publication metadata")?;
             let job_request_id = job
