@@ -80,8 +80,13 @@ impl ReplacementDocumentTree for CodeBuddyDocumentAdapter {
         leaf: &Self::Leaf,
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
-        scan_changed_codebuddy_source(authority, leaf, &self.context, sink)
-            .map_err(codebuddy_route_error)
+        let mut sink_failure = None;
+        let result =
+            scan_changed_codebuddy_source(authority, leaf, &self.context, sink, &mut sink_failure);
+        if let Some(error) = sink_failure {
+            return Err(error);
+        }
+        result.map_err(codebuddy_route_error)
     }
 
     fn revalidate_complete(
@@ -97,6 +102,7 @@ fn scan_changed_codebuddy_source(
     leaf: &CodeBuddyDocumentLeaf,
     context: &ProviderAdapterContext,
     sink: &mut ChangedDocumentSink<'_, '_>,
+    sink_failure: &mut Option<SourceBackedRouteError>,
 ) -> Result<DocumentSourceTerminal> {
     let source = open_codebuddy_source(authority, leaf)?;
     let mut state = initial_state(&source, context)?;
@@ -115,7 +121,7 @@ fn scan_changed_codebuddy_source(
     }
 
     sink.begin_source(source_key.clone())
-        .map_err(codebuddy_capture_error)?;
+        .map_err(|error| codebuddy_capture_error(sink_failure, error))?;
     while let Some(page) = next_source_page(&source, &state, context)? {
         for record in &page.records {
             counts.complete_records = checked_add(counts.complete_records, 1, "complete records")?;
@@ -129,7 +135,7 @@ fn scan_changed_codebuddy_source(
                         record,
                         core,
                     )?)
-                    .map_err(codebuddy_capture_error)?;
+                    .map_err(|error| codebuddy_capture_error(sink_failure, error))?;
                     counts.indexed_documents =
                         checked_add(counts.indexed_documents, 1, "indexed documents")?;
                 }
@@ -438,8 +444,13 @@ fn codebuddy_route_error(error: CaptureError) -> SourceBackedRouteError {
     SourceBackedRouteError::new(kind, error.to_string())
 }
 
-fn codebuddy_capture_error(error: SourceBackedRouteError) -> CaptureError {
-    invalid_source_backed(error.to_string())
+fn codebuddy_capture_error(
+    failure: &mut Option<SourceBackedRouteError>,
+    error: SourceBackedRouteError,
+) -> CaptureError {
+    let detail = error.to_string();
+    *failure = Some(error);
+    invalid_source_backed(detail)
 }
 
 #[cfg(test)]

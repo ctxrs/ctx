@@ -399,6 +399,55 @@ fn internal_route_failure_aborts_the_whole_cold_refresh() {
 }
 
 #[test]
+fn real_shared_resource_exhaustion_aborts_warm_refresh_and_retains_complete_prior_generation() {
+    let (first_v1, _) = revisioned_receipt_route(51);
+    let second = fixture_route(CaptureProvider::Hermes, "hermes_state_sqlite", 52);
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(first_v1);
+    initial_registry.register(second.clone());
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+    let initial_generation = initial.commit.generation_id.clone();
+    let initial_sources = initial.sources.clone();
+
+    let first_v2 = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 51);
+    let mut warm_registry = SourceBackedProviderRegistry::new();
+    warm_registry.register(first_v2);
+    warm_registry.register(fixture_route_with_body(
+        CaptureProvider::Hermes,
+        "hermes_state_sqlite",
+        52,
+        "x".repeat(8 * 1024),
+    ));
+
+    let error = refresh_source_backed_generation_with_resource_limits_for_test(
+        temp.path(),
+        &warm_registry,
+        WriterOptions::default(),
+        4 * 1024,
+        u64::MAX,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::RouteScan {
+            source: SourceBackedRouteError {
+                kind: SourceBackedRouteErrorKind::ResourceUnavailable,
+                ..
+            },
+            ..
+        }
+    ));
+
+    let retained = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(retained.generation_id(), initial_generation);
+    assert_eq!(retained.document_count(), 2);
+    assert_eq!(retained.manifest().sources, initial_sources);
+}
+
+#[test]
 fn cold_final_revalidation_failures_scan_each_route_once_and_publish_only_successes() {
     let first_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let second_scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -742,6 +791,47 @@ fn selected_route_refresh_carries_unselected_route_and_reports_exact_noop_succes
         Some(&retained_second)
     );
     assert_eq!(second_scans.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn selected_clean_route_completion_ignores_carried_unselected_rejections() {
+    let clean = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 61);
+    let rejected = fixture_route_with_body_and_rejections(
+        CaptureProvider::Hermes,
+        "hermes_state_sqlite",
+        62,
+        "retained peer".to_owned(),
+        1,
+    );
+    let clean_id = clean.metadata.route_identity.clone().unwrap();
+    let rejected_id = rejected.metadata.route_identity.clone().unwrap();
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(clean.clone());
+    initial_registry.register(rejected);
+    let temp = tempdir().unwrap();
+    let initial =
+        refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+            .unwrap();
+    assert_eq!(
+        initial.record_completion(),
+        SourceBackedRecordCompletion::CompletedWithRejections
+    );
+
+    let mut selected_registry = SourceBackedProviderRegistry::new();
+    selected_registry.register(clean);
+    let selected = refresh_source_backed_generation_for_routes(
+        temp.path(),
+        &selected_registry,
+        WriterOptions::default(),
+        [clean_id],
+    )
+    .unwrap();
+
+    assert_eq!(
+        selected.record_completion(),
+        SourceBackedRecordCompletion::Completed
+    );
+    assert_eq!(selected.carried_unselected_route_ids, vec![rejected_id]);
 }
 
 #[test]

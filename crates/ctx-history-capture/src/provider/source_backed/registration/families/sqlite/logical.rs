@@ -198,19 +198,27 @@ impl ReplacementDocumentTree for ZedReplacementTree {
         let snapshot_revision = snapshot.snapshot_revision.clone();
         sink.begin_source(source.clone())?;
         let connection = snapshot.connection().map_err(route_error)?;
+        let mut sink_failure = None;
         let mut projection =
             ZedSourceBackedSinkV0::with_emitter(connection, source.clone(), |record| {
-                sink.emit_core_record(record)
-                    .map_err(|error| CaptureError::InvalidPayload(error.to_string()).into())
+                sink.emit_core_record(record).map_err(|error| {
+                    let detail = error.to_string();
+                    sink_failure = Some(error);
+                    CaptureError::InvalidPayload(detail).into()
+                })
             })
             .map_err(route_error)?;
-        let scan = scan_zed_native_snapshot(connection, &snapshot_revision, &mut projection)
-            .map_err(route_error)?;
-        if let Some(error) = projection.take_failure() {
-            return Err(route_error(error));
-        }
+        let scan = scan_zed_native_snapshot(connection, &snapshot_revision, &mut projection);
+        let projection_failure = projection.take_failure();
         let staged_core_records = projection.staged_core_records();
         drop(projection);
+        if let Some(error) = sink_failure {
+            return Err(error);
+        }
+        if let Some(error) = projection_failure {
+            return Err(route_error(error));
+        }
+        let scan = scan.map_err(route_error)?;
         snapshot.finish().map_err(route_error)?;
         if staged_core_records != scan.counters.retained_events {
             return Err(zed_internal("Zed source-backed counts do not reconcile"));

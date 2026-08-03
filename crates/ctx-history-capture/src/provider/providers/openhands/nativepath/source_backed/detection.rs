@@ -6,11 +6,11 @@ use crate::{
     CaptureError,
 };
 
-use super::OpenHandsSourceBackedResultV1;
+use super::OpenHandsSourceBackedResultV2;
 
 const OPENHANDS_CURRENT_CLI_MAX_ENTRIES: usize = 16_384;
 
-pub(super) fn detects_current_cli_format(path: &Path) -> OpenHandsSourceBackedResultV1<bool> {
+pub(super) fn detects_current_cli_format(path: &Path) -> OpenHandsSourceBackedResultV2<bool> {
     let path = normalized_openhands_authority_path(path)?;
     let opened = match open_provider_source_path(&path) {
         Ok(opened) => opened,
@@ -71,7 +71,7 @@ pub(super) fn detects_current_cli_format(path: &Path) -> OpenHandsSourceBackedRe
 
 fn directory_has_current_cli_event(
     directory: &ProviderSourceDirectory,
-) -> OpenHandsSourceBackedResultV1<bool> {
+) -> OpenHandsSourceBackedResultV2<bool> {
     let names = directory.entries(OPENHANDS_CURRENT_CLI_MAX_ENTRIES.saturating_add(1))?;
     if names.len() > OPENHANDS_CURRENT_CLI_MAX_ENTRIES {
         return Err(CaptureError::InvalidProviderTranscriptPath {

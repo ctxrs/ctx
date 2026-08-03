@@ -16,19 +16,18 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     CaptureProvider, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
-    CertifiedSourceInventory, CoreRecord, ScannedSourceCounts, SourceAnchor, SourceFrontier,
-    SourceKey, TypedKey,
+    CertifiedSourceInventory, CoreRecord, ScannedSourceCounts, SourceAnchor, SourceKey, TypedKey,
 };
 use ctx_history_index::{
-    CommitReceipt, GenerationManifest, GenerationWriter, IndexError, RevalidationTarget,
-    SourceRouteIdentity, SourceRouteSnapshot, WriterOptions,
+    CommitReceipt, CoreRecordPreparer, GenerationManifest, GenerationWriter, IndexError,
+    RevalidationTarget, SourceRouteIdentity, SourceRouteSnapshot, WriterOptions,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::codex::nativepath::{
-    codex_source_observation, codex_writer_base_sources, ingest_codex_sources_serial_v0,
-    managed_codex_session_source, observe_codex_explicit_session_source_backed_v0,
+    codex_source_observation, ingest_codex_sources_serial_v0, managed_codex_session_source,
+    observe_codex_explicit_session_source_backed_v0,
     observe_codex_prompt_history_source_backed_explicit_v0,
     plan_codex_prompt_history_source_backed_v0, revalidate_codex_prompt_history_source_backed_v0,
     scan_codex_prompt_history_source_backed_v0,
@@ -72,10 +71,7 @@ use super::providers::{
     mux::mux_jsonl_adapter,
     nanoclaw::native_path::source_backed::NanoClawDocumentTreeAdapter,
     openclaw::openclaw_source_backed_adapter_v0,
-    openhands::nativepath::{
-        openhands_owns_source, openhands_route_error, OpenHandsEventFileAdapterV2,
-        OpenHandsEventFileSourcePlan,
-    },
+    openhands::nativepath::OpenHandsEventFileAdapterV2,
     pi::nativepath::{pi_source_backed_adapter, PiSourceBackedRoot},
     rovodev::native_path::RovoDevDocumentTreeAdapter,
     shelley::native_path::source_backed::{

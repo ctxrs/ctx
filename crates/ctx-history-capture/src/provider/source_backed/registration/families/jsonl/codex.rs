@@ -209,12 +209,33 @@ fn register_codex_session_tree_route_with_indexer_threads(
                     Ok::<CodexSessionTreeInventoryV0, CodexSourceBackedErrorV0>,
                 )
                 .map_err(route_error)?;
-            sink.certify_complete_inventory(opening.certificate.clone())
+            let base_sources = sink
+                .base_route_sources()
+                .map_err(route_coordinator_error)?
+                .into_iter()
+                .filter(|(source, _)| managed_codex_session_source(source))
+                .collect::<HashMap<_, _>>();
+            let owned_opening_sources = opening
+                .sources
+                .iter()
+                .filter(|(_, source, _)| !sink.source_owned_by_other_route(source))
+                .cloned()
+                .collect::<Vec<_>>();
+            let route_inventory = CertifiedSourceInventory::certify(
+                opening.certificate.observation().clone(),
+                opening.certificate.observation().clone(),
+                opening.certificate.discovery_revision(),
+                owned_opening_sources
+                    .iter()
+                    .map(|(_, source, _)| source.clone())
+                    .collect(),
+            )
+            .map_err(route_error)?;
+            sink.certify_complete_inventory(route_inventory.clone())
                 .map_err(route_coordinator_error)?;
-            let base_sources = codex_writer_base_sources(sink.writer);
             {
                 let mut current = CodexSessionTreeOwnership::default();
-                for (_, source_key, _) in &opening.sources {
+                for (_, source_key, _) in &owned_opening_sources {
                     current.remember(source_key);
                 }
                 for base in base_sources.values() {
@@ -231,7 +252,7 @@ fn register_codex_session_tree_route_with_indexer_threads(
                 })?;
                 *owned = current;
             }
-            for (_, source_key, _) in &opening.sources {
+            for (_, source_key, _) in &owned_opening_sources {
                 sink.claim_present(source_key)
                     .map_err(route_coordinator_error)?;
             }
@@ -239,7 +260,7 @@ fn register_codex_session_tree_route_with_indexer_threads(
             let mut timings = CodexSourceBackedPhaseTimingsV0::default();
             let mut counters = CodexSourceBackedCountersV0::default();
             ingest_codex_sources_v0(
-                opening.sources.clone(),
+                owned_opening_sources,
                 &base_sources,
                 sink.writer,
                 &mut revalidation,
@@ -261,10 +282,10 @@ fn register_codex_session_tree_route_with_indexer_threads(
                         .delete_source(
                             CertifiedSourceDeletion::from_inventory(
                                 base_source.clone(),
-                                &opening.certificate,
+                                &route_inventory,
                             )
                             .map_err(route_error)?,
-                            opening.certificate.clone(),
+                            route_inventory.clone(),
                         )
                         .map_err(route_coordinator_error)?;
                     deletions.push(base_source.clone());
@@ -279,7 +300,7 @@ fn register_codex_session_tree_route_with_indexer_threads(
                     "Codex terminal evidence lock was poisoned",
                 )
             })? = Some(CodexSessionTreeTerminalEvidence {
-                inventory: opening.certificate,
+                inventory: route_inventory,
                 sources: revalidation,
                 deletions,
             });
@@ -622,6 +643,7 @@ pub fn register_codex_prompt_history_source_backed_route(
             let Some(base) = base else {
                 sink.begin_source(claimed_source.clone())
                     .map_err(route_coordinator_error)?;
+                let mut sink_failure = None;
                 let scan = scan_codex_prompt_history_source_backed_v0(
                     capture_source.clone(),
                     None,
@@ -635,13 +657,17 @@ pub fn register_codex_prompt_history_source_backed_route(
                         }
                         let _retained_page_bytes = page.retained_bytes;
                         for record in page.records {
-                            sink.add_core_record(record)
-                                .map_err(capture_coordinator_error)?;
+                            sink.add_core_record(record).map_err(|error| {
+                                capture_coordinator_error(&mut sink_failure, error)
+                            })?;
                         }
                         Ok(())
                     },
-                )
-                .map_err(route_error)?;
+                );
+                if let Some(error) = sink_failure {
+                    return Err(error);
+                }
+                let scan = scan.map_err(route_error)?;
                 if !matches!(
                     scan.disposition,
                     CodexPromptHistorySourceBackedDispositionV0::Cold
@@ -713,6 +739,7 @@ pub fn register_codex_prompt_history_source_backed_route(
                         sink.begin_source(claimed_source.clone())
                             .map_err(route_coordinator_error)?;
                     }
+                    let mut sink_failure = None;
                     let scan = stage_planned_codex_prompt_history_source_backed_v0(
                         capture_source.clone(),
                         Some(&base),
@@ -727,13 +754,17 @@ pub fn register_codex_prompt_history_source_backed_route(
                             }
                             let _retained_page_bytes = page.retained_bytes;
                             for record in page.records {
-                                sink.add_core_record(record)
-                                    .map_err(capture_coordinator_error)?;
+                                sink.add_core_record(record).map_err(|error| {
+                                    capture_coordinator_error(&mut sink_failure, error)
+                                })?;
                             }
                             Ok(())
                         },
-                    )
-                    .map_err(route_error)?;
+                    );
+                    if let Some(error) = sink_failure {
+                        return Err(error);
+                    }
+                    let scan = scan.map_err(route_error)?;
                     if scan.certificate != planned.certificate
                         || std::mem::discriminant(&scan.disposition)
                             != std::mem::discriminant(&planned.disposition)

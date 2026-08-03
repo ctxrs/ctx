@@ -6,30 +6,55 @@ use std::{
     },
 };
 
+use crate::provider::source_backed::{
+    CoreRecordEmission, SourceBackedLogicalSourceFailures, SourceBackedRecordRejections,
+    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResourceKind,
+    SourceBackedRouteResources,
+};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend, CoreRecord,
-    CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceObservation, TypedKey,
-    MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
+    EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceFrontier, SourceObservation, TypedKey, MAX_CORE_CONTENT_BYTES,
 };
 use ctx_history_index::{
-    CommitReceipt, GenerationWriter, IndexError, VerifiedIndex, WriterOptions,
+    CommitReceipt, GenerationWriter, SourceRouteIdentity, VerifiedIndex, WriterOptions,
 };
 
-use super::super::{CompleteInventoryOwner, SourceBackedCoordinatorError, SourceOwner};
+use super::super::{CompleteInventoryOwner, SourceOwner};
 use super::*;
 
 #[derive(Debug, thiserror::Error)]
-#[error("injected worker failure")]
-struct TestWorkerFailure;
+enum TestWorkerFailure {
+    #[error("injected worker failure")]
+    Injected,
+    #[error(transparent)]
+    Emission(#[from] SourceBackedRouteError),
+}
+
+impl From<ParallelLeafScanEmitError> for ParallelLeafScanWorkerError<TestWorkerFailure> {
+    fn from(error: ParallelLeafScanEmitError) -> Self {
+        match error {
+            ParallelLeafScanEmitError::Cancelled(error) => Self::Cancelled(error),
+            ParallelLeafScanEmitError::Route(error) => {
+                Self::Provider(TestWorkerFailure::Emission(error))
+            }
+        }
+    }
+}
 
 type TestWorkerResult = Result<(), ParallelLeafScanWorkerError<TestWorkerFailure>>;
 type TestRunResult<R> = Result<Vec<R>, ParallelLeafScanError<TestWorkerFailure>>;
+
+fn test_route_identity() -> SourceRouteIdentity {
+    SourceRouteIdentity::from_sha256("00".repeat(32)).unwrap()
+}
 
 struct SinkHarness {
     writer: GenerationWriter,
     owners: HashMap<[u8; 32], SourceOwner>,
     complete_inventories: Vec<CompleteInventoryOwner>,
+    logical_source_failures: SourceBackedLogicalSourceFailures,
+    record_rejections: SourceBackedRecordRejections,
     leaf_worker_budget: usize,
 }
 
@@ -46,6 +71,8 @@ impl SinkHarness {
             .unwrap(),
             owners: HashMap::new(),
             complete_inventories: Vec::new(),
+            logical_source_failures: SourceBackedLogicalSourceFailures::default(),
+            record_rejections: SourceBackedRecordRejections::default(),
             leaf_worker_budget: 16,
         }
     }
@@ -66,11 +93,15 @@ impl SinkHarness {
             + Sync,
     {
         let mut sink = SourceBackedGenerationSink {
+            core_record_preparer: self.writer.core_record_preparer(),
             writer: &mut self.writer,
             owners: &mut self.owners,
             complete_inventories: &mut self.complete_inventories,
             route_index: 0,
-            leaf_worker_budget: self.leaf_worker_budget,
+            route_identity: test_route_identity(),
+            resources: SourceBackedRouteResources::production(self.leaf_worker_budget),
+            logical_source_failures: &mut self.logical_source_failures,
+            record_rejections: &mut self.record_rejections,
             applied_removals: &mut Vec::new(),
             record_progress: None,
             current_source_progress: None,
@@ -160,18 +191,18 @@ fn run_replacements(worker_count: usize) -> ReplacementSummary {
                 ))?;
                 accepted_sequences.push(sequence);
             }
-            emitter.complete(ParallelLeafScanComplete::Replace {
-                certificate: test_certificate(
+            emitter.complete(ParallelLeafScanComplete::replace(
+                test_certificate(
                     &source,
                     job.leaf().id.saturating_add(10),
                     job.leaf().document_count,
                     false,
                 ),
-                result: ReplacementResult {
+                ReplacementResult {
                     id: job.leaf().id,
                     accepted_sequences,
                 },
-            })?;
+            ))?;
             Ok(())
         })
         .unwrap();
@@ -328,10 +359,7 @@ fn append_and_skipped_jobs_use_typed_lifecycles_and_ordered_results() {
                     base: Box::new(base.clone()),
                 })?;
                 emitter.emit_core_record(test_core_record(job.source(), 2, 12))?;
-                emitter.complete(ParallelLeafScanComplete::Append {
-                    append: append.clone(),
-                    result: "append",
-                })?;
+                emitter.complete(ParallelLeafScanComplete::append(append.clone(), "append"))?;
             } else {
                 emitter.complete(ParallelLeafScanComplete::Skipped { result: "skip" })?;
             }
@@ -488,7 +516,9 @@ fn worker_error_cancels_its_peer_and_all_workers_join() {
         .run::<_, (), _>(jobs, 2, move |job, emitter| {
             scan_barrier.wait();
             if *job.leaf() == 0 {
-                return Err(ParallelLeafScanWorkerError::provider(TestWorkerFailure));
+                return Err(ParallelLeafScanWorkerError::provider(
+                    TestWorkerFailure::Injected,
+                ));
             }
             while !emitter.is_cancelled() {
                 std::thread::yield_now();
@@ -628,11 +658,15 @@ fn worker_budget_reserves_indexers_runtime_and_caps_scanners() {
     let mut harness = SinkHarness::open(&temp.path().join("index"));
     harness.leaf_worker_budget = 6;
     let sink = SourceBackedGenerationSink {
+        core_record_preparer: harness.writer.core_record_preparer(),
         writer: &mut harness.writer,
         owners: &mut harness.owners,
         complete_inventories: &mut harness.complete_inventories,
         route_index: 0,
-        leaf_worker_budget: harness.leaf_worker_budget,
+        route_identity: test_route_identity(),
+        resources: SourceBackedRouteResources::production(harness.leaf_worker_budget),
+        logical_source_failures: &mut harness.logical_source_failures,
+        record_rejections: &mut harness.record_rejections,
         applied_removals: &mut Vec::new(),
         record_progress: None,
         current_source_progress: None,
@@ -644,6 +678,9 @@ fn worker_budget_reserves_indexers_runtime_and_caps_scanners() {
 
 #[test]
 fn core_record_transport_is_a_zero_capacity_one_record_rendezvous() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let harness = SinkHarness::open(&temp.path().join("index"));
+    let core_record_preparer = harness.writer.core_record_preparer();
     let source = test_source(14);
     let record = test_core_record(&source, 1, 141);
     let (sender, receiver) =
@@ -659,6 +696,8 @@ fn core_record_transport_is_a_zero_capacity_one_record_rendezvous() {
                 job_index: 0,
                 sender: &sender,
                 cancellation: &cancellation,
+                resources: SourceBackedRouteResources::production(1),
+                core_record_preparer,
             };
             barrier.wait();
             emitter.emit_core_record(record).unwrap();
@@ -671,20 +710,122 @@ fn core_record_transport_is_a_zero_capacity_one_record_rendezvous() {
             Err(mpsc::TryRecvError::Empty)
         ));
         let event = receiver.recv().unwrap();
+        let ParallelLeafWorkerEvent::Protocol {
+            worker_index,
+            job_index,
+            message,
+        } = event
+        else {
+            panic!("expected a protocol event");
+        };
+        assert_eq!(worker_index, 0);
+        assert_eq!(job_index, 0);
         assert!(matches!(
-            event,
-            ParallelLeafWorkerEvent::Protocol {
-                worker_index: 0,
-                job_index: 0,
-                message: ParallelLeafProtocolMessage::CoreRecord(_),
-            }
+            *message,
+            ParallelLeafProtocolMessage::CoreRecord(_)
         ));
         finished_receiver.recv().unwrap();
     });
 }
 
 #[test]
-fn oversized_valid_core_record_is_rejected_typed_by_the_generation_writer() {
+fn five_prior_repository_certificates_are_counted_before_output_admission() {
+    use ctx_history_core::{
+        RepositoryAbstention, RepositoryAbstentionReason, RepositoryBinding, RepositoryEvidence,
+        RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryLocalRootAuthorization,
+        CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+        CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
+    };
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let index = temp.path().join("index");
+    let source = test_source(19);
+    let mut prior = test_core_record(&source, 1, 191);
+    prior.repository_bindings = (0_u8..5)
+        .map(|index| RepositoryBinding {
+            binding_id: format!("binding-{index}"),
+            logical_repository_id: format!("local:repository-{index}"),
+            checkout_id: Some(format!("checkout-{index}")),
+            worktree_id: Some(format!("worktree-{index}")),
+            aliases: Vec::new(),
+            git_object_format: None,
+            local_root_authorization: Some(RepositoryLocalRootAuthorization {
+                local_root: format!("/repository/{index}"),
+                local_root_authorization_fingerprint_revision:
+                    CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
+                local_root_authorization_fingerprint: [index.saturating_add(1); 32],
+                observed_at_unix_ms: i64::from(index).saturating_add(1),
+            }),
+            evidence: vec![RepositoryEvidence {
+                kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
+                confidence: RepositoryEvidenceConfidence::High,
+            }],
+            association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+        })
+        .collect();
+    prior.validate_contract().unwrap();
+
+    let mut initial = GenerationWriter::open(&index, WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial.add_core_record(prior).unwrap();
+    initial
+        .certify_source(test_certificate(&source, 1, 1, false))
+        .unwrap();
+    initial.commit(|_| true).unwrap();
+
+    let mut replacement = GenerationWriter::open(&index, WriterOptions::default()).unwrap();
+    replacement.begin_source(source.clone()).unwrap();
+    let mut uncertified = test_core_record(&source, 1, 191);
+    uncertified.repository_abstentions = vec![RepositoryAbstention {
+        evidence_kind: RepositoryEvidenceKind::DeclaredToolWorkdir,
+        reason: RepositoryAbstentionReason::CandidateMissingBeforeCertification,
+        detail: None,
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    }];
+    uncertified.validate_contract().unwrap();
+    let uncertified_bytes = uncertified.encode_stored().unwrap().len();
+    let preparer = replacement.core_record_preparer();
+    let prepared_bytes = preparer
+        .prepare(uncertified.clone())
+        .unwrap()
+        .encoded_core_bytes();
+    assert!(prepared_bytes > uncertified_bytes);
+
+    let one_under = SourceBackedRouteResources::for_test(
+        4,
+        u64::try_from(prepared_bytes - 1).unwrap(),
+        u64::MAX,
+    );
+    let error = CoreRecordEmission::new(uncertified.clone(), &one_under, &preparer).unwrap_err();
+    assert_eq!(error.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
+    assert_eq!(
+        one_under.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        0
+    );
+
+    let exact =
+        SourceBackedRouteResources::for_test(1, u64::try_from(prepared_bytes).unwrap(), u64::MAX);
+    let emission = CoreRecordEmission::new(uncertified, &exact, &preparer).unwrap();
+    assert_eq!(
+        exact.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        u64::try_from(prepared_bytes).unwrap()
+    );
+    let (prepared, reservation) = emission.into_prepared();
+    replacement.add_prepared_core_record(prepared).unwrap();
+    assert_eq!(
+        exact.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        u64::try_from(prepared_bytes).unwrap(),
+        "the reservation must outlive writer acceptance"
+    );
+    drop(reservation);
+    assert_eq!(
+        exact.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        0
+    );
+}
+
+#[test]
+fn oversized_valid_core_record_is_rejected_by_the_emission_envelope() {
     let source = test_source(15);
     let mut record = test_core_record(&source, 1, 151);
     record.content.normalized_body = Some("\0".repeat(MAX_CORE_CONTENT_BYTES));
@@ -699,16 +840,12 @@ fn oversized_valid_core_record_is_rejected_typed_by_the_generation_writer() {
 
     assert!(matches!(
         error,
-        ParallelLeafScanError::Sink {
+        ParallelLeafScanError::Worker {
             job_index: 0,
-            operation: ParallelLeafSinkOperation::AddCoreRecord,
-            source: SourceBackedCoordinatorError::Index(IndexError::CoreRecord(
-                CoreRecordError::FieldTooLarge {
-                    field: "encoded_core_record",
-                    maximum: MAX_ENCODED_CORE_RECORD_BYTES,
-                    ..
-                }
-            )),
+            source: TestWorkerFailure::Emission(SourceBackedRouteError {
+                kind: SourceBackedRouteErrorKind::InvalidSource,
+                ..
+            }),
             ..
         }
     ));

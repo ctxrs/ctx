@@ -111,9 +111,20 @@ pub(crate) fn route_error(error: impl fmt::Display) -> SourceBackedRouteError {
 pub(crate) fn route_coordinator_error(
     error: SourceBackedCoordinatorError,
 ) -> SourceBackedRouteError {
-    SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, error.to_string())
+    match error {
+        SourceBackedCoordinatorError::CoreEmission(source) => source,
+        error => {
+            SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, error.to_string())
+        }
+    }
 }
 
-fn capture_coordinator_error(error: SourceBackedCoordinatorError) -> CaptureError {
-    CaptureError::InvalidPayload(error.to_string())
+fn capture_coordinator_error(
+    failure: &mut Option<SourceBackedRouteError>,
+    error: SourceBackedCoordinatorError,
+) -> CaptureError {
+    let error = route_coordinator_error(error);
+    let detail = error.to_string();
+    *failure = Some(error);
+    CaptureError::InvalidPayload(detail)
 }

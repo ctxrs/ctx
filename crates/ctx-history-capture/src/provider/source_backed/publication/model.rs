@@ -128,11 +128,35 @@ impl SourceRecordProgress {
 
 pub(super) struct SourceBackedRefreshPlan {
     pub(super) scope: SourceBackedRefreshScope,
+    #[cfg(test)]
+    resource_limits: Option<(u64, u64)>,
 }
 
 impl SourceBackedRefreshPlan {
     pub(super) fn isolate(scope: SourceBackedRefreshScope) -> Self {
-        Self { scope }
+        Self {
+            scope,
+            #[cfg(test)]
+            resource_limits: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_resource_limits(
+        mut self,
+        maximum_live_output_bytes: u64,
+        maximum_physical_scratch_bytes: u64,
+    ) -> Self {
+        self.resource_limits = Some((maximum_live_output_bytes, maximum_physical_scratch_bytes));
+        self
+    }
+
+    pub(super) fn route_resources(&self, work_budget: usize) -> SourceBackedRouteResources {
+        #[cfg(test)]
+        if let Some((output, scratch)) = self.resource_limits {
+            return SourceBackedRouteResources::for_test(work_budget, output, scratch);
+        }
+        SourceBackedRouteResources::production(work_budget)
     }
 }
 
@@ -157,14 +181,52 @@ pub struct SourceBackedRefreshReceipt {
     pub successful_route_outcomes: Vec<SourceBackedSuccessfulRouteOutcome>,
     pub failed_routes: Vec<SourceBackedFailedRouteOutcome>,
     pub source_failures: SourceBackedSourceFailures,
+    /// Failures confined to independently owned logical sources inside an
+    /// otherwise successfully published provider route.
+    pub logical_source_failures: SourceBackedLogicalSourceFailures,
+    /// Bounded record-level diagnostics for provider inputs that completed and
+    /// published valid peers with explicit rejected-record counts.
+    pub record_rejections: SourceBackedRecordRejections,
     pub carried_unselected_route_ids: Vec<SourceRouteIdentity>,
     pub carried_failed_route_ids: Vec<SourceRouteIdentity>,
+}
+
+impl SourceBackedRefreshReceipt {
+    /// Record-level completion is derived from durable certified counts, so an
+    /// exact replay preserves `completed_with_rejections` even when no input
+    /// record is reparsed and no fresh diagnostic is emitted. Exact-scope
+    /// refreshes consider only successfully selected route members, not
+    /// carried history belonging to routes outside the requested scope.
+    pub fn record_completion(&self) -> SourceBackedRecordCompletion {
+        let successful_source_has_rejections = self
+            .successful_route_ids
+            .iter()
+            .filter_map(|route_id| self.commit.manifest().source_route(route_id))
+            .flat_map(|route| route.sources())
+            .any(|route_source| {
+                self.sources.iter().any(|source| {
+                    source
+                        .observation()
+                        .source()
+                        .exact_descriptor_eq(route_source)
+                        && source.counts().rejected_records != 0
+                })
+            });
+        if successful_source_has_rejections || !self.record_rejections.is_empty() {
+            SourceBackedRecordCompletion::CompletedWithRejections
+        } else {
+            SourceBackedRecordCompletion::Completed
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceBackedSuccessfulRouteOutcome {
     pub route_identity: SourceRouteIdentity,
     pub changed: bool,
+    /// Exact logical-source failure count for this successful route, including
+    /// entries omitted from the bounded diagnostic vector.
+    pub logical_source_failure_total: usize,
 }
 
 #[cfg(test)]

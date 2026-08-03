@@ -312,12 +312,12 @@ use lineage::{CodexOutcomeLineageAuthorityV0, CodexOutcomeOriginV0};
 pub(crate) use catalog::{
     discover_codex_session_tree_inventory_from_base_v0,
     discover_codex_session_tree_inventory_from_plans_v0, install_after_codex_directory_visit_hook,
-    install_after_codex_metadata_inventory_hook, CodexCatalogWorkV0,
+    install_after_codex_metadata_inventory_hook, writer_base_sources, CodexCatalogWorkV0,
 };
 pub(crate) use catalog::{
     discover_codex_session_tree_inventory_v0, managed_codex_session_source,
-    observe_codex_explicit_session_source_backed_v0, writer_base_sources,
-    CodexExplicitSessionSourceBackedInputV0, CodexSessionTreeInventoryV0,
+    observe_codex_explicit_session_source_backed_v0, CodexExplicitSessionSourceBackedInputV0,
+    CodexSessionTreeInventoryV0,
 };
 use cold::{
     cold_scanner_worker_count, ingest_codex_cold_parallel_v0, ColdIngestionTargetV0,
