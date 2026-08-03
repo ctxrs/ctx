@@ -447,7 +447,6 @@ fn machine_errors_preserve_exact_bytes_for_repaired_human_families() {
         "key_store_unavailable: private key-store detail",
         "key_store_locked: selected store is locked",
         "cancelled: uninstall confirmation was not provided",
-        "invalid_request: qualification helpers are unsupported on this platform",
         "helper_upgrade_required: private helper detail",
         "commercial_identity_conflict: bounded safe cause",
         "authentication_expired: WorkOS device authorization expired",

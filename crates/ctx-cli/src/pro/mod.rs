@@ -16,8 +16,6 @@ mod lifecycle;
 mod local_deletion;
 mod pending_materialization;
 mod pricing;
-#[cfg(any(test, ctx_pro_qualification))]
-mod qualification_helper;
 mod referral;
 mod render;
 mod request_identity;

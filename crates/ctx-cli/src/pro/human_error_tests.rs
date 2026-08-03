@@ -47,12 +47,6 @@ fn audited_pro_failures_use_only_trusted_human_copy_and_recovery() {
             Some("ctx pro uninstall"),
         ),
         (
-            "invalid_request: qualification helpers are unsupported on this platform at /private/target",
-            "ctx Pro is not available on this platform",
-            "No compatible signed helper is published",
-            None,
-        ),
-        (
             "helper_upgrade_required: incompatible helper at /private/helper",
             "The ctx Pro helper needs repair",
             "compatible signed helper",

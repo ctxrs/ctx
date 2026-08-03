@@ -157,6 +157,7 @@ CI_TESTS = [
     ":stage_github_release_assets_tests",
     "//crates/ctx-cli:daemon_config_reload_tests",
     "//crates/ctx-cli:search_source_identity_filters_tests",
+    "//crates/ctx-pro-host-protocol:protocol_inventory_regeneration_test",
     "//sdks/go:go_sdk_tests",
     "//sdks/go/examples/dogfood:dogfood_tests",
     "//tools/bazel:release_route_analysis_tests",
@@ -169,6 +170,5 @@ NIGHTLY_TESTS = [
     ":performance_sanity_tests",
     "//crates/ctx-cli:auto_upgrade_acceptance_tests",
     "//crates/ctx-cli:persistent_daemon_lifecycle_tests",
-    "//crates/ctx-cli:pro_qualification_tests",
     "//scripts/source-backed-recovery:fault_qualification",
 ]

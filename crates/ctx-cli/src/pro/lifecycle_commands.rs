@@ -30,8 +30,6 @@ use super::{
     SetupInstallation,
 };
 use crate::pro::artifact_delivery::SetupArtifactBundle;
-#[cfg(ctx_pro_qualification)]
-use crate::pro::client::smoke_qualification_helper;
 #[cfg(test)]
 use crate::pro::client::HelperSmoke;
 use crate::pro::client::{
@@ -566,28 +564,6 @@ fn run_setup(
                     ProReconcileOutcomeV1::Installed
                 };
                 true
-            }
-            #[cfg(ctx_pro_qualification)]
-            SetupArtifactBundle::Qualification(bundle) => {
-                let executable =
-                    crate::pro::verified_executable::VerifiedHelperExecutable::open_qualification(
-                        bundle,
-                    )?;
-                let smoke = record_helper_smoke(
-                    smoke_qualification_helper(data_root, executable),
-                    telemetry,
-                )?;
-                validate_staged_helper(&smoke)?;
-                false
-            }
-            #[cfg(all(test, not(ctx_pro_qualification)))]
-            SetupArtifactBundle::Qualification(bundle) => {
-                let smoke = record_helper_smoke(
-                    smoke_helper_at_path(data_root, bundle.verified_path()?),
-                    telemetry,
-                )?;
-                validate_staged_helper(&smoke)?;
-                false
             }
             #[cfg(ctx_pro_test_helper)]
             SetupArtifactBundle::TestControl(bundle) => {

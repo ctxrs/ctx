@@ -129,11 +129,15 @@ impl ProInstallMarker {
         if manifest_bytes.len() as u64 > MAX_MANIFEST_BYTES {
             bail!("invalid_response: installed Pro marker manifest exceeds maximum size");
         }
-        verified_manifest(
+        verify_signature_with_key(
             &manifest_bytes,
             self.signature_base64.as_bytes(),
             public_key_pem,
-        )
+        )?;
+        let manifest: ProManifest = serde_json::from_slice(&manifest_bytes)
+            .context("invalid_response: parse signed Pro manifest")?;
+        validate_manifest(&manifest)?;
+        Ok(manifest)
     }
 }
 
@@ -195,7 +199,17 @@ pub(crate) fn validate_manifest_release_trust(
     Ok(())
 }
 
-pub(super) fn validate_manifest(manifest: &ProManifest) -> Result<()> {
+pub(crate) fn validate_manifest(manifest: &ProManifest) -> Result<()> {
+    validate_manifest_identity(manifest)?;
+    if manifest.protocol_fingerprint != ctx_pro_host_protocol::PROTOCOL_FINGERPRINT {
+        bail!(
+            "protocol_mismatch: signed artifact protocol fingerprint does not match this ctx host"
+        );
+    }
+    Ok(())
+}
+
+fn validate_manifest_identity(manifest: &ProManifest) -> Result<()> {
     if manifest.schema_version != 1 || manifest.product != "ctx-pro" {
         bail!("invalid_response: signed manifest is not a supported ctx-pro manifest");
     }
@@ -203,11 +217,6 @@ pub(super) fn validate_manifest(manifest: &ProManifest) -> Result<()> {
         || manifest.protocol_max != ctx_pro_host_protocol::PROTOCOL_VERSION
     {
         bail!("protocol_mismatch: signed artifact is not compatible with this ctx host");
-    }
-    if manifest.protocol_fingerprint != ctx_pro_host_protocol::PROTOCOL_FINGERPRINT {
-        bail!(
-            "protocol_mismatch: signed artifact protocol fingerprint does not match this ctx host"
-        );
     }
     if manifest.target != platform_target() {
         bail!(
