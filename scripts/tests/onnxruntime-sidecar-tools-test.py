@@ -690,8 +690,11 @@ class StageAndFinalValidationTests(unittest.TestCase):
                 0o755,
             )
 
-    @unittest.skipUnless(shutil.which("zstd"), "zstd is required for tar.zst validation")
     def test_final_archive_validator_runs_as_an_independent_program(self) -> None:
+        self.assertIsNotNone(
+            shutil.which("zstd"),
+            "zstd is required; the release archive test must fail rather than skip",
+        )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             copied_tools = root / "tools"

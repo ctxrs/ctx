@@ -346,7 +346,15 @@ fn scripted_errors_are_terminal_and_still_publish_complete_isolation_receipts() 
     let output = locked.run(&["referral", "status"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("key_store_locked"), "{stderr}");
+    assert!(
+        stderr.contains("The secure key store is locked"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Unlock the selected persistent key store"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("key_store_locked"), "{stderr}");
     let receipt = locked.receipt();
     assert_eq!(receipt["command_outcome"], "error");
     assert_receipt(&receipt, "referral.status", &[], &[]);
@@ -368,6 +376,7 @@ fn parser_rejects_unknown_noncanonical_and_tampered_manifests_before_state() {
                 canonical_json(value)
             },
             "unknown field",
+            "invalid_request",
         ),
         (
             "noncanonical",
@@ -379,6 +388,7 @@ fn parser_rejects_unknown_noncanonical_and_tampered_manifests_before_state() {
             ))
             .unwrap(),
             "canonical JSON",
+            "invalid_request",
         ),
         (
             "tampered-trust",
@@ -393,17 +403,20 @@ fn parser_rejects_unknown_noncanonical_and_tampered_manifests_before_state() {
                 canonical_json(value)
             },
             "selected commercial channel",
+            "invalid_response",
         ),
     ];
-    for (name, bytes, expected) in cases {
+    for (name, bytes, expected, expected_code) in cases {
         let harness = Harness::new();
         write_private(&harness.manifest, &bytes);
         let output = harness.run(&["pro", "manage", "--no-open", "--format", "json"]);
         assert!(!output.status.success(), "{name}");
-        assert!(
-            String::from_utf8(output.stderr).unwrap().contains(expected),
-            "{name}"
-        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let error: Value = serde_json::from_str(&stderr).unwrap();
+        assert_eq!(error["error"], expected_code, "{name}: {stderr}");
+        assert_eq!(error["error_code"], expected_code, "{name}: {stderr}");
+        assert_eq!(error.as_object().unwrap().len(), 2, "{name}: {stderr}");
+        assert!(!stderr.contains(expected), "{name}: {stderr}");
         assert!(!harness.root.path().join(RECEIPT).exists(), "{name}");
         assert!(!harness.data_root.join("pro").exists(), "{name}");
     }
@@ -424,9 +437,12 @@ fn parser_rejects_unknown_noncanonical_and_tampered_manifests_before_state() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8(output.stderr)
-        .unwrap()
-        .contains("normalized absolute path"));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let error: Value = serde_json::from_str(&stderr).unwrap();
+    assert_eq!(error["error"], "invalid_request", "{stderr}");
+    assert_eq!(error["error_code"], "invalid_request", "{stderr}");
+    assert_eq!(error.as_object().unwrap().len(), 2, "{stderr}");
+    assert!(!stderr.contains("normalized absolute path"), "{stderr}");
 }
 
 #[test]

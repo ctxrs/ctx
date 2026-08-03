@@ -722,7 +722,34 @@ py_test(
         "scripts/onnxruntime-sidecar/validate_sidecar.sh",
     ],
     main = "scripts/tests/onnxruntime-sidecar-tools-test.py",
-    tags = ["release-gate"],
+    tags = [
+        "release-gate",
+        "requires-zstd",
+    ],
+)
+
+# This test intentionally queries the complete live workspace graph. The
+# no-cache/no-sandbox execution requirements keep undeclared package additions
+# from being hidden by a stale test result.
+sh_test(
+    name = "test_tier_inventory_check",
+    srcs = ["scripts/tests/test-tier-inventory-test.sh"],
+    args = [
+        "$(rootpath BUILD.bazel)",
+        "$(rootpath //tools/bazel:test-tier-inventory.json)",
+        "$(rootpath //tools/bazel:check_test_tier_inventory.py)",
+    ],
+    data = [
+        "BUILD.bazel",
+        "scripts/bazelw",
+        "//tools/bazel:check_test_tier_inventory.py",
+        "//tools/bazel:test-tier-inventory.json",
+    ],
+    tags = [
+        "build-graph",
+        "no-cache",
+        "no-sandbox",
+    ],
 )
 
 sh_test(
