@@ -184,6 +184,35 @@ pub(super) fn daemon_test_job(job: &'static str) -> Option<Value> {
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_SOURCE_REFRESH_RECOVERY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn install_after_source_refresh_recovery_hook_for_test(hook: impl FnOnce() + 'static) {
+    AFTER_SOURCE_REFRESH_RECOVERY_HOOK.with(|slot| {
+        let previous = slot.replace(Some(Box::new(hook)));
+        assert!(
+            previous.is_none(),
+            "source refresh recovery test hooks must not nest"
+        );
+    });
+}
+
+#[cfg(test)]
+fn run_after_source_refresh_recovery_hook() {
+    AFTER_SOURCE_REFRESH_RECOVERY_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_after_source_refresh_recovery_hook() {}
+
 fn daemon_previous_status_needs_recovery(status: Option<&Value>) -> bool {
     status
         .and_then(|status| status.get("status"))
@@ -367,18 +396,16 @@ pub(super) fn run_daemon_inner(
         }
         #[cfg(test)]
         fail_daemon_before_ready_for_test(data_root)?;
-        restore_daemon_background_refresh_cadence(&mut runtime, data_root);
         if !runtime.config.daemon.mode.runs_only_source_refresh() {
             resume_completed_installation_daemons(data_root)?;
         }
-        if let Some(source_refresh) = refresh_service
-            .as_ref()
-            .map(|service| service.source_refresh.as_ref())
-        {
-            source_refresh
-                .recover_interrupted_publication(data_root)
-                .context("recover interrupted Core refresh before daemon readiness")?;
-        }
+        recover_source_refresh_before_background_cadence(
+            &mut runtime,
+            data_root,
+            refresh_service
+                .as_ref()
+                .map(|service| service.source_refresh.as_ref()),
+        )?;
         write_daemon_lifecycle_status_with_runtime(
             data_root,
             &args,
@@ -771,6 +798,24 @@ pub(super) fn run_daemon_inner(
         )?;
     }
     Ok(daemon_report_with_disabled_status(data_root, !args.force))
+}
+
+fn recover_source_refresh_before_background_cadence(
+    runtime: &mut DaemonRuntime,
+    data_root: &Path,
+    source_refresh: Option<&CoreRefreshEngine>,
+) -> Result<()> {
+    if let Some(source_refresh) = source_refresh {
+        source_refresh
+            .recover_interrupted_publication(data_root)
+            .context("recover interrupted Core refresh before daemon readiness")?;
+    }
+    // Recovery may turn a pre-crash `running` periodic job into the durable
+    // terminal publication that owns the cooldown timestamps. Restore only
+    // after that transition so restart cannot erase background rest.
+    run_after_source_refresh_recovery_hook();
+    restore_daemon_background_refresh_cadence(runtime, data_root);
+    Ok(())
 }
 
 fn daemon_wait_duration(

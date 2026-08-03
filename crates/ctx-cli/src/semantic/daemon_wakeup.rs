@@ -115,7 +115,7 @@ impl SourceWatchSinkSlot {
             .is_some()
     }
 
-    fn dispatch(&self, batch: &SourceWatchBatch) {
+    fn dispatch(&self, batch: &SourceWatchBatch) -> bool {
         let sink = self
             .sink
             .read()
@@ -123,7 +123,9 @@ impl SourceWatchSinkSlot {
             .clone();
         if let Some(sink) = sink {
             sink(batch);
+            return true;
         }
+        false
     }
 }
 
@@ -141,6 +143,11 @@ struct DaemonWakeupState {
     // One merged batch replaces a queue of batches. Route entries therefore
     // cannot exceed the current exact watch-catalog cardinality.
     source_watch: SourceWatchBatch,
+    // Exact observations are retained independently from the debounced daemon
+    // wake. This closes sink installation races and lets an in-progress
+    // publication fence events without forcing the synchronous loop awake for
+    // every native callback.
+    observed_source_watch: SourceWatchBatch,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -156,6 +163,23 @@ pub(super) struct DaemonWakeup {
     state: Mutex<DaemonWakeupState>,
     changed: Condvar,
     source_watch_sink: SourceWatchSinkSlot,
+    #[cfg(test)]
+    source_watch_test_hook: SourceWatchTestHook,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct SourceWatchTestHook {
+    before_sink_dispatch: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for SourceWatchTestHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceWatchTestHook")
+            .finish_non_exhaustive()
+    }
 }
 
 impl DaemonWakeup {
@@ -164,15 +188,31 @@ impl DaemonWakeup {
         self.signal(WAKE_FILESYSTEM);
     }
 
+    /// Records exact route observations immediately for the publication fence.
+    ///
+    /// The merged replay state is updated before any sink lookup or dispatch.
+    /// Installation therefore observes every interleaving: either it replays
+    /// this batch, or this call observes the installed sink and dispatches it.
+    fn observe_source_watch(&self, batch: &SourceWatchBatch) {
+        if batch.is_empty() {
+            return;
+        }
+        self.lock_state().observed_source_watch.merge(batch.clone());
+        #[cfg(test)]
+        self.run_before_source_watch_sink_dispatch_hook();
+        if self.source_watch_sink.dispatch(batch) {
+            // The replay buffer is startup-only. Once an installed sink has
+            // observed this batch, clearing the merged state prevents route
+            // identities from accumulating across later catalog churn.
+            self.lock_state().observed_source_watch = SourceWatchBatch::default();
+        }
+    }
+
+    /// Coalesces the daemon wake independently from prompt ledger observation.
     fn signal_source_watch(&self, batch: SourceWatchBatch) {
         if batch.is_empty() {
             return;
         }
-        // The debounce worker records route watermarks before waking the
-        // synchronous daemon loop. Long capture work can therefore include
-        // these observations in its publication handoff fence instead of
-        // discovering them only after the route has already acknowledged.
-        self.source_watch_sink.dispatch(&batch);
         let mut state = self.lock_state();
         state.pending |= WAKE_FILESYSTEM;
         state.filesystem_signals = state.filesystem_signals.saturating_add(1);
@@ -182,16 +222,40 @@ impl DaemonWakeup {
 
     pub(super) fn install_source_watch_sink(&self, sink: SourceWatchSink) {
         self.source_watch_sink.set(Some(sink));
-        // Close startup's install-versus-signal race. Normal daemon ingestion
-        // remains idempotent because route watermarks are monotonic.
-        let pending = self.lock_state().source_watch.clone();
-        if !pending.is_empty() {
-            self.source_watch_sink.dispatch(&pending);
+        // Replay all observations merged before installation. Normal daemon
+        // ingestion remains idempotent because route watermarks are monotonic.
+        let pending = self.lock_state().observed_source_watch.clone();
+        if !pending.is_empty() && self.source_watch_sink.dispatch(&pending) {
+            self.lock_state().observed_source_watch = SourceWatchBatch::default();
         }
     }
 
     pub(super) fn has_source_watch_sink(&self) -> bool {
         self.source_watch_sink.is_installed()
+    }
+
+    #[cfg(test)]
+    fn install_before_source_watch_sink_dispatch_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        let previous = self
+            .source_watch_test_hook
+            .before_sink_dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(hook);
+        assert!(previous.is_none(), "source-watch test hooks must not nest");
+    }
+
+    #[cfg(test)]
+    fn run_before_source_watch_sink_dispatch_hook(&self) {
+        let hook = self
+            .source_watch_test_hook
+            .before_sink_dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     pub(super) fn signal_ipc(&self) {
@@ -751,9 +815,10 @@ fn watch_event_loop(
             Ok(WatchMessage::Stop) | Err(_) => return,
         };
         let started = Instant::now();
-        let mut relevant = record_watch_event(
+        let mut relevant = record_and_observe_watch_event(
             &authority,
             &counters,
+            &wakeup,
             &data_root,
             &daemon_root,
             first,
@@ -767,9 +832,10 @@ fn watch_event_loop(
             let timeout = WATCH_DEBOUNCE_QUIET.min(WATCH_DEBOUNCE_MAX - elapsed);
             match receiver.recv_timeout(timeout) {
                 Ok(WatchMessage::Event { event, watermark }) => {
-                    relevant.merge(record_watch_event(
+                    relevant.merge(record_and_observe_watch_event(
                         &authority,
                         &counters,
+                        &wakeup,
                         &data_root,
                         &daemon_root,
                         event,
@@ -789,6 +855,27 @@ fn watch_event_loop(
             wakeup.signal_source_watch(relevant);
         }
     }
+}
+
+fn record_and_observe_watch_event(
+    authority: &RwLock<WatchAuthority>,
+    counters: &Mutex<WatchCounters>,
+    wakeup: &DaemonWakeup,
+    data_root: &Path,
+    daemon_root: &Path,
+    event: notify::Result<Event>,
+    watermark: EventWatermark,
+) -> SourceWatchBatch {
+    let batch = record_watch_event(
+        authority,
+        counters,
+        data_root,
+        daemon_root,
+        event,
+        watermark,
+    );
+    wakeup.observe_source_watch(&batch);
+    batch
 }
 
 fn record_watch_event(

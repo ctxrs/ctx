@@ -916,6 +916,94 @@ fn due_dirty_route_waits_for_background_cadence_instead_of_spinning() {
 }
 
 #[test]
+fn recovered_periodic_publication_restores_crash_cooldown_before_explicit_bypass() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root)?;
+    super::super::paths_status::write_daemon_job_status(
+        &daemon_core_refresh_job_path(&data_root),
+        &json!({
+            "trigger": "periodic",
+            "request_state": "running",
+            "started_at_ms": 1,
+        }),
+    )?;
+
+    let recovery_root = data_root.clone();
+    install_after_source_refresh_recovery_hook_for_test(move || {
+        let finished_at_ms = source_route_ledger_now_ms();
+        super::super::paths_status::write_daemon_job_status(
+            &daemon_core_refresh_job_path(&recovery_root),
+            &json!({
+                "trigger": "periodic",
+                "request_state": "published",
+                "status": "completed",
+                "started_at_ms": finished_at_ms.saturating_sub(1_000),
+                "finished_at_ms": finished_at_ms,
+            }),
+        )
+        .expect("persist recovered automatic publication");
+    });
+
+    let mut runtime = DaemonRuntime::default();
+    recover_source_refresh_before_background_cadence(&mut runtime, &data_root, None)?;
+    assert!(
+        runtime
+            .background_refresh_cadence
+            .remaining(Instant::now())
+            .is_some_and(|remaining| remaining > StdDuration::ZERO),
+        "recovered periodic publication must retain background cooldown"
+    );
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor_calls = Arc::clone(&calls);
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            executor_calls.fetch_add(1, Ordering::SeqCst);
+            let receipt = GenerationWriter::open(execution.index_root, WriterOptions::default())?
+                .commit(|_| true)?;
+            Ok(SourceBackedRefreshPublication {
+                generation_id: receipt.generation_id,
+                published_explicit_source_catalog: None,
+                unsupported_routes: 0,
+                certified_source_count: 0,
+                certified_source_bytes: 0,
+                current: SourceBackedRefreshCurrent::default(),
+                timings: SourceBackedRefreshTimings::default(),
+                route_results: Vec::new(),
+                catalog_route_bindings: Vec::new(),
+                verified_index: None,
+            })
+        },
+    ));
+    coordinator
+        .handle_ipc_request(
+            &data_root,
+            &json!({
+                "schema_version": 1,
+                "op": "source_refresh_request",
+                "mode": "wait",
+                "operation": "refresh",
+            }),
+        )?
+        .expect("explicit freshness response");
+
+    let iteration = run_daemon_scheduler_cycle_with_activity(
+        &test_daemon_run_args(),
+        &data_root,
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )?;
+    assert!(!iteration.failed);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(!coordinator.has_pending_request());
+    Ok(())
+}
+
+#[test]
 fn continuous_query_wait_loop_reaches_consumer_retry_fairness_deadline() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let generation = ctx_history_index::GenerationWriter::open(
