@@ -285,14 +285,38 @@ send({
 request = receive()
 if request['message']['kind'] != 'status':
     sys.exit(22)
+requested_generation = request['message']['body'].get('requested_core_generation_id')
+current = requested_generation is not None
+receipt = {
+  'core_generation_id':requested_generation,
+  'core_record_contract_fingerprint':'__CORE_RECORD_CONTRACT_FINGERPRINT__',
+  'source_snapshot_sha256':'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  'materializer_revision':'status-fixture-v1',
+  'source_count':1,
+  'event_count':1
+} if current else None
+storage_evidence = {
+  'graph_manifest_schema':3,
+  'flat_format_version':2,
+  'materializer_checkpoint_version':3,
+  'journal_pack_format_version':3,
+  'legacy_journals_written':0,
+  'journal_pages_written':2,
+  'journal_packs_written':1,
+  'journal_finish_activity':{
+    'worker_limit':1,
+    'peak_workers':1,
+    'started_after_preparation':True
+  }
+} if current else None
 send({
   'sequence': request['sequence'],
   'request_id': request['request_id'],
   'message': {'kind':'status','body':{
-    'currentness':'not_materialized',
-    'requested_core_generation_id':request['message']['body'].get('requested_core_generation_id'),
-    'core_receipt':None,
-    'coverage':'not_materialized',
+    'currentness':'current' if current else 'not_materialized',
+    'requested_core_generation_id':requested_generation,
+    'core_receipt':receipt,
+    'coverage':'abstained' if current else 'not_materialized',
     'repository_coverage':{
       'repository_candidate_events':0,
       'logical_binding_events':0,
@@ -301,20 +325,27 @@ send({
       'exact_commit_evidence_events':0,
       'exact_pull_request_evidence_events':0
     },
+    'core_preparation_peak_workers':0,
     'access':{
       'entitlement':'available',
       'graph_key':'available',
       'local_repository':'unavailable'
     },
     'supported_operations':['file_blame','commit_blame','pull_request_blame'],
-    'available_operations':[]
+    'available_operations':[],
+    'storage_evidence':storage_evidence
   }}
 })
 "#;
-    let helper = HELPER.replace(
-        "__PROTOCOL_FINGERPRINT__",
-        ctx_pro_host_protocol::PROTOCOL_FINGERPRINT,
-    );
+    let helper = HELPER
+        .replace(
+            "__PROTOCOL_FINGERPRINT__",
+            ctx_pro_host_protocol::PROTOCOL_FINGERPRINT,
+        )
+        .replace(
+            "__CORE_RECORD_CONTRACT_FINGERPRINT__",
+            &ctx_history_core::core_record_contract_fingerprint(),
+        );
     write_python_helper(path, &helper);
 }
 
@@ -422,13 +453,28 @@ def status_body(request):
         'exact_commit_evidence_events':1,
         'exact_pull_request_evidence_events':1
       },
+      'core_preparation_peak_workers':0,
       'access':{
         'entitlement':'available',
         'graph_key':'available',
         'local_repository':'available'
       },
       'supported_operations':['file_blame','commit_blame','pull_request_blame'],
-      'available_operations':['file_blame','commit_blame','pull_request_blame']
+      'available_operations':['file_blame','commit_blame','pull_request_blame'],
+      'storage_evidence':{
+        'graph_manifest_schema':3,
+        'flat_format_version':2,
+        'materializer_checkpoint_version':3,
+        'journal_pack_format_version':3,
+        'legacy_journals_written':0,
+        'journal_pages_written':2,
+        'journal_packs_written':1,
+        'journal_finish_activity':{
+          'worker_limit':1,
+          'peak_workers':1,
+          'started_after_preparation':True
+        }
+      }
     }
 
 hello = receive()

@@ -77,15 +77,6 @@ pub(super) fn helper_path(data_root: &Path) -> Result<PathBuf> {
         return Ok(path);
     }
 
-    #[cfg(ctx_pro_qualification)]
-    if let Some(bundle) =
-        crate::pro::qualification_helper::QualificationHelperBundle::from_process_environment(
-            crate::pro::commercial_config::selected_channel()?,
-        )?
-    {
-        return Ok(bundle.source_path().to_path_buf());
-    }
-
     #[cfg(any(test, ctx_pro_test_helper))]
     if let Some(value) = env::var_os("CTX_PRO_HELPER") {
         let path = PathBuf::from(value);
@@ -102,15 +93,6 @@ pub(super) fn helper_executable(data_root: &Path) -> Result<VerifiedHelperExecut
     #[cfg(ctx_pro_test_helper)]
     if let Some(path) = crate::pro::test_control::helper_path()? {
         return VerifiedHelperExecutable::open_developer(&path);
-    }
-
-    #[cfg(ctx_pro_qualification)]
-    if let Some(bundle) =
-        crate::pro::qualification_helper::QualificationHelperBundle::from_process_environment(
-            crate::pro::commercial_config::selected_channel()?,
-        )?
-    {
-        return VerifiedHelperExecutable::open_qualification(bundle);
     }
 
     #[cfg(any(test, ctx_pro_test_helper))]

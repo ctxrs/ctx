@@ -7,8 +7,8 @@ use anyhow::Result;
 use ctx_history_index::VerifiedIndex;
 use ctx_pro_host_protocol::{
     Capability, CoreProjectionCurrentness, EntitlementAccessState, HelperMessage, HostMessage,
-    MaterializedCoverage, ProOperation, RepositoryCoverage, StatusRequest, StatusResult,
-    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+    MaterializedCoverage, ProOperation, ProStorageEvidence, RepositoryCoverage, StatusRequest,
+    StatusResult, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 
@@ -38,6 +38,8 @@ pub(crate) struct ProStatus {
     pub(crate) projection_currentness: Option<CoreProjectionCurrentness>,
     pub(crate) materialized_coverage: Option<MaterializedCoverage>,
     pub(crate) repository_coverage: Option<RepositoryCoverage>,
+    pub(crate) core_preparation_peak_workers: Option<u16>,
+    pub(crate) storage_evidence: Option<ProStorageEvidence>,
     pub(crate) supported_operations: Option<BTreeSet<ProOperation>>,
     pub(crate) available_operations: Option<BTreeSet<ProOperation>>,
     pub(crate) access_state: Option<String>,
@@ -86,21 +88,6 @@ pub(super) fn smoke_helper_at_path_with_authorization(
         path,
         None,
         authorization,
-        drop,
-    )
-}
-
-#[cfg(ctx_pro_qualification)]
-pub(crate) fn smoke_qualification_helper(
-    data_root: &Path,
-    executable: VerifiedHelperExecutable,
-) -> Result<HelperSmoke> {
-    let path = executable.path().to_path_buf();
-    smoke_helper_at_path_with_authorization_observing_status(
-        data_root,
-        &path,
-        Some(executable),
-        None,
         drop,
     )
 }
@@ -184,6 +171,8 @@ fn status_with_helper_resolver_and_core<'a>(
                 projection_currentness: None,
                 materialized_coverage: None,
                 repository_coverage: None,
+                core_preparation_peak_workers: None,
+                storage_evidence: None,
                 supported_operations: None,
                 available_operations: None,
                 access_state: None,
@@ -210,6 +199,8 @@ fn status_with_helper_resolver_and_core<'a>(
                 projection_currentness: None,
                 materialized_coverage: None,
                 repository_coverage: None,
+                core_preparation_peak_workers: None,
+                storage_evidence: None,
                 supported_operations: None,
                 available_operations: None,
                 access_state: None,
@@ -258,6 +249,10 @@ fn status_with_helper_resolver_and_core<'a>(
                         projection_currentness: valid_status.map(|status| status.currentness),
                         materialized_coverage: valid_status.map(|status| status.coverage),
                         repository_coverage: valid_status.map(|status| status.repository_coverage),
+                        core_preparation_peak_workers: valid_status
+                            .map(|status| status.core_preparation_peak_workers),
+                        storage_evidence: valid_status
+                            .and_then(|status| status.storage_evidence.clone()),
                         supported_operations: valid_status
                             .map(|status| status.supported_operations.clone()),
                         available_operations: valid_status
@@ -282,6 +277,8 @@ fn status_with_helper_resolver_and_core<'a>(
                     projection_currentness: None,
                     materialized_coverage: None,
                     repository_coverage: None,
+                    core_preparation_peak_workers: None,
+                    storage_evidence: None,
                     supported_operations: None,
                     available_operations: None,
                     access_state: access.state,
@@ -303,6 +300,8 @@ fn status_with_helper_resolver_and_core<'a>(
                     projection_currentness: None,
                     materialized_coverage: None,
                     repository_coverage: None,
+                    core_preparation_peak_workers: None,
+                    storage_evidence: None,
                     supported_operations: None,
                     available_operations: None,
                     access_state: access.state,
@@ -326,6 +325,8 @@ fn status_with_helper_resolver_and_core<'a>(
             projection_currentness: None,
             materialized_coverage: None,
             repository_coverage: None,
+            core_preparation_peak_workers: None,
+            storage_evidence: None,
             supported_operations: None,
             available_operations: None,
             access_state: None,

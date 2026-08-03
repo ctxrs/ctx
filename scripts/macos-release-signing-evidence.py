@@ -11,18 +11,17 @@ import re
 from pathlib import Path
 from typing import Any
 
-EXPECTED_TEAM_ID = "SJSNARH4TG"
-
-
-def is_expected_authority(value: object) -> bool:
+def authority_team_id(value: object) -> str | None:
     if not isinstance(value, str) or "\n" in value or "\r" in value:
-        return False
-    prefix = "Developer ID Application: "
-    suffix = f" ({EXPECTED_TEAM_ID})"
+        return None
+    match = re.fullmatch(r"Developer ID Application: .+ \(([A-Z0-9]{10})\)", value)
+    return match.group(1) if match else None
+
+
+def authority_matches_team(value: object, team_identifier: object) -> bool:
     return (
-        value.startswith(prefix)
-        and value.endswith(suffix)
-        and len(value) > len(prefix + suffix)
+        isinstance(team_identifier, str)
+        and authority_team_id(value) == team_identifier
     )
 
 
@@ -106,10 +105,10 @@ def require_base_document(
     verification = document.get("artifact_verification")
     if not isinstance(signing, dict) or signing.get("verified") is not True:
         raise SystemExit("signing evidence does not record strict codesign verification")
-    if not is_expected_authority(signing.get("authority")):
-        raise SystemExit("signing evidence does not record the pinned ctx Apple authority")
-    if signing.get("team_identifier") != EXPECTED_TEAM_ID:
-        raise SystemExit("signing evidence does not record the pinned ctx Apple Team ID")
+    if not authority_matches_team(
+        signing.get("authority"), signing.get("team_identifier")
+    ):
+        raise SystemExit("signing evidence authority and Apple Team ID disagree")
     if signing.get("hardened_runtime") is not True:
         raise SystemExit("signing evidence does not record hardened runtime")
     if signing.get("secure_timestamp") is not True:
@@ -161,10 +160,8 @@ def command_write(args: argparse.Namespace) -> None:
     authority = detail_value(details, "Authority")
     identifier = detail_value(details, "Identifier")
     team_identifier = detail_value(details, "TeamIdentifier")
-    if not is_expected_authority(authority):
-        raise SystemExit(f"unexpected codesign authority: {authority}")
-    if team_identifier != EXPECTED_TEAM_ID:
-        raise SystemExit(f"unexpected codesign TeamIdentifier: {team_identifier}")
+    if not authority_matches_team(authority, team_identifier):
+        raise SystemExit("codesign authority and TeamIdentifier disagree")
     if "runtime" not in code_directory_flags(details):
         raise SystemExit(
             "codesign details do not contain runtime in CodeDirectory flags"
@@ -297,7 +294,8 @@ def command_verify_archive(args: argparse.Namespace) -> None:
 def command_create_attestation(args: argparse.Namespace) -> None:
     if not re.fullmatch(r"[0-9a-f]{40}", args.source_commit):
         raise SystemExit("attestation source commit must be a lowercase 40-character git SHA")
-    if not is_expected_authority(args.codesign_authority):
+    team_identifier = authority_team_id(args.codesign_authority)
+    if team_identifier is None:
         raise SystemExit("attestation codesign authority is not a ctx Developer ID identity")
     document = {
         "artifact_kind": args.kind,
@@ -307,14 +305,15 @@ def command_create_attestation(args: argparse.Namespace) -> None:
         "platform": args.platform,
         "schema_version": 2,
         "source_commit": args.source_commit,
-        "team_identifier": EXPECTED_TEAM_ID,
+        "team_identifier": team_identifier,
     }
     document.update(accepted_notary_fields(args.notary_submit))
     write_json(args.output, document)
 
 
 def command_verify_attestation(args: argparse.Namespace) -> None:
-    if not is_expected_authority(args.codesign_authority):
+    team_identifier = authority_team_id(args.codesign_authority)
+    if team_identifier is None:
         raise SystemExit("attestation codesign authority is not a ctx Developer ID identity")
     document = read_json(args.attestation)
     expected = {
@@ -325,7 +324,7 @@ def command_verify_attestation(args: argparse.Namespace) -> None:
         "platform": args.platform,
         "schema_version": 2,
         "source_commit": args.source_commit,
-        "team_identifier": EXPECTED_TEAM_ID,
+        "team_identifier": team_identifier,
     }
     expected.update(accepted_notary_fields(args.notary_submit))
     if document != expected:
@@ -335,7 +334,8 @@ def command_verify_attestation(args: argparse.Namespace) -> None:
 def runtime_archive_attestation_document(args: argparse.Namespace) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9a-f]{40}", args.source_commit):
         raise SystemExit("attestation source commit must be a lowercase 40-character git SHA")
-    if not is_expected_authority(args.codesign_authority):
+    team_identifier = authority_team_id(args.codesign_authority)
+    if team_identifier is None:
         raise SystemExit("attestation codesign authority is not a ctx Developer ID identity")
     document = {
         "archive_name": args.archive.name,
@@ -349,7 +349,7 @@ def runtime_archive_attestation_document(args: argparse.Namespace) -> dict[str, 
         "role": "release",
         "schema_version": 2,
         "source_commit": args.source_commit,
-        "team_identifier": EXPECTED_TEAM_ID,
+        "team_identifier": team_identifier,
     }
     document.update(accepted_notary_fields(args.notary_submit))
     return document

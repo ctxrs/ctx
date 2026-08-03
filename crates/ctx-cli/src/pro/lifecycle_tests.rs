@@ -554,6 +554,48 @@ fn signed_manifest_identity_exact_protocol_hash_and_length_are_enforced() {
 }
 
 #[test]
+fn newly_installed_artifacts_remain_current_fingerprint_only() {
+    let temp = TempDir::new().unwrap();
+    let artifact = b"stale helper";
+    let mut stale = manifest(artifact, "1.0.0");
+    stale["protocol_fingerprint"] = json!("0".repeat(64));
+    let bundle = write_bundle(temp.path(), "stale-download", artifact, stale);
+    let error = install_bundle(&bundle, temp.path(), false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("protocol_mismatch:"));
+    assert!(!default_helper_path(temp.path()).exists());
+}
+
+#[test]
+fn installed_signed_stale_fingerprint_is_rejected() {
+    let temp = TempDir::new().unwrap();
+    let artifact = b"installed helper";
+    let bundle = write_bundle(
+        temp.path(),
+        "installed-current",
+        artifact,
+        manifest(artifact, "1.0.0"),
+    );
+    install_bundle(&bundle, temp.path(), false).unwrap();
+    let target = default_helper_path(temp.path());
+    let marker_path = install_marker_path(&target).unwrap();
+
+    let write_signed_marker = |fingerprint: &str| {
+        let mut value = manifest(artifact, "1.0.0");
+        value["protocol_fingerprint"] = json!(fingerprint);
+        let manifest_bytes = serde_json::to_vec(&value).unwrap();
+        let signature = sign(&manifest_bytes);
+        let marker = ProInstallMarker::new(&manifest_bytes, signature.as_bytes()).unwrap();
+        fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+    };
+
+    write_signed_marker(&"0".repeat(64));
+    let error = reconcile(temp.path()).unwrap_err().to_string();
+    assert!(error.starts_with("invalid_response:"), "{error}");
+}
+
+#[test]
 fn oversized_and_truncated_inputs_are_rejected() {
     let temp = TempDir::new().unwrap();
     let oversized_manifest = temp.path().join("oversized.json");

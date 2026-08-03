@@ -15,11 +15,10 @@ pub(crate) fn sync_core_materialization(
     data_root: &Path,
     index: &ctx_history_index::VerifiedIndex,
 ) -> Result<CoreMaterializationSyncOutcome> {
-    core_materialization_feed::sync_generation_pinned_core(data_root, index).map(|report| {
-        CoreMaterializationSyncOutcome {
-            receipt: report.receipt,
-            did_work: !report.replayed,
-        }
+    let report = core_materialization_feed::sync_generation_pinned_core(data_root, index)?;
+    Ok(CoreMaterializationSyncOutcome {
+        did_work: !report.replayed,
+        receipt: report.receipt,
     })
 }
 

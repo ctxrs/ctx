@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-expected_authority="Developer ID Application: Example Publisher LLC (SJSNARH4TG)"
+expected_authority="Developer ID Application: Fixture Publisher (TESTTEAM01)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/ctx-macos-signing-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT
 fake_bin="${test_root}/bin"
@@ -29,6 +29,13 @@ case "${1:-}" in
     [[ -n "${output}" ]]
     printf '%s\n' 'fake certificate or key' >"${output}"
     ;;
+  dgst)
+    if [[ -e "${TMPDIR}/fake-production-team-digest" ]]; then
+      printf '%s *stdin\n' '913603530eb11be6c4e501c7a8190bee4192f3536ac195add60716e3e372594a'
+    else
+      sha256sum | awk '{print $1 " *stdin"}'
+    fi
+    ;;
   x509)
     if [[ " $* " == *' -fingerprint '* ]]; then
       printf '%s\n' 'sha256 Fingerprint=F1:6C:D3:C5:4C:7F:83:CE:A4:BF:1A:3E:6A:08:19:C8:AA:A8:E4:A1:52:8F:D1:44:71:5F:35:06:43:D2:DF:3A'
@@ -49,9 +56,9 @@ case "${1:-}" in
         printf '%s\n' '1.2.840.113635.100.6.1.13: critical'
       fi
     elif [[ -e "${TMPDIR}/fake-coherent-wrong-identity" ]]; then
-      printf '%s\n' 'subject=CN=Developer ID Application: Other Corp (OTHERTEAM),OU=OTHERTEAM,O=Other Corp'
+      printf '%s\n' 'subject=CN=Developer ID Application: Other Corp (OTHERTEAM1),OU=OTHERTEAM1,O=Other Corp'
     else
-      printf '%s\n' 'subject=CN=Developer ID Application: Example Publisher LLC (SJSNARH4TG),OU=SJSNARH4TG,O=Example Publisher LLC'
+      printf '%s\n' 'subject=CN=Developer ID Application: Fixture Publisher (TESTTEAM01),OU=TESTTEAM01,O=Fixture Publisher'
     fi
     ;;
   pkey) ;;
@@ -144,11 +151,11 @@ artifact="${!#}"
 grep -Fq 'FAKE_DEVELOPER_ID_SIGNATURE' "${artifact}" || exit 1
 if [[ "${1:-}" == "-d" ]]; then
   if [[ -e "${TMPDIR}/fake-coherent-wrong-identity" ]]; then
-    authority='Developer ID Application: Other Corp (OTHERTEAM)'
-    team='OTHERTEAM'
+    authority='Developer ID Application: Other Corp (OTHERTEAM1)'
+    team='OTHERTEAM1'
   else
-    authority='Developer ID Application: Example Publisher LLC (SJSNARH4TG)'
-    team='SJSNARH4TG'
+    authority='Developer ID Application: Fixture Publisher (TESTTEAM01)'
+    team='TESTTEAM01'
   fi
   if [[ -e "${TMPDIR}/fake-missing-runtime" ]]; then
     code_directory_flags='flags=0x0(none)'
@@ -329,6 +336,7 @@ export PATH="${fake_bin}:/usr/bin:/bin"
 export TMPDIR="${test_root}/tmp"
 export CTX_LOCAL_MACOS_SIGNING_LIVE_TEST=1
 export CTX_TEST_ONLY_MACOS_HOST=Darwin
+export CTX_TEST_ONLY_MACOS_RELEASE_TEAM_ID_SHA256="$(printf '%s' TESTTEAM01 | sha256sum | awk '{print $1}')"
 export CTX_MACOS_NOTARY_TIMEOUT=30m
 export CTX_MACOS_SIGNING_SECRET_SOURCE=injected
 export APPLE_CODESIGN_CERT_PASSWORD='password-secret-sentinel'
@@ -421,8 +429,10 @@ expect_failure 'lacks required exclusive-trust flag -no-CAstore' \
 rm -f "${TMPDIR}/fake-openssl-missing-exclusive-flags"
 
 infisical_artifact="$(new_artifact infisical-cli)"
+touch "${TMPDIR}/fake-production-team-digest"
 trusted_infisical "${launcher}" macos-arm64 cli "${infisical_artifact}" \
   "${test_root}/infisical-evidence" >/dev/null
+rm -f "${TMPDIR}/fake-production-team-digest"
 [[ "$(wc -l < "${TMPDIR}/infisical.log" | tr -d ' ')" == "5" ]] || \
   fail "signing point did not fetch exactly five Infisical values"
 while IFS='|' read -r name args; do
@@ -569,7 +579,8 @@ done
 
 touch "${TMPDIR}/fake-coherent-wrong-identity"
 artifact="$(new_artifact wrong-identity)"
-expect_failure 'not the pinned ctx Developer ID identity' "${test_root}/wrong-identity.log" \
+expect_failure 'does not match the pinned project release publisher' \
+  "${test_root}/wrong-identity.log" \
   "${launcher}" macos-arm64 cli "${artifact}" "${test_root}/wrong-identity-evidence"
 rm -f "${TMPDIR}/fake-coherent-wrong-identity"
 
@@ -647,9 +658,11 @@ for handoff_file in "${TMPDIR}/fake-attester-argv.txt" "${TMPDIR}/fake-attester-
 done
 
 rm -f "${TMPDIR}/infisical.log"
+touch "${TMPDIR}/fake-production-team-digest"
 trusted_infisical "${launcher}" --attest-runtime-archive macos-x64 \
   "${runtime_archive}" "${runtime_dir}/package/lib/libonnxruntime.dylib" \
   "${runtime_dir}" >/dev/null
+rm -f "${TMPDIR}/fake-production-team-digest"
 [[ "$(wc -l < "${TMPDIR}/infisical.log" | tr -d ' ')" == "2" ]] || \
   fail "final archive attestation did not fetch exactly two Infisical values"
 cut -d '|' -f 1 "${TMPDIR}/infisical.log" \
@@ -735,13 +748,12 @@ import sys
 path = sys.argv[1]
 with open(path, encoding="utf-8") as source:
     value = json.load(source)
-value["codesign"]["authority"] = "Developer ID Application: Other Corp (OTHERTEAM)"
-value["codesign"]["team_identifier"] = "OTHERTEAM"
+value["codesign"]["authority"] = "Developer ID Application: Other Corp (OTHERTEAM1)"
 with open(path, "w", encoding="utf-8") as output:
     json.dump(value, output, sort_keys=True, separators=(",", ":"))
     output.write("\n")
 PY
-expect_failure 'pinned ctx Apple authority' "${test_root}/coherent-wrong.log" \
+expect_failure 'authority and Apple Team ID disagree' "${test_root}/coherent-wrong.log" \
   python3 "${evidence_tool}" verify-artifact \
     --evidence "${coherent_evidence}" --platform macos-arm64 --kind cli \
     --artifact "${success_artifact}" --checksum "${success_artifact}.sha256"
@@ -776,6 +788,8 @@ if /usr/bin/python3 -c 'import cryptography' >/dev/null 2>&1 \
   mkdir -p "${decoy_root}/scripts"
   cp "${attestation_check}" "${decoy_root}/scripts/verify-macos-release-attestation.sh"
   cp "${evidence_tool}" "${decoy_root}/scripts/macos-release-signing-evidence.py"
+  cp "${repo_root}/scripts/macos-release-publisher-policy.sh" \
+    "${decoy_root}/scripts/macos-release-publisher-policy.sh"
   /usr/bin/python3 - "${decoy_root}" <<'PY'
 import datetime
 import sys
@@ -869,22 +883,22 @@ write_key(root / "ca.key", ca_key)
 (root / "scripts" / "apple-developer-id-g2-ca.pem").write_bytes(
     ca_cert.public_bytes(serialization.Encoding.PEM)
 )
-leaf("wrong", "Developer ID Application: Wrong Signer (WRONGTEAM)", "WRONGTEAM")
+leaf("wrong", "Developer ID Application: Wrong Signer (WRONGTEAM1)", "WRONGTEAM1")
 leaf(
     "decoy",
-    "Developer ID Application: Example Publisher LLC (SJSNARH4TG)",
-    "SJSNARH4TG",
+    "Developer ID Application: Fixture Publisher (TESTTEAM01)",
+    "TESTTEAM01",
 )
 leaf(
     "wrong-eku",
-    "Developer ID Application: Example Publisher LLC (SJSNARH4TG)",
-    "SJSNARH4TG",
+    "Developer ID Application: Fixture Publisher (TESTTEAM01)",
+    "TESTTEAM01",
     ExtendedKeyUsageOID.SERVER_AUTH,
 )
 leaf(
     "wrong-key-usage",
-    "Developer ID Application: Example Publisher LLC (SJSNARH4TG)",
-    "SJSNARH4TG",
+    "Developer ID Application: Fixture Publisher (TESTTEAM01)",
+    "TESTTEAM01",
     digital_signature=False,
 )
 PY
@@ -965,7 +979,7 @@ PY
     -signer "${decoy_root}/wrong.pem" -inkey "${decoy_root}/wrong.key" \
     -certfile "${decoy_root}/decoy.pem" -outform DER -out "${decoy_cli_cms}" \
     -md sha256 -noattr >/dev/null 2>&1
-  expect_failure 'actual signer does not have the pinned ctx Apple authority' \
+  expect_failure 'signer does not match the pinned project release publisher' \
     "${test_root}/real-decoy-cli.log" env PATH=/usr/bin:/bin \
     "${decoy_root}/scripts/verify-macos-release-attestation.sh" \
       macos-arm64 cli "${decoy_cli}" "${decoy_cli_statement}" "${decoy_cli_cms}"
@@ -1005,7 +1019,7 @@ PY
     -signer "${decoy_root}/wrong.pem" -inkey "${decoy_root}/wrong.key" \
     -certfile "${decoy_root}/decoy.pem" -outform DER -out "${decoy_archive_cms}" \
     -md sha256 -noattr >/dev/null 2>&1
-  expect_failure 'actual signer does not have the pinned ctx Apple authority' \
+  expect_failure 'signer does not match the pinned project release publisher' \
     "${test_root}/real-decoy-archive.log" env PATH=/usr/bin:/bin \
     "${decoy_root}/scripts/verify-macos-release-attestation.sh" \
       --runtime-archive macos-arm64 "${decoy_archive}" "${decoy_nested}" \
@@ -1022,7 +1036,7 @@ if [[ -x /usr/bin/openssl ]] && /usr/bin/openssl cms -help >/dev/null 2>&1; then
   printf '%s\n' 'self-signed coherent substitution' >"${forged_artifact}"
   printf '%s\n' '{"id":"forged","status":"Accepted"}' >"${forged_notary}"
   /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-    -subj '/CN=Developer ID Application: Other Corp (OTHERTEAM)/OU=OTHERTEAM' \
+    -subj '/CN=Developer ID Application: Other Corp (OTHERTEAM1)/OU=OTHERTEAM1' \
     -keyout "${forged_root}/key.pem" -out "${forged_root}/cert.pem" \
     >/dev/null 2>&1
   python3 "${evidence_tool}" create-attestation \

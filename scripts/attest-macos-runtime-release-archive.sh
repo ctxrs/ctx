@@ -4,16 +4,16 @@ case "$-" in
   *x*) set +x ;;
 esac
 
-EXPECTED_TEAM_ID="SJSNARH4TG"
-
 die() {
   printf 'error: %s\n' "$*" >&2
   exit 1
 }
 
-authority_matches_expected_team() {
-  case "$1" in
-    "Developer ID Application: "*" (${EXPECTED_TEAM_ID})") return 0 ;;
+authority_matches_team() {
+  local authority="$1"
+  local team_id="$2"
+  case "${authority}" in
+    "Developer ID Application: "*" (${team_id})") return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -22,6 +22,13 @@ subject_authority() {
   local subject="$1"
   [[ "${subject}" == *",CN="* ]] || return 1
   subject="${subject#*,CN=}"
+  printf '%s\n' "${subject%%,*}"
+}
+
+subject_organizational_unit() {
+  local subject="$1"
+  [[ "${subject}" == *",OU="* ]] || return 1
+  subject="${subject#*,OU=}"
   printf '%s\n' "${subject%%,*}"
 }
 
@@ -82,6 +89,7 @@ case "${platform}" in macos-arm64|macos-x64) ;; *) die "unsupported macOS platfo
   die "runtime archive attester must be invoked through the trusted narrow launcher"
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${root_dir}/scripts/macos-release-publisher-policy.sh"
 "${root_dir}/scripts/check-macos-signing-trusted-ref.sh" >/dev/null
 if [[ "${CTX_TEST_ONLY_MACOS_HOST:-}" == "Darwin" ]]; then
   [[ "${CTX_LOCAL_MACOS_SIGNING_LIVE_TEST:-0}" == "1" ]] || \
@@ -139,10 +147,14 @@ subject="$(openssl x509 -in "${cert_path}" -noout -subject -nameopt RFC2253 2>/d
 subject=",${subject#subject=},"
 certificate_authority="$(subject_authority "${subject}")" || \
   die "runtime archive attester certificate is missing a Developer ID common name"
-authority_matches_expected_team "${certificate_authority}" || \
-  die "runtime archive attester is not the pinned ctx Developer ID identity"
-[[ "${subject}" == *",OU=${EXPECTED_TEAM_ID},"* ]] || \
-  die "runtime archive attester does not have the pinned ctx Apple Team ID"
+certificate_team_id="$(subject_organizational_unit "${subject}")" || \
+  die "runtime archive attester certificate is missing an Apple Team ID"
+[[ "${certificate_team_id}" =~ ^[A-Z0-9]{10}$ ]] || \
+  die "runtime archive attester certificate has an invalid Apple Team ID"
+authority_matches_team "${certificate_authority}" "${certificate_team_id}" || \
+  die "runtime archive attester authority and Team ID disagree"
+ctx_macos_release_team_id_matches_policy "${certificate_team_id}" || \
+  die "runtime archive attester does not match the pinned project release publisher"
 eku="$(openssl x509 -in "${cert_path}" -noout -ext extendedKeyUsage 2>/dev/null || true)"
 grep -Eq '(^|[ ,])(Code Signing|1\.3\.6\.1\.5\.5\.7\.3\.3)(,|$)' <<<"${eku}" || \
   die "runtime archive attester certificate lacks the Code Signing EKU"

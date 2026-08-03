@@ -32,7 +32,6 @@
         "test:pro_host": "//crates/ctx-cli:pro_host_tests",
         "test:pro_lifecycle": "//crates/ctx-cli:pro_lifecycle_tests",
         "test:pro_mcp": "//crates/ctx-cli:pro_mcp_tests",
-        "test:pro_qualification": "//crates/ctx-cli:pro_qualification_tests",
         "test:pro_release_helper": "//crates/ctx-cli:pro_release_helper_tests",
         "test:pro_test_control": "//crates/ctx-cli:pro_test_control_tests",
         "test:pro_test_support": "//crates/ctx-cli:pro_test_support_tests",

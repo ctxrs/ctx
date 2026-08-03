@@ -29,7 +29,7 @@ use crate::{
     durable_directory::DurableMmapDirectory,
     fields_from_schema, hex,
     query::{self, CompactIdentity, IdentityFieldRole},
-    staging::accumulate_core_record,
+    staging::{accumulate_core_record, core_record_accumulator_leaf},
     GenerationManifest, IndexError, Result, WriterOptions,
 };
 

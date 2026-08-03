@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use ctx_pro_host_protocol::{
     BlameResult, CoreMaterializationReceipt, CoreProjectionCurrentness, MaterializedCoverage,
-    ProAccessState, ProAccessStatus, ProOperation, QuerySnapshotExpectation, RepositoryCoverage,
-    ResolvedBlameTarget, ResourceKind, ResourceRef,
+    ProAccessState, ProAccessStatus, ProOperation, ProStorageEvidence, QuerySnapshotExpectation,
+    RepositoryCoverage, ResolvedBlameTarget, ResourceKind, ResourceRef,
 };
 
 fn receipt(generation: char) -> CoreMaterializationReceipt {
@@ -45,6 +45,21 @@ fn status(coverage: MaterializedCoverage) -> StatusResult {
         } else {
             RepositoryCoverage::default()
         },
+        core_preparation_peak_workers: 4,
+        storage_evidence: Some(ProStorageEvidence {
+            graph_manifest_schema: 3,
+            flat_format_version: 2,
+            materializer_checkpoint_version: 3,
+            journal_pack_format_version: 3,
+            legacy_journals_written: 0,
+            journal_pages_written: 2,
+            journal_packs_written: 1,
+            journal_finish_activity: ctx_pro_host_protocol::JournalFinishActivity {
+                worker_limit: 1,
+                peak_workers: 1,
+                started_after_preparation: true,
+            },
+        }),
         access: ProAccessStatus {
             entitlement: ProAccessState::Available,
             graph_key: ProAccessState::Available,
@@ -98,6 +113,28 @@ fn blame_capabilities_require_git_only_for_file_targets() {
         }),
         BTreeSet::from([Capability::Status, Capability::Query])
     );
+}
+
+#[test]
+fn every_helper_session_requires_the_current_protocol_fingerprint() {
+    let core = BTreeSet::from([Capability::Status, Capability::CoreMaterialization]);
+    for fingerprint in [
+        "0a5db03b653a8effa18ff3ef6a275b085f3e68eedf7d3f982ac18d4a6c38b642",
+        "dd902ae952032e66fcdaabcdc84522bde4350dace2bca28b9b16e67ffe6ef2fd",
+    ] {
+        let error = super::transport::validate_protocol_session(&core, fingerprint).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("requires the current Protocol V1 fingerprint"));
+    }
+    super::transport::validate_protocol_session(&core, PROTOCOL_FINGERPRINT).unwrap();
+
+    let query = BTreeSet::from([Capability::Status, Capability::Query]);
+    assert!(super::transport::validate_protocol_session(
+        &query,
+        "0a5db03b653a8effa18ff3ef6a275b085f3e68eedf7d3f982ac18d4a6c38b642",
+    )
+    .is_err());
 }
 
 #[test]
@@ -369,6 +406,7 @@ fn missing_pro_receipt_after_blame_fails_closed() {
     missing.coverage = MaterializedCoverage::NotMaterialized;
     missing.repository_coverage = RepositoryCoverage::default();
     missing.available_operations.clear();
+    missing.storage_evidence = None;
     let error = ensure_committed_pro_receipt_is_unchanged(&receipt('a'), &missing).unwrap_err();
     assert_eq!(stable_error_code(&error), Some("stale_source"));
 }

@@ -7,7 +7,7 @@ use uuid::Uuid;
 pub(crate) const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 pub(crate) const MAX_SIGNATURE_BYTES: u64 = 16 * 1024;
 pub(crate) const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
-pub(super) const MAX_INSTALL_MARKER_BYTES: u64 = 128 * 1024;
+pub(in crate::pro) const MAX_INSTALL_MARKER_BYTES: u64 = 128 * 1024;
 pub(super) const PRO_RELEASE_STABLE_KEY_ID: &str = "ctx-pro-release-stable-2026-07-27";
 pub(super) const PRO_RELEASE_STABLE_PUBLIC_KEY_PEM: &str = r#"-----BEGIN RSA PUBLIC KEY-----
 MIIBigKCAYEAq2vmUvoGcm0bAJhCdjzqzLF9SAALDA33KQOHWI3JeKFjxHTLs3hP
@@ -99,7 +99,7 @@ pub(crate) struct ProManifest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ProInstallMarker {
+pub(in crate::pro) struct ProInstallMarker {
     schema_version: u32,
     manifest_base64: String,
     signature_base64: String,
@@ -116,7 +116,7 @@ impl ProInstallMarker {
         })
     }
 
-    pub(super) fn signed_manifest(&self, public_key_pem: &str) -> Result<ProManifest> {
+    pub(in crate::pro) fn signed_manifest(&self, public_key_pem: &str) -> Result<ProManifest> {
         if self.schema_version != 1
             || self.manifest_base64.len() as u64 > MAX_INSTALL_MARKER_BYTES
             || self.signature_base64.len() as u64 > MAX_SIGNATURE_BYTES
@@ -129,11 +129,15 @@ impl ProInstallMarker {
         if manifest_bytes.len() as u64 > MAX_MANIFEST_BYTES {
             bail!("invalid_response: installed Pro marker manifest exceeds maximum size");
         }
-        verified_manifest(
+        verify_signature_with_key(
             &manifest_bytes,
             self.signature_base64.as_bytes(),
             public_key_pem,
-        )
+        )?;
+        let manifest: ProManifest = serde_json::from_slice(&manifest_bytes)
+            .context("invalid_response: parse signed Pro manifest")?;
+        validate_manifest(&manifest)?;
+        Ok(manifest)
     }
 }
 
@@ -195,7 +199,17 @@ pub(crate) fn validate_manifest_release_trust(
     Ok(())
 }
 
-pub(super) fn validate_manifest(manifest: &ProManifest) -> Result<()> {
+pub(crate) fn validate_manifest(manifest: &ProManifest) -> Result<()> {
+    validate_manifest_identity(manifest)?;
+    if manifest.protocol_fingerprint != ctx_pro_host_protocol::PROTOCOL_FINGERPRINT {
+        bail!(
+            "protocol_mismatch: signed artifact protocol fingerprint does not match this ctx host"
+        );
+    }
+    Ok(())
+}
+
+fn validate_manifest_identity(manifest: &ProManifest) -> Result<()> {
     if manifest.schema_version != 1 || manifest.product != "ctx-pro" {
         bail!("invalid_response: signed manifest is not a supported ctx-pro manifest");
     }
@@ -203,11 +217,6 @@ pub(super) fn validate_manifest(manifest: &ProManifest) -> Result<()> {
         || manifest.protocol_max != ctx_pro_host_protocol::PROTOCOL_VERSION
     {
         bail!("protocol_mismatch: signed artifact is not compatible with this ctx host");
-    }
-    if manifest.protocol_fingerprint != ctx_pro_host_protocol::PROTOCOL_FINGERPRINT {
-        bail!(
-            "protocol_mismatch: signed artifact protocol fingerprint does not match this ctx host"
-        );
     }
     if manifest.target != platform_target() {
         bail!(

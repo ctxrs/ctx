@@ -130,6 +130,26 @@ pub(crate) fn validate_core_record_encoded_bytes(
     Ok(())
 }
 
+pub(super) fn stored_core_event_record_with_source_json(
+    searcher: &tantivy::Searcher,
+    address: DocAddress,
+    fields: Fields,
+) -> Result<StoredCoreEventRecord> {
+    note_stored_core_event_record_materialization();
+    let document: TantivyDocument = searcher.doc(address)?;
+    let encoded_core_record = unique_required_bytes(&document, fields.core_record, "core_record")?;
+    let core_record = decode_core_bytes(searcher, address, encoded_core_record)?;
+    let content_bytes = core_content_bytes(&core_record.content)?;
+    Ok(StoredCoreEventRecord {
+        core_record,
+        stored_json: StoredCoreRecordJson {
+            content_bytes,
+            document,
+            core_record_field: fields.core_record,
+        },
+    })
+}
+
 pub(super) fn stored_core_verification_record(
     searcher: &tantivy::Searcher,
     address: DocAddress,
@@ -148,7 +168,7 @@ pub(super) fn stored_core_verification_record(
     ))
 }
 
-fn unique_required_bytes<'a>(
+pub(super) fn unique_required_bytes<'a>(
     document: &'a TantivyDocument,
     field: tantivy::schema::Field,
     field_name: &'static str,

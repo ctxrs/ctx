@@ -11,8 +11,8 @@ use clap::{Args, Subcommand};
 use ctx_pro_host_protocol::ProFilesystemLayout;
 #[cfg(test)]
 use ctx_pro_host_protocol::{
-    Capability, CoreProjectionCurrentness, MaterializedCoverage, ProOperation, RepositoryCoverage,
-    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+    Capability, CoreProjectionCurrentness, MaterializedCoverage, ProOperation, ProStorageEvidence,
+    RepositoryCoverage, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 use serde_json::json;
 
@@ -30,8 +30,6 @@ use super::{
     SetupInstallation,
 };
 use crate::pro::artifact_delivery::SetupArtifactBundle;
-#[cfg(ctx_pro_qualification)]
-use crate::pro::client::smoke_qualification_helper;
 #[cfg(test)]
 use crate::pro::client::HelperSmoke;
 use crate::pro::client::{
@@ -493,6 +491,8 @@ pub(super) fn lifecycle_status_value(helper: ProStatus, preserved_data: bool) ->
         "projection_currentness": helper.projection_currentness,
         "materialized_coverage": helper.materialized_coverage,
         "repository_coverage": helper.repository_coverage,
+        "core_preparation_peak_workers": helper.core_preparation_peak_workers,
+        "storage_evidence": helper.storage_evidence,
         "supported_operations": helper.supported_operations,
         "available_operations": helper.available_operations,
         "access_state": helper.access_state,
@@ -564,28 +564,6 @@ fn run_setup(
                     ProReconcileOutcomeV1::Installed
                 };
                 true
-            }
-            #[cfg(ctx_pro_qualification)]
-            SetupArtifactBundle::Qualification(bundle) => {
-                let executable =
-                    crate::pro::verified_executable::VerifiedHelperExecutable::open_qualification(
-                        bundle,
-                    )?;
-                let smoke = record_helper_smoke(
-                    smoke_qualification_helper(data_root, executable),
-                    telemetry,
-                )?;
-                validate_staged_helper(&smoke)?;
-                false
-            }
-            #[cfg(all(test, not(ctx_pro_qualification)))]
-            SetupArtifactBundle::Qualification(bundle) => {
-                let smoke = record_helper_smoke(
-                    smoke_helper_at_path(data_root, bundle.verified_path()?),
-                    telemetry,
-                )?;
-                validate_staged_helper(&smoke)?;
-                false
             }
             #[cfg(ctx_pro_test_helper)]
             SetupArtifactBundle::TestControl(bundle) => {

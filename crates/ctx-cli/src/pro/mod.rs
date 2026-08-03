@@ -7,6 +7,7 @@ mod commercial_config;
 mod commercial_deletion;
 mod commercial_lifecycle;
 mod commercial_production_record;
+mod core_worker_budget;
 mod credential_vault;
 pub(crate) mod evidence_preview;
 mod graph_key_deletion;
@@ -15,8 +16,6 @@ mod lifecycle;
 mod local_deletion;
 mod pending_materialization;
 mod pricing;
-#[cfg(any(test, ctx_pro_qualification))]
-mod qualification_helper;
 mod referral;
 mod render;
 mod request_identity;

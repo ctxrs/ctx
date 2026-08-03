@@ -143,12 +143,53 @@ fn generic_mcp_status_exactly_matches_cli_json_with_pro_present() {
     assert_eq!(cli["pro"]["installed"], true, "{cli:#}");
     assert_ne!(cli["pro"]["state"], "not_setup", "{cli:#}");
     assert_eq!(cli["pro"]["payload_type"], "pro_status", "{cli:#}");
+    assert_eq!(cli["pro"]["schema_version"], 2, "{cli:#}");
+    assert_eq!(cli["pro"]["storage_evidence"], serde_json::Value::Null);
     assert_eq!(cli["read_only"], true, "{cli:#}");
     let text = mcp_content_text(&result);
     assert!(!text.contains("pro_status"), "{text}");
     assert!(
         !root.exists(),
         "CLI and generic MCP status must not initialize the data root for Pro status"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn generic_mcp_status_carries_authenticated_storage_evidence() {
+    let temp = tempdir();
+    let helper = temp.path().join("ctx-pro-status");
+    write_status_helper(&helper);
+    let root = data_root(&temp);
+    initialize_current_query_store(&root);
+
+    let (cli, _) = assert_pro_cli_mcp_status_parity(
+        &temp,
+        &[
+            ("CTX_LOCAL_USAGE_ENABLED", "false"),
+            ("CTX_PRO_HELPER", helper.to_str().unwrap()),
+        ],
+    );
+
+    assert_eq!(cli["schema_version"], 2, "{cli:#}");
+    assert_eq!(cli["pro"]["schema_version"], 2, "{cli:#}");
+    assert_eq!(
+        cli["pro"]["storage_evidence"],
+        serde_json::json!({
+            "graph_manifest_schema": 3,
+            "flat_format_version": 2,
+            "materializer_checkpoint_version": 3,
+            "journal_pack_format_version": 3,
+            "legacy_journals_written": 0,
+            "journal_pages_written": 2,
+            "journal_packs_written": 1,
+            "journal_finish_activity": {
+                "worker_limit": 1,
+                "peak_workers": 1,
+                "started_after_preparation": true,
+            },
+        }),
+        "{cli:#}"
     );
 }
 

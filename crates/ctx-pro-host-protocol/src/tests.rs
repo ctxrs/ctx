@@ -67,9 +67,11 @@ fn status_axes_preserve_terminal_empty_without_advertising_blame() {
         core_receipt: Some(empty_receipt),
         coverage: MaterializedCoverage::Empty,
         repository_coverage: RepositoryCoverage::default(),
+        core_preparation_peak_workers: 0,
         access: access(ProAccessState::Available),
         supported_operations: operations(),
         available_operations: BTreeSet::new(),
+        storage_evidence: None,
     };
     quiet.validate().unwrap();
 
@@ -100,9 +102,11 @@ fn status_currentness_is_bound_to_requested_and_receipt_generations() {
         core_receipt: Some(receipt('a')),
         coverage: MaterializedCoverage::Partial,
         repository_coverage: RepositoryCoverage::default(),
+        core_preparation_peak_workers: 0,
         access: access(ProAccessState::Available),
         supported_operations: operations(),
         available_operations: BTreeSet::new(),
+        storage_evidence: None,
     };
     stale.validate().unwrap();
 
@@ -123,9 +127,11 @@ fn available_operations_are_a_supported_ready_subset() {
         core_receipt: Some(receipt('a')),
         coverage: MaterializedCoverage::Complete,
         repository_coverage: repository_coverage(2),
+        core_preparation_peak_workers: 4,
         access: access(ProAccessState::Available),
         supported_operations: BTreeSet::from([ProOperation::CommitBlame]),
         available_operations: BTreeSet::from([ProOperation::FileBlame]),
+        storage_evidence: None,
     };
     assert_eq!(
         status.validate().unwrap_err().class,
@@ -183,9 +189,11 @@ fn repository_coverage_is_zero_without_and_bounded_by_a_receipt() {
         core_receipt: None,
         coverage: MaterializedCoverage::Partial,
         repository_coverage: RepositoryCoverage::default(),
+        core_preparation_peak_workers: 0,
         access: access(ProAccessState::Available),
         supported_operations: operations(),
         available_operations: BTreeSet::new(),
+        storage_evidence: None,
     };
     status.validate().unwrap();
 
@@ -235,9 +243,11 @@ fn impossible_terminal_status_and_coverage_lattice_vectors_fail_closed() {
         core_receipt: Some(receipt('a')),
         coverage: MaterializedCoverage::Complete,
         repository_coverage: repository_coverage(2),
+        core_preparation_peak_workers: 4,
         access: access(ProAccessState::Available),
         supported_operations: operations(),
         available_operations: BTreeSet::new(),
+        storage_evidence: None,
     };
 
     let impossible_coverages = [
@@ -353,4 +363,106 @@ fn core_capability_and_strict_status_frame_round_trip() {
 
     let value = serde_json::json!({"requested_core_generation_id": null, "legacy": true});
     assert!(serde_json::from_value::<StatusRequest>(value).is_err());
+}
+
+#[test]
+fn storage_evidence_is_strict_and_required_nullable() {
+    let evidence = ProStorageEvidence {
+        graph_manifest_schema: 3,
+        flat_format_version: 2,
+        materializer_checkpoint_version: 3,
+        journal_pack_format_version: 3,
+        legacy_journals_written: 0,
+        journal_pages_written: 2,
+        journal_packs_written: 1,
+        journal_finish_activity: JournalFinishActivity {
+            worker_limit: 1,
+            peak_workers: 1,
+            started_after_preparation: true,
+        },
+    };
+    assert_eq!(
+        serde_json::from_value::<ProStorageEvidence>(serde_json::to_value(&evidence).unwrap())
+            .unwrap(),
+        evidence
+    );
+
+    let status = StatusResult {
+        currentness: CoreProjectionCurrentness::NotMaterialized,
+        requested_core_generation_id: None,
+        core_receipt: None,
+        coverage: MaterializedCoverage::NotMaterialized,
+        repository_coverage: RepositoryCoverage::default(),
+        core_preparation_peak_workers: 0,
+        access: access(ProAccessState::Unavailable),
+        supported_operations: BTreeSet::new(),
+        available_operations: BTreeSet::new(),
+        storage_evidence: None,
+    };
+    let mut value = serde_json::to_value(status).unwrap();
+    assert_eq!(value["core_preparation_peak_workers"], 0);
+    let mut missing_peak = value.clone();
+    missing_peak
+        .as_object_mut()
+        .unwrap()
+        .remove("core_preparation_peak_workers");
+    assert!(serde_json::from_value::<StatusResult>(missing_peak).is_err());
+    assert_eq!(value["storage_evidence"], serde_json::Value::Null);
+    value.as_object_mut().unwrap().remove("storage_evidence");
+    assert!(serde_json::from_value::<StatusResult>(value).is_err());
+
+    let mut excessive_peak = serde_json::to_value(StatusResult {
+        currentness: CoreProjectionCurrentness::NotMaterialized,
+        requested_core_generation_id: None,
+        core_receipt: None,
+        coverage: MaterializedCoverage::NotMaterialized,
+        repository_coverage: RepositoryCoverage::default(),
+        core_preparation_peak_workers: 17,
+        access: access(ProAccessState::Unavailable),
+        supported_operations: BTreeSet::new(),
+        available_operations: BTreeSet::new(),
+        storage_evidence: None,
+    })
+    .unwrap();
+    let excessive_peak = serde_json::from_value::<StatusResult>(excessive_peak.take()).unwrap();
+    assert_eq!(
+        excessive_peak.validate().unwrap_err().class,
+        ErrorClass::Bounds
+    );
+
+    let mut unknown = serde_json::to_value(&evidence).unwrap();
+    unknown["legacy"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<ProStorageEvidence>(unknown).is_err());
+
+    let mut missing_activity = serde_json::to_value(&evidence).unwrap();
+    missing_activity
+        .as_object_mut()
+        .unwrap()
+        .remove("journal_finish_activity");
+    assert!(serde_json::from_value::<ProStorageEvidence>(missing_activity).is_err());
+
+    for activity in [
+        JournalFinishActivity {
+            worker_limit: 9,
+            peak_workers: 1,
+            started_after_preparation: true,
+        },
+        JournalFinishActivity {
+            worker_limit: 0,
+            peak_workers: 1,
+            started_after_preparation: true,
+        },
+        JournalFinishActivity {
+            worker_limit: 1,
+            peak_workers: 0,
+            started_after_preparation: true,
+        },
+        JournalFinishActivity {
+            worker_limit: 1,
+            peak_workers: 2,
+            started_after_preparation: true,
+        },
+    ] {
+        assert!(activity.validate(1).is_err(), "activity={activity:?}");
+    }
 }

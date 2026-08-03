@@ -122,29 +122,6 @@ ctx_rust_binary(
     stamp = -1,
 )
 
-# This target is the only non-test host allowed to select an unpublished local
-# Pro helper. It remains testonly so no release graph can depend on it.
-ctx_rust_binary(
-    name = "ctx_pro_qualification",
-    testonly = True,
-    srcs = PROD_SRCS,
-    crate_name = "ctx_pro_qualification",
-    crate_root = "src/main.rs",
-    edition = crate_edition(),
-    aliases = aliases(),
-    compile_data = CTX_CLI_COMPILE_DATA,
-    deps = all_crate_deps(normal = True) + CTX_CLI_DEPS,
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    rustc_env = RELEASE_BUILD_RUSTC_ENV,
-    rustc_env_files = [
-        ":cargo_toml_env_vars",
-        "release-stamp.env",
-    ],
-    rustc_flags = CTX_CLI_RUSTC_FLAGS + ["--cfg=ctx_pro_qualification"],
-    stamp = -1,
-    tags = ["manual", "qualification"],
-)
-
 # Optimized Pro protocol tests need a local helper authority that ordinary
 # binaries intentionally compile out. Keep it in this test-only host.
 ctx_rust_binary(
@@ -500,6 +477,7 @@ ctx_cli_integration_test(
     name = "pro_host_tests",
     src = "tests/pro_host.rs",
     binary = ":ctx_pro_test_host",
+    extra_deps = ["//crates/ctx-history-core:lib"],
     tags = ["protocol"],
     test_support = [
         "base",
@@ -526,6 +504,7 @@ ctx_cli_integration_test(
     name = "pro_mcp_tests",
     src = "tests/pro_mcp.rs",
     binary = ":ctx_pro_test_host",
+    extra_deps = ["//crates/ctx-history-core:lib"],
     tags = ["protocol"],
     test_support = [
         "base",
@@ -552,18 +531,6 @@ ctx_cli_integration_test(
         "security",
     ],
     test_support = [],
-)
-
-ctx_cli_integration_test(
-    name = "pro_qualification_tests",
-    src = "tests/pro_qualification.rs",
-    binary = ":ctx_pro_qualification",
-    tags = ["qualification", "release-gate", "security"],
-    test_support = [
-        "base",
-        "fixtures",
-        "pro",
-    ],
 )
 
 ctx_cli_integration_test(

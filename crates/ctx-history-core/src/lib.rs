@@ -120,7 +120,8 @@ mod result_compaction;
 pub mod source;
 
 pub use core_record::{
-    core_record_contract_fingerprint, CoreContent, CoreContentPolicyStatus, CoreRecord,
+    core_record_accumulator_leaf_digest, core_record_contract_fingerprint, core_record_leaf_digest,
+    core_record_leaf_sha256, CoreContent, CoreContentPolicyStatus, CoreRecord,
     CoreRecordAnnotation, CoreRecordError, CoreRecordResult, GitObjectFormat, GitObjectId,
     RepositoryAbstention, RepositoryAbstentionReason, RepositoryAlias, RepositoryAliasKind,
     RepositoryBinding, RepositoryCandidate, RepositoryCandidateEvidence, RepositoryCandidateKind,
@@ -131,8 +132,9 @@ pub use core_record::{
     RepositoryOutcomeLinkage, RepositoryOutcomeObservation, RepositoryPullRequestIdentity,
     RepositoryVcsObservation, RepositoryVcsObservationKind, CORE_BOUNDED_SHELL_SUBSET_REVISION,
     CORE_CONTENT_POLICY_REVISION, CORE_MISSING_ACTIVITY_TIME_UNIX_MS, CORE_NORMALIZATION_REVISION,
-    CORE_RECORD_VERSION, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
-    CORE_REPOSITORY_CONTRACT_REVISION, CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN,
+    CORE_RECORD_ACCUMULATOR_IDENTITY, CORE_RECORD_LEAF_DOMAIN, CORE_RECORD_VERSION,
+    CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION, CORE_REPOSITORY_CONTRACT_REVISION,
+    CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
     MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,

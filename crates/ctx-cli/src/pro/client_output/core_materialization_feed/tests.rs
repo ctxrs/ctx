@@ -1,4 +1,8 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hint::black_box;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceDeletion,
@@ -10,13 +14,23 @@ use ctx_history_index::{
     GenerationWriter, SourceRouteIdentity, SourceRouteSnapshot, WriterOptions,
 };
 use ctx_pro_host_protocol::{
-    write_frame, HelperEnvelope, FRAME_HEADER_BYTES, MAX_CORE_CONTROL_WIRE_BYTES,
+    write_frame, ApplyCoreEventDeltaPageRequest, CoreEventDeltaPageApplied,
+    CoreEventDeltaPagesApplied, HelperEnvelope, FRAME_HEADER_BYTES, MAX_CORE_CONTROL_WIRE_BYTES,
     MAX_FRAME_PAYLOAD_BYTES,
 };
 use tempfile::tempdir;
 use uuid::Uuid;
 
 use super::*;
+
+#[path = "tests/batching_replay.rs"]
+mod batching_replay;
+#[path = "tests/materialization.rs"]
+mod materialization;
+#[path = "tests/prefetch.rs"]
+mod prefetch;
+#[path = "tests/status.rs"]
+mod status;
 
 fn source(name: &str) -> SourceKey {
     SourceKey::derive(
@@ -113,6 +127,16 @@ fn add_source(
         .unwrap();
 }
 
+fn single_source_index(name: &str, bodies: Vec<String>) -> (tempfile::TempDir, VerifiedIndex) {
+    let temp = tempdir().unwrap();
+    let source = source(name);
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    add_source(&mut writer, &source, 1, bodies);
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    (temp, index)
+}
+
 fn receipt_for(index: &VerifiedIndex, revision: &str) -> CoreMaterializationReceipt {
     let sources = core_source_states(index.manifest()).unwrap();
     let head = core_generation_head(index, &sources).unwrap();
@@ -190,7 +214,9 @@ struct Consumer {
     seen_sources: BTreeSet<[u8; 32]>,
     next_materialize_index: u32,
     replay_begin: bool,
+    replay_status_currentness: Option<CoreProjectionCurrentness>,
     replay_pages: bool,
+    wrong_begin_materialization: bool,
     wrong_delta_generation: bool,
     wrong_acknowledgement_page_index: bool,
     source_response_mutation: Option<SourceResponseMutation>,
@@ -198,13 +224,31 @@ struct Consumer {
     source_exchanges: u64,
     source_page_applications: u64,
     source_feed_terminal: bool,
+    status_generation_override: Option<String>,
+    pre_finish_status_error: Option<String>,
     event_exchanges: u64,
+    event_exchange_page_ids: Vec<Vec<([u8; 32], u32)>>,
     state_exchanges: u64,
     source_acknowledgement_requests: Vec<(u32, u32)>,
     source_acknowledgements: BTreeMap<u32, Vec<CoreSourceDeltaPageApplied>>,
+    event_state_error_after: Option<u64>,
+    source_response_loss_after: Option<u64>,
+    event_state_response_loss_after: Option<u64>,
+    event_response_loss_after: Option<u64>,
+    lose_finish_response: bool,
     delta_pages: Vec<CoreSourceDeltaPage>,
+    state_requests: Vec<CoreEventStatePageRequest>,
     event_pages: Vec<CoreEventDeltaPage>,
     finish: Option<FinishCoreMaterializationRequest>,
+    finish_requests: Vec<FinishCoreMaterializationRequest>,
+    last_receipt: Option<CoreMaterializationReceipt>,
+    status_exchanges: u64,
+    core_preparation_peak_workers: u16,
+    journal_finish_activity: JournalFinishActivity,
+    state_journal:
+        BTreeMap<(String, [u8; 32], u32), (CoreEventStatePageRequest, CoreEventStatePage)>,
+    event_journal:
+        BTreeMap<(String, [u8; 32], u32), (CoreEventDeltaPage, CoreEventDeltaPageApplied)>,
 }
 
 impl Consumer {
@@ -220,9 +264,103 @@ impl Consumer {
             .entry(source.identity().digest())
             .or_default()
     }
+
+    fn apply_event_page(&mut self, page: CoreEventDeltaPage) -> CoreEventDeltaPageApplied {
+        let source = page.reconciliation.delta.source().clone();
+        let mut additions = 0_u32;
+        let mut replacements = 0_u32;
+        let mut tombstones = 0_u32;
+        for delta in &page.deltas {
+            match delta {
+                CoreEventDelta::Added(record) => {
+                    let state = CoreEventState {
+                        event_id: record.event_id,
+                        core_record_sha256: core_record_sha256(record).unwrap(),
+                        requires_replacement: false,
+                    };
+                    self.source_events_mut(&source)
+                        .insert(state.event_id.digest(), state);
+                    additions = additions.saturating_add(1);
+                }
+                CoreEventDelta::Replaced(replacement) => {
+                    let state = CoreEventState {
+                        event_id: replacement.record.event_id,
+                        core_record_sha256: core_record_sha256(&replacement.record).unwrap(),
+                        requires_replacement: false,
+                    };
+                    let prior = self
+                        .source_events_mut(&source)
+                        .insert(state.event_id.digest(), state);
+                    assert_eq!(
+                        prior.map(|state| state.core_record_sha256),
+                        Some(replacement.prior_core_record_sha256.clone())
+                    );
+                    replacements = replacements.saturating_add(1);
+                }
+                CoreEventDelta::Tombstoned(tombstone) => {
+                    let prior = self
+                        .source_events_mut(&source)
+                        .remove(&tombstone.event_id.digest());
+                    assert_eq!(
+                        prior.map(|state| state.core_record_sha256),
+                        Some(tombstone.prior_core_record_sha256.clone())
+                    );
+                    tombstones = tombstones.saturating_add(1);
+                }
+            }
+        }
+        if page.terminal && matches!(page.reconciliation.delta, CoreSourceDelta::Removed(_)) {
+            self.known_events.remove(&source.identity().digest());
+            self.known_sources.remove(&source.identity().digest());
+        }
+        let response = CoreEventDeltaPageApplied {
+            materialization_id: page.materialization_id.clone(),
+            core_generation_id: page.core_generation_id.clone(),
+            source: page.reconciliation.delta.source().clone(),
+            page_index: if self.wrong_event_page_index {
+                page.page_index.saturating_add(1)
+            } else {
+                page.page_index
+            },
+            additions,
+            replacements,
+            tombstones,
+            terminal: page.terminal,
+            replayed: self.replay_pages,
+        };
+        response
+    }
 }
 
 impl CoreMaterializationConsumer for Consumer {
+    fn status(&mut self, request: StatusRequest) -> Result<ctx_pro_host_protocol::StatusResult> {
+        self.status_exchanges = self.status_exchanges.saturating_add(1);
+        if self.finish.is_none() {
+            if let Some(error) = &self.pre_finish_status_error {
+                bail!(error.clone());
+            }
+        }
+        let currentness = if self.finish.is_some() {
+            CoreProjectionCurrentness::Current
+        } else {
+            self.replay_status_currentness
+                .unwrap_or(CoreProjectionCurrentness::Current)
+        };
+        let request = StatusRequest {
+            requested_core_generation_id: self
+                .status_generation_override
+                .clone()
+                .or(request.requested_core_generation_id),
+        };
+        Ok(status::result(
+            request,
+            currentness,
+            self.last_receipt.clone(),
+            self.core_preparation_peak_workers,
+            self.journal_finish_activity.clone(),
+        ))
+    }
+
     fn begin(
         &mut self,
         request: BeginCoreMaterializationRequest,
@@ -235,12 +373,14 @@ impl CoreMaterializationConsumer for Consumer {
             self.source_acknowledgements.clear();
             self.delta_pages.clear();
         }
+        let materialization_id = if self.wrong_begin_materialization {
+            "f".repeat(64)
+        } else {
+            ctx_pro_host_protocol::core_materialization_id(&request, &self.revision)
+                .map_err(|error| anyhow!(error.message))?
+        };
         Ok(CoreMaterializationBegan {
-            materialization_id: ctx_pro_host_protocol::core_materialization_id(
-                &request,
-                &self.revision,
-            )
-            .map_err(|error| anyhow!(error.message))?,
+            materialization_id,
             core_generation_id: request.head.core_generation_id.clone(),
             materializer_revision: self.revision.clone(),
             expected_prior_receipt: request.expected_prior_receipt.clone(),
@@ -266,12 +406,13 @@ impl CoreMaterializationConsumer for Consumer {
                 .find(|original| original.page_index == page.page_index)
                 .ok_or_else(|| anyhow!("cached source page has no original request"))?;
             if original != &page {
-                bail!("source page replay changed the original request");
+                bail!("invalid_request: divergent duplicate Core source delta page");
             }
-            let response = responses
+            let mut response = responses
                 .get(usize::try_from(acknowledgement_page_index).unwrap_or(usize::MAX))
                 .cloned()
                 .ok_or_else(|| anyhow!("acknowledgement page is beyond terminal"))?;
+            response.replayed = true;
             if page.terminal && response.acknowledgement_terminal {
                 self.source_feed_terminal = true;
             }
@@ -407,17 +548,36 @@ impl CoreMaterializationConsumer for Consumer {
         self.delta_pages.push(page.clone());
         self.source_acknowledgements
             .insert(page.page_index, responses);
+        if self.source_response_loss_after == Some(self.source_exchanges) {
+            bail!("synthetic_source_response_lost: committed Core source page");
+        }
         if page.terminal && response.acknowledgement_terminal {
             self.source_feed_terminal = true;
         }
         Ok(response)
     }
-
     fn event_states(&mut self, request: CoreEventStatePageRequest) -> Result<CoreEventStatePage> {
         if !self.source_feed_terminal {
             bail!("event state requested before terminal source acknowledgement");
         }
         self.state_exchanges = self.state_exchanges.saturating_add(1);
+        self.state_requests.push(request.clone());
+        if self.event_state_error_after == Some(self.state_exchanges) {
+            bail!("synthetic_event_state_error: ordered coordinator failure");
+        }
+        let key = (
+            request.materialization_id.clone(),
+            request.reconciliation.delta.source().identity().digest(),
+            request.page_index,
+        );
+        if let Some((prior_request, prior_response)) = self.state_journal.get(&key) {
+            if prior_request != &request {
+                bail!("invalid_request: divergent duplicate Core event state page");
+            }
+            let mut response = prior_response.clone();
+            response.replayed = true;
+            return Ok(response);
+        }
         let source = request.reconciliation.delta.source();
         let after = request.after_event_id.map(|event| event.digest());
         let maximum = usize::try_from(request.maximum_items).unwrap();
@@ -430,91 +590,84 @@ impl CoreMaterializationConsumer for Consumer {
             .cloned()
             .collect::<Vec<_>>();
         let terminal = all.len() <= maximum;
-        Ok(CoreEventStatePage {
-            materialization_id: request.materialization_id,
-            core_generation_id: request.core_generation_id,
-            reconciliation: request.reconciliation,
+        let response = CoreEventStatePage {
+            materialization_id: request.materialization_id.clone(),
+            core_generation_id: request.core_generation_id.clone(),
+            reconciliation: request.reconciliation.clone(),
             page_index: request.page_index,
             after_event_id: request.after_event_id,
             states: all.into_iter().take(maximum).collect(),
             terminal,
             replayed: self.replay_pages,
-        })
+        };
+        self.state_journal.insert(key, (request, response.clone()));
+        if self.event_state_response_loss_after == Some(self.state_exchanges) {
+            bail!("synthetic_state_response_lost: committed Core event state page");
+        }
+        Ok(response)
     }
 
-    fn apply_event_delta(
-        &mut self,
-        request: ApplyCoreEventDeltaPageRequest,
-    ) -> Result<CoreEventDeltaPageApplied> {
+    fn apply_event_delta_pages(&mut self, pages: Vec<CoreEventDeltaPage>) -> Result<()> {
         if !self.source_feed_terminal {
             bail!("event delta applied before terminal source acknowledgement");
         }
         self.event_exchanges = self.event_exchanges.saturating_add(1);
-        let page = request.page;
-        let source = page.reconciliation.delta.source().clone();
-        let mut additions = 0_u32;
-        let mut replacements = 0_u32;
-        let mut tombstones = 0_u32;
-        for delta in &page.deltas {
-            match delta {
-                CoreEventDelta::Added(record) => {
-                    let state = CoreEventState {
-                        event_id: record.event_id,
-                        core_record_sha256: core_record_sha256(record).unwrap(),
-                        requires_replacement: false,
-                    };
-                    self.source_events_mut(&source)
-                        .insert(state.event_id.digest(), state);
-                    additions = additions.saturating_add(1);
-                }
-                CoreEventDelta::Replaced(replacement) => {
-                    let state = CoreEventState {
-                        event_id: replacement.record.event_id,
-                        core_record_sha256: core_record_sha256(&replacement.record).unwrap(),
-                        requires_replacement: false,
-                    };
-                    let prior = self
-                        .source_events_mut(&source)
-                        .insert(state.event_id.digest(), state);
-                    assert_eq!(
-                        prior.map(|state| state.core_record_sha256),
-                        Some(replacement.prior_core_record_sha256.clone())
-                    );
-                    replacements = replacements.saturating_add(1);
-                }
-                CoreEventDelta::Tombstoned(tombstone) => {
-                    let prior = self
-                        .source_events_mut(&source)
-                        .remove(&tombstone.event_id.digest());
-                    assert_eq!(
-                        prior.map(|state| state.core_record_sha256),
-                        Some(tombstone.prior_core_record_sha256.clone())
-                    );
-                    tombstones = tombstones.saturating_add(1);
-                }
+        self.event_exchange_page_ids.push(
+            pages
+                .iter()
+                .map(|page| {
+                    (
+                        page.reconciliation.delta.source().identity().digest(),
+                        page.page_index,
+                    )
+                })
+                .collect(),
+        );
+        self.event_pages.extend(pages.iter().cloned());
+        let mut has_replayed_page = false;
+        let mut has_new_page = false;
+        for page in &pages {
+            let key = (
+                page.materialization_id.clone(),
+                page.reconciliation.delta.source().identity().digest(),
+                page.page_index,
+            );
+            match self.event_journal.get(&key) {
+                Some((prior_page, _)) if prior_page == page => has_replayed_page = true,
+                Some(_) => bail!("invalid_request: divergent duplicate Core event delta page"),
+                None => has_new_page = true,
             }
         }
-        if page.terminal && matches!(page.reconciliation.delta, CoreSourceDelta::Removed(_)) {
-            self.known_events.remove(&source.identity().digest());
-            self.known_sources.remove(&source.identity().digest());
+        if pages.len() > 1 && has_replayed_page && has_new_page {
+            bail!("invalid_request: mixed replayed and new Core event delta pages");
         }
-        let response = CoreEventDeltaPageApplied {
-            materialization_id: page.materialization_id.clone(),
-            core_generation_id: page.core_generation_id.clone(),
-            source: page.reconciliation.delta.source().clone(),
-            page_index: if self.wrong_event_page_index {
-                page.page_index.saturating_add(1)
+
+        let request = ApplyCoreEventDeltaPagesRequest { pages };
+        let identity = request.acknowledgement_identity().unwrap();
+        let mut responses = Vec::with_capacity(request.pages.len());
+        for page in &request.pages {
+            let key = (
+                page.materialization_id.clone(),
+                page.reconciliation.delta.source().identity().digest(),
+                page.page_index,
+            );
+            if let Some((_, prior_response)) = self.event_journal.get(&key) {
+                let mut response = prior_response.clone();
+                response.replayed = true;
+                responses.push(response);
             } else {
-                page.page_index
-            },
-            additions,
-            replacements,
-            tombstones,
-            terminal: page.terminal,
-            replayed: self.replay_pages,
-        };
-        self.event_pages.push(page);
-        Ok(response)
+                let response = self.apply_event_page(page.clone());
+                self.event_journal
+                    .insert(key, (page.clone(), response.clone()));
+                responses.push(response);
+            }
+        }
+        if self.event_response_loss_after == Some(self.event_exchanges) {
+            bail!("synthetic_event_response_lost: committed Core event delta exchange");
+        }
+        CoreEventDeltaPagesApplied { pages: responses }
+            .validate_for_identity(&identity)
+            .map_err(|error| anyhow!("invalid_response: {}", error.message))
     }
 
     fn finish(
@@ -535,637 +688,285 @@ impl CoreMaterializationConsumer for Consumer {
             },
             replayed: self.replay_begin,
         };
+        self.last_receipt = Some(response.receipt.clone());
+        self.finish_requests.push(request.clone());
         self.finish = Some(request);
+        if self.lose_finish_response {
+            self.lose_finish_response = false;
+            bail!("synthetic_finish_response_lost: committed Core finish");
+        }
         Ok(response)
     }
 }
 
-#[test]
-fn source_page_admission_uses_exact_wire_index_at_decimal_transitions() {
-    let materialization_id = "d".repeat(64);
-    let generation_id = "a".repeat(64);
+const TEST_MATERIALIZATION_ID: &str =
+    "1111111111111111111111111111111111111111111111111111111111111111";
+const TEST_GENERATION_ID: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
-    for transition in [9_u32, 99] {
-        let count = usize::try_from(transition).unwrap() * 2 + 5;
-        let deltas = ordered_source_deltas(count, 32);
-        let pair_start = usize::try_from(transition).unwrap() * 2;
-        let exact_boundary_page = CoreSourceDeltaPage::new(
-            &materialization_id,
-            &generation_id,
-            transition,
+fn reconciliation(source: &SourceKey) -> CoreSourceReconciliation {
+    CoreSourceReconciliation {
+        materialize_index: 0,
+        delta: CoreSourceDelta::Present(CoreSourceState {
+            source: source.clone(),
+            core_record_accumulator: "3".repeat(64),
+            event_count: 0,
+        }),
+    }
+}
+
+fn sorted_additions(source: &SourceKey, bodies: Vec<String>) -> Vec<CoreEventDelta> {
+    let mut deltas = bodies
+        .into_iter()
+        .enumerate()
+        .map(|(index, body)| {
+            CoreEventDelta::Added(record(source, u64::try_from(index + 1).unwrap(), body))
+        })
+        .collect::<Vec<_>>();
+    deltas.sort_by_key(|delta| delta.event_id().digest());
+    deltas
+}
+
+fn legacy_event_delta_pages(
+    reconciliation: &CoreSourceReconciliation,
+    deltas: Vec<CoreEventDelta>,
+) -> Result<Vec<CoreEventDeltaPage>> {
+    let mut pending = Vec::new();
+    let mut pages = Vec::new();
+    let mut page_index = 0_u32;
+    for delta in deltas {
+        if pending.len() == MAX_CORE_EVENT_DELTA_PAGE_ITEMS {
+            pages.push(event_delta_page(
+                TEST_MATERIALIZATION_ID,
+                TEST_GENERATION_ID,
+                reconciliation,
+                page_index,
+                false,
+                std::mem::take(&mut pending),
+            )?);
+            page_index = page_index.checked_add(1).unwrap();
+        }
+        pending.push(delta);
+        if event_delta_page(
+            TEST_MATERIALIZATION_ID,
+            TEST_GENERATION_ID,
+            reconciliation,
+            page_index,
             false,
-            deltas[pair_start..pair_start + 2].to_vec(),
+            pending.clone(),
         )
-        .unwrap();
-        let maximum_wire_bytes = serde_json::to_vec(&exact_boundary_page).unwrap().len();
-
-        let pages = build_delta_pages_with_wire_bound(
-            &materialization_id,
-            &generation_id,
-            deltas.clone(),
-            maximum_wire_bytes,
-        )
-        .unwrap();
-        let repeated = build_delta_pages_with_wire_bound(
-            &materialization_id,
-            &generation_id,
-            deltas,
-            maximum_wire_bytes,
-        )
-        .unwrap();
-
-        assert_eq!(pages, repeated);
-        assert_eq!(
-            pages[usize::try_from(transition).unwrap()],
-            exact_boundary_page
-        );
-        assert_eq!(
-            pages[usize::try_from(transition + 1).unwrap()].deltas.len(),
-            1
-        );
-        assert_eq!(
-            pages[usize::try_from(transition + 2).unwrap()].deltas.len(),
-            2
-        );
-        assert_eq!(
-            serde_json::to_vec(&pages[usize::try_from(transition + 2).unwrap()])
-                .unwrap()
-                .len(),
-            maximum_wire_bytes
-        );
-        assert_eq!(
-            pages.last().map(|page| page.page_index),
-            Some(transition + 2)
-        );
-        for (expected_index, page) in pages.iter().enumerate() {
-            assert_eq!(page.page_index, u32::try_from(expected_index).unwrap());
-            assert_eq!(page.terminal, expected_index + 1 == pages.len());
-            assert!(serde_json::to_vec(page).unwrap().len() <= maximum_wire_bytes);
-            page.validate().unwrap();
+        .is_err()
+        {
+            let overflow = pending.pop().unwrap();
+            if pending.is_empty() {
+                return Err(anyhow!(
+                    "invalid_request: one Core event delta exceeds its page bound"
+                ));
+            }
+            pages.push(event_delta_page(
+                TEST_MATERIALIZATION_ID,
+                TEST_GENERATION_ID,
+                reconciliation,
+                page_index,
+                false,
+                std::mem::take(&mut pending),
+            )?);
+            page_index = page_index.checked_add(1).unwrap();
+            pending.push(overflow);
         }
     }
+    pages.push(event_delta_page(
+        TEST_MATERIALIZATION_ID,
+        TEST_GENERATION_ID,
+        reconciliation,
+        page_index,
+        true,
+        pending,
+    )?);
+    Ok(pages)
 }
 
-#[test]
-fn source_page_admission_enforces_the_protocol_wire_bound() {
-    let materialization_id = "d".repeat(64);
-    let generation_id = "a".repeat(64);
-    let deltas = ordered_source_deltas(140, 60 * 1024);
-
-    assert_eq!(MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES, 4_194_304);
-    let pages = build_delta_pages(&materialization_id, &generation_id, deltas).unwrap();
-
-    assert!(pages.len() > 1);
-    for (index, page) in pages.iter().enumerate() {
-        let wire_bytes = serde_json::to_vec(page).unwrap().len();
-        assert!(wire_bytes <= MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES);
-        assert_eq!(page.page_index, u32::try_from(index).unwrap());
-        assert_eq!(page.terminal, index + 1 == pages.len());
-        page.validate().unwrap();
-        if let Some(next) = pages.get(index + 1) {
-            let next_delta_bytes = serde_json::to_vec(&next.deltas[0]).unwrap().len();
-            assert!(
-                page.deltas.len() == MAX_CORE_SOURCE_DELTA_PAGE_ITEMS
-                    || wire_bytes + 1 + next_delta_bytes > MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES
-            );
+fn incremental_event_delta_pages(
+    reconciliation: &CoreSourceReconciliation,
+    deltas: Vec<CoreEventDelta>,
+) -> Result<Vec<CoreEventDeltaPage>> {
+    let mut page_index = 0_u32;
+    let mut pending = EventDeltaPageBuilder::new(
+        TEST_MATERIALIZATION_ID,
+        TEST_GENERATION_ID,
+        reconciliation,
+        page_index,
+    )?;
+    let mut pages = Vec::new();
+    for delta in deltas {
+        if pending.is_full() {
+            let (deltas, _) = pending.into_deltas_with_wire_bytes(false)?;
+            let deltas = deltas
+                .into_iter()
+                .map(PreparedEventDelta::into_typed)
+                .collect();
+            pages.push(event_delta_page(
+                TEST_MATERIALIZATION_ID,
+                TEST_GENERATION_ID,
+                reconciliation,
+                page_index,
+                false,
+                deltas,
+            )?);
+            page_index = page_index.checked_add(1).unwrap();
+            pending = EventDeltaPageBuilder::new(
+                TEST_MATERIALIZATION_ID,
+                TEST_GENERATION_ID,
+                reconciliation,
+                page_index,
+            )?;
+        }
+        if let Some(overflow) = pending.try_push(PreparedEventDelta::from_typed(delta)?)? {
+            if pending.is_empty() {
+                return Err(anyhow!(
+                    "invalid_request: one Core event delta exceeds its page bound"
+                ));
+            }
+            let (deltas, _) = pending.into_deltas_with_wire_bytes(false)?;
+            let deltas = deltas
+                .into_iter()
+                .map(PreparedEventDelta::into_typed)
+                .collect();
+            pages.push(event_delta_page(
+                TEST_MATERIALIZATION_ID,
+                TEST_GENERATION_ID,
+                reconciliation,
+                page_index,
+                false,
+                deltas,
+            )?);
+            page_index = page_index.checked_add(1).unwrap();
+            pending = EventDeltaPageBuilder::new(
+                TEST_MATERIALIZATION_ID,
+                TEST_GENERATION_ID,
+                reconciliation,
+                page_index,
+            )?;
+            pending.push_split_overflow(overflow)?;
         }
     }
+    let (deltas, _) = pending.into_deltas_with_wire_bytes(true)?;
+    let deltas = deltas
+        .into_iter()
+        .map(PreparedEventDelta::into_typed)
+        .collect();
+    pages.push(event_delta_page(
+        TEST_MATERIALIZATION_ID,
+        TEST_GENERATION_ID,
+        reconciliation,
+        page_index,
+        true,
+        deltas,
+    )?);
+    Ok(pages)
 }
 
-#[test]
-fn source_page_admission_rejects_an_oversized_singleton_with_typed_error() {
-    let materialization_id = "d".repeat(64);
-    let generation_id = "a".repeat(64);
-    let delta = source_delta(0, 32, 1);
-    let exact_singleton_bytes = serde_json::to_vec(
-        &CoreSourceDeltaPage::new(
-            &materialization_id,
-            &generation_id,
-            0,
-            true,
-            vec![delta.clone()],
+fn assert_exact_page_boundary_equivalence(
+    reconciliation: &CoreSourceReconciliation,
+    deltas: Vec<CoreEventDelta>,
+) {
+    let legacy = legacy_event_delta_pages(reconciliation, deltas.clone()).unwrap();
+    let incremental = incremental_event_delta_pages(reconciliation, deltas).unwrap();
+    assert_eq!(incremental, legacy);
+
+    let legacy_requests = legacy
+        .into_iter()
+        .map(|page| serde_json::to_vec(&ApplyCoreEventDeltaPageRequest { page }).unwrap())
+        .collect::<Vec<_>>();
+    let incremental_requests = incremental
+        .into_iter()
+        .map(|page| {
+            let request = ApplyCoreEventDeltaPageRequest { page };
+            request.validate().unwrap();
+            serde_json::to_vec(&request).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(incremental_requests, legacy_requests);
+}
+
+fn single_delta_event_pages(
+    source: &SourceKey,
+    page_count: usize,
+    body_bytes: usize,
+) -> Vec<CoreEventDeltaPage> {
+    let reconciliation = reconciliation(source);
+    let deltas = sorted_additions(source, vec!["x".repeat(body_bytes); page_count]);
+    deltas
+        .into_iter()
+        .enumerate()
+        .map(|(index, delta)| {
+            event_delta_page(
+                TEST_MATERIALIZATION_ID,
+                TEST_GENERATION_ID,
+                &reconciliation,
+                u32::try_from(index).unwrap(),
+                index + 1 == page_count,
+                vec![delta],
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+fn applied_page(page: &CoreEventDeltaPage) -> CoreEventDeltaPageApplied {
+    CoreEventDeltaPageApplied {
+        materialization_id: page.materialization_id.clone(),
+        core_generation_id: page.core_generation_id.clone(),
+        source: page.reconciliation.delta.source().clone(),
+        page_index: page.page_index,
+        additions: u32::try_from(
+            page.deltas
+                .iter()
+                .filter(|delta| matches!(delta, CoreEventDelta::Added(_)))
+                .count(),
         )
         .unwrap(),
-    )
-    .unwrap()
-    .len();
-
-    let error = build_delta_pages_with_wire_bound(
-        &materialization_id,
-        &generation_id,
-        vec![delta],
-        exact_singleton_bytes - 1,
-    )
-    .unwrap_err();
-
-    assert!(matches!(
-        &error,
-        CoreSourceDeltaPageBuildError::OversizedSingleton
-    ));
-    assert_eq!(
-        error.to_string(),
-        "invalid_request: one Core source delta exceeds its wire bound"
-    );
-}
-
-#[test]
-fn same_certificate_and_count_with_changed_core_record_is_reconciled() {
-    let temp = tempdir().unwrap();
-    let source = source("changed.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source(
-        &mut writer,
-        &source,
-        1,
-        vec!["one".to_owned(), "two".to_owned(), "three".to_owned()],
-    );
-    writer.commit(|_| true).unwrap();
-    let first = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let first_certificate = first.manifest().sources[0].clone();
-    let first_accumulator = first.manifest().core_record_aggregates[0]
-        .core_record_accumulator()
-        .to_owned();
-    let prior = receipt_for(&first, "test-core-materializer-v1");
-    let mut consumer = Consumer::new();
-    sync_core_feed(&first, None, &mut consumer).unwrap();
-    drop(first);
-    consumer.event_pages.clear();
-
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source(
-        &mut writer,
-        &source,
-        1,
-        vec![
-            "one".to_owned(),
-            "two revised".to_owned(),
-            "three".to_owned(),
-        ],
-    );
-    writer.commit(|_| true).unwrap();
-    let second = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    assert_eq!(second.manifest().sources[0], first_certificate);
-    assert_ne!(
-        second.manifest().core_record_aggregates[0].core_record_accumulator(),
-        first_accumulator
-    );
-    let second_sources = core_source_states(second.manifest()).unwrap();
-    let second_head = core_generation_head(&second, &second_sources).unwrap();
-    assert_ne!(
-        prior.source_snapshot_sha256,
-        second_head.source_snapshot_sha256
-    );
-    let report = sync_core_feed(&second, Some(&prior), &mut consumer).unwrap();
-
-    assert_eq!(report.changed_sources, 1);
-    assert_eq!(report.event_mutations, 1);
-    assert_eq!(consumer.event_pages.len(), 1);
-    assert!(consumer.event_pages[0].terminal);
-    assert!(matches!(
-        consumer.event_pages[0].deltas.as_slice(),
-        [CoreEventDelta::Replaced(replacement)]
-            if replacement.record.content.normalized_body.as_deref() == Some("two revised")
-    ));
-}
-
-#[test]
-fn unchanged_large_source_is_not_resent_when_another_source_changes() {
-    let temp = tempdir().unwrap();
-    let large = source("large.jsonl");
-    let changed = source("changed.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source(&mut writer, &large, 1, vec!["L".repeat(32 * 1024)]);
-    add_source(&mut writer, &changed, 2, vec!["changed body".to_owned()]);
-    writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let states = core_source_states(index.manifest()).unwrap();
-    let mut consumer = Consumer::new();
-    let large_state = states
-        .iter()
-        .find(|state| state.source.exact_descriptor_eq(&large))
-        .unwrap();
-    consumer.known_accumulators.insert(
-        large.identity().digest(),
-        large_state.core_record_accumulator.clone(),
-    );
-    consumer
-        .known_accumulators
-        .insert(changed.identity().digest(), "0".repeat(64));
-
-    let report = sync_core_feed(&index, None, &mut consumer).unwrap();
-    assert_eq!(report.changed_sources, 1);
-    assert_eq!(report.event_mutations, 1);
-    assert!(consumer.event_pages.iter().all(|page| {
-        page.reconciliation
-            .delta
-            .source()
-            .exact_descriptor_eq(&changed)
-            && page.deltas.iter().all(|delta| match delta {
-                CoreEventDelta::Added(record) => {
-                    record.content.normalized_body.as_deref() == Some("changed body")
-                }
-                _ => false,
-            })
-    }));
-}
-
-#[test]
-fn exact_replay_is_a_no_op_with_no_delta_or_event_pages() {
-    let temp = tempdir().unwrap();
-    let source = source("replay.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
-    writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let prior = receipt_for(&index, "test-core-materializer-v1");
-    let mut consumer = Consumer::new();
-    consumer.replay_begin = true;
-
-    let report = sync_core_feed(&index, Some(&prior), &mut consumer).unwrap();
-    assert!(report.replayed);
-    assert!(consumer.delta_pages.is_empty());
-    assert!(consumer.event_pages.is_empty());
-    let finish = consumer.finish.unwrap();
-    assert_eq!(finish.changed_sources, 0);
-    assert_eq!(finish.removed_sources, 0);
-    assert_eq!(finish.event_mutations, 0);
-}
-
-#[test]
-fn missing_route_grace_rollover_finishes_without_source_or_event_mutations() {
-    const DELETE_AFTER: u32 = 3;
-
-    let temp = tempdir().unwrap();
-    let source = source("missing-route-grace.jsonl");
-    let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source(&mut writer, &source, 1, vec!["unchanged body".to_owned()]);
-    writer
-        .set_present_source_routes(vec![SourceRouteSnapshot::present(
-            route.clone(),
-            vec![source.clone()],
-        )
-        .unwrap()])
-        .unwrap();
-    writer.commit(|_| true).unwrap();
-    let initial = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let prior = receipt_for(&initial, "test-core-materializer-v1");
-    let mut consumer = Consumer::new();
-    sync_core_feed(&initial, None, &mut consumer).unwrap();
-    drop(initial);
-
-    let prior_accumulators = consumer.known_accumulators.clone();
-    let prior_sources = consumer.known_sources.clone();
-    let prior_events = consumer.known_events.clone();
-    consumer.event_pages.clear();
-    consumer.finish = None;
-
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    writer.set_present_source_routes(Vec::new()).unwrap();
-    let grace = writer
-        .observe_certified_missing_route(route.clone(), 100, DELETE_AFTER, || true)
-        .unwrap();
-    assert!(!grace.deleted());
-    assert_eq!(grace.retained_sources(), std::slice::from_ref(&source));
-    writer.commit(|_| true).unwrap();
-    let rollover = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    assert_ne!(rollover.generation_id(), prior.core_generation_id);
-    assert_eq!(rollover.manifest().indexed_documents, prior.event_count);
-    assert_eq!(
-        u32::try_from(rollover.manifest().sources.len()).unwrap(),
-        prior.source_count
-    );
-    assert_eq!(
-        rollover
-            .manifest()
-            .source_route(&route)
-            .unwrap()
-            .missing_state()
-            .unwrap()
-            .consecutive_missing()
-            .get(),
-        1
-    );
-
-    let report = sync_core_feed(&rollover, Some(&prior), &mut consumer).unwrap();
-    assert!(!report.replayed);
-    assert_eq!(report.changed_sources, 0);
-    assert_eq!(report.removed_sources, 0);
-    assert_eq!(report.event_delta_pages, 0);
-    assert_eq!(report.event_mutations, 0);
-    assert!(consumer.event_pages.is_empty());
-    assert_eq!(consumer.known_accumulators, prior_accumulators);
-    assert_eq!(consumer.known_sources, prior_sources);
-    assert_eq!(consumer.known_events, prior_events);
-
-    let expected = receipt_for(&rollover, "test-core-materializer-v1");
-    assert_eq!(report.receipt, expected);
-    assert_eq!(
-        report.receipt.source_snapshot_sha256,
-        prior.source_snapshot_sha256
-    );
-    assert_ne!(report.receipt.core_generation_id, prior.core_generation_id);
-    let finish = consumer.finish.as_ref().unwrap();
-    assert_eq!(finish.head.core_generation_id, rollover.generation_id());
-    assert_eq!(finish.changed_sources, 0);
-    assert_eq!(finish.removed_sources, 0);
-    assert_eq!(finish.event_delta_pages, 0);
-    assert_eq!(finish.event_mutations, 0);
-}
-
-#[test]
-fn event_item_boundary_uses_one_exchange_per_bounded_page() {
-    let temp = tempdir().unwrap();
-    let source = source("item-boundary.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source(
-        &mut writer,
-        &source,
-        1,
-        (0..=MAX_CORE_EVENT_DELTA_PAGE_ITEMS)
-            .map(|index| format!("body {index}"))
-            .collect(),
-    );
-    writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let mut consumer = Consumer::new();
-
-    let report = sync_core_feed(&index, None, &mut consumer).unwrap();
-    assert_eq!(
-        report.event_mutations,
-        u64::try_from(MAX_CORE_EVENT_DELTA_PAGE_ITEMS + 1).unwrap()
-    );
-    assert_eq!(report.event_delta_pages, 2);
-    assert_eq!(consumer.event_exchanges, 2);
-    assert_eq!(
-        consumer.event_pages[0].deltas.len(),
-        MAX_CORE_EVENT_DELTA_PAGE_ITEMS
-    );
-    assert_eq!(consumer.event_pages[1].deltas.len(), 1);
-    assert!(!consumer.event_pages[0].terminal);
-    assert!(consumer.event_pages[1].terminal);
-}
-
-#[test]
-fn source_deletion_is_resumable_tombstone_pages() {
-    let temp = tempdir().unwrap();
-    let retained = source("retained.jsonl");
-    let removed = source("removed.jsonl");
-    let removed_count = MAX_CORE_EVENT_DELTA_PAGE_ITEMS + 1;
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source(&mut writer, &retained, 1, vec!["retained".to_owned()]);
-    add_source(
-        &mut writer,
-        &removed,
-        1,
-        (0..removed_count)
-            .map(|index| format!("removed {index}"))
-            .collect(),
-    );
-    writer.commit(|_| true).unwrap();
-    let prior_index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let prior = receipt_for(&prior_index, "test-core-materializer-v1");
-    let mut consumer = Consumer::new();
-    sync_core_feed(&prior_index, None, &mut consumer).unwrap();
-    drop(prior_index);
-    consumer.event_pages.clear();
-
-    let observation = SourceInventoryObservation::new(
-        removed.provider(),
-        "fixture-root",
-        TypedKey::utf8("fixture-authority").unwrap(),
-        "inventory-v1",
-        vec![2],
-    )
-    .unwrap();
-    let inventory = CertifiedSourceInventory::certify(
-        observation.clone(),
-        observation,
-        "discovery-v1",
-        vec![retained.clone()],
-    )
-    .unwrap();
-    let deletion = CertifiedSourceDeletion::from_inventory(removed.clone(), &inventory).unwrap();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    writer.delete_source(deletion, inventory).unwrap();
-    writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-
-    let report = sync_core_feed(&index, Some(&prior), &mut consumer).unwrap();
-    assert_eq!(report.changed_sources, 0);
-    assert_eq!(report.removed_sources, 1);
-    assert_eq!(
-        report.event_mutations,
-        u64::try_from(removed_count).unwrap()
-    );
-    assert_eq!(report.event_delta_pages, 2);
-    assert!(consumer.event_pages.iter().all(|page| {
-        page.reconciliation
-            .delta
-            .source()
-            .exact_descriptor_eq(&removed)
-            && page
-                .deltas
+        replacements: u32::try_from(
+            page.deltas
                 .iter()
-                .all(|delta| matches!(delta, CoreEventDelta::Tombstoned(_)))
-    }));
-    assert!(!consumer
-        .known_events
-        .contains_key(&removed.identity().digest()));
-}
-
-#[test]
-fn large_native_key_removals_without_receipt_drive_all_acknowledgements_idempotently() {
-    const REMOVAL_COUNT: usize = 2_048;
-    let temp = tempdir().unwrap();
-    let writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let mut consumer = Consumer::new();
-    for source_index in 0..REMOVAL_COUNT {
-        let removed = large_native_key_source(source_index);
-        consumer
-            .known_sources
-            .insert(removed.identity().digest(), removed);
-    }
-
-    let report = sync_core_feed(&index, None, &mut consumer).unwrap();
-    let expected_acknowledgement_pages = REMOVAL_COUNT.div_ceil(MAX_CORE_SOURCE_DELTA_PAGE_ITEMS);
-    assert_eq!(report.changed_sources, 0);
-    assert_eq!(
-        report.removed_sources,
-        u64::try_from(REMOVAL_COUNT).unwrap()
-    );
-    assert_eq!(consumer.source_page_applications, 1);
-    assert_eq!(
-        consumer.finish.as_ref().unwrap().removed_sources,
-        u32::try_from(REMOVAL_COUNT).unwrap()
-    );
-    assert_eq!(
-        consumer.source_exchanges,
-        u64::try_from(expected_acknowledgement_pages).unwrap()
-    );
-    assert_eq!(
-        consumer.source_acknowledgement_requests,
-        (0..expected_acknowledgement_pages)
-            .map(|index| (0, u32::try_from(index).unwrap()))
-            .collect::<Vec<_>>()
-    );
-    let responses = consumer.source_acknowledgements.get(&0).unwrap();
-    assert_eq!(responses.len(), expected_acknowledgement_pages);
-    assert_eq!(
-        responses
-            .iter()
-            .map(|response| usize::try_from(response.removed_sources).unwrap())
-            .sum::<usize>(),
-        REMOVAL_COUNT
-    );
-    for (index, response) in responses.iter().enumerate() {
-        assert_eq!(
-            response.acknowledgement_page_index,
-            u32::try_from(index).unwrap()
-        );
-        assert_eq!(
-            response.acknowledgement_terminal,
-            index + 1 == expected_acknowledgement_pages
-        );
-        assert_eq!(
-            response.reconcile_sources.len(),
-            MAX_CORE_SOURCE_DELTA_PAGE_ITEMS
-        );
-        assert!(serde_json::to_vec(response).unwrap().len() <= MAX_CORE_CONTROL_WIRE_BYTES);
-        let mut frame = Vec::new();
-        write_frame(
-            &mut frame,
-            &HelperEnvelope {
-                sequence: u64::try_from(index).unwrap(),
-                request_id: Uuid::from_u128(1),
-                message: HelperMessage::CoreSourceDeltaPageApplied(response.clone()),
-            },
+                .filter(|delta| matches!(delta, CoreEventDelta::Replaced(_)))
+                .count(),
         )
-        .unwrap();
-        assert!(frame.len() - FRAME_HEADER_BYTES <= MAX_FRAME_PAYLOAD_BYTES);
+        .unwrap(),
+        tombstones: u32::try_from(
+            page.deltas
+                .iter()
+                .filter(|delta| matches!(delta, CoreEventDelta::Tombstoned(_)))
+                .count(),
+        )
+        .unwrap(),
+        terminal: page.terminal,
+        replayed: false,
     }
-
-    let source_page = consumer.delta_pages[0].clone();
-    let original_responses = responses.clone();
-    for (index, expected) in original_responses.into_iter().enumerate() {
-        let replayed = consumer
-            .apply_source_delta(ApplyCoreSourceDeltaPageRequest {
-                page: source_page.clone(),
-                acknowledgement_page_index: u32::try_from(index).unwrap(),
-            })
-            .unwrap();
-        assert_eq!(replayed, expected);
-    }
-    assert_eq!(consumer.source_page_applications, 1);
 }
 
-#[test]
-fn event_page_cas_mismatch_fails_closed_after_one_exchange() {
-    let temp = tempdir().unwrap();
-    let source = source("event-cas-mismatch.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
-    writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let mut consumer = Consumer::new();
-    consumer.wrong_event_page_index = true;
-
-    let error = sync_core_feed(&index, None, &mut consumer).unwrap_err();
-    assert!(error.to_string().contains("acknowledgement"));
-    assert_eq!(consumer.event_exchanges, 1);
-}
-
-#[test]
-fn event_page_is_authoritatively_validated_before_exchange() {
-    let source = source("invalid-page.jsonl");
-    let page = CoreEventDeltaPage {
-        materialization_id: "d".repeat(64),
-        core_generation_id: "a".repeat(64),
-        reconciliation: CoreSourceReconciliation {
-            materialize_index: 0,
-            delta: CoreSourceDelta::Present(CoreSourceState {
-                source,
-                core_record_accumulator: "0".repeat(64),
-                event_count: 0,
-            }),
-        },
-        page_index: 0,
-        terminal: false,
-        deltas: Vec::new(),
+fn successful_plural_response(message: &HostMessage) -> HelperMessage {
+    let HostMessage::ApplyCoreEventDeltaPages(request) = message else {
+        panic!("expected plural Core event delta request")
     };
-    let mut consumer = Consumer::new();
-
-    let error = send_event_delta_page(&mut consumer, page).unwrap_err();
-    assert!(error.to_string().contains("invalid_request"));
-    assert_eq!(consumer.event_exchanges, 0);
+    HelperMessage::CoreEventDeltaPagesApplied(CoreEventDeltaPagesApplied {
+        pages: request.pages.iter().map(applied_page).collect(),
+    })
 }
 
-#[test]
-fn generation_mismatched_delta_ack_fails_closed() {
-    let temp = tempdir().unwrap();
-    let source = source("mismatch.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
-    writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let mut consumer = Consumer::new();
-    consumer.wrong_delta_generation = true;
-    assert!(sync_core_feed(&index, None, &mut consumer)
-        .unwrap_err()
-        .to_string()
-        .contains("acknowledgement"));
-}
-
-#[test]
-fn source_acknowledgement_sequence_and_global_identity_fail_closed() {
-    let temp = tempdir().unwrap();
-    let source = source("invalid-source-ack.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
-    writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-
-    for (mutation, expected) in [
-        (
-            SourceResponseMutation::DuplicateSource,
-            "repeat a stable source identity",
-        ),
-        (SourceResponseMutation::StalePresent, "stale current source"),
-        (
-            SourceResponseMutation::RemoveCurrent,
-            "removes a current source",
-        ),
-        (
-            SourceResponseMutation::SkipMaterializeIndex,
-            "indices are not contiguous",
-        ),
-    ] {
-        let mut consumer = Consumer::new();
-        consumer.source_response_mutation = Some(mutation);
-        let error = sync_core_feed(&index, None, &mut consumer).unwrap_err();
-        assert!(error.to_string().contains(expected), "{error:#}");
-        assert_eq!(consumer.source_exchanges, 1);
-        assert_eq!(consumer.state_exchanges, 0);
-        assert_eq!(consumer.event_exchanges, 0);
+fn event_page_batches(pages: Vec<CoreEventDeltaPage>) -> Vec<Vec<CoreEventDeltaPage>> {
+    let mut builder = EventDeltaPageBatchBuilder::new().unwrap();
+    let mut batches = Vec::new();
+    for page in pages {
+        let terminal = page.terminal;
+        let page = prepared_event_delta_page_from_typed(page).unwrap();
+        if let Some(overflow) = builder.try_push(page).unwrap() {
+            batches.push(builder.take_request().unwrap().into_typed_pages());
+            builder.push_empty_overflow(overflow).unwrap();
+        }
+        if terminal {
+            batches.push(builder.take_request().unwrap().into_typed_pages());
+        }
     }
-
-    let mut consumer = Consumer::new();
-    consumer.wrong_acknowledgement_page_index = true;
-    let error = sync_core_feed(&index, None, &mut consumer).unwrap_err();
-    assert!(error.to_string().contains("page CAS"), "{error:#}");
-    assert_eq!(consumer.source_exchanges, 1);
-    assert_eq!(consumer.state_exchanges, 0);
-    assert_eq!(consumer.event_exchanges, 0);
-}
-
-#[test]
-fn producer_reads_only_pinned_core_records() {
-    let source = include_str!("../core_materialization_feed.rs");
-    for forbidden in ["ctx_history_capture", "reread_source"] {
-        assert!(!source.contains(forbidden), "producer contains {forbidden}");
-    }
-    assert!(source.contains("core_source_event_page_with_budget"));
-    assert!(!source.contains("MaterializeCoreRecordPage"));
+    assert!(builder.is_empty());
+    batches
 }

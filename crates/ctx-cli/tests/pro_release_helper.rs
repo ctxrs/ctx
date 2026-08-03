@@ -22,12 +22,6 @@ fn release_binary_ignores_all_untrusted_helper_overrides() {
         .unwrap()
         .env("CTX_PRO_CHANNEL", "staging")
         .env("CTX_PRO_HELPER", &helper)
-        .env("CTX_PRO_QUALIFICATION_HELPER_PATH", &helper)
-        .env(
-            "CTX_PRO_QUALIFICATION_HELPER_SHA256",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
-        .env("CTX_PRO_QUALIFICATION_HELPER_CHANNEL", "staging")
         .args([
             "--data-root",
             root.path().to_str().unwrap(),

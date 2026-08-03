@@ -29,12 +29,15 @@ fn helper_receives_exact_opaque_installation_identity_and_clears_unknown_values(
 
     const ID: &str = "6a1de1ab-c732-45ed-b3f8-bbf6ab1048e8";
     let mut command = Command::new("ctx-pro-test");
-    command.env("CTX_TEST_SECRET", "must-not-survive");
-    super::configure_environment(
+    command
+        .env("CTX_TEST_SECRET", "must-not-survive")
+        .env("CTX_PRO_CORE_PREPARATION_WORKERS", " 999 ");
+    super::configure_environment_with_preparation_workers(
         &mut command,
         std::path::Path::new("/ctx/data"),
         ID,
         Some(std::path::Path::new("/usr/bin/git")),
+        16,
     )
     .unwrap();
     let environment = command.get_envs().collect::<Vec<_>>();
@@ -44,6 +47,23 @@ fn helper_receives_exact_opaque_installation_identity_and_clears_unknown_values(
     assert!(environment
         .iter()
         .all(|(key, _)| *key != OsStr::new("CTX_TEST_SECRET")));
+    assert!(environment.iter().any(|(key, value)| {
+        *key == OsStr::new("CTX_PRO_CORE_PREPARATION_WORKERS") && *value == Some(OsStr::new("16"))
+    }));
+}
+
+#[test]
+fn helper_rejects_a_zero_preparation_worker_budget() {
+    let mut command = std::process::Command::new("ctx-pro-test");
+    let error = super::configure_environment_with_preparation_workers(
+        &mut command,
+        std::path::Path::new("/ctx/data"),
+        "6a1de1ab-c732-45ed-b3f8-bbf6ab1048e8",
+        None,
+        0,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("must be positive"));
 }
 
 #[cfg(unix)]
@@ -65,11 +85,12 @@ printf '%s' 'bounded-environment'
     fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
     let mut command = Command::new(&helper);
     command.env("CTX_TEST_SECRET", "must-not-survive");
-    super::configure_environment(
+    super::configure_environment_with_preparation_workers(
         &mut command,
         root.path(),
         "6a1de1ab-c732-45ed-b3f8-bbf6ab1048e8",
         None,
+        4,
     )
     .unwrap();
 
@@ -87,7 +108,7 @@ mod windows {
         process::Command,
     };
 
-    use super::super::{configure_environment, windows_system_root_from};
+    use super::super::{configure_environment_with_preparation_workers, windows_system_root_from};
 
     #[test]
     fn system_root_grows_the_api_buffer_without_reading_the_environment() {
@@ -133,11 +154,12 @@ mod windows {
             .env("CTX_TEST_SECRET", "must-not-survive")
             .env("SystemRoot", r"Z:\attacker-controlled");
 
-        configure_environment(
+        configure_environment_with_preparation_workers(
             &mut command,
             Path::new(r"C:\ctx\data"),
             "6a1de1ab-c732-45ed-b3f8-bbf6ab1048e8",
             Some(Path::new(r"C:\Program Files\Git\cmd\git.exe")),
+            8,
         )
         .unwrap();
 
@@ -153,6 +175,7 @@ mod windows {
             keys,
             [
                 "CTX_DATA_ROOT",
+                "CTX_PRO_CORE_PREPARATION_WORKERS",
                 "CTX_PRO_DATA_ROOT",
                 "CTX_PRO_GIT_EXECUTABLE",
                 "CTX_PRO_INSTALLATION_ID",

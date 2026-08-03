@@ -22,8 +22,6 @@ use super::lifecycle::lifecycle_manifest::{
     MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,
 };
 use super::lifecycle::ProInstallArgs;
-#[cfg(any(test, ctx_pro_qualification))]
-use super::qualification_helper::QualificationHelperBundle;
 
 const RELEASE_ACCEPT: &str = "application/json, application/problem+json";
 const MAX_RELEASE_RESPONSE_BYTES: u64 = 96 * 1024;
@@ -54,8 +52,6 @@ pub(crate) struct VerifiedArtifactBundle {
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) enum SetupArtifactBundle {
     Release(VerifiedArtifactBundle),
-    #[cfg(any(test, ctx_pro_qualification))]
-    Qualification(QualificationHelperBundle),
     #[cfg(ctx_pro_test_helper)]
     TestControl(crate::pro::test_control::TestControlHelperBundle),
 }
@@ -64,8 +60,6 @@ impl SetupArtifactBundle {
     pub(crate) fn verified_helper_path(&self) -> Result<&Path> {
         match self {
             Self::Release(bundle) => Ok(&bundle.artifact),
-            #[cfg(any(test, ctx_pro_qualification))]
-            Self::Qualification(bundle) => bundle.verified_path(),
             #[cfg(ctx_pro_test_helper)]
             Self::TestControl(bundle) => bundle.verified_path_ref(),
         }
@@ -177,13 +171,6 @@ pub(super) fn acquire_latest(
     installed_version: Option<&str>,
     config: ArtifactDeliveryConfig<'_>,
 ) -> Result<SetupArtifactBundle> {
-    #[cfg(ctx_pro_qualification)]
-    if let Some(bundle) =
-        QualificationHelperBundle::from_process_environment(config.release_trust.channel)?
-    {
-        return Ok(SetupArtifactBundle::Qualification(bundle));
-    }
-
     fetch_latest(data_root, installed_version, config).map(SetupArtifactBundle::Release)
 }
 

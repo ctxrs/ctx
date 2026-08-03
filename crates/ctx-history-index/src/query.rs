@@ -11,7 +11,8 @@ use filtering::*;
 pub(crate) use records::stored_event_record;
 use records::{
     core_event_fast_preflight, stored_core_event_record, stored_core_event_record_with_size,
-    EventAddressCandidate, SessionEventAddressCandidate,
+    stored_core_event_record_with_source_json, unique_required_bytes, EventAddressCandidate,
+    SessionEventAddressCandidate,
 };
 
 pub(crate) use verification::{

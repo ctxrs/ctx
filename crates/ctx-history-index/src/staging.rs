@@ -1,8 +1,5 @@
 use super::*;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-
-const CORE_RECORD_LEAF_DOMAIN: &[u8] = b"ctx-core-record-leaf-v1\0";
 
 #[derive(Clone)]
 pub(super) struct PendingSource {
@@ -84,15 +81,20 @@ pub(super) fn core_record_leaf(
     event_id: ctx_history_core::StableEntityId,
     encoded_core_record: &[u8],
 ) -> Result<[u8; 32]> {
-    let identity = event_id.encode_canonical()?;
-    let encoded_len =
-        u64::try_from(encoded_core_record.len()).map_err(|_| IndexError::CountOverflow)?;
-    let mut digest = Sha256::new();
-    digest.update(CORE_RECORD_LEAF_DOMAIN);
-    digest.update(identity);
-    digest.update(encoded_len.to_be_bytes());
-    digest.update(encoded_core_record);
-    Ok(digest.finalize().into())
+    Ok(ctx_history_core::core_record_leaf_digest(
+        event_id,
+        encoded_core_record,
+    )?)
+}
+
+pub(super) fn core_record_accumulator_leaf(
+    event_id: ctx_history_core::StableEntityId,
+    record_leaf: &[u8; 32],
+) -> Result<[u8; 32]> {
+    Ok(ctx_history_core::core_record_accumulator_leaf_digest(
+        event_id,
+        record_leaf,
+    )?)
 }
 
 /// Adds a domain-separated record leaf to the source's commutative 256-bit

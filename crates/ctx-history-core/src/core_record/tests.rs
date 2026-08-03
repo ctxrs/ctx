@@ -1069,14 +1069,25 @@ fn pull_request_outcome_must_match_its_referenced_repository_binding() {
 }
 
 #[test]
-fn every_repository_revision_changes_the_core_contract_fingerprint() {
+fn every_bound_revision_and_accumulator_identity_changes_the_core_contract_fingerprint() {
     let current = CoreContractRevisions::current();
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
+        "674bf76268eb8dd75e265585306738ba8ca40fc4fe8d142e13916112018f6215"
+    );
+    assert_eq!(
+        core_record_contract_fingerprint_for(CoreContractRevisions {
+            accumulator_identity: b"",
+            ..current
+        }),
         "4b98a0de80615ce7742d79622dc5743482d3ed4a8c7b48a002cdb681fd39c7a0"
     );
     for changed in [
+        CoreContractRevisions {
+            accumulator_identity: b"ctx-core-record-event-binding-v2\0",
+            ..current
+        },
         CoreContractRevisions {
             repository_contract: current.repository_contract + 1,
             ..current

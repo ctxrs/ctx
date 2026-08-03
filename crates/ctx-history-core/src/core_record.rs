@@ -27,6 +27,13 @@ use validation::{
 pub const CORE_RECORD_VERSION: u32 = 1;
 pub const CORE_NORMALIZATION_REVISION: u32 = 1;
 pub const CORE_CONTENT_POLICY_REVISION: u32 = 2;
+/// Frozen domain for the exact canonical Core-record leaf algorithm.
+pub const CORE_RECORD_LEAF_DOMAIN: &[u8] = b"ctx-core-record-leaf-v1\0";
+/// Frozen identity of the per-source Core-record accumulator algorithm.
+///
+/// This identity is part of the Core record contract fingerprint so a change
+/// to the accumulator cannot be interpreted under older generation semantics.
+pub const CORE_RECORD_ACCUMULATOR_IDENTITY: &[u8] = b"ctx-core-record-event-binding-v1\0";
 pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 7;
 pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 2;
 pub const CORE_BOUNDED_SHELL_SUBSET_REVISION: u32 = 1;
@@ -71,6 +78,7 @@ struct CoreContractRevisions {
     record: u32,
     normalization: u32,
     content_policy: u32,
+    accumulator_identity: &'static [u8],
     repository_contract: u32,
     repository_observation: u32,
     bounded_shell_subset: u32,
@@ -85,6 +93,7 @@ impl CoreContractRevisions {
             record: CORE_RECORD_VERSION,
             normalization: CORE_NORMALIZATION_REVISION,
             content_policy: CORE_CONTENT_POLICY_REVISION,
+            accumulator_identity: CORE_RECORD_ACCUMULATOR_IDENTITY,
             repository_contract: CORE_REPOSITORY_CONTRACT_REVISION,
             repository_observation: CORE_REPOSITORY_OBSERVATION_REVISION,
             bounded_shell_subset: CORE_BOUNDED_SHELL_SUBSET_REVISION,
@@ -112,17 +121,76 @@ fn core_record_contract_fingerprint_for(revisions: CoreContractRevisions) -> Str
             .repository_local_root_authorization_fingerprint
             .to_be_bytes(),
     );
-    digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    digest.update(revisions.accumulator_identity);
+    lowercase_sha256(&digest.finalize().into())
+}
+
+/// Computes the frozen leaf over an already-canonical stored Core record.
+///
+/// The exact input is `domain || canonical_event_id ||
+/// u64_be(encoded_core_record.len) || encoded_core_record`.
+pub fn core_record_leaf_digest(
+    event_id: StableEntityId,
+    encoded_core_record: &[u8],
+) -> CoreRecordResult<[u8; 32]> {
+    let canonical_event_id = event_id.encode_canonical()?;
+    let encoded_len = u64::try_from(encoded_core_record.len())
+        .map_err(|_| CoreRecordError::EncodedLengthOverflow)?;
+    let mut digest = Sha256::new();
+    digest.update(CORE_RECORD_LEAF_DOMAIN);
+    digest.update(canonical_event_id);
+    digest.update(encoded_len.to_be_bytes());
+    digest.update(encoded_core_record);
+    Ok(digest.finalize().into())
+}
+
+/// Computes the frozen per-record addend for a source accumulator.
+///
+/// The exact input is `accumulator_identity ||
+/// u64_be(canonical_event_id.len) || canonical_event_id || core_record_leaf`.
+pub fn core_record_accumulator_leaf_digest(
+    event_id: StableEntityId,
+    core_record_leaf: &[u8; 32],
+) -> CoreRecordResult<[u8; 32]> {
+    let canonical_event_id = event_id.encode_canonical()?;
+    let encoded_len = u64::try_from(canonical_event_id.len())
+        .map_err(|_| CoreRecordError::EncodedLengthOverflow)?;
+    let mut digest = Sha256::new();
+    digest.update(CORE_RECORD_ACCUMULATOR_IDENTITY);
+    digest.update(encoded_len.to_be_bytes());
+    digest.update(canonical_event_id);
+    digest.update(core_record_leaf);
+    Ok(digest.finalize().into())
+}
+
+/// Returns the lowercase leaf digest for one exact canonical `CoreRecord`.
+pub fn core_record_leaf_sha256(record: &CoreRecord) -> CoreRecordResult<String> {
+    let encoded = record.encode_stored()?;
+    Ok(lowercase_sha256(&core_record_leaf_digest(
+        record.event_id,
+        &encoded,
+    )?))
+}
+
+fn lowercase_sha256(digest: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        encoded.push(HEX[usize::from(byte >> 4)] as char);
+        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
 }
 
 #[derive(Debug, Error)]
 pub enum CoreRecordError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Projection(#[from] crate::ProjectionContractError),
+    #[error("encoded Core record length cannot be represented as u64")]
+    EncodedLengthOverflow,
     #[error("unsupported Core record version {0}")]
     UnsupportedVersion(u32),
     #[error("Core record field {field} is empty")]

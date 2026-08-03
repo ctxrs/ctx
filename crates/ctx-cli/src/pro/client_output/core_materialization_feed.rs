@@ -1,29 +1,46 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, Write};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    mpsc::{sync_channel, Receiver, SyncSender},
+    Arc, Condvar, Mutex,
+};
+use std::thread;
+use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES;
 use ctx_history_index::{
-    CoreEventPageBudget, GenerationManifest, SourceEventCursor, VerifiedIndex,
+    CoreEventPageBudget, CoreSourceEventPagePlan, GenerationManifest, SourceEventCursor,
+    StoredCoreRecordJson, VerifiedIndex,
 };
-#[cfg(test)]
-use ctx_pro_host_protocol::CoreSourceRemoval;
 use ctx_pro_host_protocol::{
-    core_record_sha256, ApplyCoreEventDeltaPageRequest, ApplyCoreSourceDeltaPageRequest,
-    BeginCoreMaterializationRequest, Capability, CoreEventDelta, CoreEventDeltaPage,
-    CoreEventDeltaPageApplied, CoreEventDeltaPageBuilder, CoreEventReplacement, CoreEventState,
-    CoreEventStatePage, CoreEventStatePageRequest, CoreEventTombstone, CoreGenerationHead,
-    CoreMaterializationBegan, CoreMaterializationFinished, CoreMaterializationReceipt,
-    CoreMaterializationReceiptIdentity, CoreSourceDelta, CoreSourceDeltaPage,
-    CoreSourceDeltaPageApplied, CoreSourceReconciliation, CoreSourceState,
-    FinishCoreMaterializationRequest, HelperMessage, HostMessage, StatusRequest,
-    MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES, MAX_CORE_EVENT_DELTA_PAGE_ITEMS,
+    core_record_digests_from_encoded, ApplyCoreEventDeltaPagesRequest,
+    ApplyCoreSourceDeltaPageRequest, BeginCoreMaterializationRequest, Capability, CoreEventDelta,
+    CoreEventDeltaPage, CoreEventReplacement, CoreEventState, CoreEventStatePage,
+    CoreEventStatePageRequest, CoreEventTombstone, CoreGenerationHead, CoreMaterializationBegan,
+    CoreMaterializationFinished, CoreMaterializationReceipt, CoreMaterializationReceiptIdentity,
+    CoreProjectionCurrentness, CoreSourceDelta, CoreSourceDeltaPage, CoreSourceDeltaPageApplied,
+    CoreSourceReconciliation, CoreSourceState, ErrorClass, FinishCoreMaterializationRequest,
+    HelperMessage, HostMessage, StatusRequest, MAX_CORE_EVENT_DELTA_PAGES,
+    MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES, MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
+    MAX_CORE_EVENT_DELTA_PAGE_ITEMS, MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES,
     MAX_CORE_EVENT_STATE_PAGE_ITEMS, MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
     MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES, MAX_CORE_SOURCE_STATES,
 };
+#[cfg(test)]
+use ctx_pro_host_protocol::{core_record_sha256, CoreSourceRemoval};
 use serde::Serialize;
 
 use super::*;
+#[cfg(test)]
+use crate::pro::core_worker_budget::{
+    core_launch_product_budget, worker_selection_for_test, CoreLaunchProductBudget,
+    MAX_HELPER_PREPARATION_WORKERS,
+};
+use crate::pro::core_worker_budget::{CoreWorkerLaunchSelection, MAX_CORE_PREFETCH_WORKERS};
+#[cfg(test)]
+use ctx_pro_host_protocol::JournalFinishActivity;
 
 // Complete content remains capped at 16 MiB. JSON escaping can expand one
 // otherwise-valid Core record, so encoded paging admits Core's validated
@@ -34,6 +51,20 @@ const CORE_RECORD_PAGE_BUDGET: CoreEventPageBudget = CoreEventPageBudget::new(
     MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES,
     MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
 );
+#[path = "core_materialization_feed/batching.rs"]
+mod batching;
+#[path = "core_materialization_feed/ordered_prefetch.rs"]
+mod ordered_prefetch;
+
+use batching::*;
+use ordered_prefetch::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoreFeedMode {
+    Fresh,
+    PartialResume,
+    CurrentReplay,
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct CoreMaterializationSyncReport {
@@ -46,10 +77,14 @@ pub(super) struct CoreMaterializationSyncReport {
     pub(super) event_delta_pages: u64,
     #[cfg(test)]
     pub(super) event_mutations: u64,
+    #[cfg(test)]
+    prefetch: CorePrefetchInstrumentationSnapshot,
     pub(super) replayed: bool,
 }
 
 trait CoreMaterializationConsumer {
+    fn status(&mut self, request: StatusRequest) -> Result<ctx_pro_host_protocol::StatusResult>;
+
     fn begin(
         &mut self,
         request: BeginCoreMaterializationRequest,
@@ -62,10 +97,14 @@ trait CoreMaterializationConsumer {
 
     fn event_states(&mut self, request: CoreEventStatePageRequest) -> Result<CoreEventStatePage>;
 
-    fn apply_event_delta(
+    fn apply_event_delta_pages(&mut self, pages: Vec<CoreEventDeltaPage>) -> Result<()>;
+
+    fn apply_prepared_event_delta_pages(
         &mut self,
-        request: ApplyCoreEventDeltaPageRequest,
-    ) -> Result<CoreEventDeltaPageApplied>;
+        request: PreparedEventDeltaPagesRequest,
+    ) -> Result<()> {
+        self.apply_event_delta_pages(request.into_typed_pages())
+    }
 
     fn finish(
         &mut self,
@@ -83,7 +122,29 @@ impl ProtocolCoreMaterializationConsumer {
     }
 }
 
+impl ProClient {
+    fn exchange_prepared_core_event_delta_pages(
+        &mut self,
+        request: &PreparedEventDeltaPagesRequest,
+        timeout: Duration,
+    ) -> Result<HelperMessage> {
+        self.exchange_with_frame_writer(timeout, |stdin, sequence, request_id| {
+            request
+                .write_frame(stdin, sequence, request_id)
+                .context("helper_crashed: write framed request")
+        })
+    }
+}
+
 impl CoreMaterializationConsumer for ProtocolCoreMaterializationConsumer {
+    fn status(&mut self, request: StatusRequest) -> Result<ctx_pro_host_protocol::StatusResult> {
+        match self.exchange(HostMessage::Status(request))? {
+            HelperMessage::Status(response) => Ok(response),
+            HelperMessage::Error(error) => Err(protocol_error(error)),
+            _ => bail!("invalid_response: helper returned a non-status response"),
+        }
+    }
+
     fn begin(
         &mut self,
         request: BeginCoreMaterializationRequest,
@@ -114,15 +175,20 @@ impl CoreMaterializationConsumer for ProtocolCoreMaterializationConsumer {
         }
     }
 
-    fn apply_event_delta(
+    fn apply_event_delta_pages(&mut self, pages: Vec<CoreEventDeltaPage>) -> Result<()> {
+        apply_batched_event_delta_pages_with(pages, &mut |message, remaining| {
+            self.client.exchange_borrowed(message, remaining)
+        })
+    }
+
+    fn apply_prepared_event_delta_pages(
         &mut self,
-        request: ApplyCoreEventDeltaPageRequest,
-    ) -> Result<CoreEventDeltaPageApplied> {
-        match self.exchange(HostMessage::ApplyCoreEventDeltaPage(request))? {
-            HelperMessage::CoreEventDeltaPageApplied(response) => Ok(response),
-            HelperMessage::Error(error) => Err(protocol_error(error)),
-            _ => bail!("invalid_response: helper returned a non-Core-event-delta response"),
-        }
+        request: PreparedEventDeltaPagesRequest,
+    ) -> Result<()> {
+        apply_prepared_batched_event_delta_pages_with(request, &mut |request, remaining| {
+            self.client
+                .exchange_prepared_core_event_delta_pages(request, remaining)
+        })
     }
 
     fn finish(
@@ -141,30 +207,59 @@ pub(super) fn sync_generation_pinned_core(
     data_root: &Path,
     index: &VerifiedIndex,
 ) -> Result<CoreMaterializationSyncReport> {
+    let selection = CoreWorkerLaunchSelection::from_runtime();
     let required = BTreeSet::from([Capability::Status, Capability::CoreMaterialization]);
     let mut consumer = ProtocolCoreMaterializationConsumer {
         client: ProClient::connect(data_root, &required)?,
     };
-    let status = match consumer.exchange(HostMessage::Status(StatusRequest {
+    let status = consumer.status(StatusRequest {
         requested_core_generation_id: Some(index.generation_id().to_owned()),
-    }))? {
-        HelperMessage::Status(status) => {
-            status
-                .validate()
-                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-            status
-        }
-        HelperMessage::Error(error) => return Err(protocol_error(error)),
-        _ => bail!("invalid_response: helper returned a non-status response"),
-    };
-    sync_core_feed(index, status.core_receipt.as_ref(), &mut consumer)
+    })?;
+    status
+        .validate()
+        .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+    sync_core_feed_with_launch(
+        index,
+        status.core_receipt.as_ref(),
+        &mut consumer,
+        selection,
+    )
 }
 
+#[cfg(test)]
 fn sync_core_feed<C: CoreMaterializationConsumer>(
     index: &VerifiedIndex,
     prior_receipt: Option<&CoreMaterializationReceipt>,
     consumer: &mut C,
 ) -> Result<CoreMaterializationSyncReport> {
+    let selection = CoreWorkerLaunchSelection::from_runtime();
+    sync_core_feed_with_launch(index, prior_receipt, consumer, selection)
+}
+
+#[cfg(test)]
+fn sync_core_feed_with_options<C: CoreMaterializationConsumer>(
+    index: &VerifiedIndex,
+    prior_receipt: Option<&CoreMaterializationReceipt>,
+    consumer: &mut C,
+    options: CoreFeedExecutionOptions,
+) -> Result<CoreMaterializationSyncReport> {
+    sync_core_feed_with_launch(
+        index,
+        prior_receipt,
+        consumer,
+        CoreWorkerLaunchSelection::explicit_test(options.prefetch_parallelism),
+    )
+}
+
+fn sync_core_feed_with_launch<C: CoreMaterializationConsumer>(
+    index: &VerifiedIndex,
+    prior_receipt: Option<&CoreMaterializationReceipt>,
+    consumer: &mut C,
+    selection: CoreWorkerLaunchSelection,
+) -> Result<CoreMaterializationSyncReport> {
+    let options = selection.execution_options();
+    let credits = Arc::new(EncodedPageCredits::new(CORE_PREFETCH_ENCODED_BYTE_BUDGET));
+    let instrumentation = Arc::new(CorePrefetchInstrumentation::default());
     let sources = core_source_states(index.manifest())?;
     let head = core_generation_head(index, &sources)?;
     if head.core_generation_id != index.generation_id() {
@@ -195,13 +290,30 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
         .validate_for_identity(&begin_identity)
         .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
 
+    let feed_mode = if began.replayed {
+        let replay_status = consumer.status(StatusRequest {
+            requested_core_generation_id: Some(head.core_generation_id.clone()),
+        })?;
+        replay_status
+            .validate()
+            .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+        replayed_core_feed_mode(
+            &head,
+            &began,
+            expected_prior_receipt.as_ref(),
+            &replay_status,
+        )?
+    } else {
+        CoreFeedMode::Fresh
+    };
+
     let mut source_delta_pages = 0_u32;
     let mut changed_sources = 0_u32;
     let mut removed_sources = 0_u32;
     let mut event_mutations = 0_u64;
     let mut event_delta_pages = 0_u64;
 
-    if !began.replayed {
+    if feed_mode != CoreFeedMode::CurrentReplay {
         let maximum_reconciliations = sources
             .len()
             .checked_add(MAX_CORE_SOURCE_STATES)
@@ -285,20 +397,24 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
                     })?;
             }
         }
-        for reconciliation in reconcile_sources {
-            let report = reconcile_source_events(
-                index,
-                &began.materialization_id,
-                reconciliation,
-                consumer,
-            )?;
-            event_delta_pages = event_delta_pages
-                .checked_add(report.pages)
-                .ok_or_else(|| anyhow!("invalid_response: Core event page count overflowed"))?;
-            event_mutations = event_mutations
-                .checked_add(report.mutations)
-                .ok_or_else(|| anyhow!("invalid_response: Core event mutation count overflowed"))?;
-        }
+        let report = reconcile_ordered_source_events(
+            index,
+            &began.materialization_id,
+            reconcile_sources,
+            consumer,
+            OrderedReconciliationOptions {
+                prefetch_parallelism: options.prefetch_parallelism,
+                exchange_mode: if feed_mode == CoreFeedMode::PartialResume {
+                    EventDeltaExchangeMode::OnePagePerExchange
+                } else {
+                    EventDeltaExchangeMode::Normal
+                },
+            },
+            &credits,
+            &instrumentation,
+        )?;
+        event_delta_pages = report.pages;
+        event_mutations = report.mutations;
     }
 
     let finish = FinishCoreMaterializationRequest {
@@ -323,6 +439,29 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
     if finished.receipt.materializer_revision != began.materializer_revision {
         bail!("invalid_response: terminal Core receipt changed materializer revision");
     }
+    let post_finish_status = consumer.status(StatusRequest {
+        requested_core_generation_id: Some(head.core_generation_id.clone()),
+    })?;
+    post_finish_status
+        .validate()
+        .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+    if post_finish_status.currentness != CoreProjectionCurrentness::Current
+        || post_finish_status.core_receipt.as_ref() != Some(&finished.receipt)
+    {
+        bail!("invalid_response: post-finish status did not expose the terminal Core receipt");
+    }
+    let _finish_activity = &post_finish_status
+        .storage_evidence
+        .as_ref()
+        .ok_or_else(|| anyhow!("invalid_response: post-finish status omitted storage evidence"))?
+        .journal_finish_activity;
+    selection.validate_observed_helper_peak(post_finish_status.core_preparation_peak_workers)?;
+    let (encoded_credit_final_bytes, encoded_credit_high_water_bytes) = credits.snapshot()?;
+    if encoded_credit_final_bytes != 0 {
+        bail!("internal: Core prefetch credits remained live after reconciliation");
+    }
+    #[cfg(not(test))]
+    let _ = encoded_credit_high_water_bytes;
 
     Ok(CoreMaterializationSyncReport {
         receipt: finished.receipt,
@@ -334,8 +473,56 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
         event_delta_pages,
         #[cfg(test)]
         event_mutations,
+        #[cfg(test)]
+        prefetch: instrumentation
+            .snapshot(encoded_credit_high_water_bytes, encoded_credit_final_bytes),
         replayed: began.replayed,
     })
+}
+
+fn replayed_core_feed_mode(
+    head: &CoreGenerationHead,
+    began: &CoreMaterializationBegan,
+    expected_prior_receipt: Option<&CoreMaterializationReceiptIdentity>,
+    status: &ctx_pro_host_protocol::StatusResult,
+) -> Result<CoreFeedMode> {
+    if status.requested_core_generation_id.as_deref() != Some(&head.core_generation_id) {
+        bail!("invalid_response: replayed Core status did not echo the requested generation");
+    }
+
+    match status.currentness {
+        CoreProjectionCurrentness::Partial => {
+            let status_prior_receipt = status
+                .core_receipt
+                .as_ref()
+                .map(CoreMaterializationReceiptIdentity::from_receipt)
+                .transpose()
+                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+            if status_prior_receipt.as_ref() != expected_prior_receipt {
+                bail!(
+                    "invalid_response: partial Core materialization prior receipt does not match its begin request"
+                );
+            }
+            Ok(CoreFeedMode::PartialResume)
+        }
+        CoreProjectionCurrentness::Current => {
+            let receipt = status.core_receipt.as_ref().ok_or_else(|| {
+                anyhow!("invalid_response: current Core replay omitted its terminal receipt")
+            })?;
+            receipt
+                .validate_for_head(head)
+                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+            if receipt.materializer_revision != began.materializer_revision {
+                bail!(
+                    "invalid_response: current Core replay receipt changed materializer revision"
+                );
+            }
+            Ok(CoreFeedMode::CurrentReplay)
+        }
+        currentness => bail!(
+            "invalid_response: replayed Core materialization reported contradictory {currentness:?} status"
+        ),
+    }
 }
 
 fn core_source_states(manifest: &GenerationManifest) -> Result<Vec<CoreSourceState>> {
@@ -364,9 +551,16 @@ fn core_generation_head(
     index: &VerifiedIndex,
     sources: &[CoreSourceState],
 ) -> Result<CoreGenerationHead> {
-    let manifest = index.manifest();
+    core_generation_head_from_manifest(index.manifest(), index.generation_id(), sources)
+}
+
+fn core_generation_head_from_manifest(
+    manifest: &GenerationManifest,
+    generation_id: &str,
+    sources: &[CoreSourceState],
+) -> Result<CoreGenerationHead> {
     CoreGenerationHead::new(
-        index.generation_id(),
+        generation_id,
         manifest.manifest_version,
         manifest.identity_version,
         manifest.core_record_contract_fingerprint.clone(),
@@ -575,29 +769,28 @@ struct EventReconciliationReport {
 }
 
 fn reconcile_source_events<C: CoreMaterializationConsumer>(
-    index: &VerifiedIndex,
+    generation_id: &str,
     materialization_id: &str,
     reconciliation: CoreSourceReconciliation,
+    current_pages: &mut CurrentPageStream<'_>,
     consumer: &mut C,
+    pending_batch: &mut EventDeltaPageBatchBuilder,
+    event_delta_exchange_mode: EventDeltaExchangeMode,
 ) -> Result<EventReconciliationReport> {
-    let current_source = match &reconciliation.delta {
-        CoreSourceDelta::Present(source) => Some(source),
-        CoreSourceDelta::Removed(_) => None,
-    };
     let mut state_after = None;
     let mut state_page_index = 0_u32;
     let mut state_terminal = false;
     let mut states = VecDeque::<CoreEventState>::new();
-    let mut current_cursor = None;
-    let mut current_terminal = current_source.is_none();
-    let mut current = VecDeque::<ctx_history_core::CoreRecord>::new();
-    let mut page_builder = CoreEventDeltaPageBuilder::new(
+    let mut current_terminal = current_pages.initially_terminal();
+    let mut current = VecDeque::<PreparedCurrentRecord>::new();
+    let mut current_credit = None;
+    let mut event_page_index = 0_u32;
+    let mut pending = EventDeltaPageBuilder::new(
         materialization_id,
-        index.generation_id(),
-        reconciliation.clone(),
-        0,
-    )
-    .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+        generation_id,
+        &reconciliation,
+        event_page_index,
+    )?;
     let mut pages = 0_u64;
     let mut mutations = 0_u64;
 
@@ -605,7 +798,7 @@ fn reconcile_source_events<C: CoreMaterializationConsumer>(
         if states.is_empty() && !state_terminal {
             let request = CoreEventStatePageRequest {
                 materialization_id: materialization_id.to_owned(),
-                core_generation_id: index.generation_id().to_owned(),
+                core_generation_id: generation_id.to_owned(),
                 reconciliation: reconciliation.clone(),
                 page_index: state_page_index,
                 after_event_id: state_after,
@@ -628,15 +821,18 @@ fn reconcile_source_events<C: CoreMaterializationConsumer>(
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("invalid_request: Core event state page overflowed"))?;
         }
-        if current.is_empty() && !current_terminal {
-            let source = current_source.ok_or_else(|| {
-                anyhow!("invalid_request: removed Core source unexpectedly requested records")
-            })?;
-            let (records, next_cursor, terminal) =
-                next_current_records(index, source, current_cursor.as_ref())?;
-            current = records.into();
-            current_cursor = next_cursor;
-            current_terminal = terminal;
+        if current.is_empty() {
+            current_credit = None;
+            if !current_terminal {
+                let PreparedCurrentPage {
+                    records,
+                    terminal,
+                    _encoded_credit,
+                } = current_pages.next_page()?;
+                current = records.into();
+                current_terminal = terminal;
+                current_credit = Some(_encoded_credit);
+            }
         }
 
         let delta = match (states.front(), current.front()) {
@@ -645,29 +841,33 @@ fn reconcile_source_events<C: CoreMaterializationConsumer>(
             (Some(state), None) => {
                 let state = state.clone();
                 states.pop_front();
-                Some(CoreEventDelta::Tombstoned(CoreEventTombstone {
+                Some(PreparedEventDelta::tombstoned(CoreEventTombstone {
                     event_id: state.event_id,
                     prior_core_record_sha256: state.core_record_sha256,
                 }))
             }
             (None, Some(_)) => {
-                Some(CoreEventDelta::Added(current.pop_front().ok_or_else(
+                Some(PreparedEventDelta::added(current.pop_front().ok_or_else(
                     || anyhow!("internal: missing current Core event"),
                 )?))
             }
             (Some(state), Some(record)) => {
-                match state.event_id.digest().cmp(&record.event_id.digest()) {
+                match state
+                    .event_id
+                    .digest()
+                    .cmp(&record.record.event_id.digest())
+                {
                     std::cmp::Ordering::Less => {
                         let state = states
                             .pop_front()
                             .ok_or_else(|| anyhow!("internal: missing prior Core event state"))?;
-                        Some(CoreEventDelta::Tombstoned(CoreEventTombstone {
+                        Some(PreparedEventDelta::tombstoned(CoreEventTombstone {
                             event_id: state.event_id,
                             prior_core_record_sha256: state.core_record_sha256,
                         }))
                     }
                     std::cmp::Ordering::Greater => {
-                        Some(CoreEventDelta::Added(current.pop_front().ok_or_else(
+                        Some(PreparedEventDelta::added(current.pop_front().ok_or_else(
                             || anyhow!("internal: missing current Core event"),
                         )?))
                     }
@@ -675,16 +875,14 @@ fn reconcile_source_events<C: CoreMaterializationConsumer>(
                         let state = states
                             .pop_front()
                             .ok_or_else(|| anyhow!("internal: missing prior Core event state"))?;
-                        let record = current
+                        let prepared = current
                             .pop_front()
                             .ok_or_else(|| anyhow!("internal: missing current Core event"))?;
-                        let current_sha256 = core_record_sha256(&record)
-                            .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
-                        (state.requires_replacement || current_sha256 != state.core_record_sha256)
-                            .then_some(CoreEventDelta::Replaced(CoreEventReplacement {
-                                prior_core_record_sha256: state.core_record_sha256,
-                                record,
-                            }))
+                        (state.requires_replacement
+                            || prepared.core_record_sha256 != state.core_record_sha256)
+                            .then(|| {
+                                PreparedEventDelta::replaced(state.core_record_sha256, prepared)
+                            })
                     }
                 }
             }
@@ -695,77 +893,83 @@ fn reconcile_source_events<C: CoreMaterializationConsumer>(
         mutations = mutations
             .checked_add(1)
             .ok_or_else(|| anyhow!("invalid_request: Core event mutation count overflowed"))?;
-        if let Some(page) = page_builder
-            .push(delta)
-            .map_err(|error| anyhow!("invalid_request: {}", error.message))?
-        {
-            send_event_delta_page(consumer, page)?;
+        if pending.is_full() {
+            let (deltas, wire_bytes) = pending.into_deltas_with_wire_bytes(false)?;
+            send_event_delta_page(
+                consumer,
+                pending_batch,
+                materialization_id,
+                generation_id,
+                &reconciliation,
+                event_page_index,
+                false,
+                deltas,
+                wire_bytes,
+                event_delta_exchange_mode,
+            )?;
             pages = pages.saturating_add(1);
+            event_page_index = event_page_index
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("invalid_request: Core event delta page overflowed"))?;
+            pending = EventDeltaPageBuilder::new(
+                materialization_id,
+                generation_id,
+                &reconciliation,
+                event_page_index,
+            )?;
+        }
+        if let Some(overflow) = pending.try_push(delta)? {
+            if pending.is_empty() {
+                return Err(anyhow!(
+                    "invalid_request: one Core event delta exceeds its page bound"
+                ));
+            }
+            let (deltas, wire_bytes) = pending.into_deltas_with_wire_bytes(false)?;
+            send_event_delta_page(
+                consumer,
+                pending_batch,
+                materialization_id,
+                generation_id,
+                &reconciliation,
+                event_page_index,
+                false,
+                deltas,
+                wire_bytes,
+                event_delta_exchange_mode,
+            )?;
+            pages = pages.saturating_add(1);
+            event_page_index = event_page_index
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("invalid_request: Core event delta page overflowed"))?;
+            pending = EventDeltaPageBuilder::new(
+                materialization_id,
+                generation_id,
+                &reconciliation,
+                event_page_index,
+            )?;
+            // The legacy builder carried a byte-split overflow directly into
+            // the next page. Preserve that behavior so a final singleton is
+            // judged with its actual `terminal: true` encoding at seal time.
+            pending.push_split_overflow(overflow)?;
         }
     }
 
-    send_event_delta_page(consumer, page_builder.finish())?;
-    pages = pages.saturating_add(1);
-    Ok(EventReconciliationReport { pages, mutations })
-}
-
-fn next_current_records(
-    index: &VerifiedIndex,
-    source: &CoreSourceState,
-    cursor: Option<&SourceEventCursor>,
-) -> Result<(
-    Vec<ctx_history_core::CoreRecord>,
-    Option<SourceEventCursor>,
-    bool,
-)> {
-    let source_page = index.core_source_event_page_with_budget(
-        &source.source,
-        cursor,
-        MAX_CORE_EVENT_DELTA_PAGE_ITEMS,
-        CORE_RECORD_PAGE_BUDGET,
+    let (deltas, wire_bytes) = pending.into_deltas_with_wire_bytes(true)?;
+    send_event_delta_page(
+        consumer,
+        pending_batch,
+        materialization_id,
+        generation_id,
+        &reconciliation,
+        event_page_index,
+        true,
+        deltas,
+        wire_bytes,
+        event_delta_exchange_mode,
     )?;
-    if source_page.generation_id != index.generation_id()
-        || !source_page.source.exact_descriptor_eq(&source.source)
-    {
-        bail!("core_generation_mismatch: Core record page escaped its pinned generation");
-    }
-    if source_page.items.len() > MAX_CORE_EVENT_DELTA_PAGE_ITEMS {
-        bail!("invalid_request: Core record page exceeded its item bound");
-    }
-    if source_page.encoded_core_bytes > CORE_RECORD_PAGE_BUDGET.maximum_encoded_core_bytes {
-        bail!(
-            "invalid_request: one Core record exceeds the {}-byte Pro page encoded-payload bound",
-            CORE_RECORD_PAGE_BUDGET.maximum_encoded_core_bytes
-        );
-    }
-    if source_page.content_bytes > CORE_RECORD_PAGE_BUDGET.maximum_content_bytes {
-        bail!(
-            "invalid_request: one Core record exceeds the {}-byte Pro page content bound",
-            CORE_RECORD_PAGE_BUDGET.maximum_content_bytes
-        );
-    }
-    let terminal = source_page.terminal;
-    let next_cursor = source_page.next_cursor;
-    let records = source_page
-        .items
-        .into_iter()
-        .map(|item| item.core_record)
-        .collect::<Vec<_>>();
-    Ok((records, next_cursor, terminal))
-}
-
-fn send_event_delta_page<C: CoreMaterializationConsumer>(
-    consumer: &mut C,
-    page: CoreEventDeltaPage,
-) -> Result<()> {
-    page.validate()
-        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
-    let acknowledgement_identity = page.acknowledgement_identity();
-    let request = ApplyCoreEventDeltaPageRequest { page };
-    let response = consumer.apply_event_delta(request)?;
-    response
-        .validate_for_identity(&acknowledgement_identity)
-        .map_err(|error| anyhow!("invalid_response: {}", error.message))
+    pages = pages.saturating_add(1);
+    drop(current_credit);
+    Ok(EventReconciliationReport { pages, mutations })
 }
 
 #[cfg(test)]

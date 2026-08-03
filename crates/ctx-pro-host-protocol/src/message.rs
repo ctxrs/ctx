@@ -4,9 +4,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    ApplyCoreEventDeltaPageRequest, ApplyCoreSourceDeltaPageRequest, AuthorizationRequest,
-    AuthorizationResult, BeginCoreMaterializationRequest, BlameRequest, BlameResult,
-    ConfirmGraphKeyDeletionRequest, CoreEventDeltaPageApplied, CoreEventStatePage,
+    ApplyCoreEventDeltaPageRequest, ApplyCoreEventDeltaPagesRequest,
+    ApplyCoreSourceDeltaPageRequest, AuthorizationRequest, AuthorizationResult,
+    BeginCoreMaterializationRequest, BlameRequest, BlameResult, ConfirmGraphKeyDeletionRequest,
+    CoreEventDeltaPageApplied, CoreEventDeltaPagesApplied, CoreEventStatePage,
     CoreEventStatePageRequest, CoreMaterializationBegan, CoreMaterializationFinished,
     CoreMaterializationReceipt, CoreSourceDeltaPageApplied, ErrorClass,
     FinishCoreMaterializationRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
@@ -189,6 +190,7 @@ pub enum HostMessage {
     ApplyCoreEventDeltaPage(ApplyCoreEventDeltaPageRequest),
     FinishCoreMaterialization(FinishCoreMaterializationRequest),
     Blame(BlameRequest),
+    ApplyCoreEventDeltaPages(ApplyCoreEventDeltaPagesRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -211,6 +213,7 @@ pub enum HelperMessage {
     CoreMaterializationFinished(CoreMaterializationFinished),
     Blame(BlameResult),
     Error(ProtocolError),
+    CoreEventDeltaPagesApplied(CoreEventDeltaPagesApplied),
 }
 
 /// Independently selectable helper behavior that exists in Protocol V1.
@@ -415,6 +418,88 @@ impl RepositoryCoverage {
     }
 }
 
+pub const MAX_JOURNAL_FINISH_WORKERS: u16 = 8;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JournalFinishActivity {
+    pub worker_limit: u16,
+    pub peak_workers: u16,
+    pub started_after_preparation: bool,
+}
+
+impl JournalFinishActivity {
+    pub fn validate(&self, journal_packs_written: u64) -> Result<(), ProtocolError> {
+        if self.worker_limit > MAX_JOURNAL_FINISH_WORKERS
+            || self.peak_workers > self.worker_limit
+            || u64::from(self.peak_workers) > journal_packs_written
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "Journal finish activity exceeds its worker or pack bound",
+            ));
+        }
+        if (self.worker_limit == 0 && self.peak_workers != 0)
+            || (self.worker_limit != 0 && journal_packs_written != 0 && self.peak_workers == 0)
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "Journal finish activity has an invalid zero or positive worker vector",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProStorageEvidence {
+    pub graph_manifest_schema: u16,
+    pub flat_format_version: u16,
+    pub materializer_checkpoint_version: u16,
+    pub journal_pack_format_version: u16,
+    pub legacy_journals_written: u64,
+    pub journal_pages_written: u64,
+    pub journal_packs_written: u64,
+    pub journal_finish_activity: JournalFinishActivity,
+}
+
+impl ProStorageEvidence {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.graph_manifest_schema != 3
+            || self.flat_format_version != 2
+            || self.materializer_checkpoint_version != 3
+            || self.journal_pack_format_version != 3
+            || self.legacy_journals_written != 0
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "Pro storage evidence has an unsupported format identity",
+            ));
+        }
+        if self.journal_pages_written == 0
+            || self.journal_packs_written == 0
+            || self.journal_packs_written > self.journal_pages_written
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "Pro storage evidence has invalid journal publication counts",
+            ));
+        }
+        self.journal_finish_activity
+            .validate(self.journal_packs_written)?;
+        Ok(())
+    }
+}
+
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusResult {
@@ -423,18 +508,36 @@ pub struct StatusResult {
     pub core_receipt: Option<CoreMaterializationReceipt>,
     pub coverage: MaterializedCoverage,
     pub repository_coverage: RepositoryCoverage,
+    pub core_preparation_peak_workers: u16,
     pub access: ProAccessStatus,
     pub supported_operations: BTreeSet<ProOperation>,
     pub available_operations: BTreeSet<ProOperation>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub storage_evidence: Option<ProStorageEvidence>,
 }
 
 impl StatusResult {
     pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.core_preparation_peak_workers > 16 {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "Core preparation peak workers cannot exceed 16",
+            ));
+        }
         if let Some(receipt) = &self.core_receipt {
             receipt.validate()?;
         }
         self.repository_coverage
             .validate_for_receipt(self.core_receipt.as_ref())?;
+        if let Some(evidence) = &self.storage_evidence {
+            evidence.validate()?;
+            if self.core_receipt.is_none() {
+                return Err(ProtocolError::new(
+                    ErrorClass::Sequence,
+                    "Pro storage evidence requires a completed Core receipt",
+                ));
+            }
+        }
         if let Some(generation) = &self.requested_core_generation_id {
             validate_lower_sha256(generation, "requested Core generation")?;
         }

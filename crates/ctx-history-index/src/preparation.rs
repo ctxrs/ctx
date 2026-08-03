@@ -99,6 +99,8 @@ impl CoreRecordPreparer {
         let encoded_core_record: Arc<[u8]> = record.encode_stored()?.into();
         let encoded_core_bytes = encoded_core_record.len();
         let record_leaf = staging::core_record_leaf(event_id, &encoded_core_record)?;
+        let record_accumulator_leaf =
+            staging::core_record_accumulator_leaf(event_id, &record_leaf)?;
         let document = IndexDocument::from_core(
             self.fields,
             record,
@@ -113,7 +115,7 @@ impl CoreRecordPreparer {
             source_token,
             encoded_core_bytes,
             encoded_core_record,
-            record_leaf,
+            record_accumulator_leaf,
             document,
         })
     }
@@ -160,7 +162,7 @@ pub struct PreparedCoreRecord {
     source_token: String,
     encoded_core_bytes: usize,
     encoded_core_record: Arc<[u8]>,
-    record_leaf: [u8; 32],
+    record_accumulator_leaf: [u8; 32],
     document: IndexDocument,
 }
 
@@ -185,7 +187,7 @@ impl PreparedCoreRecord {
     pub(crate) fn into_parts(self) -> PreparedCoreRecordParts {
         debug_assert_eq!(self.encoded_core_bytes, self.encoded_core_record.len());
         PreparedCoreRecordParts {
-            record_leaf: self.record_leaf,
+            record_accumulator_leaf: self.record_accumulator_leaf,
             document: self.document,
         }
     }
@@ -202,7 +204,7 @@ impl fmt::Debug for PreparedCoreRecord {
 }
 
 pub(crate) struct PreparedCoreRecordParts {
-    pub(crate) record_leaf: [u8; 32],
+    pub(crate) record_accumulator_leaf: [u8; 32],
     pub(crate) document: IndexDocument,
 }
 

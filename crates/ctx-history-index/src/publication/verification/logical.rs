@@ -206,7 +206,9 @@ fn verify_segment(
             .count
             .checked_add(1)
             .ok_or(IndexError::CountOverflow)?;
-        accumulate_core_record(&mut source.accumulator, &record.core_record_leaf);
+        let accumulator_leaf =
+            core_record_accumulator_leaf(record.core_record.event_id, &record.core_record_leaf)?;
+        accumulate_core_record(&mut source.accumulator, &accumulator_leaf);
         parent_session_documents = parent_session_documents
             .checked_add(u64::from(record.identities.parent_session.is_some()))
             .ok_or(IndexError::CountOverflow)?;

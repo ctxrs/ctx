@@ -189,6 +189,12 @@ pub(super) fn event_delta_page() -> CoreEventDeltaPage {
     }
 }
 
+pub(super) fn event_delta_pages_request() -> ApplyCoreEventDeltaPagesRequest {
+    ApplyCoreEventDeltaPagesRequest {
+        pages: vec![event_delta_page()],
+    }
+}
+
 pub(super) fn finish_request() -> FinishCoreMaterializationRequest {
     FinishCoreMaterializationRequest {
         materialization_id: materialization_id(),
