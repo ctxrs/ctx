@@ -69,8 +69,9 @@ pub(crate) use publication::{
     INDEX_GENERATIONS_DIRECTORY,
 };
 pub use query::{
-    AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeError,
-    CoreEventRangePage, CoreEventRangeSelection, CoreEventRecord, CoreSemanticEventPage,
+    AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeDirection,
+    CoreEventRangeDomain, CoreEventRangeError, CoreEventRangeFilters, CoreEventRangePage,
+    CoreEventRangeScope, CoreEventRangeSelection, CoreEventRecord, CoreSemanticEventPage,
     CoreSessionEventPage, CoreSourceEventPage, CoreSourceEventPagePlan, EventRecord,
     EventSearchCandidate, EventSearchFilters, ExcludedSessionTree, LexicalQueryLimits,
     SemanticEligibility, SemanticEventCursor, SemanticEventPage, SessionEventCoordinate,

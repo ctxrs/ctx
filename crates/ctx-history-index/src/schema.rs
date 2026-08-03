@@ -38,6 +38,7 @@ pub(crate) struct Fields {
     pub(crate) source_event_order: Field,
     pub(crate) session_event_order: Field,
     pub(crate) semantic_event_order: Field,
+    pub(crate) event_range_order: Field,
 }
 
 pub(crate) fn validate_schema(schema: &Schema) -> Result<()> {
@@ -87,6 +88,7 @@ pub(crate) fn lexical_schema() -> Schema {
     builder.add_bytes_field("source_event_order", INDEXED);
     builder.add_bytes_field("session_event_order", INDEXED);
     builder.add_bytes_field("semantic_event_order", INDEXED);
+    builder.add_bytes_field("event_range_order", FAST | INDEXED);
     builder.build()
 }
 
@@ -124,6 +126,7 @@ pub(crate) fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         source_event_order: required_field(schema, "source_event_order")?,
         session_event_order: required_field(schema, "session_event_order")?,
         semantic_event_order: required_field(schema, "semantic_event_order")?,
+        event_range_order: required_field(schema, "event_range_order")?,
     })
 }
 

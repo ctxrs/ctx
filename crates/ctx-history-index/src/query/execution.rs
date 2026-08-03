@@ -521,7 +521,7 @@ impl SegmentCollector for SessionIdSegmentCollector {
     }
 }
 
-fn validate_core_event_page_budget(budget: CoreEventPageBudget) -> Result<()> {
+pub(super) fn validate_core_event_page_budget(budget: CoreEventPageBudget) -> Result<()> {
     for (field, requested, maximum) in [
         (
             "encoded Core",
@@ -545,7 +545,7 @@ fn validate_core_event_page_budget(budget: CoreEventPageBudget) -> Result<()> {
     Ok(())
 }
 
-fn core_event_page_budget_admits(
+pub(super) fn core_event_page_budget_admits(
     budget: CoreEventPageBudget,
     retained_encoded_core_bytes: usize,
     retained_content_bytes: usize,
