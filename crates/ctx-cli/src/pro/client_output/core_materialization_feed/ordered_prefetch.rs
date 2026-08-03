@@ -34,7 +34,8 @@ pub(super) struct CorePrefetchInstrumentationSnapshot {
     pub(super) maximum_active_workers: usize,
     pub(super) planned_pages: usize,
     pub(super) materialized_pages: usize,
-    pub(super) hashed_records: usize,
+    pub(super) decoded_records: usize,
+    pub(super) decoded_record_bytes: usize,
     pub(super) encoded_credit_high_water_bytes: usize,
     pub(super) encoded_credit_final_bytes: usize,
     pub(super) cancelled_waits_or_sends: usize,
@@ -48,7 +49,8 @@ pub(super) struct CorePrefetchInstrumentation {
     maximum_active_workers: AtomicUsize,
     planned_pages: AtomicUsize,
     materialized_pages: AtomicUsize,
-    hashed_records: AtomicUsize,
+    decoded_records: AtomicUsize,
+    decoded_record_bytes: AtomicUsize,
     cancelled_waits_or_sends: AtomicUsize,
 }
 
@@ -79,9 +81,11 @@ impl CorePrefetchInstrumentation {
             .fetch_add(1, AtomicOrdering::Relaxed);
     }
 
-    fn records_hashed(&self, records: usize) {
-        self.hashed_records
+    fn records_decoded(&self, records: usize, record_bytes: usize) {
+        self.decoded_records
             .fetch_add(records, AtomicOrdering::Relaxed);
+        self.decoded_record_bytes
+            .fetch_add(record_bytes, AtomicOrdering::Relaxed);
     }
 
     fn cancelled(&self) {
@@ -101,7 +105,8 @@ impl CorePrefetchInstrumentation {
             maximum_active_workers: self.maximum_active_workers.load(AtomicOrdering::Relaxed),
             planned_pages: self.planned_pages.load(AtomicOrdering::Relaxed),
             materialized_pages: self.materialized_pages.load(AtomicOrdering::Relaxed),
-            hashed_records: self.hashed_records.load(AtomicOrdering::Relaxed),
+            decoded_records: self.decoded_records.load(AtomicOrdering::Relaxed),
+            decoded_record_bytes: self.decoded_record_bytes.load(AtomicOrdering::Relaxed),
             encoded_credit_high_water_bytes,
             encoded_credit_final_bytes,
             cancelled_waits_or_sends: self.cancelled_waits_or_sends.load(AtomicOrdering::Relaxed),
@@ -523,6 +528,7 @@ fn prepare_planned_current_page(
             page_budget.maximum_content_bytes
         );
     }
+    instrumentation.records_decoded(source_page.items.len(), source_page.encoded_core_bytes);
     let terminal = source_page.terminal;
     let next_cursor = source_page.next_cursor;
     let records = source_page
@@ -540,7 +546,6 @@ fn prepare_planned_current_page(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    instrumentation.records_hashed(records.len());
     Ok(Some((
         PreparedCurrentPage {
             records,

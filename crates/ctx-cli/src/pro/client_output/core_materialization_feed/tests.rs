@@ -29,13 +29,19 @@ mod batching_replay;
 mod materialization;
 #[path = "tests/prefetch.rs"]
 mod prefetch;
+#[path = "tests/proportionality.rs"]
+mod proportionality;
 #[path = "tests/status.rs"]
 mod status;
 
 fn source(name: &str) -> SourceKey {
+    source_with_format("fixture_jsonl", name)
+}
+
+fn source_with_format(source_format: &str, name: &str) -> SourceKey {
     SourceKey::derive(
         "fixture",
-        "fixture_jsonl",
+        source_format,
         "fixture-v1",
         1,
         SourceAnchor::provider_native("session-file", TypedKey::utf8(name).unwrap()).unwrap(),
