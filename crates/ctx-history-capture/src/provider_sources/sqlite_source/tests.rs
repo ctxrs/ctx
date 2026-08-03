@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
-    io::{Seek, SeekFrom, Write},
+    io::{self, Seek, SeekFrom, Write},
     path::Path,
     sync::{Arc, Barrier},
     thread,
@@ -19,7 +19,8 @@ use sha2::{Digest, Sha256};
 use crate::provider::source_backed::SourceBackedCurrentSourceProgressStage;
 
 use super::{
-    certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
+    certify_root_handle_sqlite_source_snapshot_copy_budget_for_test, map_revalidation_error,
+    map_revalidation_io_error,
     open_root_handle_sqlite_source_online_backup_after_database_copy_for_test,
     open_root_handle_sqlite_source_online_backup_before_identity_check_for_test,
     open_root_handle_sqlite_source_online_backup_with_scratch_limit_for_test,
@@ -132,6 +133,85 @@ fn provider_content_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
             name == OsStr::new("provider.sqlite") || name == OsStr::new("provider.sqlite-wal")
         })
         .collect()
+}
+
+fn assert_revalidation_resource_unavailable(error: SqliteSourceAccessError) {
+    assert!(error.is_retryable_resource_unavailable());
+    assert!(matches!(
+        error,
+        SqliteSourceAccessError::ResourceUnavailable { .. }
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn sqlite_authority_revalidation_preserves_descriptor_exhaustion() {
+    let path = Path::new("/provider/provider.sqlite");
+    for code in [libc::EMFILE, libc::ENFILE] {
+        let error = map_revalidation_io_error(
+            io::Error::from_raw_os_error(code),
+            "retaining SQLite authority in the regression test",
+            path,
+        );
+        match &error {
+            SqliteSourceAccessError::ResourceUnavailable {
+                operation,
+                path: error_path,
+                source,
+            } => {
+                assert_eq!(
+                    *operation,
+                    "retaining SQLite authority in the regression test"
+                );
+                assert_eq!(error_path, path);
+                assert_eq!(source.raw_os_error(), Some(code));
+            }
+            other => panic!("unexpected revalidation error: {other:?}"),
+        }
+        assert_revalidation_resource_unavailable(error);
+    }
+}
+
+#[test]
+fn sqlite_authority_revalidation_preserves_portable_resource_exhaustion() {
+    let path = Path::new("provider.sqlite");
+    for kind in [
+        io::ErrorKind::OutOfMemory,
+        io::ErrorKind::StorageFull,
+        io::ErrorKind::QuotaExceeded,
+    ] {
+        let error = map_revalidation_io_error(
+            io::Error::from(kind),
+            "retaining SQLite authority in the portable regression test",
+            path,
+        );
+        assert!(matches!(
+            &error,
+            SqliteSourceAccessError::ResourceUnavailable { source, .. }
+                if source.kind() == kind
+        ));
+        assert_revalidation_resource_unavailable(error);
+    }
+}
+
+#[test]
+fn sqlite_authority_revalidation_keeps_mutation_as_source_changed() {
+    assert!(matches!(
+        map_revalidation_error(SqliteSourceAccessError::ConnectionIdentityMismatch),
+        SqliteSourceAccessError::SourceChanged
+    ));
+    assert!(matches!(
+        map_revalidation_error(SqliteSourceAccessError::SourceChanged),
+        SqliteSourceAccessError::SourceChanged
+    ));
+    assert!(matches!(
+        map_revalidation_io_error(
+            io::Error::from(io::ErrorKind::NotFound),
+            "reopening mutated SQLite authority in the regression test",
+            Path::new("provider.sqlite"),
+        ),
+        SqliteSourceAccessError::SourceChanged
+    ));
 }
 
 #[test]
