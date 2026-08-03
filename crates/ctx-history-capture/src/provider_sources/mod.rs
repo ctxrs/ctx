@@ -45,14 +45,14 @@ pub(crate) use resolvers::{
     CrushProjectInventorySelectorError,
 };
 pub use specs::{provider_source_spec, provider_source_specs};
-#[cfg(test)]
-pub(crate) use sqlite_source::SqliteSourceSnapshotCounters;
 pub(crate) use sqlite_source::{
     open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
     SqliteArtifactKind, SqliteCleanupStatus, SqliteFailurePhase, SqliteLogicalSnapshot,
-    SqliteRetryDecision, SqliteSourceAccessError, SqliteSourceDirectoryAuthority,
-    SqliteSourceEvidence, SqliteSourceProgressError, SqliteSourceReadSnapshot,
+    SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+    SqliteSourceProgressError, SqliteSourceReadSnapshot,
 };
+#[cfg(test)]
+pub(crate) use sqlite_source::{SqliteRetryDecision, SqliteSourceSnapshotCounters};
 pub use types::{
     DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderCatalogSupport,
     ProviderDefaultLocation, ProviderImportSupport, ProviderSource, ProviderSourceKind,

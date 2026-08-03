@@ -1016,6 +1016,7 @@ pub(crate) struct SqliteSourceReadSnapshot {
     evidence: SqliteSourceEvidence,
     policy: SqliteSourceSnapshotPolicy,
     admitted_revision_is_replay_safe: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
     certification: Option<SqliteSnapshotCertification>,
     #[cfg(test)]
     strategy: SqliteSourceSnapshotStrategy,
