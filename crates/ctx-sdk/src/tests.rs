@@ -3,6 +3,8 @@ use std::fs;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::process::Child;
 
 #[cfg(unix)]
 fn spawn_json_shell(body: &str) -> Child {
