@@ -53,7 +53,7 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-claude-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "claude-session";
 const LOGICAL_EVENT_KIND: &str = "claude-event";
 const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v6";
-const PARSER_REVISION: &str = "claude-shared-jsonl-v5-complete-content-blocks";
+const PARSER_REVISION: &str = "claude-shared-jsonl-v6-pull-request-association";
 const MAX_PENDING_CALLS: usize = 4096;
 const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;
 
@@ -463,6 +463,7 @@ impl JsonlFamilyProjector for ClaudeProjector {
                             input.outcome_output_repository_path =
                                 linked.outcome_output_repository_path;
                             input.outcome_observations = linked.outcomes;
+                            input.pull_request_associations = linked.pull_request_associations;
                             input.outcome_abstentions = linked.abstentions;
                         }
                     }

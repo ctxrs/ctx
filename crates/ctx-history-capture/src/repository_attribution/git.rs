@@ -20,6 +20,7 @@ use ctx_history_core::{
 };
 mod geometry;
 mod parsing;
+mod pull_request;
 
 pub(super) use geometry::{negative_route_geometry_state, validate_candidate_route};
 use geometry::{
@@ -36,11 +37,12 @@ use parsing::{
 const MAX_PARENT_COMPONENTS: usize = 64;
 const MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_RESOLVED_COMMIT_FILES: usize = 256;
+const MAX_PULL_REQUEST_CONTAINS_COMMITS: usize = 256;
 const MAX_REMOTES: usize = 64;
 const GIT_TIMEOUT: Duration = Duration::from_secs(2);
 // Two repositories, each checked by two snapshots of two Git subprocesses.
 pub(super) const MAX_FULL_CERTIFICATIONS_PER_EVENT: usize = 2;
-pub(super) const MAX_GIT_SUBPROCESSES_PER_EVENT: usize = 8;
+pub(super) const MAX_GIT_SUBPROCESSES_PER_EVENT: usize = 10;
 const MAX_GIT_PROBE_TIME_PER_EVENT: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -126,6 +128,11 @@ pub(super) struct ResolvedCommitFile {
     pub(super) path: String,
     pub(super) prior_path: Option<String>,
     pub(super) kind: RepositoryFileObservationKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResolvedPullRequestMergeMembership {
+    pub(super) contains_commits: Vec<GitObjectId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,6 +387,19 @@ impl GitCertifier {
         self.git_subprocesses.load(Ordering::Relaxed)
     }
 
+    fn executable_state(
+        &self,
+    ) -> Result<([u8; 32], u64, Option<std::time::SystemTime>), ProbeFailure> {
+        let path = Path::new(&self.executable);
+        if !path.is_absolute() {
+            return Err(ProbeFailure::PlatformUnsupported);
+        }
+        let identity = path_identity_fingerprint(path)?;
+        let metadata = fs::metadata(path)
+            .map_err(|_| ProbeFailure::Unsafe("git_executable_metadata_failed"))?;
+        Ok((identity, metadata.len(), metadata.modified().ok()))
+    }
+
     fn inspect_once(
         &self,
         directory: &Path,
@@ -479,8 +499,10 @@ impl GitCertifier {
             .env("GIT_OPTIONAL_LOCKS", "0")
             .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_LFS_SKIP_SMUDGE", "1")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
             .env("LC_ALL", "C")
             .arg("--no-optional-locks")
+            .arg("--no-replace-objects")
             .arg("-c")
             .arg(format!("core.hooksPath={null_device}"))
             .arg("-c")
@@ -489,6 +511,8 @@ impl GitCertifier {
             .arg("core.fsmonitor=false")
             .arg("-c")
             .arg("maintenance.auto=false")
+            .arg("-c")
+            .arg("protocol.allow=never")
             .arg("-C")
             .arg(directory)
             .args(arguments)

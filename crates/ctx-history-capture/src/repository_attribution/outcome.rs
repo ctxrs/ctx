@@ -1,18 +1,22 @@
 use std::{collections::HashSet, path::Path};
 
 use ctx_history_core::{
-    GitObjectFormat, GitObjectId, RepositoryAbstentionReason, RepositoryAlias, RepositoryAliasKind,
+    GitObjectFormat, GitObjectId, RepositoryAbstentionReason, RepositoryAlias,
     RepositoryObjectReplacement, RepositoryOutcomeKind, RepositoryOutcomeLinkage,
-    RepositoryOutcomeObservation, RepositoryPullRequestIdentity,
-    CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    RepositoryOutcomeObservation, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
 };
 use serde_json::{Map, Value};
-use url::Url;
+
+#[path = "outcome/pull_request.rs"]
+mod pull_request;
+
+use pull_request::{exact_pr_create_result, exact_pr_merge_result, pr_matches_plan};
 
 use super::shell::BoundedCommitProducer;
 use super::{
-    bounded_outcome_plan, lexical_absolute, BoundedOutcomeOperation, BoundedOutcomePlan,
-    BoundedOutcomePlanDisposition,
+    bounded_outcome_plan, exact_pull_request_association, lexical_absolute,
+    BoundedOutcomeOperation, BoundedOutcomePlan, BoundedOutcomePlanDisposition,
+    UnscopedPullRequestAssociationObservation,
 };
 use crate::OutputOutcome;
 
@@ -67,16 +71,65 @@ pub(crate) struct LinkedOutcomeEvidence {
     pub(crate) outcome_operation_repository_path: Option<String>,
     pub(crate) outcome_output_repository_path: Option<String>,
     pub(crate) outcomes: Vec<UnscopedOutcomeObservation>,
+    pub(crate) pull_request_associations: Vec<UnscopedPullRequestAssociationObservation>,
     pub(crate) abstentions: Vec<(RepositoryAbstentionReason, &'static str)>,
 }
 
 pub(crate) fn linked_outcome_evidence(
     input: LinkedOutcomeInput<'_>,
 ) -> Option<LinkedOutcomeEvidence> {
+    let declared_base = input
+        .declared_workdir
+        .and_then(|value| lexical_absolute(value, None));
     let base = input
         .declared_workdir
         .or(input.session_cwd)
         .and_then(|value| lexical_absolute(value, None));
+    if let Some(base) = declared_base.as_deref().filter(|base| {
+        super::shell::bounded_pull_request_association_query(input.command, base).is_some()
+    }) {
+        let operation_path = Some(base.to_string_lossy().into_owned());
+        if input.result_outcome != OutputOutcome::Success {
+            return Some(abstained(
+                operation_path,
+                None,
+                RepositoryAbstentionReason::OutcomeResultInadmissible,
+                "recognized_pull_request_association_query_did_not_succeed",
+            ));
+        }
+        let Some(linkage) = exact_result_linkage(&input) else {
+            return Some(abstained(
+                operation_path,
+                None,
+                RepositoryAbstentionReason::ProviderOutputUnjoined,
+                "pull_request_association_linkage_is_missing_or_ambiguous",
+            ));
+        };
+        let Some(association) = exact_pull_request_association(
+            input.command,
+            base.to_str()?,
+            input.result_output,
+            linkage,
+        ) else {
+            return Some(abstained(
+                operation_path,
+                None,
+                RepositoryAbstentionReason::OutcomeResultInadmissible,
+                "linked_result_has_no_exact_pull_request_association",
+            ));
+        };
+        return Some(LinkedOutcomeEvidence {
+            provider_native_repository_aliases: vec![association
+                .pull_request
+                .forge_repository
+                .clone()],
+            outcome_operation_repository_path: Some(association.repository_path.clone()),
+            outcome_output_repository_path: None,
+            outcomes: Vec::new(),
+            pull_request_associations: vec![association],
+            abstentions: Vec::new(),
+        });
+    }
     let plan = match base.as_deref() {
         Some(base) => bounded_outcome_plan(input.command, base),
         None => match bounded_outcome_plan(input.command, Path::new("/")) {
@@ -128,31 +181,13 @@ pub(crate) fn linked_outcome_evidence(
             "recognized_outcome_command_did_not_succeed",
         ));
     }
-    if input.origin_call_id.is_empty()
-        || input.result_call_id.is_empty()
-        || input.origin_call_id.len() > MAX_LINKAGE_CALL_ID_BYTES
-        || input.result_call_id.len() > MAX_LINKAGE_CALL_ID_BYTES
-        || input
-            .continuation_call_id_sha256
-            .iter()
-            .collect::<HashSet<_>>()
-            .len()
-            != input.continuation_call_id_sha256.len()
-    {
+    let Some(linkage) = exact_result_linkage(&input) else {
         return Some(abstained(
             operation_path,
             output_path,
             RepositoryAbstentionReason::ProviderOutputUnjoined,
             "outcome_linkage_is_missing_oversized_or_ambiguous",
         ));
-    }
-    let linkage = RepositoryOutcomeLinkage {
-        provider: input.provider.to_owned(),
-        origin_call_id: input.origin_call_id.to_owned(),
-        result_call_id: input.result_call_id.to_owned(),
-        origin_event_sequence: input.origin_event_sequence,
-        continuation_call_id_sha256: input.continuation_call_id_sha256.to_vec(),
-        result_record_sha256: input.result_record_sha256,
     };
     let parsed = parse_operation_result(
         input.result_output,
@@ -167,6 +202,7 @@ pub(crate) fn linked_outcome_evidence(
             outcome_operation_repository_path: operation_path,
             outcome_output_repository_path: output_path,
             outcomes: vec![(*outcome).into()],
+            pull_request_associations: Vec::new(),
             abstentions: Vec::new(),
         }),
         OperationResult::Deferred(deferred) => Some(LinkedOutcomeEvidence {
@@ -174,6 +210,7 @@ pub(crate) fn linked_outcome_evidence(
             outcome_operation_repository_path: operation_path,
             outcome_output_repository_path: output_path,
             outcomes: vec![UnscopedOutcomeObservation::DeferredCommit(deferred)],
+            pull_request_associations: Vec::new(),
             abstentions: if matches!(
                 plan.operation,
                 BoundedOutcomeOperation::Commit {
@@ -204,6 +241,32 @@ pub(crate) fn linked_outcome_evidence(
     }
 }
 
+fn exact_result_linkage(input: &LinkedOutcomeInput<'_>) -> Option<RepositoryOutcomeLinkage> {
+    if input.origin_call_id.is_empty()
+        || input.result_call_id.is_empty()
+        || input.origin_call_id.len() > MAX_LINKAGE_CALL_ID_BYTES
+        || input.result_call_id.len() > MAX_LINKAGE_CALL_ID_BYTES
+        || input.result_record_sha256 == [0; 32]
+        || input.continuation_call_id_sha256.contains(&[0; 32])
+        || input
+            .continuation_call_id_sha256
+            .iter()
+            .collect::<HashSet<_>>()
+            .len()
+            != input.continuation_call_id_sha256.len()
+    {
+        return None;
+    }
+    Some(RepositoryOutcomeLinkage {
+        provider: input.provider.to_owned(),
+        origin_call_id: input.origin_call_id.to_owned(),
+        result_call_id: input.result_call_id.to_owned(),
+        origin_event_sequence: input.origin_event_sequence,
+        continuation_call_id_sha256: input.continuation_call_id_sha256.to_vec(),
+        result_record_sha256: input.result_record_sha256,
+    })
+}
+
 fn abstained(
     operation_path: Option<String>,
     output_path: Option<String>,
@@ -215,6 +278,7 @@ fn abstained(
         outcome_operation_repository_path: operation_path,
         outcome_output_repository_path: output_path,
         outcomes: Vec::new(),
+        pull_request_associations: Vec::new(),
         abstentions: vec![(reason, detail)],
     }
 }
@@ -515,51 +579,6 @@ fn valid_lineage(lineage: &[RepositoryObjectReplacement]) -> bool {
     true
 }
 
-fn exact_pr_create_result(output: &Value) -> Option<RepositoryPullRequestIdentity> {
-    if let Some(url) = output.as_str() {
-        return pull_request_from_url(url.trim());
-    }
-    pull_request_from_exact_object(exact_json_object(output)?)
-}
-
-fn exact_pr_merge_result(output: &Value) -> Option<(RepositoryPullRequestIdentity, GitObjectId)> {
-    let object = exact_json_object(output)?;
-    let allowed = ["url", "number", "id", "node_id", "merge_commit_oid"];
-    if !keys_are_subset(object, &allowed)
-        || object.len() < 2
-        || !object.contains_key("url")
-        || !object.contains_key("merge_commit_oid")
-    {
-        return None;
-    }
-    let pull_request = pull_request_from_exact_object(object)?;
-    let merge_oid = object_id(object.get("merge_commit_oid")?.as_str()?)?;
-    Some((pull_request, merge_oid))
-}
-
-fn pull_request_from_exact_object(
-    object: &Map<String, Value>,
-) -> Option<RepositoryPullRequestIdentity> {
-    let allowed = ["url", "number", "id", "node_id", "merge_commit_oid"];
-    if !keys_are_subset(object, &allowed)
-        || !object.contains_key("url")
-        || (object.contains_key("id") && object.contains_key("node_id"))
-    {
-        return None;
-    }
-    let mut identity = pull_request_from_url(object.get("url")?.as_str()?)?;
-    if let Some(number) = object.get("number") {
-        if number.as_u64()? != identity.number {
-            return None;
-        }
-    }
-    identity.provider_id = match object.get("id").or_else(|| object.get("node_id")) {
-        Some(value) => Some(value.as_str().filter(|value| !value.is_empty())?.to_owned()),
-        None => None,
-    };
-    Some(identity)
-}
-
 fn exact_json_object(output: &Value) -> Option<&Map<String, Value>> {
     output.as_object()
 }
@@ -615,64 +634,6 @@ fn object_id(value: &str) -> Option<GitObjectId> {
             format,
             hex: value.to_ascii_lowercase(),
         })
-}
-
-fn pull_request_from_url(value: &str) -> Option<RepositoryPullRequestIdentity> {
-    let url = Url::parse(value).ok()?;
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.port().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return None;
-    }
-    let host = url.host_str()?.to_ascii_lowercase();
-    let segments = url.path_segments()?.collect::<Vec<_>>();
-    if segments.len() < 4 || segments[segments.len() - 2] != "pull" {
-        return None;
-    }
-    let number = segments.last()?.parse::<u64>().ok()?;
-    let name = segments.get(segments.len() - 3)?.to_string();
-    let namespace = segments[..segments.len() - 3]
-        .iter()
-        .map(|segment| (*segment).to_owned())
-        .collect::<Vec<_>>();
-    if number == 0 || namespace.is_empty() || name.is_empty() {
-        return None;
-    }
-    Some(RepositoryPullRequestIdentity {
-        forge_repository: RepositoryAlias {
-            kind: RepositoryAliasKind::Forge,
-            host,
-            namespace,
-            name,
-            remote_name: None,
-        },
-        number,
-        provider_id: None,
-    })
-}
-
-fn pr_matches_plan(
-    pull_request: &RepositoryPullRequestIdentity,
-    plan: &BoundedOutcomePlan,
-) -> bool {
-    if plan
-        .expected_pr_number
-        .is_some_and(|number| number != pull_request.number)
-    {
-        return false;
-    }
-    if let Some(expected) = &plan.expected_pr_repository_path {
-        let mut actual = pull_request.forge_repository.namespace.clone();
-        actual.push(pull_request.forge_repository.name.clone());
-        if &actual != expected {
-            return false;
-        }
-    }
-    true
 }
 
 fn plan_paths(plan: &BoundedOutcomePlan) -> (Option<String>, Option<String>) {

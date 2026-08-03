@@ -9,6 +9,7 @@ use ctx_history_core::{
     CORE_MISSING_ACTIVITY_TIME_UNIX_MS, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION,
 };
 use serde_json::json;
 
@@ -19,11 +20,14 @@ use super::{
         ResolvedCommitProducer,
     },
     identity::{
-        push_abstention, reconcile_provider_identity, resolve_provider_native_identity,
-        ProviderIdentityResolution,
+        binding_accepts_forge_repository, push_abstention, reconcile_provider_identity,
+        resolve_provider_native_identity, ProviderIdentityResolution,
     },
     outcome::UnscopedOutcomeObservation,
-    scoping::{path_string, scope_file_invocations, scope_files, scope_outcomes, scope_vcs},
+    scoping::{
+        path_string, scope_file_invocations, scope_files, scope_outcomes,
+        scope_pull_request_associations, scope_vcs,
+    },
     shell::{analyze, command_too_large, lexical_absolute},
     AttributionInput, BoundedCommitProducer, CommandEvidenceDisposition, UnscopedVcsObservation,
 };
@@ -74,6 +78,7 @@ pub(super) fn attribute_with_attributor(
         .activity_at_unix_ms
         .unwrap_or(CORE_MISSING_ACTIVITY_TIME_UNIX_MS);
     let mut outcome_observations = input.outcome_observations.clone();
+    let pull_request_associations = input.pull_request_associations.clone();
     let provider_native_context_ambiguous = input.provider_native_context_ambiguous;
     let outcome_operation_repository_path = input.outcome_operation_repository_path.clone();
     let outcome_output_repository_path = input.outcome_output_repository_path.clone();
@@ -86,6 +91,7 @@ pub(super) fn attribute_with_attributor(
                 "repository_observation_revision": CORE_REPOSITORY_OBSERVATION_REVISION,
                 "bounded_shell_subset_revision": CORE_BOUNDED_SHELL_SUBSET_REVISION,
                 "outcome_capture_revision": CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+                "pull_request_association_capture_revision": CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION,
                 "local_root_authorization_fingerprint_revision": CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
                 "candidate_source": "bounded_structured_activity",
             }),
@@ -420,6 +426,13 @@ pub(super) fn attribute_with_attributor(
         &attributor.certifier,
         &mut probe_budget,
     );
+    let pull_request_associations = enrich_pull_request_associations(
+        &mut annotation,
+        &certified,
+        pull_request_associations,
+        &attributor.certifier,
+        &mut probe_budget,
+    );
     scope_file_invocations(&mut annotation, &certified, file_invocation_inputs);
     scope_files(&mut annotation, &certified, file_inputs);
     scope_vcs(&mut annotation, &certified, vcs_inputs);
@@ -430,6 +443,7 @@ pub(super) fn attribute_with_attributor(
         outcome_operation_path.as_deref(),
         outcome_output_path.as_deref(),
     );
+    scope_pull_request_associations(&mut annotation, pull_request_associations);
     if annotation.repository_bindings.is_empty() && annotation.repository_abstentions.is_empty() {
         push_abstention(
             &mut annotation,
@@ -636,6 +650,128 @@ fn resolve_deferred_commit_observations(
         }
     }
     exact
+}
+
+fn enrich_pull_request_associations(
+    annotation: &mut CoreRecordAnnotation,
+    certified: &[CertifiedCandidate],
+    associations: Vec<super::UnscopedPullRequestAssociationObservation>,
+    certifier: &GitCertifier,
+    budget: &mut EventProbeBudget,
+) -> Vec<(
+    Option<String>,
+    ctx_history_core::RepositoryPullRequestAssociationObservation,
+)> {
+    let mut published = Vec::new();
+    for source in associations {
+        let mut association = ctx_history_core::RepositoryPullRequestAssociationObservation {
+            pull_request: source.pull_request,
+            merged_as: source.merged_as,
+            contains_commits: Vec::new(),
+            linkage: source.linkage,
+            association_capture_revision: CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION,
+        };
+        let operation_path = std::path::Path::new(&source.repository_path);
+        let matching = certified
+            .iter()
+            .filter(|certificate| {
+                operation_path.starts_with(&certificate.repository_root)
+                    && certificate.binding.git_object_format == Some(association.merged_as.format)
+                    && binding_accepts_forge_repository(
+                        &certificate.binding,
+                        &association.pull_request.forge_repository,
+                    )
+            })
+            .collect::<Vec<_>>();
+        let Some(certificate) = matching
+            .iter()
+            .copied()
+            .max_by_key(|certificate| certificate.repository_root.components().count())
+        else {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::ProviderNativeResult,
+                RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+                "pull_request_association_has_no_certified_operation_route",
+            );
+            published.push((None, association));
+            continue;
+        };
+        if matching
+            .iter()
+            .filter(|candidate| {
+                candidate.repository_root.components().count()
+                    == certificate.repository_root.components().count()
+            })
+            .count()
+            != 1
+        {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::ProviderNativeResult,
+                RepositoryAbstentionReason::ConflictingIdentity,
+                "pull_request_association_route_is_ambiguous",
+            );
+            published.push((None, association));
+            continue;
+        }
+        match certifier.resolve_pull_request_merge_membership(
+            certificate,
+            &association.merged_as,
+            budget,
+        ) {
+            Ok(resolved) if !resolved.contains_commits.is_empty() => {
+                association.contains_commits = resolved.contains_commits;
+                published.push((Some(certificate.binding.binding_id.clone()), association));
+            }
+            Ok(_) => {
+                push_abstention(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    RepositoryAbstentionReason::OutcomeResultInadmissible,
+                    "pull_request_association_contains_no_certified_commits",
+                );
+                published.push((None, association));
+            }
+            Err(ProbeFailure::Missing | ProbeFailure::ConcurrentDrift) => {
+                push_abstention(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    RepositoryAbstentionReason::ConcurrentDrift,
+                    "pull_request_association_repository_or_object_state_drifted",
+                );
+                published.push((None, association));
+            }
+            Err(ProbeFailure::BudgetExceeded) => {
+                push_probe_failure(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    ProbeFailure::BudgetExceeded,
+                    false,
+                );
+                published.push((None, association));
+            }
+            Err(ProbeFailure::PlatformUnsupported) => {
+                push_probe_failure(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    ProbeFailure::PlatformUnsupported,
+                    false,
+                );
+                published.push((None, association));
+            }
+            Err(_) => {
+                push_abstention(
+                    annotation,
+                    RepositoryEvidenceKind::ProviderNativeResult,
+                    RepositoryAbstentionReason::OutcomeResultInadmissible,
+                    "pull_request_association_dag_proof_is_inadmissible",
+                );
+                published.push((None, association));
+            }
+        }
+    }
+    published
 }
 
 fn bounded_absolute(

@@ -1,16 +1,20 @@
 use ctx_history_core::{
     RepositoryAbstentionReason, RepositoryAlias, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION,
 };
 use serde_json::{json, Value};
 
 use crate::{
     provider::codex::events::CodexToolCallContext,
     repository_attribution::{
-        linked_outcome_evidence, LinkedOutcomeEvidence, LinkedOutcomeInput,
-        UnscopedOutcomeObservation,
+        bounded_pull_request_association_query, lexical_absolute, linked_outcome_evidence,
+        LinkedOutcomeEvidence, LinkedOutcomeInput, UnscopedOutcomeObservation,
+        UnscopedPullRequestAssociationObservation,
     },
     OutputOutcome, OutputOutcomeMetadata,
 };
+
+const MAX_CODEX_EXEC_RESULT_ENVELOPE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodexRepositoryResultEvidence {
@@ -22,6 +26,7 @@ pub(crate) struct CodexRepositoryResultEvidence {
     pub(crate) structured_content: Value,
     pub(crate) provider_native_repository_aliases: Vec<RepositoryAlias>,
     pub(crate) outcomes: Vec<UnscopedOutcomeObservation>,
+    pub(crate) pull_request_associations: Vec<UnscopedPullRequestAssociationObservation>,
     pub(crate) abstentions: Vec<(RepositoryAbstentionReason, &'static str)>,
 }
 
@@ -48,16 +53,38 @@ pub(crate) fn repository_result_evidence(
                     result_call_id,
                     result_record_sha256,
                     0,
+                    0,
                 ),
                 provider_native_repository_aliases: Vec::new(),
                 outcomes: Vec::new(),
+                pull_request_associations: Vec::new(),
                 abstentions: Vec::new(),
             });
     }
     let command = command?;
     let missing_output = super::repository_result_output(payload).is_none();
     let null_output = Value::Null;
-    let output = super::repository_result_output(payload).unwrap_or(&null_output);
+    let provider_output = super::repository_result_output(payload).unwrap_or(&null_output);
+    let exact_output;
+    let unwrap_pull_request_association = context.tool_name == "exec_command"
+        && context
+            .declared_workdir
+            .as_deref()
+            .and_then(|workdir| lexical_absolute(workdir, None))
+            .and_then(|base| bounded_pull_request_association_query(command, &base))
+            .is_some();
+    let output = if unwrap_pull_request_association {
+        match provider_output.as_str().map(exact_codex_exec_result_body) {
+            Some(Ok(Some(body))) => {
+                exact_output = Value::String(body.to_owned());
+                &exact_output
+            }
+            Some(Err(())) => &null_output,
+            Some(Ok(None)) | None => provider_output,
+        }
+    } else {
+        provider_output
+    };
     let mut linked = linked_outcome_evidence(LinkedOutcomeInput {
         provider: "codex",
         command,
@@ -114,6 +141,7 @@ pub(crate) fn repository_result_evidence(
     }
 
     let captured_outcomes = linked.outcomes.len();
+    let captured_associations = linked.pull_request_associations.len();
     Some(CodexRepositoryResultEvidence {
         command: Some(command.to_owned()),
         command_too_large: false,
@@ -125,9 +153,11 @@ pub(crate) fn repository_result_evidence(
             result_call_id,
             result_record_sha256,
             captured_outcomes,
+            captured_associations,
         ),
         provider_native_repository_aliases: linked.provider_native_repository_aliases,
         outcomes: linked.outcomes,
+        pull_request_associations: linked.pull_request_associations,
         abstentions: linked.abstentions,
     })
 }
@@ -139,6 +169,7 @@ fn replace_with_abstention(
 ) {
     linked.provider_native_repository_aliases.clear();
     linked.outcomes.clear();
+    linked.pull_request_associations.clear();
     linked.abstentions = vec![(reason, detail)];
 }
 
@@ -152,6 +183,7 @@ fn result_summary(
     result_call_id: &str,
     result_record_sha256: [u8; 32],
     captured_outcomes: usize,
+    captured_associations: usize,
 ) -> Value {
     json!({
         "provider_native_tool_result": {
@@ -166,9 +198,97 @@ fn result_summary(
             "result_record_sha256": hex_digest(&result_record_sha256),
             "outcome_capture_revision": CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
             "captured_outcomes": captured_outcomes,
+            "pull_request_association_capture_revision": CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION,
+            "captured_pull_request_associations": captured_associations,
             "raw_output_retained": false,
         }
     })
+}
+
+fn exact_codex_exec_result_body(output: &str) -> Result<Option<&str>, ()> {
+    if !output.starts_with("Chunk ID: ") {
+        return if output
+            .lines()
+            .any(|line| line.trim().starts_with("Chunk ID: "))
+        {
+            Err(())
+        } else {
+            Ok(None)
+        };
+    }
+    if output.is_empty()
+        || output.len() > MAX_CODEX_EXEC_RESULT_ENVELOPE_BYTES
+        || output.contains('\0')
+    {
+        return Err(());
+    }
+    let (chunk_id, remainder) = output
+        .strip_prefix("Chunk ID: ")
+        .and_then(|value| value.split_once('\n'))
+        .ok_or(())?;
+    if chunk_id.len() != 6
+        || !chunk_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(());
+    }
+    let (wall_time, remainder) = remainder
+        .strip_prefix("Wall time: ")
+        .and_then(|value| value.split_once(" seconds\n"))
+        .ok_or(())?;
+    if wall_time.is_empty() || wall_time.len() > 32 {
+        return Err(());
+    }
+    let mut wall_time_components = wall_time.split('.');
+    let whole = wall_time_components.next().ok_or(())?;
+    let fractional = wall_time_components.next();
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fractional.is_some_and(|value| {
+            value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        || wall_time_components.next().is_some()
+        || wall_time
+            .parse::<f64>()
+            .ok()
+            .is_none_or(|seconds| !seconds.is_finite())
+    {
+        return Err(());
+    }
+    let remainder = remainder
+        .strip_prefix("Process exited with code 0\n")
+        .ok_or(())?;
+    let body = if let Some(remainder) = remainder.strip_prefix("Original token count: ") {
+        let (token_count, remainder) = remainder.split_once('\n').ok_or(())?;
+        if token_count.is_empty()
+            || token_count.len() > 20
+            || !token_count.bytes().all(|byte| byte.is_ascii_digit())
+            || token_count.parse::<u64>().is_err()
+        {
+            return Err(());
+        }
+        remainder.strip_prefix("Output:\n").ok_or(())?
+    } else {
+        remainder.strip_prefix("Final output:\n").ok_or(())?
+    };
+    if body.is_empty()
+        || body.len() > MAX_CODEX_EXEC_RESULT_ENVELOPE_BYTES
+        || body.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("Chunk ID: ")
+                || line.starts_with("Wall time: ")
+                || line.starts_with("Process exited with code ")
+                || line.starts_with("Original token count: ")
+                || line == "Output:"
+                || line == "Final output:"
+                || line.starts_with("Warning: truncated output (original token count: ")
+                || line.starts_with("Warning: truncated output (original char count: ")
+        })
+    {
+        return Err(());
+    }
+    Ok(Some(body))
 }
 
 fn hex_digest(value: &[u8; 32]) -> String {
@@ -195,6 +315,18 @@ mod tests {
             session_cwd: Some("/repo".to_owned()),
             declared_workdir: Some("/repo".to_owned()),
             origin_call_id: Some("call-origin".to_owned()),
+            origin_event_sequence: Some(7),
+            ..CodexToolCallContext::default()
+        }
+    }
+
+    fn real_context(command: &str, workdir: &str, call_id: &str) -> CodexToolCallContext {
+        CodexToolCallContext {
+            tool_name: "exec_command".to_owned(),
+            exact_command: Some(command.to_owned()),
+            session_cwd: Some("/home/daddy/code/ctx-multi-repo-workspace".to_owned()),
+            declared_workdir: Some(workdir.to_owned()),
+            origin_call_id: Some(call_id.to_owned()),
             origin_event_sequence: Some(7),
             ..CodexToolCallContext::default()
         }
@@ -235,6 +367,103 @@ mod tests {
         assert!(!serde_json::to_string(&captured.structured_content)
             .unwrap()
             .contains(oid));
+    }
+
+    #[test]
+    fn codex_captures_bounded_multiline_pull_request_association() {
+        let command = "gh pr view 203 --json state,mergedAt,mergeCommit,url\n\
+                       git fetch origin main\n\
+                       git log -1 --oneline origin/main";
+        let output = concat!(
+            "{\"mergeCommit\":{\"oid\":\"103c0105645cc02c730f98eba2831fba854d3569\"},",
+            "\"mergedAt\":\"2026-07-29T17:11:30Z\",\"state\":\"MERGED\",",
+            "\"url\":\"https://github.com/ctxrs/ctx/pull/203\"}\n",
+            "From github.com:ctxrs/ctx\n",
+            "103c0105 merge\n",
+        );
+        let captured = repository_result_evidence(
+            &json!({"output": output}),
+            &context(command),
+            "call-result",
+            [8; 32],
+            10,
+            &success(),
+        )
+        .unwrap();
+        assert!(captured.outcomes.is_empty());
+        assert_eq!(captured.pull_request_associations.len(), 1);
+        assert_eq!(
+            captured.pull_request_associations[0].merged_as.hex,
+            "103c0105645cc02c730f98eba2831fba854d3569"
+        );
+    }
+
+    #[test]
+    fn codex_unwraps_the_exact_exec_result_envelope() {
+        let command = "gh pr view 203 --json state,mergedAt,mergeCommit,url\n\
+                       git fetch origin main\n\
+                       git log -1 --oneline origin/main";
+        let call_id = "call_5eCij3bzNa2V5SUxyUIR9INA";
+        let output = concat!(
+            "Chunk ID: 57a5b6\n",
+            "Wall time: 0.3549 seconds\n",
+            "Process exited with code 0\n",
+            "Original token count: 95\n",
+            "Output:\n",
+            "{\"mergeCommit\":{\"oid\":\"103c0105645cc02c730f98eba2831fba854d3569\"},",
+            "\"mergedAt\":\"2026-07-28T01:19:34Z\",\"state\":\"MERGED\",",
+            "\"url\":\"https://github.com/ctxrs/ctx/pull/203\"}\n",
+            "From https://github.com/ctxrs/ctx\n",
+            "103c01056 merge\n",
+        );
+        let captured = repository_result_evidence(
+            &json!({"output": output}),
+            &real_context(command, "/repo", call_id),
+            call_id,
+            [0x50; 32],
+            10,
+            &success(),
+        )
+        .unwrap();
+        let [association] = captured.pull_request_associations.as_slice() else {
+            panic!("expected exact pull request association");
+        };
+        assert_eq!(association.pull_request.number, 203);
+        assert_eq!(
+            association.merged_as.hex,
+            "103c0105645cc02c730f98eba2831fba854d3569"
+        );
+    }
+
+    #[test]
+    fn codex_exec_result_envelope_is_fail_closed() {
+        let command = "gh pr view 203 --json state,mergedAt,mergeCommit,url";
+        let body = concat!(
+            "{\"mergeCommit\":{\"oid\":\"103c0105645cc02c730f98eba2831fba854d3569\"},",
+            "\"mergedAt\":\"2026-07-28T01:19:34Z\",\"state\":\"MERGED\",",
+            "\"url\":\"https://github.com/ctxrs/ctx/pull/203\"}\n",
+        );
+        let exact = format!(
+            "Chunk ID: 57a5b6\nWall time: 0.3549 seconds\nProcess exited with code 0\nOriginal token count: 95\nOutput:\n{body}"
+        );
+        for output in [
+            exact.replacen("code 0", "code 1", 1),
+            exact.replacen("0.3549 seconds", "3e-1 seconds", 1),
+            exact.replacen("Original token count: 95\n", "", 1),
+            exact.replacen("Output:\n", "Output:\nOutput:\n", 1),
+            format!("{exact}{exact}"),
+        ] {
+            let captured = repository_result_evidence(
+                &json!({"output": output}),
+                &real_context(command, "/repo", "call-result"),
+                "call-result",
+                [0x58; 32],
+                10,
+                &success(),
+            )
+            .unwrap();
+            assert!(captured.pull_request_associations.is_empty());
+        }
     }
 
     #[test]

@@ -109,6 +109,35 @@ pub(super) fn parse_resolved_commit_metadata(
     Ok((object_id, parent_object_ids, (*subject).to_owned()))
 }
 
+pub(super) fn parse_exact_merge_metadata(
+    value: &[u8],
+    format: GitObjectFormat,
+) -> Result<(GitObjectId, [GitObjectId; 2]), ProbeFailure> {
+    let value = std::str::from_utf8(value)
+        .map_err(|_| ProbeFailure::Unsafe("git_merge_metadata_is_not_unicode"))?;
+    let value = value.strip_suffix('\n').unwrap_or(value);
+    let fields = value.split('\0').collect::<Vec<_>>();
+    let [object, parents] = fields.as_slice() else {
+        return Err(ProbeFailure::Failed("unexpected_git_merge_metadata"));
+    };
+    let object_id = parse_full_object_id(object, format)?;
+    let parents = parents
+        .split(' ')
+        .map(|parent| parse_full_object_id(parent, format))
+        .collect::<Result<Vec<_>, _>>()?;
+    let [first, second] = parents.as_slice() else {
+        return Err(ProbeFailure::Failed(
+            "pull_request_merge_has_invalid_parent_topology",
+        ));
+    };
+    if first == second {
+        return Err(ProbeFailure::Failed(
+            "pull_request_merge_has_invalid_parent_topology",
+        ));
+    }
+    Ok((object_id, [first.clone(), second.clone()]))
+}
+
 fn parse_full_object_id(value: &str, format: GitObjectFormat) -> Result<GitObjectId, ProbeFailure> {
     let object = GitObjectId {
         format,

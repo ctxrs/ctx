@@ -305,7 +305,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     assert_eq!(
         canonical["core_record_contract"],
         serde_json::json!({
-            "fingerprint": "674bf76268eb8dd75e265585306738ba8ca40fc4fe8d142e13916112018f6215",
+            "fingerprint": "1994a5d75f6bdcaa9ee24a76706e0260b3684557a8115473a45d1cef44e33684",
             "leaf": {
                 "helper": "ctx_pro_host_protocol::core_record_leaf_sha256",
                 "paired_helper": "ctx_pro_host_protocol::core_record_digests",
@@ -318,10 +318,11 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
                 "identity": "ctx-core-record-event-binding-v1\0",
                 "algorithm": "sum_mod_2^256(sha256(identity_then_u64_be_canonical_event_id_length_then_canonical_event_id_then_core_record_leaf))"
             },
-            "repository_contract_revision": 7,
-            "repository_observation_revision": 2,
+            "repository_contract_revision": 8,
+            "repository_observation_revision": 3,
             "bounded_shell_subset_revision": 1,
-            "repository_association_policy_revision": 4,
+            "repository_association_policy_revision": 5,
+            "repository_pull_request_association_capture_revision": 3,
             "repository_outcome_capture_revision": 2,
             "repository_local_root_authorization_fingerprint_revision": 1,
             "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs",
@@ -332,9 +333,9 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
         value["golden_vectors"]["core_record_digests"],
         serde_json::json!({
             "core_record_sha256":
-                "e94c0e534b6f5c9dca4551b7c035481e7db9ba07848429e03418535e9d24f810",
+                "db9e1f395689248f3a9902e8b4be4a26accae76d0f85dd076b50b4bce3b81910",
             "core_record_leaf_sha256":
-                "99bf3ccba297311dd8c8980ee1d63bc12a0e2ad89ad629ef730366f5ed86e61d"
+                "da8cecbf5cfc5bfac5a40e4374131ae18ae4d38dafd8f545fc70d2f8a4a5ed36"
         })
     );
 
@@ -346,8 +347,8 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     let envelope: Value = serde_json::from_slice(&frame[FRAME_HEADER_BYTES..]).unwrap();
     let evidence =
         &envelope["message"]["body"]["page"]["deltas"][0]["value"]["repository_candidate_evidence"];
-    assert_eq!(evidence["repository_observation_revision"], 2);
-    assert_eq!(evidence["association_policy_revision"], 4);
+    assert_eq!(evidence["repository_observation_revision"], 3);
+    assert_eq!(evidence["association_policy_revision"], 5);
     assert_eq!(evidence["outcome_capture_revision"], 2);
     assert_eq!(
         evidence["candidates"],

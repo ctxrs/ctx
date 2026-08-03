@@ -19,6 +19,151 @@ fn custom_tool_call(call_id: &str, name: &str, input: Value) -> String {
 }
 
 #[test]
+fn codex_exact_wrapped_pull_request_result_captures_merge_membership() {
+    use ctx_history_core::RepositoryVcsObservationKind;
+    use std::process::Command;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let run_git = |arguments: &[&str]| {
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&repository)
+            .args(arguments)
+            .status()
+            .unwrap()
+            .success());
+    };
+    let git_output = |arguments: &[&str]| {
+        let output = Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&repository)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    run_git(&["branch", "-M", "main"]);
+    run_git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/ctxrs/ctx.git",
+    ]);
+    run_git(&["checkout", "-qb", "feature"]);
+    run_git(&["commit", "--allow-empty", "-qm", "feature one"]);
+    let feature_one = git_output(&["rev-parse", "HEAD"]);
+    run_git(&["commit", "--allow-empty", "-qm", "feature two"]);
+    let feature_two = git_output(&["rev-parse", "HEAD"]);
+    run_git(&["checkout", "-q", "main"]);
+    run_git(&["commit", "--allow-empty", "-qm", "main side"]);
+    run_git(&[
+        "merge",
+        "--no-ff",
+        "feature",
+        "-m",
+        "Merge pull request #203 from ctxrs/feature",
+    ]);
+    let merged_as = git_output(&["rev-parse", "HEAD"]);
+
+    let command = "gh pr view 203 --json state,mergedAt,mergeCommit,url\n\
+                   git fetch origin main\n\
+                   git log -1 --oneline origin/main";
+    let call_id = "call_5eCij3bzNa2V5SUxyUIR9INA";
+    let wrapped_output = format!(
+        concat!(
+            "Chunk ID: 57a5b6\n",
+            "Wall time: 0.3549 seconds\n",
+            "Process exited with code 0\n",
+            "Original token count: 95\n",
+            "Output:\n",
+            "{{\"mergeCommit\":{{\"oid\":\"{}\"}},",
+            "\"mergedAt\":\"2026-07-28T01:19:34Z\",\"state\":\"MERGED\",",
+            "\"url\":\"https://github.com/ctxrs/ctx/pull/203\"}}\n",
+            "From https://github.com/ctxrs/ctx\n",
+            "103c01056 merge\n",
+        ),
+        merged_as
+    );
+    let function_call = serde_json::json!({
+        "timestamp": "2026-07-28T01:19:33Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": call_id,
+            "arguments": serde_json::json!({
+                "cmd": command,
+                "workdir": repository.to_string_lossy(),
+                "yield_time_ms": 10_000,
+                "max_output_tokens": 30_000,
+            }).to_string(),
+        }
+    })
+    .to_string();
+    let function_call_output = serde_json::json!({
+        "timestamp": "2026-07-28T01:19:34Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": wrapped_output,
+        }
+    })
+    .to_string();
+    let native_session_id = "019f95c9-2671-79f3-bf13-e7e0dd7eb68c";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[function_call, function_call_output],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let core = outcome_for_sequence(&verified, session_id, 2);
+    let associations = core
+        .repository_vcs_observations
+        .iter()
+        .filter_map(|observation| match &observation.kind {
+            RepositoryVcsObservationKind::PullRequestAssociation(association) => {
+                Some(association.as_ref())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [association] = associations.as_slice() else {
+        panic!(
+            "expected one pull-request association: observations={:?} abstentions={:?}",
+            core.repository_vcs_observations, core.repository_abstentions
+        );
+    };
+    assert_eq!(association.pull_request.number, 203);
+    assert_eq!(association.merged_as.hex, merged_as);
+    let mut expected_feature_side = vec![feature_one, feature_two];
+    expected_feature_side.sort();
+    assert_eq!(
+        association
+            .contains_commits
+            .iter()
+            .map(|commit| commit.hex.clone())
+            .collect::<Vec<_>>(),
+        expected_feature_side
+    );
+    assert_eq!(
+        core.content.structured_content.as_ref().unwrap()["provider_native_tool_activities"][0]
+            ["provider_native_tool_result"]["captured_pull_request_associations"],
+        1
+    );
+}
+
+#[test]
 fn codex_complete_patch_publishes_strict_provider_neutral_invocation_evidence() {
     use ctx_history_core::RepositoryFileInvocationKind;
 

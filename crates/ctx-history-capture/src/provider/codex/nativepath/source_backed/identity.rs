@@ -253,6 +253,7 @@ pub(super) fn codex_core_record(
         .collect::<Vec<_>>();
     let mut provider_native_repository_aliases = Vec::new();
     let mut outcome_observations = Vec::new();
+    let mut pull_request_associations = Vec::new();
     let mut outcome_abstentions = Vec::new();
     let mut outcome_operation_repository_path = None;
     let mut outcome_output_repository_path = None;
@@ -271,6 +272,7 @@ pub(super) fn codex_core_record(
         outcome_operation_repository_path = evidence.outcome_operation_repository_path;
         outcome_output_repository_path = evidence.outcome_output_repository_path;
         outcome_observations = evidence.outcomes;
+        pull_request_associations = evidence.pull_request_associations;
         outcome_abstentions = evidence.abstentions;
     }
     let mut copied_origin = false;
@@ -300,6 +302,19 @@ pub(super) fn codex_core_record(
         }
     }
     outcome_observations = retained_outcomes;
+    let mut retained_associations = Vec::with_capacity(pull_request_associations.len());
+    for association in pull_request_associations {
+        match outcome_lineage.classify(
+            native_session_id,
+            &association.linkage.origin_call_id,
+            &association.linkage.result_call_id,
+        )? {
+            CodexOutcomeOriginV0::UniqueToSession => retained_associations.push(association),
+            CodexOutcomeOriginV0::CopiedFromAncestor => copied_origin = true,
+            CodexOutcomeOriginV0::Unproven => unproven_origin = true,
+        }
+    }
+    pull_request_associations = retained_associations;
     if copied_origin {
         outcome_abstentions.push((
             ctx_history_core::RepositoryAbstentionReason::ProviderOutputUnjoined,
@@ -333,6 +348,7 @@ pub(super) fn codex_core_record(
         outcome_operation_repository_path,
         outcome_output_repository_path,
         outcome_observations,
+        pull_request_associations,
         outcome_abstentions,
     });
     for evidence in repository_tools {

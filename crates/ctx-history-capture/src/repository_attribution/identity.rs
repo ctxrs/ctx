@@ -177,10 +177,29 @@ pub(super) fn reconcile_provider_identity(
     annotation.repository_bindings.push(*provider);
 }
 
-fn alias_identity_matches(left: &RepositoryAlias, right: &RepositoryAlias) -> bool {
+pub(super) fn alias_identity_matches(left: &RepositoryAlias, right: &RepositoryAlias) -> bool {
     left.host.eq_ignore_ascii_case(&right.host)
         && left.namespace == right.namespace
         && left.name == right.name
+}
+
+pub(super) fn binding_accepts_forge_repository(
+    binding: &RepositoryBinding,
+    forge_repository: &RepositoryAlias,
+) -> bool {
+    let logical_forge_matches = binding
+        .logical_repository_id
+        .strip_prefix("forge:")
+        .map(|logical| forge_logical_identity_matches(logical, forge_repository));
+    if logical_forge_matches == Some(false) {
+        return false;
+    }
+    logical_forge_matches == Some(true)
+        || (logical_forge_matches.is_none()
+            && binding
+                .aliases
+                .iter()
+                .any(|alias| alias_identity_matches(alias, forge_repository)))
 }
 
 fn logical_only_binding(
@@ -220,6 +239,16 @@ fn logical_repository_id(alias: &RepositoryAlias) -> String {
     path.push('/');
     path.push_str(&alias.name);
     format!("forge:{}/{path}", alias.host)
+}
+
+fn forge_logical_identity_matches(logical: &str, repository: &RepositoryAlias) -> bool {
+    let Some((host, path)) = logical.split_once('/') else {
+        return false;
+    };
+    let mut expected_path = repository.namespace.join("/");
+    expected_path.push('/');
+    expected_path.push_str(&repository.name);
+    host.eq_ignore_ascii_case(&repository.host) && path == expected_path
 }
 
 pub(super) fn push_abstention(

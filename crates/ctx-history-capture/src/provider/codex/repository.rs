@@ -107,6 +107,7 @@ fn exact_linked_result_context(
         }),
         provider_native_repository_aliases: Vec::new(),
         outcomes: Vec::new(),
+        pull_request_associations: Vec::new(),
         abstentions: Vec::new(),
     })
 }
