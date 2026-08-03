@@ -41,6 +41,11 @@ fn walk_private_directory(path: &Path, repair_final: bool) -> io::Result<()> {
         ));
     }
 
+    let normalized_path = super::path_overlap::normalize_platform_namespace_alias(path);
+    walk_private_directory_nofollow(&normalized_path, repair_final)
+}
+
+fn walk_private_directory_nofollow(path: &Path, repair_final: bool) -> io::Result<()> {
     let mut components = path.components().peekable();
     let mut current = match components.peek() {
         Some(Component::RootDir) => {
@@ -251,7 +256,10 @@ fn private_directory_error() -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt as _};
+    use std::{
+        fs,
+        os::unix::fs::{MetadataExt as _, PermissionsExt as _},
+    };
 
     use super::*;
 
@@ -305,16 +313,19 @@ mod tests {
     }
 
     #[test]
-    fn symlink_ancestor_is_rejected() {
+    fn user_owned_0700_symlink_prefix_is_rejected() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("target");
         let link = temp.path().join("link");
+        let temp_metadata = fs::metadata(temp.path()).unwrap();
+        assert_eq!(temp_metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(temp_metadata.permissions().mode() & 0o777, 0o700);
         fs::create_dir(&target).unwrap();
         symlink(&target, &link).unwrap();
 
-        assert!(create_private_directory_all(&link.join("nested")).is_err());
+        assert!(establish_private_data_root(&link.join("nested")).is_err());
         assert!(!target.join("nested").exists());
     }
 
