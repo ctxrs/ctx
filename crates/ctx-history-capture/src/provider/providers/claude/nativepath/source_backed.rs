@@ -58,9 +58,11 @@ const PARSER_REVISION: &str = "claude-shared-jsonl-v6-pull-request-association";
 const MAX_PENDING_CALLS: usize = 4096;
 const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;
 
+mod binding;
 mod checkpoint;
 mod normalized_body;
 
+use binding::*;
 use checkpoint::*;
 use normalized_body::{event_kind, lexical_body};
 
@@ -69,14 +71,6 @@ struct ClaudeJsonlAdapter;
 
 fn claude_source_backed_adapter() -> Arc<dyn JsonlFamilyAdapter> {
     Arc::new(ClaudeJsonlAdapter)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Binding {
-    project_dir: PathBuf,
-    key: ClaudeSessionKey,
-    layout: SessionLayout,
 }
 
 impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
@@ -975,22 +969,6 @@ fn fallback_event_key_parts(identity: FallbackEventIdentity) -> Result<Vec<Typed
         TypedKey::bytes(identity.digest.to_vec()).map_err(contract)?,
         TypedKey::U64(identity.duplicate_occurrence),
     ])
-}
-
-fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<Binding> {
-    let TypedKey::Bytes(bytes) = leaf.binding() else {
-        return Err(contract("Claude family binding is malformed"));
-    };
-    Ok(serde_json::from_slice(bytes)?)
-}
-
-fn relative_to_authority(authority: &ProviderSourceRoot, path: &Path) -> Result<PathBuf> {
-    path.strip_prefix(authority.named_path())
-        .map(Path::to_path_buf)
-        .map_err(|_| CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "Claude transcripts must remain below their selected authority",
-        })
 }
 
 fn contract(error: impl std::fmt::Display) -> CaptureError {
