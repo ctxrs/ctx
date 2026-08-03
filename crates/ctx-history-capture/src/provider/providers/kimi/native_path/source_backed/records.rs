@@ -67,33 +67,7 @@ pub(super) fn core_record(
         AgentType::Subagent
     };
     let event = value.get("event").unwrap_or(value);
-    let tool_name = event
-        .get("toolName")
-        .or_else(|| event.get("tool_name"))
-        .or_else(|| event.get("name"))
-        .cloned();
-    let call_id = event
-        .get("callId")
-        .or_else(|| event.get("call_id"))
-        .or_else(|| event.get("id"))
-        .cloned();
-    let provider_tool_content = matches!(
-        event_type,
-        EventType::ToolCall | EventType::ToolOutput | EventType::CommandOutput
-    )
-    .then(|| event.clone());
-    let structured_content = (!touched_files.is_empty()
-        || tool_name.is_some()
-        || call_id.is_some()
-        || provider_tool_content.is_some())
-    .then(|| {
-        serde_json::json!({
-            "tool_name": tool_name,
-            "call_id": call_id,
-            "file_touches": touched_files,
-            "provider_tool_content": provider_tool_content,
-        })
-    });
+    let structured_content = kimi_structured_content(event, event_type, touched_files);
     let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
@@ -116,6 +90,41 @@ pub(super) fn core_record(
     record.content.structured_content = structured_content;
     record.validate_contract()?;
     Ok(Some(record))
+}
+
+fn kimi_structured_content(
+    event: &Value,
+    event_type: EventType,
+    touched_files: Vec<String>,
+) -> Option<Value> {
+    let tool_name = event
+        .get("toolName")
+        .or_else(|| event.get("tool_name"))
+        .or_else(|| event.get("name"))
+        .cloned();
+    let call_id = event
+        .get("toolCallId")
+        .or_else(|| event.get("callId"))
+        .or_else(|| event.get("call_id"))
+        .or_else(|| event.get("id"))
+        .cloned();
+    let provider_tool_content = matches!(
+        event_type,
+        EventType::ToolCall | EventType::ToolOutput | EventType::CommandOutput
+    )
+    .then(|| event.clone());
+    (!touched_files.is_empty()
+        || tool_name.is_some()
+        || call_id.is_some()
+        || provider_tool_content.is_some())
+    .then(|| {
+        serde_json::json!({
+            "tool_name": tool_name,
+            "call_id": call_id,
+            "file_touches": touched_files,
+            "provider_tool_content": provider_tool_content,
+        })
+    })
 }
 
 pub(super) fn kimi_lexical_body(
@@ -190,6 +199,33 @@ fn kimi_output_classification(value: &Value) -> KimiOutputClassification {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_tool_call_id_is_published_for_call_and_result() {
+        let call = serde_json::json!({
+            "type": "tool.call",
+            "toolCallId": "call_1",
+            "name": "Read",
+            "args": {"path": "/tmp/splines.txt"}
+        });
+        let result = serde_json::json!({
+            "type": "tool.result",
+            "toolCallId": "call_1",
+            "result": {"output": "spline data", "isError": false}
+        });
+
+        for (event, event_type) in [
+            (&call, EventType::ToolCall),
+            (&result, EventType::ToolOutput),
+        ] {
+            let structured = kimi_structured_content(event, event_type, Vec::new()).unwrap();
+            assert_eq!(
+                structured.get("call_id").and_then(Value::as_str),
+                Some("call_1"),
+                "{structured:#}"
+            );
+        }
+    }
 
     #[test]
     fn successful_textual_result_over_16k_is_complete() {
