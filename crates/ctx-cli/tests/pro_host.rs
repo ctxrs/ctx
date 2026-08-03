@@ -17,6 +17,7 @@ use std::{
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use tempfile::tempdir;
 
 mod support;
@@ -124,7 +125,26 @@ fn run_with_stdout_pty(args: &[String], columns: u16) -> (ExitStatus, Vec<u8>, V
     (status, stdout_bytes, stderr_bytes)
 }
 
-fn start_live_pro_daemon(temp: &tempfile::TempDir, helper: &Path) -> Child {
+struct LiveProDaemon {
+    child: Child,
+}
+
+impl LiveProDaemon {
+    fn is_running(&mut self) -> bool {
+        self.child.try_wait().unwrap().is_none()
+    }
+}
+
+impl Drop for LiveProDaemon {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+fn start_live_pro_daemon(temp: &tempfile::TempDir, helper: &Path) -> LiveProDaemon {
     let binary = copied_ctx_binary(temp);
     let prepared = ctx_from_binary(temp, &binary);
     let mut command = std::process::Command::new(prepared.get_program());
@@ -138,7 +158,7 @@ fn start_live_pro_daemon(temp: &tempfile::TempDir, helper: &Path) -> Child {
             }
         }
     }
-    command
+    let child = command
         .args([
             "daemon",
             "run",
@@ -152,7 +172,8 @@ fn start_live_pro_daemon(temp: &tempfile::TempDir, helper: &Path) -> Child {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap()
+        .unwrap();
+    LiveProDaemon { child }
 }
 
 fn daemon_pid(temp: &tempfile::TempDir) -> Option<u64> {
@@ -200,11 +221,18 @@ fn live_daemon_rebuilds_replaced_helper_without_a_new_core_generation() {
         || fs::read_to_string(&helper_log).is_ok_and(|log| log.contains("finish:revision-v1")),
         "initial helper materialization",
     );
-    assert!(daemon.try_wait().unwrap().is_none());
+    assert!(daemon.is_running());
 
-    write_core_materialization_helper(&helper, "revision-v2", &helper_state, &helper_log);
+    let staged_helper = temp.path().join("ctx-pro-materializer.next");
+    write_core_materialization_helper(&staged_helper, "revision-v2", &helper_state, &helper_log);
+    let target_helper_sha256 = format!("{:x}", Sha256::digest(fs::read(&staged_helper).unwrap()));
     let output = ctx(&temp)
-        .args(["pro", "_test-request-helper-recheck"])
+        .args([
+            "pro",
+            "_test-publish-helper-recheck",
+            "--target-helper-sha256",
+            &target_helper_sha256,
+        ])
         .output()
         .unwrap();
     assert!(
@@ -214,12 +242,31 @@ fn live_daemon_rebuilds_replaced_helper_without_a_new_core_generation() {
         String::from_utf8_lossy(&output.stderr),
         fs::read_to_string(&helper_log).unwrap_or_default()
     );
+    let recheck_path = data_root.join("daemon/jobs/pro-catch-up-recheck.json");
+    let recheck: Value = serde_json::from_slice(&fs::read(&recheck_path).unwrap()).unwrap();
+    assert_eq!(recheck["target_helper_sha256"], target_helper_sha256);
+
+    // Mirror the production transaction: the intent is durable while the old
+    // helper is still visible, then the exact target becomes visible, then the
+    // daemon is woken. An early wake must not let the old helper clear it.
+    ctx(&temp)
+        .args(["pro", "_test-wake-helper-recheck"])
+        .assert()
+        .success();
+    assert!(recheck_path.exists());
+    assert!(!fs::read_to_string(&helper_log)
+        .unwrap()
+        .contains("finish:revision-v2"));
+    fs::rename(&staged_helper, &helper).unwrap();
+    ctx(&temp)
+        .args(["pro", "_test-wake-helper-recheck"])
+        .assert()
+        .success();
     wait_until(
         || fs::read_to_string(&helper_log).is_ok_and(|log| log.contains("finish:revision-v2")),
         "replacement helper materialization",
     );
     let catch_up_path = data_root.join("daemon/jobs/pro-catch-up.json");
-    let recheck_path = data_root.join("daemon/jobs/pro-catch-up-recheck.json");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let catch_up_bytes = fs::read(&catch_up_path).unwrap_or_default();
@@ -241,7 +288,7 @@ fn live_daemon_rebuilds_replaced_helper_without_a_new_core_generation() {
     }
 
     assert_eq!(daemon_pid(&temp), Some(original_pid));
-    assert!(daemon.try_wait().unwrap().is_none());
+    assert!(daemon.is_running());
     let final_state: Value = serde_json::from_slice(&fs::read(&helper_state).unwrap()).unwrap();
     assert_eq!(
         final_state["core_generation_id"], generation,

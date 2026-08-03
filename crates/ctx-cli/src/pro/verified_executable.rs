@@ -16,6 +16,8 @@ use ctx_history_core::platform_security::{
     verify_private_directory_handle, verify_private_file_handle,
 };
 use ctx_pro_host_protocol::ProFilesystemLayout;
+#[cfg(any(test, ctx_pro_test_helper))]
+use sha2::{Digest as _, Sha256};
 
 pub(super) struct PreparedHelperExecution {
     program: PathBuf,
@@ -35,6 +37,8 @@ impl PreparedHelperExecution {
 /// complete helper process lifetime.
 pub(super) struct VerifiedHelperExecutable {
     path: PathBuf,
+    artifact_sha256: String,
+    _installation_guard: Option<Box<dyn std::any::Any>>,
     #[cfg(windows)]
     _directories: Vec<fs::File>,
     #[cfg(windows)]
@@ -51,6 +55,10 @@ impl VerifiedHelperExecutable {
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             bail!("pro_not_installed: developer Pro helper is not a regular file");
         }
+        let artifact_sha256 = format!(
+            "{:x}",
+            Sha256::digest(fs::read(path).context("pro_not_installed: read developer Pro helper")?)
+        );
         #[cfg(windows)]
         {
             let helper = open_locked_file(path)?;
@@ -59,6 +67,8 @@ impl VerifiedHelperExecutable {
                 .context("pro_not_installed: clone developer Pro helper handle")?;
             Ok(Self {
                 path: path.to_path_buf(),
+                artifact_sha256,
+                _installation_guard: None,
                 _directories: Vec::new(),
                 helper,
                 marker,
@@ -67,10 +77,17 @@ impl VerifiedHelperExecutable {
         #[cfg(not(windows))]
         Ok(Self {
             path: path.to_path_buf(),
+            artifact_sha256,
+            _installation_guard: None,
         })
     }
 
-    pub(super) fn open(data_root: &Path, path: &Path, marker: &Path) -> Result<Self> {
+    pub(super) fn open(
+        data_root: &Path,
+        path: &Path,
+        marker: &Path,
+        artifact_sha256: String,
+    ) -> Result<Self> {
         let layout = ProFilesystemLayout::new(data_root);
         let expected_parent = layout.bin_dir();
         if path.parent() != Some(expected_parent.as_path())
@@ -97,6 +114,8 @@ impl VerifiedHelperExecutable {
                 .context("invalid_response: installed Pro marker ACL is unsafe")?;
             Ok(Self {
                 path: path.to_path_buf(),
+                artifact_sha256,
+                _installation_guard: None,
                 _directories: locked,
                 helper,
                 marker: marker_file,
@@ -116,8 +135,18 @@ impl VerifiedHelperExecutable {
                 .context("invalid_response: installed Pro marker permissions are unsafe")?;
             Ok(Self {
                 path: path.to_path_buf(),
+                artifact_sha256,
+                _installation_guard: None,
             })
         }
+    }
+
+    pub(super) fn retain_installation_guard(&mut self, guard: impl std::any::Any) {
+        self._installation_guard = Some(Box::new(guard));
+    }
+
+    pub(super) fn artifact_sha256(&self) -> &str {
+        &self.artifact_sha256
     }
 
     pub(super) fn path(&self) -> &Path {
@@ -316,7 +345,12 @@ mod windows_tests {
         restrict_private_executable(&helper)?;
         restrict_private_file(&marker)?;
 
-        let locked = VerifiedHelperExecutable::open(&data_root, &helper, &marker)?;
+        let locked = VerifiedHelperExecutable::open(
+            &data_root,
+            &helper,
+            &marker,
+            format!("{:x}", Sha256::digest(b"signed helper bytes")),
+        )?;
         assert!(fs::remove_file(&helper).is_err());
         assert!(fs::rename(&helper, bin.join("replaced.exe")).is_err());
         assert!(fs::write(&helper, b"attacker replacement").is_err());

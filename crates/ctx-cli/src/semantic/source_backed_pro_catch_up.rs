@@ -1,5 +1,4 @@
 use std::{
-    fs,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -10,9 +9,8 @@ use ctx_history_core::utc_now;
 use ctx_history_index::VerifiedIndex;
 use ctx_pro_host_protocol::CoreMaterializationReceipt;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use thiserror::Error;
-use uuid::Uuid;
 
 use crate::{
     compact_json,
@@ -20,52 +18,34 @@ use crate::{
 };
 
 use super::{
-    health_search::{create_private_dir_all, secure_private_file_permissions},
     paths_status::{daemon_jobs_path, read_daemon_job_status, write_daemon_job_status},
-    query_service::daemon_source_refresh_request,
     source_backed_refresh_coordinator::{
         nonzero_duration_micros, open_verified_index, source_backed_index_root,
         PinnedCorePublication, PinnedSourceBackedGeneration,
     },
 };
 
+#[path = "source_backed_pro_catch_up/recheck.rs"]
+mod recheck;
+
+#[cfg(test)]
+use recheck::path as recheck_path;
+pub(super) use recheck::schedule as helper_recheck_schedule;
+use recheck::{
+    complete as complete_observed_recheck, read as read_recheck_request,
+    read_unlocked as read_recheck_request_unlocked, with_lock as with_recheck_lock,
+};
+pub(crate) use recheck::{
+    publish as publish_helper_recheck_intent, targets as helper_recheck_targets,
+    wake as wake_helper_recheck,
+};
+
 const SOURCE_BACKED_PRO_CATCH_UP_STATUS_FILE: &str = "pro-catch-up.json";
-const SOURCE_BACKED_PRO_CATCH_UP_RECHECK_FILE: &str = "pro-catch-up-recheck.json";
-const SOURCE_BACKED_PRO_CATCH_UP_RECHECK_LOCK_FILE: &str = "pro-catch-up-recheck.lock";
 const SOURCE_BACKED_PRO_CATCH_UP_SCHEMA_VERSION: u16 = 1;
-const SOURCE_BACKED_PRO_CATCH_UP_RECHECK_SCHEMA_VERSION: u16 = 1;
 const SOURCE_BACKED_PRO_CATCH_UP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const SOURCE_BACKED_PRO_CATCH_UP_WAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const SOURCE_BACKED_PRO_CATCH_UP_WAKE_TIMEOUT: Duration = Duration::from_millis(500);
 const SOURCE_BACKED_PRO_CATCH_UP_WAKE_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
-
-#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct SourceBackedProCatchUpRecheck {
-    schema_version: u16,
-    request_id: Uuid,
-    requested_at_ms: i64,
-}
-
-impl SourceBackedProCatchUpRecheck {
-    fn new() -> Self {
-        Self {
-            schema_version: SOURCE_BACKED_PRO_CATCH_UP_RECHECK_SCHEMA_VERSION,
-            request_id: Uuid::now_v7(),
-            requested_at_ms: utc_now().timestamp_millis(),
-        }
-    }
-
-    fn validate(self) -> Result<Self> {
-        if self.schema_version != SOURCE_BACKED_PRO_CATCH_UP_RECHECK_SCHEMA_VERSION {
-            anyhow::bail!(
-                "invalid source-backed Pro catch-up recheck schema {}",
-                self.schema_version
-            );
-        }
-        Ok(self)
-    }
-}
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -272,6 +252,7 @@ pub(super) fn run_after_core_publication(
             Ok(ProCatchUpSyncOutcome {
                 receipt: outcome.receipt,
                 did_work: outcome.did_work,
+                helper_artifact_sha256: outcome.helper_artifact_sha256,
             })
         },
     )
@@ -285,6 +266,7 @@ struct ProCatchUpAuthority<'a> {
 struct ProCatchUpSyncOutcome {
     receipt: CoreMaterializationReceipt,
     did_work: bool,
+    helper_artifact_sha256: String,
 }
 
 fn run_with<Preflight, Sync>(
@@ -298,9 +280,9 @@ where
     Preflight: FnOnce(&Path) -> Result<()>,
     Sync: FnOnce(&Path, &VerifiedIndex) -> Result<ProCatchUpSyncOutcome>,
 {
-    // Capture the exact request this run is allowed to satisfy. A helper
-    // replacement that lands while this run is in flight publishes a new ID,
-    // so the older helper can never clear the replacement's recheck request.
+    // Capture the exact target this run is allowed to satisfy. The completion
+    // path additionally requires the helper identity reported by this exact
+    // materialization session, so an old helper cannot clear a newer intent.
     let observed_recheck = read_recheck_request(data_root)?;
     let prior = read_status(data_root);
     let attempts = next_attempt(prior.as_ref(), core_generation_id);
@@ -345,7 +327,11 @@ where
                 .completed(outcome.receipt.core_generation_id)
                 .with_duration(nonzero_duration_micros(attempt_started.elapsed()));
             persist_status(data_root, &completed)?;
-            complete_observed_recheck(data_root, observed_recheck.as_ref())?;
+            complete_observed_recheck(
+                data_root,
+                observed_recheck.as_ref(),
+                &outcome.helper_artifact_sha256,
+            )?;
             Ok(SourceBackedProCatchUpRun {
                 status: completed.to_json()?,
                 did_work: outcome.did_work,
@@ -419,102 +405,6 @@ fn open_exact_index(
 
 fn status_path(data_root: &Path) -> PathBuf {
     daemon_jobs_path(data_root).join(SOURCE_BACKED_PRO_CATCH_UP_STATUS_FILE)
-}
-
-fn recheck_path(data_root: &Path) -> PathBuf {
-    daemon_jobs_path(data_root).join(SOURCE_BACKED_PRO_CATCH_UP_RECHECK_FILE)
-}
-
-fn recheck_lock_path(data_root: &Path) -> PathBuf {
-    daemon_jobs_path(data_root).join(SOURCE_BACKED_PRO_CATCH_UP_RECHECK_LOCK_FILE)
-}
-
-fn with_recheck_lock<T>(data_root: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    let jobs = daemon_jobs_path(data_root);
-    create_private_dir_all(&jobs)?;
-    let lock_path = recheck_lock_path(data_root);
-    let (lock, _) = super::paths_status::open_or_create_pid_lock_file(&lock_path)
-        .with_context(|| format!("open Pro catch-up recheck lock {}", lock_path.display()))?;
-    secure_private_file_permissions(&lock_path)?;
-    fs2::FileExt::lock_exclusive(&lock)
-        .with_context(|| format!("lock Pro catch-up recheck {}", lock_path.display()))?;
-    let result = operation();
-    let unlock = fs2::FileExt::unlock(&lock)
-        .with_context(|| format!("unlock Pro catch-up recheck {}", lock_path.display()));
-    match (result, unlock) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-    }
-}
-
-fn read_recheck_request_unlocked(
-    data_root: &Path,
-) -> Result<Option<SourceBackedProCatchUpRecheck>> {
-    let path = recheck_path(data_root);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read Pro catch-up recheck {}", path.display()));
-        }
-    };
-    serde_json::from_slice::<SourceBackedProCatchUpRecheck>(&bytes)
-        .with_context(|| format!("parse Pro catch-up recheck {}", path.display()))?
-        .validate()
-        .map(Some)
-}
-
-fn read_recheck_request(data_root: &Path) -> Result<Option<SourceBackedProCatchUpRecheck>> {
-    if !recheck_path(data_root).exists() {
-        return Ok(None);
-    }
-    with_recheck_lock(data_root, || read_recheck_request_unlocked(data_root))
-}
-
-fn complete_observed_recheck(
-    data_root: &Path,
-    observed: Option<&SourceBackedProCatchUpRecheck>,
-) -> Result<()> {
-    let Some(observed) = observed else {
-        return Ok(());
-    };
-    with_recheck_lock(data_root, || {
-        let current = read_recheck_request_unlocked(data_root)?;
-        if current.as_ref().map(|request| request.request_id) == Some(observed.request_id) {
-            let path = recheck_path(data_root);
-            fs::remove_file(&path)
-                .with_context(|| format!("complete Pro catch-up recheck {}", path.display()))?;
-        }
-        Ok(())
-    })
-}
-
-pub(crate) fn request_helper_recheck(data_root: &Path) -> Result<()> {
-    let request = SourceBackedProCatchUpRecheck::new();
-    with_recheck_lock(data_root, || {
-        write_daemon_job_status(
-            &recheck_path(data_root),
-            &compact_json(serde_json::to_value(&request)?),
-        )
-    })?;
-
-    // The request is durable, so a missing or concurrently restarting daemon
-    // is harmless. A live daemon is nudged immediately, including setup flows
-    // that intentionally defer foreground materialization.
-    let _ = daemon_source_refresh_request(
-        data_root,
-        json!({"schema_version": 1, "op": "lifecycle_wakeup"}),
-        SOURCE_BACKED_PRO_CATCH_UP_WAKE_TIMEOUT,
-        SOURCE_BACKED_PRO_CATCH_UP_WAKE_RESPONSE_MAX_BYTES,
-    );
-    Ok(())
-}
-
-pub(super) fn helper_recheck_request_id(data_root: &Path) -> Result<Option<String>> {
-    read_recheck_request(data_root)
-        .map(|request| request.map(|request| request.request_id.to_string()))
 }
 
 fn read_status(data_root: &Path) -> Option<SourceBackedProCatchUpStatus> {
@@ -638,6 +528,7 @@ mod tests {
         ProCatchUpSyncOutcome {
             receipt: receipt_with_revision(index, materializer_revision),
             did_work,
+            helper_artifact_sha256: "a".repeat(64),
         }
     }
 
@@ -832,7 +723,7 @@ mod tests {
         wait_for_completed_generation_with(temp.path(), &generation, Duration::ZERO, || {})
             .unwrap();
 
-        request_helper_recheck(temp.path()).unwrap();
+        publish_helper_recheck_intent(temp.path(), &"a".repeat(64)).unwrap();
         let error =
             wait_for_completed_generation_with(temp.path(), &generation, Duration::ZERO, || {})
                 .unwrap_err();
@@ -850,7 +741,7 @@ mod tests {
         )
         .unwrap();
         assert!(rerun.did_work);
-        assert_eq!(helper_recheck_request_id(temp.path()).unwrap(), None);
+        assert!(read_recheck_request(temp.path()).unwrap().is_none());
         wait_for_completed_generation_with(temp.path(), &generation, Duration::ZERO, || {})
             .unwrap();
     }
@@ -860,8 +751,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let index = empty_index(temp.path());
         let generation = index.generation_id().to_owned();
-        request_helper_recheck(temp.path()).unwrap();
-        let first_request = helper_recheck_request_id(temp.path()).unwrap().unwrap();
+        publish_helper_recheck_intent(temp.path(), &"a".repeat(64)).unwrap();
+        let first_request = read_recheck_request(temp.path()).unwrap().unwrap();
 
         run_with(
             temp.path(),
@@ -872,18 +763,42 @@ mod tests {
             },
             |_| Ok(()),
             |data_root, supplied| {
-                request_helper_recheck(data_root).unwrap();
+                publish_helper_recheck_intent(data_root, &"b".repeat(64)).unwrap();
                 Ok(sync_outcome(supplied, "test-core-materializer-v1", true))
             },
         )
         .unwrap();
 
-        let current_request = helper_recheck_request_id(temp.path()).unwrap().unwrap();
+        let current_request = read_recheck_request(temp.path()).unwrap().unwrap();
         assert_ne!(current_request, first_request);
+        assert_eq!(current_request.target_helper_sha256(), "b".repeat(64));
         let error =
             wait_for_completed_generation_with(temp.path(), &generation, Duration::ZERO, || {})
                 .unwrap_err();
         assert!(error.to_string().contains("timed out"), "{error:#}");
+    }
+
+    #[test]
+    fn old_helper_cannot_clear_pending_target_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let index = empty_index(temp.path());
+        let generation = index.generation_id().to_owned();
+        publish_helper_recheck_intent(temp.path(), &"b".repeat(64)).unwrap();
+
+        run_with(
+            temp.path(),
+            &generation,
+            ProCatchUpAuthority {
+                generation_id: Some(&generation),
+                verified_index: Some(&index),
+            },
+            |_| Ok(()),
+            |_, supplied| Ok(sync_outcome(supplied, "test-core-materializer-v1", true)),
+        )
+        .unwrap();
+
+        let pending = read_recheck_request(temp.path()).unwrap().unwrap();
+        assert_eq!(pending.target_helper_sha256(), "b".repeat(64));
     }
 
     #[test]

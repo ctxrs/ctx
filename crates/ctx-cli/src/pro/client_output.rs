@@ -8,6 +8,7 @@ use super::{protocol_error, ProClient, BATCH_TIMEOUT};
 pub(crate) struct CoreMaterializationSyncOutcome {
     pub(crate) receipt: CoreMaterializationReceipt,
     pub(crate) did_work: bool,
+    pub(crate) helper_artifact_sha256: String,
 }
 
 /// Synchronizes Pro from one already-published, generation-pinned Core feed.
@@ -19,6 +20,7 @@ pub(crate) fn sync_core_materialization(
     Ok(CoreMaterializationSyncOutcome {
         did_work: !report.replayed,
         receipt: report.receipt,
+        helper_artifact_sha256: report.helper_artifact_sha256,
     })
 }
 

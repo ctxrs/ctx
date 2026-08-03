@@ -206,13 +206,24 @@ fn run_pending_core_pro_catch_up(
     }
     let retry_due = runtime.pro_retry.consecutive_failures > 0 && runtime.pro_retry.ready();
     let retained_authority = source_refresh.and_then(CoreRefreshEngine::pinned_core_publication);
-    let helper_recheck_request = if runtime.sidecar_drain.pro_attempted_generation.is_some() {
-        helper_recheck_request_id(data_root)?
-    } else {
-        None
-    };
+    // Reading an absent intent is the ordinary fast path. Only a pending
+    // intent resolves the installed helper identity (and may take its lock).
+    let helper_recheck = helper_recheck_schedule(data_root)?;
+    let helper_recheck_request = helper_recheck
+        .as_ref()
+        .map(|schedule| schedule.attempt_key.clone());
     let helper_recheck_due = helper_recheck_request.is_some()
         && helper_recheck_request != runtime.sidecar_drain.pro_attempted_recheck;
+    if helper_recheck
+        .as_ref()
+        .is_some_and(|schedule| !schedule.target_ready)
+    {
+        // Remember the old/missing installed identity. Once the transaction
+        // publishes the target helper, the attempt key changes and this same
+        // daemon automatically reconsiders the unchanged Core generation.
+        runtime.sidecar_drain.pro_attempted_recheck = helper_recheck_request;
+        return Ok(None);
+    }
     let installation_requires_recheck = helper_recheck_due
         || (retained_authority.is_none()
             && runtime.sidecar_drain.pro_attempted_generation.is_some()
@@ -880,7 +891,7 @@ use super::{
     query_service::DaemonQueryActivity,
     runtime_limits::DAEMON_MIN_REMAINING_FOR_JOB_SECS,
     source_backed_pro_catch_up::{
-        helper_recheck_request_id, persist_status_json as persist_pro_status,
+        helper_recheck_schedule, persist_status_json as persist_pro_status,
         read_status_json as read_pro_status, run_after_core_publication,
         status_generation as pro_status_generation, SourceBackedProCatchUpRun,
         SourceBackedProCoreAuthority,

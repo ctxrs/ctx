@@ -28,8 +28,8 @@ use std::io;
 
 use crate::ui::{hint, outcome, Action, Document, Hint, Outcome, OutcomeState, RenderContext, Ui};
 pub(crate) use client::{
-    blame, preflight_core_materialization, stable_error_code, stable_error_diagnostic,
-    sync_core_materialization, RESOURCE_NOT_FOUND_DIAGNOSTIC,
+    blame, preflight_core_materialization, selected_helper_artifact_sha256, stable_error_code,
+    stable_error_diagnostic, sync_core_materialization, RESOURCE_NOT_FOUND_DIAGNOSTIC,
 };
 #[cfg(test)]
 pub(crate) use lifecycle::count_lifecycle_status_queries;

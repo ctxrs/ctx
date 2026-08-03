@@ -275,14 +275,19 @@ pub(super) fn validated_installed_helper(data_root: &Path) -> Result<VerifiedHel
         bail!("pro_not_installed: signed Pro helper is not installed");
     }
     let trust = CommercialConfig::production()?.release_trust;
-    let _lifecycle_lock = LifecycleLock::acquire(&target, false)?
+    let lifecycle_lock = LifecycleLock::acquire(&target, false)?
         .ok_or_else(|| anyhow!("pro_not_installed: signed Pro helper is not installed"))?;
     let pair =
         reconcile_installation_locked(&target, trust.public_key_pem, &mut Persistence::default())?
             .ok_or_else(|| anyhow!("pro_not_installed: signed Pro helper is not installed"))?;
     validate_manifest_release_trust(&pair.manifest, trust)?;
     let marker_path = install_marker_path(&target)?;
-    let helper = VerifiedHelperExecutable::open(data_root, &target, &marker_path)?;
+    let mut helper = VerifiedHelperExecutable::open(
+        data_root,
+        &target,
+        &marker_path,
+        pair.identity.artifact_sha256.clone(),
+    )?;
     let locked_pair = validate_pair_bytes(
         helper.read_helper(MAX_ARTIFACT_BYTES)?,
         helper.read_marker(&marker_path, MAX_INSTALL_MARKER_BYTES)?,
@@ -292,6 +297,7 @@ pub(super) fn validated_installed_helper(data_root: &Path) -> Result<VerifiedHel
     if locked_pair.identity != pair.identity {
         bail!("invalid_response: installed Pro helper changed during validation");
     }
+    helper.retain_installation_guard(lifecycle_lock);
     Ok(helper)
 }
 
@@ -436,6 +442,22 @@ fn install_candidate_with_key_locked(
     let marker_bytes = serde_json::to_vec(&marker)
         .context("invalid_response: encode signed Pro install marker")?;
     let new_identity = PairIdentity::new(&artifact, &marker_bytes, &manifest);
+    let helper_changed = current
+        .map(|current| current.identity != new_identity)
+        .unwrap_or(true);
+    if helper_changed {
+        persistence.boundary("before_publish_pro_recheck_intent")?;
+        crate::semantic::publish_source_backed_pro_recheck(
+            data_root,
+            &new_identity.artifact_sha256,
+        )?;
+        persistence.boundary("after_publish_pro_recheck_intent")?;
+    }
+    let recheck_wake_required = helper_changed
+        || crate::semantic::source_backed_pro_recheck_targets(
+            data_root,
+            &new_identity.artifact_sha256,
+        )?;
     install_transaction_locked(
         &target,
         current,
@@ -445,6 +467,11 @@ fn install_candidate_with_key_locked(
         public_key_pem,
         persistence,
     )?;
+    if recheck_wake_required {
+        persistence.boundary("after_install_before_pro_recheck_wake")?;
+        crate::semantic::wake_source_backed_pro_recheck(data_root);
+        persistence.boundary("after_pro_recheck_wake")?;
+    }
     Ok(json!({
         "schema_version": 1,
         "installed": true,
