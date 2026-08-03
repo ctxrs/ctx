@@ -7,10 +7,11 @@ use ctx_history_index::SourceRouteIdentity;
 
 use super::source_backed_refresh_coordinator::VerifiedSourceRefreshRouteBoundary;
 
+mod backoff;
+use backoff::retry_delay_ms;
+
 const DEBOUNCE_MS: u64 = 250;
 const MAX_EVENT_LATENCY_MS: u64 = 2_000;
-const RETRY_BASE_MS: u64 = 10_000;
-const RETRY_MAX_MS: u64 = 5 * 60 * 1_000;
 
 /// Monotonic position in one watcher's event stream.
 ///
@@ -568,14 +569,6 @@ fn admission_matches(state: &DirtyRouteState, admission: &DirtySourceRouteAdmiss
         in_flight.dirty_revision == admission.dirty_revision
             && in_flight.admission_id == admission.admission_id
     })
-}
-
-fn retry_delay_ms(consecutive_failures: u32) -> u64 {
-    let exponent = consecutive_failures.saturating_sub(1).min(63);
-    RETRY_BASE_MS
-        .checked_mul(1_u64 << exponent)
-        .unwrap_or(RETRY_MAX_MS)
-        .min(RETRY_MAX_MS)
 }
 
 #[cfg(test)]
