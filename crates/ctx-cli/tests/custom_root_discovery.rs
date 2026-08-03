@@ -58,19 +58,15 @@ fn sources_json_keeps_the_v1_top_level_and_source_fields() {
         ])
     );
 
-    let no_path_report = json_output(ctx(&temp).args([
-        "sources",
-        "--provider",
-        "factory-ai-droid",
-        "--format=json",
-    ]));
+    let no_path_report =
+        json_output(ctx(&temp).args(["sources", "--provider", "firebender", "--format=json"]));
     assert_eq!(object_keys(&no_path_report), object_keys(&packet));
     assert!(no_path_report["sources"].as_array().unwrap().is_empty());
     assert_eq!(no_path_report["issues_truncated"], false);
     let issues = no_path_report["issues"].as_array().unwrap();
     assert_eq!(issues.len(), 1);
-    assert_eq!(issues[0]["provider"], "factory_ai_droid");
-    assert!(issues[0]["path"].is_string());
+    assert_eq!(issues[0]["provider"], "firebender");
+    assert!(issues[0]["path"].is_null());
     assert_eq!(issues[0]["code"], "insufficient_official_evidence");
     assert_eq!(issues[0]["message_truncated"], false);
 }
@@ -127,14 +123,13 @@ fn provider_filtered_human_sources_and_import_errors_are_actionable() {
     assert!(!stderr.contains("relative-provider-root"), "{stderr}");
 
     let unestablished = tempdir();
-    let stdout =
-        success_stdout(ctx(&unestablished).args(["sources", "--provider", "factory-ai-droid"]));
+    let stdout = success_stdout(ctx(&unestablished).args(["sources", "--provider", "firebender"]));
     assert!(
         stdout.contains("has no established automatic history location"),
         "{stdout}"
     );
     assert!(
-        stdout.contains("ctx import --provider factory-ai-droid --path <path>"),
+        stdout.contains("ctx import --provider firebender --path <path>"),
         "{stdout}"
     );
     assert!(
@@ -144,16 +139,16 @@ fn provider_filtered_human_sources_and_import_errors_are_actionable() {
     let stderr = failure_stderr(ctx(&unestablished).args([
         "import",
         "--provider",
-        "factory-ai-droid",
+        "firebender",
         "--format=json",
     ]));
     assert!(
         stderr.contains("has no official automatic history location established")
-            || stderr.contains("no official automatic Factory history location is established"),
+            || stderr.contains("no official automatic Firebender history location is established"),
         "{stderr}"
     );
     assert!(
-        stderr.contains("ctx import --provider factory-ai-droid --path <path>"),
+        stderr.contains("ctx import --provider firebender --path <path>"),
         "{stderr}"
     );
 }

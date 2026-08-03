@@ -1177,11 +1177,13 @@
           "source_format": "factory_ai_droid_sessions_jsonl",
           "fidelity": "imported",
           "notes": [
-            "Reads Factory AI Droid session JSONL supplied by exact explicit path, including worker session linkage when present; no official automatic root is established."
+            "Reads Factory AI Droid session JSONL under ~/.factory/sessions or an explicit session directory, including worker session linkage when present."
           ]
         }
       ],
-      "history_locations": [],
+      "history_locations": [
+        "Fixed: `~/.factory/sessions/<project>/<session-id>.jsonl`."
+      ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
@@ -1199,7 +1201,7 @@
         "parent_child_session_edges": true
       },
       "limitations": [
-        "No automatic official Factory root; former `~/.factory/sessions` probe is removed. User-owned supported JSONL remains available by exact `--path`."
+        "Unsupported Unix platforms require an exact `--path`."
       ],
       "public_docs": "docs/provider-support.md"
     },

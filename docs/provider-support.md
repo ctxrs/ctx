@@ -64,8 +64,8 @@ support matrix is:
 | Cline | Supported | `cline_task_directory_json` |
 | Roo Code | Supported | `roo_task_directory_json` |
 
-Factory AI Droid has no automatic history location. Its imports always require
-an exact path, for example
+Factory AI Droid history is discovered automatically at `~/.factory/sessions`.
+An exact path remains available, for example
 `ctx import --provider factory-ai-droid --path /path/to/factory/sessions`.
 
 `ctx sources --format json` reports each known provider source with `import_support`

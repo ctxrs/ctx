@@ -104,6 +104,7 @@ pub(super) fn resolver_group(provider: CaptureProvider) -> Option<ResolverGroup>
         | CaptureProvider::Cursor
         | CaptureProvider::KimiCodeCli
         | CaptureProvider::Junie
+        | CaptureProvider::FactoryAiDroid
         | CaptureProvider::ForgeCode => Some(ResolverGroup::Simple),
         CaptureProvider::KiroCli
         | CaptureProvider::Warp
@@ -127,7 +128,6 @@ pub(super) fn resolver_group(provider: CaptureProvider) -> Option<ResolverGroup>
         | CaptureProvider::Shelley
         | CaptureProvider::OpenHands => Some(ResolverGroup::ProfileProject),
         CaptureProvider::Qoder
-        | CaptureProvider::FactoryAiDroid
         | CaptureProvider::Firebender
         | CaptureProvider::Auggie
         | CaptureProvider::DeepAgents
@@ -481,11 +481,11 @@ mod tests {
             .iter()
             .all(|spec| resolver_group(spec.provider).is_some()));
         for (group, expected) in [
-            (ResolverGroup::Simple, 13),
+            (ResolverGroup::Simple, 14),
             (ResolverGroup::Platform, 9),
             (ResolverGroup::ConfigProject, 6),
             (ResolverGroup::ProfileProject, 6),
-            (ResolverGroup::ManualUnsupported, 7),
+            (ResolverGroup::ManualUnsupported, 6),
         ] {
             assert_eq!(
                 specs
