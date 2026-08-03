@@ -7,6 +7,9 @@ use sha2::{Digest as _, Sha256};
 #[path = "capture_refresh/catalog_witness.rs"]
 mod catalog_witness;
 use catalog_witness::{reconcile_published_catalog_witness, retained_catalog_witness};
+#[path = "capture_refresh/progress.rs"]
+mod progress;
+use progress::{daemon_current_source_progress, record_source_backed_refresh_progress};
 
 pub(super) struct SourceBackedRefreshPlan<'a> {
     pub(super) explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
@@ -708,33 +711,6 @@ fn committed_route_rejected_records(
         .collect()
 }
 
-fn daemon_current_source_progress(
-    progress: CaptureSourceBackedCurrentSourceProgress,
-) -> SourceBackedCurrentSourceProgress {
-    SourceBackedCurrentSourceProgress {
-        stage: match progress.stage {
-            CaptureSourceBackedCurrentSourceProgressStage::SourceFamilyCopy => {
-                SourceBackedCurrentSourceProgressStage::SourceFamilyCopy
-            }
-            CaptureSourceBackedCurrentSourceProgressStage::OnlineBackup => {
-                SourceBackedCurrentSourceProgressStage::OnlineBackup
-            }
-            CaptureSourceBackedCurrentSourceProgressStage::LogicalFingerprint => {
-                SourceBackedCurrentSourceProgressStage::LogicalFingerprint
-            }
-            CaptureSourceBackedCurrentSourceProgressStage::LogicalScan => {
-                SourceBackedCurrentSourceProgressStage::LogicalScan
-            }
-        },
-        snapshot_pages_completed: progress.snapshot_pages_completed,
-        snapshot_pages_total: progress.snapshot_pages_total,
-        snapshot_bytes_completed: progress.snapshot_bytes_completed,
-        snapshot_bytes_total: progress.snapshot_bytes_total,
-        logical_rows_scanned: progress.logical_rows_scanned,
-        logical_certified_bytes: progress.logical_certified_bytes,
-    }
-}
-
 pub(super) fn source_backed_watch_catalog(data_root: &Path) -> Result<SourceBackedWatchCatalog> {
     let discovery = source_backed_discovery_context()?.with_data_root(data_root);
     let work_budget = source_backed_refresh_work_budget(WriterOptions::default().indexer_threads);
@@ -994,13 +970,4 @@ fn automatic_registry_issue_reason(reason: &SourceBackedAutomaticUnavailableReas
             (*detail).to_owned()
         }
     }
-}
-
-fn record_source_backed_refresh_progress(
-    data_root: &Path,
-    coordinator: &CoreRefreshEngine,
-    request_id: &str,
-    update: SourceBackedRefreshProgressUpdate,
-) -> Result<()> {
-    coordinator.persist_progress(data_root, request_id, update)
 }

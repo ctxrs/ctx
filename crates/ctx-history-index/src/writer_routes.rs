@@ -314,11 +314,7 @@ impl GenerationWriter {
                 .delete_term(Term::from_field_text(source_key_field, &token));
             self.route_deletions.insert(source.clone());
         }
-        self.source_route_plan
-            .as_mut()
-            .expect("route plan checked above")
-            .carried_from_base
-            .remove(retired_route);
+        remove_retired_route_from_plan(self.source_route_plan.as_mut(), retired_route)?;
         Ok(retired_sources)
     }
 
@@ -443,5 +439,35 @@ impl GenerationWriter {
                         .any(|candidate| candidate.exact_descriptor_eq(source))
             })
         })
+    }
+}
+
+fn remove_retired_route_from_plan(
+    source_route_plan: Option<&mut SourceRoutePlan>,
+    retired_route: &SourceRouteIdentity,
+) -> Result<()> {
+    source_route_plan
+        .ok_or(IndexError::WriterInvariant(
+            "route retirement lost its route plan",
+        ))?
+        .carried_from_base
+        .remove(retired_route);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_retirement_plan_loss_is_a_typed_invariant() {
+        let retired_route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
+
+        let error = remove_retired_route_from_plan(None, &retired_route).unwrap_err();
+
+        assert!(matches!(
+            error,
+            IndexError::WriterInvariant("route retirement lost its route plan")
+        ));
     }
 }

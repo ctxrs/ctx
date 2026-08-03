@@ -69,7 +69,7 @@ fn cli_show_operations_are_typed_and_stats_status_are_excluded() {
     for (args, expected) in [
         (vec!["ctx", "show", "session", "abc"], "show_session"),
         (vec!["ctx", "show", "event", "abc"], "show_event"),
-        (vec!["ctx", "show", "events"], "show_event"),
+        (vec!["ctx", "list", "events"], "show_event"),
     ] {
         let cli = crate::Cli::try_parse_from(args).unwrap();
         assert_eq!(

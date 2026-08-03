@@ -62,6 +62,7 @@ mod coordinator_state;
 mod current_state;
 mod publication_metadata;
 mod publication_observation;
+mod refresh_mode;
 mod request;
 
 use capture_refresh::{
@@ -94,6 +95,7 @@ pub(crate) use current_state::SourceBackedRefreshCurrent;
 use publication_metadata::SourceBackedPublicationMetadata;
 #[cfg(test)]
 use publication_observation::install_after_capture_scan_before_metadata_hook_for_test;
+pub(crate) use refresh_mode::SourceBackedRefreshMode;
 use request::{SourceBackedRefreshOperation, SourceBackedRefreshRequest};
 
 const SEARCH_DIRECTORY: &str = "search";
@@ -166,23 +168,6 @@ pub(super) fn nonzero_duration_micros(duration: StdDuration) -> u64 {
     u64::try_from(duration.as_micros())
         .unwrap_or(u64::MAX)
         .max(1)
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum SourceBackedRefreshMode {
-    Off,
-    Background,
-    Wait,
-}
-
-impl SourceBackedRefreshMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Background => "background",
-            Self::Wait => "wait",
-        }
-    }
 }
 
 /// Provider-neutral publication returned by the capture-owned refresh
