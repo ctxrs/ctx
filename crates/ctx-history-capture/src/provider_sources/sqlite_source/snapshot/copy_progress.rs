@@ -31,7 +31,7 @@ pub(super) fn copy_sqlite_member_with_progress<E>(
         .write(true)
         .create_new(true)
         .open(destination)
-        .map_err(|source| SqliteSourceAccessError::Io {
+        .map_err(|source| SqliteSourceAccessError::ScratchIoUnavailable {
             operation: "creating a ctx-owned SQLite snapshot component",
             path: destination.to_path_buf(),
             source,
@@ -53,7 +53,7 @@ pub(super) fn copy_sqlite_member_with_progress<E>(
         }
         destination_file
             .write_all(&buffer[..read])
-            .map_err(|source| SqliteSourceAccessError::Io {
+            .map_err(|source| SqliteSourceAccessError::ScratchIoUnavailable {
                 operation: "writing a ctx-owned SQLite snapshot component",
                 path: destination.to_path_buf(),
                 source,
@@ -86,7 +86,7 @@ pub(super) fn copy_sqlite_member_with_progress<E>(
     }
     destination_file
         .flush()
-        .map_err(|source| SqliteSourceAccessError::Io {
+        .map_err(|source| SqliteSourceAccessError::ScratchIoUnavailable {
             operation: "flushing a ctx-owned SQLite snapshot component",
             path: destination.to_path_buf(),
             source,

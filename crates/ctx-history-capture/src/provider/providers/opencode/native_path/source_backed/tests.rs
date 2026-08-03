@@ -29,7 +29,7 @@ use crate::{
         SourceBackedCurrentSourceProgressStage, SourceBackedProviderRegistry,
         SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
     },
-    provider_sources::provider_source_for_path,
+    provider_sources::{provider_source_for_path, SqliteRetryDecision},
 };
 
 mod current_schema;
@@ -148,6 +148,115 @@ fn write_current_schema(
             .unwrap();
     }
     connection
+}
+
+#[test]
+fn schema_and_projection_sqlite_failures_have_distinct_stable_diagnostics() {
+    for (phase, error) in [
+        (
+            SqliteFailurePhase::Schema,
+            OpenCodeSourceBackedError::Capture(CaptureError::Sqlite(
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+                    None,
+                ),
+            )),
+        ),
+        (
+            SqliteFailurePhase::Projection,
+            OpenCodeSourceBackedError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+                None,
+            )),
+        ),
+    ] {
+        let error = diagnose_provider_query_error(error, phase);
+        let OpenCodeSourceBackedError::SqliteSource(source) = &error else {
+            panic!("unexpected diagnosed OpenCode error: {error:?}");
+        };
+        let diagnostic = source.diagnostic().unwrap();
+        assert_eq!(diagnostic.phase, phase);
+        assert_eq!(diagnostic.artifact, SqliteArtifactKind::PrivateBackup);
+        assert_eq!(
+            diagnostic.sqlite_primary_code,
+            Some(rusqlite::ffi::SQLITE_CORRUPT)
+        );
+        assert_eq!(
+            diagnostic.sqlite_extended_code,
+            Some(rusqlite::ffi::SQLITE_CORRUPT)
+        );
+        assert_eq!(diagnostic.retry, SqliteRetryDecision::DoNotRetryCorrupt);
+        let rendered = source.to_string();
+        assert!(rendered.contains("sqlite_phase="));
+        assert!(rendered.contains("artifact_kind=private_backup"));
+        assert!(rendered.contains("sqlite_primary_code=11"));
+        assert!(rendered.contains("sqlite_extended_code=11"));
+        assert!(rendered.contains("copied_pages=0"));
+        assert!(rendered.contains("copied_bytes=0"));
+        assert!(rendered.contains("retry_decision=do_not_retry_corrupt"));
+        assert!(rendered.contains("cleanup_status=not_required"));
+        assert_eq!(
+            adapter::route_error(error).kind,
+            SourceBackedRouteErrorKind::InvalidSource
+        );
+    }
+}
+
+#[test]
+fn private_backup_full_is_route_fatal_with_copied_progress() {
+    let source = SqliteSourceAccessError::SqliteControl {
+        operation: "copying the pinned logical SQLite snapshot",
+        code: rusqlite::ffi::SQLITE_FULL,
+    }
+    .with_diagnostic(
+        SqliteFailurePhase::OnlineBackup,
+        SqliteArtifactKind::PrivateBackup,
+        17,
+        69_632,
+        SqliteCleanupStatus::NotRequired,
+    );
+    let diagnostic = source.diagnostic().unwrap();
+    assert_eq!(
+        diagnostic.sqlite_primary_code,
+        Some(rusqlite::ffi::SQLITE_FULL)
+    );
+    assert_eq!(
+        diagnostic.sqlite_extended_code,
+        Some(rusqlite::ffi::SQLITE_FULL)
+    );
+    assert_eq!(diagnostic.copied_pages, 17);
+    assert_eq!(diagnostic.copied_bytes, 69_632);
+    assert_eq!(diagnostic.retry, SqliteRetryDecision::RouteFatalResource);
+    assert_eq!(
+        adapter::route_error(OpenCodeSourceBackedError::SqliteSource(source)).kind,
+        SourceBackedRouteErrorKind::ResourceUnavailable
+    );
+}
+
+#[test]
+fn provider_and_private_backup_corruption_take_distinct_routes() {
+    for (phase, artifact, expected) in [
+        (
+            SqliteFailurePhase::SourceValidation,
+            SqliteArtifactKind::ProviderDatabase,
+            SourceBackedRouteErrorKind::InvalidSource,
+        ),
+        (
+            SqliteFailurePhase::BackupValidation,
+            SqliteArtifactKind::PrivateBackup,
+            SourceBackedRouteErrorKind::Internal,
+        ),
+    ] {
+        let source = SqliteSourceAccessError::SqliteControl {
+            operation: "certifying the pinned SQLite snapshot",
+            code: rusqlite::ffi::SQLITE_CORRUPT,
+        }
+        .with_diagnostic(phase, artifact, 2, 8_192, SqliteCleanupStatus::NotRequired);
+        assert_eq!(
+            adapter::route_error(OpenCodeSourceBackedError::SqliteSource(source)).kind,
+            expected
+        );
+    }
 }
 
 fn scan_current_schema(

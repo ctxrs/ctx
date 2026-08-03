@@ -40,7 +40,8 @@ use crate::{
         },
     },
     provider_sources::{
-        retain_sqlite_source_directory_authority, SqliteLogicalSnapshot, SqliteSourceAccessError,
+        retain_sqlite_source_directory_authority, SqliteArtifactKind, SqliteCleanupStatus,
+        SqliteFailurePhase, SqliteLogicalSnapshot, SqliteSourceAccessError,
         SqliteSourceDirectoryAuthority, SqliteSourceProgressError, SqliteSourceReadSnapshot,
     },
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
@@ -272,31 +273,35 @@ fn scan_pinned_source_with_scratch_limit(
 ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
     let working = {
         let connection = sqlite_snapshot.connection()?;
-        let streamed = sqlite_snapshot.with_private_scratch_database(
-            "opencode-order-",
-            scratch_limit,
-            |scratch, scratch_path| {
-                initialize_ordering_scratch(scratch)?;
-                let session_scan = scan_session_evidence(
-                    connection,
-                    scratch,
-                    &observation.schema,
-                    &observation.source,
-                )?;
-                emit(OpenCodeScanOutput::Begin(observation.source.clone()))?;
-                stream_logical_rows(
-                    connection,
-                    &observation.schema,
-                    dialect,
-                    path,
-                    &observation.source,
-                    session_scan,
-                    scratch,
-                    scratch_path,
-                    emit,
-                )
-            },
-        )?;
+        let streamed = sqlite_snapshot
+            .with_private_scratch_database(
+                "opencode-order-",
+                scratch_limit,
+                |scratch, scratch_path| {
+                    initialize_ordering_scratch(scratch)?;
+                    let session_scan = scan_session_evidence(
+                        connection,
+                        scratch,
+                        &observation.schema,
+                        &observation.source,
+                    )?;
+                    emit(OpenCodeScanOutput::Begin(observation.source.clone()))?;
+                    stream_logical_rows(
+                        connection,
+                        &observation.schema,
+                        dialect,
+                        path,
+                        &observation.source,
+                        session_scan,
+                        scratch,
+                        scratch_path,
+                        emit,
+                    )
+                },
+            )
+            .map_err(|error| {
+                diagnose_provider_query_error(error, SqliteFailurePhase::Projection)
+            })?;
         let schema_evidence = relevant_schema_evidence(&observation.schema);
         let logical_snapshot = SqliteLogicalSnapshot::new(
             PARSER_REVISION,
@@ -339,7 +344,9 @@ fn observe_logical_source_with_progress(
         0,
         0,
     ))?;
-    let schema = OpenCodeNativeSchema::probe(connection, dialect)?;
+    let schema = OpenCodeNativeSchema::probe(connection, dialect)
+        .map_err(OpenCodeSourceBackedError::from)
+        .map_err(|error| diagnose_provider_query_error(error, SqliteFailurePhase::Schema))?;
     let source = source_key(dialect, schema.family)?;
     report_progress(opencode_logical_progress(
         SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
@@ -347,6 +354,33 @@ fn observe_logical_source_with_progress(
         0,
     ))?;
     Ok(OpenCodeLogicalObservation { source, schema })
+}
+
+fn diagnose_provider_query_error(
+    error: OpenCodeSourceBackedError,
+    phase: SqliteFailurePhase,
+) -> OpenCodeSourceBackedError {
+    match error {
+        OpenCodeSourceBackedError::Sqlite(source)
+        | OpenCodeSourceBackedError::Capture(CaptureError::Sqlite(source)) => {
+            SqliteSourceAccessError::Sqlite {
+                operation: match phase {
+                    SqliteFailurePhase::Schema => "probing the OpenCode SQLite schema",
+                    _ => "projecting the OpenCode SQLite snapshot",
+                },
+                source,
+            }
+            .with_diagnostic(
+                phase,
+                SqliteArtifactKind::PrivateBackup,
+                0,
+                0,
+                SqliteCleanupStatus::NotRequired,
+            )
+            .into()
+        }
+        error => error,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

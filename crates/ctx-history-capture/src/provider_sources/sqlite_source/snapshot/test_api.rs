@@ -75,6 +75,27 @@ pub(in crate::provider_sources::sqlite_source) fn open_root_handle_sqlite_source
     )
 }
 
+pub(in crate::provider_sources::sqlite_source) fn open_root_handle_sqlite_source_online_backup_after_backup_for_test(
+    authority: &SqliteSourceDirectoryAuthority,
+    database_name: &OsStr,
+    after_online_backup: impl FnOnce(&Path),
+) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
+    let family = SqliteSourceFamily::open(authority, database_name, || {})?;
+    match open_logical_online_backup_snapshot_with_progress(
+        authority,
+        family,
+        || {},
+        || {},
+        after_online_backup,
+        SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+        &mut |_| Ok::<(), std::convert::Infallible>(()),
+    ) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(SqliteSourceProgressError::Source(error)) => Err(error),
+        Err(SqliteSourceProgressError::Progress(never)) => match never {},
+    }
+}
+
 pub(in crate::provider_sources::sqlite_source) fn run_online_backup_with_deadline_for_test(
     source: &Connection,
     destination: &Connection,
