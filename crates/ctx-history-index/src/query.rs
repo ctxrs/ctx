@@ -24,7 +24,7 @@ pub(crate) use verification::{
 use std::cell::{Cell, RefCell};
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{BTreeMap, BTreeSet, BinaryHeap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet},
     ops::Bound,
 };
 

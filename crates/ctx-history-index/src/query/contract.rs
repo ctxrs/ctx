@@ -378,6 +378,40 @@ impl SemanticEventPage {
     }
 }
 
+/// Body-free event eligibility selected from one immutable Core generation.
+///
+/// The IDs are derived from the same indexed metadata predicates as lexical
+/// search. Semantic scorers can therefore reject ineligible events before
+/// touching vector bytes without reopening provider sources or retaining Core
+/// content for the candidate corpus.
+#[derive(Debug, Clone)]
+pub struct SemanticFilterProjection {
+    pub(super) generation_id: String,
+    pub(super) event_ids: HashSet<Uuid>,
+}
+
+impl SemanticFilterProjection {
+    pub fn generation_id(&self) -> &str {
+        &self.generation_id
+    }
+
+    pub fn len(&self) -> usize {
+        self.event_ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.event_ids.is_empty()
+    }
+
+    pub fn contains(&self, event_id: Uuid) -> bool {
+        self.event_ids.contains(&event_id)
+    }
+
+    pub fn event_ids(&self) -> impl Iterator<Item = Uuid> + '_ {
+        self.event_ids.iter().copied()
+    }
+}
+
 /// One deterministic page of complete Core semantic candidates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreSemanticEventPage {

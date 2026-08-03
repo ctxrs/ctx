@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     sync::{Condvar, LazyLock, Mutex},
     time::Instant,
 };
@@ -26,7 +25,7 @@ pub(super) fn scan_exact_generation(
     reader: &PinnedFlatGeneration,
     query_embedding: &[f32],
     limit: usize,
-    allowed_events: Option<&HashSet<Uuid>>,
+    event_is_eligible: Option<&dyn Fn(Uuid) -> bool>,
     started: Instant,
 ) -> Result<SemanticVectorSearch> {
     if query_embedding.len() != SEMANTIC_DIMENSIONS {
@@ -50,11 +49,11 @@ pub(super) fn scan_exact_generation(
     let mut scan = ExactFlatF32Scan::new(query_embedding, FlatScanConfig::new(dimensions, limit))
         .map_err(|error| SemanticVectorStoreError::unavailable(error.to_string()))?;
 
-    if let Some(allowed) = allowed_events {
+    if let Some(event_is_eligible) = event_is_eligible {
         for (segment_index, segment) in reader.scan_segments().iter().enumerate() {
             let mut chunks = segment.scoring_chunks().peekable();
             while let Some(chunk) = chunks.next() {
-                if allowed.contains(&chunk.event_id) {
+                if event_is_eligible(chunk.event_id) {
                     scan.scan_prevalidated_f32(std::iter::once((
                         ActiveChunk::at_location(
                             chunk.event_id,

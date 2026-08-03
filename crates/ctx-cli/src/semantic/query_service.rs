@@ -4,7 +4,9 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use ctx_history_index::{EventSearchCandidate, EventSearchFilters, VerifiedIndex};
+use ctx_history_index::{
+    EventSearchCandidate, EventSearchFilters, SemanticFilterProjection, VerifiedIndex,
+};
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -29,9 +31,7 @@ pub(in crate::semantic) use transport::{
     read_daemon_service_endpoint_identity, DaemonIpcService, DaemonQueryEndpoint,
     DaemonSourceRefreshServiceUnavailable,
 };
-mod semantic_filters;
 mod server;
-use self::semantic_filters::source_event_matches_filters;
 #[cfg(test)]
 pub(in crate::semantic) use server::*;
 #[cfg(not(test))]
@@ -91,6 +91,7 @@ impl SourceBackedSemanticNotReady {
 pub(crate) struct SourceBackedSemanticQueryPin {
     core_generation_id: String,
     pinned: Option<PinnedFlatGeneration>,
+    filter_projection: Option<(EventSearchFilters, SemanticFilterProjection)>,
 }
 
 impl PinnedSourceBackedGeneration {
@@ -132,7 +133,7 @@ impl PinnedSourceBackedGeneration {
         query: &str,
         filters: &EventSearchFilters,
         candidate_limit: usize,
-        pin: &SourceBackedSemanticQueryPin,
+        pin: &mut SourceBackedSemanticQueryPin,
     ) -> Result<(Vec<EventSearchCandidate>, Value)> {
         validate_semantic_query_generation(index.generation_id(), pin)?;
         let Some(pinned) = pin.pinned.as_ref() else {
@@ -149,6 +150,7 @@ impl PinnedSourceBackedGeneration {
                     0,
                     0,
                     0,
+                    0,
                     None,
                 ),
             ));
@@ -160,10 +162,23 @@ impl PinnedSourceBackedGeneration {
                     "the daemon query embedding service is unavailable",
                 )
             })?;
+        if pin
+            .filter_projection
+            .as_ref()
+            .is_none_or(|(cached_filters, _)| cached_filters != filters)
+        {
+            pin.filter_projection =
+                Some((filters.clone(), index.semantic_filter_projection(filters)?));
+        }
+        let projection = &pin
+            .filter_projection
+            .as_ref()
+            .ok_or_else(|| anyhow!("semantic filter projection is unavailable"))?
+            .1;
         source_semantic_candidates_with_embedding(
             index,
             pinned,
-            filters,
+            projection,
             candidate_limit,
             &embedding,
             Some(query_embed_ms),
@@ -174,7 +189,7 @@ impl PinnedSourceBackedGeneration {
 fn source_semantic_candidates_with_embedding(
     index: &VerifiedIndex,
     pinned: &PinnedFlatGeneration,
-    filters: &EventSearchFilters,
+    projection: &SemanticFilterProjection,
     candidate_limit: usize,
     embedding: &[f32],
     query_embed_ms: Option<u64>,
@@ -184,102 +199,113 @@ fn source_semantic_candidates_with_embedding(
             "source-backed semantic candidate limit must be between 1 and {SEMANTIC_EXACT_TOP_K_MAX}"
         ));
     }
-    let active_events = pinned.stats().active_events;
-    let mut requested_k = candidate_limit.min(active_events.max(1));
-    let initial_k = requested_k;
-    let mut iterations = 0_usize;
-    loop {
-        iterations = iterations.saturating_add(1);
-        let search = scan_exact_generation(pinned, embedding, requested_k, None, Instant::now())?;
-        let stats = search.stats.clone();
-        let raw_candidates = search.hits.len();
-        let mut filtered = 0_usize;
-        let mut non_positive = 0_usize;
-        let mut positive_hits = Vec::with_capacity(raw_candidates);
-        for hit in search.hits {
-            if !hit.similarity.is_finite() || hit.similarity <= 0.0 {
-                non_positive = non_positive.saturating_add(1);
-                continue;
-            }
-            positive_hits.push(hit);
-        }
-        let event_ids = positive_hits
-            .iter()
-            .map(|hit| hit.event_id)
-            .collect::<Vec<_>>();
-        let records = index
-            .core_events_by_ids_if_bounded(
-                &event_ids,
-                SEMANTIC_EXACT_TOP_K_MAX,
-                MAX_SEMANTIC_CORE_BATCH_BYTES,
-            )?
-            .ok_or_else(|| {
-                source_semantic_not_ready(
-                    "semantic_projection_event_mismatch",
-                    format!(
-                        "flat-F32 event batch does not map exactly to Core generation {}",
-                        index.generation_id()
-                    ),
-                )
-            })?;
-        let mut candidates = Vec::with_capacity(records.len());
-        for (hit, record) in positive_hits.into_iter().zip(records) {
-            if record.event_id.as_uuid() != hit.event_id {
-                return Err(source_semantic_not_ready(
-                    "semantic_projection_event_mismatch",
-                    format!(
-                        "flat-F32 event {} does not match its ordered Core record in generation {}",
-                        hit.event_id,
-                        index.generation_id()
-                    ),
-                ));
-            }
-            if record.event_type != "message" || record.role.as_deref() != Some("user") {
-                return Err(source_semantic_not_ready(
-                    "semantic_projection_event_mismatch",
-                    format!(
-                        "flat-F32 event {} is not metadata-eligible in Core generation {}",
-                        hit.event_id,
-                        index.generation_id()
-                    ),
-                ));
-            }
-            if !source_event_matches_filters(&record.event, filters) {
-                filtered = filtered.saturating_add(1);
-                continue;
-            }
-            candidates.push(EventSearchCandidate {
-                event: record.event,
-                score: hit.similarity,
-            });
-        }
-        let exhausted = requested_k >= active_events;
-        if candidates.len() >= candidate_limit
-            || exhausted
-            || requested_k >= SEMANTIC_EXACT_TOP_K_MAX
-        {
-            candidates.truncate(candidate_limit);
-            let diagnostics = source_semantic_diagnostics(
-                index,
-                Some(pinned),
-                Some(&stats),
-                initial_k,
-                requested_k,
-                iterations,
-                raw_candidates,
-                candidates.len(),
-                filtered,
-                non_positive,
-                query_embed_ms,
-            );
-            return Ok((candidates, diagnostics));
-        }
-        requested_k = requested_k
-            .saturating_mul(2)
-            .min(active_events)
-            .min(SEMANTIC_EXACT_TOP_K_MAX)
-            .max(requested_k.saturating_add(1));
+    if projection.generation_id() != index.generation_id() {
+        return Err(source_semantic_not_ready(
+            "semantic_generation_receipt_mismatch",
+            format!(
+                "semantic filter projection belongs to Core generation {}, not {}",
+                projection.generation_id(),
+                index.generation_id()
+            ),
+        ));
     }
+    let active_events = pinned.stats().active_events;
+    let eligible_events = projection.len();
+    if eligible_events > active_events {
+        return Err(source_semantic_not_ready(
+            "semantic_projection_event_mismatch",
+            format!(
+                "Core generation {} selected {eligible_events} semantic events but the flat-F32 generation contains only {active_events}",
+                index.generation_id()
+            ),
+        ));
+    }
+    let requested_k = candidate_limit.min(eligible_events.max(1));
+    let event_is_eligible = |event_id| projection.contains(event_id);
+    let search = scan_exact_generation(
+        pinned,
+        embedding,
+        requested_k,
+        Some(&event_is_eligible),
+        Instant::now(),
+    )?;
+    let stats = search.stats.clone();
+    if stats.events_scored != eligible_events {
+        return Err(source_semantic_not_ready(
+            "semantic_projection_event_mismatch",
+            format!(
+                "flat-F32 generation scored {} of {eligible_events} metadata-eligible events from Core generation {}",
+                stats.events_scored,
+                index.generation_id()
+            ),
+        ));
+    }
+    let raw_candidates = search.hits.len();
+    let mut non_positive = 0_usize;
+    let mut positive_hits = Vec::with_capacity(raw_candidates);
+    for hit in search.hits {
+        if !hit.similarity.is_finite() || hit.similarity <= 0.0 {
+            non_positive = non_positive.saturating_add(1);
+            continue;
+        }
+        positive_hits.push(hit);
+    }
+    let event_ids = positive_hits
+        .iter()
+        .map(|hit| hit.event_id)
+        .collect::<Vec<_>>();
+    let records = index
+        .core_events_by_ids_if_bounded(
+            &event_ids,
+            SEMANTIC_EXACT_TOP_K_MAX,
+            MAX_SEMANTIC_CORE_BATCH_BYTES,
+        )?
+        .ok_or_else(|| {
+            source_semantic_not_ready(
+                "semantic_projection_event_mismatch",
+                format!(
+                    "flat-F32 event batch does not map exactly to Core generation {}",
+                    index.generation_id()
+                ),
+            )
+        })?;
+    let mut candidates = Vec::with_capacity(records.len());
+    for (hit, record) in positive_hits.into_iter().zip(records) {
+        if record.event_id.as_uuid() != hit.event_id
+            || record.event_type != "message"
+            || record.role.as_deref() != Some("user")
+            || !projection.contains(hit.event_id)
+        {
+            return Err(source_semantic_not_ready(
+                "semantic_projection_event_mismatch",
+                format!(
+                    "flat-F32 event {} does not match its eligible Core record in generation {}",
+                    hit.event_id,
+                    index.generation_id()
+                ),
+            ));
+        }
+        candidates.push(EventSearchCandidate {
+            event: record.event,
+            score: hit.similarity,
+        });
+    }
+    candidates.truncate(candidate_limit);
+    let diagnostics = source_semantic_diagnostics(
+        index,
+        Some(pinned),
+        Some(&stats),
+        requested_k,
+        requested_k,
+        1,
+        raw_candidates,
+        candidates.len(),
+        active_events.saturating_sub(eligible_events),
+        non_positive,
+        eligible_events,
+        query_embed_ms,
+    );
+    Ok((candidates, diagnostics))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -294,6 +320,7 @@ fn source_semantic_diagnostics(
     eligible_candidates: usize,
     filtered_candidates: usize,
     non_positive_candidates: usize,
+    eligible_event_count: usize,
     query_embed_ms: impl Into<Option<u64>>,
 ) -> Value {
     let query_embed_ms = query_embed_ms.into();
@@ -314,8 +341,9 @@ fn source_semantic_diagnostics(
         "eligible_candidates": eligible_candidates,
         "filtered_candidates": filtered_candidates,
         "non_positive_candidates": non_positive_candidates,
-        "exhausted": pinned.is_none_or(|pinned| final_k >= pinned.stats().active_events),
-        "cap_reached": final_k >= SEMANTIC_EXACT_TOP_K_MAX,
+        "exhausted": final_k >= eligible_event_count,
+        "cap_reached": final_k >= SEMANTIC_EXACT_TOP_K_MAX
+            && final_k < eligible_event_count,
     }))
 }
 
@@ -342,6 +370,7 @@ fn source_backed_query_pin_from_readiness(
     Ok(SourceBackedSemanticQueryPin {
         core_generation_id: core_generation_id.to_owned(),
         pinned,
+        filter_projection: None,
     })
 }
 

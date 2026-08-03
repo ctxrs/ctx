@@ -963,6 +963,91 @@ mod tests {
     }
 
     #[test]
+    fn daemon_disabled_cli_default_and_hybrid_fall_back_but_semantic_is_typed() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        config::set_semantic_search_enabled(temp.path(), true).unwrap();
+        config::set_daemon_enabled(temp.path(), false).unwrap();
+        let config = config::AppConfig::load(temp.path()).unwrap();
+        let index = open_index(temp.path()).unwrap();
+
+        for backend in [None, Some(SearchBackendArg::Hybrid)] {
+            let mut source_request = request(RefreshArg::Off);
+            source_request.backend = backend;
+            let resolved =
+                super::search::resolve_source_search_backend(&source_request, &config).unwrap();
+            assert_eq!(resolved, SearchBackendArg::Hybrid);
+            source_request.backend = Some(resolved);
+            source_request.semantic_enabled = config.semantic_search_enabled();
+            source_request.semantic_daemon_enabled = config.daemon.enabled;
+            let filters = index_search_filters(&source_request, &index).unwrap();
+            let collection = collect_search_hits_with_backend_using(
+                &source_request,
+                &index,
+                temp.path(),
+                source_request.semantic_weight,
+                &filters,
+                |_index, _data_root, _query, _filters, _candidate_limit| {
+                    panic!("daemon-disabled hybrid must fall back before semantic work")
+                },
+            )
+            .unwrap();
+            assert_eq!(collection.requested_backend, SearchBackendArg::Hybrid);
+            assert_eq!(collection.effective_backend, SearchBackendArg::Lexical);
+            assert_eq!(collection.semantic_status, "unavailable");
+            assert_eq!(
+                collection
+                    .semantic_fallback
+                    .as_ref()
+                    .map(|fallback| fallback.code),
+                Some("semantic_daemon_disabled")
+            );
+            assert_eq!(collection.result_window.hits.len(), 1);
+        }
+
+        let mut semantic = request(RefreshArg::Off);
+        semantic.backend = Some(SearchBackendArg::Semantic);
+        let error = super::search::resolve_source_search_backend(&semantic, &config)
+            .expect_err("semantic-only must still fail when the daemon is disabled");
+        let not_ready = error
+            .downcast_ref::<SourceBackedSemanticNotReady>()
+            .expect("semantic-only daemon failure must remain typed");
+        assert_eq!(not_ready.code(), "semantic_daemon_disabled");
+    }
+
+    #[test]
+    fn daemon_disabled_mcp_default_and_hybrid_return_lexical_fallback() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        config::set_semantic_search_enabled(temp.path(), true).unwrap();
+        config::set_daemon_enabled(temp.path(), false).unwrap();
+
+        for backend in [None, Some(SearchBackendArg::Hybrid)] {
+            let mut source_request = request(RefreshArg::Off);
+            source_request.backend = backend;
+            let (value, _) = mcp_search(source_request, temp.path()).unwrap();
+            assert_eq!(value["retrieval"]["requested_mode"], "hybrid");
+            assert_eq!(value["retrieval"]["effective_mode"], "lexical");
+            assert_eq!(
+                value["retrieval"]["semantic_fallback_code"],
+                "semantic_daemon_disabled"
+            );
+            assert_eq!(value["results"].as_array().unwrap().len(), 1);
+        }
+
+        let mut semantic = request(RefreshArg::Off);
+        semantic.backend = Some(SearchBackendArg::Semantic);
+        let error = mcp_search(semantic, temp.path())
+            .expect_err("MCP semantic-only must fail when the daemon is disabled");
+        assert_eq!(
+            error
+                .downcast_ref::<SourceBackedSemanticNotReady>()
+                .map(SourceBackedSemanticNotReady::code),
+            Some("semantic_daemon_disabled")
+        );
+    }
+
+    #[test]
     fn show_json_output_limit_is_typed() {
         let event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 7, 7);
         let value = json!({

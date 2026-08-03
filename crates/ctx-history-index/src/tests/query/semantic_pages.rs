@@ -159,6 +159,105 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
 }
 
 #[test]
+fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_decode() {
+    let temp = tempdir().unwrap();
+    let source = source("semantic-filter-parity.jsonl");
+    let mut target = document_for_session(&source, "target-session", 1, "shared parity needle");
+    target.workspace = None;
+    target.cwd = Some("/Work/CwdOnlyTarget".to_owned());
+    target.repository_bindings.push(RepositoryBinding {
+        binding_id: "binding-1".to_owned(),
+        logical_repository_id: "repo-1".to_owned(),
+        checkout_id: None,
+        worktree_id: None,
+        aliases: Vec::new(),
+        git_object_format: None,
+        local_root_authorization: None,
+        evidence: vec![RepositoryEvidence {
+            kind: RepositoryEvidenceKind::FileActivity,
+            confidence: RepositoryEvidenceConfidence::Explicit,
+        }],
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    });
+    target.repository_file_observations = vec![RepositoryFileObservation {
+        repository_binding_id: "binding-1".to_owned(),
+        relative_path: "src/ParityTarget.rs".to_owned(),
+        kind: RepositoryFileObservationKind::Modified,
+        prior_relative_path: None,
+    }];
+    target.validate_contract().unwrap();
+    let other = document_for_session(&source, "other-session", 2, "shared parity needle");
+    let mut subagent = document_for_session(&source, "subagent-session", 3, "shared parity needle");
+    subagent.agent_type = "subagent".to_owned();
+    subagent.is_primary = false;
+    subagent.validate_contract().unwrap();
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in [target.clone(), other.clone(), subagent.clone()] {
+        writer.add_core_record(record).unwrap();
+    }
+    writer.certify_source(certificate(&source, 1, 3)).unwrap();
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+
+    let parity_filters = [
+        EventSearchFilters::default(),
+        EventSearchFilters {
+            session_id: Some(target.session_id.as_uuid()),
+            provider: Some("codex".to_owned()),
+            source_format: Some("codex_session_jsonl".to_owned()),
+            branch: Some("main".to_owned()),
+            workspace: Some("cwdonlyTARGET".to_owned()),
+            since_unix_ms: target.occurred_at_unix_ms,
+            event_type: Some("message".to_owned()),
+            role: Some("user".to_owned()),
+            agent_type: Some("primary".to_owned()),
+            file: Some("paritytarget.RS".to_owned()),
+            ..EventSearchFilters::default()
+        },
+        EventSearchFilters {
+            agent_scope: AgentScope::Primary,
+            ..EventSearchFilters::default()
+        },
+        EventSearchFilters {
+            exclude_session_tree: Some(ExcludedSessionTree {
+                provider: "codex".to_owned(),
+                provider_session_id: "target-session".to_owned(),
+                session_id: Some(target.session_id.as_uuid()),
+            }),
+            ..EventSearchFilters::default()
+        },
+    ];
+    for filters in parity_filters {
+        let lexical = index
+            .search_event_candidates_with_filters("shared parity needle", &filters, 10)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.event.event_id.as_uuid())
+            .collect::<HashSet<_>>();
+        crate::query::reset_core_record_decodes();
+        let semantic = index.semantic_filter_projection(&filters).unwrap();
+        assert_eq!(semantic.generation_id(), index.generation_id());
+        assert_eq!(semantic.event_ids().collect::<HashSet<_>>(), lexical);
+        assert_eq!(
+            crate::query::core_record_decodes(),
+            0,
+            "semantic eligibility must use indexed metadata without decoding Core bodies"
+        );
+    }
+
+    let invalid = EventSearchFilters {
+        provider: Some("  ".to_owned()),
+        ..EventSearchFilters::default()
+    };
+    assert!(matches!(
+        index.semantic_filter_projection(&invalid),
+        Err(IndexError::EmptyQueryFilter { field: "provider" })
+    ));
+}
+
+#[test]
 fn semantic_first_pages_filter_the_neutral_core_order() {
     const INELIGIBLE_EVENTS: u64 = 2_048;
     let temp = tempdir().unwrap();
