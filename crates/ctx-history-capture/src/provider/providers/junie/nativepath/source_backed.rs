@@ -37,7 +37,7 @@ const NATIVE_EVENT_POSITION_KIND: &str = "junie.normalized-event-index";
 const LOGICAL_SESSION_KIND: &str = "junie-session";
 const LOGICAL_EVENT_KIND: &str = "junie-event";
 const SOURCE_SCHEMA_VARIANT: &str = "junie-session-events-v2";
-const PARSER_REVISION: &str = "junie-source-backed-v4";
+const PARSER_REVISION: &str = "junie-source-backed-v5";
 const METADATA_TEXT_MAX_CHARS: usize = 2_048;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,7 +46,6 @@ struct JunieBinding {
     provider_session_id: String,
     session_id: StableEntityId,
     meta: JunieIndexMeta,
-    require_supported_events: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -119,7 +118,6 @@ impl JsonlFamilyAdapter for JunieJsonlAdapter {
                 session_id: session_identity(&source, &provider_session_id)?,
                 provider_session_id,
                 meta,
-                require_supported_events: session.require_supported_events,
             };
             let relative_path = relative_to_authority(&authority, &session.events_path)?;
             leaves.push(JsonlFamilyLeaf::observe(
@@ -152,8 +150,7 @@ impl JsonlFamilyAdapter for JunieJsonlAdapter {
             .project_dir
             .as_deref()
             .map(|value| provider_local_preview(value, METADATA_TEXT_MAX_CHARS).0);
-        let projection =
-            JunieProjection::new(&binding.meta, binding.require_supported_events, imported_at);
+        let projection = JunieProjection::new(&binding.meta, imported_at);
         Ok(Box::new(JunieProjector {
             source: leaf.source().clone(),
             binding,

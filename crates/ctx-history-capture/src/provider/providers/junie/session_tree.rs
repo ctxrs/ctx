@@ -35,7 +35,6 @@ pub(super) struct JunieIndexMeta {
 pub(super) struct JunieSessionPath {
     pub(super) events_path: PathBuf,
     pub(super) index_meta: JunieIndexMeta,
-    pub(super) require_supported_events: bool,
 }
 
 struct JunieIndex {
@@ -93,7 +92,6 @@ pub(super) fn visit_junie_session_event_paths(
             JunieSessionPath {
                 events_path,
                 index_meta,
-                require_supported_events: true,
             },
             0,
         )?;
@@ -133,7 +131,6 @@ pub(super) fn visit_junie_session_event_paths(
                 JunieSessionPath {
                     events_path,
                     index_meta,
-                    require_supported_events: true,
                 },
                 0,
             )?;
@@ -181,7 +178,6 @@ pub(super) fn visit_junie_session_event_paths(
             JunieSessionPath {
                 events_path: authority.named_path().join(&events_relative),
                 index_meta: meta,
-                require_supported_events: true,
             },
             ordinal,
         )?;
@@ -235,7 +231,6 @@ pub(super) fn visit_junie_session_event_paths(
                     session_id,
                     ..JunieIndexMeta::default()
                 },
-                require_supported_events: false,
             },
             ordinal,
         )?;

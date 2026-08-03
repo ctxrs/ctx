@@ -60,6 +60,7 @@ struct SearchRenderMetrics<'a> {
     query_duration: Duration,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn search_json<'event>(
     request: &SourceSearchRequest,
     data_root: &Path,

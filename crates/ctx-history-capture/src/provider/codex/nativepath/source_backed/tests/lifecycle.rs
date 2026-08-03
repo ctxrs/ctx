@@ -140,6 +140,126 @@ fn malformed_session_owner_quarantines_only_that_source() {
 }
 
 #[test]
+fn unknown_codex_events_publish_fresh_and_replay_warm_without_indexing_bodies() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000247";
+    let binary_body = "iVBORw0KGgo=issue-247-import-body";
+    let future_body = "future-import-body-must-not-be-indexed";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            message("user", "alphaquartz247before"),
+            serde_json::json!({
+                "timestamp": "2026-05-31T20:33:10Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "image_generation_end",
+                    "call_id": "ig-issue-247",
+                    "result": binary_body,
+                    "saved_path": "/tmp/repro/img.png"
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "timestamp": "2026-05-31T20:33:11Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "future_tool_result",
+                    "result": future_body
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "timestamp": "2026-05-31T20:33:12Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "future_tool_end",
+                    "output": future_body
+                }
+            })
+            .to_string(),
+            message("assistant", "omegajade247after"),
+        ],
+    );
+
+    let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(cold.commit.indexed_documents, 2);
+    assert_eq!(cold.counters.complete_records_scanned, 6);
+    assert_eq!(cold.counters.retained_records_scanned, 2);
+    assert_eq!(cold.counters.rejected_records_scanned, 0);
+    assert_eq!(cold.counters.ignored_records_scanned, 4);
+    assert_eq!(cold.counters.prefiltered_records, 3);
+
+    let verified = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(verified.document_count(), 2);
+    assert_eq!(search_event_ids(&verified, "alphaquartz247before").len(), 1);
+    assert_eq!(search_event_ids(&verified, "omegajade247after").len(), 1);
+    assert!(search_event_ids(&verified, binary_body).is_empty());
+    assert!(search_event_ids(&verified, future_body).is_empty());
+    let certificate = verified.manifest().sources.first().unwrap();
+    assert_eq!(certificate.parser_revision(), CODEX_PARSER_REVISION);
+    assert_eq!(certificate.counts().complete_records, 6);
+    assert_eq!(certificate.counts().retained_records, 2);
+    assert_eq!(certificate.counts().rejected_records, 0);
+    assert_eq!(certificate.counts().ignored_records, 4);
+
+    let cold_generation = verified.generation_id().to_owned();
+    let warm = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(warm.commit.generation_id, cold_generation);
+    assert_eq!(warm.counters.replayed_sources, 1);
+    assert_eq!(warm.counters.staged_documents, 0);
+    assert_eq!(warm.counters.complete_records_scanned, 0);
+    assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 2);
+}
+
+#[test]
+fn unknown_only_codex_source_certifies_ignored_records_and_replays() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000248";
+    write_session(
+        &sessions,
+        native_session_id,
+        &[serde_json::json!({
+            "timestamp": "2026-05-31T20:33:10Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "image_generation_end",
+                "call_id": "ig-unknown-only",
+                "result": "iVBORw0KGgo=unknown-only-body"
+            }
+        })
+        .to_string()],
+    );
+
+    let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(cold.commit.indexed_documents, 0);
+    assert_eq!(cold.counters.complete_records_scanned, 2);
+    assert_eq!(cold.counters.retained_records_scanned, 0);
+    assert_eq!(cold.counters.rejected_records_scanned, 0);
+    assert_eq!(cold.counters.ignored_records_scanned, 2);
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let certificate = verified.manifest().sources.first().unwrap();
+    assert_eq!(certificate.counts().complete_records, 2);
+    assert_eq!(certificate.counts().retained_records, 0);
+    assert_eq!(certificate.counts().rejected_records, 0);
+    assert_eq!(certificate.counts().ignored_records, 2);
+    assert!(certificate.frontier().is_some());
+
+    let generation = verified.generation_id().to_owned();
+    let warm = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(warm.commit.generation_id, generation);
+    assert_eq!(warm.counters.replayed_sources, 1);
+    assert_eq!(warm.counters.complete_records_scanned, 0);
+}
+
+#[test]
 fn source_backed_changed_leaf_parallel_matches_single_lane_semantics() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");

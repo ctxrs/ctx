@@ -784,7 +784,6 @@ mod tests {
             &normalized_query,
             SearchPresentationHydrationBudget {
                 maximum_retained_snippet_bytes: retained_snippet_bytes - 1,
-                ..SEARCH_PRESENTATION_HYDRATION_BUDGET
             },
         )
         .unwrap_err();

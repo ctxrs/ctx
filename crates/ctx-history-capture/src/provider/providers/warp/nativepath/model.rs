@@ -189,6 +189,7 @@ pub(in super::super) struct WarpNativeCounters {
     pub(in super::super) peak_task_identity_entries: u64,
     pub(in super::super) protobuf_bytes_scanned: u64,
     pub(in super::super) retained_events: u64,
+    pub(in super::super) ignored_messages: u64,
     pub(in super::super) retained_body_bytes: u64,
     pub(in super::super) tool_calls_retained: u64,
     pub(in super::super) malformed_task_cells: u64,

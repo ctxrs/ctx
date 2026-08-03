@@ -318,7 +318,7 @@ fn classify_response_item(item_type: Option<&str>) -> CodexRecordClass {
         Some("tool_search_output") => {
             CodexRecordClass::ExcludedResult(CodexResultKind::ToolSearchOutput)
         }
-        Some(item_type) if result_like_item_type(item_type) => {
+        Some("tool_output" | "tool_result") => {
             CodexRecordClass::ExcludedResult(CodexResultKind::OtherResult)
         }
         _ => CodexRecordClass::Ignored,
@@ -329,27 +329,13 @@ fn classify_event_message(item_type: Option<&str>) -> CodexRecordClass {
     match item_type {
         Some(
             "patch_apply_end" | "web_search_end" | "exec_command_end" | "command_complete"
-            | "tool_complete",
+            | "tool_complete" | "mcp_tool_call_end",
         ) => CodexRecordClass::ExcludedResult(CodexResultKind::OtherResult),
         Some(
             "task_started" | "task_complete" | "turn_aborted" | "context_compacted" | "token_count",
         ) => CodexRecordClass::Ignored,
-        Some(item_type) if result_like_item_type(item_type) => {
-            CodexRecordClass::ExcludedResult(CodexResultKind::OtherResult)
-        }
         _ => CodexRecordClass::Ignored,
     }
-}
-
-fn result_like_item_type(item_type: &str) -> bool {
-    item_type.ends_with("_output")
-        || item_type.ends_with("_result")
-        || item_type.ends_with("_response")
-        || item_type.ends_with("_end")
-        || matches!(
-            item_type,
-            "tool_output" | "tool_result" | "command_output" | "command_result"
-        )
 }
 
 mod prefilter;
