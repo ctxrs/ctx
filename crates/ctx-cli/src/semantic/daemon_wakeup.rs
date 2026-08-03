@@ -77,6 +77,56 @@ impl SourceWatchBatch {
     }
 }
 
+pub(super) type SourceWatchSink = Arc<dyn Fn(&SourceWatchBatch) + Send + Sync>;
+
+#[derive(Default)]
+struct SourceWatchSinkSlot {
+    sink: RwLock<Option<SourceWatchSink>>,
+}
+
+impl std::fmt::Debug for SourceWatchSinkSlot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceWatchSinkSlot")
+            .field(
+                "installed",
+                &self
+                    .sink
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some(),
+            )
+            .finish()
+    }
+}
+
+impl SourceWatchSinkSlot {
+    fn set(&self, sink: Option<SourceWatchSink>) {
+        *self
+            .sink
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = sink;
+    }
+
+    fn is_installed(&self) -> bool {
+        self.sink
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    fn dispatch(&self, batch: &SourceWatchBatch) {
+        let sink = self
+            .sink
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(sink) = sink {
+            sink(batch);
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct DaemonWakeupState {
     pending: u8,
@@ -105,6 +155,7 @@ pub(super) struct DaemonWake {
 pub(super) struct DaemonWakeup {
     state: Mutex<DaemonWakeupState>,
     changed: Condvar,
+    source_watch_sink: SourceWatchSinkSlot,
 }
 
 impl DaemonWakeup {
@@ -117,11 +168,30 @@ impl DaemonWakeup {
         if batch.is_empty() {
             return;
         }
+        // The debounce worker records route watermarks before waking the
+        // synchronous daemon loop. Long capture work can therefore include
+        // these observations in its publication handoff fence instead of
+        // discovering them only after the route has already acknowledged.
+        self.source_watch_sink.dispatch(&batch);
         let mut state = self.lock_state();
         state.pending |= WAKE_FILESYSTEM;
         state.filesystem_signals = state.filesystem_signals.saturating_add(1);
         state.source_watch.merge(batch);
         self.changed.notify_one();
+    }
+
+    pub(super) fn install_source_watch_sink(&self, sink: SourceWatchSink) {
+        self.source_watch_sink.set(Some(sink));
+        // Close startup's install-versus-signal race. Normal daemon ingestion
+        // remains idempotent because route watermarks are monotonic.
+        let pending = self.lock_state().source_watch.clone();
+        if !pending.is_empty() {
+            self.source_watch_sink.dispatch(&pending);
+        }
+    }
+
+    pub(super) fn has_source_watch_sink(&self) -> bool {
+        self.source_watch_sink.is_installed()
     }
 
     pub(super) fn signal_ipc(&self) {

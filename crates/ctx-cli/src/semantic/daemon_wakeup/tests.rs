@@ -177,6 +177,59 @@ fn source_watch_batches_coalesce_to_catalog_cardinality() {
 }
 
 #[test]
+fn source_watch_sink_receives_pending_and_live_routes_before_daemon_wait() {
+    let catalog = watch_catalog([catalog_route(
+        CaptureProvider::Codex,
+        PathBuf::from("/tmp/provider/direct-ingress.jsonl"),
+        "codex_history_jsonl",
+    )]);
+    let route = catalog.route_ids().next().unwrap().clone();
+    let wakeup = DaemonWakeup::default();
+    let mut pending = SourceWatchBatch::default();
+    pending
+        .routes
+        .insert(route.clone(), EventWatermark::new(11, 1));
+    wakeup.signal_source_watch(pending);
+
+    let observed = Arc::new(Mutex::new(SourceWatchBatch::default()));
+    let sink_observed = Arc::clone(&observed);
+    wakeup.install_source_watch_sink(Arc::new(move |batch| {
+        sink_observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .merge(batch.clone());
+    }));
+    assert!(wakeup.has_source_watch_sink());
+    assert_eq!(
+        observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .routes
+            .get(&route),
+        Some(&EventWatermark::new(11, 1))
+    );
+
+    let mut live = SourceWatchBatch::default();
+    live.routes
+        .insert(route.clone(), EventWatermark::new(11, 2));
+    wakeup.signal_source_watch(live);
+    assert_eq!(
+        observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .routes
+            .get(&route),
+        Some(&EventWatermark::new(11, 2))
+    );
+
+    let wake = wakeup.wait(Duration::ZERO);
+    assert_eq!(
+        wake.source_watch.routes.get(&route),
+        Some(&EventWatermark::new(11, 2))
+    );
+}
+
+#[test]
 fn full_watcher_ingress_fails_closed_into_catalog_reconciliation() {
     use notify::event::DataChange;
 

@@ -6,6 +6,86 @@ pub(super) struct DaemonSidecarDrain {
     pub(super) semantic_attempted_generation: Option<String>,
 }
 
+pub(super) const DAEMON_BACKGROUND_REFRESH_MIN_REST: StdDuration = StdDuration::from_secs(5);
+const DAEMON_BACKGROUND_REFRESH_MAX_REST: StdDuration = StdDuration::from_secs(15 * 60);
+
+/// Monotonic, duration-aware cadence for automatic provider capture.
+///
+/// Explicit requests are admitted before this policy is consulted. Automatic
+/// work rests for at least five seconds and, up to the cap, for as long as the
+/// previous capture took. This prevents a continuously dirty route from
+/// turning the daemon into a tight publisher loop while keeping the tuning
+/// independent from route-local failure backoff.
+#[derive(Debug, Default)]
+pub(super) struct DaemonBackgroundRefreshCadence {
+    not_before: Option<Instant>,
+}
+
+impl DaemonBackgroundRefreshCadence {
+    fn ready(&self, now: Instant) -> bool {
+        self.not_before.is_none_or(|not_before| now >= not_before)
+    }
+
+    pub(super) fn remaining(&self, now: Instant) -> Option<StdDuration> {
+        self.not_before
+            .and_then(|not_before| not_before.checked_duration_since(now))
+    }
+
+    pub(super) fn record_completion(&mut self, started: Instant, completed: Instant) {
+        let capture_duration = completed.saturating_duration_since(started);
+        let rest = background_refresh_rest(capture_duration);
+        self.not_before = completed.checked_add(rest).or(Some(completed));
+    }
+
+    fn restore(&mut self, status: Option<&Value>, wall_now_ms: u64, now: Instant) {
+        let Some(status) = status
+            .filter(|status| status.get("trigger").and_then(Value::as_str) == Some("periodic"))
+        else {
+            return;
+        };
+        let Some(finished_at_ms) = status
+            .get("finished_at_ms")
+            .and_then(Value::as_i64)
+            .and_then(|value| u64::try_from(value).ok())
+        else {
+            return;
+        };
+        let started_at_ms = status
+            .get("started_at_ms")
+            .and_then(Value::as_i64)
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(finished_at_ms);
+        let maximum_rest_ms =
+            u64::try_from(DAEMON_BACKGROUND_REFRESH_MAX_REST.as_millis()).unwrap_or(u64::MAX);
+        let capture_duration = StdDuration::from_millis(
+            finished_at_ms
+                .saturating_sub(started_at_ms)
+                .min(maximum_rest_ms),
+        );
+        let rest_ms = u64::try_from(background_refresh_rest(capture_duration).as_millis())
+            .unwrap_or(u64::MAX);
+        let not_before_at_ms = finished_at_ms.saturating_add(rest_ms);
+        // Wall clocks may move backward or persisted status may be malformed.
+        // Recovery never extends the monotonic cooldown beyond its normal cap.
+        let remaining_ms = not_before_at_ms
+            .saturating_sub(wall_now_ms)
+            .min(maximum_rest_ms);
+        if remaining_ms == 0 {
+            self.not_before = None;
+            return;
+        }
+        self.not_before = now
+            .checked_add(StdDuration::from_millis(remaining_ms))
+            .or(Some(now));
+    }
+}
+
+fn background_refresh_rest(capture_duration: StdDuration) -> StdDuration {
+    capture_duration
+        .max(DAEMON_BACKGROUND_REFRESH_MIN_REST)
+        .min(DAEMON_BACKGROUND_REFRESH_MAX_REST)
+}
+
 pub(super) const DAEMON_CONSUMER_RETRY_QUERY_GRACE: StdDuration = StdDuration::from_secs(2);
 
 #[derive(Debug, Default)]
@@ -315,6 +395,13 @@ fn run_dirty_core_refresh(
             DaemonCycleStateV1::unknown(),
         ));
     };
+    if !runtime.background_refresh_cadence.ready(Instant::now()) {
+        return Ok(DaemonIteration::new(
+            false,
+            false,
+            DaemonCycleStateV1::unknown(),
+        ));
+    }
     if !source_refresh.enqueue_next_scheduled_refresh(data_root, source_route_ledger_now_ms())? {
         return Ok(DaemonIteration::new(
             false,
@@ -322,6 +409,7 @@ fn run_dirty_core_refresh(
             DaemonCycleStateV1::unknown(),
         ));
     }
+    let capture_started = Instant::now();
     let Some(run) = source_refresh.run_next(data_root) else {
         return Ok(DaemonIteration::new(
             false,
@@ -329,6 +417,9 @@ fn run_dirty_core_refresh(
             DaemonCycleStateV1::unknown(),
         ));
     };
+    runtime
+        .background_refresh_cadence
+        .record_completion(capture_started, Instant::now());
     let cold_all_refresh = run.scope == SourceBackedRefreshScope::All
         && run.job.get("trigger").and_then(Value::as_str) == Some("periodic")
         && run
@@ -613,6 +704,18 @@ pub(super) fn daemon_foreground_query_preempts(
 pub(super) fn restore_daemon_source_refresh_retry(runtime: &mut DaemonRuntime, data_root: &Path) {
     let status = read_daemon_job_status(&daemon_core_refresh_job_path(data_root));
     runtime.history_retry.restore(status.as_ref());
+}
+
+pub(super) fn restore_daemon_background_refresh_cadence(
+    runtime: &mut DaemonRuntime,
+    data_root: &Path,
+) {
+    let status = read_daemon_job_status(&daemon_core_refresh_job_path(data_root));
+    runtime.background_refresh_cadence.restore(
+        status.as_ref(),
+        source_route_ledger_now_ms(),
+        Instant::now(),
+    );
 }
 
 pub(super) fn restore_daemon_consumer_retries(runtime: &mut DaemonRuntime, data_root: &Path) {

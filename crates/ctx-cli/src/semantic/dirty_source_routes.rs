@@ -53,6 +53,34 @@ impl DirtySourceRouteAdmission {
     }
 }
 
+/// Successful route coverage proven by one exact published generation.
+///
+/// The coordinator owns construction of this proof: it must bind the route to
+/// a verified generation, read `covered_through` from the ledger before its
+/// post-publication route observation, and construct this value only when that
+/// observation still matches the generation's route certificate.
+#[derive(Debug)]
+pub(super) struct GenerationBoundRouteCoverage<'a> {
+    route: &'a SourceRouteIdentity,
+    published_generation: &'a str,
+    covered_through: EventWatermark,
+}
+
+impl<'a> GenerationBoundRouteCoverage<'a> {
+    #[allow(dead_code)] // Integration seam for the issue #281 coordinator branch.
+    pub(super) fn new(
+        route: &'a SourceRouteIdentity,
+        published_generation: &'a str,
+        covered_through: EventWatermark,
+    ) -> Option<Self> {
+        (!published_generation.is_empty()).then_some(Self {
+            route,
+            published_generation,
+            covered_through,
+        })
+    }
+}
+
 #[derive(Debug)]
 struct InFlightAdmission {
     dirty_revision: u64,
@@ -106,9 +134,11 @@ pub(super) struct DirtySourceRoutes {
     // the epoch, delayed events from older watcher instances are stale for
     // every route, including routes the ledger has not seen before.
     current_watcher_epoch: Option<u64>,
-    // Acknowledged watermarks remain here so duplicate or out-of-order watcher
-    // delivery cannot recreate work after a route becomes clean.
-    watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
+    // Seen and covered positions remain after a route becomes clean. Duplicate
+    // or out-of-order delivery therefore cannot recreate acknowledged work,
+    // while a completion can advance only the prefix it actually proved.
+    seen_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
+    covered_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
     dirty: BTreeMap<SourceRouteIdentity, DirtyRouteState>,
     next_dirty_revision: u64,
     next_dirty_order: u64,
@@ -132,16 +162,32 @@ impl DirtySourceRoutes {
     }
 
     pub(super) fn retain_exact_routes(&mut self, routes: &BTreeSet<SourceRouteIdentity>) {
-        self.watermarks.retain(|route, _| routes.contains(route));
+        self.seen_watermarks
+            .retain(|route, _| routes.contains(route));
+        self.covered_watermarks
+            .retain(|route, _| routes.contains(route));
         self.dirty.retain(|route, _| routes.contains(route));
     }
 
     pub(super) fn seed_watermark(&self) -> EventWatermark {
-        self.watermarks
+        self.seen_watermarks
             .values()
             .copied()
             .max()
             .unwrap_or_else(|| EventWatermark::new(self.current_watcher_epoch.unwrap_or(0), 0))
+    }
+
+    /// Captures the watcher fence that a post-publication route observation
+    /// may prove covered. The caller must sample the route after reading this
+    /// value; reversing that order could clear an event delivered in between.
+    #[allow(dead_code)] // Integration seam for the issue #281 coordinator branch.
+    pub(super) fn seen_watermark(&self, route: &SourceRouteIdentity) -> Option<EventWatermark> {
+        self.seen_watermarks.get(route).copied()
+    }
+
+    #[cfg(test)]
+    fn covered_watermark(&self, route: &SourceRouteIdentity) -> Option<EventWatermark> {
+        self.covered_watermarks.get(route).copied()
     }
 
     /// Records one exact-route watcher event if its watermark is strictly new.
@@ -163,13 +209,13 @@ impl DirtySourceRoutes {
                 .max(watermark.watcher_epoch),
         );
         if self
-            .watermarks
+            .seen_watermarks
             .get(&route)
             .is_some_and(|current| watermark <= *current)
         {
             return false;
         }
-        self.watermarks.insert(route.clone(), watermark);
+        self.seen_watermarks.insert(route.clone(), watermark);
         self.mark_dirty(route, observed_at_ms);
         true
     }
@@ -194,7 +240,7 @@ impl DirtySourceRoutes {
                 .max(watermark.watcher_epoch),
         );
         for route in routes {
-            self.watermarks
+            self.seen_watermarks
                 .entry(route.clone())
                 .and_modify(|current| *current = (*current).max(watermark))
                 .or_insert(watermark);
@@ -224,7 +270,7 @@ impl DirtySourceRoutes {
         );
         let mut scheduled = 0_usize;
         for route in routes {
-            self.watermarks
+            self.seen_watermarks
                 .entry(route.clone())
                 .and_modify(|current| *current = (*current).max(watermark))
                 .or_insert(watermark);
@@ -300,7 +346,7 @@ impl DirtySourceRoutes {
         route: &SourceRouteIdentity,
         now_ms: u64,
     ) -> Option<DirtySourceRouteAdmission> {
-        let watermark = self.watermarks.get(route).copied()?;
+        let watermark = self.seen_watermarks.get(route).copied()?;
         let admission_id = self.allocate_admission_id();
         let state = self.dirty.get_mut(route)?;
         if state.permanently_blocked || state.in_flight.is_some() || state.due_at_ms() > now_ms {
@@ -327,7 +373,7 @@ impl DirtySourceRoutes {
     ) -> Option<Vec<DirtySourceRouteAdmission>> {
         if routes.is_empty()
             || routes.iter().any(|route| {
-                !self.watermarks.contains_key(route)
+                !self.seen_watermarks.contains_key(route)
                     || self.dirty.get(route).is_none_or(|state| {
                         state.permanently_blocked
                             || state.in_flight.is_some()
@@ -356,7 +402,7 @@ impl DirtySourceRoutes {
             .collect::<Vec<_>>();
         let mut admissions = Vec::with_capacity(routes.len());
         for route in routes {
-            let Some(watermark) = self.watermarks.get(&route).copied() else {
+            let Some(watermark) = self.seen_watermarks.get(&route).copied() else {
                 continue;
             };
             let admission_id = self.allocate_admission_id();
@@ -383,22 +429,29 @@ impl DirtySourceRoutes {
     /// Returns true only when that exact admitted observation became clean. A
     /// newer event or seed remains dirty and a stale admission changes nothing.
     pub(super) fn acknowledge(&mut self, admission: &DirtySourceRouteAdmission) -> bool {
-        let should_remove = {
-            let Some(state) = self.dirty.get_mut(&admission.route) else {
-                return false;
-            };
-            if !admission_matches(state, admission) {
-                return false;
-            }
-            state.in_flight = None;
-            state.reset_retry();
-            state.dirty_revision == admission.dirty_revision
-                && self.watermarks.get(&admission.route).copied() == Some(admission.watermark)
-        };
-        if should_remove {
-            self.dirty.remove(&admission.route);
+        self.acknowledge_through(admission, admission.watermark, false)
+    }
+
+    /// Advances coverage through a successful generation-bound handoff.
+    ///
+    /// Unlike a plain admission acknowledgement, a matching route certificate
+    /// may cover watcher events delivered while capture was running. An event
+    /// delivered after the coordinator read the handoff fence has a greater
+    /// watermark and remains dirty. Admission identity still fences stale or
+    /// duplicate completions.
+    #[allow(dead_code)] // Called by the issue #281 coordinator integration branch.
+    pub(super) fn acknowledge_generation_coverage(
+        &mut self,
+        admission: &DirtySourceRouteAdmission,
+        coverage: &GenerationBoundRouteCoverage<'_>,
+    ) -> bool {
+        if coverage.route != &admission.route
+            || coverage.published_generation.is_empty()
+            || coverage.covered_through < admission.watermark
+        {
+            return false;
         }
-        should_remove
+        self.acknowledge_through(admission, coverage.covered_through, true)
     }
 
     /// Records a retryable failure and returns its bounded backoff delay.
@@ -490,6 +543,41 @@ impl DirtySourceRoutes {
     fn allocate_admission_id(&mut self) -> u64 {
         self.next_admission_id = self.next_admission_id.saturating_add(1);
         self.next_admission_id
+    }
+
+    fn acknowledge_through(
+        &mut self,
+        admission: &DirtySourceRouteAdmission,
+        covered_through: EventWatermark,
+        may_cover_newer_revision: bool,
+    ) -> bool {
+        let Some(seen) = self.seen_watermarks.get(&admission.route).copied() else {
+            return false;
+        };
+        if covered_through > seen {
+            return false;
+        }
+        let should_remove = {
+            let Some(state) = self.dirty.get_mut(&admission.route) else {
+                return false;
+            };
+            if !admission_matches(state, admission) {
+                return false;
+            }
+            state.in_flight = None;
+            state.reset_retry();
+            let current_covered = self
+                .covered_watermarks
+                .entry(admission.route.clone())
+                .or_insert(covered_through);
+            *current_covered = (*current_covered).max(covered_through);
+            seen <= *current_covered
+                && (may_cover_newer_revision || state.dirty_revision == admission.dirty_revision)
+        };
+        if should_remove {
+            self.dirty.remove(&admission.route);
+        }
+        should_remove
     }
 }
 
@@ -707,6 +795,64 @@ mod tests {
     }
 
     #[test]
+    fn matching_generation_certificate_covers_event_delivered_during_capture() {
+        let mut ledger = DirtySourceRoutes::default();
+        let route = route(41);
+
+        ledger.record_event(route.clone(), watermark(1, 1), 0);
+        let admission = ledger.admit_next(250).unwrap();
+        ledger.record_event(route.clone(), watermark(1, 2), 300);
+        let handoff_fence = ledger.seen_watermark(&route).unwrap();
+        let coverage =
+            GenerationBoundRouteCoverage::new(&route, "generation-2", handoff_fence).unwrap();
+
+        assert!(ledger.acknowledge_generation_coverage(&admission, &coverage));
+        assert_eq!(ledger.covered_watermark(&route), Some(watermark(1, 2)));
+        assert!(ledger.is_empty());
+        assert!(!ledger.record_event(route, watermark(1, 2), 400));
+    }
+
+    #[test]
+    fn event_delivered_after_handoff_fence_survives_generation_acknowledgement() {
+        let mut ledger = DirtySourceRoutes::default();
+        let route = route(42);
+
+        ledger.record_event(route.clone(), watermark(3, 1), 0);
+        let admission = ledger.admit_next(250).unwrap();
+        ledger.record_event(route.clone(), watermark(3, 2), 300);
+        let handoff_fence = ledger.seen_watermark(&route).unwrap();
+        ledger.record_event(route.clone(), watermark(3, 3), 350);
+        let coverage =
+            GenerationBoundRouteCoverage::new(&route, "generation-3", handoff_fence).unwrap();
+
+        assert!(!ledger.acknowledge_generation_coverage(&admission, &coverage));
+        assert_eq!(ledger.covered_watermark(&route), Some(watermark(3, 2)));
+        assert_eq!(ledger.next_due_at_ms(), Some(600));
+        let successor = ledger.admit_next(600).unwrap();
+        assert_eq!(successor.watermark(), watermark(3, 3));
+    }
+
+    #[test]
+    fn generation_coverage_rejects_wrong_route_empty_generation_and_future_fence() {
+        let mut ledger = DirtySourceRoutes::default();
+        let selected_route = route(43);
+        let other = route(44);
+
+        ledger.record_event(selected_route.clone(), watermark(2, 5), 0);
+        let admission = ledger.admit_next(250).unwrap();
+        assert!(GenerationBoundRouteCoverage::new(&selected_route, "", watermark(2, 5)).is_none());
+        let wrong_route =
+            GenerationBoundRouteCoverage::new(&other, "generation", watermark(2, 5)).unwrap();
+        assert!(!ledger.acknowledge_generation_coverage(&admission, &wrong_route));
+        let future =
+            GenerationBoundRouteCoverage::new(&selected_route, "generation", watermark(2, 6))
+                .unwrap();
+        assert!(!ledger.acknowledge_generation_coverage(&admission, &future));
+        assert_eq!(ledger.covered_watermark(&selected_route), None);
+        assert_eq!(ledger.len(), 1);
+    }
+
+    #[test]
     fn stale_acknowledgement_cannot_clear_a_newer_admission() {
         let mut ledger = DirtySourceRoutes::default();
         let route = route(7);
@@ -721,6 +867,24 @@ mod tests {
         assert_eq!(ledger.len(), 1);
         assert!(ledger.acknowledge(&current));
         assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn stale_generation_acknowledgement_cannot_clear_a_newer_admission() {
+        let mut ledger = DirtySourceRoutes::default();
+        let route = route(45);
+
+        ledger.record_event(route.clone(), watermark(1, 1), 0);
+        let stale = ledger.admit_next(250).unwrap();
+        ledger.record_event(route.clone(), watermark(1, 2), 300);
+        assert!(!ledger.acknowledge(&stale));
+        let current = ledger.admit_next(550).unwrap();
+        let coverage =
+            GenerationBoundRouteCoverage::new(&route, "stale-generation", watermark(1, 2)).unwrap();
+
+        assert!(!ledger.acknowledge_generation_coverage(&stale, &coverage));
+        assert_eq!(ledger.len(), 1);
+        assert!(ledger.acknowledge(&current));
     }
 
     #[test]
