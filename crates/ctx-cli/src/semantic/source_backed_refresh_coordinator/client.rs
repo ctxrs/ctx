@@ -246,8 +246,10 @@ fn coordinate_source_backed_refresh_with_catalog(
         .context("start or recover enabled daemon before source-backed refresh")?;
     }
 
+    let logical_request_id = Uuid::now_v7().to_string();
     let response = match send_wait_authority_request(
         data_root,
+        &logical_request_id,
         mode,
         operation,
         explicit_source_catalog,
@@ -369,6 +371,7 @@ fn wait_for_published_generation_inner(
             Ok(None) => {
                 request_id = recover_wait_refresh_request(
                     data_root,
+                    &request_id,
                     operation,
                     expected_catalog,
                     fresh_after_admitted_snapshot,
@@ -386,6 +389,7 @@ fn wait_for_published_generation_inner(
             {
                 request_id = recover_wait_refresh_request(
                     data_root,
+                    &request_id,
                     operation,
                     expected_catalog,
                     fresh_after_admitted_snapshot,
@@ -411,6 +415,7 @@ fn wait_for_published_generation_inner(
                 || {
                     enqueue_equivalent_wait_refresh_request(
                         data_root,
+                        &lost_request_id,
                         operation,
                         expected_catalog,
                         fresh_after_admitted_snapshot,
@@ -581,6 +586,7 @@ fn failed_refresh_response(response: &Value) -> Result<SourceBackedRefreshObserv
 
 fn recover_wait_refresh_request(
     data_root: &Path,
+    request_id: &str,
     operation: SourceBackedRefreshOperation,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     fresh_after_admitted_snapshot: bool,
@@ -608,6 +614,7 @@ fn recover_wait_refresh_request(
     .context("restart daemon-owned source refresh service")?;
     enqueue_equivalent_wait_refresh_request(
         data_root,
+        request_id,
         operation,
         explicit_source_catalog,
         fresh_after_admitted_snapshot,
@@ -616,12 +623,14 @@ fn recover_wait_refresh_request(
 
 fn enqueue_equivalent_wait_refresh_request(
     data_root: &Path,
+    request_id: &str,
     operation: SourceBackedRefreshOperation,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     fresh_after_admitted_snapshot: bool,
 ) -> Result<String> {
     let response = send_wait_authority_request(
         data_root,
+        request_id,
         SourceBackedRefreshMode::Wait,
         operation,
         explicit_source_catalog,
@@ -641,6 +650,7 @@ fn enqueue_equivalent_wait_refresh_request(
 
 fn send_wait_authority_request(
     data_root: &Path,
+    request_id: &str,
     mode: SourceBackedRefreshMode,
     operation: SourceBackedRefreshOperation,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
@@ -652,6 +662,7 @@ fn send_wait_authority_request(
         explicit_source_catalog,
         fresh_after_admitted_snapshot,
     )
+    .with_request_id(request_id)
     .to_json(data_root)?;
     daemon_source_refresh_request(
         data_root,

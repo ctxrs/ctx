@@ -112,6 +112,7 @@ pub(super) fn new_refresh_attempt(
         certified_source_bytes: None,
         receipt: None,
         publication_receipt: None,
+        route_observations: BTreeMap::new(),
         timings: None,
         publication_probe_us: 0,
         daemon_mode: metadata.daemon_mode,
@@ -203,7 +204,13 @@ mod tests {
     #[test]
     fn continuation_preserves_route_local_change_in_catalog_outcome() {
         let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
-        let mut continuation = ManualAllContinuation::new("predecessor".to_owned());
+        let mut continuation = ManualAllContinuation::new(
+            "predecessor".to_owned(),
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
         continuation.covered_route_results.insert(
             route.clone(),
             SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), false),
@@ -234,7 +241,13 @@ mod tests {
     #[test]
     fn continuation_overlap_remains_visible_to_canonical_duplicate_rejection() {
         let route = SourceRouteIdentity::from_sha256("ef".repeat(32)).unwrap();
-        let mut continuation = ManualAllContinuation::new("predecessor".to_owned());
+        let mut continuation = ManualAllContinuation::new(
+            "predecessor".to_owned(),
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
         continuation.covered_route_results.insert(
             route.clone(),
             SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), false),

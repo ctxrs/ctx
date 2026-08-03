@@ -446,7 +446,7 @@ impl SourceBackedRefreshRouteResult {
         Ok(())
     }
 
-    fn compact_json(&self) -> Value {
+    pub(super) fn compact_json(&self) -> Value {
         let details = self
             .source_failures
             .iter()
@@ -665,6 +665,7 @@ pub(super) struct SourceBackedRefreshAttempt {
     pub(super) receipt: Option<SourceBackedRefreshReceipt>,
     /// The sole publication receipt, decoded from Core CommitPayload metadata.
     pub(super) publication_receipt: Option<SourceBackedRefreshReceipt>,
+    pub(super) route_observations: BTreeMap<SourceRouteIdentity, String>,
     pub(super) timings: Option<SourceBackedRefreshTimings>,
     pub(super) publication_probe_us: u64,
     pub(super) daemon_mode: DaemonMode,
@@ -717,6 +718,7 @@ impl SourceBackedRefreshAttempt {
             certified_source_bytes: Some(receipt.current.certified_source_bytes),
             receipt: Some(receipt.clone()),
             publication_receipt: Some(receipt),
+            route_observations: metadata.route_observations.clone(),
             timings: Some(SourceBackedRefreshTimings::default()),
             publication_probe_us: 0,
             daemon_mode: DaemonMode::default(),

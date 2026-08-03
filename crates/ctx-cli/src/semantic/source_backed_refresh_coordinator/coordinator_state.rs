@@ -15,7 +15,7 @@ mod startup_observation;
 use attempt_helpers::*;
 use durable_queue::{
     durable_job_json, install_recovered_successors, job_with_queued_successors,
-    recover_queued_root, recover_queued_successors,
+    recover_logical_demand_continuations, recover_queued_root, recover_queued_successors,
 };
 use generation_authority::CoreRefreshTerminalSuccess;
 pub(crate) use generation_authority::PinnedCorePublication;
@@ -156,7 +156,9 @@ pub(super) struct CoreRefreshEngineState {
     current_published_generation: Option<String>,
     dirty_routes: DirtySourceRoutes,
     known_route_ids: BTreeSet<SourceRouteIdentity>,
+    route_event_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
     route_admissions: BTreeMap<String, Vec<DirtySourceRouteAdmission>>,
+    route_admission_watermarks: BTreeMap<String, BTreeMap<SourceRouteIdentity, EventWatermark>>,
     manual_all_continuations: BTreeMap<String, ManualAllContinuation>,
     pending_terminal_persistence: Option<PendingTerminalPersistence>,
     pending_scheduler_retry_root_id: Option<String>,
@@ -205,16 +207,32 @@ impl fmt::Debug for PendingTerminalPersistence {
 struct ManualAllContinuation {
     predecessor_request_id: String,
     predecessor_finished: bool,
+    admission_route_observations: BTreeMap<SourceRouteIdentity, Option<String>>,
+    ledger_eligible_routes: BTreeSet<SourceRouteIdentity>,
+    admission_event_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
+    predecessor_event_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
+    invalidated_routes: BTreeSet<SourceRouteIdentity>,
     covered_route_results: BTreeMap<SourceRouteIdentity, SourceBackedRefreshRouteResult>,
     covered_removed_source_count: usize,
     covered_timings: SourceBackedRefreshTimings,
 }
 
 impl ManualAllContinuation {
-    fn new(predecessor_request_id: String) -> Self {
+    fn new(
+        predecessor_request_id: String,
+        admission_route_observations: BTreeMap<SourceRouteIdentity, Option<String>>,
+        ledger_eligible_routes: BTreeSet<SourceRouteIdentity>,
+        admission_event_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
+        predecessor_event_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
+    ) -> Self {
         Self {
             predecessor_request_id,
             predecessor_finished: false,
+            admission_route_observations,
+            ledger_eligible_routes,
+            admission_event_watermarks,
+            predecessor_event_watermarks,
+            invalidated_routes: BTreeSet::new(),
             covered_route_results: BTreeMap::new(),
             covered_removed_source_count: 0,
             covered_timings: SourceBackedRefreshTimings::default(),
@@ -222,6 +240,9 @@ impl ManualAllContinuation {
     }
 
     fn invalidate_route(&mut self, route: &SourceRouteIdentity) {
+        if self.admission_route_observations.contains_key(route) {
+            self.invalidated_routes.insert(route.clone());
+        }
         if self.covered_route_results.remove(route).is_some()
             && self.covered_route_results.is_empty()
         {
@@ -237,6 +258,252 @@ impl ManualAllContinuation {
             timings: self.covered_timings,
         }
     }
+
+    fn is_fully_covered(&self) -> bool {
+        self.invalidated_routes.is_empty()
+            && self
+                .admission_route_observations
+                .keys()
+                .all(|route| self.covered_route_results.contains_key(route))
+    }
+
+    fn to_json(&self) -> Value {
+        let admission_route_observations = self
+            .admission_route_observations
+            .iter()
+            .map(|(route, observation)| {
+                (
+                    route.as_str().to_owned(),
+                    observation
+                        .as_ref()
+                        .map_or(Value::Bool(false), |value| json!(value)),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let covered_route_results = self
+            .covered_route_results
+            .iter()
+            .map(|(route, result)| (route.as_str().to_owned(), result.compact_json()))
+            .collect::<serde_json::Map<_, _>>();
+        compact_json(json!({
+            "predecessor_request_id": self.predecessor_request_id,
+            "predecessor_finished": self.predecessor_finished,
+            "admission_route_observations": admission_route_observations,
+            "ledger_eligible_routes": self.ledger_eligible_routes
+                .iter()
+                .map(SourceRouteIdentity::as_str)
+                .collect::<Vec<_>>(),
+            "admission_event_watermarks": event_watermarks_json(&self.admission_event_watermarks),
+            "predecessor_event_watermarks": event_watermarks_json(&self.predecessor_event_watermarks),
+            "invalidated_routes": self.invalidated_routes
+                .iter()
+                .map(SourceRouteIdentity::as_str)
+                .collect::<Vec<_>>(),
+            "covered_route_results": covered_route_results,
+            "covered_removed_source_count": self.covered_removed_source_count,
+            "covered_timings": self.covered_timings.to_json(),
+        }))
+    }
+
+    fn from_json(value: &Value) -> Result<Self> {
+        let predecessor_request_id = value
+            .get("predecessor_request_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("logical refresh demand has no predecessor request ID"))?
+            .to_owned();
+        let predecessor_finished = value
+            .get("predecessor_finished")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| anyhow!("logical refresh demand has no predecessor terminal state"))?;
+        let admission = value
+            .get("admission_route_observations")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("logical refresh demand has no admission fence"))?;
+        if admission.len() > SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT {
+            bail!("logical refresh demand admission fence exceeds its route bound");
+        }
+        let admission_route_observations = admission
+            .iter()
+            .map(|(route, observation)| {
+                let route = SourceRouteIdentity::from_sha256(route.clone())?;
+                let observation = if observation.is_null() || observation == &Value::Bool(false) {
+                    None
+                } else {
+                    let value = observation
+                        .as_str()
+                        .filter(|value| is_sha256_identity(value))
+                        .ok_or_else(|| anyhow!("logical refresh demand observation is invalid"))?;
+                    Some(value.to_owned())
+                };
+                Ok((route, observation))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let ledger_eligible_routes = value
+            .get("ledger_eligible_routes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("logical refresh demand has no ledger-eligible route set"))?;
+        if ledger_eligible_routes.len() > SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT {
+            bail!("logical refresh demand ledger-eligible route set exceeds its route bound");
+        }
+        let ledger_eligible_routes = ledger_eligible_routes
+            .iter()
+            .map(|route| {
+                route
+                    .as_str()
+                    .ok_or_else(|| anyhow!("logical refresh demand ledger route is invalid"))
+                    .and_then(|route| {
+                        SourceRouteIdentity::from_sha256(route.to_owned()).map_err(Into::into)
+                    })
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        if ledger_eligible_routes
+            .iter()
+            .any(|route| !admission_route_observations.contains_key(route))
+        {
+            bail!("logical refresh demand ledger route is outside its admission fence");
+        }
+        let admission_event_watermarks = event_watermarks_from_json(
+            value.get("admission_event_watermarks"),
+            "logical refresh demand admission event watermarks",
+        )?;
+        let predecessor_event_watermarks = event_watermarks_from_json(
+            value.get("predecessor_event_watermarks"),
+            "logical refresh demand predecessor event watermarks",
+        )?;
+        if admission_event_watermarks
+            .keys()
+            .chain(predecessor_event_watermarks.keys())
+            .any(|route| !admission_route_observations.contains_key(route))
+        {
+            bail!(
+                "logical refresh demand event boundary names a route outside its admission fence"
+            );
+        }
+        let invalidated_routes = value
+            .get("invalidated_routes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("logical refresh demand has no invalidated route set"))?;
+        if invalidated_routes.len() > SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT {
+            bail!("logical refresh demand invalidated route set exceeds its route bound");
+        }
+        let invalidated_routes = invalidated_routes
+            .iter()
+            .map(|route| {
+                route
+                    .as_str()
+                    .ok_or_else(|| anyhow!("logical refresh demand invalidated route is invalid"))
+                    .and_then(|route| {
+                        SourceRouteIdentity::from_sha256(route.to_owned()).map_err(Into::into)
+                    })
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        if invalidated_routes
+            .iter()
+            .any(|route| !admission_route_observations.contains_key(route))
+        {
+            bail!("logical refresh demand invalidates a route outside its admission fence");
+        }
+        let covered_value = value
+            .get("covered_route_results")
+            .ok_or_else(|| anyhow!("logical refresh demand has no covered route results"))?;
+        let covered_route_results = required_route_results(Some(covered_value))?
+            .into_iter()
+            .map(|result| {
+                let route = SourceRouteIdentity::from_sha256(result.route_identity.clone())?;
+                Ok((route, result))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let covered_outside_fence = covered_route_results
+            .keys()
+            .filter(|route| !admission_route_observations.contains_key(*route))
+            .map(|route| route.as_str())
+            .collect::<Vec<_>>();
+        if !covered_outside_fence.is_empty() {
+            bail!(
+                "logical refresh demand covers routes outside its admission fence: {}",
+                covered_outside_fence.join(", ")
+            );
+        }
+        let covered_removed_source_count = value
+            .get("covered_removed_source_count")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| anyhow!("logical refresh demand removed-source count is invalid"))?;
+        let covered_timings = value
+            .get("covered_timings")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("logical refresh demand covered timings are invalid"))?;
+        let covered_timings = SourceBackedRefreshTimings {
+            discovery_us: covered_timings
+                .get("discovery")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| anyhow!("logical refresh demand discovery timing is invalid"))?,
+            scan_stage_us: covered_timings
+                .get("scan_stage")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| anyhow!("logical refresh demand scan timing is invalid"))?,
+            commit_us: covered_timings
+                .get("commit")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| anyhow!("logical refresh demand commit timing is invalid"))?,
+        };
+        Ok(Self {
+            predecessor_request_id,
+            predecessor_finished,
+            admission_route_observations,
+            ledger_eligible_routes,
+            admission_event_watermarks,
+            predecessor_event_watermarks,
+            invalidated_routes,
+            covered_route_results,
+            covered_removed_source_count,
+            covered_timings,
+        })
+    }
+}
+
+fn event_watermarks_json(
+    watermarks: &BTreeMap<SourceRouteIdentity, EventWatermark>,
+) -> serde_json::Map<String, Value> {
+    watermarks
+        .iter()
+        .map(|(route, watermark)| {
+            (
+                route.as_str().to_owned(),
+                json!([watermark.watcher_epoch, watermark.sequence]),
+            )
+        })
+        .collect()
+}
+
+fn event_watermarks_from_json(
+    value: Option<&Value>,
+    label: &str,
+) -> Result<BTreeMap<SourceRouteIdentity, EventWatermark>> {
+    let fields = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("{label} are invalid"))?;
+    if fields.len() > SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT {
+        bail!("{label} exceed the route bound");
+    }
+    fields
+        .iter()
+        .map(|(route, watermark)| {
+            let route = SourceRouteIdentity::from_sha256(route.clone())?;
+            let watermark = watermark
+                .as_array()
+                .filter(|watermark| watermark.len() == 2)
+                .ok_or_else(|| anyhow!("{label} contain an invalid watermark"))?;
+            let watcher_epoch = watermark[0]
+                .as_u64()
+                .ok_or_else(|| anyhow!("{label} contain an invalid watcher epoch"))?;
+            let sequence = watermark[1]
+                .as_u64()
+                .ok_or_else(|| anyhow!("{label} contain an invalid sequence"))?;
+            Ok((route, EventWatermark::new(watcher_epoch, sequence)))
+        })
+        .collect()
 }
 
 type SourceRefreshStatusWriter = dyn Fn(&Path, &Value) -> Result<()> + Send + Sync;
@@ -253,6 +520,85 @@ pub(in crate::semantic) struct SourceBackedRefreshRun {
     pub(in crate::semantic) failed: bool,
     pub(in crate::semantic) terminal_persistence_pending: bool,
     pub(in crate::semantic) scope: SourceBackedRefreshScope,
+    coverage_certificate: Option<SourceBackedRefreshCoverageCertificate>,
+}
+
+/// Coordinator-minted proof that exact routes were admitted before capture,
+/// included in one verified Core publication, and acknowledged without a
+/// newer watcher event crossing the admitted boundary.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(in crate::semantic) struct SourceBackedRefreshCoverageCertificate {
+    request_id: String,
+    published_generation: String,
+    routes: BTreeMap<SourceRouteIdentity, SourceBackedRefreshRouteCoverageCertificate>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct SourceBackedRefreshRouteCoverageCertificate {
+    observation: String,
+    admitted_watermark: EventWatermark,
+}
+
+struct PostPublicationRouteCoverageFence {
+    seen_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
+    sampled_observations: BTreeMap<SourceRouteIdentity, Option<String>>,
+}
+
+impl PostPublicationRouteCoverageFence {
+    fn certified_boundary(
+        &self,
+        route: &SourceRouteIdentity,
+        admitted_watermark: EventWatermark,
+        verified_observation: &str,
+    ) -> EventWatermark {
+        let observed_matches = self
+            .sampled_observations
+            .get(route)
+            .and_then(Option::as_deref)
+            == Some(verified_observation);
+        if !observed_matches {
+            return admitted_watermark;
+        }
+        self.seen_watermarks
+            .get(route)
+            .copied()
+            .map_or(admitted_watermark, |seen| admitted_watermark.max(seen))
+    }
+}
+
+#[allow(dead_code)] // Public integration seam consumed by #282.
+impl SourceBackedRefreshRun {
+    pub(in crate::semantic) fn coverage_certificate(
+        &self,
+    ) -> Option<&SourceBackedRefreshCoverageCertificate> {
+        self.coverage_certificate.as_ref()
+    }
+}
+
+#[allow(dead_code)] // Public integration seam consumed by #282.
+impl SourceBackedRefreshCoverageCertificate {
+    pub(in crate::semantic) fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub(in crate::semantic) fn published_generation(&self) -> &str {
+        &self.published_generation
+    }
+
+    /// Exact route/event boundaries safe for an acknowledge-through update.
+    /// A consumer must clear only through each returned watermark, never
+    /// through a later globally observed watcher position.
+    pub(in crate::semantic) fn exact_route_boundaries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&SourceRouteIdentity, EventWatermark, &str)> {
+        self.routes.iter().map(|(route, certificate)| {
+            (
+                route,
+                certificate.admitted_watermark,
+                certificate.observation.as_str(),
+            )
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -328,7 +674,9 @@ impl CoreRefreshEngine {
                 current_published_generation: None,
                 dirty_routes: DirtySourceRoutes::default(),
                 known_route_ids: BTreeSet::new(),
+                route_event_watermarks: BTreeMap::new(),
                 route_admissions: BTreeMap::new(),
+                route_admission_watermarks: BTreeMap::new(),
                 manual_all_continuations: BTreeMap::new(),
                 pending_terminal_persistence: None,
                 pending_scheduler_retry_root_id: None,
@@ -367,6 +715,9 @@ impl CoreRefreshEngine {
         let routes = routes.into_iter().collect::<BTreeSet<_>>();
         let mut state = self.lock_state();
         state.dirty_routes.retain_exact_routes(&routes);
+        state
+            .route_event_watermarks
+            .retain(|route, _| routes.contains(route));
         for continuation in state.manual_all_continuations.values_mut() {
             for route in &routes {
                 continuation.invalidate_route(route);
@@ -399,6 +750,13 @@ impl CoreRefreshEngine {
             .into_iter()
             .filter(|route| state.known_route_ids.contains(route))
             .collect::<Vec<_>>();
+        for route in &routes {
+            state
+                .route_event_watermarks
+                .entry(route.clone())
+                .and_modify(|current| *current = (*current).max(watermark))
+                .or_insert(watermark);
+        }
         state
             .dirty_routes
             .seed_exact_routes(routes, watermark, observed_at_ms);
@@ -459,6 +817,13 @@ impl CoreRefreshEngine {
             .into_iter()
             .filter(|route| state.known_route_ids.contains(route))
             .collect::<Vec<_>>();
+        for route in &dirty {
+            state
+                .route_event_watermarks
+                .entry(route.clone())
+                .and_modify(|current| *current = (*current).max(watermark))
+                .or_insert(watermark);
+        }
         state
             .dirty_routes
             .seed_exact_routes(dirty, watermark, observed_at_ms);
@@ -477,6 +842,9 @@ impl CoreRefreshEngine {
                         .dirty_routes
                         .record_event(route.clone(), watermark, observed_at_ms);
                 if recorded {
+                    state
+                        .route_event_watermarks
+                        .insert(route.clone(), watermark);
                     for continuation in state.manual_all_continuations.values_mut() {
                         continuation.invalidate_route(&route);
                     }
@@ -646,6 +1014,19 @@ impl CoreRefreshEngine {
                 let requested_catalog = explicit_catalog
                     .map(ExplicitSourceCatalogAuthority::from_json)
                     .transpose()?;
+                let logical_request_id = match request.get("request_id") {
+                    Some(Value::String(request_id)) if !request_id.is_empty() => {
+                        Uuid::parse_str(request_id)
+                            .context("daemon source refresh logical request ID must be a UUID")?;
+                        Some(request_id.clone())
+                    }
+                    None => None,
+                    Some(_) => {
+                        return Err(anyhow!(
+                            "daemon source refresh logical request ID is invalid"
+                        ))
+                    }
+                };
                 let admission = match request.get("fresh_after_admitted_snapshot") {
                     None | Some(Value::Bool(false)) => {
                         SourceRefreshAdmissionRequirement::AttachEquivalent
@@ -660,6 +1041,12 @@ impl CoreRefreshEngine {
                     }
                 };
                 let previous_generation = self.observed_published_generation(data_root)?;
+                let admission_route_observations =
+                    if admission == SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot {
+                        source_backed_route_admission_fence(data_root, requested_catalog.as_ref())?
+                    } else {
+                        BTreeMap::new()
+                    };
                 let metadata = match operation {
                     SourceBackedRefreshOperation::Import => {
                         source_catalog_refresh_runtime_metadata(data_root)
@@ -676,6 +1063,8 @@ impl CoreRefreshEngine {
                     // Wait controls how the client observes the attempt; it is
                     // not itself a fresh-after-admission barrier.
                     admission,
+                    admission_route_observations,
+                    logical_request_id,
                 ) {
                     Ok(response) => response,
                     Err(error) => {
@@ -732,17 +1121,23 @@ impl CoreRefreshEngine {
         })))
     }
 
-    fn finish_route_admissions(&self, request_id: &str, publication_ready: bool) {
+    fn finish_route_admissions(
+        &self,
+        request_id: &str,
+        publication_ready: bool,
+        post_publication_fence: Option<&PostPublicationRouteCoverageFence>,
+    ) -> Option<SourceBackedRefreshCoverageCertificate> {
         let now_ms = source_route_ledger_now_ms();
         let mut state = self.lock_state();
-        let Some(admissions) = state.route_admissions.remove(request_id) else {
-            for continuation in state.manual_all_continuations.values_mut() {
-                if continuation.predecessor_request_id == request_id {
-                    continuation.predecessor_finished = true;
-                }
-            }
-            return;
-        };
+        let admissions = state
+            .route_admissions
+            .remove(request_id)
+            .unwrap_or_default();
+        let predecessor_event_watermarks = state
+            .route_admission_watermarks
+            .remove(request_id)
+            .unwrap_or_default();
+        let current_event_watermarks = state.route_event_watermarks.clone();
         let attempt = find_attempt(&state, request_id).cloned();
         let route_results = attempt
             .as_ref()
@@ -755,6 +1150,7 @@ impl CoreRefreshEngine {
                     .collect::<BTreeMap<_, _>>()
             });
         let mut covered_route_results = BTreeMap::new();
+        let mut certified_routes = BTreeMap::new();
         for admission in admissions {
             let retry = !publication_ready
                 || attempt
@@ -787,6 +1183,28 @@ impl CoreRefreshEngine {
             } else if result.outcome.is_success() {
                 if state.dirty_routes.acknowledge(&admission) {
                     covered_route_results.insert(admission.route().clone(), result.clone());
+                    if let (Some(observation), Some(admitted_watermark)) = (
+                        attempt
+                            .as_ref()
+                            .and_then(|attempt| attempt.route_observations.get(admission.route())),
+                        predecessor_event_watermarks.get(admission.route()).copied(),
+                    ) {
+                        let admitted_watermark =
+                            post_publication_fence.map_or(admitted_watermark, |fence| {
+                                fence.certified_boundary(
+                                    admission.route(),
+                                    admitted_watermark,
+                                    observation,
+                                )
+                            });
+                        certified_routes.insert(
+                            admission.route().clone(),
+                            SourceBackedRefreshRouteCoverageCertificate {
+                                observation: observation.clone(),
+                                admitted_watermark,
+                            },
+                        );
+                    }
                 }
             } else {
                 state.dirty_routes.retryable_failure(&admission, now_ms);
@@ -797,12 +1215,78 @@ impl CoreRefreshEngine {
                 continue;
             }
             continuation.predecessor_finished = true;
-            if covered_route_results.is_empty() {
-                continue;
+            if let Some(attempt) = attempt.as_ref() {
+                if let Some(receipt) = attempt.receipt.as_ref() {
+                    for (route, admission_observation) in &continuation.admission_route_observations
+                    {
+                        let covered = !continuation.invalidated_routes.contains(route)
+                            && continuation.admission_event_watermarks.get(route)
+                                == continuation.predecessor_event_watermarks.get(route)
+                            && admission_observation.as_ref().is_some_and(|admitted| {
+                                attempt.route_observations.get(route) == Some(admitted)
+                                    && receipt.route_results.iter().any(|result| {
+                                        result.route_identity == route.as_str()
+                                            && result.outcome.is_success()
+                                    })
+                            });
+                        if covered {
+                            if let Some(result) = receipt
+                                .route_results
+                                .iter()
+                                .find(|result| result.route_identity == route.as_str())
+                            {
+                                continuation
+                                    .covered_route_results
+                                    .insert(route.clone(), result.clone());
+                            }
+                        }
+                    }
+                }
             }
-            continuation
-                .covered_route_results
-                .extend(covered_route_results.clone());
+            if covered_route_results.is_empty() {
+                if continuation.covered_route_results.is_empty() {
+                    continue;
+                }
+            } else {
+                for (route, result) in &covered_route_results {
+                    if continuation.invalidated_routes.contains(route) {
+                        continue;
+                    }
+                    if continuation
+                        .admission_route_observations
+                        .contains_key(route)
+                        && !continuation.ledger_eligible_routes.contains(route)
+                    {
+                        continue;
+                    }
+                    // Legacy watcher-ledger admissions are a second exact
+                    // coverage proof for routes outside the catalog-derived
+                    // fence. Keep them in the durable logical demand, but do
+                    // not let them override an indeterminate or mismatched
+                    // catalog observation for the same route.
+                    continuation
+                        .admission_route_observations
+                        .insert(route.clone(), None);
+                    if let Some(watermark) = current_event_watermarks.get(route).copied() {
+                        continuation
+                            .admission_event_watermarks
+                            .insert(route.clone(), watermark);
+                    }
+                    if let Some(watermark) = predecessor_event_watermarks.get(route).copied() {
+                        continuation
+                            .predecessor_event_watermarks
+                            .insert(route.clone(), watermark);
+                    }
+                    if continuation.admission_event_watermarks.get(route)
+                        != continuation.predecessor_event_watermarks.get(route)
+                    {
+                        continue;
+                    }
+                    continuation
+                        .covered_route_results
+                        .insert(route.clone(), result.clone());
+                }
+            }
             continuation.covered_removed_source_count = attempt
                 .as_ref()
                 .and_then(|attempt| attempt.receipt.as_ref())
@@ -813,9 +1297,82 @@ impl CoreRefreshEngine {
                 .and_then(|attempt| attempt.timings)
                 .unwrap_or_default();
         }
+        let attempt = attempt.filter(|attempt| {
+            publication_ready && attempt.state == SourceBackedRefreshState::Published
+        })?;
+        Some(SourceBackedRefreshCoverageCertificate {
+            request_id: request_id.to_owned(),
+            published_generation: attempt.published_generation.clone()?,
+            routes: certified_routes,
+        })
     }
 
     pub(super) fn lock_state(&self) -> std::sync::MutexGuard<'_, CoreRefreshEngineState> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod coverage_certificate_tests {
+    use super::*;
+
+    #[test]
+    fn matching_post_publication_observation_covers_through_seen_event() {
+        let route = SourceRouteIdentity::from_sha256("81".repeat(32)).unwrap();
+        let admitted = EventWatermark::new(4, 1);
+        let seen_during_capture = EventWatermark::new(4, 2);
+        let observation = "91".repeat(32);
+        let fence = PostPublicationRouteCoverageFence {
+            seen_watermarks: BTreeMap::from([(route.clone(), seen_during_capture)]),
+            sampled_observations: BTreeMap::from([(route.clone(), Some(observation.clone()))]),
+        };
+
+        let boundary = fence.certified_boundary(&route, admitted, &observation);
+        let certificate = SourceBackedRefreshCoverageCertificate {
+            request_id: Uuid::from_u128(0x28107).to_string(),
+            published_generation: "verified-generation".to_owned(),
+            routes: BTreeMap::from([(
+                route.clone(),
+                SourceBackedRefreshRouteCoverageCertificate {
+                    observation: observation.clone(),
+                    admitted_watermark: boundary,
+                },
+            )]),
+        };
+
+        assert_eq!(
+            certificate.request_id(),
+            Uuid::from_u128(0x28107).to_string()
+        );
+        assert_eq!(certificate.published_generation(), "verified-generation");
+        assert_eq!(
+            certificate.exact_route_boundaries().collect::<Vec<_>>(),
+            vec![(&route, seen_during_capture, observation.as_str())]
+        );
+    }
+
+    #[test]
+    fn event_after_seen_fence_survives_and_indeterminate_sample_does_not_extend() {
+        let route = SourceRouteIdentity::from_sha256("82".repeat(32)).unwrap();
+        let admitted = EventWatermark::new(5, 1);
+        let seen_fence = EventWatermark::new(5, 2);
+        let event_after_fence = EventWatermark::new(5, 3);
+        let observation = "92".repeat(32);
+        let matching = PostPublicationRouteCoverageFence {
+            seen_watermarks: BTreeMap::from([(route.clone(), seen_fence)]),
+            sampled_observations: BTreeMap::from([(route.clone(), Some(observation.clone()))]),
+        };
+        let indeterminate = PostPublicationRouteCoverageFence {
+            seen_watermarks: BTreeMap::from([(route.clone(), seen_fence)]),
+            sampled_observations: BTreeMap::from([(route.clone(), None)]),
+        };
+
+        let certified = matching.certified_boundary(&route, admitted, &observation);
+        assert_eq!(certified, seen_fence);
+        assert!(event_after_fence > certified);
+        assert_eq!(
+            indeterminate.certified_boundary(&route, admitted, &observation),
+            admitted
+        );
     }
 }

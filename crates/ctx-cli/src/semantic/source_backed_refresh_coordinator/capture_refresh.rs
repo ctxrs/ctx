@@ -725,6 +725,38 @@ pub(super) fn source_backed_watch_catalog(data_root: &Path) -> Result<SourceBack
     Ok(build.registry.watch_catalog())
 }
 
+/// Captures the logical caller's admission fence over the current automatic
+/// route catalog. Missing observation tokens are retained explicitly so
+/// coverage evaluation fails closed instead of treating silence as freshness.
+pub(super) fn source_backed_route_admission_fence(
+    data_root: &Path,
+    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>> {
+    let discovery = source_backed_discovery_context()?.with_data_root(data_root);
+    let work_budget = source_backed_refresh_work_budget(WriterOptions::default().indexer_threads);
+    let discovery_started = StdInstant::now();
+    let report = discover_provider_sources_with_context_and_work_budget(&discovery, work_budget);
+    let discovery_duration = discovery_started.elapsed();
+    validate_provider_source_roots_outside_data_root(data_root, report.sources.iter())
+        .context("validate provider roots before admitting source refresh demand")?;
+    let merged = build_merged_source_backed_registry(
+        &discovery,
+        report,
+        discovery_duration,
+        data_root,
+        explicit_source_catalog,
+    )?;
+    let catalog = merged.build.registry.watch_catalog();
+    Ok(catalog
+        .route_ids()
+        .cloned()
+        .map(|route| {
+            let observation = catalog.certify_route_observation(&route);
+            (route, observation)
+        })
+        .collect())
+}
+
 fn build_merged_source_backed_registry(
     discovery: &DiscoveryContext,
     mut report: DiscoveryReport,

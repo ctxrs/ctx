@@ -27,6 +27,9 @@ mod registry_policy;
 #[path = "source_backed_refresh_coordinator_tests/observation_fence.rs"]
 mod observation_fence;
 
+#[path = "source_backed_refresh_coordinator_tests/logical_demand.rs"]
+mod logical_demand;
+
 struct TestExecutor {
     calls: Arc<AtomicUsize>,
     generation_id: String,
@@ -423,9 +426,11 @@ fn manual_all_request(
             &json!({
                 "schema_version": 1,
                 "op": SOURCE_REFRESH_REQUEST_OP,
+                "request_id": Uuid::now_v7().to_string(),
                 "mode": "wait",
                 "operation": "import",
                 "explicit_source_catalog": authority.to_json(),
+                "fresh_after_admitted_snapshot": true,
             }),
         )
         .unwrap()
